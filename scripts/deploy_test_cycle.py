@@ -1149,6 +1149,33 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
         entry["proof"]["send_receipt"] = {"path": send_proof["path"], "sha256": send_proof["sha256"]}
 
 
+def interrupted_receipt(state: dict, request_token: str) -> dict:
+    """Identify a terminal interrupted operation, without inventing an RCA occurrence."""
+    if (state.get('phase') != 'interrupted' or not state.get('attempts')
+            or state['attempts'][-1].get('interrupted') is not True
+            or state.get('running') or 'live_failures' in state
+            or not isinstance(request_token, str) or not request_token):
+        raise ValueError('a quiescent interrupted operation token is required')
+    rows = [r for r in state['attempts'][-1]['results'] if r.get('token') == request_token]
+    if (len(rows) != 1 or latest_receipts(state).get(rows[0]['gate']) != rows[0]
+            or rows[0].get('source') != state['source'] or rows[0].get('complete') is not False
+            or rows[0].get('executed') is not True or 'UNVERIFIED' not in rows[0].get('cases', {}).values()):
+        raise ValueError('token must identify the exact latest incomplete interrupted receipt')
+    return rows[0]
+
+
+def interrupted_boundary(state: dict) -> None:
+    """All original ownership must be accounted before resume or source refresh."""
+    if (state.get('phase') != 'interrupted' or state.get('resume_phase') not in
+            {'quick', 'initial', 'focused', 'failed-gates', 'final'}
+            or not state.get('attempts') or state['attempts'][-1].get('interrupted') is not True
+            or CANCEL.is_set() or state.get('running') or 'live_failures' in state):
+        raise ValueError('quiescent interrupted repair boundary required')
+    owned = retained_owners(state, [r['gate'] for r in state['attempts'][-1]['results']])
+    if owned:
+        raise ValueError('worker ownership remains; reconcile exact cleanup before recovery: ' + ', '.join(owned))
+
+
 def reexecute(state: dict, occurrence_id: str) -> None:
     """Observation loss only: an incomplete UNVERIFIED occurrence re-runs its bound gate unchanged.
 
@@ -1517,6 +1544,11 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
+    interrupted_refresh = state.get('phase') == 'interrupted'
+    if interrupted_refresh:
+        interrupted_boundary(state)
+        if state.get('pending'):
+            raise ValueError('interrupted pending triage must resume before refresh')
     pending_refresh = bool(state.get('pending'))
     if pending_refresh and (state.get('phase') != 'triage' or CANCEL.is_set()
             or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
@@ -1524,7 +1556,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     unstarted_quick = (state["phase"] == "quick" and not state.get('pending')
                        and 'live_failures' not in state and not state.get('resume_phase')
                        and not state.get('running'))
-    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick:
+    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not interrupted_refresh:
         raise ValueError("source refresh only at the repair boundary")
     if new["source"] != source(root):
         raise ValueError("new plan is not bound to current source")
@@ -1598,6 +1630,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if carried:
         state.setdefault('pass_carryover_history', []).append(copy.deepcopy(carried))
     state['repair_gates'] = [name for name in state['repair_gates'] if name not in carried]
+    if interrupted_refresh:
+        state.pop('resume_phase')
     state.update(plan=new, source=new["source"], plan_digest=digest(new), ready=False, focused={},
                  input_fingerprints=fingerprints, environment=environment_digest(),
                  phase="quick", next_after_quick="triage" if state.get("pending") else
@@ -1699,8 +1733,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.action == "resume":
                     if state["phase"] != "interrupted":
                         raise ValueError("resume requires an interrupted cycle")
-                    if any(r.get('lingering_group') for r in state['attempts'][-1]['results']):
-                        raise ValueError('worker descendants remain; reconcile owned cleanup before resuming')
+                    interrupted_boundary(state)
                     state["phase"] = state.pop("resume_phase")
                 with cancellation_handlers():
                     while state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:

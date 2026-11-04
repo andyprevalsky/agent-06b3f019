@@ -30,6 +30,7 @@ const AGENT_LIST_SELECT = {
   contextSize: true,
   messageCount: true,
   fastModeCacheEnabled: true,
+  speed: true,
   worldModelMode: true,
   memoryEnabled: true,
   projectId: true,

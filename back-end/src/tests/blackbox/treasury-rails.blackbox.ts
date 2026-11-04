@@ -225,7 +225,7 @@ async function checkEarlierUnusedMints(
         console.log(`  PENDING ${label} still ${verdict.status}; deadline ${RECLAIM_DEADLINE}`);
         break;
       case 'unobservable':
-        console.warn(`  UNVERIFIED ${label}: ${verdict.reason}`);
+        lost.push(`${label}: reclaim remains unverified: ${verdict.reason}`);
         break;
       case 'overdue': {
         const overdue =

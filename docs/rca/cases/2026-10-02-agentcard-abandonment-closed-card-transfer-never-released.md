@@ -625,6 +625,20 @@ liability. The underlying provider release cause remains open. At 10,000 agents
 this policy adds only local validation of the existing per-root snapshot, no
 new provider calls, polling loops, shared subscriptions or production writes.
 
+### October 29, PR1634 sandbox recurrence
+
+The unchanged four-task lifecycle gate on source `67416cabc` returned three
+passes and the standing warning skip for `agent-payment-abandonment`. Its
+exact sandbox card `card_e3e7acee2be4fde2f9a36ed4` was CLOSED with zero balance;
+transfer `owt_c467ce1fd31d52c893bce98a` still reported consumed, transferred4396
+cents and released0. Purchase remained HELD and wallet funding RECLAIMING.
+This is an additional $43.96 unresolved transfer, not proof of release or
+Stripe refund. The original snapshot and skipped outcome remain in run
+`05cf1dbc-a3c1-4948-ab54-9ce39768d3e8`, context
+`.context/benchmarks/1793302876-1547394-92658/` and
+`/var/tmp/rose-6741-agentcard.log`. No second mint or manual ledger clearing was
+used to obtain a pass. The eight earlier treasury obligations are separate.
+
 ### October 26 sandbox recurrence under the standing exception
 
 Final integrated source 646ee1bab18145f519306376014282bcfadea99d produced

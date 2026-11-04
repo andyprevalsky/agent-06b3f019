@@ -77,6 +77,7 @@ from providers.planner_memory.inject import (
 )
 from providers.planner_memory.retrieval import DEFAULT_CONFIG as PLANNER_MEMORY_CONFIG
 from providers.planner_memory.retrieval import MemoryRetrieval
+from providers.rose.flash_agent import is_flash_agent_call
 from providers.rose import (
     ClaudeAuthContext,
     ComputeAuthContext,
@@ -754,6 +755,60 @@ def _build_compute_auth_context(
         demo_cache_affinity_key=demo_cache_affinity_key or result.get("fastCacheAffinityKey"),
         max_rotations=max_rotations,
     )
+
+
+async def _flash_agent_auth_contexts(
+    claude: Optional[ClaudeAuthContext],
+    gpt: Optional[GptAuthContext],
+    *,
+    user_id: Optional[str],
+    lineage_key: Optional[str],
+    agent_id: Optional[str],
+    demo_cache_affinity_key: Optional[str],
+    exclude_anthropic_family: bool = False,
+) -> Tuple[Optional[ClaudeAuthContext], Optional[GptAuthContext]]:
+    """Reuse a lease; otherwise try Terra then Opus, with broker-owned cooldowns."""
+    exclude_anthropic_family = anthropic_family_excluded(exclude_anthropic_family)
+    seen_tokens = {context.token for context in (gpt, claude) if context is not None}
+
+    async def fetch_next(
+        fetch_user_id: str, current: Optional[ComputeAuthContext] = None,
+    ) -> Optional[ComputeAuthContext]:
+        # Once on Claude, never cycle back to GPT within this call.
+        kinds = (("gpt",) if exclude_anthropic_family else
+                 ("claude",) if isinstance(current, ClaudeAuthContext) else ("gpt", "claude"))
+        for kind in kinds:
+            result = await fetch_compute_token_activity(
+                fetch_user_id, lineage_key=lineage_key, agent_id=agent_id,
+                root_agent_id=agent_id, demo_cache_affinity_key=demo_cache_affinity_key,
+                token_type=kind,
+            )
+            if not result or result.get("type") != kind:
+                continue
+            context = _build_compute_auth_context(
+                result, fetch_user_id, agent_id=agent_id, root_agent_id=agent_id,
+                demo_cache_affinity_key=demo_cache_affinity_key,
+            )
+            if context is None or context.token in seen_tokens:
+                continue
+            seen_tokens.add(context.token)
+            bind_rotation(context)
+            return context
+        return None
+
+    def bind_rotation(context: ComputeAuthContext) -> None:
+        async def refresh(fetch_user_id: str):
+            return await fetch_next(fetch_user_id, context)
+        context.fetch_fresh = refresh if context.user_id and context.max_rotations > 0 else None
+
+    current = gpt or (None if exclude_anthropic_family else claude)
+    if current is not None:
+        bind_rotation(current)
+    elif user_id:
+        current = await fetch_next(user_id)
+    if isinstance(current, ClaudeAuthContext):
+        return current, None
+    return None, current if isinstance(current, GptAuthContext) else None
 
 
 def _build_compute_auth_context_from_payload(
@@ -3060,6 +3115,16 @@ async def call_llm_structured_streaming(
             demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
         )
 
+        if is_flash_agent_call(pool, call_site):
+            claude_auth_context, gpt_auth_context = await _flash_agent_auth_contexts(
+                claude_auth_context, gpt_auth_context,
+                user_id=gpt_token_user_id or claude_token_user_id,
+                lineage_key=compute_token_lineage_key,
+                agent_id=agent_id,
+                demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
+                exclude_anthropic_family=_exclude_anthropic_family,
+            )
+
         def _native_visible_text() -> str:
             reasoning = accumulated_reasoning.strip()
             if reasoning and text_buffer:
@@ -4351,6 +4416,15 @@ async def call_llm(
                 root_agent_id=agent_id,
                 demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
+            if is_flash_agent_call(pool, call_site):
+                claude_auth_context, gpt_auth_context = await _flash_agent_auth_contexts(
+                    claude_auth_context, gpt_auth_context,
+                    user_id=gpt_token_user_id or claude_token_user_id,
+                    lineage_key=compute_token_lineage_key,
+                    agent_id=agent_id,
+                    demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
+                    exclude_anthropic_family=anthropic_family_excluded(),
+                )
             try:
                 rose_response = await rose_client.collect(
                     pool=pool,

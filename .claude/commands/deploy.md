@@ -1021,6 +1021,7 @@ The concurrent runner executes exactly these independent suites, without changin
 their assertions or test counts:
 
 `bash scripts/tests/workspace-env.test.sh`,
+`bash scripts/tests/rose-startup-script.test.sh`,
 `python3 scripts/tests/temporal-namespace-isolation.test.py`,
 `python3 scripts/tests/swap-harness.test.py`,
 `bash scripts/tests/kill-services.test.sh`,
@@ -2501,7 +2502,12 @@ python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result cle
 
 The normal budget is the initial review plus one batched incremental review. A
 third verification review is allowed only when the second review found a valid
-issue that required another code change. `deploy_review_cycle.py` hard-stops a
+issue that required another code change. A separately approved final-admission exception may use
+`start --kind verification --head "$REVIEW_HEAD" --verification-approval <approval-id>`
+after a clean second cycle when later required gate fixes changed the source.
+Record the explicit user approval ID and exact scope in TEST_REPORT and the PR.
+This preserves the old entries and the three-cycle cap; it only opens the final
+review and does not waive a review result or any other gate. `deploy_review_cycle.py` hard-stops a
 fourth cycle. If cycle three still has valid findings, record `deploy outcome
 blocked` and stop this deploy as **review-unstable**; never merge an unreviewed
 fix. Stabilize the branch as development work, then start a fresh `/deploy`.
@@ -3523,12 +3529,17 @@ failing lane is listed first, and lanes that never ran are omitted.
 
 ### Required post-deploy: cloud-origin local Mac execution and computer use
 
-This is an explicit user acceptance gate when an owned Mac is connected. If a
-read-only check of the intended account proves no owned Mac is connected, record
-`SKIPPED — no connected Mac` and continue the deploy without creating or connecting
-a device. An authentication error or unavailable inventory is not proof of absence.
-When a Mac is connected, keep this gate **OPEN** until witnessed there; offline
-relay tests or a tool acknowledgement are insufficient.
+This is an explicit user acceptance gate when an owned Mac is available.
+**Standing user instruction, November 2, 2026:** if no Mac is available, skip
+this test and continue deployment. First inspect owner-scoped device discovery;
+when it establishes that no connected Mac is available, record **SKIPPED — no
+Mac available** with the timestamp and discovery evidence in the deploy report.
+Do not wait for a Mac, request one, or block an otherwise eligible deployment.
+This is an availability skip, not a passing Mac test. When a Mac is available,
+keep the acceptance **OPEN** until witnessed; offline relay tests or a tool
+acknowledgement are insufficient. Access or consent failures on an available
+Mac are not covered by the no-device exception.
+An authentication error or unavailable inventory is not proof of absence.
 Do not start a new database, migrate production, replace encryption keys, or reset
 sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
 
@@ -3553,9 +3564,9 @@ sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
    cloud fallback may be created. Close only the test-owned session and preserve
    the Mac app, granted files, data, user services and Freedom.
 
-Owner: Code Main. No connected Mac is the explicit skip above. Missing access or
-consent for a connected Mac keeps acceptance OPEN; report that prerequisite instead
-of marking a mocked or Linux-only run successful.
+Owner: Code Main. With no available connected Mac, apply the recorded skip above.
+Otherwise missing access/consent keeps this acceptance OPEN; report that
+prerequisite instead of marking a mocked or Linux-only run successful.
 
 ## Required factory execution metadata
 

@@ -16404,6 +16404,36 @@ async def test_normal_code_preflight_preserves_shared_fallback():
                                 '/api/integrations/compute-code/anthropic-key/cooldown']
 
 
+async def test_codex_harness_preflight_uses_backend_codex_plan_not_gpt_api_key():
+    """No GPT login: the backend's Codex plan (Azure unless backed off) decides; GPT_API_KEY never funds Codex."""
+    import benchmarks.run_benchmark as bench
+    import httpx
+    from unittest.mock import patch
+    original_client = httpx.AsyncClient
+    plan = {}
+    requests = []
+    def respond(request):
+        requests.append((request.url.path, dict(request.url.params), request.headers.get('x-api-key')))
+        if request.url.path == '/api/integrations/gpt-code/credentials/token':
+            return httpx.Response(404, json={'error': 'NoTokensAvailable'})
+        return httpx.Response(200, json=plan)
+    with patch.dict(bench.os.environ, {'GPT_API_KEY': 'unfunded-openai-key'}), \
+         patch.object(bench, 'API_KEY', 'test-key'), \
+         patch.object(bench, '_api_headers', new=AsyncMock(return_value={})), \
+         patch.object(bench, '_current_benchmark_user_id', return_value='bench-user'), \
+         patch.object(bench.httpx, 'AsyncClient', side_effect=lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)):
+        for codex, expected in [(True, True), (False, False)]:
+            plan.clear()
+            plan.update({'claude': True, 'codex': codex})
+            requests.clear()
+            assert await bench._check_codex_harness_credentials('http://fixture.invalid') is expected, plan
+            assert requests == [
+                ('/api/integrations/gpt-code/credentials/token', {}, None),
+                ('/api/claude-code-session/credential-availability', {'user_id': 'bench-user'}, 'test-key'),
+            ], requests
+    assert 'Azure' in bench.CODEX_HARNESS_CREDENTIAL_SKIP_REASON
+
+
 async def test_code_dispatch_skip_remains_opt_in():
     import benchmarks.run_benchmark as bench
     from unittest.mock import patch
@@ -26880,6 +26910,10 @@ async def run_all_tests():
     await r.record_async("deploy_claude_preflight_accepts_tokens_and_rejects_unproven_absence", test_deploy_claude_preflight_accepts_tokens_and_rejects_unproven_absence)
     await r.record_async("normal_code_preflight_preserves_shared_fallback", test_normal_code_preflight_preserves_shared_fallback)
     await r.record_async("code_dispatch_skip_remains_opt_in", test_code_dispatch_skip_remains_opt_in)
+    await r.record_async(
+        "codex_harness_preflight_uses_backend_codex_plan",
+        test_codex_harness_preflight_uses_backend_codex_plan_not_gpt_api_key,
+    )
     await r.record_async(
         "claude_code_preflight_uses_runtime_credential_route",
         test_claude_code_preflight_uses_runtime_credential_route,

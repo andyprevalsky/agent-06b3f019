@@ -140,7 +140,8 @@ def next_cycle(entries: list[object]) -> dict[str, object]:
 
 
 def start_cycle(
-    path: Path, *, head: str, kind: str, reset: bool = False
+    path: Path, *, head: str, kind: str, reset: bool = False,
+    verification_approval: str | None = None,
 ) -> dict[str, object]:
     if not head:
         raise ReviewCycleError("review HEAD must not be empty")
@@ -167,9 +168,19 @@ def start_cycle(
         raise ReviewCycleError(
             f"review cycle {cycle_number} must be {expected['kind']}, not {kind}{hint}"
         )
+    previous = budget_cycles(entries)[-1] if cycle_number == 3 else None
+    if verification_approval is not None:
+        if (
+            cycle_number != 3
+            or previous.get("result") != "clean"
+            or not verification_approval
+            or len(verification_approval) > 128
+            or any(not (c.isalnum() or c in "-_.:") for c in verification_approval)
+        ):
+            raise ReviewCycleError("verification approval needs cycle three after clean cycle two and an approval ID")
     if cycle_number == 3:
-        previous = budget_cycles(entries)[-1]
-        if previous.get("result") != "findings":
+        assert previous is not None
+        if previous.get("result") != "findings" and verification_approval is None:
             raise ReviewCycleError(
                 "verification review is allowed only after cycle two found a valid issue"
             )
@@ -180,6 +191,8 @@ def start_cycle(
         "status": "open",
         "started_at": now(),
     }
+    if verification_approval is not None:
+        cycle["verification_approval"] = verification_approval
     if expected["replaces"]:
         cycle["replaces"] = expected["replaces"]
     entries.append(cycle)
@@ -731,7 +744,10 @@ def override_cycle(
     entries = state["cycles"]
     assert isinstance(entries, list)
     # Only cycles that delivered a review count: an `unavailable` cycle consumed no review budget.
-    rounds = len(budget_cycles(entries)) + prior_rounds
+    rounds = sum(
+        cycle.get("disposition") != "skipped" and not cycle.get("skip_reason")
+        for cycle in budget_cycles(entries)
+    ) + prior_rounds
     if rounds < MIN_OVERRIDE_ROUNDS:
         raise ReviewCycleError(
             f"override is pre-authorized only after {MIN_OVERRIDE_ROUNDS} review rounds; "
@@ -820,6 +836,7 @@ def parse_args() -> argparse.Namespace:
     start.add_argument("--head", required=True)
     start.add_argument("--kind", choices=sorted(KINDS), required=True)
     start.add_argument("--reset", action="store_true")
+    start.add_argument("--verification-approval", help="Explicit user approval ID for final verification after a clean second cycle")
 
     finish = subparsers.add_parser("finish")
     finish.add_argument("--head", required=True)
@@ -864,7 +881,8 @@ def main() -> int:
     try:
         if args.command == "start":
             payload = start_cycle(
-                args.state, head=args.head, kind=args.kind, reset=args.reset
+                args.state, head=args.head, kind=args.kind, reset=args.reset,
+                verification_approval=args.verification_approval,
             )
         elif args.command == "finish":
             payload = finish_cycle(args.state, head=args.head, result=args.result)

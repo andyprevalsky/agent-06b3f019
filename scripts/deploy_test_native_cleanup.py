@@ -553,10 +553,11 @@ def validate(receipt, owner, proof):
 
 
 def reconcile(state, occurrence_id, proof):
-    from deploy_test_cycle import latest_receipts, receipt_owner
+    from deploy_test_cycle import latest_receipts, receipt_owner, interrupted_receipt
     try:
-        failure = next(f for f in state['failures'] if f['id'] == occurrence_id)
-        gate = failure['gate']
+        failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
+        interrupted = interrupted_receipt(state, occurrence_id) if failure is None else None
+        gate = interrupted['gate'] if interrupted is not None else failure['gate']
         need(any(g['name'] == gate and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
         receipt = latest_receipts(state)[gate]
         if proof.get('purpose') == 'isolated-validation':
@@ -564,9 +565,12 @@ def reconcile(state, occurrence_id, proof):
                           if r.get('gate') == gate and r.get('token') == proof.get('request_token')]
             need(len(candidates) == 1, 'ambiguous historical receipt')
             receipt = candidates[0]
-        case = failure['check'].split('/', 1)[1]
-        need(failure.get('native_result') == 'UNVERIFIED' and not failure.get('complete')
-             and receipt.get('complete') is False and receipt['cases'].get(case) == 'UNVERIFIED', 'latest incomplete occurrence required')
+        if failure is not None:
+            case = failure['check'].split('/', 1)[1]
+            need(failure.get('native_result') == 'UNVERIFIED' and not failure.get('complete')
+                 and receipt.get('complete') is False and receipt['cases'].get(case) == 'UNVERIFIED', 'latest incomplete occurrence required')
+        else:
+            need(receipt == interrupted and receipt.get('token') == proof.get('request_token'), 'interrupted token mismatch')
         entry = validate(receipt, receipt_owner(gate, receipt), proof)
         entry['occurrence'] = occurrence_id
         key = proof['receipt_sha256']

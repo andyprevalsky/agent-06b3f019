@@ -10,8 +10,17 @@ from structlog.testing import capture_logs
 from providers.rose import foundry
 from providers.rose.errors import RoseAuthError, RoseInvalidRequest, RoseRateLimitError, RoseServerError
 from providers.rose.gpt_auth import _openai_credit_error, build_codex_responses_body
-from providers.rose.pools import foundry_model, get_pool
+from providers.rose.pools import PoolSpec, foundry_model, get_pool
 from providers.rose.pricing import get_model_pricing
+
+
+UNPINNED_SOL = PoolSpec(
+    name="rose-1-ultra",
+    claude_auth_model="claude-opus-5-5",
+    gpt_auth_model="gpt-6.1-sol",
+    foundry_enabled=True,
+    waterfall=(),
+)
 
 
 def _sse(*events: dict) -> str:
@@ -35,7 +44,7 @@ def test_openai_credit_codes_are_distinct_from_rate_limits(code):
 
 def _call():
     return foundry.foundry_complete(
-        pool_spec=get_pool("rose-1-ultra"),
+        pool_spec=UNPINNED_SOL,
         messages=[{"role": "user", "content": "Say hi"}],
         response_format=None,
         tools=None,
@@ -43,7 +52,7 @@ def _call():
         tool_choice=None,
         temperature=None,
         effort="high",
-        provider_fast_mode=True,
+        speed="fast",
         request_id="foundry-test",
         route_key="agent-1",
         agent_id="agent-1",
@@ -85,7 +94,7 @@ async def test_foundry_outbound_payload_matches_gpt_compute_payload(monkeypatch)
 
     _install_http(monkeypatch, handler)
     monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-6-sol")
-    pool = get_pool("rose-1-ultra")
+    pool = UNPINNED_SOL
     messages = [
         {"role": "system", "content": "Follow the supplied response contract."},
         {"role": "user", "content": "Return the result."},
@@ -123,7 +132,6 @@ async def test_foundry_outbound_payload_matches_gpt_compute_payload(monkeypatch)
             tool_choice=tool_choice,
             temperature=0.7,
             effort="xhigh",
-            provider_fast_mode=fast,
             request_id=f"parity-{name}",
             cache_namespace="agent-parity",
         )
@@ -131,6 +139,7 @@ async def test_foundry_outbound_payload_matches_gpt_compute_payload(monkeypatch)
             chunk
             async for chunk in foundry.foundry_complete(
                 **options,
+                speed="fast" if fast else "standard",
                 route_key="agent-parity",
                 agent_id="agent-parity",
                 call_site="parity-test",
@@ -139,7 +148,9 @@ async def test_foundry_outbound_payload_matches_gpt_compute_payload(monkeypatch)
             )
         ]
         assert any(chunk.kind == "content" for chunk in chunks)
-        expected = build_codex_responses_body(**options, model_override="gpt-6-sol")
+        expected = build_codex_responses_body(
+            **options, model_override="gpt-6-sol", service_tier="priority" if fast else None
+        )
         assert captured[-1] == expected
         assert "temperature" not in captured[-1]  # GPT compute also omits it.
 
@@ -150,7 +161,7 @@ async def test_responses_shape_and_zero_user_cost(monkeypatch):
         assert str(request.url) == "https://a-4989-resource.openai.azure.com/openai/v1/responses"
         assert request.headers["api-key"] == "test-key"
         body = json.loads(request.content)
-        assert body["model"] == "gpt-6-sol"
+        assert body["model"] == "gpt-6.1-sol"
         assert body["reasoning"]["effort"] == "high"
         assert body["stream"] is True and body["store"] is False
         assert body["include"] == ["reasoning.encrypted_content"]
@@ -166,9 +177,9 @@ async def test_responses_shape_and_zero_user_cost(monkeypatch):
     _install_http(monkeypatch, handler)
     chunks = [chunk async for chunk in _call()]
     assert [chunk.kind for chunk in chunks] == ["metadata", "content", "usage", "done"]
-    assert chunks[0].data["actual_model"] == "gpt-6-sol-foundry"
+    assert chunks[0].data["actual_model"] == "gpt-6.1-sol-foundry"
     assert chunks[1].data["text"] == "Hi"
-    assert get_model_pricing("gpt-6-sol-foundry") == {
+    assert get_model_pricing("gpt-6.1-sol-foundry") == {
         "input_cents_per_1k": 0.0,
         "output_cents_per_1k": 0.0,
     }
@@ -276,11 +287,11 @@ def test_shared_deployment_list_is_scoped_to_each_pool_model(monkeypatch):
         return [d for _, d in foundry._route_plan(foundry.foundry_regions(), model, "agent-1")]
 
     monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-6-sol, gpt-6-sol-b")
-    assert sorted(deployments(get_pool("rose-1-ultra").gpt_auth_model)) == ["gpt-6-sol", "gpt-6-sol-b"]
+    assert sorted(deployments(foundry.foundry_models(UNPINNED_SOL))) == ["gpt-6-sol", "gpt-6-sol-b"]
     for pool in ("rose-1-mini", "rose-1-flash", "rose-1-browser-use"):
         spec = get_pool(pool)
         assert spec.foundry_enabled, pool
-        assert deployments(spec.gpt_auth_model) == ["gpt-5.6-luna"], pool
+        assert deployments(foundry_model(spec)) == ["gpt-6-luna" if pool == "rose-1-flash" else "gpt-5.6-luna"], pool
     monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS", "gpt-5.6-luna-east")
     assert deployments("gpt-5.6-luna") == ["gpt-5.6-luna-east"]
     assert deployments("gpt-6-sol") == ["gpt-6-sol"]
@@ -312,7 +323,7 @@ async def test_open_weights_foundry_omits_reasoning_params(monkeypatch):
             tool_choice=None,
             temperature=None,
             effort=None,
-            provider_fast_mode=False,
+            speed="standard",
             request_id=f"reasoning-{pool}",
             route_key="agent-1",
             agent_id="agent-1",
@@ -325,7 +336,7 @@ async def test_open_weights_foundry_omits_reasoning_params(monkeypatch):
     oss, ultra = bodies
     assert oss["model"] == "DeepSeek-V3.2"
     assert "reasoning" not in oss and "include" not in oss
-    assert ultra["model"] == "gpt-6-sol" and ultra["reasoning"]["effort"] == "xhigh"
+    assert ultra["model"] == "gpt-6.1-sol" and ultra["reasoning"]["effort"] == "xhigh"
 
 
 # ---------------------------------------------------------------------------
@@ -359,9 +370,9 @@ def _install_regions(monkeypatch, handler, *, regions=(_R1, _R2, _R3), deploymen
     return requests
 
 
-def _call_with(route_key: str, pool: str = "rose-1-ultra"):
+def _call_with(route_key: str, pool: PoolSpec = UNPINNED_SOL):
     return foundry.foundry_complete(
-        pool_spec=get_pool(pool),
+        pool_spec=pool,
         messages=[{"role": "user", "content": "Say hi"}],
         response_format=None,
         tools=None,
@@ -369,7 +380,7 @@ def _call_with(route_key: str, pool: str = "rose-1-ultra"):
         tool_choice=None,
         temperature=None,
         effort="high",
-        provider_fast_mode=True,
+        speed="fast",
         request_id=f"region-{route_key}",
         route_key=route_key,
         agent_id=route_key,
@@ -507,7 +518,7 @@ async def test_region_auth_failure_cools_only_that_regions_key(monkeypatch):
     chunks = [chunk async for chunk in _call_with(route_key)]
     assert requests[0][0] == _R2 and requests[1][0] != _R2
     assert any(c.kind == "content" for c in chunks)
-    assert foundry.foundry_configured(get_pool("rose-1-ultra"))
+    assert foundry.foundry_configured(UNPINNED_SOL)
     requests.clear()
     [chunk async for chunk in _call_with(route_key)]
     assert all(region != _R2 for region, _ in requests)
@@ -519,7 +530,7 @@ async def test_single_region_auth_failure_still_disables_foundry(monkeypatch):
     with pytest.raises(RoseAuthError):
         [chunk async for chunk in _call_with("agent-auth")]
     assert len(requests) == 1
-    assert not foundry.foundry_configured(get_pool("rose-1-ultra"))
+    assert not foundry.foundry_configured(UNPINNED_SOL)
 
 
 def test_route_key_keeps_a_stable_primary_and_spreads_load(monkeypatch):
@@ -569,7 +580,7 @@ def test_secondary_regions_serve_only_listed_models(monkeypatch):
         assert _plan_regions(key, "DeepSeek-V3.2") == [_R1]
     for name in ("AZURE_FOUNDRY_ENDPOINT", "AZURE_FOUNDRY_API_KEY"):
         monkeypatch.delenv(name)
-    assert foundry.foundry_configured(get_pool("rose-1-ultra"))
+    assert foundry.foundry_configured(UNPINNED_SOL)
     assert not foundry.foundry_configured(get_pool("rose-1-mini"))
     # An incomplete region (missing key or endpoint) is not a region.
     monkeypatch.delenv("AZURE_FOUNDRY_API_KEY_2")
@@ -594,8 +605,8 @@ async def test_unpinned_sol_pool_uses_any_sol_deployment_and_pinned_pool_does_no
     """GPT-6 Sol and GPT-6.1 Sol stand in for each other unless a pool pins its Foundry model."""
     _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
     monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
-    ultra = foundry.foundry_models(get_pool("rose-1-ultra"))
-    assert ultra == ("gpt-6-sol", "gpt-6.1-sol")
+    ultra = foundry.foundry_models(UNPINNED_SOL)
+    assert ultra == ("gpt-6.1-sol", "gpt-6-sol")
     assert foundry.foundry_models(get_pool("rose-wmh-gpt61")) == ("gpt-6.1-sol",)
     assert foundry.foundry_models(get_pool("rose-1-oss")) == ("DeepSeek-V3.2",)
     plans = {
@@ -625,7 +636,7 @@ async def test_truncation_exclusion_removes_only_the_excluded_sol_model(monkeypa
     """A Sol model cut off at its output limit is never retried; the other Sol model still serves."""
     requests = _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
     monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_2", "gpt-6.1-sol")
-    ultra = get_pool("rose-1-ultra")
+    ultra = UNPINNED_SOL
     assert foundry.foundry_candidates(ultra, frozenset({"gpt61sol"})) == ("gpt-6-sol",)
     assert foundry.foundry_candidates(ultra, frozenset({"gpt6sol"})) == ("gpt-6.1-sol",)
     assert foundry.foundry_candidates(ultra, frozenset({"gpt6sol", "gpt61sol"})) == ()
@@ -645,7 +656,7 @@ async def test_truncation_exclusion_removes_only_the_excluded_sol_model(monkeypa
                     tool_choice=None,
                     temperature=None,
                     effort="high",
-                    provider_fast_mode=True,
+                    speed="fast",
                     request_id=f"trunc-{excluded}-{i}",
                     route_key=f"agent-{i}",
                     agent_id=None,
@@ -670,7 +681,7 @@ async def test_truncation_exclusion_removes_only_the_excluded_sol_model(monkeypa
                 tool_choice=None,
                 temperature=None,
                 effort="high",
-                provider_fast_mode=True,
+                speed="fast",
                 request_id="trunc-all",
                 route_key="agent-1",
                 agent_id=None,
@@ -692,7 +703,7 @@ async def test_non_https_optional_region_is_skipped_and_primary_still_rejects(mo
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY_7", "key-region-7")
     monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_7", "gpt-6-sol")
     with capture_logs() as logs:
-        assert foundry.foundry_configured(get_pool("rose-1-ultra"))
+        assert foundry.foundry_configured(UNPINNED_SOL)
         chunks = [chunk async for chunk in _call_with("agent-insecure-optional")]
         [chunk async for chunk in _call_with("agent-insecure-optional-2")]
     assert next(c for c in chunks if c.kind == "content").data["text"] == "Hi"
@@ -707,7 +718,7 @@ async def test_non_https_optional_region_is_skipped_and_primary_still_rejects(mo
     monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT_3", "http://typo-region.openai.azure.com")
     monkeypatch.setenv("AZURE_FOUNDRY_API_KEY_3", "key-region-3")
     monkeypatch.setenv("AZURE_FOUNDRY_DEPLOYMENTS_3", "gpt-6-sol")
-    assert not foundry.foundry_configured(get_pool("rose-1-ultra"))
+    assert not foundry.foundry_configured(UNPINNED_SOL)
     # No HTTPS region left: the configuration is rejected.
     monkeypatch.delenv("AZURE_FOUNDRY_ENDPOINT_2")
     with pytest.raises(RoseInvalidRequest, match="AZURE_FOUNDRY_ENDPOINT_3 must be HTTPS"):
@@ -716,7 +727,7 @@ async def test_non_https_optional_region_is_skipped_and_primary_still_rejects(mo
     # A non-HTTPS region 1 still rejects the whole configuration before any request.
     requests = _install_regions(monkeypatch, lambda *_: _ok(), regions=(_R1, _R2))
     monkeypatch.setenv("AZURE_FOUNDRY_ENDPOINT", "http://a-4989-resource.openai.azure.com")
-    assert foundry.foundry_configured(get_pool("rose-1-ultra")), "routing surfaces the config error"
+    assert foundry.foundry_configured(UNPINNED_SOL), "routing surfaces the config error"
     with pytest.raises(RoseInvalidRequest, match="AZURE_FOUNDRY_ENDPOINT must be HTTPS"):
         [chunk async for chunk in _call_with("agent-insecure-primary")]
     assert requests == []

@@ -90,7 +90,7 @@ async def main(phase: str) -> None:
                 tool_choice=None,
                 temperature=None,
                 effort=None,
-                provider_fast_mode=True,
+                speed="fast",
                 request_id=f"foundry-shared-cooldown-{phase}",
                 route_key=ROUTE_KEY,
                 agent_id=None,

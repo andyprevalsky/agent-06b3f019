@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
@@ -107,4 +110,47 @@ test('reports its own peak so a regression names the table', () => {
 test('withinSeedBudget gates on the recorded budget', () => {
   assert.equal(withinSeedBudget(SEED_PEAK_RSS_BUDGET_MB), true);
   assert.equal(withinSeedBudget(SEED_PEAK_RSS_BUDGET_MB + 1), false);
+});
+
+test('resolved TSX stays within the seed budget with a large expired cache', () => {
+  const backend = join(__dirname, '../../..');
+  const resolve = createRequire(join(backend, 'package.json'));
+  const temporary = mkdtempSync(join(tmpdir(), 'seed-tsx-cache-'));
+  const entry = join(temporary, 'entry.ts');
+  const preload = join(backend, 'scripts/fixtures/seed-tsx-cache-cohort.cjs');
+  try {
+    const marker = `SEED_TSX_CACHE_ENTRY:${temporary}`;
+    writeFileSync(
+      entry,
+      `const marker: string = ${JSON.stringify(marker)}; console.log(marker);\n`
+    );
+    const result = spawnSync(process.execPath, [resolve.resolve('tsx/cli'), entry], {
+      cwd: backend,
+      encoding: 'utf8',
+      timeout: 15_000,
+      env: {
+        ...process.env,
+        TMPDIR: temporary,
+        TSX_DISABLE_CACHE: '',
+        NODE_OPTIONS: `--max-old-space-size=96 --require ${JSON.stringify(preload)}`,
+      },
+    });
+    assert.equal(result.status, 0, `TSX cache startup failed: ${result.error ?? result.stderr}`);
+    assert(result.stdout.split(/\r?\n/).includes(marker), 'actual TypeScript entry must execute');
+    const enumerated = [...result.stdout.matchAll(/CACHE_PROBE_ENUMERATED=(\d+)/g)].map((m) =>
+      Number(m[1])
+    );
+    assert(
+      enumerated.some((count) => count >= 60_000),
+      'loader must enumerate the expired cache cohort'
+    );
+    const peaks = [...result.stdout.matchAll(/CACHE_PROBE_RSS_KB=(\d+)/g)].map((m) => Number(m[1]));
+    assert(peaks.length > 0, 'child must report OS maximum RSS');
+    assert(
+      Math.max(...peaks) / 1024 <= SEED_PEAK_RSS_BUDGET_MB,
+      `TSX cache startup exceeds unchanged ${SEED_PEAK_RSS_BUDGET_MB}MB seed budget`
+    );
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
 });

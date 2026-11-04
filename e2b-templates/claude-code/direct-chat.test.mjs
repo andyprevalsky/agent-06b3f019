@@ -83,8 +83,16 @@ async function until(predicate) {
   }
   throw new Error("event timeout");
 }
+// Fast mode is the spawning agent's request (CLAUDE_CODE_SPEED), never a
+// default: no request is standard even when the catalog supports fast.
 for (const profile of [
-  { name: "defaults", env: {}, effort: "medium", fast: true },
+  { name: "defaults", env: {}, effort: "medium", fast: false },
+  {
+    name: "fast request",
+    env: { CLAUDE_CODE_SPEED: "fast" },
+    effort: "medium",
+    fast: true,
+  },
   {
     name: "explicit overrides",
     env: {
@@ -299,6 +307,81 @@ const selectDefaults = vm.runInNewContext(
     source.indexOf("async function initializeNativeSettings("),
   ) + "\nnativeDefaultSettings",
 );
+// The native catalog Claude Code 2.1.305 returns from initialize (2026-10-28):
+// aliases name their full model in resolvedModel; only Opus offers fast mode.
+// Each tier's model gets its own entry's speed: Opus 5.5 (ultra) fast,
+// Sonnet 5.5 (flash) standard.
+test("tier models take their own catalog entry's fast mode: Opus 5.5 fast, Sonnet 5.5 standard", () => {
+  const efforts = ["low", "medium", "high", "xhigh", "max"];
+  const catalog = [
+    {
+      value: "default",
+      resolvedModel: "claude-opus-5-5",
+      supportedEffortLevels: efforts,
+      supportsFastMode: true,
+    },
+    {
+      value: "opus",
+      resolvedModel: "claude-opus-5-5",
+      supportedEffortLevels: efforts,
+      supportsFastMode: true,
+    },
+    {
+      value: "claude-fable-5-1[1m]",
+      resolvedModel: "claude-fable-5-1",
+      supportedEffortLevels: efforts,
+    },
+    {
+      value: "sonnet",
+      resolvedModel: "claude-sonnet-5-5",
+      supportedEffortLevels: efforts,
+    },
+    {
+      value: "haiku",
+      resolvedModel: "claude-haiku-5-5",
+      supportedEffortLevels: efforts,
+    },
+  ];
+  const settings = (model, env = {}) =>
+    JSON.parse(JSON.stringify(selectDefaults(catalog, model, env)));
+  const fast = { CLAUDE_CODE_SPEED: "fast" };
+  const ultra = { CLAUDE_CODE_SPEED: "fast", CLAUDE_CODE_EFFORT: "xhigh" };
+  // A Fast agent's request: fast where the entry supportsFastMode, else standard.
+  assert.deepEqual(settings("claude-opus-5-5", fast), {
+    effort: "medium",
+    speed: "fast",
+  });
+  assert.deepEqual(settings("claude-opus-5-5", ultra), {
+    effort: "xhigh",
+    speed: "fast",
+  });
+  assert.deepEqual(settings("claude-sonnet-5-5", fast), {
+    effort: "medium",
+    speed: "standard",
+  });
+  assert.deepEqual(settings("claude-fable-5-1", fast), {
+    effort: "medium",
+    speed: "standard",
+  });
+  // The UI label comes from the alias entry ("Opus"), not "Default (recommended)".
+  const option = vm.runInNewContext(
+    source.slice(
+      source.indexOf("function nativeModelOption("),
+      source.indexOf("function nativeDefaultSettings("),
+    ) + "\nnativeModelOption",
+  );
+  assert.equal(option(catalog, "claude-opus-5-5").value, "opus");
+  assert.equal(option(catalog, "claude-sonnet-5-5").value, "sonnet");
+  // Standard (or no request) is standard everywhere, even where fast is offered.
+  assert.deepEqual(settings("claude-opus-5-5"), {
+    effort: "medium",
+    speed: "standard",
+  });
+  assert.deepEqual(
+    settings("claude-opus-5-5", { CLAUDE_CODE_SPEED: "standard" }),
+    { effort: "medium", speed: "standard" },
+  );
+});
 test("Claude defaults use only advertised effort/speed and preserve explicit environment values", () => {
   const catalog = [
     {
@@ -334,10 +417,11 @@ test("Claude defaults use only advertised effort/speed and preserve explicit env
       }),
     /unsupported_settings/,
   );
-  assert.throws(
-    () =>
-      selectDefaults(catalog, "claude-sonnet-5", { CLAUDE_CODE_SPEED: "fast" }),
-    /unsupported_settings/,
+  assert.equal(
+    selectDefaults(catalog, "claude-sonnet-5", { CLAUDE_CODE_SPEED: "fast" })
+      .speed,
+    "standard",
+    "a fast request on a model without fast mode runs standard",
   );
   assert.throws(
     () =>

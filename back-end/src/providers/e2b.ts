@@ -9,10 +9,6 @@ import {
   type ClaudeCodeCredentialResult,
 } from './claudeCredentials';
 import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
-import {
-  fetchGptCodeCredentialsWithMeta,
-  type GptCodeCredentialEnvelopeResult,
-} from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
@@ -33,6 +29,7 @@ import {
   releaseSandboxAfterFailedStart,
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
+import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
 import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
@@ -48,8 +45,6 @@ import {
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeSandboxApiKey,
   resolveClaudeCodeTokenSource,
-  resolveCodexAzureFunding,
-  resolveCodexCodeAuthEnvs,
   shouldEnableClaudeCodeFastMode,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldInjectClaudeCodeFastModeProxy,
@@ -83,6 +78,7 @@ export {
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
 import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from './codexTemplate';
+import { codeAgentCliEnvs } from './codeAgentModels';
 
 const log = createLogger('E2B');
 
@@ -174,7 +170,9 @@ async function createClaudeCodeSessionUnlocked(
   ) {
     log.info('OpenRouter configured — skipping Fast Mode tee-proxy/flags for Claude Code session');
   }
-  const model = process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5';
+  // The spawning agent's tier and Fast Mode button pick model, effort and speed.
+  const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId);
+  const model = cliSettings.CLAUDE_CODE_MODEL;
   const workDir = workDirForGithubRepo(githubRepoUrl);
   const templateId = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
   const runtimeFingerprint = [
@@ -196,7 +194,7 @@ async function createClaudeCodeSessionUnlocked(
   // Build environment variables for sandbox
   const envs: Record<string, string> = {
     CLAUDE_CODE_GOAL: goal,
-    CLAUDE_CODE_MODEL: model,
+    ...cliSettings,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     ...codeSessionBranchEnvs(codeSession),
     // Write capability for direct-chat user turns (codeSessionTurns.ts). The
@@ -250,18 +248,14 @@ async function createClaudeCodeSessionUnlocked(
   const preferSandboxBase = shouldPreferSandboxAnthropicBaseUrlOverFastMode(
     sandboxTransport.baseUrl
   );
-  // Fast Mode CLI flags + tee-proxy only when opt-in Fast Mode is active and we
-  // are not already on a funded non-Anthropic gateway. Andy write-through alone
-  // must not inject the proxy (k=5 t5 recurrence, 2026-08-21).
+  // The DEMO-cache tee-proxy only when its opt-in gate is active and we are not
+  // already on a funded non-Anthropic gateway; Andy write-through alone must not
+  // inject it (k=5 t5 recurrence, 2026-08-21). It never sets provider speed:
+  // CLAUDE_CODE_SPEED comes from the agent's speed (cliSettings).
   const injectFastModeProxy = shouldInjectClaudeCodeFastModeProxy({
     codeAgentFastModeActive,
     preferSandboxBase,
   });
-  if (injectFastModeProxy) {
-    envs.CLAUDE_CODE_FAST_MODE = '1';
-    envs.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS = '1';
-    envs.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK = '1';
-  }
   const fastModeEnv: Record<string, string> = injectFastModeProxy
     ? buildFastModeAnthropicEnv(
         goal,
@@ -369,7 +363,7 @@ async function createClaudeCodeSessionUnlocked(
   try {
     acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code', {
       provider: 'claude',
-      projectSize: projectWorkspace?.project.sandboxSize,
+      project: projectWorkspace?.project,
       agentId,
     });
   } catch (err) {
@@ -394,7 +388,12 @@ async function createClaudeCodeSessionUnlocked(
   log.info(`Using sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayClaudeCodeWsServer(sandbox);
   await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
-  const project = await restoreSandboxProject(taskId, sandbox, projectWorkspace);
+  const project = await restoreSandboxProject(
+    taskId,
+    sandbox,
+    projectWorkspace,
+    acquired.fromSnapshot
+  );
 
   const uploadedFiles = await uploadAttachmentsToSandbox(sandbox, attachments, 'Claude Code');
 
@@ -498,7 +497,7 @@ export async function createCodexCodeSession(
 
   const taskId = uuidv4();
   const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
-  const model = process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra';
+  const { settings: agentSettings, envs: cliSettings } = await codeAgentCliEnvs('codex', agentId);
   const harnessMode = harnessOptions?.harnessMode ?? 'code';
   const roseApiBaseUrl = harnessOptions?.roseApiBaseUrl?.replace(/\/$/, '');
   const workDir = workDirForGithubRepo(githubRepoUrl);
@@ -517,17 +516,19 @@ export async function createCodexCodeSession(
           ...promptFlagsForUser(userId),
         });
 
-  const credentialMeta: GptCodeCredentialEnvelopeResult | null =
-    await fetchGptCodeCredentialsWithMeta(userId);
-  // User OAuth first; the funded fallback is our Azure Codex deployment (the
-  // OpenAI GPT_API_KEY is not funded). Mirrors the Claude Code path.
-  const azureFunding = resolveCodexAzureFunding();
-  const authEnvs = resolveCodexCodeAuthEnvs(credentialMeta, azureFunding);
+  // User OAuth → shared pool → our funded Azure Codex deployment unless it is
+  // backed off (the OpenAI GPT_API_KEY is not funded). Mirrors the Claude Code path.
+  const {
+    credentialMeta,
+    azureFunding,
+    envs: authEnvs,
+    servedBy,
+  } = await resolveCodexSpawnAuth(userId, new Date(), agentSettings.tier);
 
   const envs: Record<string, string> = {
     CODEX_GOAL: goal,
     ...authEnvs,
-    CODEX_MODEL: model,
+    ...cliSettings,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     CODE_AGENT_HARNESS_MODE: harnessMode,
     ...codeSessionBranchEnvs(codeSession),
@@ -554,7 +555,7 @@ export async function createCodexCodeSession(
     log.info(`Using ${credentialMeta.source} GPT Code credentials for agent ${agentId}`);
   } else {
     log.info(
-      `Using Azure ${azureFunding?.deployment} funded fallback for Codex Code agent ${agentId}`
+      `Using Azure ${azureFunding?.deployment} on ${azureFunding ? new URL(azureFunding.baseUrl).host : 'unconfigured'} funded fallback for Codex Code agent ${agentId}`
     );
   }
 
@@ -631,7 +632,8 @@ export async function createCodexCodeSession(
       streamUrl: wsUrl,
       goal,
       status: 'ACTIVE',
-      claudeTokenSource: credentialMeta?.source ?? null,
+      // What serves the run: 'user' | 'pool' login, or 'azure' (the funded deployment alone).
+      claudeTokenSource: servedBy,
       claudeTokenIntegrationId:
         credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
       ...codeSessionTaskFields(codeSession, 'codex'),

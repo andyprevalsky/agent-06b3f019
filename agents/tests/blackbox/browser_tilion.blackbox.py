@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
@@ -104,66 +105,132 @@ class FakeTilionGateway:
             await self._server.wait_closed()
 
 
+async def _chromium_endpoint(client, port: Optional[int], active_port_file: Optional[Path] = None) -> str:
+    """Use the existing polling budget, waiting for usable native CDP discovery."""
+    if port is None and active_port_file is None:
+        raise ValueError("native port discovery requires its profile file")
+    last_observation = "no response"
+    for _ in range(100):
+        try:
+            current_port = port
+            expected_path = None
+            if current_port is None:
+                published = active_port_file.read_text().splitlines()
+                current_port = int(published[0])
+                expected_path = published[1].strip()
+                if not expected_path:
+                    raise ValueError("native debugger path is not published")
+                if not 0 < current_port < 65536:
+                    raise ValueError("native debugging port is out of range")
+            version = await client.get(f"http://127.0.0.1:{current_port}/json/version")
+            version.raise_for_status()
+            payload = version.json()
+            endpoint = payload.get("webSocketDebuggerUrl") if isinstance(payload, dict) else None
+            if isinstance(endpoint, str) and endpoint.startswith(("ws://", "wss://")):
+                if expected_path is not None:
+                    assert urlsplit(endpoint).path == expected_path, "CDP endpoint belongs to another browser"
+                return endpoint
+            last_observation = f"incomplete discovery: {str(payload)[:300]}"
+        except (OSError, httpx.HTTPError, ValueError, IndexError) as error:
+            last_observation = f"{type(error).__name__}: {error}"
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"/json/version on 127.0.0.1:{port} not ready: {last_observation}")
+
+
+async def test_chromium_readiness_requires_debugger_url():
+    """HTTP/JSON readiness alone must not hand an unready browser to the mux."""
+    ready = "ws://127.0.0.1:12345/devtools/browser/ready"
+    request = httpx.Request("GET", "http://127.0.0.1:12345/json/version")
+    responses = [
+        httpx.ConnectError("not listening", request=request),
+        httpx.Response(503, json={}, request=request),
+        httpx.Response(200, json={}, request=request),
+        httpx.Response(200, json={"webSocketDebuggerUrl": ""}, request=request),
+        httpx.Response(200, json={"webSocketDebuggerUrl": ready}, request=request),
+    ]
+    class Client:
+        async def get(self, url):
+            assert url == str(request.url)
+            response = responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+    async def no_sleep(delay):
+        assert delay == 0.1
+    with patch("asyncio.sleep", no_sleep):
+        assert await _chromium_endpoint(Client(), 12345) == ready
+    assert not responses, "readiness must wait through every incomplete response"
+
+
+async def test_chromium_readiness_preserves_budget_and_reports_last_failure():
+    calls = 0
+    class Client:
+        async def get(self, url):
+            nonlocal calls
+            calls += 1
+            raise httpx.ConnectError("fixture connection refused")
+    async def no_sleep(delay):
+        assert delay == 0.1
+    with patch("asyncio.sleep", no_sleep):
+        try:
+            await _chromium_endpoint(Client(), 12345)
+        except AssertionError as error:
+            assert "ConnectError: fixture connection refused" in str(error), str(error)
+        else:
+            raise AssertionError("unready discovery must fail closed")
+    assert calls == 100, "retain the original readiness attempt budget"
+
+
 @contextlib.asynccontextmanager
 async def _chromium(full: bool = False):
     """Local Chromium with a CDP endpoint.
 
-    ``full`` starts the full build in new headless mode as a plain process: the
-    default headless shell has no WebAuthn, and a Playwright-launched browser
-    keeps Playwright's own pipe client attached to every target, a second CDP
-    client the single-client provider never has.
+    The full browser owns its debugging port until shutdown. Reading its native
+    discovery file avoids releasing a parent-selected port before Chrome binds.
+    The plain process also avoids Playwright attaching a second CDP client.
     """
     async with async_playwright() as playwright:
-        # A released reservation does not transfer ownership to Chromium.
-        # Let the raw browser bind an ephemeral port and publish its own address.
-        port = 0
-        debugger_path = None
-        if not full:
-            with socket.socket() as reservation:
-                reservation.bind(("127.0.0.1", 0))
-                port = reservation.getsockname()[1]
         process = None
         browser = None
-        if full:
-            profile = tempfile.mkdtemp(prefix="tilion-full-chromium-")
-            process = subprocess.Popen(
-                [
-                    playwright.chromium.executable_path,
-                    "--headless=new",
-                    "--no-sandbox",
-                    "--no-first-run",
-                    f"--remote-debugging-port={port}",
-                    f"--user-data-dir={profile}",
-                    "about:blank",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        else:
-            browser = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={port}"])
+        profile = None
+        stderr = None
         try:
-            payload: Dict[str, Any] = {}
-            async with httpx.AsyncClient(trust_env=False) as client:
-                for _ in range(100):
-                    if full and port == 0:
-                        # Publication can be missing or partial during startup.
-                        # Discovery and the real HTTP probe share this one budget.
-                        with contextlib.suppress(FileNotFoundError, ValueError):
-                            with open(os.path.join(profile, "DevToolsActivePort"), encoding="ascii") as active:
-                                published_port = int(active.readline())
-                                published_path = active.readline().strip()
-                            if 0 < published_port < 65536 and published_path:
-                                port, debugger_path = published_port, published_path
-                    if port:
-                        with contextlib.suppress(httpx.HTTPError):
-                            version = await client.get(f"http://127.0.0.1:{port}/json/version")
-                            payload = version.json()
-                            break
-                    await asyncio.sleep(0.1)
-            assert "webSocketDebuggerUrl" in payload, f"/json/version on 127.0.0.1:{port} -> {str(payload)[:300]}"
             if full:
-                assert urlsplit(payload["webSocketDebuggerUrl"]).path == debugger_path, "CDP endpoint belongs to another browser"
-            yield playwright, browser, payload["webSocketDebuggerUrl"]
+                profile = Path(tempfile.mkdtemp(prefix="tilion-full-chromium-"))
+                stderr = tempfile.TemporaryFile()
+                process = subprocess.Popen(
+                    [
+                        playwright.chromium.executable_path,
+                        "--headless=new",
+                        "--no-sandbox",
+                        "--no-first-run",
+                        "--remote-debugging-port=0",
+                        f"--user-data-dir={profile}",
+                        "about:blank",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr,
+                )
+                port = None
+            else:
+                with socket.socket() as reservation:
+                    reservation.bind(("127.0.0.1", 0))
+                    port = reservation.getsockname()[1]
+                browser = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={port}"])
+            try:
+                async with httpx.AsyncClient(trust_env=False) as client:
+                    endpoint = await _chromium_endpoint(
+                        client, port, profile / "DevToolsActivePort" if profile is not None else None
+                    )
+            except AssertionError as error:
+                if process is not None and stderr is not None:
+                    size = os.fstat(stderr.fileno()).st_size
+                    diagnostic = os.pread(stderr.fileno(), min(size, 8192), max(0, size - 8192)).decode(errors="replace")
+                    raise AssertionError(
+                        f"{error}; Chromium exit={process.poll()}; stderr={diagnostic}"
+                    ) from error
+                raise
+            yield playwright, browser, endpoint
         finally:
             if browser is not None:
                 await browser.close()
@@ -171,7 +238,79 @@ async def _chromium(full: bool = False):
                 process.kill()
                 with contextlib.suppress(Exception):
                     process.wait(timeout=10)
+            if stderr is not None:
+                stderr.close()
+            if profile is not None:
                 shutil.rmtree(profile, ignore_errors=True)
+
+
+async def test_chromium_native_discovery_waits_for_valid_port_file():
+    with tempfile.TemporaryDirectory() as directory:
+        active = Path(directory) / "DevToolsActivePort"
+        sleeps = 0
+        requests = 0
+
+        class Client:
+            async def get(self, url):
+                nonlocal requests
+                requests += 1
+                assert url == "http://127.0.0.1:4242/json/version"
+                return httpx.Response(200, json={"webSocketDebuggerUrl": "ws://127.0.0.1:4242/devtools/browser/ready"}, request=httpx.Request("GET", url))
+
+        async def publish_native_port(delay):
+            nonlocal sleeps
+            assert delay == 0.1
+            sleeps += 1
+            active.write_text("not-a-port" if sleeps == 1 else "4242\n/devtools/browser/ready")
+
+        with patch("asyncio.sleep", publish_native_port):
+            assert await _chromium_endpoint(Client(), None, active) == "ws://127.0.0.1:4242/devtools/browser/ready"
+        assert sleeps == 2 and requests == 1
+
+
+async def test_chromium_native_discovery_preserves_missing_file_budget():
+    with tempfile.TemporaryDirectory() as directory:
+        sleeps = 0
+        class Client:
+            async def get(self, url):
+                raise AssertionError("HTTP must not use an unknown port")
+        async def no_sleep(delay):
+            nonlocal sleeps
+            assert delay == 0.1
+            sleeps += 1
+        with patch("asyncio.sleep", no_sleep):
+            try:
+                await _chromium_endpoint(Client(), None, Path(directory) / "missing")
+            except AssertionError as error:
+                assert "FileNotFoundError" in str(error), str(error)
+            else:
+                raise AssertionError("missing native discovery must fail")
+        assert sleeps == 100, "retain the original readiness attempt budget"
+
+
+async def test_full_chromium_port_cannot_be_stolen_after_parent_reservation():
+    original_popen = subprocess.Popen
+    held_ports = []
+    requested_ports = []
+
+    def steal_released_port(args, *positional, **kwargs):
+        if isinstance(args, (list, tuple)) and "--headless=new" in args:
+            port = int(next(arg.split("=", 1)[1] for arg in args if arg.startswith("--remote-debugging-port=")))
+            requested_ports.append(port)
+            if port:
+                blocker = socket.socket()
+                blocker.bind(("127.0.0.1", port))
+                held_ports.append(blocker)
+        return original_popen(args, *positional, **kwargs)
+
+    try:
+        with patch("subprocess.Popen", steal_released_port):
+            async with _chromium(full=True) as (_playwright, _browser, endpoint):
+                assert endpoint.startswith("ws://"), endpoint
+        assert requested_ports == [0], requested_ports
+    finally:
+        for blocker in held_ports:
+            blocker.close()
 
 
 def _tilion_env(gateway: FakeTilionGateway):
@@ -3688,6 +3827,12 @@ async def test_tilion_checkpoint_waits_for_pending_dial_and_real_close():
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("chromium_native_port_discovery", test_chromium_native_discovery_waits_for_valid_port_file),
+        ("chromium_native_discovery_budget", test_chromium_native_discovery_preserves_missing_file_budget),
+        ("chromium_native_port_ownership", test_full_chromium_port_cannot_be_stolen_after_parent_reservation),
+        ("chromium_readiness_requires_debugger_url", test_chromium_readiness_requires_debugger_url),
+        ("chromium_readiness_preserves_budget", test_chromium_readiness_preserves_budget_and_reports_last_failure),
+
         ("tilion_checkpoint_waits_for_pending_dial_and_real_close", test_tilion_checkpoint_waits_for_pending_dial_and_real_close),
         ("checkpoint_recorder_close_bounds_and_control_signals", test_checkpoint_recorder_close_bounds_and_control_signals),
         ("tilion_pause_releases_socket_before_backend_checkpoint", test_tilion_pause_releases_socket_before_backend_checkpoint),

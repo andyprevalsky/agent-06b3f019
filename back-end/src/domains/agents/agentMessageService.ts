@@ -123,21 +123,6 @@ async function routeUserMessage(
 }
 
 /**
- * Every USER message sent to an agent lifts a user pause, whoever sends it.
- * Only rows the agent's own workflow writes (internal writes stamped with its
- * generation: response-schema context, OTP relays, sub-agent auto-replies)
- * leave the pause alone, because they can land after the user paused.
- */
-async function deliverUserMessage(
-  agentId: string,
-  body: PostMessageBody,
-  authoredByWorkflow: boolean
-): Promise<void> {
-  const signalValue = buildUserMessageSignalValue(body.message, body.metadata);
-  await routeUserMessage(agentId, signalValue, authoredByWorkflow);
-}
-
-/**
  * One agent-graph (A2A) USER row from another agent: written once per
  * idempotency key and delivered only by the call that wrote it, so a retried
  * or racing send never signals the workflow twice. An agent's message is not
@@ -359,8 +344,13 @@ export async function postMessage(
   // echoing them back as receive_user_response would read as user feedback.
   // A Browser-composer message belongs to that browser task: the browser reads
   // it at its next step, so the owner's loop is never signalled for it.
+  // User messages lift a user pause; generation-stamped workflow writes leave it alone.
   if (role === 'USER' && targeted === null && !(isInternal && isAgentAuthoredRow(body.metadata))) {
-    await deliverUserMessage(agentId, body, isInternal && workflowGeneration !== undefined);
+    await routeUserMessage(
+      agentId,
+      buildUserMessageSignalValue(body.message, body.metadata),
+      isInternal && workflowGeneration !== undefined
+    );
   }
 
   return withPiggybackedInbox(agentId, body, isInternal, {

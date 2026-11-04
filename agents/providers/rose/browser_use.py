@@ -755,7 +755,7 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
             if "phone" in known_actions:
                 description = (
                     "For targetKind=browser (default): " + description +
-                    " For targetKind=iphone: request help only for a blocking password, "
+                    " For targetKind=iphone: request password help only after matching native AutoFill is unavailable and credentials.fill_saved returned phone_credential_unavailable, or a saved credential was rejected. Request help for a "
                     "user-only verification code, device passcode, or manual_verification "
                     "requiring user presence (biometrics or trusted-device approval). "
                     "The browser authentication waterfall does not apply to this native target. "

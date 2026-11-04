@@ -7,7 +7,12 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { clearCaptures, capturedRequests } from './msw/capture';
 import { ADMIN_ACCOUNTS } from '@/lib/adminAccounts';
-import { resetQueryPreferencesMemory, writeQueryPreferences } from '@/lib/queryPreferences';
+import { readQueryPreferences, resetQueryPreferencesMemory } from '@/lib/queryPreferences';
+import {
+  setUltraPreferred,
+  useUltraPreferred,
+  resetSpeedLevelSession,
+} from '@/features/terminal-component-group/components/query-input/speedLevel';
 import { resetFastModeSessionOverride } from '@/lib/fastModeSession';
 
 const mocks = vi.hoisted(() => {
@@ -109,6 +114,7 @@ function messageSendingArgs(overrides: Partial<Parameters<typeof useMessageSendi
 
 afterEach(() => {
   resetQueryPreferencesMemory();
+  resetSpeedLevelSession();
   for (const cookie of document.cookie.split(';')) {
     const key = cookie.trim().split('=')[0]!;
     if (key.startsWith('rose-query-defaults%3A')) document.cookie = `${key}=;Max-Age=0;Path=/`;
@@ -200,7 +206,7 @@ describe('useTerminalAgents creation state bridge', () => {
     await waitFor(() => expect(result.current.fastMode).toBe(true));
   });
 
-  it('sends the current Fast Mode button state in create-agent payloads', async () => {
+  it('sends all three speed levels independently of cache flags', async () => {
     const { result } = renderHook(() => useMessageSending(messageSendingArgs()));
 
     await waitFor(() => expect(result.current.fastMode).toBe(true));
@@ -210,7 +216,22 @@ describe('useTerminalAgents creation state bridge', () => {
     });
 
     const createOn = capturedRequests.find((r) => r.method === 'POST' && r.url.endsWith('/agents'));
-    expect(createOn?.body).toMatchObject({ fast_mode_cache_enabled: true });
+    expect(createOn?.body).toMatchObject({ speed: 'fast' });
+    expect(createOn?.body).not.toHaveProperty('fast_mode_cache_enabled');
+
+    clearCaptures();
+    act(() => {
+      setUltraPreferred(true, mocks.authState.user.id);
+      result.current.setMessageInput('make it fast');
+    });
+    await act(async () => {
+      await result.current.handleSendMessage();
+    });
+    const createFast = capturedRequests.find(
+      (r) => r.method === 'POST' && r.url.endsWith('/agents'),
+    );
+    expect(createFast?.body).toMatchObject({ speed: 'ultrafast' });
+    expect(createFast?.body).not.toHaveProperty('fast_mode_cache_enabled');
 
     clearCaptures();
     act(() => {
@@ -224,10 +245,65 @@ describe('useTerminalAgents creation state bridge', () => {
     const createOff = capturedRequests.find(
       (r) => r.method === 'POST' && r.url.endsWith('/agents'),
     );
-    expect(createOff?.body).toMatchObject({ fast_mode_cache_enabled: false });
+    expect(createOff?.body).toMatchObject({ speed: 'standard' });
+    expect(createOff?.body).not.toHaveProperty('fast_mode_cache_enabled');
+  });
+
+  it.each(['standard', 'fast', 'ultrafast'] as const)(
+    'hydrates %s from stored speed even when the legacy flag disagrees',
+    (speed) => {
+      const savedUltra = readQueryPreferences(mocks.authState.user.id).ultraPreferred;
+      const { result } = renderHook(() => ({
+        sending: useMessageSending(
+          messageSendingArgs({
+            selectedAgentId: 'stored-speed-agent',
+            agentDetail: {
+              agent_id: 'stored-speed-agent',
+              speed,
+              fast_mode_cache_enabled: speed === 'standard',
+            } as never,
+          }),
+        ),
+        ultra: useUltraPreferred(mocks.authState.user.id),
+      }));
+      expect(result.current.sending.fastMode).toBe(speed !== 'standard');
+      if (speed !== 'standard') expect(result.current.ultra).toBe(speed === 'ultrafast');
+      expect(readQueryPreferences(mocks.authState.user.id).ultraPreferred).toBe(savedUltra);
+    },
+  );
+
+  it('resets selected-agent speed display to the saved new-agent preference', async () => {
+    const userId = mocks.authState.user.id;
+    setUltraPreferred(false, userId);
+    const { result, rerender, unmount } = renderHook(
+      ({ selected }: { selected: boolean }) => ({
+        sending: useMessageSending(
+          messageSendingArgs({
+            selectedAgentId: selected ? 'display-only-ultra' : null,
+            agentDetail: selected
+              ? ({ agent_id: 'display-only-ultra', speed: 'ultrafast' } as never)
+              : null,
+          }),
+        ),
+        ultra: useUltraPreferred(userId),
+      }),
+      { initialProps: { selected: true } },
+    );
+    await waitFor(() => expect(result.current.ultra).toBe(true));
+    expect(readQueryPreferences(userId).ultraPreferred).toBe(false);
+    rerender({ selected: false });
+    await waitFor(() => expect(result.current.ultra).toBe(false));
+    expect(readQueryPreferences(userId).ultraPreferred).toBe(false);
+    unmount();
+    const newAgent = renderHook(() => ({
+      sending: useMessageSending(messageSendingArgs()),
+      ultra: useUltraPreferred(userId),
+    }));
+    expect(newAgent.result.current.ultra).toBe(false);
   });
 
   it('sends the query-box speed (standard, fast or ultrafast) so agents start at that native speed', async () => {
+    setUltraPreferred(true, mocks.authState.user.id);
     const { result } = renderHook(() => useMessageSending(messageSendingArgs()));
     await waitFor(() => expect(result.current.fastMode).toBe(true));
     const sent = async (goal: string) => {
@@ -240,12 +316,13 @@ describe('useTerminalAgents creation state bridge', () => {
         ?.body as Record<string, unknown> | undefined;
     };
 
-    expect(await sent('ultra by default')).toMatchObject({ speed: 'ultrafast' });
-    writeQueryPreferences(ADMIN_ACCOUNTS[0]!.userId, { ultraPreferred: false });
+    expect(await sent('ultra when chosen')).toMatchObject({ speed: 'ultrafast' });
+    act(() => setUltraPreferred(false, mocks.authState.user.id));
     expect(await sent('fast when chosen')).toMatchObject({ speed: 'fast' });
     act(() => result.current.setFastMode(false));
     const off = await sent('normal speed');
-    expect(off).toMatchObject({ fast_mode_cache_enabled: false, speed: 'standard' });
+    expect(off).toMatchObject({ speed: 'standard' });
+    expect(off).not.toHaveProperty('fast_mode_cache_enabled');
   });
 
   it('hydrates Fast Mode from the loaded agent detail instead of the account default', async () => {

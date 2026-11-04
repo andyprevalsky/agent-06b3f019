@@ -540,11 +540,11 @@ describe('Rose Desktop speed toggle (#32, #23)', () => {
     hookMocks.authUserId = CURRENT_ANDY_ID;
   });
 
-  it('is a Zap-only 26px square right after the model selector, Ultrafast by default', () => {
+  it('is a Zap-only 26px square right after the model selector, Fast by default', () => {
     render(speedQueryBox(true, true));
     const speed = screen.getByTestId('speed-toggle');
-    expect(speed).toHaveAttribute('data-state', 'ultra');
-    expect(speed).toHaveAccessibleName('Ultrafast');
+    expect(speed).toHaveAttribute('data-state', 'fast');
+    expect(speed).toHaveAccessibleName('Fast');
     expect(speed.textContent).toBe('');
     expect(speed).toHaveClass('rose-speed', 'h-[26px]', 'w-[26px]', 'rounded-[8px]', 'border');
     // A rounded square (the mock's .mk-spd 8px corners), never the near-circle
@@ -566,7 +566,7 @@ describe('Rose Desktop speed toggle (#32, #23)', () => {
     ).toBeNull();
   });
 
-  it('cycles Ultrafast -> Normal -> Fast -> Ultrafast; Fast and Ultrafast send fast mode', () => {
+  it('cycles Fast -> Ultrafast -> Normal -> Fast; Ultrafast requires selection', () => {
     const onFastModeChange = vi.fn();
     const view = render(speedQueryBox(true, true, onFastModeChange));
     const speed = screen.getByTestId('speed-toggle');
@@ -574,6 +574,11 @@ describe('Rose Desktop speed toggle (#32, #23)', () => {
       fireEvent.click(speed);
       view.rerender(speedQueryBox(true, onFastModeChange.mock.lastCall![0], onFastModeChange));
     };
+
+    clickAndApply();
+    expect(onFastModeChange).toHaveBeenLastCalledWith(true);
+    expect(speed).toHaveAttribute('data-state', 'ultra');
+    expect(speed).toHaveAccessibleName('Ultrafast');
 
     clickAndApply();
     expect(onFastModeChange).toHaveBeenLastCalledWith(false);
@@ -585,10 +590,6 @@ describe('Rose Desktop speed toggle (#32, #23)', () => {
     expect(onFastModeChange).toHaveBeenLastCalledWith(true);
     expect(speed).toHaveAttribute('data-state', 'fast');
     expect(speed).toHaveAccessibleName('Fast');
-
-    clickAndApply();
-    expect(onFastModeChange).toHaveBeenLastCalledWith(true);
-    expect(speed).toHaveAttribute('data-state', 'ultra');
     expect(onFastModeChange).toHaveBeenCalledTimes(3);
   });
 

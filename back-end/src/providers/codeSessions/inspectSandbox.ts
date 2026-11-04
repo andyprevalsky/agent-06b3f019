@@ -16,6 +16,8 @@
  */
 import { type CodeSessionFs, shellQuote } from './sandboxFs';
 import type { CheckpointManifest } from './checkpoint';
+import { CODEX_AZURE_MODEL_CATALOG_FILE, CODEX_AZURE_SERVICE_TIER } from '../codexTemplate';
+import type { CodeAgentSpeed } from '../codeAgentModels';
 
 export type InspectProvider = 'claude' | 'codex';
 
@@ -76,6 +78,8 @@ export interface InspectPaths {
   err: string;
   rc: string;
   answer: string;
+  /** Codex model catalog for the funded Azure provider (written only for that run). */
+  codexAzureModelCatalog: string;
 }
 
 export function inspectPaths(home: string): InspectPaths {
@@ -91,6 +95,7 @@ export function inspectPaths(home: string): InspectPaths {
     err: `${dir}/err.txt`,
     rc: `${dir}/rc`,
     answer: `${dir}/answer.txt`,
+    codexAzureModelCatalog: `${dir}/${CODEX_AZURE_MODEL_CATALOG_FILE}`,
   };
 }
 
@@ -253,6 +258,14 @@ export interface InspectCliParams {
   timeoutS: number;
   /** Codex only: run on the funded Azure OpenAI provider (no user OAuth leased). */
   codexAzureBaseUrl?: string;
+  /** Codex on Azure: the catalog at paths.codexAzureModelCatalog describes the model. */
+  codexAzureModelCatalog?: boolean;
+  /** Claude reasoning effort (codeAgentModels.ts tier effort). */
+  claudeEffort?: string;
+  /** Codex reasoning effort (codeAgentModels.ts tier effort). */
+  codexEffort?: string;
+  /** The spawning agent's speed request; fast asks Codex for its priority ("Fast") tier. */
+  codexSpeed?: CodeAgentSpeed;
 }
 
 /** argv (after the binary) of the headless inspector CLI. */
@@ -271,11 +284,26 @@ export function inspectCliArgs(params: InspectCliParams, paths: InspectPaths): s
             'model_providers.azure.env_key="AZURE_OPENAI_API_KEY"',
             '-c',
             'model_providers.azure.wire_api="responses"',
+            ...(params.codexAzureModelCatalog === true
+              ? ['-c', `model_catalog_json=${JSON.stringify(paths.codexAzureModelCatalog)}`]
+              : []),
           ]
+        : [];
+    // Fast or Ultrafast asks for priority processing: the Codex catalog's "Fast"
+    // tier and Azure's only one. Standard (or no request) sends no tier.
+    const tier =
+      params.codexSpeed === 'fast' || params.codexSpeed === 'ultrafast'
+        ? ['-c', `service_tier=${JSON.stringify(CODEX_AZURE_SERVICE_TIER)}`]
+        : [];
+    const effort =
+      params.codexEffort !== undefined && params.codexEffort !== ''
+        ? ['-c', `model_reasoning_effort=${JSON.stringify(params.codexEffort)}`]
         : [];
     return [
       'exec',
       ...azure,
+      ...tier,
+      ...effort,
       '--ignore-user-config',
       '--skip-git-repo-check',
       '--dangerously-bypass-approvals-and-sandbox',
@@ -295,6 +323,7 @@ export function inspectCliArgs(params: InspectCliParams, paths: InspectPaths): s
     'stream-json',
     '--model',
     params.model,
+    ...(params.claudeEffort ? ['--effort', params.claudeEffort] : []),
     '--permission-mode',
     'bypassPermissions',
     '--strict-mcp-config',

@@ -25,7 +25,11 @@ import {
   CODE_SANDBOX_IDLE_TIMEOUT_MS,
   CodeSessionPauseUnconfirmedError,
 } from '../e2bCodeSessionSandbox';
-import { switchCodeSessionProvider } from './usageLimit';
+import {
+  revertCodeSessionProvider,
+  switchCodeSessionProvider,
+  type SpawnCodeSession,
+} from './usageLimit';
 import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
 import type { SandboxSize } from './sandboxSize';
 import {
@@ -128,26 +132,67 @@ export async function createWithCodeSession<
   },
 >(
   params: ResolveSpawnParams,
-  create: (codeSession: CodeSessionRow | null, handoff: string | null) => Promise<T>
+  create: (codeSession: SpawnCodeSession | null, handoff: string | null) => Promise<T>
 ): Promise<{ session: T; fields: CodeSessionSpawnFields }> {
-  let codeSession = await resolveSpawnCodeSession(params);
+  let codeSession: SpawnCodeSession | null = await resolveSpawnCodeSession(params);
   // C15: a retry after a usage limit may run on the other provider. It keeps
-  // the session (branch, commits, files via the checkpoint) and gets a
-  // handoff summary instead of the other CLI's conversation.
+  // the session (branch, commits, files via the checkpoint) and gets a handoff
+  // prompt instead of the other CLI's conversation; the previous CLI's session
+  // log rides on the session handle, and the sandbox acquire writes it into
+  // the new sandbox at the path the prompt names.
   let handoff: string | null = null;
+  let switchedFrom: string | null = null;
   if (codeSession !== null && codeSession.codeProvider !== params.codeProvider) {
+    switchedFrom = codeSession.codeProvider;
+    // A concurrent duplicate loses with CodeSessionBusyError and keeps the
+    // winner's lease (same owner), so exactly one spawn rotates the session.
     const switched = await switchCodeSessionProvider(codeSession, params.codeProvider, (id) =>
       Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
     );
-    codeSession = switched.session;
+    codeSession = {
+      ...switched.session,
+      handoffTrajectory: switched.trajectory,
+      retainFailedStartLease: true,
+    };
     handoff = switched.handoff;
   }
   let session: T;
   try {
     session = await create(codeSession, handoff);
   } catch (error) {
-    if (codeSession !== null && !(error instanceof CodeSessionPauseUnconfirmedError)) {
-      await markPaused(codeSession.id);
+    // A start that failed after the switch hands the session back, so the
+    // retry switches again and gets the handoff and trajectory once more.
+    if (
+      codeSession !== null &&
+      switchedFrom !== null &&
+      !(error instanceof CodeSessionPauseUnconfirmedError)
+    ) {
+      await revertCodeSessionProvider(
+        codeSession.id,
+        params.codeProvider,
+        switchedFrom,
+        codeSession.leaseOwner,
+        (id) => Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
+      ).catch((cleanupError: unknown) => {
+        log.error('Provider switch rollback failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          startError: error instanceof Error ? error.message : String(error),
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
+    }
+    if (
+      codeSession !== null &&
+      switchedFrom === null &&
+      !(error instanceof CodeSessionPauseUnconfirmedError)
+    ) {
+      await markPaused(codeSession.id).catch((cleanupError: unknown) => {
+        log.error('Failed-start pause failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          startError: error instanceof Error ? error.message : String(error),
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
     }
     throw error;
   }

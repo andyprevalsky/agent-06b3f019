@@ -34,7 +34,8 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 
 async function main(): Promise<void> {
   const { prisma } = await import('../../providers/database');
-  const { ensureAgentTreeRepo } = await import('../../providers/github');
+  const { ensureAgentTreeRepo, fetchGithubBranchHeadSha } = await import('../../providers/github');
+  await verifyHeadLookupTimeout(fetchGithubBranchHeadSha);
   const userId = `gh-repo-${crypto.randomUUID()}`;
   const rootId = crypto.randomUUID();
   const childId = crypto.randomUUID();
@@ -103,3 +104,52 @@ main()
     console.error(error);
     process.exit(1);
   });
+
+/** Pure HTTP seam: no GitHub request or wall-clock timeout is needed. */
+export async function verifyHeadLookupTimeout(
+  lookup: (owner: string, repo: string, branch: string) => Promise<string | null>
+): Promise<void> {
+  const savedFetch = globalThis.fetch;
+  const savedTimeout = AbortSignal.timeout;
+  let signal: AbortSignal;
+  let controller: AbortController;
+  AbortSignal.timeout = (milliseconds) => {
+    assert.equal(milliseconds, 10_000);
+    controller = new AbortController();
+    signal = controller.signal;
+    return signal;
+  };
+  try {
+    globalThis.fetch = (async (input, init) => {
+      assert.equal(
+        String(input),
+        'https://api.github.com/repos/fixture/repo/commits/topic%2Fbranch'
+      );
+      assert.equal(new Headers(init?.headers).get('Accept'), 'application/vnd.github.sha');
+      assert.equal(init?.signal, signal);
+      return new Response('a'.repeat(40));
+    }) as typeof fetch;
+    assert.equal(await lookup('fixture', 'repo', 'topic/branch'), 'a'.repeat(40));
+    for (const phase of ['headers', 'body']) {
+      let aborted = false;
+      globalThis.fetch = (async (_input, init) => {
+        assert.equal(init?.signal, signal);
+        const pending = new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            aborted = true;
+            reject(new Error('fixture timeout'));
+          });
+          queueMicrotask(() => controller.abort());
+        });
+        return phase === 'headers'
+          ? await pending
+          : ({ ok: true, text: () => pending } as Response);
+      }) as typeof fetch;
+      assert.equal(await lookup('fixture', 'repo', 'topic/branch'), null);
+      assert(aborted, `${phase} stall must observe request cancellation`);
+    }
+  } finally {
+    globalThis.fetch = savedFetch;
+    AbortSignal.timeout = savedTimeout;
+  }
+}
