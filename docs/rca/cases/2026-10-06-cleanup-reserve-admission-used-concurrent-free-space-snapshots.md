@@ -354,3 +354,52 @@ The latter retains only an empty storage.lock after its timeout and directory
 removal race; it has its separate open evidence-loss case. Neither unknown
 failure is attributed to this disk fixture or relabeled by these passing
 controls. All original outcomes, source bindings and cleanup obligations remain.
+
+
+## November 4 PR1662: seed inventory fixture shared the host cleanup ledger
+
+Round49 on `0af9bc091328f30cd505fea9c132ba48f7d9c7da` failed
+`test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller`
+at the expected single GET: the recorded call list was empty. The rescued
+original summary records `cleanup_ticket_failure=prepare`, an aborted cohort,
+zero admitted children and no seed-preflight output or prepared budget. Native
+FAIL/UNVERIFIED and the original orphan/cleanup facts remain unchanged.
+
+The fixture already reduced its own policy to1MiB preferred/minimum and zero
+headroom, but still keyed native ticket admission by the real host device.
+The host's separate legacy ledger contained14 groups and3758096384 bytes of
+liability. Its immutable-state hash was `d91711e0...`; a later3146440704-byte
+free-space observation was not the original round49 `df`. The original exact
+prepare error/free-space input remains unavailable, so that historical capacity
+cause stays UNKNOWN. No old ledger entry was removed or reclassified.
+
+The unchanged owning function reproduced the same prepare/zero-GET assertion
+failure in1.833s. Isolating only this fake workspace's directory device in its
+native Python transport made the same function and assertions pass in2.694s:
+one complete loopback GET ran, then the intentionally failed atomic proof
+publication still returned native campaign exit1 with no admitted child. This
+is fixture-boundary proof, not a campaign/task PASS or a production allocator
+repair. The shared host ledger remained byte-identical in these observations.
+
+The one-file candidate scopes `Path.lstat` and `Path.stat` directory identities
+only below this fixture workspace, using an unpredictable invocation-specific
+namespace. File identities, real native `df`, physical allocation,1/1/0 policy,
+30-second subprocess ceiling and all101 existing test function ASTs are
+unchanged. Native campaign, seed and cleanup-ticket helpers are byte-identical.
+The earlier private-device fixes covered reserve/multi-workstream fixtures;
+this separate seed fixture had not adopted that isolation.
+
+A registered same-command control fails with only the isolation call absent
+(2.957s), then passes restored (4.545s). It preserves a self-owned foreign
+ledger byte-for-byte while the original GET/publication assertions pass. The
+same finite debt inside the fixture's own private ledger still causes native
+prepare refusal, zero GETs and zero admitted children. Its pressure derives
+from real device capacity; neither `df` nor native floor checks are replaced.
+It does not assert an unrelated live host ledger stays immutable while
+legitimate sibling producers run.
+
+Exact patch `1f609135...`, logs, source bindings and report `3ac28eaf...` are
+retained under `/var/tmp/pr1662-49-seed-ledger-isolation`. No live provider,
+production accounting cleanup, canonical state/source edit or full structural
+sweep was performed by this reduction. The parent-owned combined-source full
+gate is still required; prior round48 stop timing remains a separate UNKNOWN.
