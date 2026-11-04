@@ -2711,6 +2711,36 @@ cd "$(git rev-parse --show-toplevel)/back-end" && npx tsx scripts/cleanup-stale-
 
 This is best-effort — if it fails (e.g., no Temporal API key, no Docker), proceed to merge anyway.
 
+## Step 11b: Include preservation records in the release PR
+
+**Standing user instruction, November 4, 2026:** a finished `/deploy` leaves
+its worktree and local environment ready for deletion. Returning the final
+deploy scorecard is a promise that this is true. Successful production checks
+alone do not satisfy completion.
+
+Start a preservation inventory before the final review. Include every local
+record needed to recover, understand or audit this workspace's work: intended
+source changes and unmerged commits, plans, RCA evidence, original failed or
+interrupted runs, final test/review/deploy receipts, benchmark traces, and
+necessary local configuration. Cover related worktrees and the real targets of
+symlinks; an ignored file or a path outside the checkout is not automatically
+disposable. Preserve original failures and unknowns without relabeling them.
+
+Commit safe, reviewable records and a closeout manifest in the release PR.
+For large or sensitive records, preserve their exact bytes in the approved
+durable private archive and commit the manifest, content hashes, immutable
+object references, verification receipts and restoration instructions instead.
+Never commit credentials, raw secret-bearing logs, private transcripts or an
+archive decryption key. A local-only archive, temporary URL, unverified upload,
+or decryption key available only on this devbox is not preservation.
+
+The manifest must give every inventoried path or grouped record an explicit
+disposition: committed, durably archived and verified, or reproducible and
+unneeded (with its regeneration source/command). Record source/ref coverage,
+configuration and secret recovery, excluded caches/build products, and any
+known historical loss. Do not silently exclude an old run or abandoned patch
+because the latest run passed. Unresolved preservation items block completion.
+
 ## Step 12: Merge
 
 **Never push an unreviewed commit immediately before merge.** Recorded smoke
@@ -3423,6 +3453,37 @@ the production-verification lifecycle:
 python3 scripts/record_factory_event.py deploy stage-finish production-verify
 ```
 
+## Step 13d: Finish preservation and prove deletion readiness
+
+After all admitted jobs and evidence writers are terminal, capture the final
+post-merge records, including production verification, cleanup, qualified
+exceptions, final scorecard HTML/link and all failed attempts. Reconcile this
+delta against the Step 11b inventory and existing verified archives. Verify
+remote readback, authenticated decryption and every archived member's hash;
+restore representative files using documented credentials/key material that
+will remain available after this devbox is deleted.
+
+The deployed PR must contain the complete preservation record. When records
+are produced after that PR has merged, land a reviewed records-only follow-up
+on `main` and link its merged commit and closeout manifest from the deployed
+PR before returning the final scorecard. This is required completion work, not
+a promise to archive later. Keep secret/raw content in its private archive;
+put its durable manifest and recovery/verification record in the PR.
+
+Check the entire local deletion boundary again: no intended source is only
+local, no required record or unique environment value depends on this disk,
+no active work still needs this worktree, and owned processes/resources have
+been retired or explicitly handed over with a durable receipt. Preserve
+Freedom and protected/shared resources; deletion readiness does not authorize
+uninstalling, weakening or terminating them. If safe cleanup or recovery
+cannot be proved, keep the environment and report the exact open item.
+
+Write a committed deletion-readiness receipt that binds the deployed SHA,
+record/follow-up commit, final inventory, archive verification, independent key
+recovery, configuration recovery and resource disposition. It must be possible
+to recover the preserved work without this machine or its `/tmp`, `/project`,
+ignored files, symlink targets, local-only refs or environment files.
+
 ## Step 14: New branch
 
 Run `/new_branch_with_context` to sync with main and create a new branch so we can keep working.
@@ -3452,6 +3513,13 @@ python3 scripts/factory_ledger.py publish
 events to `main`'s `agents/benchmarks/history/factory_events.jsonl` (see the
 publication rule before Step 0i). `/factory-review` then rebuilds /deploy and /RCA
 timing from the repo on any machine.
+
+Before returning the final scorecard, reconcile and preserve any records created
+by final publication or closeout itself. Include the final factory commit and
+any final archive/scorecard metadata in the deployed PR's linked closeout
+record. Verify that record is merged and independently recoverable, then run
+the deletion-readiness check one last time. Do not return a completed scorecard
+with “archive later”, unpreserved local records, or unresolved recovery work.
 
 After the new branch is created, publish only the deploy scorecard using the
 stable `deploy-summary-v1` template in
@@ -3490,6 +3558,16 @@ come from `stages.jsonl` and production factory events, including failed and
 interrupted attempts; parallel intervals overlap on the same axis. Missing
 boundaries stay explicitly unmeasured, never invented. Preserve costs and
 source/proof bindings in the underlying evidence.
+
+Returning the final **SHIPPED** scorecard also certifies deletion readiness:
+required deployment work is complete (including qualified exceptions), the
+deployed PR contains the merged closeout record, and the worktree and local
+environment can be deleted without losing needed records or configuration.
+If preservation, key/configuration recovery, intended source or resource
+handoff remains unresolved, keep the deploy incomplete and list the exact item
+in FOLLOWUPS. Independent repairs and qualified external exceptions do not
+waive preservation. Do not add a second status line or redesign the approved
+scorecard layout to report this requirement.
 
 WHAT DEPLOYED includes the actual production/Temporal state and verified
 coverage. Every elected AgentCard gate remains **SKIPPED — <reason>**, never
