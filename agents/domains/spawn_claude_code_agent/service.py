@@ -266,9 +266,9 @@ def format_code_events_transcript(
     ``[Claude]``, ``[Claude tool]``, ``[Claude result]``.
     """
     lines: list[str] = []
-    for event in code_events or []:
-        if not isinstance(event, dict):
-            continue
+    # One line per streamed message: partial snapshots superseded by a later
+    # snapshot or the final block would repeat its text once per delta.
+    for event in _latest_stream_snapshots([event for event in code_events or [] if isinstance(event, dict)]):
         event_type = str(event.get("type") or event.get("event_type") or "").strip().lower()
         provider = str(event.get("provider") or "claude").strip().title() or "Claude"
         if provider.lower() not in {"claude", "codex"}:
@@ -869,6 +869,90 @@ def _code_session_from_heartbeat() -> Optional[Dict[str, Any]]:
     return None
 
 
+class ToolsInFlight:
+    """Tools a code-agent session started and has not finished.
+
+    Keyed by tool id, so the events repeated for one call (Claude: the streamed
+    block start and the assistant envelope; Codex: item/started then
+    item/completed) count it once, and one tool_result carrying several calls
+    (``tool_results``) finishes each of them. A finished turn has no tool left.
+    """
+
+    _CODEX_ITEM_TYPES = frozenset({"tool_use", "command", "file_change"})
+
+    def __init__(self) -> None:
+        self._ids: set[str] = set()
+        self._anonymous = 0  # tool_use events without an id (older sandboxes)
+
+    def __len__(self) -> int:
+        return len(self._ids) + self._anonymous
+
+    def clear(self) -> None:
+        self._ids.clear()
+        self._anonymous = 0
+
+    def observe(self, event: dict[str, Any]) -> None:
+        event_type = event.get("type")
+        item_id = event.get("item_id")
+        if (
+            event.get("provider") == "codex"
+            and event_type in self._CODEX_ITEM_TYPES
+            and isinstance(item_id, str)
+            and event.get("status") in ("started", "completed")
+        ):
+            if event.get("status") == "started":
+                self._ids.add(item_id)
+            else:
+                self._ids.discard(item_id)
+        elif event_type == "tool_use":
+            tool_id = event.get("tool_use_id")
+            if isinstance(tool_id, str) and tool_id:
+                self._ids.add(tool_id)
+            else:
+                self._anonymous += 1
+        elif event_type == "tool_result":
+            results = event.get("tool_results")
+            ids = [
+                tool_id
+                for tool_id in (
+                    [part.get("tool_use_id") for part in results if isinstance(part, dict)]
+                    if isinstance(results, list)
+                    else [event.get("tool_use_id")]
+                )
+                if isinstance(tool_id, str) and tool_id
+            ]
+            if ids:
+                self._ids.difference_update(ids)
+            elif self._anonymous:
+                self._anonymous -= 1
+        elif event_type in ("result", "turn_ended", "final"):
+            self.clear()
+
+
+def _supersede_partial_snapshot(
+    code_events: list[Dict[str, Any]], latest_partials: dict[tuple[Any, Any, str], int], index: int
+) -> None:
+    """Drop the text of the item's previous partial snapshot once a newer one arrives.
+
+    A partial stream event carries the whole block so far, so keeping every
+    snapshot grows memory with the square of the output. The stored copy keeps
+    its delta and its place (indices identify sandbox events across replays).
+    """
+    event = code_events[index]
+    item_id = event.get("item_id")
+    text = event.get("text")
+    # An empty final (e.g. redacted thinking) supersedes nothing: the streamed
+    # text is the only copy.
+    if not isinstance(item_id, str) or not isinstance(text, str) or not text:
+        return
+    key = (event.get("type"), event.get("turn_id"), item_id)
+    previous = latest_partials.pop(key, None)
+    if previous is not None:
+        code_events[previous] = {k: v for k, v in code_events[previous].items() if k != "text"}
+    if event.get("partial") is True:
+        latest_partials[key] = index
+
+
 async def _run_agentic_loop(
     *,
     agent_id: str,
@@ -927,9 +1011,10 @@ async def _run_agentic_loop(
     code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
-    # Tools awaiting their tool_result: while any is in flight the session is
+    # Tools awaiting their result: while any is in flight the session is
     # working and never idle-paused, however long the tool runs.
-    in_flight_tool_count = 0
+    tools_in_flight = ToolsInFlight()
+    latest_partials: dict[tuple[Any, Any, str], int] = {}
     # Wall-clock of first SDK type=result; the exit-grace backstop ends the
     # monitor if the CLI never exits after declaring completion.
     sdk_result_at: float | None = None
@@ -997,9 +1082,10 @@ async def _run_agentic_loop(
     async def on_events_replay(events: list[dict[str, Any]]) -> None:
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
-        nonlocal completed_codex_turns, in_flight_tool_count
+        nonlocal completed_codex_turns
         nonlocal direct_chat_active, transcript, user_turns_seen, sdk_results_seen, native_codex_terminal
         code_events.clear()
+        latest_partials.clear()
         native_codex_terminal = None
         direct_chat_active = False
         user_turns_seen = 0
@@ -1008,7 +1094,7 @@ async def _run_agentic_loop(
         transcript_pending.clear()
         completed_codex_turn_keys.clear()
         completed_codex_turns = 0
-        in_flight_tool_count = 0
+        tools_in_flight.clear()
         for event in events:
             await on_event(event)
         logger.info(
@@ -1017,7 +1103,7 @@ async def _run_agentic_loop(
 
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time
-        nonlocal in_flight_tool_count, sdk_result_at, logged_events
+        nonlocal sdk_result_at, logged_events
         nonlocal direct_chat_active, user_turns_seen, sdk_results_seen, native_codex_terminal
         last_output_time = safe_time()
         code_events.append(event)
@@ -1031,6 +1117,7 @@ async def _run_agentic_loop(
         for record in transcript.feed(event, event_index):
             if event_index >= transcript_flushed:
                 transcript_pending[record["id"]] = record
+        _supersede_partial_snapshot(code_events, latest_partials, event_index)
         if event.get("provider") == "codex":
             if event.get("type") == "turn_started":
                 native_codex_terminal = None
@@ -1061,15 +1148,8 @@ async def _run_agentic_loop(
                 completed_codex_turn_keys.add(key)
                 completed_codex_turns += 1
         event_type = event.get("type")
-        # Count every tool_use toward in-flight, even when name is missing /
-        # non-string — tool_result always decrements, and a name-gated
-        # increment made those paths asymmetric (CodeRabbit #1260).
-        if event_type == "tool_use":
-            in_flight_tool_count += 1
-        elif event_type == "tool_result":
-            if in_flight_tool_count > 0:
-                in_flight_tool_count -= 1
-        elif event_type == "result":
+        tools_in_flight.observe(event)
+        if event_type == "result":
             # The result of the latest delivered turn arms the exit-grace
             # backstop (r31 a2/a3); an earlier turn's result does not.
             sdk_results_seen += 1
@@ -1279,7 +1359,7 @@ async def _run_agentic_loop(
             # CLI with nothing in flight and no SDK result is idle.
             if (
                 silence_duration >= CODE_SESSION_IDLE_PAUSE_S
-                and in_flight_tool_count == 0
+                and not tools_in_flight
                 and sdk_result_at is None
                 and not pending_output
                 and ws_connected

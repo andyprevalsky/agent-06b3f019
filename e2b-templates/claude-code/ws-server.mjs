@@ -125,24 +125,71 @@ function wantsReplay(req) {
   }
 }
 
+// Replay frames stay far below a client's receive limit (aiohttp: 4 MiB). One
+// frame for a long session's whole history exceeded it, and the client then
+// reconnected forever without reading the exit queued behind it.
+const REPLAY_FRAME_BYTES = 1024 * 1024;
+const REPLAY_OUTPUT_CHARS = 256 * 1024;
+
+// The terminal buffer replays as `buffer` (reset) followed by `stdout` (append)
+// chunks, which every client already handles.
+function sendOutputReplay(ws) {
+  for (let start = 0; start < outputBuffer.length;) {
+    let end = Math.min(start + REPLAY_OUTPUT_CHARS, outputBuffer.length);
+    const last = outputBuffer.charCodeAt(end - 1);
+    if (end < outputBuffer.length && last >= 0xd800 && last <= 0xdbff) end--;
+    ws.send(
+      JSON.stringify({
+        type: start === 0 ? "buffer" : "stdout",
+        data: outputBuffer.slice(start, end),
+      }),
+    );
+    start = end;
+  }
+}
+
+// A client that asks for `?replay_chunks=1` gets the event history as bounded
+// `code_agent_events` frames: chunk 0 replaces what it holds, later chunks
+// append, `last` marks the end. Older clients get the single frame they expect.
+function sendEventReplay(ws, events, chunked) {
+  if (!chunked) {
+    ws.send(JSON.stringify({ type: "code_agent_events", data: events }));
+    return;
+  }
+  let parts = [];
+  let bytes = 0;
+  let chunk = 0;
+  const flush = (last) => {
+    ws.send(
+      `{"type":"code_agent_events","chunk":${chunk},"last":${last},"data":[${parts.join(",")}]}`,
+    );
+    chunk++;
+    parts = [];
+    bytes = 0;
+  };
+  for (const event of events) {
+    const part = JSON.stringify(event);
+    const size = Buffer.byteLength(part);
+    if (parts.length > 0 && bytes + size > REPLAY_FRAME_BYTES) flush(false);
+    parts.push(part);
+    bytes += size;
+  }
+  flush(true);
+}
+
 wss.on("connection", (ws, req) => {
   // Send full buffer to new client
   const replay = wantsReplay(req);
-  if (replay && outputBuffer.length > 0) {
-    ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
-  }
+  const params = new URL(req?.url || "/", "http://localhost").searchParams;
+  if (replay && outputBuffer.length > 0) sendOutputReplay(ws);
   if (replay && eventBuffer.length > 0) {
-    const rawCursor = new URL(
-      req?.url || "/",
-      "http://localhost",
-    ).searchParams.get("cursor");
+    const rawCursor = params.get("cursor");
     const cursor =
       rawCursor !== null && /^\d+$/.test(rawCursor) ? Number(rawCursor) : -1;
-    ws.send(
-      JSON.stringify({
-        type: "code_agent_events",
-        data: eventBuffer.filter((event) => event.seq > cursor),
-      }),
+    sendEventReplay(
+      ws,
+      eventBuffer.filter((event) => event.seq > cursor),
+      params.get("replay_chunks") === "1",
     );
   }
   if (exitAnnounced) {
@@ -261,6 +308,27 @@ function appendOutput(type, data) {
 // Startup branch events can be emitted before the native CLI is initialized.
 let activeTurn = null;
 
+// Each partial stream event carries the whole block so far. Once a newer
+// snapshot or the final block of the same item arrives, the stored copy keeps
+// only its delta, so the replay buffer grows with the output, not its square.
+const latestPartialIndex = new Map();
+function supersedePartialSnapshot(event, index) {
+  // An empty final (e.g. redacted thinking) supersedes nothing: the streamed
+  // text is the only copy.
+  if (typeof event.item_id !== "string" || typeof event.text !== "string")
+    return;
+  if (!event.text) return;
+  const key = `${event.type}:${event.turn_id ?? ""}:${event.item_id}`;
+  const previous = latestPartialIndex.get(key);
+  if (previous !== undefined) {
+    const compacted = { ...eventBuffer[previous] };
+    delete compacted.text;
+    eventBuffer[previous] = compacted;
+  }
+  if (event.partial === true) latestPartialIndex.set(key, index);
+  else latestPartialIndex.delete(key);
+}
+
 function appendEvent(event) {
   const normalized = {
     version: 1,
@@ -272,6 +340,7 @@ function appendEvent(event) {
       : {}),
     ...event,
   };
+  supersedePartialSnapshot(normalized, eventBuffer.length);
   eventBuffer.push(normalized);
   broadcast("code_agent_event", normalized);
 }
