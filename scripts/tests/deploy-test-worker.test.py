@@ -1901,6 +1901,8 @@ class Backend(unittest.TestCase):
             (bin_dir / name).write_text(body); (bin_dir / name).chmod(0o700)
         self.config = Path(self.temp.name) / 'runner.json'; self.npx_calls = Path(self.temp.name) / 'npx.jsonl'
         self.env = patch.dict(os.environ, {'PATH': f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                                           # This fake runner owns no pinned workspace Postgres fixture.
+                                           'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '0',
                                            'FAKE_RUNNER_CONFIG': str(self.config), 'FAKE_NPX_CALLS': str(self.npx_calls)})
         self.env.start()
         self.request = {'token': 'be-1', 'source': cycle.source(self.root), 'gate': 'backend-coverage-blackbox',
