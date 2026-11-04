@@ -247,6 +247,82 @@ def run_step(spec, root, env, log, timeout):
     return code == 0 and not (timed_out or cancelled or lingering), code
 
 
+def restore_workspace_postgres(root, env, directory, remaining):
+    """Restore an existing pinned fixture after admission; never provision or reset it."""
+    workspace = env.get('CONDUCTOR_WORKSPACE_NAME')
+    # Unpinned/explicit system-PG callers retain the runner's existing discovery.
+    if (env.get('ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME') != '1'
+            or env.get('BACKEND_COVERAGE_DATABASE_URL')
+            or (env.get('ROSE_DEPLOY_WORKTREE') == '1'
+                and env.get('ROSE_USE_SYSTEM_PG') == 'true'
+                and env.get('ROSE_DEPLOY_WORKTREE_PATH') == str(root)
+                and (root / '.context/deploy-system-pg.db').is_file())):
+        return None
+    port = env.get('CONDUCTOR_PORT', '')
+    if (not isinstance(workspace, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,53}', workspace)
+            or not port.isdigit() or not 1 <= int(port) <= 65526):
+        raise ValueError('Postgres fixture workspace/port is not pinned')
+    name, volume = 'victoria-db-' + workspace, 'victoria-pgdata-' + workspace
+    helper = root / 'back-end/scripts/local-db-container.sh'
+    template = ('{"id":{{json .Id}},"name":{{json .Name}},"image":{{json .Image}},'
+                '"image_name":{{json .Config.Image}},'
+                '"owner":{{json (index .Config.Labels "ai.rose.deploy-worktree.path")}},'
+                '"running":{{json .State.Running}},"status":{{json .State.Status}},'
+                '"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},'
+                '"dead":{{json .State.Dead}},"ports":{{json .HostConfig.PortBindings}},'
+                '"mounts":{{json .Mounts}}}')
+    def docker(*args):
+        with (directory / 'postgres-fixture.log').open('wb') as output:
+            outcome = run_command(['bash', '-c', 'source "$1"; shift; docker_quick "$@"',
+                                   'backend-postgres', str(helper), *args],
+                                  cwd=root, env=env, output=output, timeout=remaining())
+        if outcome[1:] != (False, False, False):
+            raise ValueError('Postgres fixture probe interrupted or not reaped')
+        return outcome[0], (directory / 'postgres-fixture.log').read_text()
+    def inspect(target):
+        code, text = docker('inspect', '--format', template, target)
+        if code != 0:
+            raise ValueError('prepared Postgres fixture is missing or unreadable')
+        row = json.loads(text)
+        mounts = row.get('mounts', [])
+        data = [m for m in mounts if m.get('Destination') == '/var/lib/postgresql/data']
+        ports = row.get('ports', {}).get('5432/tcp', [])
+        if (not re.fullmatch(r'[0-9a-f]{64}', row.get('id', ''))
+                or row.get('name') != '/' + name or row.get('owner') != str(root)
+                or row.get('image_name') != env.get('LOCAL_PG_IMAGE', 'pgvector/pgvector:pg16')
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', row.get('image', ''))
+                or set(row.get('ports', {})) != {'5432/tcp'} or len(ports) != 1
+                or ports[0].get('HostPort') != str(int(port) + 5)
+                or ports[0].get('HostIp') not in ('', '127.0.0.1', '0.0.0.0', '::')
+                or len(data) != 1 or data[0].get('Type') != 'volume' or data[0].get('Name') != volume
+                or data[0].get('RW') is not True
+                or any(row.get(k) is not False for k in ('paused', 'restarting', 'dead'))
+                or type(row.get('running')) is not bool
+                or row.get('status') != ('running' if row['running'] else 'exited')):
+            raise ValueError('prepared Postgres fixture identity/state mismatch')
+        return row
+    before = inspect(name)
+    write(directory / 'postgres-before.json', before)
+    if not before['running'] and docker('start', before['id'])[0] != 0:
+        raise ValueError('same-ID Postgres fixture start failed')
+    after = inspect(before['id'])
+    identity = lambda row: {k: v for k, v in row.items() if k not in ('running', 'status')}
+    if not after['running'] or identity(before) != identity(after):
+        raise ValueError('Postgres fixture changed during readiness')
+    write(directory / 'postgres-after.json', after)
+    # Same readiness bound as prepare-deploy-worktree; charged to the original deadline.
+    end = time.monotonic() + min(30, remaining())
+    while True:
+        if docker('exec', before['id'], 'pg_isready', '-U', 'postgres', '-q')[0] == 0:
+            return {'id': before['id'], 'name': name, 'image': before['image'], 'volume': volume,
+                    'port': int(port) + 5, 'restored': not before['running'],
+                    'before_sha256': sha_file(directory / 'postgres-before.json'),
+                    'after_sha256': sha_file(directory / 'postgres-after.json')}
+        if CANCEL.is_set() or time.monotonic() >= end:
+            raise ValueError('same-ID Postgres fixture is not ready')
+        time.sleep(min(1, max(0, end - time.monotonic())))
+
+
 @contextmanager
 def cleanup_cancellation():
     interrupted = CANCEL.is_set()
@@ -301,6 +377,7 @@ def _execute(request, root, failed_first=False):
         cut = argv.index('--') + 1 if '--' in argv else 0
         argv = [*argv[:cut], *FAILED_FIRST, shards]
     started = time.time()
+    fixture = restore_workspace_postgres(root, env, directory, remaining)
     setup_ok, setup_rc = True, None
     cleaned, cleanup_rc = True, None
     code, timed_out, cancelled, lingering = None, False, False, False
@@ -324,6 +401,8 @@ def _execute(request, root, failed_first=False):
     cases, evidence, hashes, unknown = domain_cases(root, [c.split(':', 1)[1] for c in active if c.startswith('blackbox:')], started)
     units, unit_rc = phase(UNIT_LINE, text)
     fps, fps_rc = phase(FPS_LINE, text)
+    if fixture is not None:
+        evidence['postgres_fixture'] = fixture
     evidence.update(units={'exit': unit_rc, 'log': str(root / 'back-end/coverage/units.log')},
                     fps={'exit': fps_rc, 'log': str(root / 'back-end/coverage/units-probe.log')})
     cases.update(units=units, fps=fps)

@@ -1915,6 +1915,95 @@ class Backend(unittest.TestCase):
     def rows(self, **passed):
         return [{'domain': d, 'passed': v, 'aborted': False} for d, v in passed.items()]
 
+    def postgres_fixture(self, running=False):
+        helper = self.root / 'back-end/scripts/local-db-container.sh'
+        shutil.copyfile(ROOT / 'back-end/scripts/local-db-container.sh', helper)
+        state, calls = Path(self.temp.name) / 'postgres.json', Path(self.temp.name) / 'docker.jsonl'
+        row = {'id': 'e' * 64, 'name': '/victoria-db-fixture', 'owner': str(self.root),
+               'image_name': 'pgvector/pgvector:pg16', 'image': 'sha256:' + 'a' * 64,
+               'running': running, 'status': 'running' if running else 'exited',
+               'paused': False, 'restarting': False, 'dead': False,
+               'ports': {'5432/tcp': [{'HostIp': '', 'HostPort': '20005'}]},
+               'mounts': [{'Type': 'volume', 'Name': 'victoria-pgdata-fixture',
+                           'Destination': '/var/lib/postgresql/data', 'RW': True}]}
+        cycle.write(state, {'row': row})
+        docker = Path(self.temp.name) / 'bin/docker'
+        docker.write_text("#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n"
+            "p=Path(os.environ['FAKE_POSTGRES']); d=json.loads(p.read_text()); a=sys.argv[1:]\n"
+            "with open(os.environ['FAKE_DOCKER_CALLS'],'a') as f: f.write(json.dumps(a)+'\\n')\n"
+            "r=d['row']\n"
+            "if a[0]=='inspect':\n"
+            " if d.get('missing') or a[-1] not in (r['id'],r['name'][1:]): sys.exit(1)\n"
+            " print(json.dumps(r)); sys.exit(0)\n"
+            "if a==['start',r['id']]:\n"
+            " if d.get('start_fail'): sys.exit(1)\n"
+            " r.update(running=True,status='running'); r.update(d.get('after_start',{})); p.write_text(json.dumps(d)); sys.exit(0)\n"
+            "if a==['exec',r['id'],'pg_isready','-U','postgres','-q']: sys.exit(0 if r['running'] else 1)\n"
+            "raise AssertionError(a)\n")
+        docker.chmod(0o700)
+        env = {'CONDUCTOR_WORKSPACE_NAME': 'fixture', 'CONDUCTOR_PORT': '20000',
+               'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1', 'FAKE_POSTGRES': str(state),
+               'FAKE_DOCKER_CALLS': str(calls)}
+        # A stopped fixture genuinely prevents the original setup; no fabricated result.
+        setup = [sys.executable, '-c', "import json,os; from pathlib import Path; "
+                 "assert json.loads(Path(os.environ['FAKE_POSTGRES']).read_text())['row']['running']; "
+                 "Path('.context/setup-ran').write_text('ready')"]
+        case = {'command': ['npm', 'run', 'test:coverage:sharded'], 'cwd': 'back-end',
+                'env': env, 'sweep': 'backend-coverage-blackbox', 'aggregate': False}
+        self.request['worker_recipe'] = {'cases': {c: dict(case) for c in self.request['checks']},
+            'setup': {'command': setup, 'env': env}, 'cleanup': {'command': ['true']},
+            'execution_timeout_seconds': 10}
+        self.request['source'] = cycle.source(self.root)
+        return state, calls, env
+
+    def test_stopped_owned_postgres_is_restored_before_the_unchanged_setup_and_sweep(self):
+        state, calls, env = self.postgres_fixture()
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+        with patch.dict(os.environ, env):
+            result = self.backend.execute(self.request, self.root)
+        self.assertEqual(0, result['native_exit'])
+        self.assertTrue(all(v == 'PASS' for v in result['cases'].values()))
+        self.assertEqual('ready', (self.root / '.context/setup-ran').read_text())
+        native = [json.loads(x) for x in calls.read_text().splitlines()]
+        self.assertEqual([['start', 'e' * 64]], [x for x in native if x[0] == 'start'])
+        self.assertEqual(['inspect', 'start', 'inspect', 'exec'], [x[0] for x in native])
+        proof = result['evidence']['postgres_fixture']
+        self.assertTrue(proof['restored']); self.assertEqual('e' * 64, proof['id'])
+        self.assertEqual(cycle.sha_file(Path(result['runner_log']).parent / 'postgres-before.json'), proof['before_sha256'])
+        self.assertEqual(cycle.sha_file(Path(result['runner_log']).parent / 'postgres-after.json'), proof['after_sha256'])
+        self.assertEqual(10, self.request['worker_recipe']['execution_timeout_seconds'])
+
+    def test_healthy_owned_postgres_is_only_checked_never_started(self):
+        state, calls, env = self.postgres_fixture(running=True)
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+        with patch.dict(os.environ, env):
+            result = self.backend.execute(self.request, self.root)
+        self.assertEqual(0, result['native_exit'])
+        self.assertFalse(result['evidence']['postgres_fixture']['restored'])
+        self.assertEqual(['inspect', 'inspect', 'exec'], [json.loads(x)[0] for x in calls.read_text().splitlines()])
+
+    def test_postgres_restore_refuses_missing_foreign_or_changed_fixture_without_running_setup(self):
+        state, calls, env = self.postgres_fixture()
+        original = cycle.read(state)
+        variants = [('missing', {'missing': True}), ('owner', {'row': {**original['row'], 'owner': '/foreign'}}),
+                    ('volume', {'row': {**original['row'], 'mounts': []}}),
+                    ('port', {'row': {**original['row'], 'ports': {}}}),
+                    ('image', {'row': {**original['row'], 'image_name': 'postgres:16-alpine'}}),
+                    ('paused', {'row': {**original['row'], 'paused': True}}),
+                    ('start_failed', {'start_fail': True}),
+                    ('identity_changed', {'after_start': {'image': 'sha256:' + 'b' * 64}})]
+        self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+        for number, (label, change) in enumerate(variants):
+            with self.subTest(label=label):
+                cycle.write(state, {**copy.deepcopy(original), **change}); calls.unlink(missing_ok=True)
+                self.request['token'] = 'fixture-refusal-' + str(number)
+                with patch.dict(os.environ, env), self.assertRaises(ValueError):
+                    self.backend.execute(self.request, self.root)
+                self.assertFalse((self.root / '.context/setup-ran').exists())
+                native = [json.loads(x) for x in calls.read_text().splitlines()]
+                self.assertTrue(all(x[0] in ('inspect', 'start') for x in native))
+                self.assertEqual(int(label in ('start_failed', 'identity_changed')), sum(x[0] == 'start' for x in native))
+
     def test_native_list_output_is_only_a_cross_check_and_is_refused_when_polluted(self):
         files = ['alpha', 'beta', 'gamma']
         good = 'Available black-box test domains:\n  alpha\n  beta\n  gamma\n\nTotal: 3 domains\n'
@@ -1989,6 +2078,8 @@ class Backend(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'prepared binding'):
             self.backend.execute({**self.request, 'worker_root': '/some-other-root'}, self.root)
 
+    # This control injects the sweep deadline/cancellation; fixture admission is tested separately.
+    @patch('deploy_test_backend.restore_workspace_postgres', new=lambda *args: None)
     def test_threshold_uses_the_remaining_original_request_budget(self):
         self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
         config = cycle.read(self.config); config['c8_sleep'] = 2; cycle.write(self.config, config)
@@ -1999,6 +2090,8 @@ class Backend(unittest.TestCase):
         self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold'])
         self.assertLess(time.monotonic() - before, 1.5)
 
+    # This control injects the sweep deadline/cancellation; fixture admission is tested separately.
+    @patch('deploy_test_backend.restore_workspace_postgres', new=lambda *args: None)
     def test_expired_or_cancelled_sweep_still_finishes_both_owned_cleanup_steps(self):
         slot = self.owner_slot()
         (self.root / 'scripts/kill-services.sh').write_text('#!/bin/bash\nsleep .05; touch "$PWD/.context/recipe-cleanup-ran"\n')
@@ -2035,6 +2128,8 @@ class Backend(unittest.TestCase):
                 self.assertEqual(self.backend.CANCEL.is_set(), reason == 'cancel')
                 self.assertLess(time.monotonic() - before, 2)
 
+    # This control injects the sweep deadline/cancellation; fixture admission is tested separately.
+    @patch('deploy_test_backend.restore_workspace_postgres', new=lambda *args: None)
     def test_cancel_is_restored_when_recipe_cleanup_or_native_teardown_raises(self):
         slot = self.owner_slot()
         self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'])
@@ -2118,6 +2213,10 @@ class Backend(unittest.TestCase):
 
     def owner_slot(self):
         slot = json.loads((ROOT / 'scripts/tests/fixtures/backend-slot-aggregate.json').read_text())
+        _, _, fixture_env = self.postgres_fixture(running=True)
+        self.request.pop('worker_recipe', None)
+        for spec in [*slot['recipe']['cases'].values(), slot['recipe']['setup'], slot['recipe']['cleanup']]:
+            spec.setdefault('env', {}).update(fixture_env)
         stage = self.root / 'scripts/run-deploy-stage'
         stage.write_text('#!/bin/bash\nmkdir -p "$PWD/.context"\n[ "$1" = "--start" ] && { touch "$PWD/.context/setup-ran"; exit 0; }\n'
                          '[ "$1" = "--finish" ] && { touch "$PWD/.context/finish-ran"; exit 0; }\nshift 2; exec "$@"\n')
