@@ -25,6 +25,8 @@ sources:
   - fleet run 3c854835-c09e-44ed-85f9-acb0fd33746c
   - commit 1a53cf85be5bd4e8682fac5705c1a710e8861d03
   - commit 8c8e19bb65
+  - PR #1687
+  - commit 8d801333bb061ed760ab8ddf86e24e45665192f2
 repro: agents/tests/blackbox/benchmark.blackbox.py::test_benchmark_launcher_imports_do_not_load_worker_dotenv
 status: fixed
 ---
@@ -157,6 +159,8 @@ fallback in production.
 
 10k-agent behavior: launcher-only and import-time changes; one dotenv read per
 stack start; no runtime path, channel or per-agent cost changes.
+
+Shipped in PR #1687 (merge 8d801333bb). The deploy's own `run-predeploy-local` passed twice on the fixed revision (webdecoy on Tilion), and production semantic passed on the merge.
 
 Golden reference: not applicable (no approval-gated hunk).
 
