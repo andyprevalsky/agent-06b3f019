@@ -1923,7 +1923,10 @@ def _live_report_producer_harness(tasks, executor, max_concurrency):
     start = next(
         i
         for i, node in enumerate(main.body)
-        if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card"
+        # Include the real initial preflight custody producer, which the
+        # coordinator's never-admitted list now consumes before dispatch.
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "initial_credential_skips" for target in node.targets)
     )
     end = next(
         i
@@ -2008,6 +2011,8 @@ async def test_live_report_counts_executor_admission_and_drains_cancellation():
         await held.wait()
 
     namespace, cards = _live_report_producer_harness(tasks, executor, 1)
+    assert namespace["initial_credential_skips"] == ()
+    assert namespace["_never_admitted_results"] == []
     with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
         coordinator = asyncio.create_task(namespace["_drive_parallel"]())
         try:
@@ -13221,6 +13226,106 @@ def test_compute_token_sync_propagates_openrouter_claude_fallback_from_backend_e
     assert captured["env"]["OPENROUTER_API_KEY"] == "sk-or-test-fallback"
 
 
+async def test_non_claude_compute_refresh_scopes_seed_opt_in_and_preserves_strict_gates():
+    """Absent Claude OAuth cannot gate explicit non-Claude tasks before dispatch."""
+    import benchmarks.run_benchmark as bench
+    from dataclasses import replace
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    browser = get_task_by_name("browser-smoke")
+    claude = get_task_by_name("claude-code-agent")
+    assert browser.requires_claude_code is False and claude.requires_claude_code is True
+    flag = "SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK"
+    observed = []
+
+    def seed(command, **kwargs):
+        env = kwargs["env"]
+        observed.append(env.copy())
+        # The unchanged seed consumer owns this existing opt-in. Other seed
+        # branches are exercised by the registered seed/fallback controls.
+        admitted = env.get(flag) == "1"
+        return subprocess.CompletedProcess(
+            command, 0 if admitted else 1, "",
+            "" if admitted else "No usable claude_code integrations after sync",
+        )
+
+    async def refresh(tasks, *, require=False, expect_opt_in=False, cost_gate=False):
+        observed.clear()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CODEX_AUTH_PATH", None)
+            os.environ.pop("BENCHMARK_REQUIRE_COMPUTE_TOKENS", None)
+            os.environ.pop(flag, None)
+            if not expect_opt_in:
+                # Ambient launch flags must not authorize Claude/mixed/default callers.
+                os.environ[flag] = "1"
+            if cost_gate:
+                os.environ["BENCHMARK_REQUIRE_COMPUTE_TOKENS"] = "1"
+            error = None
+            try:
+                await bench._refresh_local_compute_tokens_for_run(
+                    "http://localhost:55120", tasks=tasks, require_claude_code=require,
+                )
+            except RuntimeError as exc:
+                error = str(exc)
+        assert len(observed) == 1
+        assert (observed[0].get(flag) == "1") is expect_opt_in
+        assert "SEED_ALLOW_MISSING_CLAUDE_CODE" not in observed[0]
+        if cost_gate:
+            assert error and "BENCHMARK_REQUIRE_COMPUTE_TOKENS=1" in error, error
+        elif expect_opt_in:
+            assert error is None, error
+        else:
+            assert error == "Benchmark run could not refresh local compute tokens", error
+        return observed[0]
+
+    with (
+        anthropic_family(excluded=False),
+        patch.object(bench, "_is_simulate_mode", return_value=False),
+        patch.object(bench, "_local_victoria_database_url", return_value="postgresql://127.0.0.1/local"),
+        patch.object(bench, "_compute_token_source_database_url", return_value=("postgresql://source/rose", "fixture")),
+        patch.object(bench, "_has_usable_anthropic_api_key_fallback", new=AsyncMock(return_value=False)),
+        patch.object(bench, "_run_seed_subprocess", side_effect=seed),
+        patch.object(bench, "_refresh_local_claude_token_from_keychain", return_value=False),
+        patch.object(bench, "_local_db_has_usable_direct_compute_token", return_value=False),
+    ):
+        try:
+            await refresh([browser], expect_opt_in=True)
+            await refresh([browser], require=True)
+            # Unknown/malformed catalog flags are not explicit non-Claude permission.
+            await refresh([replace(browser, requires_claude_code=None)])
+            claude_env = await refresh([claude])
+            assert claude_env["SEED_REQUIRE_COMPUTE_TOKEN_TYPES"] == "claude"
+            mixed_env = await refresh([claude, browser])
+            assert "SEED_REQUIRE_COMPUTE_TOKEN_TYPES" not in mixed_env
+            await refresh([])
+            await refresh([browser], expect_opt_in=True, cost_gate=True)
+            with patch.dict(os.environ, {flag: "1"}, clear=False):
+                observed.clear()
+                assert bench._sync_compute_tokens(
+                    allow_missing_claude_for_non_claude_tasks=1,
+                ) is False
+                assert flag not in observed[0]
+            # Existing AgentCard launchers intentionally inherit this flag.
+            # Their later fixture/default sync must retain that established scope.
+            with (
+                patch.dict(os.environ, {flag: "1"}, clear=False),
+                patch.object(bench, "_sync_email_credentials", return_value=True),
+                patch.object(bench, "_sync_browser_credentials", return_value=True),
+            ):
+                observed.clear()
+                assert bench._sync_compute_tokens() is True
+                assert observed[0][flag] == "1"
+                observed.clear()
+                result = bench._apply_live_fixture(bench.LiveFixtureContext(
+                    base_url="http://localhost:55120", user_id="fixture-user",
+                    auth_realm="example.test", cookie_domains=(),
+                ))
+                assert result["browser_auth"] is True
+                assert observed[0][flag] == "1"
+        finally:
+            bench._withheld_compute_token_types.clear()
+
+
 def test_shared_workspace_compute_source_requires_usable_claude_code():
     """A reachable shared DB without an agent token must not shadow prod."""
     from unittest.mock import patch
@@ -16521,6 +16626,7 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
             "tolerate_gpt_code_unavailable": True,
             "tolerate_claude_code_unavailable": True,
             "required_token_types": None,
+            "allow_missing_claude_for_non_claude_tasks": False,
         }
     ]
     assert http_calls == [
@@ -16566,6 +16672,7 @@ async def test_local_compute_refresh_rehydrates_tokens_after_base_restore():
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=False,
         required_token_types=None,
+        allow_missing_claude_for_non_claude_tasks=False,
     )
 
 
@@ -27057,6 +27164,10 @@ async def run_all_tests():
     r.record(
         "compute_token_sync_propagates_openrouter_claude_fallback",
         test_compute_token_sync_propagates_openrouter_claude_fallback_from_backend_env,
+    )
+    await r.record_async(
+        "non_claude_compute_refresh_scopes_seed_opt_in_and_preserves_strict_gates",
+        test_non_claude_compute_refresh_scopes_seed_opt_in_and_preserves_strict_gates,
     )
     await r.record_async(
         "anthropic_api_key_fallback_availability_fails_closed",

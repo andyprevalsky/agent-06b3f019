@@ -4885,27 +4885,54 @@ async def _run_with_agent_execution_backstop(
     started_at = asyncio.get_running_loop().time() if started_at is None else started_at
     deadline = started_at + seconds
     execution = asyncio.create_task(execute(snapshot))
+    original_error = None
     try:
         finished, _ = await asyncio.wait({execution}, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
         if finished:
             return await execution
+    except BaseException as error:
+        original_error = error
+    if original_error is None:
         print(f"    ⏰ Agent execution deadline reached after {seconds}s; cancelling poll")
-        # asyncio.timeout_at waits for cancellation to propagate. A provider
-        # coroutine can absorb that cancellation during reconnect/close and
-        # keep the entire benchmark alive. Retry within a separate finite
-        # grace period, then surface INFRA if it still owns execution.
+
+    # Both deadline expiry and external cancellation own the same finite drain.
+    # Repeated caller cancellation must neither abandon it nor restart its grace.
+    grace_end = asyncio.get_running_loop().time() + 5.0
+
+    async def drain_execution():
         for _ in range(5):
+            remaining = grace_end - asyncio.get_running_loop().time()
+            if execution.done() or remaining <= 0:
+                break
             execution.cancel()
-            finished, _ = await asyncio.wait({execution}, timeout=1.0)
+            finished, _ = await asyncio.wait({execution}, timeout=min(1.0, remaining))
             if finished:
                 break
         if not execution.done():
-            raise RuntimeError(f"Agent execution did not stop after {seconds}s wall-clock backstop")
-        await asyncio.gather(execution, return_exceptions=True)
-    except BaseException:
-        if not execution.done():
-            execution.cancel()
-        raise
+            raise RuntimeError("Agent execution did not stop after bounded cancellation")
+
+    cleanup = asyncio.create_task(drain_execution())
+    while True:
+        try:
+            await asyncio.shield(cleanup)
+            break
+        except asyncio.CancelledError as error:
+            if original_error is None:
+                original_error = error
+            if cleanup.cancelled():
+                raise RuntimeError("Agent execution cleanup was cancelled before joining") from error
+        except BaseException as cleanup_error:
+            raise cleanup_error from original_error
+    try:
+        execution.result()
+    except asyncio.CancelledError:
+        pass
+    except BaseException as execution_error:
+        if execution_error is original_error:
+            raise
+        raise execution_error from original_error
+    if original_error is not None:
+        raise original_error
     # Stop paid work before diagnostics; the normal task path subsequently
     # waits for terminal browser evidence and performs payment/agent cleanup.
     if not await pause_agent(base_url, agent_id):
@@ -7106,6 +7133,13 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and r.stop_metadata.get("runner") == "sms"
         and r.stop_metadata.get("owned_cleanup_verified") is True
     ]
+    rootless_credentials = [r for r in results if any(r is proof for proof in never_admitted_results)
+        and not r.agent_id and not getattr(r, "owned_roots", None) and not getattr(r, "logs", None)
+        and not live_ids.get(r.name) and r.status == r.benchmark_status == "SKIPPED" and r.passed is False
+        and _is_permitted_claude_code_skip(r)
+        and getattr(r, "graded_root_creation_outcome", None) == "not_started"
+        and getattr(r, "stop_metadata", None) == {"runner": "benchmark_preflight", "admission": "not_started",
+                                                  "reason": "claude_credential_unavailable"}]
     rootless_queued = [r for r in results if any(r is proof for proof in never_admitted_results)
         and not r.agent_id and not getattr(r, "owned_roots", None) and not getattr(r, "logs", None)
         and r.status == r.benchmark_status == "CANCELLED" and r.passed is False
@@ -7113,7 +7147,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
         and isinstance(meta := getattr(r, "stop_metadata", None), dict)
         and meta == {"runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": meta.get("occurrence_index")}
         and type(meta.get("occurrence_index")) is int and meta["occurrence_index"] >= 0]
-    if len(rootless_queued) != len(never_admitted_results):
+    if len(rootless_queued) + len(rootless_credentials) != len(never_admitted_results):
         failures.append("invalid coordinator nonadmission proof")
     if any(not r.agent_id and r.status != "SKIPPED" and r not in rootless_sms and not any(r is proof for proof in rootless_queued)
            and not (getattr(r, "graded_root_creation_outcome", None) == "not_started"
@@ -7121,7 +7155,8 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         getattr(r, "graded_root_creation_outcome", None) == "unknown" for r in results):
         failures.append("owned cloud execution has an unknown root creation outcome")
     if not owned:
-        if failures or not (rootless_sms or rootless_queued):
+        rootless = [*rootless_sms, *rootless_queued, *rootless_credentials]
+        if failures or not rootless or any(not any(r is proof for proof in rootless) for r in results):
             raise RuntimeError("; ".join(failures) or "owned cloud execution has no proven root allocation")
         return
     snapshots = {}
@@ -8366,6 +8401,7 @@ def _sync_compute_tokens(
     tolerate_gpt_code_unavailable: bool = False,
     tolerate_claude_code_unavailable: bool = False,
     required_token_types: tuple[str, ...] | None = None,
+    allow_missing_claude_for_non_claude_tasks: bool | None = None,
 ) -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
     from the verified workspace DB into an isolated benchmark DB. When there is
@@ -8394,6 +8430,12 @@ def _sync_compute_tokens(
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    # None preserves existing launcher-scoped AgentCard fixture/default calls.
+    # Explicit run-level selection overrides ambient permission for strict tasks.
+    if allow_missing_claude_for_non_claude_tasks is not None:
+        env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK", None)
+        if allow_missing_claude_for_non_claude_tasks is True:
+            env["SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK"] = "1"
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
     env.pop("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL", None)
@@ -9208,6 +9250,10 @@ async def _refresh_local_compute_tokens_for_run(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
         required_token_types=required_token_types,
+        allow_missing_claude_for_non_claude_tasks=(
+            bool(tasks) and not require_claude_code
+            and all(task.requires_claude_code is False for task in tasks)
+        ),
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
     if not has_anthropic_key_fallback:
@@ -15359,41 +15405,53 @@ async def _run_single_task_as_run_user(
                     await post_attachment_message(base_url, agent_id, file_pointers)
                     print(f"    📎 Posted {len(file_pointers)} file(s) as agent message")
             await post_world_model_update_events(base_url, agent_id)
-            start_fixture_ref = await archive_agent_start(base_url, agent_id)
+
+            async def observe_agent():
+                if checkpoint_source_index is not None:
+                    if checkpoint_source_out is None:
+                        raise ValueError("checkpoint_source_out is required in checkpoint source mode")
+                    data = await poll_agent_until_message_index(
+                        base_url,
+                        agent_id,
+                        task,
+                        checkpoint_source_index,
+                        checkpoint_source_boundary,
+                    )
+                    messages = data.get("messages", []) or []
+                    export_checkpoint_source_from_local_db(
+                        agent_id,
+                        source_out=checkpoint_source_out,
+                        tree_out=checkpoint_tree_out,
+                    )
+                    duration = time.time() - start
+                    return TaskResult(
+                        name=task.name,
+                        passed=True,
+                        agent_id=agent_id,
+                        status=(data.get("agent") or {}).get("status", "PAUSED"),
+                        benchmark_status="PASSED",
+                        progress_score=(data.get("agent") or {}).get("progress", 0),
+                        duration_seconds=round(duration, 1),
+                        cost_cents=0,
+                        message_count=len(messages),
+                        failure_reason=None,
+                    )
+
+                return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
+
+            # Archival is required, but must not hide a short-lived feedback trigger.
+            archive = asyncio.create_task(archive_agent_start(base_url, agent_id))
+            observation = asyncio.create_task(observe_agent())
+            try:
+                start_fixture_ref, result = await asyncio.gather(archive, observation)
+            finally:
+                for pending in (archive, observation):
+                    if not pending.done():
+                        pending.cancel()
+                await asyncio.gather(archive, observation, return_exceptions=True)
             if start_fixture_ref:
                 print(f"    🧊 Trace archive start fixture: {start_fixture_ref}")
-
-            if checkpoint_source_index is not None:
-                if checkpoint_source_out is None:
-                    raise ValueError("checkpoint_source_out is required in checkpoint source mode")
-                data = await poll_agent_until_message_index(
-                    base_url,
-                    agent_id,
-                    task,
-                    checkpoint_source_index,
-                    checkpoint_source_boundary,
-                )
-                messages = data.get("messages", []) or []
-                export_checkpoint_source_from_local_db(
-                    agent_id,
-                    source_out=checkpoint_source_out,
-                    tree_out=checkpoint_tree_out,
-                )
-                duration = time.time() - start
-                return TaskResult(
-                    name=task.name,
-                    passed=True,
-                    agent_id=agent_id,
-                    status=(data.get("agent") or {}).get("status", "PAUSED"),
-                    benchmark_status="PASSED",
-                    progress_score=(data.get("agent") or {}).get("progress", 0),
-                    duration_seconds=round(duration, 1),
-                    cost_cents=0,
-                    message_count=len(messages),
-                    failure_reason=None,
-                )
-
-            return await _poll_agent(base_url, agent_id, task, realtime_monitor, snapshot)
+            return result
 
         try:
             execution_result = await _run_with_agent_execution_backstop(
@@ -17464,8 +17522,12 @@ async def main_async(args):
             print(f"  ⚠ Worker memory sampling unavailable before smoke: {memory_before.get('reason')}")
 
     # Record skipped Claude Code tasks in results
-    for t in skipped_claude_tasks:
-        run.task_results.append(_claude_code_credential_skip_result(t))
+    initial_credential_skips = tuple(_claude_code_credential_skip_result(t) for t in skipped_claude_tasks)
+    for result in initial_credential_skips:
+        result.graded_root_creation_outcome = "not_started"
+        result.stop_metadata = {"runner": "benchmark_preflight", "admission": "not_started",
+                                "reason": "claude_credential_unavailable"}
+    run.task_results.extend(initial_credential_skips)
 
     # Live report card: a standardized progress snapshot emitted to stdout + the run's
     # context dir once per second (and once, forced, at the end). Purely observational —
@@ -17585,7 +17647,7 @@ async def main_async(args):
     # distinct without treating pending scheduler waiters as active executors.
 
     _entered_task_futures: set[asyncio.Task] = set()
-    _never_admitted_results: list[TaskResult] = []
+    _never_admitted_results: list[TaskResult] = list(initial_credential_skips)
 
     async def _run_reported_task(task: BenchmarkTask, **kwargs) -> TaskResult:
         # Before admission: nothing is created yet if the batch is cancelled here.

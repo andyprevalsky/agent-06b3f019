@@ -132,6 +132,36 @@ Independent review found and corrected cleanup ownership/publication ordering
 before execution. This repairs the prerequisite, not yet the pending complete
 smoke or AgentCard outcomes; no cold sync, migration, timeout or benchmark edit.
 
+
+### November 2, 2026 missing-lsof recurrence — PR1662
+
+Occurrence 761cdfb859e54c82a65900dd42e18a77 repeats the environment prerequisite
+noted in this case's deployment followup. The full original native log (SHA256
+fb091ee4e1bb28d7487b0319a7df929cbf3438929f1b488f82121f2b0c8ac955) names exactly
+three failed cleanup assertions, with 123 of 124 domains passing. The two earlier
+observer/listener checks and the reparented portless worker check all fail when
+lsof is unavailable. This is not a recurrence of the main planner-data defect.
+
+The worker's original post-run, pre-install probe recorded lsof ENOENT, and its
+package state was not installed. A private actual-process fixture extracted the
+unchanged owning functions and tests from main
+6f3f53201faac3a3e70de099e7c211cee6770fad and PR1662 frozen
+ e99c91f55b9444f01a90bd4e8efc18315faeb51b. Both revisions failed all three exact
+assertions with lsof absent; both passed the identical assertions with only
+lsof added to the fixture PATH. Production code, test definitions, coverage
+runners, run-deploy-stage and cloud-init.sh are byte-identical at those boundaries.
+Gate: NOT_INTRODUCED. The original command environment was not captured; the
+later native probe and controlled reproduction are distinguished from an
+in-run environment snapshot.
+
+The deploy owner authorized lsof installation on the recorded worker; apt
+installed 4.95.0-1build3 with zero removals and a clean source tree afterward.
+The existing cloud-init.sh already declares and installs this prerequisite.
+No application change or weaker cleanup assertion is needed. The original
+aggregate remains UNVERIFIED, exit 1; full coverage has not been reexecuted by
+this investigator. Parent retains deployment and aggregate-verification
+ownership. Detailed proof is retained in /var/tmp/rca761-agents-coverage.
+
 ## Human feedback
 
 The user challenged the smoke skip, asked exactly which failures had been
@@ -142,3 +172,40 @@ must not be called unrelated without checking the schema change and publication.
 ## Reusable lesson
 
 Publish and verify the reviewed fixture for every changed schema key before running smokes, and establish causality before applying an unrelated-failure override.
+
+
+### November 2, 2026 PR1662 cloud/PG15 integration prerequisite
+
+The new staged deploy integration made cloud smoke mandatory where base
+bf92cbd98ab436af20f9a8d647c32e748c67e93a documented local smoke by default.
+The earlier comment-only rekey repair above published PG16 only; the matching
+PG15 key remained absent. The schema SHA1 was already 049dc6b64d546bc8969fc864fcaf891ca82568d0
+on base6f3f53201, bf92cbd98 and frozen7be0644bb164763af1526ead7b426e2d5e909f4a.
+Gate: INTRODUCED applies to omitted preparation of the newly mandatory cloud
+fixture, not to a newly authored schema change. Independent review confirmed
+that scope in /var/tmp/pr1662-pg15-seed-review.json.
+
+Native campaign f9d1709a9c89c45ae901d7684e1a0dd9d4e6b046a8827fad4531ac41f5d8161b
+stopped after r001-j0013 failed its PG15 seed preflight. The fixed-total 1/17
+infrastructure predicate then cancelled the other members; no task assertion
+was exercised. The target native HEAD returned3; reviewed predecessor
+ a7c48e4f351c50bc4e00b11ffe55a7b104230d8b-pg15-victoria-prod-sync-v1-whatsapp-v2
+returned0 and downloaded an authentic pg_dump15.19 archive.
+
+The unchanged native migrate-canonical-seed.sh ran in a private fixture with an
+owned pgvector:pg15 container. Prisma reported an empty schema migration. Both
+restores passed the canonical validator (3825 WhatsApp messages, connected
+integration,241 archived trajectory rows across3 roots, and named profile), all
+table counts matched, and the absent target was uploaded and downloaded with
+byte-identical verification. Final PG15 archive:31144906 bytes, SHA256
+ e1439aed8adda5cca62f5c1e7834c24b756fe65a75efb0362700a0fc48c0e275.
+
+The unchanged native cloudbench-seed-get.sh now exits0 in1.24s with that same
+SHA256; HEAD changed3 to0. The publication process exited0 and exact container
+canonical-seed-pg15-3210543 was confirmed absent after its cleanup trap. All16
+original fleet cleanup receipts show empty clone IDs and verified provider
+release; the central viewer retains its explicit native owner transfer policy.
+No task definitions, thresholds, schema, provider settings or parent source
+changed. The full17-task smoke remains UNVERIFIED until the deploy owner reruns
+it. Evidence: /var/tmp/pr1662-pg15-seed-repair/report.json, publication.log,
+native-consumer-receipt.json and original-campaign-cleanup.json.

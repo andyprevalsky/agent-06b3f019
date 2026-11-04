@@ -70,3 +70,22 @@ At source fa0310f9f6a55cd4f937f59ab4af51bd385b16fb, the normal one-worker agents
 Original child stderr, PID and readiness phase are still missing. The cached84,478,216-byte test-server ELF and dynamic dependencies were present. Earlier root-disk exhaustion is not a demonstrated cause of this startup failure; no direct write failure appears in this log. The complete investigation is .context/pr1634-workflow-startup-rca/report.md.
 
 One small diagnostic subsequently entered the SDK context in under one second, then its extra reporting statement raised TypeError. That reporting error is separate from the original startup failure; this was not a clean workflow pass. After the existing coverage lane ended, the unchanged full owning command `venv/bin/python scripts/run_blackbox_tests.py workflow` passed in141.7s, exit0, one domain. The log is /project/rose-speed-comparison-20261028/workflow-unchanged-rerun-20261030.log. This establishes observed recovery only, not a causal fix. Its recovered getNamespace test-server warning also appears in the previous passing run. No timeout, assertion, cache or runtime configuration was changed.
+
+## November 4 b9 display and deploy-resume readiness recurrences
+
+On `b9a1f743`, inline_display_runs_in_production_sandbox failed while the SDK
+started its local ephemeral server at127.0.0.1:35973. The separate
+rolling_deploy_resumes_browser_task_on_the_new_machine and
+cutover_resumes_browser_task_on_the_new_generation cases failed at the same
+SDK startup/readiness boundary on32831 and45283. Each error says the server
+did not start within5s; all occurred before their owning behavior assertions.
+Display/deploy-resume domain elapsed times were17.9/65.2 seconds respectively.
+
+The owning test files, sandbox helper and Python requirements match main0784.
+Original child launch/stderr/readiness/download phase evidence is missing;
+no host-load, port-conflict or stuck-download cause is established. These three
+failures remain separate FAILED/UNKNOWN observations. Neither the later passing
+workflow cutover diagnostic nor the unrelated local seed fixture isolation
+repairs or qualifies them. No domain rerun or5s change was made by this RCA lane.
+Evidence: plan:/var/tmp/pr1662-b9-local-lifecycle-fixture/report.json; original
+logs remain under the agents coverage20261104-031806-510293 directory.

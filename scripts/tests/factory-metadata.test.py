@@ -679,14 +679,23 @@ class FactoryDetailTest(unittest.TestCase):
             self.assertEqual(same["retry_cause"], "unchanged-source")
 
     def test_stage_runner_records_detail_reuse_and_publishes_it(self):
-        wrapper = str(ROOT / "scripts/run-deploy-stage")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            # Source telemetry needs a real merge base. Prepared native workers
+            # may intentionally contain HEAD without an ambient origin/main.
+            checkout = git_checkout(root)
+            for name in ("run_deploy_stage.py", "factory_detail.py"):
+                shutil.copyfile(ROOT / "scripts" / name, checkout / "scripts" / name)
+            git = ["git", "-C", str(checkout), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+            subprocess.run([*git, "add", "."], check=True)
+            subprocess.run([*git, "commit", "-qm", "stage runner"], check=True)
+            subprocess.run([*git, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+            wrapper = str(checkout / "scripts/run-deploy-stage")
             env = {**os.environ, "DEPLOY_RUN_ROOT": str(root / "deploy-runs")}
             env.pop("FACTORY_METADATA_FILE", None)
 
             def stage(*command, check=True):
-                return subprocess.run(["bash", wrapper, *command], env=env, cwd=ROOT,
+                return subprocess.run(["bash", wrapper, *command], env=env, cwd=checkout,
                                       capture_output=True, text=True, check=check)
 
             stage("--start", "--run-id", "detail")
@@ -717,6 +726,8 @@ class FactoryDetailTest(unittest.TestCase):
                 self.assertGreater(detail["host"]["cpu_count"], 0)
                 self.assertRegex(detail["source"]["sha"], r"^[0-9a-f]{40}$")
                 self.assertIn("lanes", detail["source"])
+                self.assertEqual(detail["source"]["base_sha"], detail["source"]["sha"])
+                self.assertEqual(detail["source"]["lanes"], [])
             # Queue wait is reported only when the caller exported its queue start.
             self.assertNotIn("queue_seconds", failed["timing"])
             self.assertGreater(passed["timing"]["queue_seconds"], 0)

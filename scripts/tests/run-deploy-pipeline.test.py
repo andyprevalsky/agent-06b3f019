@@ -2197,7 +2197,7 @@ def main() -> int:
         # A launcher exports FACTORY_METADATA_FILE for its own worktree; the
         # telemetry scenario selects its own fixture snapshot explicitly.
         env = {**{key: value for key, value in os.environ.items()
-                  if not key.startswith("DEPLOY_ADMISSION_") and key != "FACTORY_METADATA_FILE"},
+                  if not key.startswith("DEPLOY_ADMISSION_") and key not in {"FACTORY_METADATA_FILE", "DEPLOY_LANE_SCOPED_REUSE"}},
                "DEPLOY_RUN_ROOT": str(tmp / "runs"), "DEPLOY_PIPELINE_SOURCE_ROOT": str(source_root)}
         start_timing(tmp / "runs", env)
         marker = tmp / "slow-finished"
@@ -4265,7 +4265,7 @@ def check_standard_plan_typescript() -> None:
     assert typescript["cwd"] == "back-end", typescript
     deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
     assert typescript["command"][-1] in deploy_md, "deploy.md Step 3 must run the same incremental tsc command"
-    assert "run_deploy_pipeline.py verify --state-dir" in deploy_md, "Phase 3 must bind the receipt to HEAD"
+    assert "run_deploy_pipeline.py verify --require-staged" in deploy_md, "Phase 3 must require the staged receipt bound to HEAD"
     assert "--follow-source" in deploy_md and "FIX_LOOP_CAP" in deploy_md
 
 

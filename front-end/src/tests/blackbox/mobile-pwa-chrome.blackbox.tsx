@@ -82,8 +82,8 @@ function signIn() {
 }
 
 function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
-  // Use the same clock as the sidebar so completed fixtures stay recent on any test date.
-  const now = new Date(Date.now()).toISOString();
+  // Keep fixtures recent on the sidebar clock, including mocked test dates.
+  const recentTimestamp = new Date(Date.now()).toISOString();
   return {
     agent_id: 'agent-1',
     goal: 'Get me 10 candidates to interview',
@@ -104,8 +104,8 @@ function makeAgent(overrides: Partial<AgentDetail> = {}): AgentDetail {
     message_count: 7,
     price_limit_cents: 1000,
     tree_cost_cents: 45,
-    created_at: now,
-    updated_at: now,
+    created_at: recentTimestamp,
+    updated_at: recentTimestamp,
     write_lock_enabled: true,
     parent_agent_id: null,
     parent_goal: null,

@@ -399,6 +399,7 @@ class _Backend:
             patch.object(service, "close_e2b_session", side_effect=self.close_session),
             patch.object(service, "save_claude_code_message", side_effect=self.save_message),
             patch.object(service, "persist_terminal_output", side_effect=self.persist_output),
+            patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
             patch.object(service, "keepalive_e2b_session", side_effect=self.keepalive),
             patch.object(service, "report_code_usage_limit", side_effect=self.report_usage),
             patch.object(service, "resize_e2b_session", side_effect=self.resize),
@@ -608,22 +609,60 @@ async def test_question_while_cli_waits_for_its_answer_is_handed_over_before_idl
         CODE_SESSION_KEEPALIVE_INTERVAL_S,
     )
 
-    scale = 200.0
+    # Advance application time at observed events, never by multiplying
+    # scheduler, transport or process-cleanup latency into virtual seconds.
+    virtual_now = time.time()
+    tool_finished = asyncio.Event()
+    keepalive_replies = asyncio.Queue()
     session_home = _SessionHome()
     backend = _Backend(session_home)
+
+    def clock():
+        return virtual_now
+
+    def observe_event(event, **kwargs):
+        if event.get("type") == "tool_result":
+            tool_finished.set()
+
+    async def observe_keepalive(*args, **kwargs):
+        reply = await backend.keepalive(*args, **kwargs)
+        keepalive_replies.put_nowait((clock(), backend.keepalives, reply))
+        return reply
+
     try:
-        with backend.patched(clock=_virtual_clock(scale)):
+        with (
+            backend.patched(clock=clock),
+            patch.object(service, "_log_code_agent_event", side_effect=observe_event),
+            patch.object(service, "keepalive_e2b_session", side_effect=observe_keepalive),
+        ):
             spawn = asyncio.create_task(
                 ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args())
             )
-            await _wait_until(lambda: session_home.runs(), "the CLI to start")
-            session_home.release("tool_done")  # the tool ends; the CLI now waits for the answer
-            await asyncio.sleep(0.3)
-            assert not spawn.done(), "the session is still attached before the question"
-            asked_at = time.monotonic()
-            backend.question_after = backend.keepalives + 1  # the CLI asked its blocked spawner
-            outcome = await asyncio.wait_for(spawn, timeout=30)
-            handoff_virtual_s = (time.monotonic() - asked_at) * scale
+            try:
+                async with asyncio.timeout(30):
+                    await _wait_until(lambda: session_home.runs(), "the CLI to start")
+                    session_home.release("tool_done")
+                    await tool_finished.wait()  # the monitor observed the quiet, waiting CLI
+                    virtual_now += CODE_SESSION_KEEPALIVE_INTERVAL_S
+                    _, before_question, first_reply = await keepalive_replies.get()
+                    assert first_reply["awaiting_parent"] is None, first_reply
+                    assert not spawn.done(), "the session is still attached before the question"
+                    asked_at = clock()
+                    backend.question_after = before_question + 1
+                    virtual_now += CODE_SESSION_KEEPALIVE_INTERVAL_S
+                    answered_at, answered_on, reply = await keepalive_replies.get()
+                    assert answered_on == before_question + 1, "question skipped the next keepalive"
+                    assert reply["awaiting_parent"]["message_id"] == "q-1", reply
+                    # Hold application time here. Waiting for another keepalive
+                    # or idle expiry cannot make a missed handoff pass.
+                    outcome = await spawn
+                    assert backend.keepalives == answered_on, "handoff required another keepalive"
+                    handoff_virtual_s = answered_at - asked_at
+            finally:
+                if not spawn.done():
+                    spawn.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await spawn
         assert outcome["status"] == "paused" and outcome["success"] is False, outcome
         assert "Which database should I use?" in outcome["message"], outcome["message"]
         assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed

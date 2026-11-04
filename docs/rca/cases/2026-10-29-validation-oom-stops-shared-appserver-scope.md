@@ -72,3 +72,49 @@ not waive coverage, resource failures or other normal gates.
 
 Check kernel and workload-unit evidence after simultaneous process loss, and do
 not mistake an empty watchdog log for proof that no OOM occurred.
+
+## November 4 recurrence (PR #1662, attempt 37)
+
+At frozen source `8cdfa46fb82741fc15f3950cfbb44932682225f8`, the kernel
+journal records global OOM killing Node PID `2053899` at
+`2026-11-04T04:20:43.199095Z` in workload scope
+`boxes-workload-fc982f3c184342bc820b7a434d4d6032.scope`. It recorded
+15,013,056 KiB active/inactive anonymous memory, 138,604 KiB free and no
+swap. The victim's exact argv, allocating lane and per-gate peak remain
+unrecorded.
+
+systemd recorded that scope's OOM and a stop timeout at `04:22:12.795063Z`,
+then killed surviving appserver processes and recorded result `oom-kill`
+with a reported `12.8G` scope peak. Native structural-worker journal metadata
+binds its root to the same scope. These records and the live/default
+`OOMPolicy=stop`, `KillMode=control-group` support scope-stop fanout; the
+historical scope properties and exact initial signal sender for each vanished
+coordinator/guardian PID were not retained. Do not invent individual signal
+ancestry.
+
+The watchdog separately sent TERM to backend PID `1971104` at
+`04:20:46.019Z`. Its implementation signals only that positive PID. The backend
+sidecar binds the same PID in `term_sent` and `reaped` with wait status zero;
+this process result is not a backend test PASS and does not establish that
+its TERM caused the whole cohort interruption. Six unfinished local supervisors
+recorded cancellation, native exit `-9` and process quiescence; the controller
+also recorded orphaned children. Process closure grants no missing recipe,
+teardown or financial assertion credit. Existing PASS/SKIP rows remain, and
+interrupted assertions remain UNVERIFIED.
+
+Source introduction remains UNKNOWN comparing
+`b9a1f743152e29cb6626ed33fdce88d24a919ba1` with the frozen `8cdfa46f` source:
+there is no matched baseline/current aggregate-memory run. The read-only native
+packet is retained at `/var/tmp/round37-memory-rca/`; its exact `diagnosis.json`
+SHA256 is `16fc9cdc7b83bc4cd30af7752c55c095ac2213e391dae4112d593ad763a04092`.
+No reproduction, rerun, repaired-gate success or fresh external call was made
+by this investigation.
+
+The user's November 4 correction supersedes the earlier recommendation in
+**Solution** to serialize heavy canonical validation lanes: **never globally
+serialize independent gates**. Preserve independent parallel execution and
+existing assertions, concurrency requirements and timing budgets. Failure
+reruns follow the documented deployment schedule. Additional disk and memory
+backing is being prepared; it has not been validated as a repair or shown to
+fit the full gate cohort. Do not change platform OOM protection or convert
+capacity preparation into a PASS or waiver.
