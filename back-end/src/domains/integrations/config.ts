@@ -72,14 +72,21 @@ export const EMAIL_PROVIDER_CONFIG: Record<EmailProviderSlug, EmailProviderConfi
   },
 };
 
+// Each host is anchored at its end (`(?=[/?#]|$)`), so look-alike hosts such
+// as `https://www.roselabs.ai.evil.com` or `http://localhost.evil.com` never match.
 export const ALLOWED_REDIRECT_PATTERNS = [
-  /^https?:\/\/localhost(:\d+)?/,
-  /^https?:\/\/127\.0\.0\.1(:\d+)?/,
-  /^https:\/\/[^/]*\.vercel\.app/,
-  /^https:\/\/roselabs\.ai/,
-  /^https:\/\/www\.roselabs\.ai/,
+  /^https?:\/\/localhost(:\d+)?(?=[/?#]|$)/,
+  /^https?:\/\/127\.0\.0\.1(:\d+)?(?=[/?#]|$)/,
+  /^https:\/\/[^/?#:@]*\.vercel\.app(?=[/?#]|$)/,
+  /^https:\/\/roselabs\.ai(?=[/?#]|$)/,
+  /^https:\/\/www\.roselabs\.ai(?=[/?#]|$)/,
   /^roselabs:\/\//,
 ];
+
+/** The env the exact-origin redirect checks read (oauthService.isGranolaRedirectOrigin). */
+export function webOriginEnvironment(): { NODE_ENV?: string; ALLOWED_ORIGINS?: string } {
+  return { NODE_ENV: process.env.NODE_ENV, ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS };
+}
 
 export const VALID_BROWSERS = [
   'chrome',

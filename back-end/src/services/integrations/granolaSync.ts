@@ -274,14 +274,9 @@ export async function completeGranolaSignIn(
   const hadGrant = config.encryptedTokens !== undefined;
   const switched =
     hadGrant && (previousEmail === null || accountEmail === null || previousEmail !== accountEmail);
+  // State row first, as in every sync transaction (fenced), so the two never
+  // lock in opposite orders.
   await prisma.$transaction([
-    ...(switched
-      ? [
-          prisma.userDataDocument.deleteMany({
-            where: { userId, source: { in: [...GRANOLA_SOURCES] } },
-          }),
-        ]
-      : []),
     prisma.userDataProviderSyncState.update({
       where: where(userId),
       data: {
@@ -294,6 +289,13 @@ export async function completeGranolaSignIn(
         lastStartedAt: null,
       },
     }),
+    ...(switched
+      ? [
+          prisma.userDataDocument.deleteMany({
+            where: { userId, source: { in: [...GRANOLA_SOURCES] } },
+          }),
+        ]
+      : []),
     prisma.integration.upsert({
       where: { userId_name_accountId: { userId, name: GRANOLA_PROVIDER, accountId: '' } },
       create: {
@@ -318,9 +320,10 @@ export async function completeGranolaSignIn(
 
 /** Remove the grant, the sync state and every synced Granola document. */
 export async function disconnectGranola(userId: string): Promise<{ deletedDocuments: number }> {
-  const [documents] = await prisma.$transaction([
-    prisma.userDataDocument.deleteMany({ where: { userId, source: { in: [...GRANOLA_SOURCES] } } }),
+  // State row first (same lock order as a fenced sync write).
+  const [, documents] = await prisma.$transaction([
     prisma.userDataProviderSyncState.deleteMany({ where: { userId, source: GRANOLA_PROVIDER } }),
+    prisma.userDataDocument.deleteMany({ where: { userId, source: { in: [...GRANOLA_SOURCES] } } }),
     prisma.integration.deleteMany({ where: { userId, name: GRANOLA_PROVIDER } }),
   ]);
   log.info('Granola disconnected', { userId, deletedDocuments: documents.count });
@@ -693,12 +696,21 @@ export async function syncGranolaUser(
   return runClaimed(claimed, opts);
 }
 
-/** Cron entry: sync every due user, a bounded batch per tick. */
+/**
+ * Cron entry: sync up to CRON_BATCH due users per tick. Each worker claims one
+ * user just before running it, so a claim's age always matches its run and a
+ * queued claim can never go stale and be taken by another replica.
+ */
 export async function runGranolaSyncJob(opts: GranolaSyncOptions = {}): Promise<number> {
-  const users = await claim((opts.now ?? (() => new Date()))(), CRON_BATCH);
-  const queue = [...users];
+  const clock = opts.now ?? (() => new Date());
+  let budget = CRON_BATCH;
+  let claimed = 0;
   const worker = async () => {
-    for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+    while (budget > 0) {
+      budget -= 1;
+      const [next] = await claim(clock(), 1);
+      if (next === undefined) return;
+      claimed += 1;
       await runClaimed(next, opts).catch((error: unknown) =>
         log.error('Granola run crashed', {
           userId: next.userId,
@@ -707,6 +719,6 @@ export async function runGranolaSyncJob(opts: GranolaSyncOptions = {}): Promise<
       );
     }
   };
-  await Promise.all(Array.from({ length: Math.min(CRON_CONCURRENCY, users.length) }, worker));
-  return users.length;
+  await Promise.all(Array.from({ length: CRON_CONCURRENCY }, worker));
+  return claimed;
 }

@@ -234,6 +234,15 @@ test('the sign-in routes accept only the frontend callback and a code with state
     });
     equal(offsite.status, 400, 'foreign origin');
     equal(offsite.body.error, 'REDIRECT_URI_NOT_ALLOWED', 'foreign origin code');
+    for (const redirectUri of [
+      'https://www.roselabs.ai.evil.com/integrations/granola/callback',
+      'http://localhost.evil.com/integrations/granola/callback',
+      'https://attacker.vercel.app/integrations/granola/callback',
+      'https://roselabs.ai@evil.com/integrations/granola/callback',
+    ]) {
+      const lookalike = await post(userId, '/oauth/start', { redirectUri });
+      equal(lookalike.body.error, 'REDIRECT_URI_NOT_ALLOWED', `look-alike ${redirectUri}`);
+    }
     const otherPath = await post(userId, '/oauth/start', {
       redirectUri: 'http://localhost:5050/integrations?next=/x',
     });

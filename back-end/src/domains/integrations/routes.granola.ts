@@ -22,11 +22,10 @@ import {
   startGranolaSignIn,
   syncGranolaUser,
 } from '../../services/integrations/granolaSync';
-import { isAllowedRedirectUrl } from './oauthService';
+import { isGranolaRedirectOrigin } from './oauthService';
 
 const log = createLogger('Integrations');
 const router = Router();
-
 
 function resolveUserId(req: AuthRequest): string | undefined {
   const id = req.isInternal === true ? req.headers['x-user-id'] : req.user?.id;
@@ -55,16 +54,23 @@ router.get(
 
 /**
  * Granola returns the browser to this Rose frontend page, which posts the code
- * to /oauth/complete with the user's own session. Only the frontend's own
- * callback path on an allowed origin is accepted.
+ * to /oauth/complete with the user's own session. The redirect must be that
+ * path on an exact Rose web origin: whoever controls the redirect origin
+ * receives the code, so prefix patterns (and any `*.vercel.app`) are refused.
+ * Local dev origins are accepted only outside production.
  */
 export const GRANOLA_CALLBACK_PATH = '/integrations/granola/callback';
 
 function isAllowedGranolaRedirect(value: unknown): value is string {
-  if (typeof value !== 'string' || !isAllowedRedirectUrl(value)) return false;
+  if (typeof value !== 'string') return false;
   try {
     const url = new URL(value);
-    return url.pathname === GRANOLA_CALLBACK_PATH && url.search === '' && url.hash === '';
+    return (
+      isGranolaRedirectOrigin(url.origin) &&
+      url.pathname === GRANOLA_CALLBACK_PATH &&
+      url.search === '' &&
+      url.hash === ''
+    );
   } catch {
     return false;
   }

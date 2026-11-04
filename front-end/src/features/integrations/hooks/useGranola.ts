@@ -123,10 +123,12 @@ export function useGranola(enabled: boolean, onChange?: () => Promise<void> | vo
       signInPoll.current = setInterval(() => {
         void (async () => {
           const next = await refresh();
-          if (next?.connected === true || Date.now() - startedAt > SIGN_IN_TIMEOUT_MS) {
+          // An EXPIRED grant still reads as connected; wait for the new one.
+          const signedIn = next?.connected === true && next.status !== 'EXPIRED';
+          if (signedIn || Date.now() - startedAt > SIGN_IN_TIMEOUT_MS) {
             stopSignInPoll();
             setBusy(null);
-            if (next?.connected === true) await onChange?.();
+            if (signedIn) await onChange?.();
           }
         })();
       }, SIGN_IN_POLL_MS);

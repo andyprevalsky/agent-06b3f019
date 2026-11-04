@@ -8,6 +8,7 @@
  *   - Mac app: Connect opens the sign-in URL in the system browser (returning
  *     to the public site's callback), then polls until the backend reports
  *     Granola connected and shows the meeting count
+ *   - Mac app reconnect from EXPIRED keeps polling until the new grant lands
  *   - callback page: posts Granola's code and state with the user's own session
  *     and returns to the remembered page; a refusal or Granola error is shown
  *   - status is re-read while history backfills, not once the sign-in expired
@@ -130,6 +131,29 @@ describe('Granola integration', () => {
       { redirectUri: 'https://www.roselabs.ai/integrations/granola/callback' },
     ]);
   });
+
+  it('Mac app: reconnecting an expired sign-in waits for the new grant', async () => {
+    const backend = granolaBackend();
+    backend.connected = true;
+    let expired = true;
+    server.use(
+      http.get(`${API_BASE}/integrations/granola`, () =>
+        HttpResponse.json({ ...status(true, 4), ...(expired ? { status: 'EXPIRED' } : {}) }),
+      ),
+    );
+    const openExternal = vi.fn(async () => {
+      setTimeout(() => {
+        expired = false;
+      }, 4_500);
+    });
+    window.api = { isElectron: true, openExternal };
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Reconnect Granola' }));
+    await waitFor(() => expect(openExternal).toHaveBeenCalledWith(AUTHORIZE_URL));
+    expect(await screen.findByText('4 meetings synced', {}, { timeout: 9000 })).toBeInTheDocument();
+  }, 15_000);
 
   it('polls while history backfills, and stops once the sign-in has expired', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
