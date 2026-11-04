@@ -7,6 +7,7 @@
 
 import { prisma } from './database';
 import { hydrateProgressEstimates } from './agentProgressEstimates';
+import { agentSpeedFromRow } from './rose/speed';
 
 interface ToolUsageItem {
   type: string;
@@ -120,6 +121,7 @@ export async function getAgentDetailForPreview(agentId: string) {
       price_limit_cents: agent.priceLimitCents,
       tree_cost_cents: agent.treeCostCents,
       fast_mode_cache_enabled: agent.fastModeCacheEnabled,
+      speed: agentSpeedFromRow(agent),
       world_model_mode: agent.worldModelMode,
       token_in_price_microdollars: agent.tokenInPriceMicrodollars,
       token_out_price_microdollars: agent.tokenOutPriceMicrodollars,

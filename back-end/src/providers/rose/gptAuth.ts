@@ -26,6 +26,7 @@ import {
   RoseServerError,
 } from './errors';
 import type { PoolSpec } from './pools';
+import { openAiServiceTierFor, type AgentSpeed } from './speed';
 import {
   boundedRateLimitBackoffMs,
   extractRateLimitedUntil,
@@ -71,7 +72,8 @@ interface BuildBodyOptions {
   toolChoice?: unknown;
   temperature?: number;
   effort?: string;
-  providerFastMode?: boolean;
+  /** Already resolved for this leg (see speed.ts); omitted = standard. */
+  serviceTier?: 'priority' | 'ultrafast';
   requestId: string;
   /** Route honors GPT-5.6+ prompt_cache_breakpoint (Foundry, OpenAI API key). */
   cacheBreakpoints?: boolean;
@@ -398,8 +400,8 @@ export function buildCodexResponsesBody(opts: BuildBodyOptions): Record<string, 
       },
     };
   }
-  if (opts.providerFastMode === true) {
-    body.service_tier = 'priority';
+  if (opts.serviceTier !== undefined) {
+    body.service_tier = opts.serviceTier;
   }
 
   return body;
@@ -417,7 +419,7 @@ interface GptAuthOptions {
   accountId?: string;
   requestId: string;
   callSite?: string;
-  providerFastMode?: boolean;
+  speed?: AgentSpeed;
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
 }
@@ -431,7 +433,7 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
     toolChoice: opts.toolChoice,
     temperature: opts.temperature,
     effort: opts.effort,
-    providerFastMode: opts.providerFastMode,
+    serviceTier: openAiServiceTierFor(opts.speed, opts.poolSpec.gptAuthModel),
     requestId: opts.requestId,
   });
   const actualModel = `${opts.poolSpec.gptAuthModel}-gpt`;
@@ -533,7 +535,7 @@ interface OpenAiApiKeyOptions {
   openAiKey: string;
   requestId: string;
   callSite?: string;
-  providerFastMode?: boolean;
+  speed?: AgentSpeed;
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
 }
@@ -551,7 +553,7 @@ export async function* openAiApiKeyComplete(
     toolChoice: opts.toolChoice,
     temperature: opts.temperature,
     effort: opts.effort,
-    providerFastMode: opts.providerFastMode,
+    serviceTier: openAiServiceTierFor(opts.speed, opts.model),
     requestId: opts.requestId,
   });
   const actualModel = `${opts.model}-openai`;

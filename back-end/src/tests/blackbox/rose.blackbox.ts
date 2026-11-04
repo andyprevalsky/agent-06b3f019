@@ -31,6 +31,7 @@
  */
 
 import { z } from 'zod';
+import { prisma } from '../../providers/database';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -52,9 +53,17 @@ import {
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   responseModel,
   type CompletionChunk,
+  type SubscriptionCredential,
+  type SubscriptionLeaseFailure,
+  type SubscriptionLeases,
 } from '../../providers/rose';
 import { buildAnthropicBody, claudeAuthComplete } from '../../providers/rose/claudeAuth';
-import { FOUNDRY_REGION_ENV_NAMES } from '../../providers/rose/foundry';
+import {
+  foundryModels,
+  foundryRegions,
+  foundryRoutePlan,
+  FOUNDRY_REGION_ENV_NAMES,
+} from '../../providers/rose/foundry';
 import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
 import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCerebrasRoute';
 import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
@@ -93,6 +102,12 @@ import {
 } from '../../providers/rose/transport';
 import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
 import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
+import { assertLocalDatabase } from './assertLocalDatabase';
+
+// In-process provider cases still reach Prisma (Foundry shared cooldowns, which
+// withIsolatedFundedKeyCooldowns does not intercept). A direct `npx tsx` run
+// would load back-end/.env and stamp production cooldown rows.
+assertLocalDatabase();
 
 // ==================== TEST INFRASTRUCTURE ====================
 
@@ -360,10 +375,11 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(lite.name, 'rose-1-flash', 'flash.name');
   assert(lite.claudeAuthModel.startsWith('claude-'), 'flash claudeAuthModel');
   assertEqual(lite.gptAuthModel, 'gpt-5.6-luna', 'flash.gptAuthModel');
-  assertEqual(lite.waterfallReasoningEffort, 'low', 'flash waterfall effort');
+  assertEqual(lite.waterfallReasoningEffort, 'medium', 'flash waterfall effort');
   assertEqual(getPool('rose-1-mini').waterfallReasoningEffort, 'low', 'mini waterfall effort');
   assertEqual(ultra.waterfallReasoningEffort, undefined, 'ultra waterfall keeps caller effort');
-  assertEqual(lite.directAuthEnabled, false, 'flash skips Claude/GPT auth');
+  assertEqual(lite.directAuthEnabled, false, 'flash skips funded API keys');
+  assertEqual(lite.subscriptionAuthEnabled, false, 'flash chat retains Cerebras first');
   assertEqual(lite.cerebrasModel, 'qwen-3.8-27b', 'flash Cerebras primary');
   assertEqual(lite.cerebrasReasoningEffort, 'high', 'flash Cerebras effort');
   assertEqual(
@@ -373,18 +389,19 @@ async function testPool_getPoolRegistryShape() {
   );
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
   assertEqual(ultra.claudeAuthModel, 'claude-opus-5-5', 'ultra claudeAuthModel');
-  assertEqual(ultra.gptAuthModel, 'gpt-6-sol', 'ultra.gptAuthModel');
+  assertEqual(ultra.gptAuthModel, 'gpt-6.1-sol', 'ultra.gptAuthModel');
   // Anthropic dropped from ultra: opus-4.8 was the priciest layer while scoring
   // below sol on every AA index. Sol leads, kimi-k3 backs it from a different vendor.
   assertEqual(
     ultra.waterfall.join(','),
-    'openai/gpt-6-sol,moonshotai/kimi-k3',
+    'openai/gpt-6.1-sol,moonshotai/kimi-k3',
     'ultra OpenRouter waterfall'
   );
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
   assertEqual(browserUse.claudeAuthModel, 'claude-sonnet-5', 'browserUse.claudeAuthModel');
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-luna', 'browserUse.gptAuthModel');
-  assertEqual(browserUse.directAuthEnabled, false, 'browser skips Claude/GPT auth');
+  assertEqual(browserUse.directAuthEnabled, false, 'browser skips funded API keys');
+  assertEqual(browserUse.subscriptionAuthEnabled, false, 'browser retains Cerebras first');
   assertEqual(browserUse.cerebrasModel, 'qwen-3.8-27b', 'browser Cerebras primary');
   assertEqual(
     browserUse.waterfall.join(','),
@@ -1825,8 +1842,6 @@ async function testFlash_skipsAuthAndHitsCerebrasQwen() {
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'hi' }],
-      claude_token: 'claude-oauth-must-not-run',
-      gpt_token: 'gpt-oauth-must-not-run',
     });
     const chunks = await collect(stream);
     assertEqual(cerebrasCalls, 1, 'direct Cerebras hop');
@@ -1864,7 +1879,6 @@ async function testFlash_cerebrasFailureFallsToOpenRouterQwen() {
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'hi' }],
-      claude_token: 'claude-oauth-must-not-run',
     });
     const chunks = await collect(stream);
     assertEqual(cerebrasCalls, 1, 'Cerebras attempted');
@@ -1916,8 +1930,8 @@ async function testOpenAiApiKey_servesBeforeAnthropicAndOpenRouter() {
     assertEqual(anthropicCalls, 0, 'did NOT fall through to Anthropic');
     assertEqual(openrouterCalls, 0, 'did NOT fall through to OpenRouter');
     assertEqual(capturedHeaders.Authorization, 'Bearer sk-proj-test-key', 'sent OpenAI bearer');
-    assertEqual(capturedBody?.model, 'gpt-6-sol', 'uses Rose Ultra GPT model');
-    assertEqual(capturedBody?.service_tier, 'priority', 'uses GPT fast mode');
+    assertEqual(capturedBody?.model, 'gpt-6.1-sol', 'uses Rose Ultra GPT model');
+    assertEqual(capturedBody?.service_tier, undefined, 'absent speed stays standard');
     assert(chunks[0].actual_model.endsWith('-openai'), 'actual_model marks OpenAI key path');
   } finally {
     delete process.env.GPT_API_KEY;
@@ -1980,7 +1994,7 @@ async function testGptApiKey_insufficientQuotaCoolsLaterRequestsBeforeFoundry() 
   for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
-  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol';
   const seen = { openai: 0, foundry: 0, openrouter: 0 };
   installFetchStub((url) => {
     if (url === OPENAI_RESPONSES_API_URL) {
@@ -2161,7 +2175,7 @@ async function testFoundry_sendsBreakpointsAndKeepsReportedZeroCacheWrites() {
   process.env.GPT_API_KEY = '';
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
-  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol';
   const bodies: Array<Record<string, unknown>> = [];
   const usages = [
     '{"input_tokens":1000,"output_tokens":1,"total_tokens":1001,"input_tokens_details":{"cached_tokens":900,"cache_write_tokens":0}}',
@@ -2257,9 +2271,8 @@ async function testSharedOpenAiPriorityRoute_isExclusiveAndPreservesRouterConfig
           },
         },
       },
-      claude_token: 'claude-oauth-must-not-run',
-      gpt_token: 'gpt-oauth-must-not-run',
       provider_route: 'shared-openai-priority',
+      speed: 'fast',
     });
     const chunks = await collect(stream);
 
@@ -2299,9 +2312,8 @@ async function testSharedOpenAiPriorityRoute_missingKeyFailsClosedWithoutProvide
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'route this request' }],
-      claude_token: 'claude-oauth-must-not-run',
-      gpt_token: 'gpt-oauth-must-not-run',
       provider_route: 'shared-openai-priority',
+      speed: 'fast',
     });
     let thrown: unknown;
     try {
@@ -2342,9 +2354,8 @@ async function testSharedOpenAiPriorityRoute_invalidKeyFailsClosedWithoutFallbac
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
       messages: [{ role: 'user', content: 'route this request' }],
-      claude_token: 'claude-oauth-must-not-run',
-      gpt_token: 'gpt-oauth-must-not-run',
       provider_route: 'shared-openai-priority',
+      speed: 'fast',
     });
     let thrown: unknown;
     try {
@@ -4281,8 +4292,429 @@ async function testClient_metadataChunkIsBuffered() {
 
 // ==================== RUNNER ====================
 
+// ==================== SUBSCRIPTION-FIRST ORDER ====================
+//
+// Andy (2026-10-28): every Claude/Codex subscription is tried before any funded
+// credential (OpenAI key, Anthropic key, Foundry), and the OpenRouter waterfall
+// comes last. The fake lease source below stands in for the compute-token pool.
+
+const SUB_FOUNDRY_URL = 'https://a-4989-resource.openai.azure.com/openai/v1/responses';
+
+type ProviderLeg = 'ok' | 'limited' | 'revoked' | 'credits' | 'down';
+
+function limitedResponse(): Response {
+  return new Response(JSON.stringify({ error: { type: 'rate_limit_error' } }), {
+    status: 429,
+    // A five-hour usage window: too long to wait in place, so the leg rotates.
+    headers: { 'Content-Type': 'application/json', 'retry-after': '18000' },
+  });
+}
+
+function providerLegResponse(leg: ProviderLeg, okLines: string[]): Response {
+  if (leg === 'ok') return sseResponse(okLines);
+  if (leg === 'limited') return limitedResponse();
+  if (leg === 'credits') return errorResponse(402, '{"error":{"type":"billing_error"}}');
+  if (leg === 'down') return errorResponse(500, '{"error":{"type":"server_error"}}');
+  return errorResponse(401, '{"error":{"type":"authentication_error"}}');
+}
+
+function headerOf(init: RequestInit | undefined, name: string): string {
+  const headers = (init?.headers ?? {}) as Record<string, string>;
+  return headers[name] ?? '';
+}
+
+/** Routes every provider by URL + credential and records the order it was called in. */
+function installSubscriptionOrderStub(legs: {
+  claude?: Record<string, ProviderLeg>;
+  codex?: Record<string, ProviderLeg>;
+  openAiKey?: ProviderLeg;
+  anthropicKey?: ProviderLeg;
+  foundry?: ProviderLeg;
+}): string[] {
+  const calls: string[] = [];
+  installFetchStub((url, init) => {
+    const bearer = headerOf(init, 'Authorization').replace(/^Bearer /, '');
+    if (url === ANTHROPIC_API_URL && headerOf(init, 'x-api-key') !== '') {
+      calls.push('anthropic-key');
+      return providerLegResponse(legs.anthropicKey ?? 'limited', ANTHROPIC_OK_SSE);
+    }
+    if (url === ANTHROPIC_API_URL) {
+      calls.push(`claude:${bearer}`);
+      return providerLegResponse(legs.claude?.[bearer] ?? 'limited', ANTHROPIC_OK_SSE);
+    }
+    if (url === CODEX_API_URL) {
+      calls.push(`codex:${bearer}`);
+      return providerLegResponse(legs.codex?.[bearer] ?? 'limited', RESPONSES_OK_SSE);
+    }
+    if (url === OPENAI_RESPONSES_API_URL) {
+      calls.push('openai-key');
+      return providerLegResponse(legs.openAiKey ?? 'credits', RESPONSES_OK_SSE);
+    }
+    if (url === SUB_FOUNDRY_URL) {
+      calls.push('foundry');
+      return providerLegResponse(legs.foundry ?? 'down', RESPONSES_OK_SSE);
+    }
+    if (url === OPENROUTER_API_URL) {
+      calls.push('openrouter');
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`Unexpected provider URL: ${url}`);
+  });
+  return calls;
+}
+
+function fakeSubscriptionLeases(available: SubscriptionCredential[]) {
+  const requests: Array<SubscriptionLeaseFailure | null> = [];
+  const source: SubscriptionLeases = {
+    async next(failure) {
+      requests.push(failure);
+      return available.shift() ?? null;
+    },
+  };
+  return { source, requests };
+}
+
+async function withFundedCredentials(fn: () => Promise<void>): Promise<void> {
+  await __resetGptApiKeyCooldown();
+  await __resetAnthropicApiKeyCooldown();
+  process.env.GPT_API_KEY = 'sk-proj-test-key';
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-api03-test';
+  for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
+  process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
+  process.env.AZURE_FOUNDRY_API_KEY = 'test-foundry-key';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol';
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  try {
+    await fn();
+  } finally {
+    restoreFetch();
+    delete process.env.GPT_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+    for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
+    await __resetGptApiKeyCooldown();
+    await __resetAnthropicApiKeyCooldown();
+  }
+}
+
+async function ultraCompletion(options: Partial<Parameters<typeof createStreamingCompletion>[0]>) {
+  return collect(
+    await createStreamingCompletion({
+      model: 'rose-labs/rose-1-ultra',
+      messages: [{ role: 'user', content: 'hi' }],
+      ...options,
+    })
+  );
+}
+
+async function testSubscriptionFirst_healthyLeaseNeedsNoLeaseLookup() {
+  await withFundedCredentials(async () => {
+    const calls = installSubscriptionOrderStub({ claude: { 'claude-a': 'ok' } });
+    const leases = fakeSubscriptionLeases([{ type: 'gpt', accessToken: 'codex-b' }]);
+    const chunks = await ultraCompletion({
+      claude_token: 'claude-a',
+      subscription_leases: leases.source,
+    });
+    assertEqual(chunks[0].actual_model, 'claude-opus-5-5-claude', 'Claude lease served Opus');
+    assertEqual(chunks[0].pool_name, 'claude-token', 'subscription route');
+    assertEqual(JSON.stringify(calls), '["claude:claude-a"]', 'only the leased token was called');
+    assertEqual(leases.requests.length, 0, 'success path makes no lease lookup');
+  });
+}
+
+async function testSubscriptionFirst_limitedLeaseRotatesToFreeSubscriptionBeforePaidKeys() {
+  await withFundedCredentials(async () => {
+    const calls = installSubscriptionOrderStub({
+      claude: { 'claude-a': 'limited' },
+      codex: { 'codex-b': 'ok' },
+      openAiKey: 'ok',
+      anthropicKey: 'ok',
+      foundry: 'ok',
+    });
+    const leases = fakeSubscriptionLeases([
+      { type: 'gpt', accessToken: 'codex-b', accountId: 'acct-b' },
+    ]);
+    const chunks = await ultraCompletion({
+      claude_token: 'claude-a',
+      subscription_leases: leases.source,
+    });
+    assertEqual(chunks[0].actual_model, 'gpt-6.1-sol-gpt', 'second subscription served GPT-6 Sol');
+    assertEqual(chunks[0].pool_name, 'gpt-token', 'subscription route');
+    assertEqual(
+      JSON.stringify(calls),
+      '["claude:claude-a","codex:codex-b"]',
+      'no funded key or waterfall was called'
+    );
+    assertEqual(leases.requests.length, 1, 'one rotation lookup');
+    const failure = leases.requests[0];
+    assertEqual(failure?.credential.accessToken, 'claude-a', 'failed lease reported');
+    assertEqual(failure?.reason, 'rate_limit', 'usage limit classified');
+    assert(
+      failure?.rateLimitedUntil !== undefined &&
+        Date.parse(failure.rateLimitedUntil) > Date.now() + 4 * 60 * 60 * 1000,
+      "provider's own reset time reaches the mark"
+    );
+  });
+}
+
+async function testSubscriptionFirst_everySubscriptionBeforeEachPaidTier() {
+  // All subscriptions limited: OpenAI key, then Anthropic key, then Foundry,
+  // then the waterfall, each only after the one before it fails.
+  const cases: Array<{
+    legs: Parameters<typeof installSubscriptionOrderStub>[0];
+    model: string;
+    route: string;
+    tail: string[];
+  }> = [
+    {
+      legs: { openAiKey: 'ok' },
+      model: 'gpt-6.1-sol-openai',
+      route: 'openai-api-key',
+      tail: ['openai-key'],
+    },
+    {
+      legs: { openAiKey: 'credits', anthropicKey: 'ok' },
+      model: 'claude-opus-5-5-anthropic',
+      route: 'anthropic-apikey',
+      tail: ['openai-key', 'anthropic-key'],
+    },
+    {
+      legs: { openAiKey: 'credits', anthropicKey: 'credits', foundry: 'ok' },
+      model: 'gpt-6.1-sol-foundry',
+      route: 'foundry',
+      tail: ['openai-key', 'anthropic-key', 'foundry'],
+    },
+    {
+      // A Foundry 429 would stamp the shared deployment cooldown row; 500 falls through cleanly.
+      legs: { openAiKey: 'credits', anthropicKey: 'credits', foundry: 'down' },
+      model: 'openai/gpt-6.1-sol',
+      route: 'rose-1-ultra',
+      tail: ['openai-key', 'anthropic-key', 'foundry', 'openrouter'],
+    },
+  ];
+  for (const testCase of cases) {
+    await withFundedCredentials(async () => {
+      const calls = installSubscriptionOrderStub({
+        ...testCase.legs,
+        claude: { 'claude-a': 'limited', 'claude-c': 'credits' },
+        codex: { 'codex-b': 'limited' },
+      });
+      const leases = fakeSubscriptionLeases([
+        { type: 'gpt', accessToken: 'codex-b' },
+        { type: 'claude', accessToken: 'claude-c' },
+      ]);
+      const chunks = await ultraCompletion({
+        claude_token: 'claude-a',
+        subscription_leases: leases.source,
+      });
+      const served = chunks.find((chunk) => chunk.actual_model)?.actual_model;
+      assert(served?.startsWith(testCase.model) === true, `${testCase.model} served (${served})`);
+      assertEqual(chunks[0].pool_name, testCase.route, 'serving route');
+      assertEqual(
+        JSON.stringify(calls.slice(0, 3)),
+        '["claude:claude-a","codex:codex-b","claude:claude-c"]',
+        'all three subscriptions precede funded credentials'
+      );
+      // OpenRouter may try more than one waterfall model; the first is enough here.
+      assertEqual(
+        JSON.stringify(calls.slice(3, 3 + testCase.tail.length)),
+        JSON.stringify(testCase.tail),
+        'funded tiers in order'
+      );
+      assertEqual(leases.requests.length, 3, 'lookups stop when no lease remains');
+      assertEqual(leases.requests[2]?.reason, 'rate_limit', 'out of credits rotates');
+    });
+  }
+}
+
+async function testSubscriptionFirst_revokedLeaseIsMarkedAndSkipped() {
+  await withFundedCredentials(async () => {
+    const calls = installSubscriptionOrderStub({
+      claude: { 'claude-a': 'revoked', 'claude-c': 'ok' },
+      openAiKey: 'ok',
+    });
+    const leases = fakeSubscriptionLeases([{ type: 'claude', accessToken: 'claude-c' }]);
+    const chunks = await ultraCompletion({
+      claude_token: 'claude-a',
+      subscription_leases: leases.source,
+    });
+    assertEqual(chunks[0].actual_model, 'claude-opus-5-5-claude', 'next lease served');
+    assertEqual(chunks[0].pool_name, 'claude-token', 'subscription route');
+    assertEqual(leases.requests[0]?.reason, 'auth_error', 'revoked lease marked as auth_error');
+    assertEqual(
+      JSON.stringify(calls),
+      '["claude:claude-a","claude:claude-c"]',
+      'revoked lease skipped'
+    );
+  });
+}
+
+async function testSubscriptionFirst_tokenlessCallerLeasesOnceAndAbortStopsRotation() {
+  await withFundedCredentials(async () => {
+    const calls = installSubscriptionOrderStub({ codex: { 'codex-b': 'ok' } });
+    const leases = fakeSubscriptionLeases([{ type: 'gpt', accessToken: 'codex-b' }]);
+    const chunks = await ultraCompletion({ subscription_leases: leases.source });
+    assertEqual(chunks[0].actual_model, 'gpt-6.1-sol-gpt', 'lazily leased subscription served');
+    assertEqual(chunks[0].pool_name, 'gpt-token', 'subscription route');
+    assertEqual(JSON.stringify(leases.requests), '[null]', 'exactly one first-lease lookup');
+    assertEqual(JSON.stringify(calls), '["codex:codex-b"]', 'no funded key');
+  });
+  await withFundedCredentials(async () => {
+    // The caller's deadline passes during the first leg: no rotation lookup follows.
+    const calls = installSubscriptionOrderStub({
+      claude: { 'claude-a': 'limited' },
+      openAiKey: 'ok',
+    });
+    const controller = new AbortController();
+    const routed = global.fetch;
+    global.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      controller.abort();
+      return routed(input, init);
+    }) as typeof fetch;
+    const leases = fakeSubscriptionLeases([{ type: 'gpt', accessToken: 'codex-b' }]);
+    await collect(
+      await createStreamingCompletion({
+        model: 'rose-labs/rose-1-ultra',
+        messages: [{ role: 'user', content: 'hi' }],
+        claude_token: 'claude-a',
+        subscription_leases: leases.source,
+        abort_signal: controller.signal,
+      })
+    ).catch(() => []);
+    assertEqual(leases.requests.length, 0, 'no lease lookup after the deadline');
+    assert(!calls.includes('codex:codex-b'), 'no subscription attempted after the deadline');
+  });
+}
+
+async function testFlashChatAndBrowserKeepCerebrasFirst() {
+  await withFundedCredentials(async () => {
+    process.env.CEREBRAS_API_KEY = 'test-cerebras';
+    try {
+      for (const model of ['rose-labs/rose-1-flash', 'rose-labs/rose-1-browser-use']) {
+        for (const available of [true, false]) {
+          const calls: string[] = [];
+          const leases = fakeSubscriptionLeases(
+            available ? [{ type: 'gpt', accessToken: 'flash-token' }] : []
+          );
+          installFetchStub((url) => {
+            if (url === CODEX_API_URL) {
+              calls.push('subscription');
+              return sseResponse(RESPONSES_OK_SSE);
+            }
+            if (url.includes('api.cerebras.ai')) {
+              calls.push('cerebras');
+              return sseResponse(OPENROUTER_OK_SSE);
+            }
+            throw new Error(`Unexpected paid route: ${url}`);
+          });
+          const chunks = await collect(
+            await createStreamingCompletion({
+              model,
+              messages: [{ role: 'user', content: 'hi' }],
+              subscription_leases: leases.source,
+            })
+          );
+          assertEqual(JSON.stringify(calls), '["cerebras"]', model);
+          assertEqual(leases.requests.length, 0, 'chat/browser do not acquire subscriptions');
+          assert(chunks.length > 0, 'selected route returns content');
+        }
+      }
+    } finally {
+      delete process.env.CEREBRAS_API_KEY;
+    }
+  });
+}
+
+async function testSubscriptionFirst_poolWithoutSubscriptionLegsNeverLeases() {
+  await withFundedCredentials(async () => {
+    installSubscriptionOrderStub({ foundry: 'ok' });
+    const leases = fakeSubscriptionLeases([{ type: 'claude', accessToken: 'claude-a' }]);
+    await collect(
+      await createStreamingCompletion({
+        model: 'rose-labs/rose-local',
+        messages: [{ role: 'user', content: 'hi' }],
+        subscription_leases: leases.source,
+      })
+    ).catch(() => []);
+    assertEqual(leases.requests.length, 0, 'local pool never consults the lease source');
+  });
+}
+
+async function testUltraFoundryPinnedModel() {
+  const originalFindMany = prisma.integration.findMany;
+  prisma.integration.findMany = (async () => []) as typeof originalFindMany;
+  for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
+  process.env.GPT_API_KEY = '';
+  process.env.OPENAI_API_KEY = '';
+  process.env.ANTHROPIC_API_KEY = '';
+  const r1 = 'https://ultra-old.openai.azure.com';
+  const r2 = 'https://ultra-current.openai.azure.com';
+  process.env.AZURE_FOUNDRY_ENDPOINT = r1;
+  process.env.AZURE_FOUNDRY_API_KEY = 'test-old';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  process.env.AZURE_FOUNDRY_ENDPOINT_2 = r2;
+  process.env.AZURE_FOUNDRY_API_KEY_2 = 'test-current';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6.1-sol';
+  const models = foundryModels(getPool('rose-1-ultra'));
+  for (let i = 0; i < 200; i++) {
+    const plan = foundryRoutePlan(foundryRegions(), models, `ultra-pin-${i}`);
+    assertEqual(
+      JSON.stringify(plan.map(({ region, deployment }) => [region.endpoint, deployment])),
+      JSON.stringify([[r2, 'gpt-6.1-sol']]),
+      'production Ultra uses only explicit 6.1 region'
+    );
+  }
+  const calls: string[] = [];
+  let failed = false;
+  installFetchStub((url, init) => {
+    if (url.startsWith(r1) || url.startsWith(r2)) {
+      const body = JSON.parse(String(init?.body));
+      assertEqual(body.model, 'gpt-6.1-sol', 'Ultra never posts GPT-6 Sol');
+      assert(url.startsWith(r2), 'explicit 6.1 region owns Ultra');
+      calls.push('foundry');
+      return failed ? errorResponse(500, 'unavailable') : sseResponse(RESPONSES_OK_SSE);
+    }
+    if (url === OPENROUTER_API_URL) {
+      calls.push('openrouter');
+      return sseResponse(OPENROUTER_OK_SSE);
+    }
+    throw new Error(`unexpected provider ${url}`);
+  });
+  try {
+    const run = async () =>
+      collect(
+        await createStreamingCompletion({
+          model: 'rose-labs/rose-1-ultra',
+          messages: [{ role: 'user', content: 'hi' }],
+          route_key: 'ultra-pin',
+        })
+      );
+    const chunks = await run();
+    assertEqual(chunks[0].actual_model, 'gpt-6.1-sol-foundry', 'Ultra serving model');
+    failed = true;
+    calls.length = 0;
+    await run();
+    assertEqual(
+      calls.join(','),
+      'foundry,openrouter',
+      '6.1 failure falls to waterfall, never 6 Sol'
+    );
+    process.env.AZURE_FOUNDRY_DEPLOYMENTS_2 = 'gpt-6-sol';
+    const fallback = foundryRoutePlan(foundryRegions(), models, 'unlisted-6.1');
+    assertEqual(
+      JSON.stringify(fallback.map(({ region, deployment }) => [region.endpoint, deployment])),
+      JSON.stringify([[r1, 'gpt-6.1-sol']]),
+      'unlisted 6.1 retains region-1 deploymentless fallback'
+    );
+  } finally {
+    restoreFetch();
+    prisma.integration.findMany = originalFindMany;
+    for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
+  }
+}
+
 async function main(): Promise<void> {
   const tests: { name: string; fn: () => Promise<void> }[] = [
+    { name: 'Ultra Foundry pinned production model', fn: testUltraFoundryPinnedModel },
     { name: 'pool / isRoseModel variants', fn: testPool_isRoseModelVariants },
     { name: 'pool / poolForModel fuzzy', fn: testPool_forModelFuzzy },
     { name: 'local / loopback only', fn: testRoseLocalOnlyCallsLoopback },
@@ -4382,7 +4814,7 @@ async function main(): Promise<void> {
       fn: testClaudeAuth_noTokenGoesDirectToWaterfall,
     },
     {
-      name: 'flash / skips auth and hits Cerebras Qwen',
+      name: 'flash / no compute token uses Cerebras Qwen',
       fn: testFlash_skipsAuthAndHitsCerebrasQwen,
     },
     {
@@ -4611,6 +5043,34 @@ async function main(): Promise<void> {
     {
       name: 'client / metadata chunk buffered (inline on every chunk)',
       fn: testClient_metadataChunkIsBuffered,
+    },
+    {
+      name: 'subscription-first / healthy lease needs no lease lookup',
+      fn: testSubscriptionFirst_healthyLeaseNeedsNoLeaseLookup,
+    },
+    {
+      name: 'subscription-first / limited lease rotates to a free subscription before paid keys',
+      fn: testSubscriptionFirst_limitedLeaseRotatesToFreeSubscriptionBeforePaidKeys,
+    },
+    {
+      name: 'subscription-first / every subscription before OpenAI key, Anthropic key, Foundry, waterfall',
+      fn: testSubscriptionFirst_everySubscriptionBeforeEachPaidTier,
+    },
+    {
+      name: 'subscription-first / revoked lease is marked and skipped',
+      fn: testSubscriptionFirst_revokedLeaseIsMarkedAndSkipped,
+    },
+    {
+      name: 'subscription-first / tokenless caller leases once; deadline stops rotation',
+      fn: testSubscriptionFirst_tokenlessCallerLeasesOnceAndAbortStopsRotation,
+    },
+    {
+      name: 'role scope / Flash chat and browser retain Cerebras first',
+      fn: testFlashChatAndBrowserKeepCerebrasFirst,
+    },
+    {
+      name: 'subscription-first / pool without subscription legs never leases',
+      fn: testSubscriptionFirst_poolWithoutSubscriptionLegsNeverLeases,
     },
   ];
 

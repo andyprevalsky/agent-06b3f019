@@ -171,3 +171,11 @@ cluster open unless a deterministic repair of the native failure is proven.
 ## Reusable lesson
 
 Capture the native WebAuthn error and distinguish document-service lifetime from virtual-authenticator presence before changing popup readiness or arming policy.
+
+## October30 PR1634 recurrence
+
+The unchanged source fa0310f9f6a55cd4f937f59ab4af51bd385b16fb reproduced the exact armed-popup NotSupportedError during full one-worker agents coverage. The original browser-tilion log is .context/test-runs/agents-coverage-20261030-012155-1751030/browser-tilion.log; domain duration138.0s. The popup was focused and visible, initially loading and subsequently complete. The relevant test, multiplexer and requirements have no diff from the prior f09f6fc11 passing run. Installed browser provenance points to the same pinned Chromium revision; the actual failed browser version was not logged.
+
+Read-only investigation matches this open document-service callback failure; it does not establish the initiating event. Original Chromium stderr was discarded and no raw CDP trace is available. No ACK barrier, wait extension, error acceptance or runtime patch is justified. The original failure remains recorded independently of any later unchanged test result.
+
+After coverage ended, the exact registered case from a byte-identical copy of the test module passed with exit0. Browser profiles were placed under /project for this scoped diagnostic; elapsed time was not recorded. The receipt is /project/rose-speed-comparison-20261028/webauthn-rca/owning-case-result.json. This is not a full-domain or coverage pass and does not prove the initiating event or a fix. No runtime, assertion, wait or timeout changed.

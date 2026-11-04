@@ -33,6 +33,7 @@ import {
 import { createLogger } from '../logger';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
 import type { PoolSpec } from './pools';
+import { foundryServiceTierFor, type AgentSpeed } from './speed';
 import { parseResponsesSSE } from './streaming';
 import { postFoundryResponsesStream } from './transport';
 import type {
@@ -155,6 +156,13 @@ export function foundryConfigured(poolSpec: PoolSpec): boolean {
   const now = Date.now();
   const models = foundryModels(poolSpec);
   const listed = isListed(regions, models);
+  if (
+    regions.length > 0 &&
+    !regions.some((region) => regionDeployments(region, models, listed).length > 0)
+  ) {
+    warnNoDeployment(poolSpec, models, regions);
+    return false;
+  }
   return regions.some(
     (region) =>
       now >= (authCooldownUntil.get(region.endpoint) ?? 0) &&
@@ -162,13 +170,37 @@ export function foundryConfigured(poolSpec: PoolSpec): boolean {
   );
 }
 
+/** (pool, models, deployment lists) already reported: one log per process and configuration. */
+const warnedNoDeployment = new Set<string>();
+
+/** Name the missing deployment instead of skipping the Foundry leg silently. */
+function warnNoDeployment(
+  poolSpec: PoolSpec,
+  models: readonly string[],
+  regions: FoundryRegion[]
+): void {
+  const key = JSON.stringify([
+    poolSpec.name,
+    models,
+    regions.map((region) => [region.slot, region.deployments]),
+  ]);
+  if (warnedNoDeployment.has(key)) return;
+  warnedNoDeployment.add(key);
+  log.warn('foundry.no_deployment_for_model', {
+    pool: poolSpec.name,
+    models,
+    region_slots: regions.map((region) => region.slot),
+    deployment_envs: regions.map((region) => `AZURE_FOUNDRY_DEPLOYMENTS${suffix(region.slot)}`),
+  });
+}
+
 /** Azure Sol deployments stand in for each other; other models serve only themselves. */
 const FOUNDRY_SOL_MODELS: readonly string[] = ['gpt-6-sol', 'gpt-6.1-sol'];
 
 /** Models whose Foundry deployments may serve the pool, its own model first. */
 export function foundryModels(poolSpec: PoolSpec): string[] {
-  const model = poolSpec.gptAuthModel;
-  if (!FOUNDRY_SOL_MODELS.includes(model)) return [model];
+  const model = poolSpec.foundryModel ?? poolSpec.gptAuthModel;
+  if (poolSpec.foundryModel !== undefined || !FOUNDRY_SOL_MODELS.includes(model)) return [model];
   return [model, ...FOUNDRY_SOL_MODELS.filter((other) => other !== model)];
 }
 
@@ -285,7 +317,7 @@ export interface FoundryOptions {
   toolChoice?: unknown;
   temperature?: number;
   effort?: string;
-  providerFastMode?: boolean;
+  speed?: AgentSpeed;
   requestId: string;
   routeKey: string;
   callSite?: string;
@@ -376,7 +408,7 @@ export async function* foundryComplete(opts: FoundryOptions): AsyncIterable<Rose
       toolChoice: opts.toolChoice,
       temperature: opts.temperature,
       effort: opts.effort,
-      providerFastMode: opts.providerFastMode,
+      serviceTier: foundryServiceTierFor(opts.speed),
       requestId: opts.requestId,
       // Foundry Standard deployments honor caller cache markers as breakpoints.
       cacheBreakpoints: true,
@@ -486,7 +518,7 @@ export function foundryRequestFor(params: {
     temperature: options.temperature,
     // A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
     effort: params.poolSpec.waterfallReasoningEffort ?? options.effort,
-    providerFastMode: options.provider_fast_mode,
+    speed: options.speed,
     requestId: params.requestId,
     routeKey:
       options.route_key ??

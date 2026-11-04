@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 
 /**
- * Mini, flash and browser-use fall back to Azure gpt-5.6-luna before OpenRouter.
+ * Flash falls back to Azure gpt-6-luna; mini and browser-use retain gpt-5.6-luna.
  * Speed pools keep their direct Cerebras hop first; Foundry serves only after it
  * fails before content. The shared Sol deployment list never receives Luna.
  */
@@ -108,9 +108,13 @@ async function main(): Promise<void> {
   try {
     for (const pool of ['rose-1-mini', 'rose-1-flash', 'rose-1-browser-use'] as const) {
       assert.equal(POOL_REGISTRY[pool].foundryEnabled, true, pool);
-      assert.deepEqual(orderedFoundryDeployments(POOL_REGISTRY[pool].gptAuthModel, 'agent-1'), [
-        'gpt-5.6-luna',
-      ]);
+      assert.deepEqual(
+        orderedFoundryDeployments(
+          POOL_REGISTRY[pool].foundryModel ?? POOL_REGISTRY[pool].gptAuthModel,
+          'agent-1'
+        ),
+        [pool === 'rose-1-flash' ? 'gpt-6-luna' : 'gpt-5.6-luna']
+      );
     }
     assert.deepEqual(orderedFoundryDeployments('gpt-6-sol', 'agent-1'), ['gpt-6-sol']);
 
@@ -123,7 +127,11 @@ async function main(): Promise<void> {
       attempts.length = 0;
       chunks = await run(pool);
       assert.deepEqual(attempts, ['cerebras', 'foundry'], pool);
-      assert.equal(chunks[0]?.actual_model, 'gpt-5.6-luna-foundry', pool);
+      assert.equal(
+        chunks[0]?.actual_model,
+        pool === 'rose-labs/rose-1-flash' ? 'gpt-6-luna-foundry' : 'gpt-5.6-luna-foundry',
+        pool
+      );
       assert.equal(text(chunks), 'luna ok', pool);
     }
 
@@ -131,9 +139,9 @@ async function main(): Promise<void> {
     chunks = await run('rose-labs/rose-1-mini');
     assert.deepEqual(attempts, ['foundry']);
     assert.equal(chunks[0]?.actual_model, 'gpt-5.6-luna-foundry');
-    assert.deepEqual(foundryModels, ['gpt-5.6-luna', 'gpt-5.6-luna', 'gpt-5.6-luna']);
+    assert.deepEqual(foundryModels, ['gpt-6-luna', 'gpt-5.6-luna', 'gpt-5.6-luna']);
     // A fallback layer keeps the pool's fast effort; xhigh TTFT is slow on fast GPT layers.
-    assert.deepEqual(foundryEfforts, ['low', 'low', 'low']);
+    assert.deepEqual(foundryEfforts, ['medium', 'low', 'low']);
 
     // Chat-exclusive routes end at OpenRouter; with Cerebras and OpenRouter both
     // out of credit, funded Azure serves the turn as the last resort.
@@ -144,7 +152,7 @@ async function main(): Promise<void> {
       assert.equal(attempts.at(-1), 'foundry', route);
       assert(attempts.includes('openrouter'), route);
       assert.equal(attempts.filter((name) => name === 'foundry').length, 1, route);
-      assert.equal(chunks[0]?.actual_model, 'gpt-5.6-luna-foundry', route);
+      assert.equal(chunks[0]?.actual_model, 'gpt-6-luna-foundry', route);
       assert.equal(text(chunks), 'luna ok', route);
     }
     process.stdout.write(

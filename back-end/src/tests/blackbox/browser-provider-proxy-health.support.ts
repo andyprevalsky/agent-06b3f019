@@ -27,6 +27,35 @@ const MARKED_UNAVAILABLE = 'Proxy is marked unavailable from the last health che
 
 type CachedProxyRow = { proxyKey: string; proxyId: string };
 
+/** Mock the cross-process lock only in tests already using an in-memory cache. */
+export async function withKernelProxyCreationTransaction<T>(run: () => Promise<T>): Promise<T> {
+  const transaction = prisma.$transaction;
+  prisma.$transaction = (async (body: (tx: unknown) => Promise<unknown>) =>
+    body({
+      $queryRaw: async () => [{ acquired: true }],
+      browserProviderProxy: {
+        findUnique: (...args: Parameters<typeof prisma.browserProviderProxy.findUnique>) =>
+          prisma.browserProviderProxy.findUnique(...args),
+        upsert: async (args: { where: unknown; create: unknown }) => {
+          try {
+            return await prisma.browserProviderProxy.create({ data: args.create } as never);
+          } catch (error) {
+            const winner = await prisma.browserProviderProxy.findUnique({
+              where: args.where,
+            } as never);
+            if (winner !== null) return winner;
+            throw error;
+          }
+        },
+      },
+    })) as typeof transaction;
+  try {
+    return await run();
+  } finally {
+    prisma.$transaction = transaction;
+  }
+}
+
 /** Run with `BrowserProviderProxy` backed by an in-memory proxyKey → proxyId map. */
 export async function withKernelProxyCache<T>(
   rows: Map<string, string>,
@@ -56,7 +85,7 @@ export async function withKernelProxyCache<T>(
     return { count: matches && rows.delete(where.proxyKey) ? 1 : 0 };
   }) as unknown as typeof model.deleteMany;
   try {
-    return await run();
+    return await withKernelProxyCreationTransaction(run);
   } finally {
     model.findUnique = originalFind;
     model.create = originalCreate;

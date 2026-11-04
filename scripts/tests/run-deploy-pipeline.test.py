@@ -97,9 +97,23 @@ def write_plan(path: Path, lanes: list[dict], **extra: object) -> None:
     path.write_text(json.dumps({"lanes": [{"memory_mb": 1, **lane} for lane in lanes], **extra}))
 
 
-def run_driver(*args: str, env: dict[str, str], **kwargs) -> subprocess.CompletedProcess:
+def run_driver(*args: str, env: dict[str, str], host: dict | None = None, **kwargs) -> subprocess.CompletedProcess:
+    command = [sys.executable, str(DRIVER), *args]
+    if host is not None:
+        # Synthetic admission cases own both their reservations and host sample;
+        # keep the real CLI/process path and its caller-provided timeout.
+        bootstrap = (
+            "import importlib.util,json,sys; from pathlib import Path; "
+            "sys.path.insert(0,str(Path(sys.argv[1]).parent)); "
+            "spec=importlib.util.spec_from_file_location('fixture_pipeline',sys.argv[1]); "
+            "module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; "
+            "spec.loader.exec_module(module); "
+            "module.host_resources=lambda:json.loads(sys.argv[2]); "
+            "raise SystemExit(module.main(sys.argv[3:]))"
+        )
+        command = [sys.executable, "-c", bootstrap, str(DRIVER), json.dumps(host), *args]
     return subprocess.run(
-        [sys.executable, str(DRIVER), *args], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, **kwargs,
     )
 
@@ -541,7 +555,8 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
 
     seen_flag: list[str] = []  # what the driver's process actually saw in each arm
 
-    def run(state: Path, extra_env: dict[str, str] | None = None, **patches) -> dict:
+    def run(state: Path, extra_env: dict[str, str] | None = None, *,
+            require_unknown_deferral: bool = False, **patches) -> dict:
         if marker.exists():
             marker.unlink()
         with ExitStack() as stack:
@@ -553,6 +568,27 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
             seen_flag.append(os.environ.get("DEPLOY_ADMISSION_CREDIT", "<unset>"))
             for name, value in patches.items():
                 stack.enter_context(patch.object(pipeline, name, value))
+            if require_unknown_deferral:
+                # This arm asserts unknown -> deferred -> fresh -> admitted.
+                # A real sample may precede gate completion, so sequence the
+                # sampler input against the actual recorded decision, not time.
+                unknown_deferred = False
+                real_sampler = pipeline.sample_lane_tree_memory
+                real_record_waiting = pipeline._record_waiting
+
+                def record_waiting(lane_state: dict, inputs: dict, reason: str) -> None:
+                    nonlocal unknown_deferred
+                    real_record_waiting(lane_state, inputs, reason)
+                    if (reason == "headroom" and inputs.get("accounting") == "unmaterialized"
+                            and inputs.get("running", {}).get("holder", {}).get("observation") == "unknown"):
+                        unknown_deferred = True
+
+                def sample_after_deferral(pids: set[int]) -> dict:
+                    observed = real_sampler(pids)
+                    return observed if unknown_deferred else {}
+
+                stack.enter_context(patch.object(pipeline, "_record_waiting", side_effect=record_waiting))
+                stack.enter_context(patch.object(pipeline, "sample_lane_tree_memory", side_effect=sample_after_deferral))
             result = pipeline.run(plan, state, max_parallel=0)
         receipt = json.loads((state / "receipt.json").read_text())
         assert result == 0 and receipt["status"] == "passed", (result, receipt["status"], receipt["lanes"])
@@ -561,7 +597,7 @@ def check_materialized_reservation_credit(tmp: Path, env: dict[str, str]) -> Non
 
     if sys.platform == "linux":
         write(tmp / "credit-joined", tmp / "credit-unphased")
-        receipt = run(tmp / "credit")
+        receipt = run(tmp / "credit", require_unknown_deferral=True)
         lanes = receipt["lanes"]
         assert "DEPLOY_ADMISSION_CREDIT" not in env and seen_flag[-1] == "<unset>", \
             f"the true-unset default is under test here; the driver saw {seen_flag[-1]!r}"
@@ -1961,6 +1997,7 @@ def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]
     pipeline = load_module("pipeline_defer_exclusive", DRIVER)
     declared = pipeline.structural_lane_memory_mb
     assert declared(6) == 6439, declared(6)
+    host = {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + 6000}
     probe = tmp / "defer-args.txt"
     plan = tmp / "defer-plan.json"
     state = tmp / "defer"
@@ -1978,7 +2015,7 @@ def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]
          "phase": "stack"},
     ], schedule={"policy": "phased"})
     ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
-                     "--memory-budget-mb", "6000", env=env, timeout=120)
+                     "--memory-budget-mb", "6000", env=env, host=host, timeout=120)
     receipt = json.loads((state / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["lanes"]["big"])
     big, smoke = receipt["lanes"]["big"], receipt["lanes"]["smoke"]
@@ -2001,7 +2038,7 @@ def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]
          "phase": "stack"},
     ], schedule={"policy": "phased"})
     ran = run_driver("run", "--plan", str(plan), "--state-dir", str(never), "--max-parallel", "0",
-                     "--memory-budget-mb", str(declared(1) - 1), env=env, timeout=120)
+                     "--memory-budget-mb", str(declared(1) - 1), env=env, host=host, timeout=120)
     big = json.loads((never / "receipt.json").read_text())["lanes"]["big"]
     assert ran.returncode == 1 and big["status"] == "failed" and big["note"].startswith("refused: needs"), big
     print("exclusive lane defers behind the stack lane: ok")

@@ -35,13 +35,13 @@ async function run(): Promise<void> {
       { role: 'user', content: 'route this' },
     ],
     providerRoute: phases.routerProviderRoute,
-    providerFastMode: true,
+    speed: 'fast',
     abortSignal: abortController.signal,
   });
 
   assert.equal(options.model, 'rose-labs/rose-1-flash');
   assert.equal(options.provider_route, 'direct-cerebras');
-  assert.equal(options.provider_fast_mode, true);
+  assert.equal(options.speed, 'fast');
   assert.equal(options.abort_signal, abortController.signal);
   assert.equal(options.temperature, 0);
   assert.equal(options.max_tokens, 2_048);
@@ -49,7 +49,7 @@ async function run(): Promise<void> {
     buildRouterCompletionOptions({
       model: phases.router,
       messages: options.messages,
-      providerFastMode: true,
+      speed: 'fast',
     }).max_tokens,
     undefined,
     'other provider routes retain their existing output budget'

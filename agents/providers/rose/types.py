@@ -110,8 +110,10 @@ class ComputeAuthContext:
     fetch_fresh: Optional[FetchFreshTokenFn] = None
     heartbeat_lease: Optional[HeartbeatTokenLeaseFn] = None
 
-    # Per-request rotation budget — caps how many tokens we burn before giving
-    # up on direct compute-token routing and falling through to waterfall.
+    # Per-request budget for rotations after a stall. Usage-limit and auth
+    # failures rotate through every subscription the backend can still lease
+    # (bounded by the call deadline and never repeating a lease) before any
+    # funded key. 0 disables client rotation: the caller owns it.
     max_rotations: int = 2
 
 
