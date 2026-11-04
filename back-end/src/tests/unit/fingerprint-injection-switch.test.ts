@@ -12,6 +12,8 @@ import assert from 'node:assert/strict';
 import { prisma } from '../../providers/database';
 import { fingerprintInjectionEnabled } from '../../providers/steel/fingerprintSwitch';
 import { getFingerprintInjectionData } from '../../providers/steel/files';
+import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
+import { fingerprintUserAgent } from '../../providers/steel/sessionResume';
 
 const ENV = 'BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED';
 
@@ -43,11 +45,27 @@ async function main(): Promise<void> {
     assert.equal(await getFingerprintInjectionData('user-1'), null);
     assert.equal(reads.length, 0, 'disabled switch must not read the fingerprint row');
 
+    // Provider fallback paths follow the same switch:
+    // rotation/resume onto Steel must not stamp the user's UA on the new session,
+    assert.equal(await fingerprintUserAgent('user-1'), undefined);
+    assert.equal(reads.length, 0, 'Steel rotation must not read the fingerprint row');
+    // and a challenge-recovery Steel candidate must not carry the live page's UA.
+    const carried = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/153.0.0.0';
+    assert.equal(
+      buildSteelRecoveryBrowserOptions({ proxy: false, userAgent: carried }).userAgent,
+      undefined
+    );
+
     // Explicit opt-in restores the old behaviour (reads the row, builds a payload).
     process.env[ENV] = 'true';
     assert.equal(fingerprintInjectionEnabled(), true);
     await getFingerprintInjectionData('user-1').catch(() => null);
     assert.equal(reads.length, 1, 'enabled switch reads the fingerprint row');
+    assert.match((await fingerprintUserAgent('user-1')) ?? '', /Macintosh/);
+    assert.equal(
+      buildSteelRecoveryBrowserOptions({ proxy: false, userAgent: carried }).userAgent,
+      carried
+    );
   } finally {
     delegate.findUnique = original;
     if (saved === undefined) delete process.env[ENV];
