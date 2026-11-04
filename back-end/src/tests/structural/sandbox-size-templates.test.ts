@@ -21,8 +21,14 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync
 import os from 'os';
 import path from 'path';
 import {
+  CLAUDE_CODE_TEMPLATE,
+  DEFAULT_CLAUDE_CODE_TEMPLATE_ID,
+} from '../../providers/claudeCodeTemplate';
+import {
   DEFAULT_SANDBOX_GRID,
+  defaultSandboxSize,
   MAX_GRID_POINTS,
+  sandboxTemplateFor,
   sizedTemplateName,
   type SandboxProvider,
 } from '../../providers/codeSessions/sandboxSize';
@@ -113,6 +119,50 @@ check('Claude templates pin a CLI that supports Opus 5.5', () => {
     )
   );
   assert.strictEqual(plan.pins.CLAUDE_CODE_VERSION, pin);
+
+  // The launched default is versioned with this pin in code (claudeCodeTemplate.ts):
+  // a pin bump builds a new claude-code-v<pin>-c<cpu>-m<mem> template and moves it.
+  assert.strictEqual(
+    CLAUDE_CODE_TEMPLATE.claudeCodeVersion,
+    pin,
+    `claudeCodeTemplate.ts claudeCodeVersion != Dockerfile pin ${pin}; build a new template`
+  );
+  const size = defaultSandboxSize();
+  assert.strictEqual(
+    CLAUDE_CODE_TEMPLATE.alias,
+    `claude-code-v${pin.replace(/\./g, '')}-c${size.cpu}-m${size.memoryGb}`
+  );
+  assert.strictEqual(DEFAULT_CLAUDE_CODE_TEMPLATE_ID, CLAUDE_CODE_TEMPLATE.alias);
+});
+
+check('a stale per-environment Claude template id cannot override the pinned template', () => {
+  // 2026-11-04: devbox envs still named kng6z68u1md05bfdhq47 (CLI 2.1.138), so the
+  // real E2B smoke got "Claude Code 2.1.138 does not support this model".
+  const keys = ['E2B_CLAUDE_CODE_TEMPLATE_ID', 'E2B_SANDBOX_TEMPLATES', 'CODE_SANDBOX_GRID'];
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    process.env.E2B_CLAUDE_CODE_TEMPLATE_ID = 'kng6z68u1md05bfdhq47';
+    delete process.env.E2B_SANDBOX_TEMPLATES;
+    delete process.env.CODE_SANDBOX_GRID;
+    assert.strictEqual(
+      sandboxTemplateFor('claude', defaultSandboxSize()),
+      DEFAULT_CLAUDE_CODE_TEMPLATE_ID
+    );
+  } finally {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+  const providersDir = path.join(repoRoot, 'back-end/src/providers');
+  const readers = readdirSync(providersDir, { recursive: true, encoding: 'utf8' }).filter(
+    (file) =>
+      file.endsWith('.ts') &&
+      readFileSync(path.join(providersDir, file), 'utf8').includes(
+        'process.env.E2B_CLAUDE_CODE_TEMPLATE_ID'
+      )
+  );
+  assert.deepStrictEqual(readers, [], `providers reading the env template id: ${readers}`);
 });
 
 check('no per-size template copies are committed', () => {

@@ -77,6 +77,7 @@ export {
   shouldPreferSandboxAnthropicBaseUrlOverFastMode,
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
+import { DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from './claudeCodeTemplate';
 import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from './codexTemplate';
 import { codeAgentCliEnvs } from './codeAgentModels';
 
@@ -85,12 +86,6 @@ const log = createLogger('E2B');
 // Validate required environment variables
 if (!process.env.E2B_API_KEY) {
   log.warn('E2B_API_KEY environment variable not set - Claude Code sessions disabled');
-}
-
-if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
-  log.warn(
-    'E2B_CLAUDE_CODE_TEMPLATE_ID environment variable not set - Claude Code sessions disabled'
-  );
 }
 
 const WS_PORT = 3000;
@@ -152,7 +147,7 @@ async function createClaudeCodeSessionUnlocked(
   const codeSession = options.codeSession ?? null;
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
-  if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
+  if (!process.env.E2B_API_KEY) {
     throw new Error('E2B environment variables not configured');
   }
 
@@ -174,7 +169,7 @@ async function createClaudeCodeSessionUnlocked(
   const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId);
   const model = cliSettings.CLAUDE_CODE_MODEL;
   const workDir = workDirForGithubRepo(githubRepoUrl);
-  const templateId = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
+  const templateId = DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
   const runtimeFingerprint = [
     `template:${templateId}`,
     `wrapper:${fileHash(findLocalClaudeCodeWsServer())}`,
@@ -358,7 +353,7 @@ async function createClaudeCodeSessionUnlocked(
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
   // When E2B team billing blocks creates, fall back to a same-host local
   // Claude Code ws-server so code-agent benches can still make progress.
-  const templateIdForCreate = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
+  const templateIdForCreate = DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
   let acquired;
   try {
     acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code', {
