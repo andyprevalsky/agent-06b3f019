@@ -65,11 +65,18 @@ Deepest owned cause: the rejection contract lacked the held-credential
 identity. Sibling failures prevented by the same fix: Claude expiry after the
 text classifier was removed, and the re-sync race for both providers.
 
-Not changed here (outside this cluster, recorded for the owner): the
+Open sibling, highest-impact (adversarial review agreed): the prod disables
+did not go through this path. Two other writers can still disable a login with
+different rules, and `classifyLoginRejection` guards neither: the
 compute-token route marks a user-wide disable when the caller names no
 credential (open sibling of `2026-10-20-compute-lease-served-claude-envelope-past-own-expiry`),
 and `retireExpiredClaudeIntegration` deliberately retires an expired Claude row
-as needs-reconnect (that case's documented decision).
+as needs-reconnect (that case's documented decision), which is "expired
+treated as revoked" by this case's rule. Unifying every disabling writer
+(`integrations/routes.compute.ts` token/rate-limited, `computeCredentials.ts`
+retire, this feedback path) behind one classifier is the follow-up; it was
+left to the compute-lease owner because it reverses a recorded design
+decision and changes the compute-token lease contract (integration identity).
 
 ## Solution
 
@@ -78,9 +85,12 @@ rejected login (never the token). Agents forward it in `credential_feedback`.
 `back-end/src/providers/codeLoginRejection.ts` `classifyLoginRejection`
 compares it with the stored credential (`storedClaudeLogin` /
 `storedCodexLogin`): fingerprint mismatch → `replaced`, stored token expired →
-`expired`, otherwise `revoked`. Only `revoked` disables the login; a missing
-stored credential stays `revoked` (unservable either way) and a feedback
-without a fingerprint compares expiry only.
+`expired`, otherwise `revoked`. Only `revoked` disables the login; a row with no
+readable credential stays `revoked` (unservable either way), a server without a
+decryption key returns `unverified` (never disables), expiry allows 60 s of
+clock skew, and a feedback without a fingerprint compares expiry only. If the
+feedback POST itself fails there is no backstop: the retry may re-lease the
+same revoked login once more (open).
 
 Golden reference: Claude Code `utils/auth.ts:1384-1388` treats a 401 whose
 stored token differs from the failed one as already recovered; Codex

@@ -287,11 +287,13 @@ export async function fetchPoolCredentials(
 /**
  * The stored access token of a `claude_code` login and its expiry, for comparing
  * with the token a sandbox held when the provider rejected it (codeLoginRejection.ts).
- * Null when the row has no readable credential.
+ * Null when the row has no readable credential; undefined when this server has no decryption key.
  */
-export async function storedClaudeLogin(integrationId: string): Promise<StoredLogin | null> {
+export async function storedClaudeLogin(
+  integrationId: string
+): Promise<StoredLogin | null | undefined> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
-  if (!decryptionKey) return null;
+  if (!decryptionKey) return undefined;
   const integration = await prisma.integration.findUnique({
     where: { id: integrationId },
     select: { id: true, config: true },

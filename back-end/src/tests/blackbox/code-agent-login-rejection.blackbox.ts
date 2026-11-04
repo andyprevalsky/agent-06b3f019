@@ -19,6 +19,8 @@ import {
 } from '../../providers/computeCredentials';
 import { persistOutput as persistClaudeOutput } from '../../domains/claude-code/service';
 import { persistOutput as persistCodexOutput } from '../../domains/codex-code/service';
+import { markCodeTaskUsageLimited } from '../../providers/codeSessions/usageLimit';
+import { classifyLoginRejection } from '../../providers/codeLoginRejection';
 import { withIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 import { encryptClaudeEnvelope } from './integrations.context';
 
@@ -275,6 +277,34 @@ async function main() {
           where: { sandboxId: { startsWith: 'offline-login-rejection-' } },
         });
       }
+    }
+    try {
+      // Out of credits / usage limit on the funded key arrive as the structured
+      // C15 report (agents usage_limit_from_event), not transcript text.
+      await __resetAnthropicApiKeyCooldown();
+      const { taskId } = await seed(userId, 'claude', { source: 'anthropic' });
+      const marked = await markCodeTaskUsageLimited(taskId, 'claude', null);
+      assert.equal(marked.marked, 'anthropic_api_key');
+      assert.equal(await isAnthropicApiKeyOnCooldown(), true, 'billing backs off the funded key');
+      // A server that cannot read credentials never disables a login on a 401.
+      assert.equal(classifyLoginRejection(undefined, 'abc'), 'unverified');
+      // Within the clock-skew margin of its expiry a rejection is an expiry.
+      const token = 'sk-ant-oat01-skew';
+      const now = Date.now();
+      assert.equal(
+        classifyLoginRejection(
+          { accessToken: token, expiresAt: now + 30_000 },
+          fingerprint(token),
+          now
+        ),
+        'expired'
+      );
+      console.log(
+        'PASS claude funded key: structured billing report backs off; unverified/skew rules'
+      );
+    } catch (error) {
+      failures.push(`structured billing / classification rules: ${String(error)}`);
+      console.error(`FAIL ${String(error)}`);
     }
     assert.deepEqual(failures, [], 'all login rejection cases must pass');
   } finally {

@@ -51,7 +51,10 @@ Two failures of one mechanism, on base `28a7bfc99`:
 The backend repeated the mistake on the persisted transcript:
 `detectAndMarkExhaustion` regexed the whole output, so an agent printing
 `Not logged in` put the user's or pool login on a 24 h cooldown plus
-needs-reconnect, and on the funded key a 30 min cooldown for every user.
+needs-reconnect, and on the funded key a 30 min cooldown for every user. (The
+bare expiry banner did not match the base backend regexes — the 401 pattern
+required "OAuth access token has been revoked" — so the backend half of this
+case is the false-positive, not the expiry; the expiry failure was agent-side.)
 
 Local reproduction (real `ws-server.mjs` + scripted CLI):
 `cd agents && python /var/tmp/t2/run_sel.py tests/blackbox/code_sessions.blackbox.py <tests>` (the
@@ -110,6 +113,18 @@ differs from the failed token, otherwise refresh. Codex
 `login/src/auth/manager.rs:1850-1862` (UnauthorizedRecovery) reloads then
 refreshes. OpenClaw types auth failures (`failover-error.ts:181-193`). Rose
 sandboxes cannot refresh, so the equivalent is pause → re-lease → `--resume`.
+
+Scope note (adversarial review): the Claude path is now structured-only. Codex
+still derives its exhaustion feedback from markers inside the structured
+`error` event messages (`build_codex_credential_feedback`, ws-server
+`classifyOAuthFallbackReason`) and the backend keeps the legacy
+terminal-diagnostic parser for workers that send no feedback — never from tool
+output or prose, but not yet from Codex error codes.
+
+Usage limits and out of credits rely on the C15 report
+(`markCodeTaskUsageLimited`); a funded-key billing regression was added to
+`code-agent-login-rejection.blackbox.ts`. Pool logins no longer get the old
+24 h billing cooldown (C15 uses the reported reset or the default window).
 
 Open follow-up: proactive re-lease before `expiresAt` is not built. The
 reactive path loses only the in-flight request; a proactive one needs the

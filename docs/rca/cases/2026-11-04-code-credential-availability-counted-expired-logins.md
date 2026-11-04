@@ -61,7 +61,14 @@ provably expired. Rows that cannot be decrypted keep their previous
 fixtures that seed credential-less rows. Serving's Claude and Codex user paths
 iterate every connected own login and take the first servable one.
 
-10k agents: availability reads the user's own rows (a handful) and the pooled
+No prod occurrence was captured for this case; it is proven by the local
+regression only.
+
+10k agents (adversarial review): availability went from two `count` queries to
+`findMany` + decrypt until the first non-expired row. Own rows are a handful;
+pooled rows are decrypted on every availability check and pause outlook,
+O(pool size) in the worst case. Storing `expiresAt` as an indexed column would
+make it one query (needs a migration; follow-up). Today availability reads the user's own rows (a handful) and the pooled
 rows, decrypting until the first non-expired one — the same work serving does
 per spawn; no writes.
 

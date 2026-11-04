@@ -546,9 +546,11 @@ export async function markGptUserTokenRateLimited(
  * with the token a sandbox held when Codex reported it unusable
  * (codeLoginRejection.ts). A malformed `exp` reads as expired, as when serving.
  */
-export async function storedCodexLogin(integrationId: string): Promise<StoredLogin | null> {
+export async function storedCodexLogin(
+  integrationId: string
+): Promise<StoredLogin | null | undefined> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
-  if (!decryptionKey) return null;
+  if (!decryptionKey) return undefined;
   const integration = await prisma.integration.findUnique({
     where: { id: integrationId },
     select: { id: true, config: true },

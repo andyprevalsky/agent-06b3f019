@@ -52,7 +52,7 @@ const CLAUDE_CODE_CREDENTIALS = process.env.CLAUDE_CODE_CREDENTIALS;
 const CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
 // Which leased credential this sandbox holds, as a digest (never the token):
 // a rejected login names it so the backend can tell an expired or
-// since-replaced token from a revoked one (claudeCodeAuthFailure.ts).
+// since-replaced token from a revoked one (back-end codeLoginRejection.ts).
 const CREDENTIAL_FINGERPRINT = CLAUDE_CODE_OAUTH_TOKEN
   ? createHash("sha256")
       .update(CLAUDE_CODE_OAUTH_TOKEN)
