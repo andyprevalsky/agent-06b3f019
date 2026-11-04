@@ -5649,7 +5649,26 @@ async def test_cc_manager_user_pause_result_names_its_resumable_code_session():
     assert row.status.value == "FINISHED" and row.metadata["session_paused"] is True, row.metadata
     assert row.metadata["code_session"] == facts, row.metadata
     assert "Code session: 6c1d6f1e-0000-4000-8000-0000000000aa (paused)" in row.message, row.message
-    assert row.message.startswith("Code session paused by the user (not failed)."), row.message
+    assert row.message.startswith(
+        "Code session paused by the user (not failed). Its files, commits and conversation are kept; "
+        "spawn the code agent again with code_session_id='6c1d6f1e-0000-4000-8000-0000000000aa' to resume it."
+    ), row.message
+
+    # A Mac session keeps its work in the user's folder and continues with target='local'.
+    local = {**cancelled, "code_agent": {"target": "local", "device_name": "Andy's MacBook", "folder": "~/dev/app"}}
+    fake = _SequencedCCWorkflow(local)
+    wf = _HandoffCCWorkflowInstance()
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-up3"))
+    finally:
+        restore()
+    row = _paused_row(events)
+    assert row.message.startswith(
+        "Code session paused by the user (not failed). Its files and commits stay in ~/dev/app on "
+        "Andy's MacBook; spawn the code agent again with target='local' to continue there."
+    ), row.message
 
 
 async def test_cc_manager_usage_limit_row_is_paused_with_user_text():

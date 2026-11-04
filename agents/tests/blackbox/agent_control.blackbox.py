@@ -1115,6 +1115,13 @@ async def test_paused_code_task_endings_are_recorded_paused_and_resumable():
 
         statuses = {task_id: wf._background_finished[task_id]["status"] for task_id in endings}
         assert statuses == {task_id: "paused" for task_id in endings}, statuses
+        # A pause is not a failure: the notification is a FINAL_ANSWER whose payload says paused.
+        notes = {row["metadata"]["backgroundTaskId"]: row for row in harness.notifications()}
+        for task_id, (_title, message, _extra) in endings.items():
+            note = notes[task_id]
+            assert note["metadata"]["status"] == "paused", note["metadata"]
+            assert note["metadata"]["messageType"] == "FINAL_ANSWER", note["metadata"]
+            assert note["text"].startswith("Message Type: FINAL_ANSWER\n") and message in note["text"], note["text"]
         harness.activity_results["send_agent_message_activity"] = {"message_id": "m-1", "delivered": False}
         for index, task_id in enumerate(endings):
             status, text = await send_message_to_agent(

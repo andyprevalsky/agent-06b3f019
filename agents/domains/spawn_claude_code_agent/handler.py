@@ -34,6 +34,7 @@ from domains.spawn_claude_code_agent.service import (
     code_session_record,
     format_code_session_summary,
     iso_utc,
+    local_workspace_place,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
@@ -310,6 +311,27 @@ def _timed_out_code_session(
             if session is not None:
                 return session
     return code_session_record(scheduled_session)
+
+
+def _user_pause_message(metadata: Dict[str, Any]) -> str:
+    """A user pause's tool result: paused (not failed) and how to resume this session.
+
+    Mirrors the idle-pause text (service.py): a Mac session keeps its files in
+    the user's folder and continues with target='local'.
+    """
+    local_place = local_workspace_place(metadata.get("code_agent"))
+    if local_place:
+        return (
+            f"Code session paused by the user (not failed). Its files and commits stay in {local_place}; "
+            "spawn the code agent again with target='local' to continue there."
+        )
+    session = metadata.get("code_session") if isinstance(metadata.get("code_session"), dict) else {}
+    session_id = session.get("code_session_id")
+    resume = f"with code_session_id='{session_id}' " if isinstance(session_id, str) and session_id else ""
+    return (
+        "Code session paused by the user (not failed). Its files, commits and conversation are kept; "
+        f"spawn the code agent again {resume}to resume it."
+    )
 
 
 class SpawnClaudeCodeAgentManager(ToolManager):
@@ -703,10 +725,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     )
                 # Same facts as an idle pause: which session is paused, so a resume
                 # targets it (not "the latest session for the repo").
-                pause_message = (
-                    "Code session paused by the user (not failed). Its files, commits and "
-                    "conversation are kept; spawn the code agent again to resume it."
-                )
+                pause_message = _user_pause_message(cancel_metadata)
                 pause_summary = format_code_session_summary(cancel_metadata.get("code_session"))
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,

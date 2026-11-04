@@ -625,8 +625,7 @@ class BackgroundAgentsMixin:
             structured_response = outcome.get("structured_response")
         # A user pause / cost limit cancels activity-backed work exactly like a
         # foreground spawn (helpers/tool_interrupts.py): it reports failed.
-        notification_status = "failed" if failed else "completed"
-        status = notification_status
+        status = "failed" if failed else "completed"
         # Paused = resumable: a user pause ended the run (browser: cancelled as
         # failed), or the executor reported its session paused (code).
         if (
@@ -657,12 +656,13 @@ class BackgroundAgentsMixin:
                 recipient=await self._notification_recipient(),
                 sender=str(record.get("path") or record["address"]),
                 agent_type=record["agent_type"],
-                # FINAL_ANSWER / FAILED follow the run's outcome; "paused" is the task state.
-                status=notification_status,
+                status=status,
                 summary=summary,
                 structured_response=structured_response,
                 file_pointers=outcome.get("file_pointers"),
                 session_id=outcome.get("session_id"),
+                # FINAL_ANSWER / FAILED follow the run's outcome; "paused" is the task state.
+                failed=bool(failed),
             )
             try:
                 await self._post_message(
@@ -676,6 +676,7 @@ class BackgroundAgentsMixin:
                         idempotency_key=key,
                         run=run,
                         session_id=outcome.get("session_id"),
+                        failed=bool(failed),
                     ),
                 )
             except Exception as exc:

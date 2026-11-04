@@ -2758,7 +2758,8 @@ async def run_all_tests():
     await r.record_async("wake_ts_user_message", test_wait_for_timestamp_woken_early_by_user_message)
     await r.record_async("wake_ts_agent_message", test_wait_for_timestamp_woken_early_by_agent_message)
     await r.record_async(
-        "wake_multi_day_ts_on_background_finish", test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes
+        "wake_multi_day_ts_on_background_finish",
+        test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes,
     )
     await r.record_async(
         "wake_ts_ignores_attention_response", test_wait_for_attention_response_does_not_wake_timestamp_wait

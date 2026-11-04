@@ -15,8 +15,11 @@ import { deterministicMessageId } from '../../providers/messageIdempotency';
 import { deliverUserTurnToCodeSession, type TurnDelivery } from '../../providers/codeSessionTurns';
 import { formatInboundAgentMessage } from './agentGraphMessageFormat';
 import { takeSendBudget } from '../../providers/agentGraph/sendBudget';
+import { createLogger } from '../../providers/logger';
 import * as graphRepo from './repoGraph';
 import { AgentGraphError, type CodeProvider } from './agentGraphService';
+
+const log = createLogger('AgentGraph');
 
 export interface CodeTarget {
   kind: 'code';
@@ -39,12 +42,12 @@ function codeTurnId(key: string): string {
   return `a2a-${createHash('sha256').update(key).digest('hex').slice(0, 40)}`;
 }
 
-function deliveryError(delivery: TurnDelivery): AgentGraphError {
+function deliveryError(delivery: TurnDelivery, endedMessage?: string): AgentGraphError {
   if (delivery.status === 'unreachable') {
     return new AgentGraphError(502, 'Could not reach the code agent session');
   }
   if (delivery.reason === 'session_ended') {
-    return new AgentGraphError(409, 'Code agent session has finished');
+    return new AgentGraphError(409, endedMessage ?? 'Code agent session has finished');
   }
   if (delivery.reason === 'relay_paused') {
     // The user holds the session in direct chat; agent turns wait for the hand back.
@@ -110,6 +113,8 @@ export async function deliverToCodeAgent(args: {
   title: string;
   a2a: Record<string, unknown>;
   original: string;
+  /** The 409 text when the CLI turn already ended (defaults to "has finished"). */
+  endedMessage?: string;
 }): Promise<'delivered' | 'duplicate'> {
   const { target } = args;
   if (target.streamUrl === null || target.status !== 'ACTIVE') {
@@ -124,7 +129,7 @@ export async function deliverToCodeAgent(args: {
     sender: 'agent',
   });
   if (delivery.status !== 'delivered' && delivery.status !== 'duplicate') {
-    throw deliveryError(delivery);
+    throw deliveryError(delivery, args.endedMessage);
   }
   await recordCodeTimelineRow({
     ownerAgentId: target.ownerAgentId,
@@ -156,13 +161,17 @@ function taskToolCallId(taskAddress: string): string {
 export async function deliverToRunningCodeTask(args: {
   ownerAgentId: string;
   taskAddress: string;
+  /** When the task's current run started (tree state): older sessions belong to earlier runs. */
+  runStartedAt: Date | null;
   sender: { id: string; label: string };
   key: string;
   text: string;
 }): Promise<{ message_id: string; status: 'delivered' | 'duplicate' }> {
+  const toolCallId = taskToolCallId(args.taskAddress);
   const session = await graphRepo.findCodeSessionForToolCall(
     args.ownerAgentId,
-    taskToolCallId(args.taskAddress)
+    toolCallId,
+    args.runStartedAt
   );
   if (session === null) {
     throw new AgentGraphError(
@@ -172,7 +181,7 @@ export async function deliverToRunningCodeTask(args: {
   }
   const receivedId = deterministicMessageId(args.ownerAgentId, `${args.key}:received`);
   if ((await graphRepo.findMessageById(receivedId)) === null) {
-    // Same per-sender cap as agent-graph sends; a retry of a delivered message is free.
+    // The agent-graph per-sender send budget; a retry of a delivered message is free.
     const budget = takeSendBudget(args.sender.id);
     if (!budget.ok) {
       throw new AgentGraphError(
@@ -182,15 +191,17 @@ export async function deliverToRunningCodeTask(args: {
       );
     }
   }
-  const chip = await graphRepo.findCodeSessionChip(args.ownerAgentId, session.id);
   const target: CodeTarget = {
     kind: 'code',
     id: session.id,
     ownerAgentId: args.ownerAgentId,
     streamUrl: session.streamUrl,
     status: session.status,
-    provider: chip.provider,
-    toolCallId: chip.toolCallId,
+    provider:
+      session.codeProvider === 'claude' || session.codeProvider === 'codex'
+        ? session.codeProvider
+        : null,
+    toolCallId,
   };
   const toLabel = codeLabel(target.provider);
   const a2a = {
@@ -214,6 +225,47 @@ export async function deliverToRunningCodeTask(args: {
     title: `${args.sender.label} → ${toLabel}`,
     a2a,
     original: args.text,
+    endedMessage:
+      'Code agent session has finished its turn, so this message was not delivered. Wait for its ' +
+      'notification: resume a paused code agent with send_message_to_agent(continue_conversation=true); ' +
+      'for new work after it completed, spawn a new code agent.',
   });
   return { message_id: receivedId, status };
+}
+
+/**
+ * POST /:id/agent-messages to a running code task (agentToAgentService):
+ * the turn, or the refusal as the route's { error, status }.
+ */
+export async function sendAgentMessageToRunningCodeTask(args: {
+  ownerAgentId: string;
+  taskAddress: string;
+  runStartedAt: string | null;
+  sender: { id: string; label: string };
+  idempotencyKey: string;
+  text: string;
+}): Promise<
+  { message_id: string; delivered: true; task_running: true } | { error: string; status: number }
+> {
+  const started = args.runStartedAt !== null ? new Date(args.runStartedAt) : null;
+  try {
+    const delivered = await deliverToRunningCodeTask({
+      ownerAgentId: args.ownerAgentId,
+      taskAddress: args.taskAddress,
+      runStartedAt: started !== null && !Number.isNaN(started.getTime()) ? started : null,
+      sender: args.sender,
+      key: `a2a:${args.sender.id}:${args.idempotencyKey}`,
+      text: args.text,
+    });
+    log.info('Agent message delivered to a running code task', {
+      agent_id: args.ownerAgentId,
+      from_agent_id: args.sender.id,
+      recipient_task_id: args.taskAddress,
+      status: delivered.status,
+    });
+    return { message_id: delivered.message_id, delivered: true, task_running: true };
+  } catch (error) {
+    if (error instanceof AgentGraphError) return { error: error.message, status: error.status };
+    throw error;
+  }
 }

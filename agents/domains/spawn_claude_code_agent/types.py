@@ -2,6 +2,7 @@
 
 from typing import Optional, TypedDict
 
+
 class CodeAgentTarget(TypedDict):
     """Where a code agent runs, and whether that target can start right now.
 

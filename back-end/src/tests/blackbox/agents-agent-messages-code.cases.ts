@@ -12,7 +12,7 @@
 import { randomUUID } from 'crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
-import { assert, assertStatus, prisma, test } from './agents-blackbox-harness';
+import { assert, assertStatus, prisma, sleep, test } from './agents-blackbox-harness';
 import {
   createTree,
   deleteTree,
@@ -79,6 +79,16 @@ async function seedRunningCodeTask(tree: Tree, taskId: string, streamUrl: string
       ],
     },
   });
+  return seedCodeSession(tree, taskId, streamUrl, 'ACTIVE');
+}
+
+/** One code session the spawn `taskId` ran, with the activity's chip row. */
+async function seedCodeSession(
+  tree: Tree,
+  taskId: string,
+  streamUrl: string | null,
+  status: 'ACTIVE' | 'CLOSED'
+): Promise<string> {
   const sessionId = randomUUID();
   await prisma.claudeCodeSession.create({
     data: {
@@ -86,12 +96,13 @@ async function seedRunningCodeTask(tree: Tree, taskId: string, streamUrl: string
       agentId: tree.childId,
       sandboxId: `sb-${sessionId}`,
       goal: 'Add a README badge.',
-      status: 'ACTIVE',
+      status,
       streamUrl,
       codeProvider: 'claude',
     },
   });
-  // The activity's chip row: the code session runs under the spawn's tool call id.
+  // The activity's row (agents/domains/spawn_claude_code_agent/repo.py
+  // save_claude_code_message): toolCallId = the background spawn's id.
   await prisma.message.create({
     data: {
       agentId: tree.childId,
@@ -99,7 +110,9 @@ async function seedRunningCodeTask(tree: Tree, taskId: string, streamUrl: string
       text: '',
       metadata: {
         toolCallId: taskId,
-        toolName: 'spawn_agent',
+        toolName: 'spawn_claude_code_agent',
+        toolStatus: 'IN_PROGRESS',
+        title: 'Claude Code session started',
         task_id: sessionId,
         code_provider: 'claude',
         action_type: 'session_started',
@@ -183,8 +196,67 @@ test('POST /:id/agent-messages — a running code task whose CLI turn ended refu
     });
     assertStatus(res.status, 409, res.data);
     const error = String((res.data as { error?: string }).error);
-    assert(error === 'Code agent session has finished', `unexpected refusal: ${error}`);
+    assert(
+      error.startsWith(
+        'Code agent session has finished its turn, so this message was not delivered.'
+      ) && error.includes('continue_conversation=true'),
+      `the refusal says what to do next: ${error}`
+    );
     assert((await unreadTaskRows(tree.childId, taskId)) === 0, 'a refused send stores nothing');
+  } finally {
+    await session.close();
+    await prisma.claudeCodeSession.deleteMany({ where: { agentId: tree.childId } });
+    await deleteTree(tree);
+  }
+});
+
+test('POST /:id/agent-messages — a woken code task run never gets the previous run session', async () => {
+  const tree = await createTree('a2a-code-run2');
+  const session = await startCodeSession(null);
+  const taskId = `toolu_code_${randomUUID().slice(0, 8)}`;
+  try {
+    // Run 1 ended (its session CLOSED); run 2 was woken just now and has no session yet.
+    await seedCodeSession(tree, taskId, null, 'CLOSED');
+    await sleep(20);
+    const run2Start = new Date().toISOString();
+    await prisma.agent.update({
+      where: { id: tree.childId },
+      data: {
+        backgroundTasks: [
+          {
+            address: `${taskId}.run2`,
+            type: 'code',
+            goal: 'Add a README badge.',
+            status: 'running',
+            task_name: 'coder',
+            path: null,
+            started_at: run2Start,
+          },
+        ],
+      },
+    });
+    const send = (key: string) =>
+      sendAgentMessage(tree.userId, tree.childId, {
+        from_agent_id: tree.rootId,
+        message: `Run 2 instruction (${key}).`,
+        idempotency_key: key,
+        recipient_task_id: `${taskId}.run2`,
+      });
+    const early = await send(`run2-early-${randomUUID()}`);
+    assertStatus(early.status, 409, early.data);
+    const error = String((early.data as { error?: string }).error);
+    assert(error.includes('has not started yet'), `run 1's session must not be used: ${error}`);
+    await sleep(20);
+    await seedCodeSession(tree, taskId, session.url, 'ACTIVE');
+    // A burst past the inbox guard's 3-message burst: code turns write no inbox rows.
+    for (let index = 0; index < 4; index += 1) {
+      const res = await send(`run2-${index}-${randomUUID()}`);
+      assertStatus(res.status, 201, res.data);
+    }
+    assert(
+      session.turns.length === 4,
+      `run 2's CLI got every turn: ${JSON.stringify(session.turns)}`
+    );
   } finally {
     await session.close();
     await prisma.claudeCodeSession.deleteMany({ where: { agentId: tree.childId } });
