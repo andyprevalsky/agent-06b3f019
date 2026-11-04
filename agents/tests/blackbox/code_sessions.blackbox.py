@@ -1700,7 +1700,8 @@ def _codex_events():
 
 
 def test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect():
-    """The ws-server's ``login_unusable`` error: parsed without prose matching, fed back as a revocation."""
+    """The ws-server's ``login_unusable`` error: parsed without prose matching, fed back as a rejected login
+    (the backend disables it only when the stored login is still the held one and not expired)."""
     from domains.spawn_claude_code_agent.service import build_codex_credential_feedback, login_unusable_from_event
 
     event = {
@@ -1712,7 +1713,7 @@ def test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect():
     }
     assert login_unusable_from_event(event) == {"provider": "codex", "reason": "oauth_refresh_invalid"}
     assert login_unusable_from_event({**event, "login_unusable": None}) is None, "the switch path is not a pause"
-    # The backend reads reason oauth_refresh_invalid as a revocation: needs reconnect, never a rate limit.
+    # Never a rate limit; code-agent-login-rejection.blackbox.ts owns revoked vs expired vs replaced.
     assert build_codex_credential_feedback([event]) == [{"source": "initial", "reason": "oauth_refresh_invalid"}]
 
 
