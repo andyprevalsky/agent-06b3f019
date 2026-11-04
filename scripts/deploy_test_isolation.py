@@ -27,20 +27,7 @@ def validate(plan, root):
             # Fail closed on saved plans too: timeout/cancel cannot reach the remote worker (finding 4447557475).
             raise ValueError(f"{gate.get('name')}: ssh transport has no remote cancel/cleanup path "
                              '(finding 4447557475); use boxes-thread or local-isolated')
-        if mode == 'ssh':
-            host = gate.get('worker_host')
-            if (not isinstance(host, str) or not host or host.startswith('-')
-                    or Path(args[0]).name != 'ssh' or len(args) < 3 or args[1] != host):
-                raise ValueError('SSH binding requires its explicit host in the transport argv')
-            location = gate.get('worker_root')
-            if not isinstance(location, str) or not location.startswith('/'):
-                raise ValueError('SSH binding requires the prepared remote checkout root')
-            if '..' in Path(location).parts:
-                raise ValueError('remote worker root must be normalized')
-            location = str(Path(location))
-            if not gate.get('case_protocol') or gate.get('result_transport') != 'stdout':
-                raise ValueError('SSH binding requires the source-bound worker receipt protocol')
-        elif mode == 'boxes-thread':
+        if mode == 'boxes-thread':
             thread, box, location, python, control = (gate.get(k) for k in
                 ('worker_thread', 'worker_host', 'worker_root', 'remote_python', 'coordinator_thread'))
             if any(not isinstance(v, str) or not v or v.startswith('-') for v in (thread, box, control)):

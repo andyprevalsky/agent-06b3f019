@@ -146,8 +146,22 @@ class FailurePolicyTest(unittest.TestCase):
                 "scope": "blackbox:kernel", "error": "Error: upstream reset\n    at parity (kernel.blackbox.ts:88)",
                 "source": "7be0644bb164763af1526ead7b426e2d5e909f4a", "evidence": ["coverage/shard-1.log:412"]}
 
+    def pending_occurrence(self):
+        packet = self.packet()
+        return self.occurrence(attribution="NOT_INTRODUCED", native_result="FAIL / exit 1",
+                               check=packet["test"], command=packet["command"],
+                               source=packet["source"], post_merge=packet)
+
+    def test_post_merge_packet_rejects_a_different_test_command_or_source(self):
+        good = self.pending_occurrence()
+        for field, value in [("test", "unrelated/test"), ("command", ["false"]),
+                             ("source", "b" * 40), ("test", True),
+                             ("command", True), ("source", True)]:
+            with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "recorded failure"):
+                MODULE.decision({**good, "post_merge": {**good["post_merge"], field: value}})
+
     def test_failed_not_introduced_packet_is_pending_post_merge_without_any_waiver(self):
-        entry = self.occurrence(attribution="NOT_INTRODUCED", native_result="FAIL / exit 1", post_merge=self.packet())
+        entry = self.pending_occurrence()
         self.assertEqual("pending post-merge", MODULE.decision(entry))
         with tempfile.TemporaryDirectory() as directory:
             report = MODULE.record(Path(directory) / "report.json", entry)
@@ -167,7 +181,7 @@ class FailurePolicyTest(unittest.TestCase):
             self.assertIn("DELEGATED", MODULE.render(resolved)); self.assertNotIn("PENDING", MODULE.render(resolved))
 
     def test_pending_post_merge_is_refused_for_incomplete_packets_links_or_nonfailed_results(self):
-        good = self.occurrence(attribution="NOT_INTRODUCED", native_result="FAIL / exit 1", post_merge=self.packet())
+        good = self.pending_occurrence()
         for field in MODULE.PACKET_FIELDS:
             with self.subTest(missing=field):
                 with self.assertRaisesRegex(ValueError, "packet requires"):

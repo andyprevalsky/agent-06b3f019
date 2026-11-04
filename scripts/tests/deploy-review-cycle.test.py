@@ -642,6 +642,44 @@ class OverrideDispositionTest(unittest.TestCase):
         with patch.object(MODULE,'_gh_json',return_value={'wrong':[]}):
             with self.assertRaises(MODULE.ReviewCycleError):MODULE._gh_check_runs('acme/rose',HEAD_C)
 
+    def test_publication_original_commit_survives_comment_retarget(self) -> None:
+        data = self.publication_data()
+        data["review_comments"][0].update(original_commit_id=HEAD_C, commit_id=HEAD_B)
+        cycle = self.override(data, prior_rounds=1)
+        self.assertEqual("overridden", cycle["disposition"])
+        self.assertEqual([4431365241], cycle["evidence"]["review_publication"]["inline_finding_ids"])
+
+    def test_retargeted_publication_refuses_usage_skip_atomically(self) -> None:
+        data = self.publication_data()
+        data["review_comments"][0].update(original_commit_id=HEAD_C, commit_id=HEAD_B)
+        data["check_runs"].append(check_run(124509628999, HEAD_C, "neutral", "Review rate limited",
+                                            "2026-10-31T10:20:00Z"))
+        data["issue_comments"] = [CAP_COMMENT]
+        normalized = MODULE.normalize_evidence(data, source="test")
+        before = self.state_path.read_bytes()
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "substantive CodeRabbit review exists"):
+            MODULE.skip_cycle(self.state_path, head=HEAD_C, pr="1656", reason="usage-cap",
+                              evidence=normalized, receipts_path=self.receipts)
+        self.assertEqual(before, self.state_path.read_bytes())
+        self.assertFalse(self.receipts.exists())
+
+    def test_publication_original_binding_falls_back_only_when_absent(self) -> None:
+        original = self.publication_data()
+        for present, value, current, accepted in [(False, None, HEAD_C, True),
+                (False, None, HEAD_B, False), (True, None, HEAD_C, False),
+                (True, "", HEAD_C, False), (True, HEAD_B, HEAD_C, False),
+                (True, HEAD_C, HEAD_B, True)]:
+            with self.subTest(present=present, original=value, current=current):
+                data = deepcopy(original)
+                comment = data["review_comments"][0]
+                comment["commit_id"] = current
+                if present:
+                    comment["original_commit_id"] = value
+                else:
+                    comment.pop("original_commit_id", None)
+                proof = MODULE.publication_evidence(data["reviews"][0], HEAD_C, data)
+                self.assertEqual(accepted, proof is not None)
+
     def test_publication_with_bound_finding_records_native_evidence(self) -> None:
         data = self.publication_data()
         self.assertIsNone(MODULE.SUBSTANTIVE_REVIEW.search(data["reviews"][0]["body"]))

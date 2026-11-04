@@ -1162,9 +1162,31 @@ class Cycle(unittest.TestCase):
         text = (self.directory / 'report.md').read_text()
         self.assertIn('BLOCKING', text); self.assertIn('real failure', text); self.assertIn('Deploy validation: needs-focused-plan', text)
 
+    def test_post_merge_packet_identity_mismatch_is_atomic(self):
+        failure = self.failure()
+        before = copy.deepcopy(self.state)
+        packet = {"test": failure["check"], "command": failure["command"],
+                  "scope": "api/a", "error": "AssertionError: boom",
+                  "source": copy.deepcopy(failure["source"]), "evidence": ["original.log"]}
+        for field, value in [("test", "api/b"), ("command", ["false"]),
+                             ("source", {**failure["source"], "head": "b" * 40}),
+                             ("source", {**failure["source"], "digest": "b" * 64}),
+                             ("source", "b" * 40), ("test", True),
+                             ("command", "true"), ("source", True)]:
+            with self.subTest(field=field, value=value):
+                state = copy.deepcopy(before)
+                report = self.report(failure, attribution="NOT_INTRODUCED",
+                                     post_merge={**packet, field: value})
+                with self.assertRaisesRegex(ValueError, "recorded failure"):
+                    c.adjudicate(state, report)
+                self.assertEqual(before, state)
+        c.adjudicate(self.state, self.report(failure, attribution="NOT_INTRODUCED", post_merge=packet))
+        self.assertEqual(packet, self.state["pending_post_merge"][0]["packet"])
+        self.assertEqual("FAIL", self.state["failures"][0]["native_result"])
+
     def test_pending_post_merge_qualifies_ready_but_blocks_completion_until_resolved(self):
         failure = self.failure()
-        packet = {"test": "api::a", "command": ["true"], "scope": "api/a", "error": "AssertionError: boom",
+        packet = {"test": "api/a", "command": ["true"], "scope": "api/a", "error": "AssertionError: boom",
                   "source": self.state["source"]["head"], "evidence": ["original.log"]}
         c.adjudicate(self.state, self.report(failure, attribution="NOT_INTRODUCED", post_merge=packet))
         self.assertTrue(self.state["ready"]); self.assertEqual("ready", self.state["phase"])
@@ -1208,7 +1230,7 @@ class Cycle(unittest.TestCase):
         self.plan['gates'][1]['input_paths'] = ['code']  # api's fingerprint follows only this file
         self.state = c.initialize(self.plan, self.root)
         failure = self.failure()
-        packet = {"test": "api::a", "command": ["true"], "scope": "api/a", "error": "AssertionError: boom",
+        packet = {"test": "api/a", "command": ["true"], "scope": "api/a", "error": "AssertionError: boom",
                   "source": self.state["source"]["head"], "evidence": ["original.log"]}
         c.adjudicate(self.state, self.report(failure, attribution="NOT_INTRODUCED", post_merge=packet))
         self.assertIn('api/a', self.state['skips']); self.assertEqual(1, len(self.state['pending_post_merge']))
@@ -1603,7 +1625,7 @@ class Cycle(unittest.TestCase):
     def test_assigned_repair_refusals_leave_the_state_unchanged(self):
         failure = self.failure()
         before = copy.deepcopy(self.state)
-        packet = {"test": "api::a", "command": ["true"], "scope": "api/a", "error": "boom",
+        packet = {"test": "api/a", "command": ["true"], "scope": "api/a", "error": "boom",
                   "source": self.state["source"]["head"], "evidence": ["original.log"]}
         variants = {
             'missing reason': self.assigned(failure, assigned_reason=''),

@@ -497,8 +497,7 @@ def publication_evidence(
     findings = [comment for comment in comments
                 if _is_bot(comment) and comment.get("in_reply_to_id") is None
                 and comment.get("pull_request_review_id") == review_id
-                and comment.get("commit_id") == head
-                and comment.get("original_commit_id", head) == head
+                and comment.get("original_commit_id", comment.get("commit_id")) == head
                 and type(comment.get("id")) is int and comment["id"] > 0
                 and _body(comment).strip()]
     published = _publication_time(review.get("submitted_at"))

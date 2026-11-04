@@ -141,6 +141,36 @@ class Selection(unittest.TestCase):
         self.assertTrue(recipe['aggregate'])
         self.assertIn('--stdio',bindings['be']['command'])
 
+    def test_local_inventory_normalizes_roots_but_remote_and_relative_roots_keep_their_contract(self):
+        from deploy_test_bindings import generate
+        actual = Path(self.workers.name) / 'actual'
+        actual.mkdir()
+        alias = Path(self.workers.name) / 'alias'
+        alias.symlink_to(actual, target_is_directory=True)
+        for native in (False, True):
+            template = copy.deepcopy(self.template)
+            template['gates'][1]['native_backend'] = native
+            for location in (str(actual) + '/', str(alias)):
+                with self.subTest(native=native, location=location):
+                    slot = {'id': 'be-worker', 'transport': 'local-isolated', 'worker_root': location,
+                            'recipe': {'cases': {'be': {'command': ['true']}}},
+                            'env': {'CONDUCTOR_WORKSPACE_NAME': 'be', 'CONDUCTOR_PORT': '12000'}}
+                    with patch('deploy_test_backend.sweep_from_recipe'):
+                        binding = generate(template, {'be': slot}, p.ROOT)['be']
+                    self.assertEqual(str(actual), binding['worker_root'])
+                    self.assertEqual(str(actual), binding['cwd'])
+                    self.assertEqual(str(actual), binding['command'][binding['command'].index('--root') + 1])
+                    self.assertEqual(location, slot['worker_root'])
+            slot['worker_root'] = 'relative-worker'
+            with self.assertRaisesRegex(ValueError, 'must be absolute'):
+                generate(template, {'be': slot}, p.ROOT)
+        remote = {**slot, 'transport': 'boxes-thread', 'worker_root': str(alias),
+                  'worker_thread': 'ph-fixture', 'worker_host': 'remote-fixture',
+                  'coordinator_thread': 'ph-coordinator', 'timeout_seconds': 60}
+        binding = generate(self.template, {'be': remote}, p.ROOT)['be']
+        self.assertEqual(str(alias), binding['worker_root'])
+        self.assertEqual(str(alias), binding['command'][binding['command'].index('--worker-root') + 1])
+
     def test_ssh_inventory_is_refused_until_a_remote_cancel_path_exists(self):
         from deploy_test_bindings import generate  # finding 4447557475: no remote cancel/cleanup over ssh
         inventory={'be':{'id':'be-worker','transport':'ssh','worker_host':'test-worker',

@@ -46,6 +46,8 @@ def prepare_checkout(root: Path, target: Path, copy_config: bool = False) -> dic
             origin, destination = root / rel, target / rel
             if origin.is_file():
                 destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.touch(mode=0o600)
+                destination.chmod(0o600)
                 shutil.copyfile(origin, destination)
                 destination.chmod(0o600)
     if source(root) != expected or source(target) != expected:

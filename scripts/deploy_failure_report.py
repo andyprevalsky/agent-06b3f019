@@ -104,6 +104,12 @@ def pending_post_merge(entry: dict, attribution: str, link, external, execute: b
     if not isinstance(packet, dict) or any(not packet.get(k) for k in PACKET_FIELDS):
         raise ValueError("A pending post-merge packet requires exact test, command, scope, verbatim error, "
                          "source revision and failure evidence")
+    source = entry.get("source")
+    # Retain revision-only packets; a full source object must also match its digest.
+    expected_source = source.get("head") if isinstance(source, dict) and isinstance(packet["source"], str) else source
+    if (packet["test"] != entry.get("check") or packet["command"] != entry.get("command")
+            or packet["source"] != expected_source):
+        raise ValueError("A post-merge packet must match the recorded failure test, command and source")
     return PENDING
 
 

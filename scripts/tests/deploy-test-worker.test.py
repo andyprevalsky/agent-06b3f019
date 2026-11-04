@@ -3,6 +3,7 @@
 from pathlib import Path
 from datetime import datetime, timezone
 import copy
+import builtins
 import contextlib
 import importlib.util
 import io
@@ -180,6 +181,45 @@ class Worker(unittest.TestCase):
             self.assertEqual(cycle.source(self.root),cycle.source(target))
             with self.assertRaisesRegex(ValueError,'overwrite'):
                 worker.prepare_checkout(self.root,target)
+
+    def test_copy_config_is_private_before_secret_bytes_for_new_and_existing_files(self):
+        # Observe the real copyfile destination open, before its first write.
+        actual_open = builtins.open
+        original_umask = os.umask(0o022)
+        try:
+            for existing in (False, True):
+                with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
+                    rel = 'env.sh' if existing else '.env'
+                    origin = self.root / rel
+                    (self.root / '.gitignore').write_text('.env\n')
+                    origin.write_bytes(b'DUMMY_SECRET=fixture-only\n')
+                    subprocess.run(['git', '-C', str(self.root), 'add', '.gitignore'], check=True)
+                    if existing:
+                        # A tracked public config placeholder is already present after clone.
+                        (self.root / '.env').unlink()
+                        subprocess.run(['git', '-C', str(self.root), 'add', rel], check=True)
+                    subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                                    'user.email=test@example.com', 'commit', '-qm', 'config fixture'], check=True)
+                    original = origin.read_bytes()
+                    destination = Path(directory) / 'worker' / rel
+                    observed = []
+                    def checked_open(file, mode='r', *args, **kwargs):
+                        stream = actual_open(file, mode, *args, **kwargs)
+                        if isinstance(file, (str, os.PathLike)) and Path(file) == destination and mode == 'wb':
+                            permissions = os.fstat(stream.fileno()).st_mode & 0o777
+                            observed.append(permissions)
+                            if permissions != 0o600:
+                                stream.close()
+                                self.fail(f'config destination exposed before copy: {permissions:o}')
+                        return stream
+                    with patch('builtins.open', side_effect=checked_open):
+                        worker.prepare_checkout(self.root, destination.parent, copy_config=True)
+                    self.assertEqual([0o600], observed)
+                    self.assertEqual(original, destination.read_bytes())
+                    self.assertEqual(original, origin.read_bytes())
+                    self.assertEqual(0o600, destination.stat().st_mode & 0o777)
+        finally:
+            os.umask(original_umask)
 
     def test_copy_config_preserves_benchmark_temporal_routing(self):
         (self.root/'.gitignore').write_text('.env\n.env.*\n')
@@ -1804,11 +1844,15 @@ class LocalController(unittest.TestCase):
 
 
 FAKE_NPM = """#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, signal, sys, time
 from pathlib import Path
 cfg = json.load(open(os.environ['FAKE_RUNNER_CONFIG'])); be = Path.cwd()
+if cfg.get('cancel_parent'): os.kill(os.getppid(), signal.SIGTERM)
+time.sleep(cfg.get('sleep', 0))
 (be / 'coverage/blackbox-run-shard1').mkdir(parents=True, exist_ok=True)
 json.dump({'results': cfg['results']}, open(be / 'coverage/blackbox-run-shard1/summary.json', 'w'))
+for shard, body in cfg.get('extra_summaries', {}).items():
+    target = be / 'coverage' / shard / 'summary.json'; target.parent.mkdir(parents=True, exist_ok=True); target.write_text(body)
 (be / 'coverage/units.log').write_text('units'); print(cfg['unit_line']); print(cfg['fps_line'])
 if cfg['rc'] != 0 and cfg.get('archive', True):
     f = be.parent / '.context/test-runs' / ('backend-coverage-failed-%s-%d' % (time.strftime('%Y%m%d-%H%M%S'), os.getpid()))
@@ -1954,6 +1998,92 @@ class Backend(unittest.TestCase):
         result = self.backend.execute(self.request, self.root)
         self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold'])
         self.assertLess(time.monotonic() - before, 1.5)
+
+    def test_expired_or_cancelled_sweep_still_finishes_both_owned_cleanup_steps(self):
+        slot = self.owner_slot()
+        (self.root / 'scripts/kill-services.sh').write_text('#!/bin/bash\nsleep .05; touch "$PWD/.context/recipe-cleanup-ran"\n')
+        (self.root / self.backend.TEARDOWN).write_text('#!/bin/bash\nsleep .05; touch "$PWD/.context/native-teardown-ran"\n')
+        self.request['source'] = cycle.source(self.root)
+        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], .2)
+        self.request['worker_recipe']['cleanup']['timeout_seconds'] = .5
+        native = self.backend.run_command
+        for reason in ('deadline', 'cancel'):
+            with self.subTest(reason=reason):
+                shutil.rmtree(self.root / '.context', ignore_errors=True)
+                self.request['token'] = 'be-cleanup-' + reason
+                self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+                config = cycle.read(self.config); config.update(sleep=2, cancel_parent=reason == 'cancel'); cycle.write(self.config, config)
+                calls = []
+                def observe(argv, **kwargs):
+                    calls.append((argv, kwargs['timeout'], self.backend.CANCEL.is_set()))
+                    return native(argv, **kwargs)
+                before = time.monotonic()
+                with patch.object(self.backend, 'run_command', side_effect=observe):
+                    result = self.backend.execute(self.request, self.root)
+                self.assertTrue(result['interrupted']); self.assertFalse(result['complete'])
+                self.assertTrue((self.root / '.context/recipe-cleanup-ran').is_file())
+                self.assertTrue((self.root / '.context/native-teardown-ran').is_file())
+                self.assertEqual(result['cases']['teardown'], 'PASS'); self.assertTrue(result['cleanup_complete'])
+                self.assertTrue(all(v == 'UNVERIFIED' for k, v in result['cases'].items() if k != 'teardown'))
+                sweep = next(c for c in calls if c[0][-3:] == self.backend.RUNNER)
+                cleanup = next(c for c in calls if 'scripts/kill-services.sh' in ' '.join(c[0]))
+                teardown = next(c for c in calls if c[0] == ['bash', self.backend.TEARDOWN])
+                self.assertGreater(sweep[1], 0); self.assertLessEqual(sweep[1], .2)
+                self.assertGreater(cleanup[1], .05); self.assertLessEqual(cleanup[1], .5)
+                self.assertGreater(teardown[1], .05); self.assertLessEqual(teardown[1], self.backend.CLEANUP_SECONDS)
+                self.assertFalse(cleanup[2]); self.assertFalse(teardown[2])
+                self.assertEqual(self.backend.CANCEL.is_set(), reason == 'cancel')
+                self.assertLess(time.monotonic() - before, 2)
+
+    def test_cancel_is_restored_when_recipe_cleanup_or_native_teardown_raises(self):
+        slot = self.owner_slot()
+        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'])
+        native = self.backend.run_command
+        for operation in ('recipe', 'native'):
+            with self.subTest(operation=operation):
+                shutil.rmtree(self.root / '.context', ignore_errors=True)
+                self.request['token'] = 'be-cleanup-error-' + operation
+                self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+                config = cycle.read(self.config); config.update(sleep=2, cancel_parent=True); cycle.write(self.config, config)
+                def fault(argv, **kwargs):
+                    selected = ('scripts/kill-services.sh' in ' '.join(argv) if operation == 'recipe'
+                                else argv == ['bash', self.backend.TEARDOWN])
+                    if selected:
+                        self.assertFalse(self.backend.CANCEL.is_set())
+                        raise OSError('controlled cleanup launch failure')
+                    return native(argv, **kwargs)
+                with patch.object(self.backend, 'run_command', side_effect=fault), self.assertRaisesRegex(OSError, 'controlled cleanup launch'):
+                    self.backend.execute(self.request, self.root)
+                self.assertTrue(self.backend.CANCEL.is_set())
+
+    def test_invalid_shard_summary_records_unverified_and_still_tears_down(self):
+        native_read = Path.read_bytes
+        variants = {'truncated': '{', 'not-object': '[]', 'null-results': '{"results":null}',
+                    'bad-results': '{"results":{}}', 'bad-row': '{"results":[null]}',
+                    'unreadable': '{"results":[]}'}
+        for name, body in variants.items():
+            with self.subTest(name=name):
+                shutil.rmtree(self.root / '.context', ignore_errors=True)
+                self.request['token'] = 'be-summary-' + name
+                self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
+                config = cycle.read(self.config); config['extra_summaries'] = {'blackbox-run-shard2': body}; cycle.write(self.config, config)
+                target = self.root / 'back-end/coverage/blackbox-run-shard2/summary.json'
+                def read_bytes(path):
+                    if name == 'unreadable' and path == target:
+                        raise PermissionError('controlled unreadable shard')
+                    return native_read(path)
+                with patch.object(Path, 'read_bytes', read_bytes):
+                    result = self.backend.execute(self.request, self.root)
+                self.assertFalse(result['complete']); self.assertTrue(result['cleanup_complete'])
+                self.assertTrue(all(v == 'UNVERIFIED' for k, v in result['cases'].items() if k.startswith('blackbox:')))
+                self.assertEqual(result['cases']['units'], 'PASS'); self.assertEqual(result['cases']['teardown'], 'PASS')
+                self.assertIn(str(target), result['evidence']['summary_errors'])
+                self.assertIn('error', result['evidence']['summary_errors'][str(target)])
+                first = str(self.root / 'back-end/coverage/blackbox-run-shard1/summary.json')
+                self.assertIn(first, result['evidence']['artifacts']['summaries'])
+                self.assertEqual(result['evidence']['blackbox:alpha']['shard'], first)
+                saved = self.root / '.context/deploy-backend' / __import__('hashlib').sha256(self.request['token'].encode()).hexdigest() / 'result.json'
+                self.assertEqual(cycle.read(saved), result)
 
     def test_threshold_failure_on_partial_coverage_is_inconclusive_not_fail(self):
         self.configure(1, self.rows(alpha=True, beta=False, gamma=True), c8_rc=1)

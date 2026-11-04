@@ -7,6 +7,7 @@ threshold and teardown cases from its own native artifacts. Nothing is rerun
 per domain; a partial-coverage threshold failure is inconclusive, never FAIL.
 """
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import math
@@ -24,6 +25,8 @@ from deploy_test_process import CANCEL, cancellation_handlers, run_command
 RUNNER = ['npm', 'run', 'test:coverage:sharded']
 FAILED_FIRST = ['bash', 'scripts/run-coverage-sharded.sh', '--failed-first']
 TEARDOWN = 'scripts/tests/blackbox-backend-teardown.test.sh'
+# Cleanup only: setup, the sweep and coverage reporting retain their original deadline.
+CLEANUP_SECONDS = 600
 FIXED = ('units', 'fps', 'coverage-threshold', 'teardown')
 UNIT_LINE = re.compile(r'^(✅ Unit pass passed|❌ Unit pass failed \(exit (\d+)\))', re.M)
 FPS_LINE = re.compile(r'^(✅ fps probe pass passed|❌ fps probe pass failed \(exit (\d+)\))', re.M)
@@ -99,10 +102,22 @@ def phase(pattern, text):
 def domain_cases(root, domains, started):
     cases, seen, hashes, unknown = {f'blackbox:{d}': 'UNVERIFIED' for d in domains}, {}, {}, []
     for path in sorted((root / 'back-end/coverage').glob('blackbox-run-shard*/summary.json')):
-        if path.stat().st_mtime < started - 1:
-            continue  # stale summary from an earlier sweep
-        hashes[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
-        for row in read(path).get('results', []):
+        try:
+            if path.stat().st_mtime < started - 1:
+                continue  # stale summary from an earlier sweep
+            raw = path.read_bytes()
+            hashes[str(path)] = hashlib.sha256(raw).hexdigest()
+            summary = json.loads(raw)
+            if not isinstance(summary, dict):
+                raise ValueError('shard summary must be an object')
+            rows = summary.get('results')
+            if (not isinstance(rows, list) or any(not isinstance(row, dict)
+                    or not isinstance(row.get('domain'), str) for row in rows)):
+                raise ValueError('shard results must be a list of domain objects')
+        except (OSError, ValueError, TypeError) as error:
+            seen.setdefault('summary_errors', {})[str(path)] = {'error': type(error).__name__ + ': ' + str(error)}
+            continue
+        for row in rows:
             domain = row.get('domain') if isinstance(row, dict) else None
             name = f'blackbox:{domain}'
             if domain in EXCLUSION_REASON:
@@ -119,7 +134,7 @@ def domain_cases(root, domains, started):
                 cases[name] = 'UNVERIFIED'
             else:
                 cases[name] = 'PASS' if row['passed'] else 'FAIL'
-    if unknown:  # never silently add a domain outside the frozen inventory
+    if unknown or seen.get('summary_errors'):  # unreadable membership cannot rule out duplicates or foreign domains
         cases = dict.fromkeys(cases, 'UNVERIFIED')
     return cases, seen, hashes, unknown
 
@@ -232,6 +247,17 @@ def run_step(spec, root, env, log, timeout):
     return code == 0 and not (timed_out or cancelled or lingering), code
 
 
+@contextmanager
+def cleanup_cancellation():
+    interrupted = CANCEL.is_set()
+    CANCEL.clear()
+    try:
+        yield
+    finally:
+        if interrupted:
+            CANCEL.set()
+
+
 def execute(request, root, failed_first=False):
     # Keep signal ownership through the report and teardown tails too.
     with cancellation_handlers(), exclusive(root / '.context/deploy-backend'):
@@ -263,6 +289,9 @@ def _execute(request, root, failed_first=False):
         value = max(0.001, deadline - time.monotonic())
         own = (spec or {}).get('timeout_seconds')
         return min(value, own) if own is not None else value
+    def cleanup_timeout(spec=None):
+        own = (spec or {}).get('timeout_seconds')
+        return min(CLEANUP_SECONDS, own) if own is not None else CLEANUP_SECONDS
     sweep = sweep_from_recipe(recipe, checks_for(domains)) if recipe else {'command': list(RUNNER), 'cwd': 'back-end'}
     refuse_env_skips(os.environ, sweep.get('env'), (recipe or {}).get('setup', {}).get('env'))
     env = {**os.environ, **sweep.get('env', {}), 'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
@@ -285,13 +314,10 @@ def _execute(request, root, failed_first=False):
             else:
                 code = setup_rc
         finally:
+            # Cleanup has its own bound; it never increases the sweep/report deadline.
             if recipe and recipe.get('cleanup'):
-                # Teardown is allowed to finish after cancellation of its tests (as deploy_test_worker.py does).
-                interrupted_before = CANCEL.is_set()
-                CANCEL.clear()
-                cleaned, cleanup_rc = run_step(recipe['cleanup'], root, env, log, remaining(recipe['cleanup']))
-                if interrupted_before:
-                    CANCEL.set()
+                with cleanup_cancellation():
+                    cleaned, cleanup_rc = run_step(recipe['cleanup'], root, env, log, cleanup_timeout(recipe['cleanup']))
     text = (directory / 'runner.log').read_text(errors='replace')
     interrupted = timed_out or cancelled or lingering or code not in (0, 1)
     active = [c for c in checks]
@@ -318,9 +344,9 @@ def _execute(request, root, failed_first=False):
         cases['coverage-threshold'] = status
         evidence['coverage-threshold'] = {'identity': identity, 'reason': why, 'log': str(directory / 'threshold.log')}
         evidence['shard_logs'] = {str(path): sha_file(path) for path, _ in child_logs}
-    with (directory / 'teardown.log').open('wb') as log:
+    with cleanup_cancellation(), (directory / 'teardown.log').open('wb') as log:
         t_code, t_timeout, t_cancel, t_linger = run_command(['bash', TEARDOWN], cwd=root, env=env,
-                                                           output=log, timeout=remaining())
+                                                           output=log, timeout=cleanup_timeout())
     teardown_ok = cleaned and t_code == 0 and not (t_timeout or t_cancel or t_linger)
     cases['teardown'] = 'PASS' if teardown_ok else ('FAIL' if t_code in (1,) and not (t_timeout or t_cancel or t_linger) else 'UNVERIFIED')
     evidence['teardown'] = {'exit': t_code, 'command': ['bash', TEARDOWN], 'log': str(directory / 'teardown.log'),

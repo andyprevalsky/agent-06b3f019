@@ -20,6 +20,9 @@ def generate(template, inventory, root):
         checkout = str(Path(slot['worker_root']))
         if not Path(checkout).is_absolute():
             raise ValueError('prepared worker roots must be absolute')
+        if mode == 'local-isolated':
+            checkout = str(Path(checkout).resolve())
+            slot = {**slot, 'worker_root': checkout}
         if gate.get('native_backend'):
             from deploy_test_backend import sweep_from_recipe
             sweep_from_recipe(slot.get('recipe', {}), gate['checks'])
