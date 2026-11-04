@@ -19,6 +19,7 @@
  */
 import { createLogger } from '../logger';
 import {
+  extendLease,
   finishRun,
   publishSnapshot,
   recordSandbox,
@@ -157,6 +158,11 @@ export async function executeMaintenanceRun(
     );
     if (restore.checkout.error) throw new RunFailure(restore.checkout.error);
     out.line(`workspace ${restore.checkout.source} @ ${restore.checkout.headSha ?? 'unknown'}`);
+
+    // Creation and checkout must not consume the sync script's lease budget.
+    if (!(await extendLease(project.id, run.id, maintenanceLeaseMs(project), deps.now()))) {
+      throw new RunFailure('the project lease was lost before the sync script started');
+    }
 
     // The script's `git fetch origin` needs the token; the scrub below removes it.
     if (workspace.cloneUrl) {

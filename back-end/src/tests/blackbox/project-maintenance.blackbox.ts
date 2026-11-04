@@ -47,6 +47,7 @@ import {
 } from '../../providers/projects/workspaceExecutor';
 import { e2bWorkspaceExecutor, restoreWorkspace } from '../../providers/projects/workspace';
 import { FakeE2b, tempRoot } from './project-maintenance-fake-e2b';
+import { registerMaintenanceLeaseCases } from './project-maintenance-lease.cases';
 import { registerMaintenanceReviewCases } from './project-maintenance-review.cases';
 
 const SECRET = `sync-fixture-secret-${randomBytes(8).toString('hex')}`;
@@ -595,3 +596,5 @@ test('a session restored from the snapshot gets the branch head, fresh env files
 });
 
 registerMaintenanceReviewCases({ fixture, runOnce, lastRun, projectRow, git, SYNC_SCRIPT });
+
+registerMaintenanceLeaseCases();
