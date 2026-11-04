@@ -4189,6 +4189,24 @@ async def test_pause_episode_preserves_user_intent_across_automatic_signals():
     await prove_pause_episode_ordering()
 
 
+async def test_pause_provenance_fixture_restores_network_after_its_proof():
+    """The fixture forbids network calls only while it runs, never for later domains.
+
+    Importing it patched socket.socket.connect for the whole process, so every
+    domain after ``workflow`` in one run lost local loopback (rose
+    rose_local_loopback_no_fallback: "provider/network calls prohibited in pause
+    provenance fixture").
+    """
+    import socket
+
+    original = (socket.socket.connect, socket.socket.connect_ex)
+    from pause_control_provenance import prove_pause_episode_ordering
+
+    assert (socket.socket.connect, socket.socket.connect_ex) == original, "import patched the process socket"
+    await prove_pause_episode_ordering()
+    assert (socket.socket.connect, socket.socket.connect_ex) == original, "the proof left the socket patched"
+
+
 async def test_pause_intent_ends_with_recovered_episode():
     from unittest.mock import AsyncMock
     wf = _bare_workflow_instance()
@@ -13786,6 +13804,7 @@ async def run_all_tests():
     await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
     await r.record_async("pause_intent_ends_with_recovered_episode", test_pause_intent_ends_with_recovered_episode)
     await r.record_async("pause_episode_ordering", test_pause_episode_preserves_user_intent_across_automatic_signals)
+    await r.record_async("pause_provenance_fixture_restores_network", test_pause_provenance_fixture_restores_network_after_its_proof)
     await r.record_async("wf_signal_pause_cascade", test_workflow_signal_pause_cascades_to_children)
     await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
     await r.record_async(
