@@ -103,7 +103,8 @@ agent_trajectories is not searched (display_order reports the real order),
 `order`/`page_after` on a merged agent_trajectories search is rejected naming
 that parameter, the remaining agent selectors are rejected by name with what
 to add, and top-level `until`/`since`/`person` apply to every selected source
-whose filters accept them (validate.normalize.ts; see
+whose filters accept them, leaving the other selected sources unfiltered
+(validate.normalize.ts; see
 2026-11-04-grep-schema-documented-nested-filters-validator-accepted-only-flat).
 The `[agent_network, messages] + order` case in
 `data-agent-task-path.cases.ts` changed from 400 to 200 accordingly.

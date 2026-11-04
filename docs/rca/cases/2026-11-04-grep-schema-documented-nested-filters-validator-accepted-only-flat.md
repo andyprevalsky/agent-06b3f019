@@ -93,23 +93,39 @@ One filter contract, implemented once in
 - A flat key, like the top-level `person`/`since`/`until` shorthands, applies
   to every selected source that accepts it and is rejected only when none
   does; nested blocks must use their source's keys.
+- A printed path (or /root/... agent address) applies only to the source it
+  belongs to; naming an unselected source's path is rejected with "add it to
+  sources".
 - Null values and empty objects are "not given". A nested block or a printed
   path names its own source when `sources` is omitted (generalizing the
-  calendar/drive-only rule).
+  calendar/drive-only rule) and wins over until/order trajectory narrowing;
+  otherwise flat filters apply to the default sources by the same rule, so
+  the blanket `'filters'` rejection is gone.
 - agent_network `filters.path` also accepts an agent address (/root/...), as
   agent_trajectories already did.
 - `InvalidGrepParamError(param, hint)`: every prod-observed rejection now names
-  the parameter the caller sent and says what to send instead.
+  the parameter the caller sent (`since`, `filters.since` or
+  `filters.messages.since`) and says what to send instead.
 
 Each parser now receives its source's effective filters, so the duplicated
 `requireFilterObject`/`rejectUnsupportedFilters` calls and
 `googleSourceOfPath` were deleted. The agents layer resolves the same implied
 sources for connector gating, reads a nested `documents.document_source`, and
-drops a skipped source's nested block when partial gating narrows `sources`.
+drops a skipped source's nested block, and flat or top-level keys only skipped
+sources accept, when partial gating narrows `sources` (`SOURCE_FILTER_KEYS` in
+`agents/domains/grep/config.py`, bound to `DATA_SOURCE_CONFIGS` by
+`test_grep_source_filter_keys_match_backend_validator`).
 The GrepTool `filters`/`since`/`until`/`order` text and the grep prompt now
 describe this contract (approval-gated text; golden-reference review attached
 to the branch handoff), and `test_grep_schema_filter_keys_match_backend_validator`
 fails if the schema's per-source key lists ever differ from `DATA_SOURCE_CONFIGS`.
+
+Known remaining design choice (adversarial review): a flat or top-level key
+that only some selected sources accept narrows those sources and leaves the
+others unfiltered, as documented in the schema ("applies to every selected
+source that accepts it"), with no per-source applied-filters field in the
+result. `filters.until` on messages is still rejected (messages has no until
+filter); adding it is a feature, not part of this contract fix.
 
 10k-agent behavior: pure in-request validation over a bounded param object
 (≤13 sources × ≤8 keys); no new queries, connections, shared state or locks.
