@@ -3526,7 +3526,7 @@ the deletion-readiness check one last time. Do not return a completed scorecard
 with “archive later”, unpreserved local records, or unresolved recovery work.
 
 After the new branch is created, publish only the deploy scorecard using the
-stable `deploy-summary-v1` template in
+stable `deploy-summary-v2` template in
 `.claude/shared/report-display-format.md` and populate
 `.claude/shared/deploy-scorecard-template.html`. Preserve the user-approved structure
 shown at https://boxes.dev/visuals/vis_1997f1fd05813cc9be440f44d5700ffe:
@@ -3572,6 +3572,14 @@ handoff remains unresolved, keep the deploy incomplete and list the exact item
 in FOLLOWUPS. Independent repairs and qualified external exceptions do not
 waive preservation. Do not add a second status line or redesign the approved
 scorecard layout to report this requirement.
+
+Apply **Work versus waiting** in `.claude/shared/report-display-format.md` to
+all current and future deploy agents. Split recorded active fixes and running
+automation from waits for users, credits, providers, queues and dependencies.
+Never use a mixed "fixes / other" row. Record mode transitions with the native
+activity events; unmatched historical gaps appear only as **Wait — reason
+unrecorded**, with no invented cause or active-work credit. Keep the same boxes
+and shared axis; add the work/wait totals inside the final timeline box.
 
 WHAT DEPLOYED includes the actual production/Temporal state and verified
 coverage. Every elected AgentCard gate remains **SKIPPED — <reason>**, never
