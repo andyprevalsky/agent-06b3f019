@@ -1,9 +1,10 @@
 /**
  * Tilion drive calls and files. Live Tilion refuses REST drive calls while a
- * CDP client (the agent worker) is attached: screenshot/act answer 409
- * `session_driven_by_client` and files/fetch 502 `ExternalControlBusy`, both
- * surfaced as TilionSessionBusyError. Callers mid-run must use the worker's own
- * CDP connection instead.
+ * CDP client (the agent worker) is attached: act answers 409
+ * `session_driven_by_client` and files/fetch 409/502, surfaced as
+ * TilionSessionBusyError; callers mid-run must use the worker's own CDP
+ * connection instead. Since 2026-11 a read-only screenshot is served beside
+ * the attached client.
  */
 import { randomUUID } from 'node:crypto';
 import type { BrowserContext } from 'playwright';

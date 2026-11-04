@@ -8005,3 +8005,13 @@
 {"task": "background-agent-message-smoke", "duration_seconds": 54.2, "cost_cents": 0.0, "timestamp": "2026-11-03T05:48:14.063163+00:00", "agent_id": "d1426c84-1956-4624-af8c-8bf8f6ac7416"}
 {"task": "chat-mode", "duration_seconds": 13.2, "cost_cents": 0.0, "timestamp": "2026-11-03T05:48:14.063163+00:00", "agent_id": "2636adda-2e58-4016-83b0-8280cee779cd"}
 {"task": "browser-smoke", "duration_seconds": 132.4, "cost_cents": 1.0, "timestamp": "2026-11-03T05:48:14.063163+00:00", "agent_id": "902e9ad6-e53b-4980-a83f-710ae6093bc8"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 265.6, "cost_cents": 78.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "7aff0c59-9d26-46fe-acd4-f5d4004d95d3"}
+{"task": "grep-agent-trajectories-cross-surface", "duration_seconds": 84.8, "cost_cents": 4.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "f2996d72-158e-42e0-a2b6-b5c5e4536c29"}
+{"task": "grep-agent-trajectories-code-tool-status", "duration_seconds": 79.8, "cost_cents": 5.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "bc192566-79fd-4b3a-9b19-3e933dc4bb5b"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 226.6, "cost_cents": 1.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "20d1efd1-232f-4ce9-ab79-e539576ced35"}
+{"task": "spawn-sub-agents", "duration_seconds": 215.3, "cost_cents": 2.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "194521b7-9c04-4a67-8198-334c856c2b87"}
+{"task": "parallel-tool-calls", "duration_seconds": 437.6, "cost_cents": 52.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "ed7e0edd-ac3a-4663-8ebb-f4c1c0896336"}
+{"task": "plaid-transactions-monthly-spend", "duration_seconds": 94.1, "cost_cents": 0.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "b7bec0c9-5816-45c5-8a02-1ac72d4d81a8"}
+{"task": "browser-smoke", "duration_seconds": 190.5, "cost_cents": 1.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "1a6ac212-1f52-4952-826b-e4b4cd243413"}
+{"task": "chat-mode", "duration_seconds": 13.1, "cost_cents": 0.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "7f1b604b-3467-4564-874a-7a61f103be4d"}
+{"task": "background-agent-message-smoke", "duration_seconds": 111.0, "cost_cents": 0.0, "timestamp": "2026-11-04T07:18:54.178204+00:00", "agent_id": "62b9f515-f7bf-41e4-94de-a54d1e3adc5e"}
