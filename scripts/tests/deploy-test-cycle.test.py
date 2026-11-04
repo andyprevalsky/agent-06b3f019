@@ -492,6 +492,104 @@ class Cycle(unittest.TestCase):
                 path.write_bytes(original)
         self.assertEqual(0, c.verify_saved(self.directory, self.root))
 
+    def qualified_full_fixture(self, resource=False):
+        worker = self.root / 'scripts/deploy_test_cloud.py'; worker.parent.mkdir()
+        worker.write_text("import json,os;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "p=Path('.context/native-launches');p.write_text(p.read_text()+'run\\n' if p.exists() else 'run\\n');"
+            "v={k:r[k] for k in ('token','source','gate')};"
+            "v.update(cases=dict.fromkeys(r['checks'],'PASS'),complete=True,cleanup_complete=True,reused=False);"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(v))")
+        self.plan['source'] = c.source(self.root)
+        self.state = c.initialize(self.plan, self.root)
+        proof, evidence = self.standing_claude_fixture()
+        gate = self.plan['gates'][-1]
+        gate['checks'] = ['passed-' + str(i) for i in range(14)] + ['mail-one', 'mail-two', 'claude-code-agent']
+        self.state = c.initialize(self.plan, self.root)
+        c.standing_skip(self.state, proof, self.root)
+        for name in ('mail-one', 'mail-two'):
+            self.state['skips']['smoke/' + name] = dict(source=self.state['source'],
+                input_fingerprint=self.state['input_fingerprints']['smoke'], disposition='external / waived',
+                rca=dict(id=name, native_result='FAIL', attribution='NOT_INTRODUCED', description='Exact historical mail operation',
+                    evidence='original-mail-receipt', external_provider=dict(name='Primitive',reason='outage')))
+        if resource:
+            native = self.root / '.context/compute-skip.json'
+            row = self.skipped_row()['native_task']; row['name'] = 'passed-0'
+            c.write(native,dict(tasks=[row]))
+            confirmation=self.confirmation(receipt_sha256=c.sha_file(native))
+            failure=dict(id='native-compute-skip',gate='smoke',check='smoke/passed-0',
+                source=self.state['source'],native_result='FAIL',complete=True,finished_at=1000.0,
+                worker_evidence=dict(native_task=row,path=str(native),sha256=c.sha_file(native)))
+            failure['rca']=dict(id=failure['id'],attribution='NOT_INTRODUCED',native_result='FAIL',
+                description='Native compute quota skip',evidence=str(native),resource_skip=confirmation)
+            self.state['failures'].append(failure)
+            self.state['resource_warnings']=[dict(id=failure['id'],check=failure['check'],gate='smoke',
+                native_result='FAIL',native_row=row,receipt_sha256=c.sha_file(native),confirmation=confirmation,
+                source=self.state['source'],input_fingerprint=self.state['input_fingerprints']['smoke'])]
+        self.state.update(phase='needs-focused-plan', repair_gates=['smoke'])
+        c.focused_plan(self.state, self.plan, dict(source=self.state['source'], gates={
+            'smoke':dict(command=gate['command'],checks=gate['checks'])}))
+        c.run_phase(self.plan,self.state,self.directory,self.root)
+        return gate, proof, evidence
+
+    def test_qualified_full_coverage_runs_once_and_revalidates_after_repeated_sync(self):
+        gate, proof, evidence = self.qualified_full_fixture()
+        native = copy.deepcopy(c.latest_receipts(self.state)['smoke'])
+        self.assertEqual((14,3), (list(native['cases'].values()).count('PASS'),list(native['cases'].values()).count('SKIP')))
+        for phase in ('failed-gates', 'quick', 'final'):
+            self.assertEqual(phase,self.state['phase'])
+            c.run_phase(self.plan,self.state,self.directory,self.root)
+        self.assertEqual(['run'], (self.root/'.context/native-launches').read_text().splitlines())
+        self.assertEqual(0,c.verify_saved(self.directory,self.root))
+        for index in range(2):
+            subprocess.run(['git','-c','user.name=test','-c','user.email=test@example.com',
+                'commit','--allow-empty','-qm','history-only sync'],cwd=self.root,check=True)
+            new=copy.deepcopy(self.plan);new['source']=c.source(self.root)
+            c.refresh(self.state,self.plan,new,self.root);self.plan=new
+            for phase in ('quick','final'):
+                self.assertEqual(phase,self.state['phase']);c.run_phase(new,self.state,self.directory,self.root)
+            self.assertEqual(0,c.verify_saved(self.directory,self.root))
+            self.assertEqual(native,c.latest_receipts(self.state)['smoke'])
+        self.assertEqual(['run'], (self.root/'.context/native-launches').read_text().splitlines())
+        (evidence/'run.json').write_bytes((evidence/'run.json').read_bytes()+b' ')
+        self.assertNotEqual(0,c.verify_saved(self.directory,self.root))
+
+    def test_qualified_full_reuse_refuses_changed_qualification_contract_owner_or_native_bytes(self):
+        gate, proof, evidence = self.qualified_full_fixture()
+        self.assertTrue(c.full_pass_binding(self.state,gate))
+        for mode in ('removed','changed','incomplete','owner','contract','newer-failure'):
+            with self.subTest(mode=mode):
+                candidate=copy.deepcopy(self.state);receipt=c.latest_receipts(candidate)['smoke']
+                if mode=='removed':candidate['skips'].pop('smoke/mail-one')
+                elif mode=='changed':candidate['skips']['smoke/mail-one']['rca']['description']='different obligation'
+                elif mode=='incomplete':receipt['complete']=False
+                elif mode=='owner':receipt['cleanup_owner']={'request_token':'retained'}
+                elif mode=='contract':receipt['execution_binding']['contract_digest']='different full recipe'
+                else:candidate['attempts'].append(dict(phase='final',results=[dict(gate='smoke',status='FAIL')]))
+                self.assertIsNone(c.full_pass_binding(candidate,gate))
+        self.state.update(phase='final',ready=False)
+        c.run_phase(self.plan,self.state,self.directory,self.root)
+        self.assertEqual(0,c.verify_saved(self.directory,self.root))
+        receipt=c.latest_receipts(self.state)['smoke'];folder=Path(receipt['log']).parent
+        for path in (folder/'receipt.json',folder/'request.json',Path(receipt['worker_result'])):
+            with self.subTest(path=path):
+                original=path.read_bytes();path.write_bytes(original+b' ')
+                self.assertNotEqual(0,c.verify_saved(self.directory,self.root));path.write_bytes(original)
+
+    def test_qualified_resource_reuse_replays_original_row_confirmation_and_bytes(self):
+        gate, proof, evidence=self.qualified_full_fixture(resource=True)
+        original=copy.deepcopy(self.state['failures'])
+        self.assertTrue(c.full_pass_binding(self.state,gate))
+        self.state.update(phase='final',ready=False)
+        c.run_phase(self.plan,self.state,self.directory,self.root)
+        self.assertEqual(0,c.verify_saved(self.directory,self.root))
+        self.assertEqual(original,self.state['failures'])
+        warning=self.state['resource_warnings'][0]
+        self.assertEqual('SKIP',c.latest_receipts(self.state)['smoke']['cases']['passed-0'])
+        native=Path(self.state['failures'][0]['worker_evidence']['path'])
+        native.write_bytes(native.read_bytes()+b' ')
+        self.assertNotEqual(0,c.verify_saved(self.directory,self.root))
+
     def test_failed_gate_boundary_refresh_keeps_history_and_revalidates_new_source(self):
         import contextlib, io
         failure = self.failure()

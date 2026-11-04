@@ -235,19 +235,63 @@ def initialize(plan: dict, root: Path) -> dict:
             "input_fingerprints": input_fingerprints(plan, root)}
 
 
+def reuse_qualifications(state: dict, gate: dict) -> dict:
+    """Replay existing dispositions; projected source fields never replace native proof."""
+    from deploy_failure_report import decision
+    revalidate_standing_skips(state)
+    name, expected = gate['name'], {}
+    for key, entry in state.get('skips', {}).items():
+        if not key.startswith(name + '/') or entry['source'] != state['source']:
+            continue
+        if entry.get('input_fingerprint') != state['input_fingerprints'][name]:
+            raise ValueError('reuse qualification input changed')
+        if 'standing_skip' not in entry and decision(entry['rca']) != entry['disposition']:
+            raise ValueError('reuse qualification disposition changed')
+        expected[key.split('/', 1)[1]] = entry
+    for warning in state.get('resource_warnings', []):
+        if warning['gate'] != name or warning['source'] != state['source']:
+            continue
+        case = warning['check'].split('/', 1)[1]
+        failure = next(f for f in state['failures'] if f['id'] == warning['id'])
+        validate_resource_skip(failure['rca'], failure)
+        evidence = failure['worker_evidence']
+        if (warning.get('input_fingerprint') != state['input_fingerprints'][name]
+                or warning['confirmation'] != failure['rca']['resource_skip']
+                or warning['native_row'] != evidence['native_task']
+                or warning['receipt_sha256'] != evidence['sha256']
+                or sha_file(evidence['path']) != evidence['sha256'] or case in expected):
+            raise ValueError('reuse resource qualification changed')
+        expected[case] = {'disposition': RESOURCE_SKIP, **warning}
+    if not set(expected) <= set(gate['checks']):
+        raise ValueError('reuse qualification outside full inventory')
+    return expected
+
+
+def qualification_identity(skips: dict) -> dict:
+    # refresh changes ONLY these outer projection fields; nested native/RCA bytes stay bound.
+    return {key: {k: v for k, v in value.items() if k not in {'source', 'original_source'}}
+            for key, value in skips.items()}
+
+
 def full_pass_binding(state: dict, gate: dict) -> dict | None:
-    """Only the latest immutable, executed FULL native PASS is eligible."""
+    """Latest FULL execution: native PASS subset plus exact existing qualified exclusions."""
     latest = latest_receipts(state).get(gate['name'])
     if not latest or gate.get('quick'):
         return None
     receipt = latest
+    try:
+        skips = reuse_qualifications(state, gate)
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        return None
+    active = [case for case in gate['checks'] if case not in skips]
+    expected = {case: 'SKIP' if case in skips else 'PASS' for case in gate['checks']}
     attempt = next((a for a in reversed(state.get('attempts', [])) if any(r is receipt for r in a.get('results', []))), {})
     if (attempt.get('phase') not in {'initial', 'focused', 'failed-gates', 'final'} or attempt.get('stale') or attempt.get('interrupted')
             or receipt.get('status') != 'PASS' or receipt.get('complete') is not True
             or receipt.get('executed') is not True or type(receipt.get('native_exit')) is not int
             or receipt['native_exit'] != 0 or receipt.get('timed_out') or receipt.get('cancelled')
             or receipt.get('lingering_group') or receipt.get('cleanup_owner')
-            or receipt.get('cases') != dict.fromkeys(gate['checks'], 'PASS')
+            or not active or receipt.get('cases') != expected
             or receipt.get('command') != gate['command']
             or receipt.get('execution_binding') != {'input_fingerprint': state['input_fingerprints'].get(gate['name']),
                 'contract_digest': digest(gate), 'environment': state['environment']}):
@@ -259,18 +303,23 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
         request_path = path.parent / 'request.json'
         request = bounded_read(request_path, 'carried gate request')
         if (any(request.get(k) != receipt.get(k) for k in ('token', 'source', 'gate'))
-                or request.get('checks') != gate['checks'] or request.get('skips')
+                or request.get('checks') != active
+                or qualification_identity(request.get('skips', {})) != qualification_identity(skips)
+                or any(v.get('source') != receipt['source'] for v in request.get('skips', {}).values())
                 or request.get('worker_recipe') != gate.get('worker_recipe')):
             return None
         worker = receipt.get('worker_result')
+        if skips and (not gate.get('case_protocol') or not worker):
+            return None
         if worker:
             value = bounded_read(worker, 'carried worker result')
             checks, complete = validate_result(value, request, receipt['native_exit'], invalid_process=False)
-            if not complete or checks != receipt['cases']:
+            if not complete or checks != dict.fromkeys(active, 'PASS'):
                 return None
         return {'receipt': str(path), 'receipt_sha256': sha_file(path), 'request_sha256': sha_file(request_path),
                 'worker_result_sha256': sha_file(worker) if worker else None,
-                'native_source': receipt['source'], 'token': receipt['token']}
+                'native_source': receipt['source'], 'token': receipt['token'],
+                **({'qualification_digest': digest(qualification_identity(skips))} if skips else {})}
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
