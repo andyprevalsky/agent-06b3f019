@@ -110,8 +110,10 @@ clock, selected coverage, failure history or cleanup obligations.
 2. Merge and install dependencies only at a safe boundary for those resources.
    Never replace source, packages or a database under their active consumers.
    A worker using an isolated checkout and database may finish its frozen run.
-   `setup-db.sh` waits only for consumers of its target database; unrelated gates
-   do not wait for that reset.
+   `setup-db.sh` serializes only against other setup runs on the same target
+   database; it does not detect running tests. Confirm every consumer of that
+   database has finished before invoking it. Gates on other databases do not
+   wait for that reset.
 3. Record the merged source and replan without dropping the original selected
    gates or checks. Preserve completed and running receipts with their original
    source. A changed HEAD alone is not evidence that every test input changed.
