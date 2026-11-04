@@ -7367,6 +7367,11 @@ async def test_user_auth_error_report_names_the_leased_integration():
         body = posted[0]
         assert body["source"] == "user" and body["failureReason"] == "auth_error", body
         assert body["integrationId"] == "integration-s33", f"{token_type}: {body}"
+        # T7: and the held token's fingerprint, so an expired or re-synced
+        # login is never disabled for a rejection of an older token.
+        from helpers.llm import credential_fingerprint
+
+        assert body["credential"] == credential_fingerprint("token"), f"{token_type}: {body}"
 
 
 async def test_client_foundry_server_error_falls_through_to_openrouter():

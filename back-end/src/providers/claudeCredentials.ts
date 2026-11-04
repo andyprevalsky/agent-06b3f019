@@ -500,21 +500,14 @@ export async function markUserTokenRateLimited(
       ...(options?.integrationId ? { id: options.integrationId } : {}),
       ...(options?.accountId ? { accountId: options.accountId } : {}),
     };
-    // S33: an auth failure must name the credential that failed. Without an
-    // integration or account id it cannot tell a user's accounts apart, so it
-    // never expires more than one row (one bad token expired every healthy
-    // sibling subscription).
+    // S33/T7: an auth failure must name the credential that failed. Without an
+    // integration or account id it cannot tell the failed login from the user's
+    // other rows, so it expires none (prod: updated:3 with integrationId:null).
     if (!options?.integrationId && !options?.accountId) {
-      const candidates = await prisma.integration.count({
-        where: { ...scopedWhere, status: 'CONNECTED' },
+      log.warn(`User token auth failure for ${userId} names no credential; not expiring`, {
+        failureReason: options?.failureReason,
       });
-      if (candidates > 1) {
-        log.warn(`User token auth failure for ${userId} names no credential; not expiring`, {
-          candidates,
-          failureReason: options?.failureReason,
-        });
-        return;
-      }
+      return;
     }
     const updated = await prisma.integration.updateMany({
       where: scopedWhere,

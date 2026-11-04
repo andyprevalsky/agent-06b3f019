@@ -70,6 +70,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         call_llm_activity,
+        credential_fingerprint,
         fetch_compute_token_activity,
         mark_compute_token_rate_limited_activity,
         persist_response_schema_activity,
@@ -996,6 +997,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id: Optional[str] = None
         self.gpt_code_token_source: Optional[str] = None
         self.gpt_code_token_pool_id: Optional[str] = None
+        # The exact Integration row the active compute token was leased from;
+        # failure reports name it so they never reach the user's other logins.
+        self.compute_token_integration_id: Optional[str] = None
         self.compute_token_lineage_key: Optional[str] = None
         self.compute_token_demo_cache_affinity_key: Optional[str] = None
         self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
@@ -3959,6 +3963,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id = None
         self.gpt_code_token_source = None
         self.gpt_code_token_pool_id = None
+        self.compute_token_integration_id = None
         self.compute_token_fetched_at = None
         self.claude_max_token_fetched_at = None
 
@@ -3968,6 +3973,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         now = workflow.now()
         self._clear_compute_token()
         self.compute_token_provider = token.get("type")
+        self.compute_token_integration_id = token.get("integrationId")
         if token.get("lineageKey"):
             self.compute_token_lineage_key = token.get("lineageKey")
         if self.compute_token_provider == "claude":
@@ -4070,6 +4076,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "userId": self.user_id,
                 "source": self.claude_max_token_source,
                 "poolTokenId": self.claude_max_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -4083,6 +4090,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "accountId": self.gpt_code_account_id,
                 "source": self.gpt_code_token_source,
                 "poolTokenId": self.gpt_code_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -5425,14 +5433,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         try:
                             await workflow.execute_activity(
                                 mark_compute_token_rate_limited_activity,
+                                # Every parameter of the activity, in order: the
+                                # report names the exact leased login (T7).
                                 args=[
                                     "claude",
                                     self.claude_max_token_source,
                                     self.user_id,
                                     self.claude_max_token_pool_id,
+                                    self.compute_token_integration_id,
                                     5 * 60,
                                     None,
                                     claude_token_error,
+                                    credential_fingerprint(self.claude_max_token),
                                 ],
                                 start_to_close_timeout=timedelta(seconds=10),
                                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -5480,14 +5492,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         try:
                             await workflow.execute_activity(
                                 mark_compute_token_rate_limited_activity,
+                                # Every parameter of the activity, in order: the
+                                # report names the exact leased login (T7).
                                 args=[
                                     "gpt",
                                     self.gpt_code_token_source,
                                     self.user_id,
                                     self.gpt_code_token_pool_id,
+                                    self.compute_token_integration_id,
                                     5 * 60,
                                     None,
                                     gpt_token_error,
+                                    credential_fingerprint(self.gpt_code_token),
                                 ],
                                 start_to_close_timeout=timedelta(seconds=10),
                                 retry_policy=RetryPolicy(maximum_attempts=2),
