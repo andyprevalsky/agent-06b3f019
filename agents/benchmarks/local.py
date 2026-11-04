@@ -37,6 +37,10 @@ from urllib.parse import urlsplit
 
 AGENTS_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = AGENTS_DIR.parent
+# The environment this launcher was started with, captured before any worker
+# module import can load agents/.env into os.environ (see service_base_environ).
+_LAUNCH_ENVIRON = dict(os.environ)
+WORKER_DOTENV_PATH = AGENTS_DIR / ".env"
 if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
@@ -1480,8 +1484,9 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
 
 def seed_payment_fixture(manifest: dict) -> None:
     database_url = manifest_database_url(manifest)
+    # A backend script: like the stack services, it reads back-end/.env itself.
     env = {
-        **os.environ,
+        **service_base_environ(),
         "DATABASE_URL": database_url,
         "DIRECT_URL": database_url,
     }
@@ -1788,6 +1793,28 @@ def benchmark_runner_env(base: Mapping[str, str] | None = None) -> dict[str, str
     return env
 
 
+def service_base_environ() -> dict[str, str]:
+    """os.environ minus values this launcher only acquired by loading the worker's dotenv.
+
+    Importing run_benchmark (for example ``needs_independent_worlds`` whenever
+    --max-concurrency > 1) runs the agents ``config.load_config()``, which
+    ``load_dotenv()``s agents/.env into this process. Forwarding those values to
+    run.sh handed the backend the worker's config ahead of back-end/.env
+    (process env beats dotenv): BROWSER_PROVIDER=kernel instead of the
+    production provider, so every predeploy browser task ran on a provider
+    production does not use. Each service loads its own env file, so keep what
+    the launcher was started with or set itself and drop the rest.
+    """
+    from dotenv import dotenv_values
+
+    worker_values = dotenv_values(WORKER_DOTENV_PATH) if WORKER_DOTENV_PATH.exists() else {}
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _LAUNCH_ENVIRON or worker_values.get(key) != value
+    }
+
+
 def start_services(
     stack: ServiceStack,
     clean_first: bool = True,
@@ -1802,7 +1829,7 @@ def start_services(
     stack.context_dir.mkdir(parents=True, exist_ok=True)
     if clean_first and not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
-    env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
+    env = {**service_base_environ(), "DISABLE_GMAIL_SYNC": "1"}
     stack_cleanup_token = uuid.uuid4().hex
     if stack.isolated:
         env["RUN_STACK_CLEANUP_STATUS_FILE"] = str((stack.context_dir / "local-stack-cleanup.status").resolve())

@@ -16730,6 +16730,96 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     assert "ratchet" in reason.lower()
 
 
+def test_webdecoy_score_evidence_is_recorded_for_comparison():
+    """Replay of the failing predeploy capture (agent 8d029581, FCaptcha 0.187 > 0.163).
+
+    The ledger kept only the failure line, and passes recorded no score at all, so
+    the 0.187 could not be compared with the passes. The capture shows the score is
+    the Kernel-residential baseline 0.153164 (PoW challenge_network_mismatch +
+    teleport click) plus a datacenter-flagged exit (+0.0336): the browser session
+    decides the number. Every attempt therefore records score, engine, the verify
+    detections and the browser provider/exit, and the failure line names them.
+    """
+    import tempfile
+
+    from benchmarks.results import BenchmarkRun, TaskResult
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result, _webdecoy_score_evidence
+    import benchmarks.timeout_history as timeout_history
+
+    fixture = pathlib.Path(__file__).parent / "fixtures" / "webdecoy_kernel_datacenter_fail" / "network" / "index.json"
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. Clicked the checkbox. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "network_recording_path": str(fixture),
+                    "browser_session_metadata": {"provider": "kernel", "proxy_source": "kernel_residential_city"},
+                },
+            }
+        ]
+    }
+
+    evidence = _webdecoy_score_evidence(data)
+    assert evidence == {
+        "fcaptcha_score": 0.18676399999999999,
+        "fcaptcha_score_source": "captured API",
+        "fcaptcha_engine_version": "1.46.1",
+        "fcaptcha_detections": [
+            "bot: PoW verification failed: challenge_network_mismatch",
+            "datacenter: Request from known datacenter IP range",
+            "bot: No local speech synthesis voices",
+            "vision_ai: Click injected with no pointer trajectory (1 teleport clicks)",
+            "captcha_farm: Unusually long interaction time",
+        ],
+        "browser_provider": "kernel",
+        "browser_proxy_source": "kernel_residential_city",
+    }
+
+    passed, reason = _evaluate_webdecoy_biometrics_result(data)
+    assert passed is False
+    assert "risk score 0.187 exceeds ratchet 0.163" in reason
+    assert "FCaptcha engine v1.46.1" in reason
+    assert "vision_ai: Click injected with no pointer trajectory" in reason
+    # The flag that tipped the score over only fired on the first verify.
+    assert "datacenter: Request from known datacenter IP range" in reason
+    assert "browser kernel/kernel_residential_city" in reason
+
+    # Passing attempts carry the same evidence into the attempts ledger.
+    with tempfile.TemporaryDirectory() as scratch:
+        ledger = pathlib.Path(scratch) / "attempts.jsonl"
+        with (
+            patch.object(timeout_history, "HISTORY_DIR", scratch),
+            patch.object(timeout_history, "ATTEMPTS_FILE", str(ledger)),
+            patch.object(timeout_history, "record_pass", lambda **_kwargs: None),
+            patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": "", "BENCHMARK_HISTORY_PARK_DIR": ""}),
+        ):
+            run = BenchmarkRun(suite="predeploy", base_url="http://localhost:3300")
+            run.task_results.append(
+                TaskResult(
+                    name="browser-biometrics-webdecoy",
+                    passed=True,
+                    agent_id="agent-pass",
+                    status="COMPLETED",
+                    progress_score=1.0,
+                    duration_seconds=140.0,
+                    cost_cents=27.0,
+                    message_count=1,
+                    evaluator_evidence={**evidence, "fcaptcha_score": 0.018, "browser_provider": "tilion"},
+                )
+            )
+            run._record_history()
+        (row,) = (json.loads(line) for line in ledger.read_text().splitlines())
+    assert row["passed"] is True
+    assert row["evaluator_evidence"]["fcaptcha_score"] == 0.018
+    assert row["evaluator_evidence"]["fcaptcha_engine_version"] == "1.46.1"
+    assert row["evaluator_evidence"]["browser_provider"] == "tilion"
+
+
 def test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples():
     """Regex pattern order must not let a prompt example replace the grounded result.
 
@@ -18837,6 +18927,143 @@ def test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only():
             os.environ.pop("FAST_MODE_CACHE_DATABASE_URL", None)
         else:
             os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
+
+
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
+def test_local_stack_env_excludes_worker_dotenv_loaded_by_launcher_imports():
+    """RCA (browser-biometrics-webdecoy, FCaptcha 0.187 > ratchet 0.163, predeploy only).
+
+    With --max-concurrency > 1, local.py imports run_benchmark (needs_independent_worlds)
+    before starting the stack, and agents config load_dotenv()s agents/.env into the
+    launcher's os.environ. start_services forwarded that to run.sh, so the backend
+    inherited the worker's BROWSER_PROVIDER=kernel over back-end/.env's tilion (the
+    production provider): every predeploy browser task ran on Kernel residential
+    exits, where FCaptcha sits at 0.153 and a datacenter-flagged exit fails the
+    ratchet. Each service loads its own env file; the launcher must forward only
+    what it was launched with or set itself.
+    """
+    from unittest.mock import patch
+
+    from dotenv import load_dotenv
+
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    worker_only = "ROSE_RCA_WORKER_DOTENV_ONLY"
+    exported = "ROSE_RCA_OPERATOR_EXPORTED"
+    launcher_set = "ROSE_RCA_LAUNCHER_SET"
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=False):
+        for key in ("BROWSER_PROVIDER", worker_only, launcher_set):
+            os.environ.pop(key, None)
+        os.environ[exported] = "operator"
+        launch_environ = dict(os.environ)
+        worker_dotenv = Path(tmp) / "agents.env"
+        worker_dotenv.write_text(f"BROWSER_PROVIDER=kernel\n{worker_only}=worker\n{exported}=worker\n")
+        # The import side effect the launcher really executes (agents config.load_config()).
+        load_dotenv(worker_dotenv, override=False)
+        os.environ[launcher_set] = "launcher"
+        assert os.environ["BROWSER_PROVIDER"] == "kernel"
+        context_dir = Path(tmp) / "worker-dotenv-run"
+        stack = local_bench.ServiceStack(
+            run_id="worker-dotenv-run",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-worker-dotenv-run",
+            base_port=55150,
+        )
+        with (
+            patch.object(local_bench.subprocess, "Popen", fake_popen),
+            patch.object(local_bench, "wait_for_services", lambda *_args, **_kwargs: {"ports": {}}),
+            patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack"),
+            patch.object(local_bench, "WORKER_DOTENV_PATH", worker_dotenv, create=True),
+            patch.object(local_bench, "_LAUNCH_ENVIRON", launch_environ, create=True),
+        ):
+            local_bench.start_services(stack, clean_first=False, tasks=["browser-biometrics-webdecoy"])
+
+    env = captured["env"]
+    assert "BROWSER_PROVIDER" not in env, (
+        f"backend inherited the worker dotenv BROWSER_PROVIDER={env.get('BROWSER_PROVIDER')!r} over back-end/.env"
+    )
+    assert worker_only not in env, "worker-only dotenv values must not reach the stack services"
+    # Operator exports and values the launcher sets itself are still forwarded.
+    assert env[exported] == "operator"
+    assert env[launcher_set] == "launcher"
+    assert env["DISABLE_GMAIL_SYNC"] == "1"
+
+
+def test_benchmark_launcher_imports_do_not_load_worker_dotenv():
+    """The real import chain behind the predeploy env leak, in a fresh interpreter.
+
+    local.py imports run_benchmark (needs_independent_worlds) before it starts a
+    stack; helpers/check_usage.py and helpers/fetch_queue_pointer.py call
+    load_config() at import, which load_dotenv()s the worker env file into the
+    launcher. Whatever that import does to os.environ, the env handed to the
+    stack services must not carry a value that only came from the worker dotenv.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    agents_dir = pathlib.Path(__file__).resolve().parents[2]
+    probe = (
+        "import json, os, sys\n"
+        f"sys.path.insert(0, {str(agents_dir)!r})\n"
+        "before = dict(os.environ)\n"
+        "import benchmarks.local as local\n"
+        # Under `python -c` the dotenv loaded is the working directory's (the real
+        # launcher's is agents/.env, which is WORKER_DOTENV_PATH's default).
+        "local.WORKER_DOTENV_PATH = local.Path(os.getcwd()) / '.env'\n"
+        "import benchmarks.run_benchmark\n"
+        "from benchmarks.local_worlds import needs_independent_worlds\n"
+        "needs_independent_worlds(['browser-biometrics-webdecoy', 'agent-payment-new-user-journey'], 2)\n"
+        "stack = local.service_base_environ()\n"
+        "print(json.dumps({\n"
+        "    'stack_leaked': sorted(k for k in stack if stack.get(k) != before.get(k)),\n"
+        "    'stack_provider': stack.get('BROWSER_PROVIDER'),\n"
+        "}))\n"
+    )
+    # Keys agents config.load_config() requires, plus the leaked provider and a sentinel:
+    # every one of them reaches the launcher only through the worker dotenv here.
+    worker_dotenv = {
+        "BROWSER_PROVIDER": "kernel",
+        "ROSE_RCA_WORKER_DOTENV_ONLY": "worker",
+        **{
+            key: "rca-worker-dotenv"
+            for key in (
+                "TEMPORAL_API_KEY",
+                "TEMPORAL_NAMESPACE",
+                "TEMPORAL_ADDRESS",
+                "TEMPORAL_TASK_QUEUE",
+                "OPENROUTER_API_KEY",
+                "OPENAI_API_KEY",
+                "PERPLEXITY_API_KEY",
+                "GEMINI_API_KEY",
+                "BROWSERBASE_API_KEY",
+                "BROWSERBASE_PROJECT_ID",
+            )
+        },
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        # With `python -c`, load_dotenv()'s find_dotenv() starts from the working directory.
+        pathlib.Path(tmp, ".env").write_text("".join(f"{k}={v}\n" for k, v in worker_dotenv.items()))
+        env = {k: v for k, v in os.environ.items() if k not in worker_dotenv}
+        result = subprocess.run(
+            [sys.executable, "-c", probe], cwd=tmp, env=env, capture_output=True, text=True, timeout=300
+        )
+    assert result.returncode == 0, result.stderr[-2000:]
+    observed = json.loads(result.stdout.strip().splitlines()[-1])
+    assert observed == {"stack_leaked": [], "stack_provider": None}, observed
 
 
 async def test_claude_code_only_run_withholds_gpt_compute_credentials():
@@ -26843,6 +27070,10 @@ async def run_all_tests():
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
     )
     r.record(
+        "webdecoy_score_evidence_recorded",
+        test_webdecoy_score_evidence_is_recorded_for_comparison,
+    )
+    r.record(
         "webdecoy_biometrics_grounded_result_precedence",
         test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples,
     )
@@ -26959,6 +27190,14 @@ async def run_all_tests():
     r.record(
         "local_isolated_july_cache_read_only",
         test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only,
+    )
+    r.record(
+        "local_stack_env_excludes_worker_dotenv",
+        test_local_stack_env_excludes_worker_dotenv_loaded_by_launcher_imports,
+    )
+    r.record(
+        "benchmark_launcher_imports_do_not_load_worker_dotenv",
+        test_benchmark_launcher_imports_do_not_load_worker_dotenv,
     )
     r.record(
         "cloudbench_demo_cache_on_guest_read_only_like_local",

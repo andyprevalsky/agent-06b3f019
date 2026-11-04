@@ -211,7 +211,8 @@ def run_task_worlds(api: ModuleType, args, task_names: list[str]) -> int:
                 process = subprocess.Popen(
                     command,
                     cwd=api.AGENTS_DIR,
-                    env=dict(os.environ),
+                    # Child launchers start their own stacks; give them the parent's launch env.
+                    env=api.service_base_environ(),
                     stdout=output,
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
