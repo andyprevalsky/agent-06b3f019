@@ -4306,6 +4306,27 @@ async def _run_all_tests():
         "cc_reconnect_replay_does_not_duplicate_events",
         test_run_agentic_loop_reconnect_replay_does_not_duplicate_events,
     )
+    await r.record_async(
+        "cc_reattach_after_replay_exceeds_frame_limit",
+        test_run_agentic_loop_reattaches_after_replay_exceeds_one_frame_limit,
+    )
+    await r.record_async("cc_sandbox_replay_frames_fit_client_limit", test_sandbox_replay_frames_fit_a_default_client_limit)
+    await r.record_async(
+        "cc_finished_real_tool_calls_then_hung_cli_paused",
+        test_run_agentic_loop_finished_real_tool_calls_then_hung_cli_is_paused,
+    )
+    await r.record_async(
+        "cc_codex_item_lifecycle_tracks_tools_in_flight",
+        test_run_agentic_loop_codex_item_lifecycle_tracks_tools_in_flight,
+    )
+    await r.record_async(
+        "cc_retains_linear_text_for_streamed_answer",
+        test_run_agentic_loop_retains_linear_text_for_streamed_answer,
+    )
+    r.record("cc_durable_transcript_each_message_once", test_durable_transcript_writes_each_streamed_message_once)
+    await r.record_async("cc_chunked_replay_applied_as_one_history", test_run_agentic_loop_applies_a_chunked_replay_as_one_history)
+    r.record("cc_transcript_rev_rises_across_compacted_replay", test_transcript_revision_keeps_rising_across_a_compacted_replay)
+    r.record("cc_empty_final_thinking_keeps_streamed_text", test_empty_final_thinking_keeps_the_streamed_thinking_text)
     r.record(
         "cc_sandbox_ws_servers_linger_past_heartbeat_timeout",
         test_sandbox_ws_servers_linger_past_the_activity_heartbeat_timeout,
@@ -4595,8 +4616,9 @@ class _LocalCodeSandbox:
     The CLI blocks on gate files so the test decides when it continues/exits.
     """
 
-    def __init__(self, extra_env: dict[str, str] | None = None) -> None:
+    def __init__(self, extra_env: dict[str, str] | None = None, cli_script: str = "") -> None:
         self._extra_env = dict(extra_env or {})
+        self._cli_script = cli_script or _STUB_CLAUDE_CLI
         self._tmp = Path(tempfile.mkdtemp(prefix="cc-sandbox-"))
         self.port = _free_port()
         self.ws_url = f"ws://127.0.0.1:{self.port}"
@@ -4611,7 +4633,7 @@ class _LocalCodeSandbox:
         home = self._tmp / "home"
         bin_dir.mkdir()
         home.mkdir()
-        (self._tmp / "stub_claude.py").write_text(_STUB_CLAUDE_CLI)
+        (self._tmp / "stub_claude.py").write_text(self._cli_script)
         cli = bin_dir / "claude"
         cli.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{self._tmp / "stub_claude.py"}" "$@"\n')
         cli.chmod(0o755)
@@ -5370,6 +5392,424 @@ async def test_run_agentic_loop_reconnect_replay_does_not_duplicate_events():
     assert connections == 2, connections
     assert exit_code == 0
     assert events == all_events, f"replayed events must replace, not append: {events}"
+
+
+_STREAMING_STUB_PRELUDE = r"""
+import json
+import os
+import sys
+import time
+
+
+def emit(message):
+    print(json.dumps(message), flush=True)
+
+
+def read_user_line():
+    # Answer native-settings control requests like the real CLI; return the next user turn.
+    while True:
+        line = sys.stdin.readline()
+        if not line:
+            return line
+        if not line.strip():
+            continue
+        incoming = json.loads(line)
+        if incoming.get("type") != "control_request":
+            return line
+        subtype = incoming["request"]["subtype"]
+        emit({"type": "control_response",
+              "response": {"request_id": incoming["request_id"],
+                           "subtype": "success" if subtype in ("initialize", "apply_flag_settings", "set_model") else "error",
+                           "response": {"models": [{"value": "stub", "supportedEffortLevels": [], "supportsFastMode": False}]}
+                           if subtype == "initialize" else {}}})
+
+
+def stream(event):
+    emit({"type": "stream_event", "event": event})
+
+
+read_user_line()
+emit({"type": "system", "subtype": "init", "session_id": "stub", "cwd": os.getcwd(), "model": "stub",
+      "tools": ["Bash"], "permissionMode": "bypassPermissions"})
+"""
+
+# One long streamed answer, token by token, the way `--include-partial-messages`
+# delivers it: 120 deltas of 1,000 characters (a 120 kB message).
+_LONG_STREAM_STUB_CLI = _STREAMING_STUB_PRELUDE + r"""
+chunk = "x" * 999 + "\n"
+stream({"type": "message_start", "message": {"id": "msg-long", "usage": {}}})
+stream({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+for _ in range(120):
+    stream({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": chunk}})
+stream({"type": "content_block_stop", "index": 0})
+emit({"type": "assistant", "message": {"id": "msg-long", "content": [{"type": "text", "text": chunk * 120}]}})
+emit({"type": "result", "subtype": "success", "result": "long answer written", "usage": {}})
+while read_user_line():
+    pass
+"""
+
+# A long session of finished answers: 50 messages of 120 kB (6 MB of history
+# that no compaction can shrink).
+_MANY_ANSWERS_STUB_CLI = _STREAMING_STUB_PRELUDE + r"""
+for n in range(50):
+    emit({"type": "assistant", "message": {"id": f"msg-{n}", "content": [{"type": "text", "text": "z" * 120_000}]}})
+emit({"type": "result", "subtype": "success", "result": "long answer written", "usage": {}})
+while read_user_line():
+    pass
+"""
+
+
+async def _reattach_after_cli_exit(cli_script: str) -> tuple[int, int, list[dict]]:
+    """Attach the real loop to a real ws-server whose CLI already exited."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    sandbox = _LocalCodeSandbox(cli_script=cli_script)
+    await sandbox.start()
+    try:
+        await sandbox.wait_for_log("Serving final buffer for reattach until closed", timeout=30)
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+            patch.object(service, "_log_code_agent_event"),
+        ):
+            try:
+                exit_code, _attempt, _history, _in, _out, events = await asyncio.wait_for(
+                    service._run_agentic_loop(
+                        agent_id="a",
+                        task_id="t",
+                        sandbox_id="sb",
+                        goal="g",
+                        ws_url=sandbox.ws_url,
+                        terminal=TerminalFilter(cols=80, rows=50),
+                        model="rose-labs/rose-1-flash",
+                        claude_token=None,
+                        action_summary=[],
+                        tool_call_id="tc",
+                    ),
+                    timeout=30,
+                )
+            except asyncio.TimeoutError:
+                attaches = sandbox.log().count("Served final buffer to reattaching client")
+                raise AssertionError(f"reattach never read the exit; {attaches} replays served in 30s") from None
+        return exit_code, sandbox.log().count("Served final buffer to reattaching client"), events
+    finally:
+        sandbox.stop()
+
+
+async def test_run_agentic_loop_reattaches_after_replay_exceeds_one_frame_limit():
+    """A long streamed session must stay reattachable (multi-day RCA T1 #1).
+
+    Every partial text delta stored the whole message so far, and every connect
+    replayed the full history in one frame. One 120 kB answer made that frame
+    larger than aiohttp's 4 MiB receive limit: the client closed with 1009,
+    reconnected (each handshake reset the reconnect budget) and looped forever,
+    never reading the exit queued behind the replay. A reattach after a deploy
+    drain, a network blip or a worker retry must read the result and return.
+    """
+    exit_code, attaches, events = await _reattach_after_cli_exit(_LONG_STREAM_STUB_CLI)
+    assert exit_code == 0, exit_code
+    assert attaches == 1, f"one reattach must suffice, served {attaches}"
+    final = [e for e in events if e.get("type") == "agent_message" and e.get("partial") is False]
+    assert len(final) == 1 and len(final[0]["text"]) == 120_000, [len(e.get("text") or "") for e in final]
+    assert [e["seq"] for e in events] == list(range(len(events))), "replay must keep the sandbox's event order"
+    assert any(e.get("type") == "result" for e in events), events[-3:]
+
+    # History that stays larger than one frame after compaction replays too.
+    exit_code, attaches, events = await _reattach_after_cli_exit(_MANY_ANSWERS_STUB_CLI)
+    answers = [e for e in events if e.get("type") == "agent_message"]
+    assert exit_code == 0 and attaches == 1, (exit_code, attaches)
+    assert len(answers) == 50 and all(len(e["text"]) == 120_000 for e in answers), len(answers)
+    assert [e["seq"] for e in events] == list(range(len(events))), "chunked replay must keep the event order"
+
+
+async def test_sandbox_replay_frames_fit_a_default_client_limit():
+    """The real ws-server bounds every replay frame for a chunk-aware client (T1 #1).
+
+    The client reads with aiohttp's default 4 MiB limit here, so a single
+    oversized history frame fails exactly as it did in production.
+    """
+    import aiohttp
+
+    sandbox = _LocalCodeSandbox(cli_script=_MANY_ANSWERS_STUB_CLI)
+    await sandbox.start()
+    sizes: list[int] = []
+    events: list[dict] = []
+    output = ""
+    try:
+        await sandbox.wait_for_log("Serving final buffer for reattach until closed", timeout=30)
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(f"{sandbox.ws_url}/?replay_chunks=1") as ws:
+                async for msg in ws:
+                    assert msg.type == aiohttp.WSMsgType.TEXT, (msg.type, ws.exception())
+                    sizes.append(len(msg.data.encode()))
+                    frame = json.loads(msg.data)
+                    if frame["type"] == "code_agent_events":
+                        events = frame["data"] if frame.get("chunk", 0) == 0 else [*events, *frame["data"]]
+                    elif frame["type"] in ("buffer", "stdout"):
+                        output = frame["data"] if frame["type"] == "buffer" else output + frame["data"]
+                    elif frame["type"] == "exit":
+                        break
+    finally:
+        sandbox.stop()
+    assert max(sizes) <= 1.5 * 1024 * 1024, f"largest replay frame {max(sizes)} bytes"
+    assert len([e for e in events if e.get("type") == "agent_message"]) == 50, len(events)
+    assert output.count("[Claude] zzz") == 50, output.count("[Claude] zzz")
+
+
+# The real event sequence of tool calls: Claude streams each tool_use at
+# content_block_start (partial) and again in the assistant envelope, and merges
+# the results of parallel calls into one user message. Then the CLI hangs.
+_TOOLS_THEN_HANG_STUB_CLI = _STREAMING_STUB_PRELUDE + r"""
+stream({"type": "message_start", "message": {"id": "msg-1", "usage": {}}})
+stream({"type": "content_block_start", "index": 0,
+        "content_block": {"type": "tool_use", "id": "tu-1", "name": "Bash", "input": {}}})
+stream({"type": "content_block_stop", "index": 0})
+emit({"type": "assistant", "message": {"id": "msg-1", "content": [
+    {"type": "tool_use", "id": "tu-1", "name": "Bash", "input": {"command": "ls"}}]}})
+emit({"type": "user", "tool_use_result": {"stdout": "ok"}, "message": {"content": [
+    {"type": "tool_result", "tool_use_id": "tu-1", "content": "ok"}]}})
+stream({"type": "message_start", "message": {"id": "msg-2", "usage": {}}})
+for index, tool_id in enumerate(("tu-2", "tu-3")):
+    stream({"type": "content_block_start", "index": index,
+            "content_block": {"type": "tool_use", "id": tool_id, "name": "Read", "input": {}}})
+    stream({"type": "content_block_stop", "index": index})
+emit({"type": "assistant", "message": {"id": "msg-2", "content": [
+    {"type": "tool_use", "id": "tu-2", "name": "Read", "input": {"file_path": "a"}},
+    {"type": "tool_use", "id": "tu-3", "name": "Read", "input": {"file_path": "b"}}]}})
+emit({"type": "user", "tool_use_result": [{"file": "a"}, {"file": "b"}], "message": {"content": [
+    {"type": "tool_result", "tool_use_id": "tu-2", "content": "a"},
+    {"type": "tool_result", "tool_use_id": "tu-3", "content": "b"}]}})
+# Every tool finished; the CLI now hangs without a result.
+while True:
+    time.sleep(1)
+"""
+
+
+async def test_run_agentic_loop_finished_real_tool_calls_then_hung_cli_is_paused():
+    """Finished tool calls must not count as in flight (multi-day RCA T1 #2).
+
+    The loop counted +1 per tool_use event and -1 per tool_result event. The
+    real ws-server emits each Claude tool_use twice (partial block start, then
+    the assistant envelope) and one tool_result for parallel calls, so the
+    count only climbed and a hung CLI was never idle-paused.
+    """
+    from domains.spawn_claude_code_agent import service
+
+    sandbox = _LocalCodeSandbox(cli_script=_TOOLS_THEN_HANG_STUB_CLI)
+    await sandbox.start()
+    outcome: dict = {}
+    summary: list[str] = []
+    try:
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+            patch.object(service, "_log_code_agent_event"),
+            patch.object(service, "keepalive_e2b_session", AsyncMock(return_value={})),
+            patch.object(service, "CODE_SESSION_IDLE_PAUSE_S", 1.0),
+        ):
+            try:
+                exit_code, *_rest, events = await asyncio.wait_for(
+                    service._run_agentic_loop(**_loop_kwargs(summary, ws_url=sandbox.ws_url, loop_outcome=outcome)),
+                    timeout=15,
+                )
+            except asyncio.TimeoutError:
+                raise AssertionError(f"finished tools kept the hung CLI attached: {summary}") from None
+    finally:
+        sandbox.stop()
+    tool_events = [(e["type"], e.get("tool_use_id")) for e in events if e.get("type") in ("tool_use", "tool_result")]
+    assert ("tool_use", "tu-1") in tool_events and tool_events.count(("tool_use", "tu-1")) == 2, tool_events
+    assert exit_code == -1 and outcome.get("idle_paused") is True, (exit_code, outcome, summary)
+
+
+async def test_run_agentic_loop_codex_item_lifecycle_tracks_tools_in_flight():
+    """Codex items are in flight from item/started until item/completed (T1 #2).
+
+    Event shapes are the ones codex-code/ws-server.mjs emits: mcpToolCall emits
+    tool_use on start AND completion (plus a tool_result), webSearch emits
+    tool_use twice and never a tool_result, a shell command is a `command` item.
+    """
+    from domains.spawn_claude_code_agent import service
+
+    base = {"version": 1, "provider": "codex", "turn_id": "t1"}
+    finished = [
+        {**base, "type": "tool_use", "item_id": "mcp-1", "tool_use_id": "mcp-1", "status": "started", "partial": True, "tool": "s.t"},
+        {**base, "type": "tool_use", "item_id": "mcp-1", "tool_use_id": "mcp-1", "status": "completed", "partial": False, "tool": "s.t"},
+        {**base, "type": "tool_result", "item_id": "mcp-1", "tool_use_id": "mcp-1", "status": "completed", "partial": False},
+        {**base, "type": "tool_use", "item_id": "ws-1", "status": "started", "partial": True, "name": "web_search"},
+        {**base, "type": "tool_use", "item_id": "ws-1", "status": "completed", "partial": False, "name": "web_search"},
+    ]
+    try:
+        exit_code, elapsed, outcome, summary, _seen = await asyncio.wait_for(
+            _assert_session_stays_attached(finished, hold_s=5.0, end_with_exit=False), timeout=10
+        )
+    except asyncio.TimeoutError:
+        raise AssertionError("finished Codex tools kept a quiet session attached") from None
+    assert exit_code == -1 and outcome.get("idle_paused") is True, (exit_code, outcome, summary)
+    assert elapsed < 3.0, f"finished Codex tools must not hold the session, took {elapsed:.2f}s"
+
+    running = [{**base, "type": "command", "item_id": "cmd-1", "status": "started", "partial": True, "command": "make"}]
+    exit_code, elapsed, outcome, summary, _seen = await _assert_session_stays_attached(running, hold_s=1.0)
+    assert exit_code == 0 and elapsed >= 0.9 and "idle_paused" not in outcome, (exit_code, elapsed, outcome)
+
+
+def _cumulative_stream_events(chunks: int = 120, size: int = 1000) -> list[dict]:
+    """A streamed Claude answer as the ws-server emits it live: cumulative partials, then the final block."""
+    piece = "y" * (size - 1) + "\n"
+    events = [
+        {"version": 1, "provider": "claude", "type": "agent_message", "item_id": "msg-1:0",
+         "text": piece * (n + 1), "delta": piece, "partial": True}
+        for n in range(chunks)
+    ]
+    events.append({"version": 1, "provider": "claude", "type": "agent_message", "item_id": "msg-1:0",
+                   "text": piece * chunks, "partial": False})
+    return events
+
+
+async def test_run_agentic_loop_retains_linear_text_for_streamed_answer():
+    """Superseded partial snapshots must not stay in activity memory (T1 #4).
+
+    Each partial carries the whole message so far; keeping every one made the
+    activity's code_events grow with the square of the streamed output on a
+    shared 2 GB worker.
+    """
+    from domains.spawn_claude_code_agent import service
+
+    streamed = _cumulative_stream_events()
+
+    class Streaming(_FakeWsClient):
+        async def listen(self):
+            for event in streamed:
+                await self.on_event(dict(event))
+            await self.on_exit(0)
+            await asyncio.Event().wait()
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    with (
+        patch.object(service, "ClaudeCodeWsClient", Streaming),
+        patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        exit_code, *_rest, events = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([])), timeout=10)
+    final_len = len(streamed[-1]["text"])
+    retained = sum(len(e.get("text") or "") for e in events)
+    assert exit_code == 0 and len(events) == len(streamed), (exit_code, len(events))
+    assert events[-1]["text"] == streamed[-1]["text"]
+    assert retained <= 2 * final_len, f"retained {retained} chars of text for a {final_len}-char answer"
+
+
+def test_durable_transcript_writes_each_streamed_message_once():
+    """The durable transcript must hold one line per message, not per partial (T1 #5)."""
+    from domains.spawn_claude_code_agent import service
+
+    streamed = _cumulative_stream_events()
+    transcript = service.build_durable_terminal_transcript("", streamed)
+    final_len = len(streamed[-1]["text"].strip())
+    assert transcript.count("[Claude]") == 1, transcript.count("[Claude]")
+    assert len(transcript) < 2 * final_len, f"{len(transcript)} chars for a {final_len}-char answer"
+
+
+async def test_run_agentic_loop_applies_a_chunked_replay_as_one_history():
+    """The monitor must never act on half of a chunked replay (T1 #1 review).
+
+    Chunk 0 ends with turn "first" completed and chunk 1 starts turn "second";
+    acting between the frames ended the Codex attachment mid-turn.
+    """
+    from aiohttp import web
+
+    from domains.spawn_claude_code_agent import service
+
+    def codex(**fields):
+        return {"version": 1, "provider": "codex", **fields}
+
+    chunk0 = [
+        codex(type="turn_started", turn_id="first"),
+        codex(type="turn_ended", raw_type="turn/completed", turn_id="first", status="completed", turn_outcome="completed"),
+    ]
+    chunk1 = [codex(type="turn_started", turn_id="second"), codex(type="user_turn", turn_id="second", text="continue")]
+
+    async def handler(request):
+        ws = web.WebSocketResponse()
+        if not ws.can_prepare(request).ok:
+            return web.Response(status=400)
+        await ws.prepare(request)
+        await ws.send_str(json.dumps({"type": "code_agent_events", "chunk": 0, "last": False, "data": chunk0}))
+        await asyncio.sleep(0.5)  # the next 1 MiB frame is still on the wire
+        await ws.send_str(json.dumps({"type": "code_agent_events", "chunk": 1, "last": True, "data": chunk1}))
+        await asyncio.sleep(3)
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    try:
+        with (
+            patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            result = None
+            with contextlib.suppress(asyncio.TimeoutError):
+                result = await asyncio.wait_for(
+                    service._run_agentic_loop(
+                        **_loop_kwargs([], code_provider="codex", ws_url=f"ws://127.0.0.1:{port}/")
+                    ),
+                    timeout=2.0,
+                )
+    finally:
+        await runner.cleanup()
+    assert result is None, f"loop ended mid-turn on half a replay: exit_code={result[0]}"
+
+
+def test_transcript_revision_keeps_rising_across_a_compacted_replay():
+    """A reattach must not persist a streamed answer at a lower revision (T1 #4/#5 review).
+
+    Replayed superseded partials carry no text. If they add no revision, the
+    final answer replays at a lower rev than the partial already persisted, and
+    readers that keep the highest rev show the truncated partial forever.
+    """
+    from domains.spawn_claude_code_agent import service
+    from utils.code_transcript import CodeTranscriptBuilder
+
+    streamed = _cumulative_stream_events(chunks=5, size=10)
+    live = CodeTranscriptBuilder("claude")
+    persisted = None
+    for index, event in enumerate(streamed[:-1]):
+        for record in live.feed(dict(event), index):
+            persisted = record
+    assert persisted is not None and persisted["partial"] is True
+
+    history: list[dict] = []
+    latest: dict = {}
+    for event in streamed:
+        history.append(dict(event))
+        service._supersede_partial_snapshot(history, latest, len(history) - 1)
+    replayed = CodeTranscriptBuilder("claude")
+    final = None
+    for index, event in enumerate(history):
+        for record in replayed.feed(event, index):
+            final = record
+    assert final is not None and final["text"] == streamed[-1]["text"] and final["partial"] is False
+    assert final["rev"] > persisted["rev"], (final["rev"], persisted["rev"])
+
+
+def test_empty_final_thinking_keeps_the_streamed_thinking_text():
+    """A redacted/empty final thinking block must not erase streamed thinking (T1 review)."""
+    from domains.spawn_claude_code_agent import service
+
+    events = [
+        {"type": "thinking", "item_id": "m:0", "turn_id": "t", "text": "plan the fix", "partial": True},
+        {"type": "thinking", "item_id": "m:0", "turn_id": "t", "text": "", "redacted": True},
+    ]
+    history: list[dict] = []
+    latest: dict = {}
+    for event in events:
+        history.append(dict(event))
+        service._supersede_partial_snapshot(history, latest, len(history) - 1)
+    assert history[0].get("text") == "plan the fix", history
 
 
 def test_sandbox_ws_servers_linger_past_the_activity_heartbeat_timeout():

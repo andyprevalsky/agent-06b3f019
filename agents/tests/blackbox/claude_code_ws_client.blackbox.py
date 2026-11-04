@@ -463,6 +463,120 @@ async def test_listen_handles_exception_then_reconnects():
     assert client.reconnects_exhausted is True
 
 
+
+async def _serve_ws(handler):
+    """A local WebSocket server standing in for a sandbox; returns (url, runner)."""
+    import socket
+
+    from aiohttp import web
+
+    async def upgrade(request):
+        ws = web.WebSocketResponse()
+        if not ws.can_prepare(request).ok:
+            # Dev-box port forwarders probe new local listeners with plain HTTP.
+            return web.Response(status=400)
+        await ws.prepare(request)
+        await handler(request, ws)
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", upgrade)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    return f"ws://127.0.0.1:{port}", runner
+
+
+async def test_reads_single_frame_history_larger_than_aiohttp_default():
+    """Sandboxes built before bounded replay frames still reattach (multi-day RCA T1 #1).
+
+    They send the whole history in one frame. With aiohttp's default 4 MiB
+    receive limit the client closed with 1009 and never read the exit behind it.
+    """
+    history = [{"seq": n, "type": "agent_message", "text": "x" * 100_000} for n in range(60)]
+
+    async def old_sandbox(_request, ws):
+        await ws.send_str(json.dumps({"type": "code_agent_events", "data": history}))
+        await ws.send_str(json.dumps({"type": "exit", "code": 0}))
+        await ws.close()
+
+    url, runner = await _serve_ws(old_sandbox)
+    replays: list = []
+
+    async def on_events_replay(events):
+        replays.append(events)
+
+    client = _make_client(ws_url=url, on_events_replay=on_events_replay, reconnect_delay=0.0)
+    try:
+        assert await client.connect()
+        await asyncio.wait_for(client.listen(), timeout=10)
+    finally:
+        await client.disconnect()
+        await runner.cleanup()
+    assert client._test_exits == [0], client._test_exits
+    assert len(replays) == 1 and len(replays[0]) == 60, [len(r) for r in replays]
+
+
+async def test_chunked_replay_is_delivered_as_one_history():
+    """A chunked replay reaches the consumer once, complete, when its last chunk arrives."""
+    seen: list = []
+
+    async def chunked_sandbox(request, ws):
+        seen.append(request.query.get("replay_chunks"))
+        await ws.send_str(json.dumps({"type": "code_agent_events", "chunk": 0, "last": False, "data": [{"seq": 0}]}))
+        await ws.send_str(json.dumps({"type": "code_agent_events", "chunk": 1, "last": True, "data": [{"seq": 1}, {"seq": 2}]}))
+        await ws.send_str(json.dumps({"type": "exit", "code": 0}))
+        await ws.close()
+
+    url, runner = await _serve_ws(chunked_sandbox)
+    replays: list = []
+
+    async def on_events_replay(events):
+        replays.append(events)
+
+    client = _make_client(ws_url=url, on_events_replay=on_events_replay)
+    try:
+        assert await client.connect()
+        await asyncio.wait_for(client.listen(), timeout=10)
+    finally:
+        await client.disconnect()
+        await runner.cleanup()
+    assert seen == ["1"], seen
+    assert replays == [[{"seq": 0}, {"seq": 1}, {"seq": 2}]] and client._test_events == [], (replays, client._test_events)
+
+
+async def test_reconnects_without_progress_exhaust_the_budget():
+    """A sandbox whose every connection fails before delivering anything ends the retries (T1 #1).
+
+    connect() reset the budget on each successful handshake, so a replay that
+    failed on every attempt was retried about once a second forever.
+    """
+    connections = 0
+
+    async def failing_sandbox(_request, ws):
+        nonlocal connections
+        connections += 1
+        await ws.send_str(json.dumps({"type": "buffer", "data": "terminal"}))
+        await ws.close()
+
+    url, runner = await _serve_ws(failing_sandbox)
+    client = _make_client(ws_url=url, max_reconnects=3, reconnect_delay=0.0)
+    try:
+        assert await client.connect()
+        try:
+            await asyncio.wait_for(client.listen(), timeout=10)
+        except asyncio.TimeoutError:
+            raise AssertionError(f"reconnected {connections} times without exhausting the budget") from None
+    finally:
+        await client.disconnect()
+        await runner.cleanup()
+    assert client.reconnects_exhausted is True
+    assert connections == 4, connections  # the first connect plus max_reconnects
+
+
 async def run_all_tests():
     print("claude-code-ws-client blackbox tests:")
     r = BlackboxResult()
@@ -494,6 +608,9 @@ async def run_all_tests():
     await r.record_async("listen_exits_when_exited_flag_set", test_listen_exits_when_exited_flag_set)
     await r.record_async("listen_reconnects_on_disconnect_then_exits_when_max_reached", test_listen_reconnects_on_disconnect_then_exits_when_max_reached)
     await r.record_async("listen_handles_exception_then_reconnects", test_listen_handles_exception_then_reconnects)
+    await r.record_async("reads_single_frame_history_over_default_limit", test_reads_single_frame_history_larger_than_aiohttp_default)
+    await r.record_async("chunked_replay_delivered_as_one_history", test_chunked_replay_is_delivered_as_one_history)
+    await r.record_async("reconnects_without_progress_exhaust_budget", test_reconnects_without_progress_exhaust_the_budget)
     teardown_mock()
     return r.summary()
 
