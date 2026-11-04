@@ -6526,9 +6526,6 @@ async def test_cc_execute_tool_cancelled_run_tracks_its_sandbox_usage():
     assert usage.get("service") == [{"cost_cents": 12.5, "provider": "E2B Desktop Sandbox"}], row.data
 
 
-if __name__ == "__main__":
-    asyncio.run(run_all_tests())
-
 async def test_native_codex_terminal_event_finishes_idle_app_server():
     """The live app-server turn/completed shape is terminal even while stdio stays open."""
     from domains.spawn_claude_code_agent import service
@@ -6594,3 +6591,7 @@ def test_native_codex_usage_retains_session_scope():
         service._log_code_agent_event({"provider": "codex", "type": "usage", "usage_scope": "session", "usage": {"input_tokens": 200, "output_tokens": 50, "cached_input_tokens": 150}}, agent_id="agent", task_id="task", sandbox_id="sandbox")
     assert logger.info.call_args.kwargs["usage_scope"] == "session"
     assert logger.info.call_args.kwargs["output_tokens"] == 50
+
+
+if __name__ == "__main__":
+    asyncio.run(run_all_tests())
