@@ -59,6 +59,8 @@ export function e2bMaintenanceDeps(): MaintenanceDeps {
         { apiKey, timeoutMs: opts.timeoutMs, metadata: opts.metadata },
         'Project sync'
       ),
+    setSandboxTimeout: (sandboxId, timeoutMs) =>
+      Sandbox.setTimeout(sandboxId, timeoutMs, { apiKey }),
     deleteSnapshot: (snapshotId) => Sandbox.deleteSnapshot(snapshotId, { apiKey }),
   };
 }

@@ -18,7 +18,13 @@ type Where = { id?: string; maintenanceRunId?: string; status?: string };
 
 /** Execute the actual runner AND store; only I/O and time are fake. */
 function fixture(
-  options: { lostAtRestore?: boolean; restoreError?: boolean; lostAtPublish?: boolean } = {}
+  options: {
+    lostAtRestore?: boolean;
+    restoreError?: boolean;
+    lostAtPublish?: boolean;
+    slowSetup?: boolean;
+    resetError?: boolean;
+  } = {}
 ) {
   let now = 0;
   const clock = () => new Date(now);
@@ -74,6 +80,7 @@ function fixture(
       Buffer,
       Date,
       Error,
+      process: { env: { E2B_API_KEY: 'fixture-key' } },
       require: (name: string) => {
         if (!(name in dependencies)) throw new Error(`Unexpected dependency ${name}`);
         return dependencies[name];
@@ -97,11 +104,13 @@ function fixture(
     },
     run: async (command: string, opts: { timeoutMs: number }) => {
       commandTimeouts.push(opts.timeoutMs);
+      if (options.slowSetup && command.startsWith('awk ')) now += 120_000;
       if (command.startsWith('bash ')) {
         events.push('script');
         now += 480_000;
         // A real cron tick while the long script finishes: uses the actual store.
         await store.reconcileStaleRuns(clock());
+        if (now >= sandboxDeadline) throw new Error('sandbox expired during script');
       }
       return {
         exitCode: 0,
@@ -184,12 +193,39 @@ function fixture(
         },
       } as Runner.MaintenanceSandbox;
     },
+    setSandboxTimeout: async (sandboxId, timeoutMs) => {
+      assert.equal(sandboxId, 'owned-sandbox');
+      assert.equal(timeoutMs, 1_080_000, 'reset uses the unchanged configured lifetime');
+      events.push('sandbox-renew');
+      if (options.resetError) throw new Error('sandbox timeout reset failed');
+      sandboxDeadline = now + timeoutMs;
+    },
     deleteSnapshot: async (id) => {
       deleted.push(id);
       return true;
     },
   };
+  const adapter = load<typeof import('../../providers/projects/maintenanceE2b')>(
+    'maintenanceE2b.ts',
+    {
+      e2b: {
+        Sandbox: {
+          setTimeout: async (id: string, ms: number, auth: { apiKey: string }) => {
+            assert.equal(id, 'owned-sandbox');
+            assert.equal(ms, 1_080_000);
+            assert.equal(auth.apiKey, 'fixture-key');
+            assert.equal(Object.keys(auth).join(','), 'apiKey');
+            events.push('adapter-reset');
+          },
+        },
+      },
+      '../e2bSandboxCreate': {},
+      '../codeSessions/sandboxSize': {},
+      './workspace': { E2B_HOME: '/home/user' },
+    }
+  );
   return {
+    adapter,
     execute: () => runner.executeMaintenanceRun(input, deps),
     row,
     run,
@@ -252,5 +288,54 @@ export function registerMaintenanceLeaseCases(): void {
     assert.equal(f.row.templateSnapshotId, 'previous');
     assert.equal(f.row.maintenanceRunId, 'successor');
     assert(f.events.includes('kill'));
+  });
+  test('setup consuming sandbox slack resets lifetime before the full script', async () => {
+    const f = fixture({ slowSetup: true });
+    const outcome = await f.execute();
+    assert.equal(outcome.status, 'SUCCEEDED', outcome.error ?? undefined);
+    assert.equal(f.row.templateSnapshotId, 'new');
+    assert.equal(f.row.templatePrevSnapshotId, 'previous');
+    assert.equal(f.run.status, 'SUCCEEDED');
+    assert.equal(f.row.maintenanceRunId, null);
+    assert.deepEqual(f.deleted, ['oldest']);
+    assert.equal(f.events.filter((event) => event === 'sandbox-renew').length, 1);
+    assert(f.events.indexOf('renew') < f.events.indexOf('sandbox-renew'));
+    assert(f.events.indexOf('sandbox-renew') < f.events.indexOf('script-write'));
+    assert.equal(f.events.filter((event) => event === 'kill').length, 1);
+    assert(f.events.includes('unregister'));
+    assert(f.commandTimeouts.includes(480_000));
+    assert(f.commandTimeouts.every((ms) => ms === 120_000 || ms === 480_000));
+  });
+  test('sandbox lifetime reset failure starts no script and cleans owned resources', async () => {
+    const f = fixture({ resetError: true });
+    const outcome = await f.execute();
+    assert.equal(outcome.status, 'FAILED');
+    assert.equal(outcome.error, 'sandbox timeout reset failed');
+    assert(f.events.includes('sandbox-renew'));
+    for (const event of ['script-write', 'script', 'snapshot'])
+      assert(!f.events.includes(event), event);
+    assert.equal(f.row.templateSnapshotId, 'previous');
+    assert.equal(f.row.templatePrevSnapshotId, 'oldest');
+    assert.equal(f.row.maintenanceRunId, null);
+    assert.equal(f.row.maintenanceLeaseUntil, null);
+    assert.equal(f.run.status, 'FAILED');
+    assert.deepEqual(f.deleted, []);
+    assert.equal(f.events.filter((event) => event === 'kill').length, 1);
+    assert(f.events.includes('unregister'));
+  });
+  test('lost project ownership never renews the sandbox lifetime', async () => {
+    const f = fixture({ lostAtRestore: true });
+    assert.equal((await f.execute()).status, 'FAILED');
+    assert(!f.events.includes('sandbox-renew'));
+    assert(!f.events.includes('script'));
+    assert.equal(f.row.maintenanceRunId, 'successor');
+    assert.equal(f.row.maintenanceLeaseUntil?.getTime(), 1_740_000);
+    assert.deepEqual(f.deleted, []);
+    assert.equal(f.events.filter((event) => event === 'kill').length, 1);
+  });
+  test('production maintenance adapter forwards sandbox identity lifetime and auth', async () => {
+    const f = fixture();
+    await f.adapter.e2bMaintenanceDeps().setSandboxTimeout('owned-sandbox', 1_080_000);
+    assert.deepEqual(f.events, ['adapter-reset']);
   });
 }

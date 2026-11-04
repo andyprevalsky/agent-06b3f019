@@ -40,3 +40,9 @@ The controlled store uses fake Prisma I/O and does not prove PostgreSQL interlea
 ## Reusable lesson
 
 Renew conditional ownership after setup and before entering a separately budgeted phase. A total lease that nominally covers one phase does not reserve that phase’s time after lengthy setup. Refused renewal must stop work before side effects.
+
+## Follow-up: renew the independent sandbox lifetime too
+
+Review5761413749/finding4462084863 identified that the project lease and E2B sandbox lifetime are separate expiry domains. The first proof deliberately fit within the original sandbox lifetime and did not establish sandbox renewal. A new controlled case makes setup consume two further minutes: the project lease is valid until31min, but the sandbox still expires at20min before the valid script completes at21min. The unchanged proof command produced5PASS/3FAIL before and8PASS after. All four original test bodies remain unchanged and passing.
+
+The runner now resets the owned sandbox lifetime to the same maintenanceLeaseMs immediately after successful project-lease renewal and before any script work. A required dependency forwards the exact owned sandbox ID and configured milliseconds to the existing static Sandbox.setTimeout API. Refused project ownership invokes no sandbox API. A failed timeout reset follows the existing cleanup path before writing/running the script or producing a snapshot. The normal fake E2B implements this operation, and the registered helper covers the deadline, API rejection, lost ownership and exact adapter arguments. No script/step/lease budget was increased. This does not guarantee survival through arbitrarily long setup before the renewal boundary or resolve the separate already-selected stale-reconciliation race.

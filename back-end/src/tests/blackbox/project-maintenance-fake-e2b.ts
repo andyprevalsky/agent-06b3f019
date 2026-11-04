@@ -21,6 +21,7 @@ export class FakeE2b {
   /** Template or snapshot ids requested from createSandbox, in order. */
   readonly created: string[] = [];
   readonly killed: string[] = [];
+  readonly timeoutResets: { sandboxId: string; timeoutMs: number }[] = [];
   readonly deleted: string[] = [];
   readonly snapshots: string[] = [];
   /** Creating from one of these fails, as a deleted snapshot would. */
@@ -41,6 +42,9 @@ export class FakeE2b {
       now: () => new Date(),
       baseTemplate: () => ({ templateId: 'base-template', size: { cpu: 2, memoryGb: 4 } }),
       createSandbox: (id) => this.createSandbox(id),
+      setSandboxTimeout: async (sandboxId, timeoutMs) => {
+        this.timeoutResets.push({ sandboxId, timeoutMs });
+      },
       deleteSnapshot: async (id) => {
         this.deleted.push(id);
         return true;

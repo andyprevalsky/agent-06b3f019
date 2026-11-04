@@ -76,6 +76,8 @@ export interface MaintenanceDeps {
     templateOrSnapshotId: string,
     opts: { timeoutMs: number; metadata: Record<string, string> }
   ): Promise<MaintenanceSandbox>;
+  /** Reset this owned sandbox lifetime, in milliseconds from now. */
+  setSandboxTimeout(sandboxId: string, timeoutMs: number): Promise<void>;
   deleteSnapshot(snapshotId: string): Promise<boolean>;
 }
 
@@ -163,6 +165,7 @@ export async function executeMaintenanceRun(
     if (!(await extendLease(project.id, run.id, maintenanceLeaseMs(project), deps.now()))) {
       throw new RunFailure('the project lease was lost before the sync script started');
     }
+    await deps.setSandboxTimeout(sandbox.sandboxId, maintenanceLeaseMs(project));
 
     // The script's `git fetch origin` needs the token; the scrub below removes it.
     if (workspace.cloneUrl) {
