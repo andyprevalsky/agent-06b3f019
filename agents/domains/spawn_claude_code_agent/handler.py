@@ -311,6 +311,29 @@ def _timed_out_code_session(
     return code_session_record(scheduled_session)
 
 
+def _workflow_tool_usage(result: Dict[str, Any]) -> Dict[str, list]:
+    """The workflow cost-tracking shape of an activity result's ``usage_items``."""
+    tool_usage: Dict[str, list] = {"llm": [], "service": []}
+    for item in result.get("usage_items") or []:
+        if item.get("type") == "llm":
+            tool_usage["llm"].append(
+                {
+                    "tokens_in": item.get("input_tokens", 0),
+                    "tokens_out": item.get("output_tokens", 0),
+                    "model": item.get("model"),
+                    "provider": item.get("provider", ""),
+                }
+            )
+        else:
+            tool_usage["service"].append(
+                {
+                    "cost_cents": item.get("cost_cents", 0),
+                    "provider": item.get("provider", ""),
+                }
+            )
+    return tool_usage
+
+
 class SpawnClaudeCodeAgentManager(ToolManager):
     """Manager for spawn_claude_code_agent tool."""
 
@@ -704,29 +727,12 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     message="User paused the agent",
                     status=MessageStatus.FINISHED,
                     metadata=cancel_metadata,
+                    # The sandbox ran until the pause: its time is billed too.
+                    data={"usage": _workflow_tool_usage(result or {})},
                 )
                 return
 
-            # Build standardized usage for workflow cost tracking
-            tool_usage: Dict[str, list] = {"llm": [], "service": []}
-            if result.get("usage_items"):
-                for item in result["usage_items"]:
-                    if item.get("type") == "llm":
-                        tool_usage["llm"].append(
-                            {
-                                "tokens_in": item.get("input_tokens", 0),
-                                "tokens_out": item.get("output_tokens", 0),
-                                "model": item.get("model"),
-                                "provider": item.get("provider", ""),
-                            }
-                        )
-                    else:
-                        tool_usage["service"].append(
-                            {
-                                "cost_cents": item.get("cost_cents", 0),
-                                "provider": item.get("provider", ""),
-                            }
-                        )
+            tool_usage = _workflow_tool_usage(result)
 
             code_provider = result.get("code_provider") or code_provider
             success = result.get("success") is True

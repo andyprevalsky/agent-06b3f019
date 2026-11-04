@@ -71,6 +71,9 @@ CODE_AGENT_ACTIVITY_NO_DEADLINE: Final[timedelta] = timedelta(days=36500)
 # session. Errors the activity itself raises (not worker death) stop retrying
 # after this many attempts so a deterministic failure cannot loop forever.
 CODE_AGENT_ERROR_RETRY_LIMIT: Final[int] = 5
+# Heartbeat detail key carrying how many errors earlier attempts raised. The
+# attempt number also counts worker deaths, so it cannot be the error count.
+CODE_AGENT_ERRORS_HEARTBEAT_KEY: Final[str] = "code_agent_errors"
 
 # Tool result status for an idle session that was paused (resumable).
 CODE_AGENT_PAUSED_STATUS: Final[str] = "paused"
@@ -161,8 +164,10 @@ ECHO_SUPPRESS_S: Final[float] = 1.0
 # After this many unchanged outputs, stop calling LLM (output is stale)
 MAX_UNCHANGED_OUTPUTS: Final[int] = 3
 
-# E2B sandbox cost: $0.000028/second = 0.0028 cents/second
-E2B_COST_CENTS_PER_SECOND: Final[float] = 0.0028
+# E2B sandbox cost per vCPU: $0.000014/second = 0.0014 cents/second. A sandbox
+# reports its size (C16); one without a reported size is the default 2 vCPUs.
+E2B_COST_CENTS_PER_VCPU_SECOND: Final[float] = 0.0014
+E2B_DEFAULT_SANDBOX_VCPUS: Final[int] = 2
 
 # ── Run target (C14: cloud sandbox vs the user's Mac) ──
 CODE_TARGET_CLOUD: Final[str] = "cloud"

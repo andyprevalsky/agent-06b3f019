@@ -4354,6 +4354,22 @@ async def _run_all_tests():
         "cc_manager_usage_limit_row_is_paused_with_user_text",
         test_cc_manager_usage_limit_row_is_paused_with_user_text,
     )
+    await r.record_async("cc_error_budget_ignores_worker_deaths", test_claude_code_error_budget_ignores_worker_deaths)
+    await r.record_async(
+        "cc_cancelled_run_tracks_its_sandbox_usage", test_cc_execute_tool_cancelled_run_tracks_its_sandbox_usage
+    )
+    await r.record_async(
+        "cc_every_run_end_reports_sandbox_usage_by_size",
+        test_claude_code_every_end_of_a_run_reports_sandbox_usage_by_size,
+    )
+    await r.record_async(
+        "cc_long_run_writes_no_repeated_status_rows",
+        test_run_agentic_loop_long_run_writes_no_repeated_status_rows,
+    )
+    await r.record_async(
+        "cc_retryable_error_keeps_live_sandbox_for_retry",
+        test_claude_code_retryable_error_keeps_the_live_sandbox_for_the_retry,
+    )
     teardown_mock()
     return r.all_passed
 
@@ -5839,6 +5855,310 @@ async def test_cc_manager_closes_the_sandbox_when_the_last_attempt_times_out():
             restore()
         assert fake.closed_sessions == ([expected] if expected else []), (label, fake.closed_sessions)
         assert "Code session failed" in _cc_titles(events), (label, _cc_titles(events))
+
+
+# ---------------------------------------------------------------------------
+# Multi-day robustness (T5): the activity's own error budget and live-session
+# retries. A multi-day run sees worker deaths (OOM, deploy SIGKILL) and network
+# blips; neither may end it.
+# ---------------------------------------------------------------------------
+
+
+def _activity_error_is_final(error: BaseException) -> bool:
+    from temporalio.exceptions import ApplicationError
+
+    return isinstance(error, ApplicationError) and error.non_retryable
+
+
+async def test_claude_code_error_budget_ignores_worker_deaths():
+    """Only errors the activity raised count toward CODE_AGENT_ERROR_RETRY_LIMIT.
+
+    The limit read ``activity.info().attempt``, which Temporal also increments
+    for every heartbeat-timeout retry after a dead worker. A weekend with two
+    worker deaths and two network blips made the next blip non-retryable and
+    ended the multi-day run. Here two attempts die without raising, then the
+    create call fails transiently on every later attempt: the first four
+    errors must stay retryable and the fifth must stop the retries.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import config, service
+
+    async def backend_blip(**kwargs):
+        raise Exception("Failed to create code session (provider=claude): HTTP 502: bad gateway")
+
+    recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+    details: list = []
+    attempt = 2  # attempts 1 and 2 died with the worker before heartbeating
+    outcomes: list[bool] = []
+    with (
+        recorder.patched(),
+        patch.object(service, "create_e2b_session", side_effect=backend_blip),
+        patch.object(service, "fetch_code_credential_availability", AsyncMock(return_value=None)),
+    ):
+        for _ in range(config.CODE_AGENT_ERROR_RETRY_LIMIT):
+            attempt += 1
+            beats: list = []
+            env = ActivityEnvironment()
+            env.info = dataclasses.replace(env.info, attempt=attempt, heartbeat_details=list(details))
+            env.on_heartbeat = lambda *beat, _beats=beats: _beats.append(beat)
+            try:
+                await asyncio.wait_for(env.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=10)
+            except Exception as error:
+                assert not isinstance(error, asyncio.TimeoutError), "the failing attempt hung"
+                outcomes.append(_activity_error_is_final(error))
+            else:
+                raise AssertionError("the failing create must raise")
+            # Temporal hands the next attempt the last heartbeat this one sent.
+            if beats:
+                details = list(beats[-1][1:])
+    limit = config.CODE_AGENT_ERROR_RETRY_LIMIT
+    assert outcomes == [False] * (limit - 1) + [True], (
+        f"after 2 worker deaths, errors 1..{limit - 1} must stay retryable and error {limit} must be final; "
+        f"final flags per error={outcomes}"
+    )
+
+
+async def test_claude_code_retryable_error_keeps_the_live_sandbox_for_the_retry():
+    """A retryable error leaves the live sandbox for the next attempt to reattach.
+
+    The generic error path posted "Task Failed" and closed (checkpoint + pause)
+    the sandbox even when Temporal was about to retry. The retry's reattach
+    probe then failed against the paused sandbox, so it created a new session
+    and restarted the CLI with the original goal. A lost WebSocket
+    (``_handle_reconnect_exhausted``) is the common trigger. Only the attempt
+    whose error is final may report failure and close the sandbox.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import config, service
+
+    sandbox = _LocalCodeSandbox()
+    await sandbox.start()
+    recorder = _CCBoundaryRecorder(sandbox.ws_url)
+    real_loop = service._run_agentic_loop
+    lost = {"armed": True}
+
+    async def loop_loses_the_socket(**kwargs):
+        if lost["armed"]:
+            lost["armed"] = False
+            await service._handle_reconnect_exhausted(
+                kwargs["sandbox_id"], kwargs["agent_id"], kwargs["task_id"], kwargs["action_summary"]
+            )
+        return await real_loop(**kwargs)
+
+    try:
+        with (
+            recorder.patched(),
+            patch.object(service, "_run_agentic_loop", side_effect=loop_loses_the_socket),
+            patch.object(service, "check_sandbox_health", AsyncMock(return_value=None)),
+            patch.object(service, "fetch_code_credential_availability", AsyncMock(return_value=None)),
+        ):
+            beats: list = []
+            first = ActivityEnvironment()
+            first.on_heartbeat = lambda *beat: beats.append(beat)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(first.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=15)
+            assert recorder.closed == [], f"a retryable error must not close the live sandbox: {recorder.closed}"
+            assert "Task Failed" not in recorder.titles, f"a retried error is not a failure: {recorder.titles}"
+            assert beats and _carries_session(beats[-1]), "the retry must find the live session in the heartbeat"
+
+            sandbox.release("continue")
+            sandbox.release("exit")
+            retry = ActivityEnvironment()
+            retry.info = dataclasses.replace(retry.info, attempt=2, heartbeat_details=list(beats[-1][1:]))
+            outcome = await asyncio.wait_for(
+                retry.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=30
+            )
+        assert len(recorder.created) == 1, f"the retry must reattach, not create: {recorder.created}"
+        assert outcome["status"] == "completed" and outcome["task_id"] == "cc-task-1", outcome
+        assert [call["task_id"] for call in recorder.closed] == ["cc-task-1"], recorder.closed
+
+        # The error that ends the run still reports failure and closes the sandbox.
+        final_recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+        spent = {"code_agent_errors": config.CODE_AGENT_ERROR_RETRY_LIMIT - 1}
+        last = ActivityEnvironment()
+        last.info = dataclasses.replace(last.info, attempt=9, heartbeat_details=[spent])
+
+        async def socket_lost(**kwargs):
+            raise Exception("WebSocket connection to Claude Code sandbox lost after all reconnect attempts")
+
+        with final_recorder.patched(), patch.object(service, "_run_agentic_loop", side_effect=socket_lost):
+            try:
+                await asyncio.wait_for(last.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=10)
+            except Exception as error:
+                assert _activity_error_is_final(error), f"the last budgeted error must be final: {error!r}"
+            else:
+                raise AssertionError("the lost socket must raise")
+        assert "Task Failed" in final_recorder.titles, final_recorder.titles
+        assert [call.get("reason") for call in final_recorder.closed] == ["failure"], final_recorder.closed
+    finally:
+        sandbox.stop()
+
+
+async def test_run_agentic_loop_long_run_writes_no_repeated_status_rows():
+    """A multi-day run must not add a lifecycle row (or a summary line) per 30s.
+
+    The loop wrote a "Claude Code working (Ns)" TOOL row every 30 seconds
+    (~2,880 rows/day per session) under the spawn's toolCallId, and appended
+    "Status update at Ns" to the action summary. Each row is a lifecycle write
+    that scans every row of the tool call under its lock, so by day 2-3 the
+    writes, including the final task_complete, time out; and the parent's
+    "last 10 actions" became ten status lines. Elapsed time is derivable from
+    started_at: a status row is only written when the reported progress
+    (interactions, completed turns) changes.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+
+    class LongBash(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("working", True)
+            await self.on_event({"version": 1, "provider": "claude", "type": "tool_use", "name": "Bash"})
+            await aio.sleep(1.5)
+            await self.on_exit(0)
+            await aio.Event().wait()
+
+    clock = {"now": 1_000_000.0}
+
+    def fake_time() -> float:
+        # Each read advances 60s: 1.5s of real loop time spans hours of run time.
+        clock["now"] += 60.0
+        return clock["now"]
+
+    rows: list[dict] = []
+
+    async def record_row(**kwargs):
+        rows.append(kwargs)
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+    with (
+        patch.object(service, "ClaudeCodeWsClient", LongBash),
+        patch.object(service, "safe_time", fake_time),
+        patch.object(service, "save_claude_code_message", side_effect=record_row),
+        patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+        patch.object(service, "keepalive_e2b_session", AsyncMock(return_value=None)),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        exit_code, *_ = await service._run_agentic_loop(**_loop_kwargs(summary, loop_outcome={}))
+    teardown_mock()
+
+    simulated_s = clock["now"] - 1_000_000.0
+    assert exit_code == 0, (exit_code, summary)
+    assert simulated_s > 3600, f"the run must span hours of loop time, spanned {simulated_s:.0f}s"
+    status_rows = [row for row in rows if row.get("action_type") == "agent_observation"]
+    assert len(status_rows) <= 1, (
+        f"{len(status_rows)} status rows over {simulated_s:.0f}s with no progress change: "
+        f"{[row.get('title') for row in status_rows[:3]]}"
+    )
+    status_lines = [line for line in summary if line.startswith("Status update at")]
+    assert status_lines == [], f"the parent's action summary filled with {len(status_lines)} status lines"
+
+
+def _e2b_cost(result: dict) -> float:
+    return sum(
+        item.get("cost_cents", 0)
+        for item in result.get("usage_items") or []
+        if item.get("provider") == "E2B Desktop Sandbox"
+    )
+
+
+async def test_claude_code_every_end_of_a_run_reports_sandbox_usage_by_size():
+    """Sandbox time is billed on every way a run ends, at the sandbox's size.
+
+    A multi-day run normally goes idle pause -> respawn, yet the idle-pause,
+    usage-limit and user-cancel results carried ``usage_items: []`` (or none),
+    so most E2B seconds were never recorded. The rate was a fixed 2-vCPU rate
+    even for an 8-vCPU sandbox, and a run on the user's own Mac was billed as
+    an E2B sandbox.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    clock = {"now": 1_000_000.0}
+
+    def fake_time() -> float:
+        clock["now"] += 300.0
+        return clock["now"]
+
+    def recorder_with(size, target_meta=None):
+        recorder = _CCBoundaryRecorder(ws_url="ws://unused")
+        create = recorder.create_session
+
+        async def sized_create(**kwargs):
+            session = await create(**kwargs)
+            return {**session, "sandbox_size": size} if size else session
+
+        recorder.create_session = sized_create
+        return recorder
+
+    async def idle_loop(**kwargs):
+        kwargs["loop_outcome"]["idle_paused"] = True
+        kwargs["loop_outcome"]["idle_s"] = 600
+        return (-1, False, [], 0, 0, [])
+
+    async def run(size, loop, env=None):
+        recorder = recorder_with(size)
+        env = env or ActivityEnvironment()
+        with (
+            recorder.patched(),
+            patch.object(service, "safe_time", fake_time),
+            patch.object(service, "_run_agentic_loop", side_effect=loop),
+            patch.object(service, "fetch_code_credential_availability", AsyncMock(return_value=None)),
+        ):
+            return await asyncio.wait_for(env.run(service.spawn_claude_code_activity, *_cc_activity_args()), 10)
+
+    small = await run({"cpu": 2, "memory_gb": 4}, idle_loop)
+    assert small["status"] == service.CODE_AGENT_PAUSED_STATUS, small["status"]
+    assert _e2b_cost(small) > 0, f"an idle-paused run must bill its sandbox time: {small.get('usage_items')}"
+
+    large = await run({"cpu": 8, "memory_gb": 16}, idle_loop)
+    ratio = _e2b_cost(large) / _e2b_cost(small)
+    seconds_ratio = large["execution_time_ms"] / small["execution_time_ms"]
+    assert abs(ratio / seconds_ratio - 4) < 0.01, f"an 8-vCPU sandbox must cost 4x a 2-vCPU one per second, got {ratio}"
+
+    cancel_env = ActivityEnvironment()
+
+    async def user_cancel(**kwargs):
+        cancel_env.cancel()
+        await asyncio.sleep(30)
+
+    cancelled = await run({"cpu": 2, "memory_gb": 4}, user_cancel, cancel_env)
+    assert cancelled["status"] == "cancelled", cancelled
+    assert _e2b_cost(cancelled) > 0, f"a user-cancelled run must bill its sandbox time: {cancelled}"
+
+
+async def test_cc_execute_tool_cancelled_run_tracks_its_sandbox_usage():
+    """A paused/cancelled code agent's sandbox time reaches the workflow's cost ledger.
+
+    The cancel branch returned before the usage block, so a user pause never
+    billed the sandbox seconds the activity reported.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    handle = _FakeActivityHandle(
+        result={
+            "status": "cancelled",
+            "message": "cancelled",
+            "task_id": "task-cancel-usage",
+            "code_provider": "claude",
+            "usage_items": [{"type": "service", "cost_cents": 12.5, "provider": "E2B Desktop Sandbox"}],
+        }
+    )
+    fake = _FakeCCWorkflow(handle)
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(
+            SpawnClaudeCodeAgentManager().execute_tool(_FakeCCWorkflowInstance(), {"goal": "g"}, "tc-cancel-usage")
+        )
+    finally:
+        restore()
+    row = _paused_row(events)
+    usage = (row.data or {}).get("usage") or {}
+    assert usage.get("service") == [{"cost_cents": 12.5, "provider": "E2B Desktop Sandbox"}], row.data
 
 
 if __name__ == "__main__":
