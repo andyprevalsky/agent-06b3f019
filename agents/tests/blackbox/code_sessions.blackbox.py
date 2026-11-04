@@ -1084,9 +1084,9 @@ def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_re
 async def test_failed_attempt_retry_keeps_state_and_code_session_id():
     """C2: an attempt fails after writing an uncommitted file; the Temporal retry resumes it.
 
-    The failing attempt closes with reason "failure" (checkpoint + pause), the
-    retry discards the unreachable sandbox record but keeps the code_session_id
-    and lease owner from the heartbeat, and the resumed CLI finds the file.
+    A retryable failure leaves the sandbox live (no close) and carries the
+    session (code_session_id, lease owner) on its heartbeat; the retry
+    reattaches to the same sandbox and the CLI still finds the file.
     """
     from temporalio.testing import ActivityEnvironment
 
@@ -1108,7 +1108,10 @@ async def test_failed_attempt_retry_keeps_state_and_code_session_id():
                 raise AssertionError("the first attempt must fail")
             except RuntimeError as error:
                 assert "transcript store unavailable" in str(error), error
-            assert [call.get("reason") for call in backend.closed] == ["failure"], backend.closed
+            # A retryable error leaves the live sandbox for the retry to reattach
+            # (2026-11-04-code-agent-retryable-error-closed-live-sandbox); only a
+            # final error checkpoints and pauses it.
+            assert backend.closed == [], backend.closed
             carried = [
                 detail
                 for beat in beats
@@ -1121,9 +1124,10 @@ async def test_failed_attempt_retry_keeps_state_and_code_session_id():
             retry.info = dataclasses.replace(retry.info, attempt=2, heartbeat_details=list(beats[-1]))
             outcome = await asyncio.wait_for(retry.run(service.spawn_claude_code_activity, *_activity_args()), 30)
         assert outcome["status"] == "completed" and outcome["success"] is True, outcome
-        assert len(backend.created) == 2, backend.created
-        assert backend.created[1]["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", backend.created[1]
-        assert backend.created[0]["lease_owner"] == backend.created[1]["lease_owner"] == "tool:agent-code:tc-code"
+        # The retry reattached to the still-live sandbox: no second create.
+        assert len(backend.created) == 1, backend.created
+        assert backend.created[0]["lease_owner"] == "tool:agent-code:tc-code", backend.created[0]
+        assert outcome["code_session"]["code_session_id"] == carried[-1]["code_session"]["code_session_id"], outcome
         texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
         assert "notes: uncommitted work" in texts, texts
     finally:
