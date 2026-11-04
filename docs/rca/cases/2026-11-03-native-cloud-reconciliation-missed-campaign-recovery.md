@@ -89,3 +89,37 @@ financial settlement, evidence reconstruction or cleanup exceptions.
 A recovery producer may emit a new release record while preserving its original
 failed execution projection. Validate the new record against exact membership and
 all native cleanup authorities; never rewrite the old failure to make it fit.
+
+## November 4 recurrence: next-source renewal after interrupted recovery
+
+At `6be23a907897c68035471d5770a7c8cdb8b4c5e2`, the public reconcile
+command refused renewal of the already validated round-37 smoke token
+`7cf73e413dbf4046b8bdcec0441fe56a`: `a quiescent interrupted operation
+token is required`. The cycle had legitimately refreshed its source and finished
+quick validation, leaving quiescent TRIAGE in round 38. The original interrupted
+receipt remained immutable, but its isolated-validation proof still named f66 as
+the permitted next source. The token resolver required the *current* phase and
+latest attempt to be interrupted, while fresh admission required the new source.
+This was a reconciliation lifecycle defect, not a new benchmark failure.
+
+The reviewed two-file correction (`0cac920b7d9e0cf5c6f9b6216af3b629d435e8b38a8c2dd690f73249d8c3a2ba`)
+uses the existing public reconcile action only for an already reconciled exact
+native-cloud token at quiescent TRIAGE. It revalidates the prior native proof,
+requires every incoming proof field except `validation_source` to be identical,
+and binds that source to the current state, plan and actual checkout. It then
+replays the unchanged native validator. Only after all checks pass does it retain
+the full prior entry in history and update next-source admission. Repeated
+identical renewal makes no state change; newer receipts or changed proof bytes,
+identity, confirmation, source or execution state refuse atomically.
+
+A registered causal control reproduced the original public refusal after an
+accepted interrupted proof, actual fixture-source change and quick attempt.
+Four targeted owning methods then passed in 5.370 seconds, including renewal,
+idempotence, nine atomic refusal variants, native-file tampering and the existing
+full-request/debt guards. Independent review cleared the exact patch. The raw
+round-37 receipts, native UNVERIFIED outcomes, old financial/archive obligations
+and original clock remain unchanged; `credit_granted` and `cleanup_complete`
+remain false. These controls grant no full-gate PASS or deployment completion.
+The observed refusal and causal logs are retained under
+`.context/preparation/6be-current/reconciliation/smoke.native.log` and
+`/var/tmp/pr1662-6be-cloud-renewal/`.

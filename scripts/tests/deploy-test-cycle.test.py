@@ -2225,6 +2225,61 @@ class Cycle(unittest.TestCase):
             c.retained_owners(state, [gate['name']])
         self.assertIsNotNone(c.pending_completion_block(state))
 
+    def renewal_state(self):
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        receipt = state['attempts'][-1]['results'][0]
+        state.update(phase='interrupted', resume_phase='focused')
+        state['attempts'][-1]['interrupted'] = True
+        state['failures'] = []
+        receipt.update(executed=True)
+        c.write(paths['receipt'], receipt); proof['receipt_sha256'] = c.sha_file(paths['receipt'])
+        c.reconcile(state, receipt['token'], proof)
+        # Ordinary source refresh + a completed quick phase leaves the original smoke latest.
+        (self.root / 'new-source').write_text('next source')
+        state.update(source=c.source(self.root), phase='triage', ready=False)
+        state['plan']['source'] = state['source']
+        state['attempts'].append(dict(phase='quick', results=[]))
+        return state, paths, proof, gate, packet, receipt
+
+    def test_existing_isolated_proof_can_renew_only_validation_source_after_refresh(self):
+        state, paths, proof, gate, packet, receipt = self.renewal_state()
+        key = proof['receipt_sha256']; original = copy.deepcopy(state)
+        renewed = {**proof, 'validation_source': copy.deepcopy(state['source'])}
+        c.reconcile(state, receipt['token'], renewed)
+        self.assertEqual(state['reconciled_owner_history'], [original['reconciled_owners'][key]])
+        current = state['reconciled_owners'][key]
+        self.assertEqual(current['validation_source'], state['source'])
+        self.assertFalse(current['credit_granted']); self.assertFalse(current['cleanup_complete'])
+        self.assertEqual(original['attempts'], state['attempts']); self.assertEqual(original['failures'], state['failures'])
+        self.assertEqual(original['round'], state['round']); self.assertEqual(original['phase'], state['phase'])
+        request = dict(token='fresh-after-source-refresh', source=state['source'], checks=gate['checks'], skips={})
+        self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
+        self.assertIn('full coverage', c.pending_completion_block(state))
+        before = copy.deepcopy(state); c.reconcile(state, receipt['token'], renewed)
+        self.assertEqual(before, state)  # idempotent, no duplicate renewal record
+
+    def test_isolated_source_renewal_refusals_are_atomic(self):
+        state, paths, proof, gate, packet, receipt = self.renewal_state()
+        renewed = {**proof, 'validation_source': copy.deepcopy(state['source'])}
+        changes = [('wrong-source', lambda s,p: p.update(validation_source=proof['validation_source'])),
+            ('wrong-token', lambda s,p: p.update(request_token='foreign')),
+            ('wrong-receipt', lambda s,p: p.update(receipt_sha256='0'*64)),
+            ('new-confirmation', lambda s,p: p.update(confirmed_at=p['confirmed_at']+1)),
+            ('running', lambda s,p: s.update(running={'gate':gate['name']})),
+            ('live-failures', lambda s,p: s.update(live_failures=[])),
+            ('wrong-phase', lambda s,p: s.update(phase='ready')),
+            ('no-prior', lambda s,p: s.update(reconciled_owners={})),
+            ('newer-receipt', lambda s,p: s['attempts'][-1]['results'].append({**receipt,'token':'new-owner'}))]
+        for name, change in changes:
+            with self.subTest(name=name):
+                candidate, incoming = copy.deepcopy(state), copy.deepcopy(renewed)
+                change(candidate, incoming); before = copy.deepcopy(candidate)
+                with self.assertRaises(ValueError): c.reconcile(candidate, receipt['token'], incoming)
+                self.assertEqual(before, candidate)
+        before = copy.deepcopy(state); packet.write_text(packet.read_text()+' ')
+        with self.assertRaises(ValueError): c.reconcile(state, receipt['token'], renewed)
+        self.assertEqual(before, state)
+
     def test_isolated_native_validation_requires_current_os_payload_authority(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         fleet = next(p for p in Path(proof['campaign']).parent.parent.joinpath('runs').iterdir()

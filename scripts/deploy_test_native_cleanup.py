@@ -552,10 +552,41 @@ def validate(receipt, owner, proof):
     return result
 
 
+def renew_isolated_validation(state, request_token, proof):
+    """Renew only the next source of an already verified original operation."""
+    from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
+    need(state.get('phase') == 'triage' and not state.get('running')
+         and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent triage required')
+    previous = [(key, entry) for key, entry in state.get('reconciled_owners', {}).items()
+                if entry.get('token') == request_token]
+    need(len(previous) == 1, 'one prior reconciliation required')
+    key, prior = previous[0]
+    need(prior.get('kind') == KIND and prior.get('purpose') == 'isolated-validation'
+         and prior.get('occurrence') == request_token and key == proof.get('receipt_sha256'), 'original reconciliation identity')
+    receipts = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
+                if row.get('gate') == prior['gate'] and row.get('token') == request_token]
+    need(len(receipts) == 1 and latest_receipts(state).get(prior['gate']) == receipts[0], 'original receipt superseded')
+    receipt = receipts[0]
+    need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
+    owner = receipt_owner(prior['gate'], receipt)
+    need(still_bound(prior, receipt, owner), 'prior native proof changed')
+    need({k: v for k, v in proof.items() if k != 'validation_source'} ==
+         {k: v for k, v in prior['proof'].items() if k != 'validation_source'}, 'only validation_source may change')
+    need(proof.get('validation_source') == state['source'] == state['plan'].get('source')
+         == source(Path(owner['worker_root'])), 'current source binding')
+    entry = validate(receipt, owner, proof)
+    entry['occurrence'] = prior['occurrence']
+    if entry != prior:
+        state.setdefault('reconciled_owner_history', []).append(copy.deepcopy(prior))
+        state['reconciled_owners'][key] = entry
+
+
 def reconcile(state, occurrence_id, proof):
     from deploy_test_cycle import latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
+        if failure is None and state.get('phase') == 'triage' and proof.get('purpose') == 'isolated-validation':
+            return renew_isolated_validation(state, occurrence_id, proof)
         interrupted = interrupted_receipt(state, occurrence_id) if failure is None else None
         gate = interrupted['gate'] if interrupted is not None else failure['gate']
         need(any(g['name'] == gate and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
