@@ -3,13 +3,14 @@
  * sync into grep documents).
  *
  *   GET    /api/integrations/granola                 connection + sync status, document counts
- *   POST   /api/integrations/granola/oauth/start     { returnUrl } → { authorizeUrl }
- *   GET    /api/integrations/granola/oauth/callback  Granola redirects here; starts a sync
+ *   POST   /api/integrations/granola/oauth/start     { redirectUri } → { authorizeUrl }
+ *   POST   /api/integrations/granola/oauth/complete  { code, state } from the frontend
+ *                                                    callback page; starts a sync
  *   POST   /api/integrations/granola/sync            start a sync now
  *   DELETE /api/integrations/granola                 disconnect and delete synced documents
  */
 
-import { type Request, type Response, Router } from 'express';
+import { type Response, Router } from 'express';
 import { type AuthRequest, authenticate } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -21,13 +22,11 @@ import {
   startGranolaSignIn,
   syncGranolaUser,
 } from '../../services/integrations/granolaSync';
-import { BACKEND_BASE_URL } from './config';
-import { isAllowedRedirectUrl, sendOAuthResult } from './oauthService';
+import { isAllowedRedirectUrl } from './oauthService';
 
 const log = createLogger('Integrations');
 const router = Router();
 
-export const GRANOLA_REDIRECT_URI = `${BACKEND_BASE_URL}/api/integrations/granola/oauth/callback`;
 
 function resolveUserId(req: AuthRequest): string | undefined {
   const id = req.isInternal === true ? req.headers['x-user-id'] : req.user?.id;
@@ -54,6 +53,23 @@ router.get(
   })
 );
 
+/**
+ * Granola returns the browser to this Rose frontend page, which posts the code
+ * to /oauth/complete with the user's own session. Only the frontend's own
+ * callback path on an allowed origin is accepted.
+ */
+export const GRANOLA_CALLBACK_PATH = '/integrations/granola/callback';
+
+function isAllowedGranolaRedirect(value: unknown): value is string {
+  if (typeof value !== 'string' || !isAllowedRedirectUrl(value)) return false;
+  try {
+    const url = new URL(value);
+    return url.pathname === GRANOLA_CALLBACK_PATH && url.search === '' && url.hash === '';
+  } catch {
+    return false;
+  }
+}
+
 router.post(
   '/granola/oauth/start',
   authenticate,
@@ -61,18 +77,12 @@ router.post(
     res.setHeader('Cache-Control', 'no-store');
     const userId = resolveUserId(req);
     if (userId === undefined) return res.status(401).json({ error: 'User not authenticated' });
-    const returnUrl = (req.body as { returnUrl?: unknown } | undefined)?.returnUrl;
-    if (
-      returnUrl !== undefined &&
-      (typeof returnUrl !== 'string' || !isAllowedRedirectUrl(returnUrl))
-    ) {
-      return res.status(400).json({ error: 'RETURN_URL_NOT_ALLOWED' });
+    const redirectUri = (req.body as { redirectUri?: unknown } | undefined)?.redirectUri;
+    if (!isAllowedGranolaRedirect(redirectUri)) {
+      return res.status(400).json({ error: 'REDIRECT_URI_NOT_ALLOWED' });
     }
     try {
-      const { authorizeUrl } = await startGranolaSignIn(userId, {
-        redirectUri: GRANOLA_REDIRECT_URI,
-        returnUrl: returnUrl ?? null,
-      });
+      const { authorizeUrl } = await startGranolaSignIn(userId, { redirectUri });
       return res.json({ authorizeUrl });
     } catch (error) {
       log.warn('Granola sign-in start failed', {
@@ -84,47 +94,32 @@ router.post(
   })
 );
 
-router.get(
-  '/granola/oauth/callback',
-  asyncHandler(async (req: Request, res: Response) => {
-    const { code, state, error } = req.query;
-    if (typeof error === 'string') {
-      return sendOAuthResult(res, {
-        title: 'Granola Connection',
-        success: false,
-        message: `Granola sign-in ${error}`,
-      });
-    }
-    if (typeof code !== 'string' || typeof state !== 'string') {
-      return sendOAuthResult(res, {
-        title: 'Granola Connection',
-        success: false,
-        message: 'Missing Granola sign-in code',
-      });
+router.post(
+  '/granola/oauth/complete',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const userId = resolveUserId(req);
+    if (userId === undefined) return res.status(401).json({ error: 'User not authenticated' });
+    const body = (req.body ?? {}) as { code?: unknown; state?: unknown };
+    if (typeof body.code !== 'string' || body.code === '' || typeof body.state !== 'string') {
+      return res.status(400).json({ error: 'CODE_AND_STATE_REQUIRED' });
     }
     try {
-      const result = await completeGranolaSignIn(state, code);
-      startSync(result.userId);
-      return sendOAuthResult(res, {
-        title: 'Granola Connection',
-        success: true,
-        message: 'Granola connected',
-        returnUrl: result.returnUrl,
-      });
+      await completeGranolaSignIn(userId, body.state, body.code);
     } catch (err) {
-      const message =
-        err instanceof GranolaSignInError && err.code !== 'EXCHANGE_FAILED'
-          ? err.message
-          : 'Could not connect Granola. Please try again.';
-      log.warn('Granola sign-in callback failed', {
+      log.warn('Granola sign-in completion failed', {
+        userId,
         error: err instanceof Error ? err.message : String(err),
       });
-      return sendOAuthResult(res, {
-        title: 'Granola Connection',
-        success: false,
-        message,
-      });
+      if (err instanceof GranolaSignInError) {
+        const status = err.code === 'EXCHANGE_FAILED' ? 502 : 400;
+        return res.status(status).json({ error: err.code, message: err.message });
+      }
+      throw err;
     }
+    startSync(userId);
+    return res.json(await getGranolaStatus(userId));
   })
 );
 

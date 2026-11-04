@@ -78,7 +78,6 @@ interface PendingConfig {
   verifier: string;
   clientId: string;
   redirectUri: string;
-  returnUrl: string | null;
   expiresAt: number;
 }
 
@@ -103,7 +102,7 @@ export interface GranolaSyncOptions {
 
 export type GranolaSyncResult =
   | { outcome: 'synced' | 'partial'; meetings: number; deleted: number }
-  | { outcome: 'not_claimed' }
+  | { outcome: 'not_claimed' | 'superseded' }
   | { outcome: 'failed' | 'expired'; error: string };
 
 export class GranolaSignInError extends Error {
@@ -139,13 +138,6 @@ async function loadConfig(userId: string): Promise<GranolaConfig | null> {
   return row === null ? null : ((row.config ?? {}) as GranolaConfig);
 }
 
-async function saveConfig(userId: string, config: GranolaConfig): Promise<void> {
-  await prisma.userDataProviderSyncState.update({
-    where: where(userId),
-    data: { config: config as Prisma.InputJsonValue },
-  });
-}
-
 async function setIntegrationStatus(
   userId: string,
   status: IntegrationStatus,
@@ -168,10 +160,14 @@ async function setIntegrationStatus(
 // Sign-in
 // ---------------------------------------------------------------------------
 
-/** Start a one-click sign-in; returns the Granola URL the browser opens. */
+/**
+ * Start a one-click sign-in; returns the Granola URL the browser opens.
+ * `redirectUri` is the Rose frontend callback page, which hands the code to
+ * the authenticated `completeGranolaSignIn` (never an unauthenticated callback).
+ */
 export async function startGranolaSignIn(
   userId: string,
-  opts: { redirectUri: string; returnUrl?: string | null; fetcher?: Fetcher; now?: Date }
+  opts: { redirectUri: string; fetcher?: Fetcher; now?: Date }
 ): Promise<{ authorizeUrl: string }> {
   const pending = await beginSignIn(opts.redirectUri, userId, opts.fetcher);
   const now = (opts.now ?? new Date()).getTime();
@@ -180,7 +176,6 @@ export async function startGranolaSignIn(
     verifier: pending.verifier,
     clientId: pending.clientId,
     redirectUri: pending.redirectUri,
-    returnUrl: opts.returnUrl ?? null,
     expiresAt: now + SIGN_IN_TTL_MS,
   };
   await prisma.user.upsert({
@@ -200,30 +195,60 @@ export async function startGranolaSignIn(
       },
     });
   } else {
-    // A reconnect keeps the current grant until the new sign-in completes.
-    await saveConfig(userId, { ...existing, pending: pendingConfig });
+    // A reconnect keeps the current grant until the new sign-in completes; only
+    // the `pending` key is written so a concurrent token refresh is not undone.
+    await prisma.$executeRaw`
+      UPDATE "UserDataProviderSyncState"
+      SET config = jsonb_set(COALESCE(config, '{}'::jsonb), '{pending}', ${JSON.stringify(pendingConfig)}::jsonb),
+          "updatedAt" = now()
+      WHERE "userId" = ${userId} AND source = ${GRANOLA_PROVIDER}
+    `;
   }
   return { authorizeUrl: pending.authorizeUrl };
 }
 
 /**
- * Finish the sign-in from the OAuth callback. The state carries the user id, so
- * the pending row is found by key; it must match exactly and be unexpired.
+ * Atomically take this user's pending sign-in when its state matches, so a
+ * duplicate callback cannot use (or later clobber) a sign-in twice.
+ */
+async function consumePending(userId: string, state: string): Promise<PendingConfig | null> {
+  const rows = await prisma.$queryRaw<Array<{ pending: PendingConfig | null }>>`
+    UPDATE "UserDataProviderSyncState" t
+    SET config = t.config - 'pending', "updatedAt" = now()
+    FROM (
+      SELECT id, config->'pending' AS pending FROM "UserDataProviderSyncState"
+      WHERE "userId" = ${userId} AND source = ${GRANOLA_PROVIDER}
+        AND config->'pending'->>'state' = ${state}
+      FOR UPDATE
+    ) old
+    WHERE t.id = old.id
+    RETURNING old.pending AS pending
+  `;
+  return rows[0]?.pending ?? null;
+}
+
+/**
+ * Finish the sign-in for the AUTHENTICATED user who started it. The frontend
+ * callback page posts Granola's `code` and `state` here with the user's own
+ * session. The state names its user, and it must be this caller: a victim who
+ * is tricked into approving an attacker's sign-in link lands back in their own
+ * session, so the attacker's state is refused and no tokens move accounts.
  */
 export async function completeGranolaSignIn(
+  userId: string,
   state: string,
   code: string,
   opts: { fetcher?: Fetcher; now?: Date } = {}
-): Promise<{ userId: string; returnUrl: string | null; accountEmail: string | null }> {
-  const userId = state.split('.')[0] ?? '';
-  const config = userId === '' ? null : await loadConfig(userId);
-  const pending = config?.pending;
-  if (config === null || pending === undefined || pending.state !== state) {
+): Promise<{ accountEmail: string | null }> {
+  if (state.split('.')[0] !== userId) {
+    throw new GranolaSignInError('STATE_INVALID', 'This Granola sign-in belongs to another user');
+  }
+  const pending = await consumePending(userId, state);
+  if (pending === null) {
     throw new GranolaSignInError('STATE_INVALID', 'Unknown or already used Granola sign-in');
   }
   const now = opts.now ?? new Date();
   if (pending.expiresAt < now.getTime()) {
-    await saveConfig(userId, { ...config, pending: undefined });
     throw new GranolaSignInError('STATE_EXPIRED', 'Granola sign-in expired; try again');
   }
   let tokens: GranolaTokens;
@@ -237,15 +262,18 @@ export async function completeGranolaSignIn(
       await session.close();
     }
   } catch (error) {
-    await saveConfig(userId, { ...config, pending: undefined });
     throw new GranolaSignInError(
       'EXCHANGE_FAILED',
       error instanceof Error ? error.message : String(error)
     );
   }
+  const config = (await loadConfig(userId)) ?? {};
   // A different Granola account starts clean: the old account's meetings go.
+  // An unknown identity on either side may be a different account.
   const previousEmail = config.accountEmail ?? null;
-  const switched = previousEmail !== null && previousEmail !== accountEmail;
+  const hadGrant = config.encryptedTokens !== undefined;
+  const switched =
+    hadGrant && (previousEmail === null || accountEmail === null || previousEmail !== accountEmail);
   await prisma.$transaction([
     ...(switched
       ? [
@@ -259,9 +287,11 @@ export async function completeGranolaSignIn(
       data: {
         status: 'CONNECTED',
         config: { encryptedTokens: sealTokens(tokens), accountEmail } as Prisma.InputJsonValue,
-        ...(switched || config.encryptedTokens === undefined ? { cursor: {} } : {}),
+        ...(switched || !hadGrant ? { cursor: {} } : {}),
         nextSyncAt: now,
         lastError: null,
+        // Fences out any run still holding the previous claim (see claimToken).
+        lastStartedAt: null,
       },
     }),
     prisma.integration.upsert({
@@ -283,7 +313,7 @@ export async function completeGranolaSignIn(
     }),
   ]);
   log.info('Granola connected', { userId, switched });
-  return { userId, returnUrl: pending.returnUrl, accountEmail };
+  return { accountEmail };
 }
 
 /** Remove the grant, the sync state and every synced Granola document. */
@@ -333,18 +363,36 @@ export async function getGranolaStatus(userId: string) {
 // ---------------------------------------------------------------------------
 
 /**
- * Claim due rows (or one user's row when `userId` is given, regardless of
- * `nextSyncAt`). Returns the claimed user ids.
+ * A run's claim token is the `lastStartedAt` its claim wrote (DB clock, so two
+ * claims never share one). Disconnect deletes the row and a new sign-in clears
+ * `lastStartedAt`, so either fences out a run still in flight: every write
+ * below re-checks the token under a row lock and the run stops when it is gone.
  */
-async function claim(now: Date, limit: number, userId?: string): Promise<string[]> {
+class ClaimLostError extends Error {
+  constructor() {
+    super('Granola sync claim superseded (disconnect, new sign-in or reclaim)');
+    this.name = 'ClaimLostError';
+  }
+}
+
+interface Claim {
+  userId: string;
+  token: Date;
+}
+
+/**
+ * Claim due rows (or one user's row when `userId` is given, regardless of
+ * `nextSyncAt`). Returns each claimed user with its claim token.
+ */
+async function claim(now: Date, limit: number, userId?: string): Promise<Claim[]> {
   const stale = new Date(now.getTime() - STALE_CLAIM_MS);
   const due =
     userId === undefined
       ? Prisma.sql`s.status IN ('CONNECTED', 'SYNC_FAILED') AND s."nextSyncAt" <= ${now}`
       : Prisma.sql`s."userId" = ${userId} AND s.status IN ('CONNECTED', 'SYNC_FAILED')`;
-  const rows = await prisma.$queryRaw<Array<{ userId: string }>>`
+  return prisma.$queryRaw<Claim[]>`
     UPDATE "UserDataProviderSyncState" t
-    SET status = 'SYNCING', "lastStartedAt" = ${now}, "updatedAt" = ${now}
+    SET status = 'SYNCING', "lastStartedAt" = clock_timestamp(), "updatedAt" = clock_timestamp()
     WHERE t.id IN (
       SELECT s.id FROM "UserDataProviderSyncState" s
       WHERE s.source = ${GRANOLA_PROVIDER}
@@ -355,18 +403,39 @@ async function claim(now: Date, limit: number, userId?: string): Promise<string[
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
     )
-    RETURNING t."userId"
+    RETURNING t."userId" AS "userId", t."lastStartedAt" AS token
   `;
-  return rows.map((row) => row.userId);
 }
 
+const owned = (c: Claim) => ({
+  userId: c.userId,
+  source: GRANOLA_PROVIDER,
+  status: 'SYNCING',
+  lastStartedAt: c.token,
+});
+
+/** Run `fn` in a transaction holding this run's claim row locked; throws if lost. */
+async function fenced<T>(c: Claim, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "UserDataProviderSyncState"
+      WHERE "userId" = ${c.userId} AND source = ${GRANOLA_PROVIDER}
+        AND status = 'SYNCING' AND "lastStartedAt" = ${c.token}
+      FOR UPDATE
+    `;
+    if (rows.length === 0) throw new ClaimLostError();
+    return fn(tx);
+  });
+}
+
+/** Ends the run; false when the claim was lost (nothing is written then). */
 async function finish(
-  userId: string,
+  c: Claim,
   status: SyncStatus,
   data: { lastError?: string | null; nextSyncAt: Date; success?: Date }
-): Promise<void> {
-  await prisma.userDataProviderSyncState.update({
-    where: where(userId),
+): Promise<boolean> {
+  const { count } = await prisma.userDataProviderSyncState.updateMany({
+    where: owned(c),
     data: {
       status,
       nextSyncAt: data.nextSyncAt,
@@ -374,48 +443,92 @@ async function finish(
       ...(data.success === undefined ? {} : { lastSuccessfulSyncAt: data.success }),
     },
   });
+  return count === 1;
 }
 
-async function saveCursor(userId: string, cursor: GranolaCursor, now: Date): Promise<void> {
-  await prisma.userDataProviderSyncState.update({
-    where: where(userId),
-    data: { cursor: cursor as Prisma.InputJsonValue, lastStartedAt: now },
+async function saveCursor(c: Claim, cursor: GranolaCursor): Promise<void> {
+  const { count } = await prisma.userDataProviderSyncState.updateMany({
+    where: owned(c),
+    data: { cursor: cursor as Prisma.InputJsonValue },
   });
+  if (count !== 1) throw new ClaimLostError();
 }
 
-/** Fresh tokens and an open MCP session; refreshes once on expiry or a 401. */
-async function openSession(
-  userId: string,
-  config: GranolaConfig,
-  tokens: GranolaTokens,
-  opts: GranolaSyncOptions,
-  clock: () => Date
-): Promise<GranolaSession> {
-  let current = tokens;
-  const refresh = async () => {
-    current = await refreshTokens(current, opts.fetcher, clock().getTime());
-    await saveConfig(userId, { ...config, encryptedTokens: sealTokens(current) });
-  };
-  if (current.expiresAt !== null && current.expiresAt - REFRESH_SKEW_MS <= clock().getTime()) {
-    await refresh();
+/** An open MCP session that can refresh its token and reopen mid-run. */
+class Connection {
+  session: GranolaSession | null = null;
+
+  constructor(
+    private readonly c: Claim,
+    private tokens: GranolaTokens,
+    private readonly opts: GranolaSyncOptions,
+    private readonly clock: () => Date
+  ) {}
+
+  private async refresh(): Promise<void> {
+    this.tokens = await refreshTokens(this.tokens, this.opts.fetcher, this.clock().getTime());
+    // Only the token field, and only while this run still owns the row: a
+    // stale copy of the config must never undo a newer sign-in.
+    const updated = await prisma.$executeRaw`
+      UPDATE "UserDataProviderSyncState"
+      SET config = jsonb_set(COALESCE(config, '{}'::jsonb), '{encryptedTokens}', to_jsonb(${sealTokens(this.tokens)}::text)),
+          "updatedAt" = now()
+      WHERE "userId" = ${this.c.userId} AND source = ${GRANOLA_PROVIDER}
+        AND status = 'SYNCING' AND "lastStartedAt" = ${this.c.token}
+    `;
+    if (updated !== 1) throw new ClaimLostError();
   }
-  try {
-    return await GranolaSession.open(current.accessToken, opts.fetcher);
-  } catch (error) {
-    if (!(error instanceof GranolaMcpError && error.reconnect)) throw error;
-    await refresh();
-    return GranolaSession.open(current.accessToken, opts.fetcher);
+
+  async open(): Promise<void> {
+    if (
+      this.tokens.expiresAt !== null &&
+      this.tokens.expiresAt - REFRESH_SKEW_MS <= this.clock().getTime()
+    ) {
+      await this.refresh();
+    }
+    try {
+      this.session = await GranolaSession.open(this.tokens.accessToken, this.opts.fetcher);
+    } catch (error) {
+      if (!(error instanceof GranolaMcpError && error.reconnect)) throw error;
+      await this.refresh();
+      this.session = await GranolaSession.open(this.tokens.accessToken, this.opts.fetcher);
+    }
+  }
+
+  /**
+   * Run `fn` on the session; when the token expires mid-run (401), refresh it,
+   * reopen and retry once. Only a refused refresh reaches EXPIRED.
+   */
+  async use<T>(fn: (session: GranolaSession) => Promise<T>): Promise<T> {
+    if (this.session === null) await this.open();
+    const session = this.session;
+    if (session === null) throw new GranolaMcpError('Granola session did not open');
+    try {
+      return await fn(session);
+    } catch (error) {
+      if (!(error instanceof GranolaMcpError && error.reconnect)) throw error;
+      await this.close();
+      await this.refresh();
+      this.session = await GranolaSession.open(this.tokens.accessToken, this.opts.fetcher);
+      return fn(this.session);
+    }
+  }
+
+  async close(): Promise<void> {
+    await this.session?.close();
+    this.session = null;
   }
 }
 
 /** Sync every meeting in [startMs, endMs); returns stored and removed counts. */
 async function syncWindow(
-  userId: string,
+  c: Claim,
   session: GranolaSession,
   startMs: number,
   endMs: number,
   now: Date
 ): Promise<{ meetings: number; deleted: number }> {
+  const { userId } = c;
   const listed = await listMeetingsBetween(session, startMs, endMs);
   const ids = listed.map((meeting) => meeting.id);
   const notes = await getMeetingNotes(session, ids);
@@ -438,37 +551,48 @@ async function syncWindow(
       settled && haveTranscript.has(meeting.id)
         ? undefined
         : await getTranscript(session, meeting.id);
-    const documents = granolaMeetingDocuments(meeting, notes.get(meeting.id), transcript);
-    await upsertDataDocuments(userId, documents);
-    // A layer Granola no longer has goes too; an unfetched transcript is kept.
+    // Notes Granola did not return this time leave the stored note and summary
+    // as they are; only a layer Granola returned without is gone. An unfetched
+    // transcript is kept too.
+    const note = notes.get(meeting.id);
+    const documents = granolaMeetingDocuments(meeting, note, transcript).filter(
+      (doc) => note !== undefined || doc.source === GRANOLA_TRANSCRIPT_SOURCE
+    );
     const gone = GRANOLA_SOURCES.filter(
       (source) =>
         !documents.some((doc) => doc.source === source) &&
-        !(source === GRANOLA_TRANSCRIPT_SOURCE && transcript === undefined)
+        !(source === GRANOLA_TRANSCRIPT_SOURCE && transcript === undefined) &&
+        !(source !== GRANOLA_TRANSCRIPT_SOURCE && note === undefined)
     );
-    if (gone.length > 0) {
-      await prisma.userDataDocument.updateMany({
-        where: { userId, externalId: meeting.id, source: { in: gone }, deletedAt: null },
-        data: { deletedAt: now },
-      });
-    }
+    await fenced(c, async (tx) => {
+      await upsertDataDocuments(userId, documents, tx);
+      if (gone.length > 0) {
+        await tx.userDataDocument.updateMany({
+          where: { userId, externalId: meeting.id, source: { in: gone }, deletedAt: null },
+          data: { deletedAt: now },
+        });
+      }
+    });
   }
   // Stored meetings in this window that Granola no longer lists were deleted.
-  const removed = await prisma.userDataDocument.updateMany({
-    where: {
-      userId,
-      source: { in: [...GRANOLA_SOURCES] },
-      sourceUpdatedAt: { gte: new Date(startMs), lt: new Date(endMs) },
-      externalId: { notIn: ids },
-      deletedAt: null,
-    },
-    data: { deletedAt: now },
-  });
+  const removed = await fenced(c, (tx) =>
+    tx.userDataDocument.updateMany({
+      where: {
+        userId,
+        source: { in: [...GRANOLA_SOURCES] },
+        sourceUpdatedAt: { gte: new Date(startMs), lt: new Date(endMs) },
+        externalId: { notIn: ids },
+        deletedAt: null,
+      },
+      data: { deletedAt: now },
+    })
+  );
   return { meetings: listed.length, deleted: removed.count };
 }
 
 /** One sync run for a user whose row this process has already claimed. */
-async function runClaimed(userId: string, opts: GranolaSyncOptions): Promise<GranolaSyncResult> {
+async function runClaimed(c: Claim, opts: GranolaSyncOptions): Promise<GranolaSyncResult> {
+  const { userId } = c;
   const clock = opts.now ?? (() => new Date());
   const deadline = clock().getTime() + (opts.deadlineMs ?? RUN_DEADLINE_MS);
   const state = await prisma.userDataProviderSyncState.findUniqueOrThrow({
@@ -480,69 +604,82 @@ async function runClaimed(userId: string, opts: GranolaSyncOptions): Promise<Gra
   const tokens = readTokens(config);
   if (tokens === null) {
     const reason = 'Granola sign-in is unreadable; connect Granola again';
-    await finish(userId, 'EXPIRED', { lastError: reason, nextSyncAt: clock() });
-    await setIntegrationStatus(userId, IntegrationStatus.EXPIRED, reason, clock());
+    if (await finish(c, 'EXPIRED', { lastError: reason, nextSyncAt: clock() })) {
+      await setIntegrationStatus(userId, IntegrationStatus.EXPIRED, reason, clock());
+    }
     return { outcome: 'expired', error: reason };
   }
 
   let meetings = 0;
   let deleted = 0;
-  let session: GranolaSession | null = null;
+  const conn = new Connection(c, tokens, opts, clock);
   try {
-    session = await openSession(userId, config, tokens, opts, clock);
+    await conn.open();
     const started = clock();
     const recentStart =
       cursor.lastPolledAt === undefined
         ? started.getTime() - FIRST_WINDOW_MS
         : Date.parse(cursor.lastPolledAt) - RECENT_OVERLAP_MS;
-    const recent = await syncWindow(userId, session, recentStart, started.getTime() + DAY, started);
+    const recent = await conn.use((session) =>
+      syncWindow(c, session, recentStart, started.getTime() + DAY, started)
+    );
     meetings += recent.meetings;
     deleted += recent.deleted;
     cursor.lastPolledAt = started.toISOString();
     cursor.backfillEnd ??= new Date(recentStart).toISOString();
-    await saveCursor(userId, cursor, clock());
+    await saveCursor(c, cursor);
 
     const oldest = started.getTime() - BACKFILL_DAYS * DAY;
     while (cursor.backfillDone !== true && clock().getTime() < deadline) {
       const end = Date.parse(cursor.backfillEnd);
       const start = Math.max(end - BACKFILL_WINDOW_MS, oldest);
-      const window = await syncWindow(userId, session, start, end, clock());
+      const window = await conn.use((session) => syncWindow(c, session, start, end, clock()));
       meetings += window.meetings;
       deleted += window.deleted;
       cursor.backfillEnd = new Date(start).toISOString();
       if (start <= oldest) cursor.backfillDone = true;
-      await saveCursor(userId, cursor, clock());
+      await saveCursor(c, cursor);
     }
 
     const now = clock();
     const done = cursor.backfillDone === true;
-    await finish(userId, 'CONNECTED', {
+    const ended = await finish(c, 'CONNECTED', {
       lastError: null,
       success: now,
       nextSyncAt: done ? new Date(now.getTime() + GRANOLA_SYNC_INTERVAL_MS) : now,
     });
+    if (!ended) throw new ClaimLostError();
     await setIntegrationStatus(userId, IntegrationStatus.CONNECTED, null, now);
     log.info('Granola synced', { userId, meetings, deleted, backfillDone: done });
     return { outcome: done ? 'synced' : 'partial', meetings, deleted };
   } catch (error) {
     const now = clock();
     const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+    if (error instanceof ClaimLostError) {
+      log.info('Granola sync stopped: claim superseded', { userId });
+      return { outcome: 'superseded' };
+    }
     if (error instanceof GranolaMcpError && error.reconnect) {
+      // A new sign-in rotates the grant under a running sync; that run lost its
+      // claim and must not mark the fresh connection expired.
       const reason = 'Granola sign-in expired; connect Granola again';
-      await finish(userId, 'EXPIRED', { lastError: reason, nextSyncAt: now });
+      if (!(await finish(c, 'EXPIRED', { lastError: reason, nextSyncAt: now }))) {
+        return { outcome: 'superseded' };
+      }
       await setIntegrationStatus(userId, IntegrationStatus.EXPIRED, reason, now);
       log.warn('Granola grant rejected', { userId, error: message.slice(0, 200) });
       return { outcome: 'expired', error: reason };
     }
-    await finish(userId, 'SYNC_FAILED', {
+    const failed = await finish(c, 'SYNC_FAILED', {
       lastError: message,
       nextSyncAt: new Date(now.getTime() + GRANOLA_SYNC_INTERVAL_MS),
     });
+    if (!failed) return { outcome: 'superseded' };
     await setIntegrationStatus(userId, IntegrationStatus.SYNC_FAILED, message, now);
     log.error('Granola sync failed', { userId, error: message.slice(0, 200) });
     return { outcome: 'failed', error: message };
   } finally {
-    await session?.close();
+    await conn.close();
   }
 }
 
@@ -551,9 +688,9 @@ export async function syncGranolaUser(
   userId: string,
   opts: GranolaSyncOptions = {}
 ): Promise<GranolaSyncResult> {
-  const claimed = await claim((opts.now ?? (() => new Date()))(), 1, userId);
-  if (claimed.length === 0) return { outcome: 'not_claimed' };
-  return runClaimed(userId, opts);
+  const [claimed] = await claim((opts.now ?? (() => new Date()))(), 1, userId);
+  if (claimed === undefined) return { outcome: 'not_claimed' };
+  return runClaimed(claimed, opts);
 }
 
 /** Cron entry: sync every due user, a bounded batch per tick. */
@@ -561,10 +698,10 @@ export async function runGranolaSyncJob(opts: GranolaSyncOptions = {}): Promise<
   const users = await claim((opts.now ?? (() => new Date()))(), CRON_BATCH);
   const queue = [...users];
   const worker = async () => {
-    for (let userId = queue.shift(); userId !== undefined; userId = queue.shift()) {
-      await runClaimed(userId, opts).catch((error: unknown) =>
+    for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
+      await runClaimed(next, opts).catch((error: unknown) =>
         log.error('Granola run crashed', {
-          userId,
+          userId: next.userId,
           error: error instanceof Error ? error.message : String(error),
         })
       );

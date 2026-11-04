@@ -36,13 +36,28 @@ export async function fetchGranolaStatusApi(): Promise<GranolaStatus> {
 }
 
 /** Start the one-click sign-in; the browser then opens `authorizeUrl`. */
-export async function startGranolaSignInApi(returnUrl?: string): Promise<{ authorizeUrl: string }> {
+export async function startGranolaSignInApi(
+  redirectUri: string,
+): Promise<{ authorizeUrl: string }> {
   const response = await fetch(`${API_BASE_WITH_PATH}/integrations/granola/oauth/start`, {
     method: 'POST',
     headers: getAuthHeaders(),
-    body: JSON.stringify(returnUrl === undefined ? {} : { returnUrl }),
+    body: JSON.stringify({ redirectUri }),
   });
   return granolaJsonOrThrow<{ authorizeUrl: string }>(response);
+}
+
+/** Finish the sign-in with the signed-in user's own session (callback page). */
+export async function completeGranolaSignInApi(
+  code: string,
+  state: string,
+): Promise<GranolaStatus> {
+  const response = await fetch(`${API_BASE_WITH_PATH}/integrations/granola/oauth/complete`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ code, state }),
+  });
+  return granolaJsonOrThrow<GranolaStatus>(response);
 }
 
 export async function syncGranolaApi(): Promise<GranolaStatus> {

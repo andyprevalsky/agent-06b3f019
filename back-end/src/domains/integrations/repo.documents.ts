@@ -48,11 +48,12 @@ export async function ensureUser(userId: string): Promise<void> {
 
 export async function upsertDataDocuments(
   userId: string,
-  documents: NormalizedDocumentRow[]
+  documents: NormalizedDocumentRow[],
+  client: Prisma.TransactionClient = prisma
 ): Promise<Array<{ id: string; externalId: string }>> {
   const rows: Array<{ id: string; externalId: string }> = [];
   for (const doc of documents) {
-    const row = await prisma.userDataDocument.upsert({
+    const row = await client.userDataDocument.upsert({
       where: {
         userId_source_externalId: {
           userId,

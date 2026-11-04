@@ -44,12 +44,14 @@ const NOT_GOOGLE_WORKSPACE = Prisma.sql`d.source NOT IN (${Prisma.join([...GOOGL
  * Granola layers (structured note, summary, transcript); each layer's own
  * source name still selects just that layer.
  */
-const DOCUMENT_SOURCE_FAMILIES: Record<string, readonly string[]> = {
-  [GRANOLA_PROVIDER]: GRANOLA_SOURCES,
-};
+// A Map, not an object: `document_source` is caller input, and names such as
+// `constructor` or `__proto__` must never resolve to an inherited property.
+const DOCUMENT_SOURCE_FAMILIES = new Map<string, readonly string[]>([
+  [GRANOLA_PROVIDER, GRANOLA_SOURCES],
+]);
 
 function sourceIs(documentSource: string): Prisma.Sql {
-  const family = DOCUMENT_SOURCE_FAMILIES[documentSource];
+  const family = DOCUMENT_SOURCE_FAMILIES.get(documentSource);
   return family === undefined
     ? Prisma.sql`d.source = ${documentSource}`
     : Prisma.sql`d.source IN (${Prisma.join([...family])})`;

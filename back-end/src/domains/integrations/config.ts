@@ -77,6 +77,7 @@ export const ALLOWED_REDIRECT_PATTERNS = [
   /^https?:\/\/127\.0\.0\.1(:\d+)?/,
   /^https:\/\/[^/]*\.vercel\.app/,
   /^https:\/\/roselabs\.ai/,
+  /^https:\/\/www\.roselabs\.ai/,
   /^roselabs:\/\//,
 ];
 

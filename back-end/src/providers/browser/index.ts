@@ -79,9 +79,10 @@ export { selectedBrowserProvider, tilionEnabled, TilionApiKeyMissingError } from
  *   initSession:   create (validation socket) → injectUserData (reuses it) → close it → worker attaches
  *   prepare-auth / inject-local-storage (JIT):  worker detaches → backend CDP → worker reattaches
  *   closeSession:  worker detaches → persistSignedInBrowserState harvest → provider release
- *   screenshot / press-key / file read+list+upload: REST, valid only while no client is
- *     attached; mid-run they raise TilionSessionBusyError (HTTP 409
- *     `session_driven_by_client`) and the worker uses its own CDP connection instead.
+ *   press-key / file read+list+upload: REST, valid only while no client is attached;
+ *     mid-run they raise TilionSessionBusyError (HTTP 409 `session_driven_by_client`)
+ *     and the worker uses its own CDP connection instead.
+ *   screenshot: read-only REST, served beside an attached client (see above).
  *   health / captcha telemetry / live view: REST status and token mints, safe while attached.
  *
  * A harvest that still collides is logged and the release proceeds, so a busy

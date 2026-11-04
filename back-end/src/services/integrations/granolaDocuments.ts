@@ -36,7 +36,13 @@ function structuredNote(meeting: ListedMeeting, notes: MeetingNotes | undefined)
   lines.push(`Meeting time: ${meeting.meetingAt}`);
   if (meeting.url !== null) lines.push(`Granola link: ${meeting.url}`);
   if (meeting.details !== '') lines.push('', meeting.details);
-  if (notes !== undefined && notes.rest !== '') lines.push('', notes.rest);
+  // get_meetings repeats the listing's sections (participants); keep one copy.
+  const listed = new Set(meeting.details.split('\n\n'));
+  const rest = (notes?.rest ?? '')
+    .split('\n\n')
+    .filter((section) => section !== '' && !listed.has(section))
+    .join('\n\n');
+  if (rest !== '') lines.push('', rest);
   return lines.join('\n');
 }
 

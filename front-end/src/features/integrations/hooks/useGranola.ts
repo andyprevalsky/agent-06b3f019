@@ -3,7 +3,8 @@
  *
  *   [LOADING] --status--> [DISCONNECTED] | [CONNECTED]
  *   [DISCONNECTED] --connect--> [SIGNING_IN]
- *     web:     browser goes to Granola sign-in, returns to this page connected
+ *     web:     browser goes to Granola sign-in, returns to the callback page
+ *              (GranolaCallback), which completes it and comes back here
  *     desktop: system browser opens Granola; poll status every 3 s until
  *              connected (gives up after 5 min) --> [CONNECTED]
  *   [CONNECTED] polls status every 10 s while a sync runs or history backfills
@@ -20,6 +21,7 @@ import {
   syncGranolaApi,
   type GranolaStatus,
 } from '../api/granola';
+import { GRANOLA_CALLBACK_PATH, GRANOLA_PUBLIC_ORIGIN, GRANOLA_RETURN_KEY } from '../config';
 
 const SYNC_POLL_MS = 10_000;
 const SIGN_IN_POLL_MS = 3_000;
@@ -64,7 +66,8 @@ export function useGranola(enabled: boolean, onChange?: () => Promise<void> | vo
   }, [enabled, refresh]);
 
   const syncing =
-    status?.status === 'SYNCING' || (status?.connected === true && !status.backfillDone);
+    // EXPIRED and SYNC_FAILED keep `connected` but make no progress: no poll.
+    status?.status === 'SYNCING' || (status?.status === 'CONNECTED' && !status.backfillDone);
   useEffect(() => {
     if (!syncing) return undefined;
     const timer = setInterval(() => void refresh(), SYNC_POLL_MS);
@@ -100,9 +103,17 @@ export function useGranola(enabled: boolean, onChange?: () => Promise<void> | vo
     stopSignInPoll();
     const electron = electronExternalApi();
     try {
-      const returnUrl =
-        electron === null ? window.location.origin + window.location.pathname : undefined;
-      const { authorizeUrl } = await startGranolaSignInApi(returnUrl);
+      // Granola returns to Rose's callback page, which finishes the sign-in
+      // with this user's session. The Mac app signs in through the system
+      // browser, so it returns to the public site instead of the app.
+      const origin = electron === null ? window.location.origin : GRANOLA_PUBLIC_ORIGIN;
+      if (electron === null) {
+        sessionStorage.setItem(
+          GRANOLA_RETURN_KEY,
+          window.location.pathname + window.location.search,
+        );
+      }
+      const { authorizeUrl } = await startGranolaSignInApi(`${origin}${GRANOLA_CALLBACK_PATH}`);
       if (electron === null) {
         window.location.href = authorizeUrl;
         return;

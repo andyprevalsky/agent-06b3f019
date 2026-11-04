@@ -89,7 +89,7 @@ export class TilionInsufficientCreditsError extends TilionApiError {
 /**
  * A CDP client (normally the agent worker) holds the session. Live Tilion
  * refuses REST drive calls instead of queueing them: 409
- * `session_driven_by_client` (screenshot, act) or 502 `file_fetch_failed` with
+ * `session_driven_by_client` (act, files/fetch) or 502 `file_fetch_failed` with
  * cause `ExternalControlBusy`. Retrying cannot help until that client detaches.
  */
 export class TilionSessionBusyError extends TilionApiError {
