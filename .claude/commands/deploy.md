@@ -2727,6 +2727,8 @@ symlinks; an ignored file or a path outside the checkout is not automatically
 disposable. Preserve original failures and unknowns without relabeling them.
 
 Commit safe, reviewable records and a closeout manifest in the release PR.
+Include them in the normal source freeze/review; preservation is not permission
+to slip an unreviewed commit past Step 12.
 For large or sensitive records, preserve their exact bytes in the approved
 durable private archive and commit the manifest, content hashes, immutable
 object references, verification receipts and restoration instructions instead.
@@ -3457,7 +3459,8 @@ python3 scripts/record_factory_event.py deploy stage-finish production-verify
 
 After all admitted jobs and evidence writers are terminal, capture the final
 post-merge records, including production verification, cleanup, qualified
-exceptions, final scorecard HTML/link and all failed attempts. Reconcile this
+exceptions, final scorecard HTML/link and all failed attempts. Prepare the
+scorecard artifact without returning it as a completion message yet. Reconcile this
 delta against the Step 11b inventory and existing verified archives. Verify
 remote readback, authenticated decryption and every archived member's hash;
 restore representative files using documented credentials/key material that
@@ -3466,8 +3469,9 @@ will remain available after this devbox is deleted.
 The deployed PR must contain the complete preservation record. When records
 are produced after that PR has merged, land a reviewed records-only follow-up
 on `main` and link its merged commit and closeout manifest from the deployed
-PR before returning the final scorecard. This is required completion work, not
-a promise to archive later. Keep secret/raw content in its private archive;
+PR before returning the final scorecard. The merged Git commit preserves the
+closeout manifest itself; do not create an endless chain of self-archiving
+receipts. This is required completion work, not a promise to archive later. Keep secret/raw content in its private archive;
 put its durable manifest and recovery/verification record in the PR.
 
 Check the entire local deletion boundary again: no intended source is only
