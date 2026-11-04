@@ -28,7 +28,7 @@
  */
 
 import { Prisma } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
 import { decryptPlaidAccessToken, encryptPlaidAccessToken } from '../../providers/plaidCredentials';
 import { upsertDataDocuments } from '../../domains/integrations/repo.documents';
@@ -416,7 +416,7 @@ const owned = (c: Claim) => ({
 
 /** Run `fn` in a transaction holding this run's claim row locked; throws if lost. */
 async function fenced<T>(c: Claim, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
-  return prisma.$transaction(async (tx) => {
+  return runTransactionWithRetry(async (tx) => {
     const rows = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM "UserDataProviderSyncState"
       WHERE "userId" = ${c.userId} AND source = ${GRANOLA_PROVIDER}
