@@ -2742,6 +2742,12 @@ cleanup() {
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
         bash "$SCRIPT_DIR/kill-services.sh" || true
     fi
+    # The database this stack records its E2B sandboxes in is about to go:
+    # kill every sandbox tagged with this stack first, or they stay paused and
+    # unattributable forever (back-end/scripts/kill-stack-sandboxes.ts).
+    if $DB_OWNED_BY_US; then
+        (cd "$SCRIPT_DIR/../back-end" && timeout 60 npx tsx scripts/kill-stack-sandboxes.ts) || true
+    fi
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
         run_cleanup_owned_db_container \
             "$DB_OWNED_CONTAINER_ID" "$DB_CONTAINER" "$DB_VOLUME" "$BENCHMARK_ISOLATED_RUN"

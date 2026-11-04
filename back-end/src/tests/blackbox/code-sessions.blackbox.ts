@@ -56,6 +56,7 @@ import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox
 import { testResumableCloseListsPaused } from './code-sessions-list.cases';
 import { registerFailedStartPauseCases } from './code-sessions-failed-start.cases';
 import { registerCodeSessionLifecycleCases } from './code-sessions-lifecycle.cases';
+import { registerSandboxAttributionCases } from './code-sessions-sandbox-attribution.cases';
 
 config();
 
@@ -611,3 +612,4 @@ registerCodeSessionLifecycleCases({
   patchConnect,
   restoreConnect: () => patchConnect(originalConnect),
 });
+registerSandboxAttributionCases(userA);

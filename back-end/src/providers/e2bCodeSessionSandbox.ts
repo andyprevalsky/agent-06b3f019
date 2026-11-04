@@ -239,6 +239,7 @@ export async function acquireCodeSandbox(
     timeoutMs: SANDBOX_TIMEOUT_MS,
     envs,
     ...codeSessionCreateOptions(codeSession),
+    ...(codeSession !== null ? { metadata: codeSessionSandboxMetadata(codeSession) } : {}),
   };
   let fromSnapshot = false;
   const acquired = await acquireCodeSessionSandbox(
@@ -385,6 +386,16 @@ export function codeSessionBranchEnvs(codeSession: CodeSessionRow | null): Recor
     CODE_AGENT_BRANCH: codeSession.branch,
     CODE_AGENT_BASE_BRANCH: codeSession.baseBranch ?? '',
     CODE_AGENT_MERGE_TARGET: codeSession.mergeTarget ?? '',
+  };
+}
+
+/** The session a sandbox belongs to, so the orphan reaper can match it to its row. */
+export function codeSessionSandboxMetadata(codeSession: CodeSessionRow): Record<string, string> {
+  return {
+    codeSessionId: codeSession.id,
+    ownerAgentId: codeSession.ownerAgentId,
+    rootAgentId: codeSession.rootAgentId,
+    userId: codeSession.userId,
   };
 }
 
