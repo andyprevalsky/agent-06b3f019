@@ -3454,7 +3454,7 @@ publication rule before Step 0i). `/factory-review` then rebuilds /deploy and /R
 timing from the repo on any machine.
 
 After the new branch is created, publish only the deploy scorecard using the
-stable `deploy-summary-v1` template in
+stable `deploy-summary-v2` template in
 `.claude/shared/report-display-format.md` and populate
 `.claude/shared/deploy-scorecard-template.html`. Preserve the user-approved structure
 shown at https://boxes.dev/visuals/vis_1997f1fd05813cc9be440f44d5700ffe:
@@ -3490,6 +3490,14 @@ come from `stages.jsonl` and production factory events, including failed and
 interrupted attempts; parallel intervals overlap on the same axis. Missing
 boundaries stay explicitly unmeasured, never invented. Preserve costs and
 source/proof bindings in the underlying evidence.
+
+Apply **Work versus waiting** in `.claude/shared/report-display-format.md` to
+all current and future deploy agents. Split recorded active fixes and running
+automation from waits for users, credits, providers, queues and dependencies.
+Never use a mixed "fixes / other" row. Record mode transitions with the native
+activity events; unmatched historical gaps appear only as **Wait — reason
+unrecorded**, with no invented cause or active-work credit. Keep the same boxes
+and shared axis; add the work/wait totals inside the final timeline box.
 
 WHAT DEPLOYED includes the actual production/Temporal state and verified
 coverage. Every elected AgentCard gate remains **SKIPPED — <reason>**, never
