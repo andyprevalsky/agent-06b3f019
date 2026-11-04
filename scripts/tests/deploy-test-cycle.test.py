@@ -2799,4 +2799,162 @@ assert len(list(p.iterdir()))==2
         self.assertEqual(2,len(self.state['pending']))
 
 
+KIND = 'local-supervisor-cleanup-v1'
+
+
+class LocalCleanup(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.worker = self.root / 'worker'
+        self.worker.mkdir()
+        (self.worker / '.context').mkdir()
+        (self.worker / '.context/native-worker-admission.lock').touch()
+        self.folder = self.root / 'cycle/attempts/33/triage/backend-coverage-blackbox'
+        self.folder.mkdir(parents=True)
+        self.token = 'captured-setup-failure'
+        self.source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        command = [sys.executable, str(ROOT / 'scripts/deploy_test_backend.py'), '--root', str(self.worker)]
+        self.recipe = {'cases': {x: {'command': ['npm', 'run', 'test:coverage:sharded'], 'cwd': 'back-end'}
+                                  for x in ['blackbox:browser-provider', 'teardown']},
+                       'setup': {'command': ['bash', 'scripts/run-deploy-stage', '--start']},
+                       'cleanup': {'command': ['bash', '-c', 'bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish']},
+                       'services': True}
+        self.gate = {'name': 'backend-coverage-blackbox', 'native_backend': True,
+                     'worker_transport': 'local-isolated', 'worker_root': str(self.worker),
+                     'cwd': str(self.worker), 'command': command, 'checks': list(self.recipe['cases']),
+                     'worker_recipe': self.recipe, 'case_protocol': True, 'result_transport': 'file'}
+        self.request = {'token': self.token, 'source': self.source, 'gate': self.gate['name'],
+                        'checks': self.gate['checks'], 'skips': {}, 'phase': 'triage',
+                        'worker_root': str(self.worker), 'worker_recipe': self.recipe}
+        runner = self.worker / '.context/deploy-backend/native/runner.log'
+        runner.parent.mkdir(parents=True)
+        runner.write_text('No ready Postgres container owned by this worktree.\nNo services to kill\n')
+        self.result = {k: self.request[k] for k in ['token', 'source', 'gate', 'worker_root']}
+        self.result.update(cases={'blackbox:browser-provider': 'UNVERIFIED', 'teardown': 'FAIL'},
+                           complete=False, cleanup_complete=False, reused=False, native_exit=1,
+                           recipe_digest=c.digest(self.recipe), source_unchanged=True,
+                           runner_log=str(runner), interrupted=False,
+                           evidence={'teardown': {'exit': 1, 'recipe_cleanup_exit': 0},
+                                     'artifacts': {'runner_log': c.sha_file(runner)}})
+        self.receipt = {k: self.request[k] for k in ['token', 'source', 'gate']}
+        self.receipt.update(command=command, cases=dict.fromkeys(self.gate['checks'], 'UNVERIFIED'),
+                            native_exit=1, executed=True, complete=False, timed_out=False, cancelled=False,
+                            lingering_group=False, lifecycle='owned', started_at=100, finished_at=200,
+                            log=str(self.folder / 'output.log'), worker_result=str(self.folder / 'result.json'),
+                            reason='worker result identity/inventory mismatch')
+        self.receipt.update(execution_binding={'contract_digest': c.digest(self.gate)},
+                            host_admission={'started': True, 'lock': str(self.worker / '.context/native-worker-admission.lock')})
+        self.process = dict(supervisor_pid=123, child_pid=124, native_exit=1, cancelled=False,
+                            timed_out=False, quiescent=True, orphaned_children=False,
+                            reaped=[{'pid': 124, 'status': 256}], term_sent=[], kill_sent=[], remaining=[], error=None)
+        self.paths = {n: self.folder / n for n in ['request.json', 'result.json', 'receipt.json', 'output.log.process.json']}
+        for name, value in zip(self.paths, [self.request, self.result, self.receipt, self.process]):
+            c.write(self.paths[name], value)
+        (self.folder / 'output.log').write_text(json.dumps(self.result))
+        self.failure = dict(id='occurrence', gate=self.gate['name'],
+                            check=self.gate['name'] + '/blackbox:browser-provider', native_result='UNVERIFIED', complete=False)
+        self.failure.update(source=self.source, evidence=self.receipt['log'], worker_result=self.receipt['worker_result'], finished_at=200)
+        self.state = dict(plan={'gates': [self.gate]}, attempts=[{'results': [self.receipt]}],
+                          failures=[self.failure], phase='triage', pending=['occurrence'], repair_gates=[],
+                          source=self.source, skips={}, ready=False)
+        self.proof = dict(kind=KIND, files={n: c.sha_file(p) for n, p in self.paths.items()},
+                          confirmed_at=201, observed_by='independent-native-review')
+        self.original_bytes = {n: p.read_bytes() for n, p in self.paths.items()}
+
+    def reconcile(self):
+        c.reconcile(self.state, 'occurrence', self.proof)
+
+    def test_quiescent_cleanup_allows_real_reexecute_without_credit_or_rewriting(self):
+        with self.assertRaisesRegex(ValueError, 'cleanup state unknown'):
+            c.reexecute(copy.deepcopy(self.state), 'occurrence')
+        self.reconcile()
+        self.assertEqual([], c.retained_owners(self.state, [self.gate['name']]))
+        c.reexecute(self.state, 'occurrence')
+        self.assertEqual('needs-focused-plan', self.state['phase'])
+        self.assertEqual([self.gate['name']], self.state['repair_gates'])
+        self.assertEqual('UNVERIFIED', self.failure['native_result'])
+        self.assertEqual(self.original_bytes, {n: p.read_bytes() for n, p in self.paths.items()})
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_process_and_cleanup_unknowns_refuse(self):
+        for field, value in [('quiescent', False), ('orphaned_children', True), ('remaining', [999]),
+                             ('cancelled', True), ('timed_out', True), ('term_sent', [124]),
+                             ('kill_sent', [124]), ('error', 'read failed'), ('native_exit', 0),
+                             ('reaped', []), ('reaped', [{'pid': 999, 'status': 256}])]:
+            with self.subTest(field=field, value=value):
+                c.write(self.paths['output.log.process.json'], {**self.process, field: value})
+                self.proof['files']['output.log.process.json'] = c.sha_file(self.paths['output.log.process.json'])
+                with self.assertRaises(ValueError): self.reconcile()
+                self.assertNotIn('reconciled_owners', self.state)
+        c.write(self.paths['output.log.process.json'], self.process)
+        self.proof['files']['output.log.process.json'] = c.sha_file(self.paths['output.log.process.json'])
+        for value in [None, 1, '0']:
+            self.result['evidence']['teardown']['recipe_cleanup_exit'] = value
+            c.write(self.paths['result.json'], self.result)
+            self.proof['files']['result.json'] = c.sha_file(self.paths['result.json'])
+            with self.assertRaises(ValueError): self.reconcile()
+
+    def test_identity_inventory_root_and_recipe_mismatches_refuse(self):
+        changes = [('token', 'other'), ('source', {}), ('gate', 'other'), ('worker_root', str(self.root)),
+                   ('recipe_digest', '0' * 64), ('cases', {}), ('cleanup_owner', {'unknown': True}),
+                   ('reused', True), ('interrupted', True)]
+        for field, value in changes:
+            with self.subTest(field=field):
+                c.write(self.paths['result.json'], {**self.result, field: value})
+                self.proof['files']['result.json'] = c.sha_file(self.paths['result.json'])
+                with self.assertRaises(ValueError): self.reconcile()
+                self.assertNotIn('reconciled_owners', self.state)
+
+    def test_missing_corrupt_or_changed_evidence_never_allows_launch(self):
+        self.reconcile()
+        for name, path in self.paths.items():
+            original = path.read_bytes()
+            for bad in [b'not-json', original + b' ']:
+                with self.subTest(name=name, bad=bad[:10]):
+                    path.write_bytes(bad)
+                    with self.assertRaises(ValueError): c.retained_owners(self.state, [self.gate['name']])
+                    path.write_bytes(original)
+            path.unlink()
+            with self.assertRaises(ValueError): c.retained_owners(self.state, [self.gate['name']])
+            path.write_bytes(original)
+        runner = Path(self.result['runner_log'])
+        runner.write_text('changed cleanup evidence')
+        with self.assertRaises(ValueError): c.retained_owners(self.state, [self.gate['name']])
+
+    def test_only_current_owned_local_backend_and_independent_proof_are_eligible(self):
+        for field, value in [('worker_transport', 'boxes-thread'), ('native_backend', False),
+                             ('worker_root', str(self.root)), ('command', ['other'])]:
+            old = self.gate[field]
+            self.gate[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError): self.reconcile()
+            self.gate[field] = old
+        for field, value in [('confirmed_at', 99), ('observed_by', ''), ('files', {})]:
+            old = self.proof[field]
+            self.proof[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError): self.reconcile()
+            self.proof[field] = old
+        self.receipt['lingering_group'] = True
+        c.write(self.paths['receipt.json'], self.receipt)
+        self.proof['files']['receipt.json'] = c.sha_file(self.paths['receipt.json'])
+        with self.assertRaises(ValueError): self.reconcile()
+
+    def test_current_root_process_or_admission_owner_refuses(self):
+        import fcntl
+        with (self.worker / '.context/native-worker-admission.lock').open('r') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(ValueError): self.reconcile()
+        proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'], cwd=self.worker)
+        try:
+            with self.assertRaises(ValueError): self.reconcile()
+        finally:
+            proc.terminate()
+            proc.wait(timeout=2)
+        self.reconcile()
+        c.write(self.worker / '.context/services.json', {'worktree': str(self.worker), 'status': 'running'})
+        with self.assertRaises(ValueError): c.retained_owners(self.state, [self.gate['name']])
+
+
+
 if __name__ == '__main__': unittest.main()

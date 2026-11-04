@@ -1007,6 +1007,15 @@ def retained_owners(state: dict, gates) -> list[str]:
         receipt = latest.get(gate)
         if not receipt:
             continue
+        local = [e for e in state.get('reconciled_owners', {}).values()
+                 if e.get('kind') == 'local-supervisor-cleanup-v1'
+                 and e.get('gate') == gate and e.get('token') == receipt.get('token')]
+        if local:
+            from deploy_test_local_cleanup import still_bound
+            if len(local) != 1:
+                raise ValueError('ambiguous local cleanup reconciliation')
+            still_bound(state, receipt, local[0])
+            continue  # launch eligibility only; original incomplete cases stay immutable
         owner = receipt_owner(gate, receipt)
         if owner and not _reconciled(state, receipt, owner):
             owned.append(gate)
@@ -1018,6 +1027,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'local-supervisor-cleanup-v1':
+        from deploy_test_local_cleanup import reconcile as reconcile_local
+        reconcile_local(state, occurrence_id, proof)
+        return
     if proof.get("kind") == "native-cloud-cleanup-v1":
         from deploy_test_native_cleanup import reconcile as reconcile_native
         reconcile_native(state, occurrence_id, proof)

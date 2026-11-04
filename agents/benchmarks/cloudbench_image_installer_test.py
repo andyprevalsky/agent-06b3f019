@@ -15,6 +15,20 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+@cache
+def installed_temporal_client():
+    """Locate the real client in either supported backend dependency layout."""
+    node = shutil.which("node")
+    assert node, "backend import coverage requires the installed Node toolchain"
+    manifest = subprocess.check_output(
+        [node, "-p", "require.resolve('@temporalio/client/package.json')"],
+        cwd=ROOT / "back-end",
+        text=True,
+    ).strip()
+    return str(Path(manifest).parent)
+
+
 INSTALLER = r"""
 import json,os,shutil,subprocess,sys,time
 from pathlib import Path
@@ -143,7 +157,7 @@ def test_cloudbench_image_build_joined_installer_keeps_artifacts_and_waits_both(
             "IMAGE_INSTALL_PY_STATUS": str(python),
             "IMAGE_INSTALL_BACKEND_STATE": backend,
             "IMAGE_INSTALL_REAL_NODE": shutil.which("node"),
-            "IMAGE_INSTALL_REAL_TEMPORAL_CLIENT": str(ROOT / "node_modules/@temporalio/client"),
+            "IMAGE_INSTALL_REAL_TEMPORAL_CLIENT": installed_temporal_client(),
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -400,7 +414,7 @@ def test_cloudbench_image_build_loads_actual_frontend_compilers_without_version_
         "IMAGE_INSTALL_GRAPH_METADATA": str(graph_file),
         "IMAGE_INSTALL_NATIVE_STATE": state,
         "IMAGE_INSTALL_REAL_NPM": npm,
-        "IMAGE_INSTALL_REAL_TEMPORAL_CLIENT": str(ROOT / "node_modules/@temporalio/client"),
+        "IMAGE_INSTALL_REAL_TEMPORAL_CLIENT": installed_temporal_client(),
         "NPM_CONFIG_USERCONFIG": str(home / ".npmrc"),
         "NPM_CONFIG_CACHE": str(home / ".npm"),
         "NPM_CONFIG_OFFLINE": "true",

@@ -1923,7 +1923,10 @@ def _live_report_producer_harness(tasks, executor, max_concurrency):
     start = next(
         i
         for i, node in enumerate(main.body)
-        if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card"
+        # Include the real initial preflight custody producer, which the
+        # coordinator's never-admitted list now consumes before dispatch.
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "initial_credential_skips" for target in node.targets)
     )
     end = next(
         i
@@ -2008,6 +2011,8 @@ async def test_live_report_counts_executor_admission_and_drains_cancellation():
         await held.wait()
 
     namespace, cards = _live_report_producer_harness(tasks, executor, 1)
+    assert namespace["initial_credential_skips"] == ()
+    assert namespace["_never_admitted_results"] == []
     with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
         coordinator = asyncio.create_task(namespace["_drive_parallel"]())
         try:

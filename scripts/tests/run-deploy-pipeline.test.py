@@ -1959,6 +1959,27 @@ def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]
     resized by fit_exclusive_lane once the running lanes release their share;
     a lane that can never fit (not even one worker) stays refused."""
     pipeline = load_module("pipeline_defer_exclusive", DRIVER)
+    # These are synthetic reservations, not this shared host's free memory.
+    # Keep the real CLI, admission core, native commands and 120s supervision;
+    # replace only the fixture's host observation with its declared capacity.
+    host_driver = tmp / "defer-fixture-host.py"
+    host_driver.write_text(
+        "import sys\n"
+        + "sys.path.insert(0, " + repr(str(DRIVER.parent)) + ")\n"
+        + "import run_deploy_pipeline as pipeline\n"
+        + "pipeline.host_resources = lambda: {\"cpus\": 8, \"mem_total_mb\": 16384, "
+          "\"mem_available_mb\": 10000, \"watchdog_cap_mb\": 14472}\n"
+        + "raise SystemExit(pipeline.main())\n"
+    )
+
+    def run_fixture(state: Path, budget: int) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(host_driver), "run", "--plan", str(plan),
+             "--state-dir", str(state), "--max-parallel", "0",
+             "--memory-budget-mb", str(budget)], env=env,
+            capture_output=True, text=True, timeout=120,
+        )
+
     declared = pipeline.structural_lane_memory_mb
     assert declared(6) == 6439, declared(6)
     probe = tmp / "defer-args.txt"
@@ -1977,8 +1998,7 @@ def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]
         {"name": "smoke", "command": ["sleep", "2.5"], "reuse_passed": False, "group": "4", "memory_mb": 4150,
          "phase": "stack"},
     ], schedule={"policy": "phased"})
-    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(state), "--max-parallel", "0",
-                     "--memory-budget-mb", "6000", env=env, timeout=120)
+    ran = run_fixture(state, 6000)
     receipt = json.loads((state / "receipt.json").read_text())
     assert ran.returncode == 0 and receipt["status"] == "passed", (ran.returncode, ran.stderr, receipt["lanes"]["big"])
     big, smoke = receipt["lanes"]["big"], receipt["lanes"]["smoke"]
@@ -2000,8 +2020,7 @@ def check_exclusive_lane_defers_behind_stack_lane(tmp: Path, env: dict[str, str]
         {"name": "smoke", "command": ["sleep", "0.5"], "reuse_passed": False, "group": "4", "memory_mb": 500,
          "phase": "stack"},
     ], schedule={"policy": "phased"})
-    ran = run_driver("run", "--plan", str(plan), "--state-dir", str(never), "--max-parallel", "0",
-                     "--memory-budget-mb", str(declared(1) - 1), env=env, timeout=120)
+    ran = run_fixture(never, declared(1) - 1)
     big = json.loads((never / "receipt.json").read_text())["lanes"]["big"]
     assert ran.returncode == 1 and big["status"] == "failed" and big["note"].startswith("refused: needs"), big
     print("exclusive lane defers behind the stack lane: ok")
