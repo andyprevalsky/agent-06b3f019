@@ -106,55 +106,6 @@ CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S: Final[int] = 300
 REATTACH_PROBE_ATTEMPTS: Final[int] = 3
 REATTACH_PROBE_BACKOFF_S: Final[float] = 2.0
 
-# Fatal error patterns in Claude Code output that should immediately abort the session.
-# These are unrecoverable inside a headless sandbox (e.g., OAuth login can't be completed).
-FATAL_ERROR_PATTERNS: Final[list[tuple[str, str]]] = [
-    (
-        "authentication_error",
-        "Claude Code authentication failed (401). The user's Claude credentials are invalid or expired. "
-        "They need to re-sync their Claude Code credentials.",
-    ),
-    (
-        "Invalid authentication credentials",
-        "Claude Code authentication failed. The user's API key or OAuth token is invalid.",
-    ),
-    (
-        "API Error: 401",
-        "Claude Code received a 401 from the Anthropic API. The user's credentials need to be refreshed.",
-    ),
-    (
-        "Please run /login",
-        "Claude Code is requesting interactive login, which cannot be completed in a sandbox.",
-    ),
-    (
-        "You've hit your limit",
-        "Claude Code OAuth credentials are rate-limited. The credential must be rotated until the reset time.",
-    ),
-    (
-        "/rate-limit-options",
-        "Claude Code OAuth credentials are rate-limited. The credential must be rotated instead of waiting in the sandbox.",
-    ),
-    (
-        # Anthropic emits this exact wording ("...is too low") in the CLI banner and
-        # API error body ("Your credit balance is too low to access the Anthropic API").
-        # The substring "Credit balance is too low" covers both; an earlier pattern
-        # without "is" silently never matched, so the sandbox looped instead of aborting.
-        "redit balance is too low",
-        "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
-        "or refill the shared Anthropic API billing account.",
-    ),
-    (
-        "Credit balance too low",
-        "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
-        "or refill the shared Anthropic API billing account.",
-    ),
-    (
-        "Add funds: https://platform.claude.com/settings/billing",
-        "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
-        "or refill the shared Anthropic API billing account.",
-    ),
-]
-
 # Suppress PTY echo from triggering silence detection for this window
 ECHO_SUPPRESS_S: Final[float] = 1.0
 

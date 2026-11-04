@@ -31,7 +31,6 @@ from domains.spawn_claude_code_agent.config import (
     DRAIN_CHECK_INTERVAL_S,
     E2B_COST_CENTS_PER_SECOND,
     ECHO_SUPPRESS_S,
-    FATAL_ERROR_PATTERNS,
     MAX_UNCHANGED_OUTPUTS,
     REATTACH_PROBE_ATTEMPTS,
     REATTACH_PROBE_BACKOFF_S,
@@ -84,45 +83,23 @@ def resolve_code_agent_provider(default_provider: str) -> str:
     return forced if forced in {"claude", "codex"} else default_provider
 
 
-def check_fatal_errors(output: str) -> Optional[str]:
-    """Check terminal output for fatal errors that should immediately abort the session.
-
-    Returns an error message if a fatal error is detected, None otherwise.
-    """
-    for pattern, message in FATAL_ERROR_PATTERNS:
-        if pattern in output:
-            return message
-    return None
-
-
 def check_terminal_fatal_error(
-    output: str,
     *,
     code_provider: str,
     exit_code: Optional[int],
     credential_feedback: Optional[list[dict[str, str]]] = None,
 ) -> Optional[str]:
-    """Classify terminal failures after the provider process has exited.
+    """Classify a terminal credential failure from structured CLI signals only.
 
-    Codex can retain either supported plan-exhaustion wording in the terminal,
-    retry with the funded API key, and then exit successfully. Credential
-    exhaustion is therefore terminal only when the complete Codex process
-    still failed after its runtime fallback opportunity.
+    Terminal text (tool output, assistant prose, injected turns) is never
+    classified: an agent may print any banner string while doing healthy work.
+    Claude Code credential failures (usage limit, out of credits, rejected
+    login) arrive as structured events and pause the session instead (C15).
+    Codex can switch to the funded API key in the sandbox and still exit
+    successfully, so its structured credential feedback is terminal only when
+    the complete Codex process still failed after that fallback opportunity.
     """
-    fatal_error = check_fatal_errors(output)
-    if fatal_error is not None:
-        return fatal_error
-    codex_credential_exhausted = bool(credential_feedback) or any(
-        marker in output.lower()
-        for marker in (
-            "you've hit your usage limit",
-            "usage_limit_reached",
-            "purchase more credits",
-            "quota exceeded. check your plan and billing details.",
-            "insufficient_quota",
-        )
-    )
-    if code_provider == "codex" and exit_code != 0 and codex_credential_exhausted:
+    if code_provider == "codex" and exit_code != 0 and credential_feedback:
         return (
             "Codex credentials are rate-limited or out of quota and the runtime "
             "fallback did not complete successfully."
@@ -140,6 +117,7 @@ def build_codex_credential_feedback(
     scrolls the original OAuth error and fallback marker out of the terminal.
     """
     feedback_by_source: dict[str, str] = {}
+    credential_by_source: dict[str, str] = {}
     fallback_seen = False
 
     for event in code_events:
@@ -156,7 +134,11 @@ def build_codex_credential_feedback(
             # The ws-server's structured unusable login (no Azure switch armed): the
             # backend marks exactly that login for reconnect, never a rate limit.
             reason = str(event["login_unusable"].get("reason") or "oauth_refresh_invalid")
-            feedback_by_source.setdefault("funded_api_key" if fallback_seen else "initial", reason[:2000])
+            source = "funded_api_key" if fallback_seen else "initial"
+            feedback_by_source.setdefault(source, reason[:2000])
+            credential = event["login_unusable"].get("credential")
+            if isinstance(credential, str) and credential:
+                credential_by_source.setdefault(source, credential[:64])
             continue
 
         error = event.get("error")
@@ -184,12 +166,41 @@ def build_codex_credential_feedback(
     if fallback_seen and "initial" in feedback_by_source:
         initial_reason = feedback_by_source.pop("initial")
         feedback_by_source["oauth"] = initial_reason
+        if "initial" in credential_by_source:
+            credential_by_source["oauth"] = credential_by_source.pop("initial")
 
     return [
-        {"source": source, "reason": feedback_by_source[source]}
+        {
+            "source": source,
+            "reason": feedback_by_source[source],
+            **({"credential": credential_by_source[source]} if source in credential_by_source else {}),
+        }
         for source in ("initial", "oauth", "funded_api_key")
         if source in feedback_by_source
     ]
+
+
+def build_credential_feedback(code_events: list[Dict[str, Any]], code_provider: str) -> list[dict[str, str]]:
+    """The credential failures a run observed, from structured CLI events only (never terminal text).
+
+    Claude Code: a rejected login (``authentication_failed``) with the
+    fingerprint of the credential the sandbox held, so the backend tells an
+    expired or since-replaced token from a revoked one. Usage limits and out
+    of credits are reported through the C15 usage-limit path instead.
+    """
+    if code_provider == "codex":
+        return build_codex_credential_feedback(code_events)
+    for event in code_events:
+        unusable = login_unusable_from_event(event)
+        if unusable is not None and unusable["provider"] == "claude":
+            return [
+                {
+                    "source": "initial",
+                    "reason": unusable["reason"],
+                    **({"credential": unusable["credential"]} if unusable.get("credential") else {}),
+                }
+            ]
+    return []
 
 
 _TIMELINE_EVENT_TYPES = frozenset(
@@ -1322,65 +1333,9 @@ async def _run_agentic_loop(
                         unchanged_output_count = 0
                         last_filtered_output = filtered_output
 
-                    # A structured usage limit (incl. out of credits) saves the
-                    # session for a retry; its printed banner is not a fatal error.
-                    usage_limited = loop_outcome is not None and bool(
-                        loop_outcome.get("usage_limit") or loop_outcome.get("login_unusable")
-                    )
-                    fatal_error = None if usage_limited else check_fatal_errors(filtered_output)
-                    if fatal_error:
-                        logger.error(
-                            "[ClaudeCode] Fatal error detected in output, aborting",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            error=fatal_error,
-                        )
-                        action_summary.append(f"FATAL: {fatal_error}")
-                        # Persist the terminal output BEFORE bubbling the fatal
-                        # exception so the back-end can see the auth-failure
-                        # banner and mark the pool token broken (otherwise the
-                        # Temporal-retried activity will re-fetch the same
-                        # broken token via LRU and burn another E2B sandbox).
-                        try:
-                            durable_fatal_output = build_durable_terminal_transcript(
-                                filtered_output,
-                                code_events,
-                                action_summary,
-                            )
-                            if durable_fatal_output:
-                                await persist_terminal_output(
-                                    task_id,
-                                    durable_fatal_output,
-                                    agent_id,
-                                    code_provider,
-                                    credential_feedback=build_codex_credential_feedback(code_events)
-                                    if code_provider == "codex"
-                                    else None,
-                                )
-                                _mark_terminal_output_persisted()
-                        except Exception as persist_err:
-                            logger.warning(
-                                "[ClaudeCode] Failed to persist fatal terminal output",
-                                agent_id=agent_id,
-                                task_id=task_id,
-                                error=str(persist_err),
-                            )
-                        await save_claude_code_message(
-                            agent_id=agent_id,
-                            title="Authentication Error",
-                            task_id=task_id,
-                            message=fatal_error,
-                            status=MessageStatus.ERROR,
-                            action_type="system",
-                            tool_call_id=tool_call_id,
-                            code_provider=code_provider,
-                        )
-                        raise ApplicationError(
-                            fatal_error,
-                            type="CLAUDE_CODE_FATAL",
-                            non_retryable=True,
-                        )
-
+                    # Credential failures are structured CLI events (C15: usage limit,
+                    # out of credits, rejected login) that pause the session; the
+                    # terminal text is never classified (an agent may print any banner).
                     logger.info(
                         "[ClaudeCode] Code-agent output observed; waiting for SDK completion",
                         agent_id=agent_id,
@@ -2844,15 +2799,28 @@ def usage_limit_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def login_unusable_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """An unusable Codex login (revoked, refresh failed) from the ws-server's structured error.
+    """A login the provider rejected, from structured CLI events only (C15; no prose matching).
 
-    Reported only when the sandbox has no Azure switch armed (subscriptions first,
-    C15): the session pauses like a usage limit and the parent retries on the next
-    credential. No prose matching here.
+    Claude Code: the SDK's ``authentication_failed`` on an assistant message (a
+    401/403, e.g. the sandbox's access token expired or was revoked). Codex: the
+    ws-server's ``login_unusable`` error (refresh failed or revoked), reported
+    only when the sandbox has no Azure switch armed (subscriptions first). The
+    session pauses like a usage limit and the parent's retry re-leases a
+    credential and resumes the conversation. ``credential`` is the ws-server's
+    fingerprint of the token it held (never the token).
     """
-    if event.get("type") == "error" and isinstance(event.get("login_unusable"), dict):
-        return {"provider": "codex", "reason": event["login_unusable"].get("reason") or "oauth_refresh_invalid"}
-    return None
+    unusable: Optional[Dict[str, Any]] = None
+    credential = event.get("credential")
+    if event.get("type") == "cli_message" and event.get("raw_type") == "assistant.api_error":
+        message = event.get("cli_message") if isinstance(event.get("cli_message"), dict) else {}
+        if message.get("error") == "authentication_failed":
+            unusable = {"provider": "claude", "reason": "authentication_failed"}
+    elif event.get("type") == "error" and isinstance(event.get("login_unusable"), dict):
+        credential = event["login_unusable"].get("credential")
+        unusable = {"provider": "codex", "reason": event["login_unusable"].get("reason") or "oauth_refresh_invalid"}
+    if unusable is not None and isinstance(credential, str) and credential:
+        unusable["credential"] = credential[:64]
+    return unusable
 
 
 def _provider_label(code_provider: str) -> str:
@@ -3021,8 +2989,8 @@ def format_usage_limit_message(
         saved += f" (checkpoint {facts['checkpoint_seq']})"
     if unusable:
         stopped = (
-            f"the {_provider_label(code_provider)} login{on_account} can no longer be used "
-            "(sign in again to reconnect it)"
+            f"the {_provider_label(code_provider)} login{on_account} was rejected "
+            "(its access token expired or was revoked)"
         )
     elif limit_type == "billing":
         stopped = (
@@ -3037,7 +3005,7 @@ def format_usage_limit_message(
     if unusable and not (isinstance(next_lease, dict) and next_lease.get("provider")):
         clause = (
             "no other credential can be leased right now, so a retry stays paused and starts nothing "
-            "until the login is reconnected or another account is connected."
+            "until the login is re-synced or reconnected, or another account is connected."
         )
     else:
         clause = _respawn_clause(next_lease, local=False, from_provider=code_provider)
@@ -3109,7 +3077,7 @@ def format_usage_limit_user_message(
     resets = f" (resets {reset})" if reset else ""
     saved = f"Work stays in {local_place}." if local_place else "Work is saved."
     if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE:
-        return f"Paused: the {provider} login needs to be reconnected. {saved}"
+        return f"Paused: the {provider} login was rejected (expired or revoked). {saved}"
     return f"Paused: {provider} usage limit reached{resets}. {saved}"
 
 
@@ -3237,11 +3205,12 @@ LOGIN_UNUSABLE_LIMIT_TYPE = "login_unusable"
 async def _unusable_login_outlook(
     user_id: str, code_provider: str, code_session_id: Optional[str], *, local: bool
 ) -> Dict[str, Any]:
-    """The stored outlook after an unusable login was marked for reconnect (C15; no lease taken).
+    """The stored outlook after a rejected login was fed back (C15; no lease taken).
 
     The usage-limit report would rate-limit the login, so the plan answers instead:
-    the connected accounts (that login now reads disconnected), the shared paths
-    and the next lease in the subscription-first order.
+    the connected accounts (a revoked login reads disconnected; an expired token
+    waits for its device's re-sync), the shared paths and the next lease in the
+    subscription-first order.
     """
     available = await fetch_code_credential_availability(
         user_id,
@@ -3250,7 +3219,7 @@ async def _unusable_login_outlook(
         prefer=code_provider,
     )
     outlook = (available or {}).get("outlook")
-    return {"marked": "reconnect", "resets_at": None, **(outlook if isinstance(outlook, dict) else {})}
+    return {"marked": "login_rejected", "resets_at": None, **(outlook if isinstance(outlook, dict) else {})}
 
 
 def _next_code_credential(available: Optional[Dict[str, Any]], preferred: str) -> tuple[Optional[str], Optional[str]]:
@@ -3737,9 +3706,7 @@ async def spawn_claude_code_activity(
 
         # 4. Persist terminal output (durable fallback when PTY display is empty)
         filtered_output = terminal.get_display()
-        credential_feedback = (
-            build_codex_credential_feedback(code_events) if code_provider == "codex" else None
-        )
+        credential_feedback = build_credential_feedback(code_events, code_provider)
         durable_output = build_durable_terminal_transcript(
             filtered_output,
             code_events,
@@ -3828,7 +3795,7 @@ async def spawn_claude_code_activity(
             await save_claude_code_message(
                 agent_id=agent_id,
                 title=(
-                    "Code agent login needs reconnecting"
+                    "Code agent login was rejected"
                     if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE
                     else "Code agent hit a usage limit"
                 ),
@@ -3878,14 +3845,10 @@ async def spawn_claude_code_activity(
                 "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
             }
 
-        # A fast CLI failure can set ``exit_code`` before the one-second silence
-        # window in ``_run_agentic_loop`` gets a chance to inspect the terminal.
-        # Re-check the final snapshot here so a revoked OAuth token is surfaced
-        # as a terminal tool error instead of going through the verifier as an
-        # ordinary incomplete result. The latter makes the parent believe the
-        # tool executed successfully and repeatedly spawn new paid sandboxes.
+        # A Codex run whose credentials stayed exhausted after its in-sandbox
+        # fallback is a terminal tool error, not an ordinary incomplete result
+        # for the verifier (which would make the parent re-spawn paid sandboxes).
         fatal_error = check_terminal_fatal_error(
-            filtered_output,
             code_provider=code_provider,
             exit_code=exit_code,
             credential_feedback=credential_feedback,

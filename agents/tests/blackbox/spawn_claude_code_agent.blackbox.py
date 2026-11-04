@@ -115,104 +115,27 @@ async def test_claude_code_session_health_mock():
     )
 
 
-# ── Pure helpers: check_fatal_errors ─────────────────────────────────
+# ── Pure helpers: check_terminal_fatal_error (structured signals only) ──
 
 
-def test_check_fatal_errors_none():
-    """No fatal patterns returns None."""
-    from domains.spawn_claude_code_agent.service import check_fatal_errors
+def test_terminal_fatal_ignores_banner_text():
+    """No credential classification from terminal text: the Claude banners (and an
+    agent printing them) are not fatal; structured events pause the session instead."""
+    from domains.spawn_claude_code_agent.service import check_terminal_fatal_error
 
-    assert check_fatal_errors("normal terminal output") is None
-
-
-def test_check_fatal_errors_auth_error():
-    """authentication_error pattern yields a message."""
-    from domains.spawn_claude_code_agent.service import check_fatal_errors
-
-    msg = check_fatal_errors("got an authentication_error from anthropic")
-    assert msg is not None
-    assert "Claude" in msg
+    for provider in ("claude", "codex"):
+        assert check_terminal_fatal_error(code_provider=provider, exit_code=1, credential_feedback=[]) is None
+        assert check_terminal_fatal_error(code_provider=provider, exit_code=1) is None
 
 
-def test_check_fatal_errors_api_401():
-    """API Error: 401 pattern yields a message."""
-    from domains.spawn_claude_code_agent.service import check_fatal_errors
+def test_codex_structured_exhaustion_is_terminal_only_after_failed_fallback():
+    """Structured Codex exhaustion may recover through the funded-key fallback."""
+    from domains.spawn_claude_code_agent.service import check_terminal_fatal_error
 
-    msg = check_fatal_errors("API Error: 401 unauthorized")
-    assert msg is not None
-
-
-def test_check_fatal_errors_login_request():
-    """Please run /login pattern yields a message."""
-    from domains.spawn_claude_code_agent.service import check_fatal_errors
-
-    msg = check_fatal_errors("Please run /login to continue")
-    assert msg is not None
-
-
-def test_check_fatal_errors_credit_balance():
-    """Claude Code API billing banner aborts immediately instead of looping."""
-    from domains.spawn_claude_code_agent.service import check_fatal_errors
-
-    msg = check_fatal_errors("Credit balance too low · Add funds: https://platform.claude.com/settings/billing")
-    assert msg is not None
-    assert "billing" in msg.lower()
-
-
-def test_check_fatal_errors_credit_balance_real_wording():
-    """Regression: Anthropic's real banner says "Credit balance is too low" (with "is")
-    and often arrives WITHOUT the "Add funds" URL on the same line. The exact
-    production output below (agent 6d048fcf, /deploy smoke) previously matched no
-    fatal pattern, so the sandbox looped through 4 retries over 333s instead of
-    aborting immediately.
-    """
-    from domains.spawn_claude_code_agent.service import check_fatal_errors
-
-    msg = check_fatal_errors("[Claude] Session started in /home/user\n[Claude] Credit balance is too low")
-    assert msg is not None
-    assert "billing" in msg.lower()
-
-
-def test_check_fatal_errors_rate_limit_options():
-    """Claude Code rate-limit prompts abort so the exhausted token can rotate."""
-    from domains.spawn_claude_code_agent.service import check_fatal_errors
-
-    output = "You've hit your limit - resets 10pm (UTC)\n> /rate-limit-options\n1. Stop and wait for limit to reset"
-    msg = check_fatal_errors(output)
-
-    assert msg is not None
-    assert "rate-limited" in msg
-
-
-def test_codex_oauth_usage_limit_is_terminal_only_after_failed_fallback():
-    """OAuth exhaustion may recover through the funded-key fallback."""
-    from domains.spawn_claude_code_agent.service import (
-        check_fatal_errors,
-        check_terminal_fatal_error,
-    )
-
-    output = (
-        "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
-        "to purchase more credits or try again at Jul 30th, 2026 3:23 PM."
-    )
-    assert check_fatal_errors(output) is None
-    assert check_terminal_fatal_error(output, code_provider="codex", exit_code=0) is None
-    msg = check_terminal_fatal_error(output, code_provider="codex", exit_code=1)
-    assert msg is not None and "runtime fallback" in msg
-
-
-def test_check_fatal_errors_codex_funded_key_quota():
-    """Quota wording may recover, but remains terminal after a failed process."""
-    from domains.spawn_claude_code_agent.service import (
-        check_fatal_errors,
-        check_terminal_fatal_error,
-    )
-
-    output = "Quota exceeded. Check your plan and billing details."
-    assert check_fatal_errors(output) is None
-    assert check_terminal_fatal_error(output, code_provider="codex", exit_code=0) is None
-    msg = check_terminal_fatal_error(output, code_provider="codex", exit_code=1)
-    assert msg is not None and "out of quota" in msg
+    feedback = [{"source": "initial", "reason": "Quota exceeded. Check your plan and billing details."}]
+    assert check_terminal_fatal_error(code_provider="codex", exit_code=0, credential_feedback=feedback) is None
+    msg = check_terminal_fatal_error(code_provider="codex", exit_code=1, credential_feedback=feedback)
+    assert msg is not None and "out of quota" in msg and "runtime fallback" in msg
 
 
 def test_build_codex_credential_feedback_preserves_fallback_order():
@@ -2934,10 +2857,9 @@ async def test_spawn_activity_returns_close_handoff_as_result():
     assert len(result["message"]) < 5_000, len(result["message"])
 
 
-async def test_spawn_activity_fast_exit_auth_failure_is_terminal():
-    """A fast CLI 401 is re-checked after exit and never reaches the verifier."""
-    from temporalio.exceptions import ApplicationError
-
+async def test_spawn_activity_fast_exit_auth_failure_pauses_for_a_retry():
+    """A fast CLI 401 never reaches the verifier: the structured rejection pauses the
+    session for a re-leased retry; the printed banner alone classifies nothing."""
     from domains.spawn_claude_code_agent import service
 
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
@@ -2947,6 +2869,13 @@ async def test_spawn_activity_fast_exit_auth_failure_is_terminal():
     fake_collector.stop = AsyncMock()
     close_session = AsyncMock(return_value={})
     verifier = AsyncMock()
+    persisted = AsyncMock()
+    rejection = {
+        "type": "cli_message",
+        "raw_type": "assistant.api_error",
+        "cli_message": {"type": "assistant_api_error", "error": "authentication_failed"},
+        "credential": "0123456789abcdef",
+    }
 
     async def fake_create_session(**_kwargs):
         return {
@@ -2962,15 +2891,18 @@ async def test_spawn_activity_fast_exit_auth_failure_is_terminal():
             "[Claude] Session started in /home/user\n"
             "[Claude] Failed to authenticate. API Error: 401 OAuth access token has been revoked.\n"
         )
-        return (1, False, [], 0, 0, [])
+        kwargs["code_events"].append(rejection)
+        kwargs["loop_outcome"]["login_unusable"] = service.login_unusable_from_event(rejection)
+        return (1, False, [], 0, 0, kwargs["code_events"])
 
     with (
         patch.object(service, "SandboxLogCollector", lambda *a, **kw: fake_collector),
         patch.object(service, "create_e2b_session", side_effect=fake_create_session),
         patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
         patch.object(service, "_run_verifier", verifier),
-        patch.object(service, "persist_terminal_output", AsyncMock()),
+        patch.object(service, "persist_terminal_output", persisted),
         patch.object(service, "close_e2b_session", close_session),
+        patch.object(service, "fetch_code_credential_availability", AsyncMock(return_value=None)),
         patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
         patch(
             "helpers.model_pricing.get_model_pricing_with_fallback",
@@ -2978,22 +2910,22 @@ async def test_spawn_activity_fast_exit_auth_failure_is_terminal():
         ),
         patch("temporalio.activity.heartbeat"),
     ):
-        try:
-            await service.spawn_claude_code_activity(
-                user_id="u",
-                agent_id="a",
-                goal="g",
-                tool_call_id="tc",
-                output_schema={"fields": []},
-            )
-            raise AssertionError("revoked OAuth must terminate the activity")
-        except ApplicationError as error:
-            assert error.non_retryable is True
-            assert error.type == "CLAUDE_CODE_FATAL"
-            assert "401" in str(error)
+        result = await service.spawn_claude_code_activity(
+            user_id="u",
+            agent_id="a",
+            goal="g",
+            tool_call_id="tc",
+            output_schema={"fields": []},
+        )
 
+    assert result["status"] == "usage_limit" and result["failure_kind"] == "login_unusable", result
+    assert result["retryable"] is True, result
     verifier.assert_not_awaited()
     close_session.assert_awaited_once()
+    assert close_session.await_args.kwargs["reason"] == "usage_limit"
+    assert persisted.await_args.kwargs["credential_feedback"] == [
+        {"source": "initial", "reason": "authentication_failed", "credential": "0123456789abcdef"}
+    ]
     fake_collector.stop.assert_awaited()
 
 
@@ -3985,18 +3917,11 @@ async def _run_all_tests():
     await r.record_async("session_create_mock", test_claude_code_session_create_mock)
     await r.record_async("session_health_mock", test_claude_code_session_health_mock)
     # pure helpers
-    r.record("check_fatal_none", test_check_fatal_errors_none)
-    r.record("check_fatal_auth", test_check_fatal_errors_auth_error)
-    r.record("check_fatal_401", test_check_fatal_errors_api_401)
-    r.record("check_fatal_login", test_check_fatal_errors_login_request)
-    r.record("check_fatal_credit_balance", test_check_fatal_errors_credit_balance)
-    r.record("check_fatal_credit_balance_real_wording", test_check_fatal_errors_credit_balance_real_wording)
-    r.record("check_fatal_rate_limit_options", test_check_fatal_errors_rate_limit_options)
+    r.record("terminal_fatal_ignores_banner_text", test_terminal_fatal_ignores_banner_text)
     r.record(
-        "check_codex_oauth_terminal_after_failed_fallback",
-        test_codex_oauth_usage_limit_is_terminal_only_after_failed_fallback,
+        "codex_structured_exhaustion_terminal_after_failed_fallback",
+        test_codex_structured_exhaustion_is_terminal_only_after_failed_fallback,
     )
-    r.record("check_fatal_codex_funded_key_quota", test_check_fatal_errors_codex_funded_key_quota)
     r.record(
         "codex_credential_feedback_order",
         test_build_codex_credential_feedback_preserves_fallback_order,
@@ -4202,7 +4127,7 @@ async def _run_all_tests():
     await r.record_async("spawn_activity_happy", test_spawn_activity_happy_path_end_to_end)
     await r.record_async(
         "spawn_activity_fast_exit_auth_failure",
-        test_spawn_activity_fast_exit_auth_failure_is_terminal,
+        test_spawn_activity_fast_exit_auth_failure_pauses_for_a_retry,
     )
     await r.record_async(
         "spawn_activity_codex_oauth_fallback_success",

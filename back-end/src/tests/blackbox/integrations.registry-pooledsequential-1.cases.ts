@@ -29,15 +29,7 @@ import {
   testAccountPoolDefault_explicitOverrideWins,
   testAccountPoolDefault_resyncKeepsPooledToken,
 } from './integrations.account-pooling-1.cases';
-import {
-  testClaudeCodeExhaustion_marksPoolToken,
-  testClaudeCodeExhaustion_marksUserToken,
-  testClaudeCodeExhaustion_noBannerNoOp,
-  testClaudeCodeAuthFailure_marksPoolTokenLongCooldown,
-  testClaudeCodeRevokedOauth_disablesUserTokenPermanently,
-  testClaudeCodeBillingFailure_marksPoolTokenLongCooldown,
-  testClaudeCodeBillingFailure_marksSharedAnthropicCooldown,
-} from './integrations.claude-lifecycle-1.cases';
+import { testClaudeCodeExhaustion_noBannerNoOp } from './integrations.claude-lifecycle-1.cases';
 import {
   testClaudeCodeSandbox_neverSpendsSharedRefreshGrant,
   testClaudeCodeSandbox_concurrentSessionsShareOneAccessToken,
@@ -157,32 +149,8 @@ export function pooledSequentialTestsPart1() {
       fn: testAccountPoolDefault_resyncKeepsPooledToken,
     },
     {
-      name: 'claude-code exhaustion -- pool token marked rate-limited at parsed reset time',
-      fn: testClaudeCodeExhaustion_marksPoolToken,
-    },
-    {
-      name: 'claude-code exhaustion -- user token marked rate-limited (12h format)',
-      fn: testClaudeCodeExhaustion_marksUserToken,
-    },
-    {
       name: 'claude-code exhaustion -- benign output is no-op',
       fn: testClaudeCodeExhaustion_noBannerNoOp,
-    },
-    {
-      name: 'claude-code auth-failure -- pool token marked rate-limited with long cooldown',
-      fn: testClaudeCodeAuthFailure_marksPoolTokenLongCooldown,
-    },
-    {
-      name: 'claude-code auth-failure -- revoked user OAuth is permanently excluded',
-      fn: testClaudeCodeRevokedOauth_disablesUserTokenPermanently,
-    },
-    {
-      name: 'claude-code billing-failure -- pool token marked rate-limited with long cooldown',
-      fn: testClaudeCodeBillingFailure_marksPoolTokenLongCooldown,
-    },
-    {
-      name: 'claude-code billing-failure -- shared Anthropic key enters cooldown',
-      fn: testClaudeCodeBillingFailure_marksSharedAnthropicCooldown,
     },
   ];
 }
