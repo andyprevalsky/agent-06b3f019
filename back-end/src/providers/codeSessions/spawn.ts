@@ -93,7 +93,7 @@ export async function resolveSpawnCodeSession(
     agent?.busId !== undefined && agent.busId !== null && agent.busId !== ''
       ? agent.busId
       : params.agentId;
-  sweepExpiredCodeSessions(userId);
+  void sweepExpiredCodeSessions(userId);
   // "New agent in this branch" works in the shared agent's session; every
   // other agent owns its own worktree and branch (plan §1b).
   const ownerAgentId = await effectiveOwnerAgentId(userId, params.agentId);

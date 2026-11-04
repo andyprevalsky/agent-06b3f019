@@ -31,8 +31,11 @@ SILENCE_TIMEOUT_S: Final[float] = 1.0
 # When the CLI sends no event for this window with no tool in flight and no
 # SDK result, the session is PAUSED (checkpoint + E2B pause) and the tool
 # returns status "paused" with its code_session_id: resumable on the next
-# spawn, never a failure. Paused processes keep their memory, so a Monitor /
-# ScheduleWakeup wait continues when the session resumes. A tool in flight
+# spawn, never a failure. E2B's pause keeps memory and processes, but the next
+# spawn restarts the sandbox's ws-server and with it the CLI
+# (e2bCodeSessionSandbox.ts stopStaleWsServer): the files, commits and the
+# conversation (--resume) carry over, while background shells and a pending
+# Monitor / ScheduleWakeup wait of the paused CLI do not. A tool in flight
 # (long Bash, Write, network call) keeps the session attached indefinitely:
 # silence there is work, not a hang (cuda k=3 r21/r22/r24 were productive
 # sessions the old 180s/900s idle kills aborted).

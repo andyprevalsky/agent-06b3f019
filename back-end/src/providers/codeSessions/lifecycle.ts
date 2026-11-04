@@ -303,9 +303,12 @@ export async function retireCodeSession(session: CodeSessionRow): Promise<void> 
   log.info('Code session retired', { codeSessionId: session.id });
 }
 
-/** Opportunistic, bounded TTL sweep for one user (never blocks the caller). */
-export function sweepExpiredCodeSessions(userId: string): void {
-  void findExpiredCodeSessions(userId)
+/**
+ * Opportunistic, bounded TTL sweep for one user. Never rejects; spawns start it
+ * without awaiting so it never blocks them.
+ */
+export function sweepExpiredCodeSessions(userId: string): Promise<void> {
+  return findExpiredCodeSessions(userId)
     .then(async (expired) => {
       for (const session of expired) await retireCodeSession(session);
     })

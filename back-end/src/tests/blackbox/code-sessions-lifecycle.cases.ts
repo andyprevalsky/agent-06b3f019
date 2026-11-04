@@ -8,13 +8,20 @@
  *   keepalive ──► periodic checkpoint; pause/resume before E2B's continuous-runtime cap
  *   resume    ──► only a missing sandbox falls back to a new one (transient errors throw)
  *   repo key  ──► `.git` / trailing slash variants name the same session
+ *   TTL       ──► an expired session is only ever RETIRED by the retire path (sandbox killed)
+ *   resume    ──► the stale ws-server stop command does not kill its own shell
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { writeFileSync } from 'node:fs';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Sandbox, SandboxNotFoundError } from 'e2b';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import {
   cleanupAgentSessions,
   releaseTerminatedWorkflowResources,
@@ -22,6 +29,7 @@ import {
 import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
 import { keepAliveCodeTask, resolveSpawnCodeSession } from '../../providers/codeSessions/spawn';
 import { markPaused } from '../../providers/codeSessions/store';
+import { sweepExpiredCodeSessions } from '../../providers/codeSessions/lifecycle';
 import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
 
 export interface CodeSessionLifecycleContext {
@@ -278,5 +286,108 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
       assert.equal(again?.id, first.id, `${JSON.stringify(variant)} must not fork a new session`);
       await markPaused(first.id);
     }
+  });
+
+  test('an expired session is never marked RETIRED with its sandbox alive (sweep or no sweep)', async (t) => {
+    const userId = `code-session-ttl-${randomUUID()}`;
+    await prisma.user.create({ data: { userId, name: 'Code Session TTL' } });
+    const owner = randomUUID();
+    await prisma.agent.create({ data: { id: owner, userId, busId: owner, goal: 'TTL' } });
+    const killed: string[] = [];
+    t.mock.method(Sandbox, 'kill', async (id: string) => {
+      killed.push(id);
+      return true;
+    });
+    const day = 24 * 60 * 60 * 1000;
+    const expired = (ownerAgentId: string, ageDays: number, sandboxId: string | null) =>
+      prisma.codeSession.create({
+        data: {
+          userId,
+          rootAgentId: ownerAgentId,
+          ownerAgentId,
+          repoKey: '',
+          state: 'PAUSED',
+          sandboxKind: sandboxId === null ? null : 'e2b',
+          sandboxId,
+          lastActiveAt: new Date(Date.now() - ageDays * day),
+        },
+      });
+    try {
+      // The bounded sweep (5 oldest per spawn) is busy with older sessions.
+      await Promise.all([30, 31, 32, 33, 34].map((age) => expired(randomUUID(), age, null)));
+      const target = await expired(owner, 20, `sb-ttl-${randomUUID()}`);
+      const fresh = await resolveSpawnCodeSession({
+        agentId: owner,
+        userId,
+        repoUrl: null,
+        codeProvider: 'claude',
+        leaseOwner: 'tool:ttl:1',
+      });
+      assert.notEqual(fresh?.id, target.id, 'an expired session is never resumed');
+      // resolve itself must never retire the expired session behind the sweep's back.
+      const afterSpawn = await prisma.codeSession.findUniqueOrThrow({ where: { id: target.id } });
+      if (afterSpawn.state === 'RETIRED') {
+        assert.ok(killed.includes(target.sandboxId ?? ''), 'RETIRED without killing its sandbox');
+      }
+      // Later sweeps (once the older sessions are retired) reach it and kill its sandbox.
+      const swept = await retryWithBackoff(
+        async () => {
+          await sweepExpiredCodeSessions(userId);
+          return prisma.codeSession.findUniqueOrThrow({ where: { id: target.id } });
+        },
+        {
+          maxRetries: 20,
+          fixedDelays: Array.from({ length: 20 }, () => 50),
+          shouldRetryResult: (row) => row.state !== 'RETIRED',
+          component: 'CodeSessionTtlTest',
+        }
+      );
+      assert.equal(swept.state, 'RETIRED');
+      assert.ok(killed.includes(target.sandboxId ?? ''), 'the expired sandbox is killed');
+    } finally {
+      await prisma.codeSession.deleteMany({ where: { userId } });
+      await prisma.agent.deleteMany({ where: { userId } });
+      await prisma.user.deleteMany({ where: { userId } });
+    }
+  });
+
+  test('resuming a paused sandbox stops its stale ws-server without killing the stop command itself', async () => {
+    const { codeSession, home, fake } = await liveTask(ctx, 'stale-ws');
+    await markPaused(codeSession.id);
+    const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSession.id } });
+    writeFileSync(join(home, 'ws-server.mjs'), 'setInterval(() => undefined, 1000);\n');
+    const stale = spawn('node', [join(home, 'ws-server.mjs')], { stdio: 'ignore' });
+    const staleExit = once(stale, 'exit').then(() => true);
+    const runs: Array<{ cmd: string; exitCode: number; signal: string | null }> = [];
+    const map = (value: string) => value.split('/home/user').join(home);
+    (fake.sandbox as unknown as { commands: { run: unknown } }).commands.run = async (
+      cmd: string
+    ) => {
+      const result = spawnSync('bash', ['-c', map(cmd)], { encoding: 'utf8' });
+      runs.push({ cmd, exitCode: result.status ?? -1, signal: result.signal });
+      return { exitCode: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
+    };
+    ctx.patchConnect(async () => fake.sandbox);
+    try {
+      const acquired = await acquireCodeSessionSandbox(row, async () => {
+        throw new Error('a paused sandbox is resumed, never replaced');
+      });
+      assert.equal(acquired.resumedFrom, 'paused_sandbox');
+      assert.equal(
+        await Promise.race([staleExit, sleep(5_000).then(() => false)]),
+        true,
+        'the stale ws-server is stopped'
+      );
+    } finally {
+      ctx.restoreConnect();
+      stale.kill('SIGKILL');
+    }
+    const stop = runs.find((run) => run.cmd.includes('ws-server.mjs'));
+    assert.ok(stop, 'the resume stops the stale ws-server');
+    assert.deepEqual(
+      { exitCode: stop.exitCode, signal: stop.signal },
+      { exitCode: 0, signal: null },
+      'the stop command must finish (and wait for the port), not be killed by its own pkill'
+    );
   });
 }

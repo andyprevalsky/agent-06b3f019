@@ -293,11 +293,17 @@ export async function acquireCodeSandbox(
   };
 }
 
-/** A resumed sandbox still runs the previous (lingering) ws-server on WS_PORT. */
+/**
+ * A resumed sandbox still runs the previous (lingering) ws-server on WS_PORT.
+ * Stopping it also ends its CLI and that CLI's processes (E2B's pause itself
+ * keeps them; live probe 2026-11-04). The `[n]ode` pattern keeps `pkill -f` from
+ * matching, and killing, the shell running this command, which skipped the
+ * wait for the port.
+ */
 async function stopStaleWsServer(sandbox: Sandbox): Promise<void> {
   try {
     await sandbox.commands.run(
-      `pkill -f 'node /home/user/ws-server.mjs' || true; for i in $(seq 1 50); do netstat -tln | grep -q ':${WS_PORT} ' || exit 0; sleep 0.1; done; exit 0`,
+      `pkill -f '[n]ode /home/user/ws-server.mjs' || true; for i in $(seq 1 50); do netstat -tln | grep -q ':${WS_PORT} ' || exit 0; sleep 0.1; done; exit 0`,
       { timeoutMs: 10_000 }
     );
   } catch (error) {
