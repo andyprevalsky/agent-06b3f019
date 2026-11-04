@@ -22,6 +22,7 @@ tags:
   - subscriptions
 sources:
   - task T7 delegated RCA 2026-11-04 (branch fix/compute-token-login-disable-writers)
+  - commit 9d4b0ea24
   - task T7 prod read-only audit 2026-11-04 (Integration rows; ClickHouse fly_logs)
 repro: back-end/src/tests/blackbox/integrations.login-disable-writers.cases.ts (expired/replaced report; lease skips expired Claude login; other login kind); back-end/src/tests/blackbox/compute-grant-readpath.blackbox.ts
 status: fixed
