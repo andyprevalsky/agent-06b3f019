@@ -22,19 +22,18 @@ import {
   parseAgentNetworkFilters,
   parseAgentTrajectoryFilters,
   parseAgentPaging,
-  PAGE_AFTER_HINT,
+  validateAgentSourceSelection,
 } from './validate.agent';
 import { parseGoogleSourceFilters } from './validate.google';
 import {
   dropNullParams,
   filtersBySource,
-  hasFilters,
+  sentParamFor,
   sharedFilters,
   sourcesNamedByFilters,
   splitFilters,
   type SplitFilters,
 } from './validate.normalize';
-import { agentTaskPathParam } from './path';
 
 function databaseRegexPattern(pattern: string, multiline: boolean): string {
   if (!multiline) return pattern;
@@ -96,77 +95,6 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
-/** agent_network rows are stored messages, so these kinds select all of them. */
-const AGENT_NETWORK_RECORD_KINDS = new Set(['message', 'all']);
-
-const AGENT_SELECTOR_HINT: Record<string, string> = {
-  role: 'role filters agent records; add agent_network or agent_trajectories to sources, or remove it.',
-  record_kind:
-    'record_kind selects agent_trajectories records; add agent_trajectories to sources, or remove it.',
-  surface:
-    'surface selects agent_trajectories records; add agent_trajectories to sources, or remove it.',
-  trace_path:
-    'trace_path scopes agent_network or agent_trajectories; add one to sources, or remove it.',
-  page_after: PAGE_AFTER_HINT,
-};
-
-/**
- * Trajectory selectors on an agent_network search. agent_network reads the
- * stored messages of the caller's tree: an agent task path scopes it and the
- * message/all kinds select every row. Anything else names itself, so the
- * caller can drop that one parameter.
- */
-function validateAgentNetworkSelectors(params: GrepParams): void {
-  if (
-    params.record_kind !== undefined &&
-    !AGENT_NETWORK_RECORD_KINDS.has(String(params.record_kind).toLowerCase())
-  ) {
-    throw new InvalidGrepParamError(
-      'record_kind',
-      'agent_network holds stored messages only (message or all); model records need sources ["agent_trajectories"].'
-    );
-  }
-  if (params.trace_path !== undefined && agentTaskPathParam(params.trace_path) === undefined) {
-    throw new InvalidGrepParamError(
-      'trace_path',
-      'agent_network takes an agent address in your tree such as /root or /root/outreach (as list_agents prints); a trajectory UUID or agent_trajectories/... path needs sources ["agent_trajectories"].'
-    );
-  }
-  if (params.surface !== undefined) {
-    throw new InvalidGrepParamError('surface', AGENT_SELECTOR_HINT.surface);
-  }
-  if (params.page_after !== undefined) {
-    throw new InvalidGrepParamError('page_after', AGENT_SELECTOR_HINT.page_after);
-  }
-}
-
-/**
- * `order` and `page_after` page one agent_trajectories search. `order` is
- * accepted and ignored where it does not apply (display_order reports the
- * real order); a merged search with agent_trajectories cannot honor it.
- */
-function validateAgentSourceSelection(params: GrepParams, sources: ValidSource[]): void {
-  const hasTrajectories = sources.includes('agent_trajectories');
-  if (hasTrajectories) {
-    for (const key of ['order', 'page_after'] as const) {
-      if (params[key] !== undefined && sources.length !== 1) {
-        throw new InvalidGrepParamError(
-          key,
-          `${key} pages an agent_trajectories search only when agent_trajectories is the only source; search it alone or remove ${key}.`
-        );
-      }
-    }
-    return;
-  }
-  if (sources.includes('agent_network')) {
-    validateAgentNetworkSelectors(params);
-    return;
-  }
-  for (const key of ['role', 'record_kind', 'surface', 'trace_path', 'page_after'] as const) {
-    if (params[key] !== undefined) throw new InvalidGrepParamError(key, AGENT_SELECTOR_HINT[key]);
-  }
-}
-
 function hasTrajectoryNarrowing(params: GrepParams, split: SplitFilters): boolean {
   const { flat } = split;
   return (
@@ -199,9 +127,10 @@ function requireKnownSources(params: GrepParams): void {
 }
 
 /**
- * Sources in precedence order: explicit `sources`/`source`; typed trajectory
- * narrowing; sources the filters name (a nested block or a printed path);
- * otherwise the local defaults, which take no filters.
+ * Sources in precedence order: explicit `sources`/`source`; sources the
+ * filters name (a nested block or a printed path); typed trajectory narrowing;
+ * otherwise the local defaults. Flat filters then apply as they do to any
+ * selection (validate.normalize.ts).
  */
 function resolveSourceSelection(params: GrepParams, split: SplitFilters): ResolvedSourceSelection {
   requireKnownSources(params);
@@ -212,19 +141,11 @@ function resolveSourceSelection(params: GrepParams, split: SplitFilters): Resolv
       ? [...new Set(sources as ValidSource[])]
       : source !== undefined
         ? [source as ValidSource]
-        : hasTrajectoryNarrowing(params, split)
-          ? ['agent_trajectories']
-          : named.length > 0
-            ? named
+        : named.length > 0
+          ? named
+          : hasTrajectoryNarrowing(params, split)
+            ? ['agent_trajectories']
             : DEFAULT_GREP_SOURCES;
-  if (sources === undefined && source === undefined && named.length === 0 && hasFilters(split)) {
-    if (!hasTrajectoryNarrowing(params, split)) {
-      throw new InvalidGrepParamError(
-        'filters',
-        'Name the source(s) these filters apply to in sources, such as sources: ["messages"], or nest them as {"messages": {...}}.'
-      );
-    }
-  }
   validateAgentSourceSelection(params, resolvedSources);
   return {
     resolvedSources,
@@ -235,7 +156,28 @@ function resolveSourceSelection(params: GrepParams, split: SplitFilters): Resolv
   };
 }
 
+/** Parse each source's filters, reporting a bad value under the name the caller sent. */
 function parseSourceFilters(
+  params: GrepParams,
+  split: SplitFilters,
+  sources: ValidSource[]
+): ValidatedGrepInput['filters'] {
+  try {
+    return parseEachSourceFilters(params, split, sources);
+  } catch (error) {
+    const key =
+      error instanceof InvalidGrepParamError
+        ? /^filters\.(\w+)$/.exec(error.param)?.[1]
+        : undefined;
+    if (error instanceof InvalidGrepParamError && key !== undefined) {
+      const sent = sentParamFor(key, params, split);
+      if (sent !== error.param) throw new InvalidGrepParamError(sent, error.hint);
+    }
+    throw error;
+  }
+}
+
+function parseEachSourceFilters(
   params: GrepParams,
   split: SplitFilters,
   sources: ValidSource[]

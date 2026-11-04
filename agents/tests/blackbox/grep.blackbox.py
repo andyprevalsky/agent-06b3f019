@@ -794,7 +794,7 @@ async def test_execute_grep_nested_documents_provider_gate():
         tool_call={
             "pattern": "renewal clause",
             "source": "documents",
-            "filters": {"documents": {"document_source": "Apple Notes"}},
+            "filters": {"documents": {"document_source": "Apple Notes"}, "tag": "lease"},
             "require_source_access": True,
         },
         tool_call_id="tc-1",
@@ -867,6 +867,58 @@ def test_grep_schema_filter_keys_match_backend_validator():
         assert sorted(advertised[source]) == sorted(keys), (source, advertised[source], keys)
 
 
+
+async def test_execute_grep_partial_gate_drops_keys_only_skipped_sources_accept():
+    """After skipping unconnected transactions, a flat key and a top-level shorthand only
+    transactions/calendar accepted are dropped; keys the kept source accepts stay."""
+    from domains.grep.service import execute_grep
+
+    grep_called_with = {}
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        if name == "source_status_activity":
+            return [{"source": "transactions", "connector": "plaid", "connected": False, "connectUrl": "https://x"}]
+        if name == "grep_activity":
+            grep_called_with.update(args[0])
+            return {"matches": [], "total_matches": 0}
+        return None
+
+    await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={
+            "pattern": "x",
+            "sources": ["messages", "transactions"],
+            "filters": {"min_amount": 5, "since": "7d"},
+            "until": "2026-11-01",
+            "person": "Ann",
+        },
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert grep_called_with.get("sources") == ["messages"]
+    assert grep_called_with.get("filters") == {"since": "7d"}
+    assert "until" not in grep_called_with
+    assert grep_called_with.get("person") == "Ann"
+
+
+def test_grep_source_filter_keys_match_backend_validator():
+    """agents SOURCE_FILTER_KEYS (used to narrow partially gated calls) equals back-end DATA_SOURCE_CONFIGS."""
+    import re
+    from pathlib import Path
+
+    from domains.grep.config import SOURCE_FILTER_KEYS
+
+    types_ts = (Path(__file__).resolve().parents[3] / "back-end/src/domains/data/types.ts").read_text()
+    configs = types_ts.split("export const DATA_SOURCE_CONFIGS", 1)[1].split("} as const;", 1)[0]
+    backend = {
+        source: sorted(key.strip().strip("'") for key in keys.split(",") if key.strip())
+        for source, keys in re.findall(r"^  (\w+): \{.*?filters: \[(.*?)\]", configs, re.S | re.M)
+    }
+    assert {source: sorted(keys) for source, keys in SOURCE_FILTER_KEYS.items()} == backend
+
+
 async def run_all_tests():
     print("grep blackbox tests:")
     r = BlackboxResult()
@@ -917,6 +969,11 @@ async def run_all_tests():
         test_execute_grep_partial_gate_drops_nested_block_of_skipped_source,
     )
     r.record("grep_schema_filter_keys_match_backend_validator", test_grep_schema_filter_keys_match_backend_validator)
+    r.record("grep_source_filter_keys_match_backend_validator", test_grep_source_filter_keys_match_backend_validator)
+    await r.record_async(
+        "execute_grep_partial_gate_drops_keys_only_skipped_sources_accept",
+        test_execute_grep_partial_gate_drops_keys_only_skipped_sources_accept,
+    )
     teardown_mock()
     return r.all_passed
 

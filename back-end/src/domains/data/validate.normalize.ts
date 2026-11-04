@@ -8,7 +8,8 @@
  *
  * The two never collide: no filter key is a source name. A flat key, like the
  * top-level shorthands `person`, `since` and `until`, applies to every
- * selected source that accepts it, and is rejected only when none does. A
+ * selected source that accepts it, and is rejected only when none does; a
+ * printed path (or /root/... agent address) applies only to its own source. A
  * nested block applies to its own source (`messages` also covers the channel
  * sources email, gmail, imessage and whatsapp) and must use that source's
  * keys. Null values and empty objects mean "not given". Each source's keys
@@ -16,6 +17,7 @@
  */
 
 import { InvalidGrepParamError } from './errors';
+import { isAgentTaskPath } from './path';
 import {
   DATA_SOURCE_CONFIGS,
   MESSAGE_FAMILY_SOURCES,
@@ -49,6 +51,19 @@ function acceptedBy(key: string): string {
     acceptedKeys(source).includes(key)
   );
   return sources.length === 0 ? 'no source' : sources.join(', ');
+}
+
+/** Order-insensitive value equality for filter objects. */
+function sameValue(a: unknown, b: unknown): boolean {
+  const canonical = (value: unknown): unknown =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.entries(value as FilterObject)
+            .sort(([x], [y]) => x.localeCompare(y))
+            .map(([key, entry]) => [key, canonical(entry)])
+        )
+      : value;
+  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 }
 
 function dropNulls(value: FilterObject): FilterObject {
@@ -85,10 +100,6 @@ export function splitFilters(params: GrepParams): SplitFilters {
   return { flat, nested };
 }
 
-export function hasFilters(split: SplitFilters): boolean {
-  return Object.keys(split.flat).length > 0 || Object.keys(split.nested).length > 0;
-}
-
 /** The nested block that addresses `source`, if any. */
 function nestedBlockFor(split: SplitFilters, source: ValidSource): [string, FilterObject] | [] {
   const own = split.nested[source];
@@ -122,7 +133,7 @@ function validateNestedKeys(split: SplitFilters, sources: ValidSource[]): void {
 }
 
 function setOnce(target: FilterObject, key: string, value: unknown, param: string): void {
-  if (key in target && JSON.stringify(target[key]) !== JSON.stringify(value)) {
+  if (key in target && !sameValue(target[key], value)) {
     throw new InvalidGrepParamError(
       param,
       `${key} is given twice with different values; give it once.`
@@ -131,8 +142,42 @@ function setOnce(target: FilterObject, key: string, value: unknown, param: strin
   target[key] = value;
 }
 
+/** The source(s) a printed path or agent address belongs to; undefined for free text. */
+function pathOwners(path: unknown): ((source: ValidSource) => boolean) | undefined {
+  if (typeof path !== 'string') return undefined;
+  const root = path.split('/', 1)[0];
+  if (isAgentTaskPath(path.trim().replace(/\/+$/, ''))) {
+    return (source) => source === 'agent_network' || source === 'agent_trajectories';
+  }
+  if (!isSourceName(root)) return undefined;
+  if (root === 'messages') return isMessageFamilySource;
+  // calendar and drive share one parsed filter set, which resolves the path's own source.
+  if (isGoogleGrepSource(root)) return isGoogleGrepSource;
+  return (source) => source === root;
+}
+
+/** A flat key reaches a source that accepts it; a printed path only its own source. */
+function flatKeyApplies(key: string, value: unknown, source: ValidSource): boolean {
+  if (!acceptedKeys(source).includes(key)) return false;
+  const owners = key === 'path' ? pathOwners(value) : undefined;
+  return owners === undefined || owners(source);
+}
+
+function rejectUnplacedPath(split: SplitFilters, sources: ValidSource[]): void {
+  const path = split.flat.path;
+  const owners = pathOwners(path);
+  if (owners === undefined || sources.some(owners) || typeof path !== 'string') return;
+  const root = path.split('/', 1)[0];
+  const owner = isSourceName(root) ? root : 'agent_network or agent_trajectories';
+  throw new InvalidGrepParamError(
+    'filters.path',
+    `It is a path for ${owner}, which is not in sources (${sources.join(', ')}); add it to sources.`
+  );
+}
+
 /** Flat and top-level keys no selected source accepts are caller errors. */
 function rejectUnplacedKeys(params: GrepParams, split: SplitFilters, sources: ValidSource[]): void {
+  rejectUnplacedPath(split, sources);
   const placed = (key: string) => sources.some((source) => acceptedKeys(source).includes(key));
   const accepts = sources.map((source) => `${source} accepts ${acceptedKeys(source).join(', ')}`);
   const unplaced = (key: string) =>
@@ -168,7 +213,7 @@ export function filtersBySource(
     const keys = acceptedKeys(source);
     const effective: FilterObject = {};
     for (const [key, value] of Object.entries(split.flat)) {
-      if (keys.includes(key)) effective[key] = value;
+      if (flatKeyApplies(key, value, source)) effective[key] = value;
     }
     const [blockKey, block] = nestedBlockFor(split, source);
     for (const [key, value] of Object.entries(block ?? {})) {
@@ -185,6 +230,24 @@ export function filtersBySource(
 }
 
 /**
+ * Where the caller sent a filter key: flat (`filters.since`), nested
+ * (`filters.messages.since`) or as a top-level shorthand (`since`). Value
+ * errors from the parsers are reported under that name.
+ */
+export function sentParamFor(key: string, params: GrepParams, split: SplitFilters): string {
+  if (key in split.flat) return `filters.${key}`;
+  const block = Object.entries(split.nested).find(([, filters]) => key in filters);
+  if (block !== undefined) return `filters.${block[0]}.${key}`;
+  if (
+    (BROADCAST_PARAMS as readonly string[]).includes(key) &&
+    params[key as 'since'] !== undefined
+  ) {
+    return key;
+  }
+  return `filters.${key}`;
+}
+
+/**
  * Sources that share one parsed filter set (the message channels; calendar and
  * drive) must resolve to the same filters.
  */
@@ -197,7 +260,7 @@ export function sharedFilters(
   );
   const first = members[0]?.[1] ?? {};
   for (const [source, filters] of members) {
-    if (JSON.stringify(filters) !== JSON.stringify(first)) {
+    if (!sameValue(filters, first)) {
       throw new InvalidGrepParamError(
         `filters.${source}`,
         `${members.map(([name]) => name).join(' and ')} are searched together and take one filter set; ` +

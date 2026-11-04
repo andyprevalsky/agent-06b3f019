@@ -24,7 +24,14 @@ interface Match {
 }
 
 type Expectation =
-  | { accept: true; sources?: string[]; every?: (match: Match) => boolean; some?: true }
+  | {
+      accept: true;
+      sources?: string[];
+      every?: (match: Match) => boolean;
+      some?: true;
+      /** The equivalent flat request, which must return the same matches. */
+      sameAs?: Record<string, unknown>;
+    }
   | { reject: string; says: RegExp[] };
 
 interface ContractCase {
@@ -134,7 +141,11 @@ function cases(thread: string): ContractCase[] {
         head_limit: 200,
         filters: { calendar: { since: '2026-11-02', until: '2026-11-25' } },
       },
-      expect: { accept: true, sources: ['calendar'] },
+      expect: {
+        accept: true,
+        sources: ['calendar'],
+        sameAs: { source: 'calendar', filters: { since: '2026-11-02', until: '2026-11-25' } },
+      },
     },
     {
       label: 'calendar nested path',
@@ -185,7 +196,18 @@ function cases(thread: string): ContractCase[] {
         head_limit: 50,
         filters: { documents: { document_source: 'apple_notes' } },
       },
-      expect: { accept: true, sources: ['documents'] },
+      expect: {
+        accept: true,
+        sources: ['documents'],
+        sameAs: {
+          pattern: 'Nimbus',
+          sources: ['documents'],
+          context: 3,
+          '-i': true,
+          head_limit: 50,
+          filters: { document_source: 'apple_notes' },
+        },
+      },
     },
     {
       label: 'agent_network nested task path (live explore call)',
@@ -194,7 +216,30 @@ function cases(thread: string): ContractCase[] {
         sources: ['agent_network'],
         filters: { agent_network: { path: '/root' } },
       },
-      expect: { accept: true, sources: ['agent_network'], some: true },
+      expect: {
+        accept: true,
+        sources: ['agent_network'],
+        some: true,
+        sameAs: { pattern: 'Atlas', sources: ['agent_network'], trace_path: '/root' },
+      },
+    },
+    {
+      label: 'nested calendar block + top-level until, no sources',
+      body: { filters: { calendar: { since: '2026-11-02' } }, until: '2026-11-05' },
+      // The block names calendar, so until applies there instead of selecting agent_trajectories.
+      expect: { accept: true, sources: ['calendar'] },
+    },
+    {
+      label: 'equal channel blocks in a different key order',
+      body: {
+        pattern: 'Ledger',
+        sources: ['email', 'imessage'],
+        filters: {
+          email: { person: 'Lighthouse Archive', since: '2025-01-01' },
+          imessage: { since: '2025-01-01', person: 'Lighthouse Archive' },
+        },
+      },
+      expect: { accept: true, sources: ['email', 'imessage'], some: true },
     },
     // Empty, null-valued and source-naming filters.
     {
@@ -228,9 +273,39 @@ function cases(thread: string): ContractCase[] {
       label: 'null-valued filter keys, no source',
       body: {
         pattern: 'Ledger',
-        filters: { path: null, account: null, until: null, since: '2026-10-24' },
+        filters: { path: null, account: null, until: null, since: '2026-01-03' },
       },
-      expect: { reject: 'filters', says: [/sources/] },
+      // Flat filters without sources apply to the default sources that accept them.
+      expect: {
+        accept: true,
+        sources: ['messages', 'network', 'agent_network'],
+        some: true,
+        every: (m) => m.source !== 'messages' || m.timestamp >= '2026-01-03',
+      },
+    },
+    {
+      label: 'printed message path with messages + network',
+      body: {
+        pattern: 'Ledger|Lighthouse',
+        sources: ['messages', 'network'],
+        filters: { path: thread },
+      },
+      // The path scopes its own source; network is searched unscoped.
+      expect: {
+        accept: true,
+        some: true,
+        every: (m) => m.source !== 'messages' || m.path.startsWith(`${thread}/`),
+      },
+    },
+    {
+      label: 'printed message path, network only',
+      body: { pattern: 'Lighthouse', sources: ['network'], filters: { path: thread } },
+      expect: { reject: 'filters.path', says: [/messages/, /add it to sources/] },
+    },
+    {
+      label: 'flat document_source without sources',
+      body: { pattern: 'Nimbus', filters: { document_source: 'apple_notes' } },
+      expect: { reject: 'filters.document_source', says: [/applies to documents/] },
     },
     // A task path where agent_network expected a record path.
     {
@@ -295,6 +370,17 @@ function cases(thread: string): ContractCase[] {
       label: 'messages filters.since 3y',
       body: { pattern: 'Ledger', sources: ['messages'], head_limit: 30, filters: { since: '3y' } },
       expect: { reject: 'filters.since', says: [/ISO 8601/, /7d|\dd/] },
+    },
+    // The same bad value is reported under the name the caller used.
+    {
+      label: 'top-level since 3y',
+      body: { pattern: 'Ledger', sources: ['messages'], since: '3y' },
+      expect: { reject: 'since', says: [/ISO 8601/] },
+    },
+    {
+      label: 'nested messages since 3y',
+      body: { pattern: 'Ledger', sources: ['email'], filters: { messages: { since: '3y' } } },
+      expect: { reject: 'filters.messages.since', says: [/ISO 8601/] },
     },
     {
       label: 'messages filters.until',
@@ -391,6 +477,15 @@ export async function testGrepParameterContract(userId: string, agentId: string)
         failures.push(`${label}: accepted but matched nothing`);
       } else if (expect.every && !matches.every(expect.every)) {
         failures.push(`${label}: filters not applied: ${matches.map((m) => m.path).join(', ')}`);
+      } else if (expect.sameAs !== undefined) {
+        const flat = await requestGrep(userId, { ...expect.sameAs, agent_id: agentId });
+        const paths = (body: unknown) =>
+          ((body as { matches?: Match[] }).matches ?? []).map((m) => m.path).join(',');
+        if (flat.status !== 200 || paths(flat.data) !== paths(data)) {
+          failures.push(
+            `${label}: differs from the flat form (${flat.status} ${paths(flat.data)})`
+          );
+        }
       }
       continue;
     }

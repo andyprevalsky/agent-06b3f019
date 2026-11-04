@@ -2,7 +2,7 @@
 
 import time
 from datetime import timedelta
-from typing import Any, Dict, Optional, get_args
+from typing import Any, Dict, Optional
 
 import structlog
 from temporalio import workflow
@@ -14,15 +14,16 @@ from domains.grep.config import (
     ACTIVITY_MAX_ATTEMPTS,
     ACTIVITY_MAX_INTERVAL_SECONDS,
     ACTIVITY_TIMEOUT_SECONDS,
+    BROADCAST_GREP_PARAMS,
     DISPLAY_PATTERN_MAX_LENGTH,
     LOG_PATTERN_MAX_LENGTH,
+    SOURCE_FILTER_KEYS,
 )
 from domains.grep.repo import grep_activity
 from domains.grep.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
 from tools.base import EventType, MessageStatus, ToolEvent, format_error_message, format_tool_message
 from tools.gate import source_status_activity
-from utils.tool_schemas import GrepTool
 
 logger = structlog.get_logger()
 
@@ -60,9 +61,9 @@ def _format_source(source: str) -> str:
 _MESSAGE_TITLE_SOURCES = {"", "messages", "email", "gmail", "imessage", "whatsapp"}
 
 
-# Every grep source name; a `filters` key with one of these names is that
-# source's nested filter block (backend validate.normalize.ts).
-_GREP_SOURCES = set(get_args(get_args(GrepTool.model_fields["source"].annotation)[0]))
+# Every backend grep source name; a `filters` key with one of these names is
+# that source's nested filter block (backend validate.normalize.ts).
+_GREP_SOURCES = set(SOURCE_FILTER_KEYS)
 _MESSAGE_FAMILY_SOURCES = {"messages", "email", "gmail", "imessage", "whatsapp"}
 
 
@@ -83,16 +84,26 @@ def _sources_named_by_filters(tool_call: Dict[str, Any]) -> list:
     return named
 
 
-def _without_blocks_of(filters: Any, kept_sources: list) -> Any:
-    """Drop nested filter blocks whose source is no longer searched."""
-    if not isinstance(filters, dict):
-        return filters
+def _narrowed_to(search_call: Dict[str, Any], kept_sources: list) -> Dict[str, Any]:
+    """Drop the filters only skipped sources accepted: their nested blocks, and
+    flat or top-level keys no kept source accepts (the backend rejects both)."""
+    kept_keys = {key for source in kept_sources for key in SOURCE_FILTER_KEYS.get(source, ())}
     kept_family = any(source in _MESSAGE_FAMILY_SOURCES for source in kept_sources)
-    return {
+    narrowed = {
         key: value
-        for key, value in filters.items()
-        if key not in _GREP_SOURCES or key in kept_sources or (key == "messages" and kept_family)
+        for key, value in search_call.items()
+        if key not in BROADCAST_GREP_PARAMS or key in kept_keys
     }
+    filters = search_call.get("filters")
+    if isinstance(filters, dict):
+
+        def kept(key: str) -> bool:
+            if key in _GREP_SOURCES:
+                return key in kept_sources or (key == "messages" and kept_family)
+            return key in kept_keys
+
+        narrowed["filters"] = {key: value for key, value in filters.items() if kept(key)}
+    return narrowed
 
 
 def _title_source(tool_call: Dict[str, Any]) -> str:
@@ -146,7 +157,8 @@ def _normalize_source_key(value: Any) -> str:
 def _document_provider(tool_call: Dict[str, Any]) -> Optional[str]:
     filters = _filters(tool_call)
     nested = filters.get("documents")
-    raw_provider = (nested if isinstance(nested, dict) else filters).get("document_source")
+    nested_provider = nested.get("document_source") if isinstance(nested, dict) else None
+    raw_provider = nested_provider or filters.get("document_source")
     if not raw_provider:
         return None
     return _normalize_source_key(raw_provider)
@@ -296,10 +308,10 @@ async def execute_grep(
                         "unavailable_sources": unavailable,
                     }
                 # Partial: search only the connected sources this call.
-                search_call = {**_backend_grep_call(tool_call), "sources": connected_sources}
+                search_call = _narrowed_to(
+                    {**_backend_grep_call(tool_call), "sources": connected_sources}, connected_sources
+                )
                 search_call.pop("source", None)
-                if "filters" in search_call:
-                    search_call["filters"] = _without_blocks_of(search_call["filters"], connected_sources)
 
         logger.info(
             "Calling grep_activity",

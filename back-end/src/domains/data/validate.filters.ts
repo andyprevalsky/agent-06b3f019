@@ -29,7 +29,7 @@ export function printedPathHint(source: ValidSource): string {
     source === 'agent_network' || source === 'agent_trajectories'
       ? ' or an agent address in your tree such as /root/outreach'
       : '';
-  return `It must be a ${source} path printed by an earlier grep result (${source}/...)${agentAddress}.`;
+  return `It must be a path an earlier ${source} result printed (${source}/...)${agentAddress}.`;
 }
 
 export function parseFilterBoolean(
