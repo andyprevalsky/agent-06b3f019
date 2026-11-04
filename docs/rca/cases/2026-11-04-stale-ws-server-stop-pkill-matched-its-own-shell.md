@@ -48,6 +48,12 @@ Pattern `'[n]ode /home/user/ws-server.mjs'`: the regex still matches the
 ws-server, but the literal text in the shell's own argv does not. The command now
 completes and waits for the port.
 
+The same bug existed in `sandboxResize.ts stopSandboxCli`, which runs
+`for p in $(pgrep -f 'node …'); do … kill -TERM "$p"; done`. That list included
+the command's own shell, which then killed itself. It is fixed the same way, and
+case 32 (`the resize CLI stop does not kill its own shell`) failed before the fix
+and passes after it.
+
 10k agents: unchanged.
 
 Post-fix: same command passes; 5/5 consecutive runs.

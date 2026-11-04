@@ -128,6 +128,19 @@ export async function checkpointCodeSession(params: {
       cliSessionId: manifest.cliSessionId,
       repoFacts: repo,
     });
+    // Restore never looks further back than RESTORE_LOOKBACK, so periodic saves
+    // keep a bounded window: drop the one checkpoint that just fell out of it.
+    if (seq > RESTORE_LOOKBACK) {
+      await deleteCheckpoint(session.userId, session.id, seq - RESTORE_LOOKBACK).catch(
+        (error: unknown) => {
+          log.warn('Pruning an old code session checkpoint failed', {
+            codeSessionId: session.id,
+            seq: String(seq - RESTORE_LOOKBACK),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      );
+    }
     let indexedCodeEvents = 0;
     if (manifest.artifacts[CLI_LOG_ARTIFACT] !== undefined) {
       const key = checkpointKey(session.userId, session.id, seq, CLI_LOG_ARTIFACT);
@@ -265,21 +278,25 @@ export async function prepareLocalCodeSessionHome(session: CodeSessionRow): Prom
   return { home, resumedFrom: 'new', cliSessionId: null };
 }
 
+async function deleteCheckpoint(userId: string, codeSessionId: string, seq: number): Promise<void> {
+  const manifestKey = checkpointKey(userId, codeSessionId, seq, MANIFEST_NAME);
+  const raw = await getCheckpointObject(manifestKey).catch(() => null);
+  if (raw !== null) {
+    try {
+      const manifest = JSON.parse(raw.toString('utf8')) as CheckpointManifest;
+      for (const name of Object.keys(manifest.artifacts ?? {})) {
+        await deleteCheckpointObject(checkpointKey(userId, codeSessionId, seq, name));
+      }
+    } catch {
+      // an unreadable manifest still gets deleted below
+    }
+  }
+  await deleteCheckpointObject(manifestKey).catch(() => undefined);
+}
+
 async function deleteCheckpoints(session: CodeSessionRow): Promise<void> {
   for (let seq = 1; seq <= session.nextCheckpointSeq; seq += 1) {
-    const manifestKey = checkpointKey(session.userId, session.id, seq, MANIFEST_NAME);
-    const raw = await getCheckpointObject(manifestKey).catch(() => null);
-    if (raw !== null) {
-      try {
-        const manifest = JSON.parse(raw.toString('utf8')) as CheckpointManifest;
-        for (const name of Object.keys(manifest.artifacts ?? {})) {
-          await deleteCheckpointObject(checkpointKey(session.userId, session.id, seq, name));
-        }
-      } catch {
-        // an unreadable manifest still gets deleted below
-      }
-    }
-    await deleteCheckpointObject(manifestKey).catch(() => undefined);
+    await deleteCheckpoint(session.userId, session.id, seq);
   }
 }
 
@@ -411,13 +428,32 @@ export function scheduleCodeSessionMaintenance(
   );
 }
 
+/** No close has started on the task (close writes closeReason before it checkpoints and pauses). */
+async function taskStillAttached(taskId: string): Promise<boolean> {
+  const task = await prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+    select: { status: true, closeReason: true },
+  });
+  return task?.status === 'ACTIVE' && task.closeReason === null;
+}
+
+/** The task closed: drop its maintenance clock (bounded map). */
+export function forgetCodeSessionMaintenance(codeSessionId: string | null): void {
+  if (codeSessionId !== null) lastSavedAt.delete(codeSessionId);
+}
+
 async function maintainCodeSession(
   task: { id: string; agentId: string; sandboxId: string },
   codeSessionId: string,
   deps: CodeSessionMaintenanceDeps
 ): Promise<void> {
   const session = await prisma.codeSession.findUnique({ where: { id: codeSessionId } });
-  if (session === null || session.state !== 'ACTIVE' || session.sandboxId !== task.sandboxId) {
+  if (
+    session === null ||
+    session.state !== 'ACTIVE' ||
+    session.sandboxId !== task.sandboxId ||
+    !(await taskStillAttached(task.id))
+  ) {
     lastSavedAt.delete(codeSessionId);
     return;
   }
@@ -432,13 +468,11 @@ async function maintainCodeSession(
     agentId: task.agentId,
   });
   if (!cycle) return;
-  // A close that ran meanwhile already paused the sandbox; never resume under it.
-  const live = await prisma.claudeCodeSession.findUnique({
-    where: { id: task.id },
-    select: { status: true },
-  });
-  if (live?.status !== 'ACTIVE') return;
+  // A close sets closeReason first and pauses the sandbox itself: never pause
+  // under it, and never resume what it paused.
+  if (!(await taskStillAttached(task.id))) return;
   await sandbox.pause();
+  if (!(await taskStillAttached(task.id))) return;
   await deps.connect(task.sandboxId);
   log.info('Cycled code session sandbox before the E2B runtime cap', {
     codeSessionId,

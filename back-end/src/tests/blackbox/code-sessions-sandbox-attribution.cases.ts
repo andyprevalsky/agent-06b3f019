@@ -80,7 +80,27 @@ export function registerSandboxAttributionCases(userId: string): void {
     assert.equal(created[1].rootAgentId, agentId);
   });
 
-  test('stack teardown kills exactly the sandboxes tagged with this stack; the reaper kills only attributable orphans', async () => {
+  test('stack identity never borrows the production Render origin off a laptop .env', async () => {
+    const mod = await reaper();
+    const saved = { render: process.env.RENDER, service: process.env.RENDER_SERVICE_ID };
+    try {
+      process.env.RENDER_SERVICE_ID = 'srv-prod';
+      delete process.env.RENDER;
+      assert.match(mod.roseSandboxIdentity().roseOrigin, /^host:/);
+      process.env.RENDER = 'true';
+      assert.equal(mod.roseSandboxIdentity().roseOrigin, 'render:srv-prod');
+    } finally {
+      for (const [key, value] of [
+        ['RENDER', saved.render],
+        ['RENDER_SERVICE_ID', saved.service],
+      ] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  test('stack teardown kills only this stack’s sandboxes recorded in its database; the reaper kills only attributable orphans, page by page', async () => {
     const mod = await reaper();
     const { roseStack, roseOrigin } = mod.roseSandboxIdentity();
     const agentId = randomUUID();
@@ -99,64 +119,92 @@ export function registerSandboxAttributionCases(userId: string): void {
     const live = await mk('PAUSED');
     const retired = await mk('RETIRED');
     const old = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const young = new Date(Date.now() - 5 * 60 * 1000);
     const mine = (
       codeSessionId: string | null,
       sandboxId: string,
-      state: 'running' | 'paused' = 'paused'
+      state: 'running' | 'paused' = 'paused',
+      startedAt = old
     ): Listed => ({
       sandboxId,
       state,
-      startedAt: old,
-      metadata: {
-        roseOrigin,
-        roseStack,
-        ...(codeSessionId !== null ? { codeSessionId } : {}),
-      },
+      startedAt,
+      metadata: { roseOrigin, roseStack, ...(codeSessionId !== null ? { codeSessionId } : {}) },
     });
     const listing: Listed[] = [
-      mine(live.id, live.sandboxId ?? ''), // live session's own sandbox: keep
-      mine(retired.id, retired.sandboxId ?? ''), // RETIRED row: reap
-      mine(randomUUID(), `sb-${randomUUID()}`), // row gone from this stack's DB: reap
-      mine(live.id, `sb-superseded-${randomUUID()}`), // superseded paused sandbox: reap
-      mine(null, `sb-untagged-session-${randomUUID()}`), // no session tag: keep
+      mine(live.id, live.sandboxId ?? ''), // 0 live session's own sandbox: keep
+      mine(retired.id, retired.sandboxId ?? ''), // 1 RETIRED row: reap
+      mine(randomUUID(), `sb-${randomUUID()}`), // 2 row gone: reap
+      mine(live.id, `sb-superseded-${randomUUID()}`), // 3 superseded, paused, old: reap
+      mine(live.id, `sb-young-${randomUUID()}`, 'paused', young), // 4 maybe mid-restore: keep
+      mine(live.id, `sb-running-${randomUUID()}`, 'running'), // 5 running: keep
+      mine(null, `sb-untagged-session-${randomUUID()}`), // 6 no session tag: keep
       {
         sandboxId: `sb-foreign-${randomUUID()}`,
         state: 'paused',
         startedAt: old,
         metadata: { roseOrigin: 'other', roseStack: 'other-stack', codeSessionId: retired.id },
-      }, // another stack: keep
+      }, // 7 another stack: keep
       {
         sandboxId: `sb-legacy-${randomUUID()}`,
         state: 'paused',
         startedAt: old,
         metadata: { createRequestId: 'x' },
-      }, // untagged: keep
+      }, // 8 untagged: keep
     ];
     const killed: string[] = [];
+    const gone = new Set<string>(); // E2B no longer lists a killed sandbox
+    const pageSize = 2;
     const deps = {
-      list: async (metadata: Record<string, string>) =>
-        listing.filter((item) =>
-          Object.entries(metadata).every(([key, value]) => item.metadata[key] === value)
-        ),
+      list: async (metadata: Record<string, string>, limit: number, cursor?: string | null) => {
+        const matching = listing.filter(
+          (item) =>
+            !gone.has(item.sandboxId) &&
+            Object.entries(metadata).every(([key, value]) => item.metadata[key] === value)
+        );
+        const start = Number(cursor ?? 0);
+        const end = Math.min(start + Math.min(limit, pageSize), matching.length);
+        return {
+          items: matching.slice(start, end),
+          nextCursor: end < matching.length ? String(end) : null,
+        };
+      },
       kill: async (sandboxId: string) => {
         killed.push(sandboxId);
+        gone.add(sandboxId);
       },
     };
     try {
-      const summary = await mod.reapOrphanedCodeSandboxes(deps, { maxSandboxes: 50 });
+      // Each tick reads one bounded page and continues where the last tick stopped.
+      let cursor: string | null = null;
+      let reaped = 0;
+      for (let tick = 0; tick < 6; tick += 1) {
+        const summary = (await (
+          mod.reapOrphanedCodeSandboxes as unknown as (
+            d: unknown,
+            o: unknown
+          ) => Promise<{ reaped: number; nextCursor: string | null }>
+        )(deps, { maxSandboxes: pageSize, cursor })) as {
+          reaped: number;
+          nextCursor: string | null;
+        };
+        reaped += summary.reaped;
+        cursor = summary.nextCursor;
+      }
       assert.deepEqual(
         new Set(killed),
         new Set([listing[1].sandboxId, listing[2].sandboxId, listing[3].sandboxId]),
-        'only this stack’s sandboxes whose session is gone, RETIRED or superseded'
+        'only this stack’s old paused sandboxes whose session is gone, RETIRED or superseded'
       );
-      assert.equal(summary.reaped, 3);
+      assert.equal(reaped, 3);
 
       killed.splice(0);
-      assert.equal(await mod.killStackSandboxes(deps), 5);
+      gone.clear();
+      assert.equal(await mod.killStackSandboxes(deps), 2);
       assert.deepEqual(
         new Set(killed),
-        new Set(listing.slice(0, 5).map((item) => item.sandboxId)),
-        'teardown kills every sandbox of this stack and nothing else'
+        new Set([listing[0].sandboxId, listing[1].sandboxId]),
+        'teardown kills only sandboxes this stack’s database recorded'
       );
     } finally {
       await prisma.codeSession.deleteMany({ where: { id: { in: [live.id, retired.id] } } });

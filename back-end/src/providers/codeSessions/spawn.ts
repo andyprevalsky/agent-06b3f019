@@ -13,6 +13,7 @@ import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
 import {
   checkpointCodeSession,
   defaultCodeSessionMaintenanceDeps,
+  forgetCodeSessionMaintenance,
   retireCodeSession,
   scheduleCodeSessionMaintenance,
   sweepExpiredCodeSessions,
@@ -343,6 +344,7 @@ export async function keepAliveCodeTask(
 }> {
   const task = await prisma.claudeCodeSession.findUnique({ where: { id: taskId } });
   if (task === null || task.status === 'CLOSED') {
+    forgetCodeSessionMaintenance(task?.codeSessionId ?? null);
     return { alive: false, code_session_id: task?.codeSessionId ?? null, awaiting_parent: null };
   }
   // Only an E2B sandbox has an idle window; a Mac session (C14) lives while its

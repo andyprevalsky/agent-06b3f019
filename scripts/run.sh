@@ -2745,7 +2745,10 @@ cleanup() {
     # The database this stack records its E2B sandboxes in is about to go:
     # kill every sandbox tagged with this stack first, or they stay paused and
     # unattributable forever (back-end/scripts/kill-stack-sandboxes.ts).
-    if $DB_OWNED_BY_US; then
+    # Same condition as the drops below: a normal dev stack keeps its database,
+    # so its paused sessions (and their sandboxes) stay resumable.
+    if { $DB_OWNED_BY_US && ! $USE_SYSTEM_PG && [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; } \
+        || { $USE_SYSTEM_PG && $SYSTEM_DB_OWNED_BY_US; }; then
         (cd "$SCRIPT_DIR/../back-end" && timeout 60 npx tsx scripts/kill-stack-sandboxes.ts) || true
     fi
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then

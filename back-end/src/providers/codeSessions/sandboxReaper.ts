@@ -5,19 +5,21 @@
  *
  *   killStackSandboxes   ── stack teardown (run.sh dropping its own database,
  *                           blackbox runner exit): kill every sandbox tagged with
- *                           THIS stack; their rows are about to disappear.
+ *                           THIS stack AND recorded in THIS database; their rows
+ *                           are about to disappear.
  *   reapOrphanedCodeSandboxes ── production cron (leased, one replica): kill a
  *                           sandbox only when it carries THIS stack's tag AND a
  *                           codeSessionId whose row is gone, RETIRED, or points at
- *                           another sandbox (paused and older than SUPERSEDED_GRACE_MS).
+ *                           another sandbox (paused, last started over SUPERSEDED_GRACE_MS ago).
  *
  * Untagged sandboxes (created before tagging, or by another deployment or
  * database) are never touched: ownership cannot be proven.
  *
  * 10k agents: the provider filters the listing by the stack tag; one tick
- * reads at most `maxSandboxes` (default 200, 100 per page), does one indexed
- * `id IN (...)` read per page and kills at most that many sandboxes. A backlog
- * drains over successive ticks; no work grows with the number of live sessions.
+ * reads at most `maxSandboxes` (default 200) starting at the cursor the last
+ * tick stored in its lease row, does one indexed `id IN (...)` read and kills at
+ * most that many sandboxes. Successive ticks walk the whole tagged set and wrap
+ * around, so a backlog drains; no tick's work grows with the number of sessions.
  */
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
@@ -41,46 +43,79 @@ export interface ListedSandbox {
 }
 
 export interface SandboxReaperDeps {
-  /** Running and paused sandboxes whose metadata matches every given tag (at most `limit`). */
-  list: (metadata: Record<string, string>, limit: number) => Promise<ListedSandbox[]>;
+  /**
+   * One page (at most `limit`) of running and paused sandboxes whose metadata
+   * matches every given tag, from `cursor` (null = the start), and the cursor of
+   * the next page (null = no more).
+   */
+  list: (
+    metadata: Record<string, string>,
+    limit: number,
+    cursor?: string | null
+  ) => Promise<{ items: ListedSandbox[]; nextCursor: string | null }>;
   kill: (sandboxId: string) => Promise<void>;
 }
 
 export const defaultSandboxReaperDeps: SandboxReaperDeps = {
-  list: async (metadata, limit) => {
+  list: async (metadata, limit, cursor) => {
     const paginator = Sandbox.list({
       apiKey: process.env.E2B_API_KEY,
       query: { metadata, state: ['running', 'paused'] },
-      limit: PAGE_SIZE,
+      limit: Math.min(limit, PAGE_SIZE),
+      ...(cursor ? { nextToken: cursor } : {}),
     });
-    const out: ListedSandbox[] = [];
-    while (paginator.hasNext && out.length < limit) {
-      for (const item of await paginator.nextItems()) {
-        out.push({
-          sandboxId: item.sandboxId,
-          state: item.state,
-          metadata: item.metadata ?? {},
-          startedAt: item.startedAt,
-        });
-      }
-    }
-    return out.slice(0, limit);
+    const items = (await paginator.nextItems()).map((item) => ({
+      sandboxId: item.sandboxId,
+      state: item.state,
+      metadata: item.metadata ?? {},
+      startedAt: item.startedAt,
+    }));
+    return { items, nextCursor: paginator.hasNext ? (paginator.nextToken ?? null) : null };
   },
   kill: async (sandboxId) => {
     await Sandbox.kill(sandboxId, { apiKey: process.env.E2B_API_KEY });
   },
 };
 
-/** Kill every sandbox tagged with this stack (its teardown). Returns how many were killed. */
+/** Sandbox ids this stack's database recorded (a session or a task row names them). */
+async function recordedSandboxIds(ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const [sessions, tasks] = await Promise.all([
+    prisma.codeSession.findMany({ where: { sandboxId: { in: ids } }, select: { sandboxId: true } }),
+    prisma.claudeCodeSession.findMany({
+      where: { sandboxId: { in: ids } },
+      select: { sandboxId: true },
+    }),
+  ]);
+  return new Set(
+    [...sessions.map((row) => row.sandboxId), ...tasks.map((row) => row.sandboxId)].filter(
+      (id): id is string => id !== null
+    )
+  );
+}
+
+/**
+ * Kill every sandbox tagged with this stack that this stack's database recorded
+ * (its teardown). Both checks must hold, so a tag shared by mistake can never
+ * reach another stack's sandboxes. Returns how many were killed.
+ */
 export async function killStackSandboxes(
   deps: SandboxReaperDeps = defaultSandboxReaperDeps,
   limit = 1000
 ): Promise<number> {
   const { roseStack } = roseSandboxIdentity();
-  let killed = 0;
-  for (const sandbox of await deps.list({ roseStack }, limit)) {
+  const tagged: ListedSandbox[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = await deps.list({ roseStack }, PAGE_SIZE, cursor);
     // The provider filters by tag; re-check so a filter bug can never widen the kill.
-    if (sandbox.metadata.roseStack !== roseStack) continue;
+    tagged.push(...page.items.filter((sandbox) => sandbox.metadata.roseStack === roseStack));
+    cursor = page.nextCursor;
+  } while (cursor !== null && tagged.length < limit);
+  const recorded = await recordedSandboxIds(tagged.map((sandbox) => sandbox.sandboxId));
+  let killed = 0;
+  for (const sandbox of tagged) {
+    if (!recorded.has(sandbox.sandboxId)) continue;
     try {
       await deps.kill(sandbox.sandboxId);
       killed += 1;
@@ -98,11 +133,12 @@ export async function killStackSandboxes(
 /** Kill this stack's sandboxes whose code session is gone, retired or superseded. */
 export async function reapOrphanedCodeSandboxes(
   deps: SandboxReaperDeps = defaultSandboxReaperDeps,
-  opts: { maxSandboxes?: number; now?: Date } = {}
-): Promise<{ scanned: number; reaped: number }> {
+  opts: { maxSandboxes?: number; now?: Date; cursor?: string | null } = {}
+): Promise<{ scanned: number; reaped: number; nextCursor: string | null }> {
   const { roseStack } = roseSandboxIdentity();
   const now = opts.now ?? new Date();
-  const listed = (await deps.list({ roseStack }, opts.maxSandboxes ?? 200)).filter(
+  const page = await deps.list({ roseStack }, opts.maxSandboxes ?? 200, opts.cursor ?? null);
+  const listed = page.items.filter(
     (sandbox) => sandbox.metadata.roseStack === roseStack && sandbox.metadata.codeSessionId
   );
   const rows = new Map(
@@ -137,7 +173,7 @@ export async function reapOrphanedCodeSandboxes(
       });
     }
   }
-  return { scanned: listed.length, reaped };
+  return { scanned: listed.length, reaped, nextCursor: page.nextCursor };
 }
 
 export const CODE_SANDBOX_REAPER_LEASE_KEY = 'scheduled-job:code-sandbox-reaper';
@@ -163,8 +199,18 @@ export async function runCodeSandboxReaperWithLease(
     RETURNING "externalId"
   `);
   if (rows[0]?.externalId !== ownerId) return { acquired: false, scanned: 0, reaped: 0 };
+  // The page cursor survives between ticks in the lease row's response.
+  const lease = await prisma.toolSideEffect.findUnique({
+    where: { operationKey: CODE_SANDBOX_REAPER_LEASE_KEY },
+    select: { response: true },
+  });
+  const stored = (lease?.response ?? null) as { cursor?: unknown } | null;
+  const cursor = typeof stored?.cursor === 'string' ? stored.cursor : null;
+  let nextCursor: string | null = cursor;
   try {
-    return { acquired: true, ...(await reapOrphanedCodeSandboxes(deps)) };
+    const summary = await reapOrphanedCodeSandboxes(deps, { cursor });
+    nextCursor = summary.nextCursor;
+    return { acquired: true, scanned: summary.scanned, reaped: summary.reaped };
   } finally {
     await prisma.toolSideEffect.updateMany({
       where: {
@@ -172,7 +218,7 @@ export async function runCodeSandboxReaperWithLease(
         status: 'STARTED',
         externalId: ownerId,
       },
-      data: { status: 'RELEASED' },
+      data: { status: 'RELEASED', response: { cursor: nextCursor } },
     });
   }
 }

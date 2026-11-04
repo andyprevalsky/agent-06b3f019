@@ -15,7 +15,7 @@ import { killStackSandboxes } from '../src/providers/codeSessions/sandboxReaper'
 function localDatabase(): boolean {
   try {
     const host = new URL(process.env.DATABASE_URL ?? '').hostname;
-    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+    return host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
   } catch {
     return false;
   }

@@ -83,7 +83,22 @@ upload. If several backend instances serve the same session's keepalives, each
 keeps its own clock, so that session saves up to N× as often. That is safe
 (`commitCheckpoint` only advances), only more frequent.
 
-Post-fix: same command passes (`# pass 26`), 5/5 consecutive runs unchanged.
+Review follow-ups:
+- The cycle never pauses, and never resumes, a task whose close has started.
+  Close writes `closeReason` first, so the check is re-read before the pause
+  and before the resume (case 29).
+- Each save prunes the checkpoint that falls out of the restore lookback
+  (`RESTORE_LOOKBACK` = 5), so a multi-day session keeps 5 checkpoints, not
+  48 per day (case 31).
+- The maintenance clock entry is dropped when the task closes.
+- Not verified live: a cycle during an in-flight Anthropic stream. E2B
+  preserves processes, but open TCP connections across a pause are the CLI's
+  stream watchdog's problem.
+- The cycle shares the 4 save slots. Under saturation it retries on the next
+  keepalive, 2 min later, well inside the 1 h margin.
+
+Post-fix: the same command passes (35/35 in the final suite), with 5
+consecutive runs unchanged.
 
 Open (not fixed here): the drain route remains callerless, and drain still
 detaches without a checkpoint; periodic saves bound that loss to one interval.

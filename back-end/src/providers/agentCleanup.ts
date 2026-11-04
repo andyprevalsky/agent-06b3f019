@@ -12,7 +12,6 @@ import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claud
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
 import { closeClaudeCodeSession } from './e2bCloseSession';
-import { retireCodeSession } from './codeSessions/lifecycle';
 
 const log = createLogger('Cleanup');
 
@@ -31,23 +30,14 @@ interface ActiveCodeSession {
   codeSessionId?: string | null;
 }
 
-export interface CodeSessionReleaseOptions {
-  /** The agent is archived: retire the code sessions it owns instead of pausing them. */
-  retire?: boolean;
-}
-
 export interface CodeSessionReleaseDependencies {
   findActiveCodeSessions: (agentId: string) => Promise<ActiveCodeSession[]>;
   /**
    * Resolves once the task's sandbox no longer runs: a one-shot sandbox is
    * killed (already absent counts); a persistent session is checkpointed and
-   * paused, or retired when its owner is archived. Throws when that is unknown.
+   * paused. Throws when that is unknown.
    */
-  killSandbox: (
-    session: ActiveCodeSession,
-    agentId: string,
-    options: CodeSessionReleaseOptions
-  ) => Promise<void>;
+  killSandbox: (session: ActiveCodeSession) => Promise<void>;
   markClosed: (sessionId: string) => Promise<void>;
 }
 
@@ -127,9 +117,15 @@ function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
         where: { agentId, status: 'ACTIVE' },
         select: { id: true, sandboxId: true, codeSessionId: true },
       }),
-    killSandbox: async (session, agentId, options) => {
+    killSandbox: async (session) => {
       if (session.codeSessionId !== null && session.codeSessionId !== undefined) {
-        await releasePersistentCodeTask(session.id, session.codeSessionId, agentId, options);
+        // Persistent session: the canonical close (checkpoint, pause, PAUSED,
+        // resumable `cancel`). Never a bare kill, which left the session ACTIVE,
+        // leased and without a checkpoint. Archive is reversible (unarchive), so
+        // it pauses too; the TTL sweep retires sessions nobody resumes.
+        await closeClaudeCodeSession(session.id, undefined, undefined, undefined, {
+          reason: 'cancel',
+        });
         return;
       }
       if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
@@ -150,32 +146,6 @@ function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
       });
     },
   };
-}
-
-/**
- * A task of a persistent code session goes through the session lifecycle, never
- * a bare kill: an interrupted run (cutover, descendant cleanup) is checkpointed
- * and paused so the retried spawn resumes it (closeReason `cancel` is
- * resumable); archiving the session's owner retires it (kill + delete
- * checkpoints). A bare kill left the session ACTIVE and leased with no
- * checkpoint, so its work was unrecoverable and the retry forked a new branch.
- */
-async function releasePersistentCodeTask(
-  taskId: string,
-  codeSessionId: string,
-  agentId: string,
-  options: CodeSessionReleaseOptions
-): Promise<void> {
-  const codeSession = await prisma.codeSession.findUnique({ where: { id: codeSessionId } });
-  if (codeSession !== null && options.retire === true && codeSession.ownerAgentId === agentId) {
-    if (codeSession.state !== 'RETIRED') await retireCodeSession(codeSession);
-    await prisma.claudeCodeSession.update({
-      where: { id: taskId },
-      data: { closeReason: 'cancel' },
-    });
-    return;
-  }
-  await closeClaudeCodeSession(taskId, undefined, undefined, undefined, { reason: 'cancel' });
 }
 
 function terminalBrowserReleaseDependencies(): TerminalBrowserReleaseDependencies {
@@ -434,7 +404,7 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
   }
 
   try {
-    await releaseAgentCodeSessions(agentId, {}, { retire: true });
+    await releaseAgentCodeSessions(agentId);
   } catch (error) {
     log.warn(`Failed to query E2B sessions for agent ${agentId}`, {
       error: error instanceof Error ? error.message : String(error),
@@ -445,7 +415,7 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
 /**
  * Stop every code sandbox (E2B or local) an agent still holds and close its row:
  * one-shot sandboxes are killed, persistent code sessions are checkpointed and
- * paused (or retired with `retire` when their owner is archived).
+ * paused.
  *
  * The Python code-agent activity closes its own sandbox, but it cannot when its
  * worker is dead, and a replaced workflow never schedules the retry that would
@@ -458,8 +428,7 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
  */
 export async function releaseAgentCodeSessions(
   agentId: string,
-  overrides: Partial<CodeSessionReleaseDependencies> = {},
-  options: CodeSessionReleaseOptions = {}
+  overrides: Partial<CodeSessionReleaseDependencies> = {}
 ): Promise<number> {
   const dependencies = { ...codeSessionReleaseDependencies(), ...overrides };
   const activeCodeSessions = await dependencies.findActiveCodeSessions(agentId);
@@ -470,7 +439,7 @@ export async function releaseAgentCodeSessions(
   let released = 0;
   for (const session of activeCodeSessions) {
     try {
-      await dependencies.killSandbox(session, agentId, options);
+      await dependencies.killSandbox(session);
       log.info(`Killed code sandbox ${session.sandboxId}`);
     } catch (error) {
       log.warn(`Failed to kill code sandbox ${session.sandboxId}; leaving it ACTIVE for retry`, {

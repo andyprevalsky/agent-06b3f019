@@ -29,8 +29,18 @@ import {
 import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
 import { keepAliveCodeTask, resolveSpawnCodeSession } from '../../providers/codeSessions/spawn';
 import { markPaused } from '../../providers/codeSessions/store';
-import { sweepExpiredCodeSessions } from '../../providers/codeSessions/lifecycle';
+import {
+  checkpointCodeSession,
+  sweepExpiredCodeSessions,
+} from '../../providers/codeSessions/lifecycle';
 import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
+import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
+import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
+import { stopSandboxCli } from '../../providers/codeSessions/sandboxResize';
+import {
+  CheckpointIntegrityError,
+  loadVerifiedCheckpoint,
+} from '../../providers/codeSessions/checkpoint';
 
 export interface CodeSessionLifecycleContext {
   userA: string;
@@ -119,7 +129,7 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
     assert.equal(retried?.sandboxId, sandboxId, 'the retry resumes the paused sandbox');
   });
 
-  test('archiving the agent that owns a code session retires it: sandbox killed, session RETIRED', async (t) => {
+  test('archiving an agent pauses its code session with a checkpoint (reversible: unarchive can resume it), never leaves it ACTIVE', async (t) => {
     const { agentId, sandboxId, codeSession, task, fake } = await liveTask(ctx, 'archive');
     const killed: string[] = [];
     t.mock.method(Sandbox, 'kill', async (id: string) => {
@@ -132,15 +142,17 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
     } finally {
       ctx.restoreConnect();
     }
-    assert.ok(
-      killed.includes(sandboxId) || fake.calls.killed > 0,
-      'the archived owner’s sandbox is killed'
-    );
+    assert.deepEqual(killed, [], 'archive never destroys the session sandbox');
+    assert.equal(fake.calls.killed, 0);
+    assert.equal(fake.calls.paused, 1, 'the archived agent’s sandbox stops running (paused)');
     const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSession.id } });
-    assert.equal(row.state, 'RETIRED', 'the archived owner’s session never stays ACTIVE');
+    assert.equal(row.state, 'PAUSED', 'the archived owner’s session never stays ACTIVE');
     assert.equal(row.leaseOwner, null);
+    assert.ok(row.latestCheckpointSeq >= 1, 'its work is checkpointed');
+    assert.equal(row.sandboxId, sandboxId);
     const closed = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: task.id } });
     assert.equal(closed.status, 'CLOSED');
+    assert.equal(closed.closeReason, 'cancel');
   });
 
   test('keepalive extends the session lease even when the E2B timeout call fails', async () => {
@@ -389,5 +401,127 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
       { exitCode: 0, signal: null },
       'the stop command must finish (and wait for the port), not be killed by its own pkill'
     );
+  });
+
+  test('the runtime cycle never pauses or resumes a sandbox whose close has started', async () => {
+    const { task, fake } = await liveTask(ctx, 'cycle-close');
+    let clock = Date.now();
+    const events: string[] = [];
+    const pause = fake.sandbox.pause.bind(fake.sandbox);
+    (fake.sandbox as unknown as { pause: () => Promise<boolean> }).pause = async () => {
+      events.push('pause');
+      return pause();
+    };
+    const jobs: Array<Promise<unknown>> = [];
+    const maintenance = {
+      now: () => clock,
+      random: () => 0,
+      schedule: (job: () => Promise<unknown>) => {
+        jobs.push(job());
+      },
+      sandboxInfo: async () => ({ startedAt: new Date(clock - 23.5 * 60 * 60 * 1000) }),
+      connect: async (id: string) => {
+        events.push(`connect:${id}`);
+        return fake.sandbox;
+      },
+    };
+    const keepalive = async () => {
+      await (keepAliveCodeTask as unknown as (...args: unknown[]) => Promise<unknown>)(
+        task.id,
+        async () => undefined,
+        NO_CODE_RESOURCES,
+        maintenance
+      );
+      await Promise.all(jobs.splice(0));
+    };
+    await keepalive();
+    // A user pause is closing this task (close sets closeReason first, CLOSED last).
+    await prisma.claudeCodeSession.update({
+      where: { id: task.id },
+      data: { closeReason: 'cancel' },
+    });
+    clock += 31 * 60 * 1000;
+    await keepalive();
+    assert.equal(events.includes('pause'), false, 'never paused under a running close');
+    assert.equal(
+      events.filter((event) => event.startsWith('connect:')).length <= 1,
+      true,
+      'never resumed after the close paused it'
+    );
+  });
+
+  test('closing a stale task whose session moved to another sandbox never connects to (and so resumes) the old one', async () => {
+    const { task, codeSession, fake } = await liveTask(ctx, 'superseded-close');
+    await prisma.codeSession.update({
+      where: { id: codeSession.id },
+      data: { sandboxId: `sb-newer-${randomUUID()}` },
+    });
+    const connected: string[] = [];
+    ctx.patchConnect(async (id) => {
+      connected.push(id);
+      return fake.sandbox;
+    });
+    try {
+      await closeClaudeCodeSession(task.id, undefined, undefined, undefined, { reason: 'cancel' });
+    } finally {
+      ctx.restoreConnect();
+    }
+    assert.deepEqual(connected, [], 'a superseded sandbox stays paused');
+    const closed = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: task.id } });
+    assert.equal(closed.status, 'CLOSED');
+  });
+
+  test('periodic saves keep a bounded number of checkpoints per session', async () => {
+    const { codeSession, home, agentId } = await liveTask(ctx, 'prune');
+    for (let i = 0; i < 8; i += 1) {
+      writeFileSync(join(home, 'workspace', `save-${i}.txt`), `${i}\n`);
+      const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSession.id } });
+      const saved = await checkpointCodeSession({
+        session: row,
+        fs: localSandboxFs(home),
+        reason: 'periodic',
+        agentId,
+      });
+      assert.equal(saved?.seq, i + 1);
+    }
+    await assert.rejects(
+      loadVerifiedCheckpoint(ctx.userA, codeSession.id, 1),
+      CheckpointIntegrityError
+    );
+    await assert.rejects(
+      loadVerifiedCheckpoint(ctx.userA, codeSession.id, 3),
+      CheckpointIntegrityError
+    );
+    for (const seq of [4, 5, 6, 7, 8]) {
+      assert.equal(
+        (await loadVerifiedCheckpoint(ctx.userA, codeSession.id, seq)).manifest.seq,
+        seq
+      );
+    }
+  });
+
+  test('the resize CLI stop does not kill its own shell', async () => {
+    const { home, fake, sandboxId } = await liveTask(ctx, 'resize-stop');
+    writeFileSync(join(home, 'ws-server.mjs'), 'setInterval(() => undefined, 1000);\n');
+    const stale = spawn('node', [join(home, 'ws-server.mjs')], { stdio: 'ignore' });
+    const staleExit = once(stale, 'exit').then(() => true);
+    const runs: Array<{ exitCode: number; signal: string | null }> = [];
+    const map = (value: string) => value.split('/home/user').join(home);
+    (fake.sandbox as unknown as { commands: { run: unknown } }).commands.run = async (
+      cmd: string
+    ) => {
+      const result = spawnSync('bash', ['-c', map(cmd)], { encoding: 'utf8' });
+      runs.push({ exitCode: result.status ?? -1, signal: result.signal });
+      return { exitCode: result.status ?? 1, stdout: result.stdout, stderr: result.stderr };
+    };
+    ctx.patchConnect(async () => fake.sandbox);
+    try {
+      await stopSandboxCli(sandboxId);
+      assert.equal(await Promise.race([staleExit, sleep(5_000).then(() => false)]), true);
+    } finally {
+      ctx.restoreConnect();
+      stale.kill('SIGKILL');
+    }
+    assert.deepEqual(runs, [{ exitCode: 0, signal: null }]);
   });
 }

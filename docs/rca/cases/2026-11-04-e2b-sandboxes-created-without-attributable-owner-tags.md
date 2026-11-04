@@ -55,22 +55,32 @@ the reaper kills only attributable orphans` with `sandboxes need a stack identit
 ## Solution
 
 - **Tag at create.** Every `createSandboxWithRetry` sandbox gets `roseOrigin`
-  (the Render service, else the host) and `roseStack`. The stack is the origin
+  and `roseStack`. The origin is the Render service only when `RENDER=true`.
+  `back-end/.env` carries the production `RENDER_SERVICE_ID`, and an earlier
+  draft let every laptop stack claim the production origin (adversarial review
+  BLOCKING; case 34). Otherwise the origin is the host. The stack is the origin
   plus a hash of the DB host/port/name, or an explicit `ROSE_SANDBOX_STACK_ID`.
   Code-session sandboxes also get `codeSessionId`, `ownerAgentId`, `rootAgentId`
   and `userId`. No credentials are tagged.
 - **Stack teardown.** `back-end/scripts/kill-stack-sandboxes.ts`
-  (`killStackSandboxes`) kills every sandbox tagged with this stack, after a
-  client-side re-check of the tag. `run.sh cleanup()` runs it before dropping a
-  database it owns. The blackbox runner sets `ROSE_SANDBOX_STACK_ID=blackbox:$RUN_ID`
+  (`killStackSandboxes`) kills only sandboxes that both carry this stack's tag
+  and are recorded in this stack's database (`CodeSession.sandboxId` or
+  `ClaudeCodeSession.sandboxId`). A tag shared by mistake therefore cannot reach
+  another stack. `run.sh cleanup()` runs it only under the exact condition that
+  then drops the database (an isolated container run, or an owned system-PG
+  database). A normal dev stack keeps its database and its resumable paused
+  sandboxes (review BLOCKING 2). The blackbox runner sets `ROSE_SANDBOX_STACK_ID=blackbox:$RUN_ID`
   and runs it on exit. The script refuses a non-local `DATABASE_URL` unless the
-  stack id is explicit.
+  stack id is explicit. The runner passes its stack id only to its backend and
+  to the cleanup; it does not export it, so nested stacks never inherit it.
 - **Orphan reaper.** `reapOrphanedCodeSandboxes` runs every 15 minutes in
   production under a ToolSideEffect lease (one replica). It lists only this
-  stack's tagged sandboxes (at most 200 per tick, 100 per page) and does one
-  `id IN` read per tick. It kills a sandbox only when its `codeSessionId` row is
-  gone, RETIRED, or names another sandbox while this one has been paused for
-  over 1 h. Untagged sandboxes, including the existing 2001, are never touched.
+  stack's tagged sandboxes, one bounded page per tick. The E2B `nextToken`
+  cursor is persisted in the lease row, so successive ticks walk the whole set
+  and wrap around (case 35). It does one `id IN` read per tick, and kills a
+  sandbox only when its `codeSessionId` row is gone or RETIRED, or names another
+  sandbox while this one is paused and was last started over 1 h ago. A
+  running or recently started sandbox may be mid-restore, so it is kept. Untagged sandboxes, including the existing 2001, are never touched.
 - Live check on real E2B: a tagged base sandbox was killed by the teardown
   script (`killed 1`), and a rerun killed 0.
 

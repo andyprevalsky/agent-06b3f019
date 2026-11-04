@@ -155,7 +155,7 @@ export class E2BSandboxCapacityError extends Error {
 
 /**
  * Who created a sandbox, carried as E2B metadata so ownership is attributable:
- * the deployment (`roseOrigin`: the Render service, else this host) and the
+ * the deployment (`roseOrigin`: the Render service on Render, else this host) and the
  * stack (`roseStack`: origin + the database it records sandboxes in, or an
  * explicit ROSE_SANDBOX_STACK_ID). Every sandbox of a stack is recorded in that
  * stack's database, so its teardown and its orphan reaper can act on exactly
@@ -165,7 +165,11 @@ export class E2BSandboxCapacityError extends Error {
 export function roseSandboxIdentity(): { roseOrigin: string; roseStack: string } {
   const roseOrigin =
     process.env.ROSE_SANDBOX_ORIGIN?.trim() ||
-    (process.env.RENDER_SERVICE_ID ? `render:${process.env.RENDER_SERVICE_ID}` : '') ||
+    // Render sets RENDER=true on its instances; a laptop .env may carry the
+    // production RENDER_SERVICE_ID and must not claim the production origin.
+    (process.env.RENDER === 'true' && process.env.RENDER_SERVICE_ID
+      ? `render:${process.env.RENDER_SERVICE_ID}`
+      : '') ||
     `host:${hostname()}`;
   const explicit = process.env.ROSE_SANDBOX_STACK_ID?.trim();
   return { roseOrigin, roseStack: explicit || `${roseOrigin}|db:${databaseFingerprint()}` };

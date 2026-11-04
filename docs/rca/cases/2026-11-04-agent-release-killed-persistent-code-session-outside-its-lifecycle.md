@@ -74,19 +74,24 @@ Step 5a ladder:
 Repro (local, buggy base 28a7bfc99):
 `cd back-end && bash scripts/run-blackbox-tests.sh code-sessions`
 - `not ok 21 - a terminated workflow (cutover / descendant) checkpoints and pauses its code session instead of killing it` — `a persistent session sandbox is never killed by a cutover` (actual `['sb-cutover-…']`, expected `[]`)
-- `not ok 22 - archiving the agent that owns a code session retires it` — expected `'RETIRED'`, actual `'ACTIVE'`
+- `not ok 22 - archiving an agent pauses its code session with a checkpoint …, never leaves it ACTIVE` — the sandbox was killed and the session stayed `ACTIVE`
 
 ## Solution
 
-`releaseAgentCodeSessions` now routes every task that has a `codeSessionId`
-through the session lifecycle (`releasePersistentCodeTask`):
-- An interrupted run (cutover, descendant cleanup) goes through the canonical
-  `closeClaudeCodeSession(reason: 'cancel')`: checkpoint, E2B pause, `markPaused`,
-  and a resumable close reason. The retried spawn resumes the same paused sandbox
-  and branch.
-- Archiving the session's owner (`cleanupAgentSessions` → `{retire: true}`) calls
-  `retireCodeSession`: kill the sandbox, delete checkpoints, mark RETIRED. An
-  archived agent that only shares the session pauses it instead.
+`releaseAgentCodeSessions` now sends every task that has a `codeSessionId`
+through the canonical `closeClaudeCodeSession(reason: 'cancel')`: checkpoint, E2B
+pause, `markPaused`, and a resumable close reason. This covers cutover,
+descendant cleanup and archive alike.
+- The retried spawn after a cutover resumes the same paused sandbox and branch.
+- Archive is reversible (`unarchiveAgent` exists), so it pauses rather than
+  retires. The TTL sweep retires sessions nobody resumes.
+- A first draft retired the archived owner's session. The adversarial review
+  rejected it: it skipped the newer-task ownership check (killing a sharer's
+  live sandbox), destroyed checkpoints irreversibly, and left local fallback CLIs
+  running.
+- `closeClaudeCodeSession` no longer connects to a task's sandbox once the
+  session has moved to another one (a resize or lost-sandbox restore), because
+  connecting resumes the superseded sandbox. Case 30 covers this.
 - One-shot sandboxes (no session) keep the kill-then-close contract, including
   "a failed kill stays ACTIVE for retry" (`agent-code-session-release.test.ts`).
 
