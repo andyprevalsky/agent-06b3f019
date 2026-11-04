@@ -123,3 +123,39 @@ remain false. These controls grant no full-gate PASS or deployment completion.
 The observed refusal and causal logs are retained under
 `.context/preparation/6be-current/reconciliation/smoke.native.log` and
 `/var/tmp/pr1662-6be-cloud-renewal/`.
+
+
+## November 4 recurrence: clean full successor prevented original proof renewal
+
+At `73104c463c1d307deafff032a24a96440d4a9160`, quiescent round-44 TRIAGE
+renewal of original round-37 token `7cf73e413dbf4046b8bdcec0441fe56a`
+failed with `native cleanup: original receipt superseded`. The later round-43
+smoke request `1c1c93625efe40e38ca7ba1fb4871dd2` had genuinely completed its
+full inventory and verified native cleanup. Its immutable request and receipt
+contained the exact original-token/receipt isolation binding. The old renewal
+required the original receipt to remain latest, while fresh admission still
+required all preserved historical isolated-validation entries to name the next
+source. Removing an old entry or substituting an unrelated failure was not used.
+
+The private two-file correction has SHA256
+`8345145844d0073466d6d3708a8a8b07a3cb4c53f9c8a5a20c13d19acadc686c`.
+It admits only a strictly validated latest COMPLETE FULL native successor as an
+alternative to the original-latest precondition: exact source/request/token,
+full command/contract/environment/inventory, original isolation admission and
+excluded resources, on-disk receipt, worker-result SHA, cleanup reference and
+native evidence hashes. An incomplete, owned, cancelled, timed-out, foreign,
+changed or newer unknown successor still refuses. Existing quiescent TRIAGE,
+prior-proof replay, current-source binding and validation-source-only renewal
+remain mandatory. It never treats a complete native FAIL as PASS.
+
+The same registered control first reproduced the original refusal, then four
+targeted methods passed in 4.305 seconds, including atomic successor/tamper
+refusals and existing renewal controls. Read-only saved-evidence replay reproduced
+the refusal on original code and accepted the candidate in memory against the
+247-file round-37 proof and exact round-43 successor. Independent review cleared
+the exact patch and matched all 265 replay-bound paths. The raw round-37 and
+round-43 receipts, native FAIL/UNVERIFIED labels, debts and original clock remain
+unchanged; historical `credit_granted` and `cleanup_complete` remain false.
+No canonical reconciliation, new-source FULL coverage or full-gate PASS is
+claimed. Evidence remains under `.context/preparation/731-current/reconciliation/`
+and `/var/tmp/pr1662-731-clean-successor-renewal/`. This does not close the case.

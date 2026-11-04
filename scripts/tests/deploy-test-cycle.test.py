@@ -2424,6 +2424,98 @@ class Cycle(unittest.TestCase):
         before = copy.deepcopy(state); c.reconcile(state, receipt['token'], renewed)
         self.assertEqual(before, state)  # idempotent, no duplicate renewal record
 
+    def clean_successor_renewal_state(self):
+        state, paths, proof, gate, packet, original = self.renewal_state()
+        prior = state['reconciled_owners'][proof['receipt_sha256']]
+        folder = self.directory / 'successor'
+        token, native_source = 'clean-full-successor', copy.deepcopy(prior['validation_source'])
+        native_root = self.root / '.context/deploy-cloud' / __import__('hashlib').sha256(token.encode()).hexdigest()
+        binding = dict(original_receipt_sha256=proof['receipt_sha256'], original_request_token=original['token'],
+            new_request_token=token, source=native_source, new_native_root=str(native_root),
+            excluded_resources=copy.deepcopy(prior['excluded_resources']), credit_granted=False)
+        # A genuine complete failure is cleanup authority, never PASS credit. Exclusions remain SKIP.
+        skip, *active = gate['checks']
+        request = dict(token=token, source=native_source, gate=gate['name'], checks=active,
+            skips={skip:dict(source=native_source)}, phase='focused', isolated_validation=[binding])
+        worker = dict(token=token, source=native_source, gate=gate['name'],
+            cases={name:('FAIL' if i == 0 else 'PASS') for i,name in enumerate(active)},
+            complete=True, cleanup_complete=True, reused=False, evidence={},
+            fleet_directory=str(native_root / 'campaigns' / ('deploy-' + native_root.name)),
+            runner_log=str(native_root / 'cli.log'))
+        leaf = folder / 'native-task.json'; c.write(leaf, dict(passed=False))
+        worker['evidence'] = {name:dict(path=str(leaf), sha256=c.sha_file(leaf)) for name in active}
+        c.write(folder / 'result.json', worker)
+        successor = dict(gate=gate['name'], token=token, source=native_source, status='FAIL',
+            executed=True, complete=True, native_exit=1, timed_out=False, cancelled=False,
+            lingering_group=False, cleanup_owner=None, cases={skip:'SKIP', **worker['cases']},
+            case_complete=dict.fromkeys(gate['checks'], True), command=gate['command'],
+            log=str(folder/'output.log'), worker_result=str(folder/'result.json'),
+            started_at=original['finished_at']+1, finished_at=original['finished_at']+2,
+            execution_binding=dict(contract_digest=c.digest(gate), input_fingerprint='captured-input',
+                                   environment=state['environment']), isolated_validation=[binding],
+            native_cleanup_reference=dict(result=str(folder/'result.json'), native_directory=worker['fleet_directory'],
+                cleanup_complete=True, result_sha256=c.sha_file(folder/'result.json'), native_evidence=worker['evidence']))
+        c.write(folder/'request.json', request); c.write(folder/'receipt.json', successor)
+        state['attempts'].append(dict(phase='focused', results=[successor]))
+        return state, paths, proof, gate, packet, original, folder, successor
+
+    def test_isolated_source_renewal_accepts_only_bound_clean_full_successor_without_credit(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        before = copy.deepcopy(state)
+        raw = {p: c.sha_file(p) for p in [*paths.values(), *folder.glob('*.json')]}
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        c.reconcile(state, original['token'], renewed)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(state['source'], entry['validation_source'])
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+        self.assertEqual(before['round'], state['round']); self.assertEqual(before['phase'], state['phase'])
+        self.assertEqual(raw, {p:c.sha_file(p) for p in raw})
+        request = dict(token='new-full-after-successor', source=state['source'], checks=gate['checks'], skips={})
+        self.assertEqual(original['token'], c.isolated_request(state, gate, request, self.root, {})[0]['original_request_token'])
+        self.assertIsNone(c.full_pass_binding(state, gate))  # Native FAIL has not become coverage credit.
+        same = copy.deepcopy(state); c.reconcile(state, original['token'], renewed)
+        self.assertEqual(same, state)  # Historical successor binding survives repeated source renewals.
+
+    def test_isolated_successor_renewal_rejects_bad_or_tampered_successors_atomically(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        changes = [
+            ('incomplete', lambda r:r.update(complete=False)),
+            ('not-executed', lambda r:r.update(executed=False)),
+            ('owned', lambda r:r.update(cleanup_owner={'new':'owner'})),
+            ('lingering', lambda r:r.update(lingering_group=True)),
+            ('cancelled', lambda r:r.update(cancelled=True)),
+            ('deadline', lambda r:r.update(timed_out=True)),
+            ('wrong-command', lambda r:r.update(command=['false'])),
+            ('wrong-contract', lambda r:r['execution_binding'].update(contract_digest='0'*64)),
+            ('missing-check', lambda r:r['cases'].pop(next(iter(r['cases'])))),
+            ('foreign-original', lambda r:r['isolated_validation'][0].update(original_request_token='foreign')),
+            ('changed-exclusions', lambda r:r['isolated_validation'][0].update(excluded_resources={})),
+            ('unbound-result', lambda r:r['native_cleanup_reference'].update(result_sha256='0'*64)),
+        ]
+        for name, mutate in changes:
+            with self.subTest(name=name):
+                candidate = copy.deepcopy(state); row=candidate['attempts'][-1]['results'][0]; mutate(row)
+                c.write(folder/'receipt.json',row)
+                before=copy.deepcopy(candidate)
+                with self.assertRaises(ValueError): c.reconcile(candidate, original['token'], renewed)
+                self.assertEqual(before,candidate)
+        c.write(folder/'receipt.json',successor)
+        for file in ('request.json','result.json','native-task.json'):
+            path=folder/file; raw=path.read_bytes(); path.write_bytes(raw+b' ')
+            # Request JSON whitespace does not change its meaning; tamper the bound original locator.
+            if file=='request.json':
+                doc=c.read(path); doc['isolated_validation'][0]['original_receipt_sha256']='0'*64; c.write(path,doc)
+            before=copy.deepcopy(state)
+            with self.subTest(file=file), self.assertRaises(ValueError): c.reconcile(state, original['token'], renewed)
+            self.assertEqual(before,state); path.write_bytes(raw)
+        candidate=copy.deepcopy(state)
+        candidate['attempts'].append(dict(phase='focused',results=[dict(successor,token='newer-unknown',complete=False)]))
+        before=copy.deepcopy(candidate)
+        with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],renewed)
+        self.assertEqual(before,candidate)
+
     def test_isolated_source_renewal_refusals_are_atomic(self):
         state, paths, proof, gate, packet, receipt = self.renewal_state()
         renewed = {**proof, 'validation_source': copy.deepcopy(state['source'])}

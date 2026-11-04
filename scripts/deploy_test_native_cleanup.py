@@ -552,6 +552,66 @@ def validate(receipt, owner, proof):
     return result
 
 
+def clean_isolated_successor(state, prior, original, successor):
+    """A later full native result may close execution without clearing historical debt or FAILs."""
+    from deploy_test_cycle import bounded_read, digest, receipt_owner, sha_file, validate_result
+    gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+    need(successor is not None and successor.get('token') != original['token']
+         and successor.get('executed') is True and successor.get('complete') is True
+         and type(successor.get('native_exit')) is int and successor['native_exit'] in (0, 1)
+         and successor.get('timed_out') is False and successor.get('cancelled') is False
+         and successor.get('lingering_group') is False and not successor.get('cleanup_owner')
+         and receipt_owner(prior['gate'], successor) is None
+         and successor.get('command') == gate['command'], 'successor execution/ownership')
+    rows = [(a, r) for a in state['attempts'] for r in a.get('results', []) if r is successor]
+    need(len(rows) == 1 and rows[0][0].get('phase') in {'initial', 'focused', 'failed-gates', 'final', 'triage'}
+         and not rows[0][0].get('interrupted')
+         and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True), 'successor full attempt')
+    binding = successor.get('execution_binding', {})
+    need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
+         and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
+    folder = Path(successor['log']).parent
+    need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
+    request = bounded_read(folder / 'request.json', 'successor request')
+    need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
+         and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
+    checks, skips = request['checks'], request['skips']
+    need(isinstance(checks, list) and checks and isinstance(skips, dict)
+         and len(set(checks)) == len(checks) and not set(checks) & set(skips)
+         and set(checks) | set(skips) == set(gate['checks'])
+         and all(v.get('source') == successor['source'] for v in skips.values()), 'successor full inventory')
+    root = Path(prior['owner']['worker_root'])
+    native_root = root / '.context/deploy-cloud' / hashlib.sha256(successor['token'].encode()).hexdigest()
+    expected = dict(original_receipt_sha256=prior['proof']['receipt_sha256'], original_request_token=prior['token'],
+        new_request_token=successor['token'], source=successor['source'], new_native_root=str(native_root),
+        excluded_resources=prior['excluded_resources'], credit_granted=False)
+    admissions = request.get('isolated_validation')
+    need(isinstance(admissions, list) and admissions == successor.get('isolated_validation')
+         and [v for v in admissions if v.get('original_request_token') == prior['token']] == [expected],
+         'successor original isolation binding')
+    result_path = folder / 'result.json'
+    need(successor.get('worker_result') == str(result_path), 'successor result locator')
+    result = bounded_read(result_path, 'successor native result')
+    cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
+    need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
+         and successor.get('case_complete') == dict.fromkeys(gate['checks'], True)
+         and successor.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
+         'successor complete cases')
+    reference = successor['native_cleanup_reference']
+    need(reference == dict(result=str(result_path), native_directory=result.get('fleet_directory'), cleanup_complete=True,
+            result_sha256=sha_file(result_path), native_evidence=result.get('evidence'))
+         and result.get('fleet_directory') == str(native_root / 'campaigns' / ('deploy-' + native_root.name))
+         and result.get('runner_log') == str(native_root / 'cli.log'), 'successor native cleanup binding')
+    need(not result.get('cleanup_owner') and isinstance(result.get('evidence'), dict)
+         and set(result['evidence']) == set(checks), 'successor native evidence inventory')
+    for evidence in result['evidence'].values():
+        need(isinstance(evidence, dict) and isinstance(evidence.get('path'), str)
+             and sha_file(evidence['path']) == evidence.get('sha256'), 'successor native evidence changed')
+    need(finite(original.get('finished_at')) and finite(successor.get('started_at'))
+         and finite(successor.get('finished_at'))
+         and original['finished_at'] <= successor['started_at'] <= successor['finished_at'], 'successor clocks')
+
+
 def renew_isolated_validation(state, request_token, proof):
     """Renew only the next source of an already verified original operation."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
@@ -565,8 +625,11 @@ def renew_isolated_validation(state, request_token, proof):
          and prior.get('occurrence') == request_token and key == proof.get('receipt_sha256'), 'original reconciliation identity')
     receipts = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
                 if row.get('gate') == prior['gate'] and row.get('token') == request_token]
-    need(len(receipts) == 1 and latest_receipts(state).get(prior['gate']) == receipts[0], 'original receipt superseded')
+    need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
+    latest = latest_receipts(state).get(prior['gate'])
+    if latest != receipt:
+        clean_isolated_successor(state, prior, receipt, latest)
     need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
     owner = receipt_owner(prior['gate'], receipt)
     need(still_bound(prior, receipt, owner), 'prior native proof changed')
