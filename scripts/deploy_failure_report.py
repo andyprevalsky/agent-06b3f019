@@ -9,12 +9,16 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import re
 from pathlib import Path
 import sys
 import tempfile
 from urllib.parse import urlparse, parse_qs, unquote
+
+TREASURY_SKIP = 'treasury / skipped with warning'
+TREASURY_POLICY = 'treasury-failures-skip-and-warn-2026-10-29'
 
 
 def decision(entry: dict) -> str:
@@ -27,6 +31,30 @@ def decision(entry: dict) -> str:
     if not all(isinstance(entry.get(k), str) and entry[k].strip()
                for k in ["id", "description", "evidence", "native_result"]):
         raise ValueError("Failure identity, description, evidence and original native result are required")
+    if 'standing_policy' in entry:
+        policy = entry['standing_policy']
+        if (not isinstance(policy, dict) or set(policy) != {'name', 'reason', 'affected_records', 'evidence_at'}
+                or policy.get('name') != TREASURY_POLICY
+                or entry.get('check') != 'backend-coverage-blackbox/blackbox:treasury-rails'
+                or not isinstance(policy.get('reason'), str) or not policy['reason'].strip()
+                or not isinstance(policy.get('affected_records'), list)
+                or not all(isinstance(x, str) and x.strip() for x in policy['affected_records'])
+                or len(set(policy['affected_records'])) != len(policy['affected_records'])
+                or type(policy.get('evidence_at')) not in (int, float)
+                or not math.isfinite(policy['evidence_at']) or policy['evidence_at'] <= 0
+                or any(entry.get(k) is not None for k in ('external_provider', 'repair_agent', 'post_merge',
+                       'execute_unverified', 'assigned_repair', 'resource_skip'))):
+            raise ValueError('standing treasury policy requires the exact check, warning evidence and no other exception')
+        if entry['native_result'] == 'prior waived failure; changed inputs':
+            waiver = entry.get('prior_waiver')
+            prior = waiver.get('rca') if isinstance(waiver, dict) else None
+            if (not isinstance(prior, dict) or waiver.get('disposition') != TREASURY_SKIP
+                    or prior.get('standing_policy') != policy or prior.get('check') != entry['check']
+                    or decision(prior) != TREASURY_SKIP):
+                raise ValueError('standing treasury renewal must retain its original native FAIL qualification')
+        elif entry['native_result'] != 'FAIL' or 'prior_waiver' in entry:
+            raise ValueError('standing treasury policy requires an actual native FAIL or its existing renewal')
+        return TREASURY_SKIP
     link = entry.get("repair_agent")
     external = entry.get("external_provider")
     execute = entry.get("execute_unverified", False)
@@ -150,6 +178,13 @@ def render(report: dict, scorecard: str = "") -> str:
     if handed:
         lines.extend(["", "DELEGATED"])
         lines.extend(f"- {e['description']} — {e['repair_agent']}" for e in handed)
+    for e in report['failures']:
+        if e['disposition'] == TREASURY_SKIP:
+            p = e['standing_policy']
+            lines.extend(['', f"⚠️ Skipped — {e['description']} · native FAIL retained",
+                          f"Reason: {p['reason']} · Evidence time: {p['evidence_at']}",
+                          f"Affected records: {', '.join(p['affected_records']) or 'not available'}",
+                          f"Evidence: {e['evidence']} · Standing user instruction: October 29, 2026"])
     # Always appended after every other section, preserving failed native results.
     for e in report["failures"]:
         if e["disposition"] == "external / waived":

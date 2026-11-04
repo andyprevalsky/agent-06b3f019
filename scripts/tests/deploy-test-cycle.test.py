@@ -873,6 +873,89 @@ class Cycle(unittest.TestCase):
                      repair_agent='https://boxes.dev/thread/repair'))
         self.assertTrue(self.state['ready'])
 
+    def treasury_failure(self, peer='PASS'):
+        self.plan['gates'][1].update(name='backend-coverage-blackbox', checks=['blackbox:treasury-rails','blackbox:independent'],case_protocol=True)
+        self.state=c.initialize(self.plan,self.root)
+        self.state['phase']='initial'
+        c.advance(self.state,[self.result('backend-coverage-blackbox',**{'blackbox:treasury-rails':'FAIL','blackbox:independent':peer})])
+        failure=next(f for f in self.state['failures'] if f['check'].endswith('/blackbox:treasury-rails'))
+        failure['finished_at']=100
+        policy=dict(name='treasury-failures-skip-and-warn-2026-10-29',reason='thirteen prior mint observations overdue',
+                    affected_records=['card-'+str(i) for i in range(13)],evidence_at=200)
+        return failure,self.report(failure,'UNKNOWN',standing_policy=policy)
+
+    def test_standing_treasury_unknown_failure_warns_without_pass_or_provider_claim(self):
+        from deploy_failure_report import render
+        failure,report=self.treasury_failure();original=copy.deepcopy(self.state['attempts'])
+        c.adjudicate(self.state,report)
+        self.assertTrue(self.state['ready'])
+        self.assertEqual(original,self.state['attempts'])
+        self.assertEqual('FAIL',failure['native_result']);self.assertEqual('UNKNOWN',failure['rca']['attribution'])
+        qualified=c.reuse_qualifications(self.state,self.plan['gates'][1])
+        self.assertEqual({'blackbox:treasury-rails'},set(qualified))
+        text=render({'failures':[{**failure['rca'],'disposition':failure['disposition']}]})
+        self.assertIn('⚠️ Skipped',text);self.assertIn('native FAIL retained',text)
+        for i in range(13):self.assertIn('card-'+str(i),text)
+        self.assertNotIn('EXTERNAL PROVIDER',text);self.assertNotIn('PASS',text)
+        failure['rca']['standing_policy']['name']='other-policy'
+        with self.assertRaises(ValueError):c.reuse_qualifications(self.state,self.plan['gates'][1])
+
+    def test_standing_treasury_refuses_unverified_malformed_or_mixed_reports_atomically(self):
+        failure,report=self.treasury_failure();original=copy.deepcopy(self.state)
+        changes=[('check','backend-coverage-blackbox/blackbox:independent'),('native_result','UNVERIFIED'),
+                 ('external_provider',{'name':'provider','reason':'outage'}),('repair_agent','https://boxes.dev/thread/repair'),
+                 ('assigned_repair',True),('resource_skip',{}),('post_merge',{}),('prior_waiver',{})]
+        for key,value in changes:
+            bad=copy.deepcopy(report);bad['failures'][0][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):c.adjudicate(self.state,bad)
+            self.assertEqual(original,self.state)
+        for policy in [None,{}, {'name':'unknown'}, {**report['failures'][0]['standing_policy'],'evidence_at':False},
+                       {**report['failures'][0]['standing_policy'],'affected_records':'card'},
+                       {**report['failures'][0]['standing_policy'],'evidence_at':float('nan')}]:
+            bad=copy.deepcopy(report);bad['failures'][0]['standing_policy']=policy
+            with self.assertRaises(ValueError):c.adjudicate(self.state,bad)
+            self.assertEqual(original,self.state)
+        failure['complete']=False
+        with self.assertRaises(ValueError):c.adjudicate(self.state,report)
+        from deploy_failure_report import decision
+        for field,value in [('check','backend-coverage-blackbox/blackbox:independent'),('native_result','UNVERIFIED')]:
+            bad=copy.deepcopy(report['failures'][0]);bad[field]=value
+            with self.assertRaises(ValueError):decision(bad)
+
+    def test_standing_treasury_never_hides_independent_unknown_failure(self):
+        failure,report=self.treasury_failure(peer='FAIL')
+        other=next(f for f in self.state['failures'] if f is not failure)
+        report['failures'].append(self.report(other,'UNKNOWN')['failures'][0])
+        before=copy.deepcopy(self.state)
+        with self.assertRaisesRegex(ValueError,'UNKNOWN'):c.adjudicate(self.state,report)
+        self.assertEqual(before,self.state)
+
+    def test_standing_treasury_existing_source_renewal_retains_original_fail_without_rerun(self):
+        from deploy_failure_report import render
+        failure,report=self.treasury_failure();native=copy.deepcopy(self.state['attempts'])
+        c.adjudicate(self.state,report)
+        old=copy.deepcopy(self.plan)
+        (self.root/'code').write_text('new source repair')
+        new=copy.deepcopy(old);new['source']=c.source(self.root)
+        c.refresh(self.state,old,new,self.root)
+        renewal=next(f for f in self.state['failures'] if f['id'] in self.state['pending'])
+        self.assertEqual('prior waived failure; changed inputs',renewal['native_result'])
+        c.advance(self.state,[self.result('static',lint='PASS')])
+        after_quick=copy.deepcopy(self.state['attempts'])
+        renewed=self.report(renewal,'UNKNOWN',standing_policy=copy.deepcopy(report['failures'][0]['standing_policy']),
+                            prior_waiver=copy.deepcopy(renewal['prior_waiver']))
+        before=copy.deepcopy(self.state)
+        bad=copy.deepcopy(renewed);bad['failures'][0]['prior_waiver']['rca']['source']={}
+        with self.assertRaises(ValueError):c.adjudicate(self.state,bad)
+        self.assertEqual(before,self.state)
+        c.adjudicate(self.state,renewed)
+        self.assertNotIn('pending',self.state)
+        self.assertEqual(after_quick,self.state['attempts'])
+        self.assertEqual(native,self.state['attempts'][:len(native)])
+        self.assertEqual('FAIL',failure['native_result']);self.assertEqual(old['source'],failure['source'])
+        self.assertEqual({'blackbox:treasury-rails'},set(c.reuse_qualifications(self.state,new['gates'][1])))
+        self.assertIn('native FAIL retained',render({'failures':[{**renewed['failures'][0],'disposition':renewal['disposition']}]}))
+
     def test_unknown_and_introduced_cannot_be_waived(self):
         f = self.failure()
         for attr, fields in [('UNKNOWN', {}), ('INTRODUCED', {'repair_agent': 'https://boxes.dev/thread/repair'}),
@@ -2955,6 +3038,244 @@ class LocalCleanup(unittest.TestCase):
         c.write(self.worker / '.context/services.json', {'worktree': str(self.worker), 'status': 'running'})
         with self.assertRaises(ValueError): c.retained_owners(self.state, [self.gate['name']])
 
+
+
+class CardPreflightCleanup(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        LocalCleanup.setUp(self)
+        name = 'agentcard-lifecycle'
+        self.folder = self.root / 'cycle/attempts/35/triage' / name
+        self.folder.mkdir(parents=True)
+        self.recipe['cases'] = {name: {'command': ['bash', str(self.worker / 'scripts/run-deploy-stage'),
+            name, '--', 'bash', 'scripts/run-bench', '--local', 'agent-payment-test-shop'], 'aggregate': True}}
+        command = [sys.executable, str(self.worker / 'scripts/deploy_test_worker.py'), '--root', str(self.worker), '--stdio']
+        self.gate.update(name=name, category=name, command=command, checks=[name], result_transport='stdout')
+        self.gate.pop('native_backend')
+        self.request.update(gate=name, checks=[name], worker_recipe=self.recipe)
+        native = self.worker / '.context/deploy-worker' / hashlib.sha256(self.token.encode()).hexdigest()
+        native.mkdir(parents=True)
+        self.run = self.worker / '.context/benchmarks/owned-preflight'
+        self.run.mkdir(parents=True)
+        case_log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
+        case_log.write_text(f'RuntimeError: run.sh exited early with code 143; see {self.run}/services.log\n')
+        case = dict(status='UNVERIFIED', native_exit=1, command=self.recipe['cases'][name]['command'],
+                    started_at=110, finished_at=190, timed_out=False, cancelled=False, lingering_group=False,
+                    log=str(case_log), sha256=c.sha_file(case_log))
+        self.result = dict(token=self.token, source=self.source, gate=name, worker_root=str(self.worker),
+                           cases={name: 'UNVERIFIED'}, complete=False, reused=False, cleanup_complete=True,
+                           recipe_digest=c.digest(self.recipe), evidence={name: case})
+        self.receipt.update(gate=name, command=command, cases={name:'UNVERIFIED'},
+                            log=str(self.folder / 'output.log'), worker_result=str(self.folder / 'result.json'),
+                            lifecycle='native-producer', lingering_group=True,
+                            execution_binding={'contract_digest': c.digest(self.gate), 'environment': 'env', 'input_fingerprint':'fp'})
+        self.benchmark = dict(version=1, run_id=self.run.name, state='not_started', pid=None, native_identity='',
+                              token='', receipt=str(self.run / 'benchmark-cleanup.status'), signal=None)
+        self.stack = dict(version=1, run_id=self.run.name, token='a'*32, pid=2000000000, birth='original birth',
+                          native_identity='linux:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':123')
+        self.cleanup = dict(version='2', state='clean', token=self.stack['token'], stack_pid=str(self.stack['pid']),
+                            stack_birth=self.stack['birth'], stack_native_identity=self.stack['native_identity'])
+        self.services = dict(worktree=str(self.worker), status='stopped', run_sh_pid=self.stack['pid'], ports={'backend':0})
+        self.paths = {n:self.folder/n for n in ['request.json','result.json','receipt.json']}
+        self.paths.update({'case.log':case_log, 'native-result.json':native/'result.json',
+                          **{n:self.run/n for n in ['local-benchmark-owner.json','local-stack-owner.json',
+                                                   'local-stack-cleanup.status','services.json']}})
+        self.failure.update(gate=name, check=name+'/'+name, evidence=self.receipt['log'], worker_result=self.receipt['worker_result'])
+        self.state.update(plan={'gates':[self.gate]}, attempts=[{'results':[self.receipt]}],
+                          environment='env', input_fingerprints={name:'fp'})
+        self.write_native()
+
+    def write_native(self):
+        for key, value in [('request.json',self.request), ('result.json',self.result), ('native-result.json',self.result),
+                           ('local-benchmark-owner.json',self.benchmark), ('local-stack-owner.json',self.stack), ('services.json',self.services)]:
+            c.write(self.paths[key], value)
+        self.paths['local-stack-cleanup.status'].write_text(''.join(k+'='+v+'\n' for k,v in self.cleanup.items()))
+        reference=dict(result=str(self.paths['result.json']), native_directory=None, cleanup_complete=True,
+                       result_sha256=c.sha_file(self.paths['result.json']), native_evidence=self.result['evidence'])
+        self.receipt.update(native_cleanup_reference=reference, cleanup_owner=dict(request_token=self.token,
+                            worker_root=str(self.worker), native_cleanup_reference=reference))
+        c.write(self.paths['receipt.json'],self.receipt)
+        self.proof=dict(kind=KIND, files={n:c.sha_file(p) for n,p in self.paths.items()}, confirmed_at=201, observed_by='native-review')
+
+    reconcile = LocalCleanup.reconcile
+
+    def test_never_admitted_card_releases_launch_only_preserving_native_failure(self):
+        original={n:p.read_bytes() for n,p in self.paths.items()}
+        with self.assertRaisesRegex(ValueError, 'cleanup owner'):
+            c.reexecute(copy.deepcopy(self.state),'occurrence')
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        c.reexecute(self.state,'occurrence')
+        self.assertEqual('needs-focused-plan',self.state['phase'])
+        self.assertEqual('UNVERIFIED',self.failure['native_result'])
+        self.assertEqual(original,{n:p.read_bytes() for n,p in self.paths.items()})
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.state['source'] = {'head':'c'*40, 'digest':'d'*64}
+        self.state['input_fingerprints'][self.gate['name']] = 'new-inputs'
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(self.source,self.failure['source'])
+        self.assertIsNone(c.full_pass_binding(self.state,self.gate))
+
+    def test_admitted_or_unknown_benchmark_and_task_artifacts_refuse(self):
+        for key,value in [('state','running'),('pid',123),('native_identity','other'),('token','other'),('signal',15)]:
+            with self.subTest(key=key):
+                old=self.benchmark[key];self.benchmark[key]=value;self.write_native()
+                with self.assertRaises(ValueError):self.reconcile()
+                self.assertNotIn('reconciled_owners',self.state)
+                self.benchmark[key]=old
+        self.write_native()
+        for name in ['run.json','report-card.json','local-benchmark-results.json','benchmark-cleanup-other.status']:
+            p=self.run/name;p.write_text('{}')
+            with self.assertRaises(ValueError):self.reconcile()
+            p.unlink()
+
+    def test_foreign_stack_identity_or_incomplete_cleanup_refuses(self):
+        for key,value in [('state','pending'),('token','foreign'),('stack_native_identity','other'),('stack_pid','1')]:
+            old=self.cleanup[key];self.cleanup[key]=value;self.write_native()
+            with self.assertRaises(ValueError):self.reconcile()
+            self.cleanup[key]=old
+        self.stack['pid']=os.getpid();self.cleanup['stack_pid']=str(os.getpid());self.services['run_sh_pid']=os.getpid();self.write_native()
+        with self.assertRaises(ValueError):self.reconcile()
+
+    def test_changed_source_recipe_or_native_bytes_refuse(self):
+        for target,key,value in [(self.result,'source',{}),(self.gate,'worker_transport','boxes-thread'),
+                                 (self.result,'cleanup_complete',False),(self.services,'status','running')]:
+            old=target[key];target[key]=value;self.write_native()
+            with self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+        self.write_native();self.reconcile()
+        self.paths['local-stack-owner.json'].write_text('{}')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+
+    def test_current_root_admission_and_listener_refuse(self):
+        import fcntl,socket
+        with (self.worker/'.context/native-worker-admission.lock').open('r') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaises(ValueError):self.reconcile()
+        proc=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],cwd=self.worker)
+        try:
+            with self.assertRaises(ValueError):self.reconcile()
+        finally:proc.terminate();proc.wait(timeout=2)
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1',0));listener.listen()
+            self.services['ports']['backend']=listener.getsockname()[1];self.write_native()
+            with self.assertRaises(ValueError):self.reconcile()
+
+
+class StructuralSupervisorCleanup(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        LocalCleanup.setUp(self)
+        name = 'deploy-command-structural'
+        self.folder = self.root / 'cycle/attempts/35/triage' / name
+        self.folder.mkdir(parents=True)
+        self.recipe['cases'] = {name: {'command': ['bash', str(self.worker / 'scripts/run-deploy-stage'),
+            name, '--', 'python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '4'],
+            'aggregate': True}}
+        command = [sys.executable, str(self.worker / 'scripts/deploy_test_worker.py'), '--root', str(self.worker), '--stdio']
+        self.gate.update(name=name, category=name, command=command, checks=[name], result_transport='stdout')
+        self.gate.pop('native_backend')
+        self.request.update(gate=name, checks=[name], worker_recipe=self.recipe)
+        native = self.worker / '.context/deploy-worker' / hashlib.sha256(self.token.encode()).hexdigest()
+        native.mkdir(parents=True)
+        self.case_log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
+        self.case_log.write_text('FAILED (errors=3)\n')
+        case = dict(status='UNVERIFIED', native_exit=1, command=self.recipe['cases'][name]['command'],
+                    started_at=110, finished_at=190, timed_out=False, cancelled=False, lingering_group=False,
+                    log=str(self.case_log), sha256=c.sha_file(self.case_log))
+        self.result = dict(token=self.token, source=self.source, gate=name, worker_root=str(self.worker),
+                           cases={name:'UNVERIFIED'}, complete=False, reused=False, cleanup_complete=True,
+                           recipe_digest=c.digest(self.recipe), evidence={name:case})
+        self.receipt.update(gate=name, status='FAIL', command=command, cases={name:'UNVERIFIED'},
+                            log=str(self.folder / 'output.log'), worker_result=str(self.folder / 'result.json'),
+                            lingering_group=True, lifecycle='owned', native_cleanup_reference=None,
+                            execution_binding={'contract_digest':c.digest(self.gate), 'environment':'env', 'input_fingerprint':'fp'})
+        # Real native supervisor shape: the failed child exited1; adopted
+        # descendants were TERM'd/reaped, including independent SIGPIPE exits.
+        self.process.update(orphaned_children=True, term_sent=[125],
+                            reaped=[{'pid':124,'status':256}, {'pid':125,'status':15}, {'pid':126,'status':13}])
+        self.paths = {n:self.folder/n for n in ['request.json','result.json','receipt.json','output.log.process.json']}
+        self.failure.update(gate=name, check=name+'/'+name, evidence=self.receipt['log'], worker_result=self.receipt['worker_result'])
+        self.state.update(plan={'gates':[self.gate]}, attempts=[{'results':[self.receipt]}],
+                          environment='env', input_fingerprints={name:'fp'})
+        self.write_native()
+
+    def write_native(self):
+        for name,value in zip(self.paths, [self.request,self.result,self.receipt,self.process]):
+            c.write(self.paths[name],value)
+        self.proof=dict(kind=KIND, files={n:c.sha_file(p) for n,p in self.paths.items()},
+                        confirmed_at=201, observed_by='native-supervisor-review')
+
+    reconcile = LocalCleanup.reconcile
+
+    def test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts(self):
+        original={n:p.read_bytes() for n,p in self.paths.items()}
+        pending=copy.deepcopy(self.state['pending'])
+        with self.assertRaisesRegex(ValueError,'cleanup owner'): c.reexecute(copy.deepcopy(self.state),'occurrence')
+        self.reconcile()
+        self.assertEqual(pending,self.state['pending'])
+        self.assertFalse(self.state['ready'])
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        c.reexecute(self.state,'occurrence')
+        self.assertEqual('needs-focused-plan',self.state['phase'])
+        self.assertEqual('UNVERIFIED',self.failure['native_result'])
+        self.assertTrue(self.receipt['lingering_group'])
+        self.assertTrue(self.process['orphaned_children'])
+        self.assertEqual([125],self.process['term_sent'])
+        self.assertEqual(original,{n:p.read_bytes() for n,p in self.paths.items()})
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertIsNone(c.full_pass_binding(self.state,self.gate))
+        self.state['source']={'head':'c'*40,'digest':'d'*64}
+        self.state['input_fingerprints'][self.gate['name']]='changed-inputs'
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(self.source,self.failure['source'])
+
+    def test_unreaped_unknown_signalled_or_foreign_supervisor_closure_refuses_atomically(self):
+        original=copy.deepcopy(self.process)
+        variants=[('quiescent',False),('remaining',[125]),('orphaned_children',False),('error','read failed'),
+                  ('kill_sent',[125]),('timed_out',True),('cancelled',True),('term_sent',[999]),
+                  ('term_sent',[True]),('term_sent',[125,125]),('term_sent',[124]),
+                  ('reaped',[]),('reaped',[{'pid':125,'status':15}]),
+                  ('reaped',original['reaped']+[{'pid':125,'status':0}]),
+                  ('reaped',original['reaped']+[{'pid':127,'status':127}]),
+                  ('reaped',original['reaped']+[{'pid':123,'status':0}])]
+        for key,value in variants:
+            with self.subTest(key=key,value=value):
+                self.process={**original,key:value};self.write_native()
+                before=copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):self.reconcile()
+                self.assertEqual(before,self.state)
+        self.process=original;self.write_native()
+        for key,value in [('cleanup_complete',False),('cases',{self.gate['name']:'FAIL'}),('worker_root',str(self.root)),('source',{})]:
+            old=self.result[key];self.result[key]=value;self.write_native()
+            with self.assertRaises(ValueError):self.reconcile()
+            self.assertNotIn('reconciled_owners',self.state)
+            self.result[key]=old
+
+    def test_proof_mutation_new_receipt_and_live_root_reblock(self):
+        import fcntl
+        with (self.worker/'.context/native-worker-admission.lock').open('r') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaises(ValueError):self.reconcile()
+        proc=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],cwd=self.worker)
+        try:
+            with self.assertRaises(ValueError):self.reconcile()
+        finally:
+            proc.terminate();proc.wait(timeout=2)
+        self.reconcile()
+        for path in self.paths.values():
+            original=path.read_bytes();path.write_bytes(original+b' ')
+            with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+            path.write_bytes(original)
+        self.case_log.write_text('changed test evidence')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+        self.case_log.write_text('FAILED (errors=3)\n')
+        old=self.gate['command'];self.gate['command']=['other']
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+        self.gate['command']=old
+        newer={**self.receipt,'token':'new-unreconciled-owner'}
+        self.state['attempts'].append({'results':[newer]})
+        self.assertEqual([self.gate['name']],c.retained_owners(self.state,[self.gate['name']]))
 
 
 if __name__ == '__main__': unittest.main()

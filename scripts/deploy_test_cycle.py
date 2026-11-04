@@ -804,6 +804,15 @@ def adjudicate(state: dict, report: dict) -> None:
                 or entry.get("native_result") != failure["native_result"]):
             raise ValueError("RCA receipt has the wrong source or check")
         disposition = decision(entry)
+        if 'standing_policy' in entry:
+            # A refresh renewal retains the original native failure, never fabricates a new FAIL.
+            prior = failure.get('prior_waiver')
+            if (entry.get('prior_waiver') != prior
+                    or (prior is not None and failure.get('phase') != 'refresh')):
+                raise ValueError('standing treasury renewal differs from its recorded prior qualification')
+            finished = failure.get('finished_at')
+            if (finished is not None and entry['standing_policy']['evidence_at'] < finished):
+                raise ValueError('standing treasury evidence predates the native failure')
         if entry.get("assigned_repair") is not None:
             validate_assigned_repair(entry, disposition)
         if entry.get("resource_skip") is not None:
@@ -895,7 +904,7 @@ def latest_receipts(state: dict) -> dict:
 
 OWNER_IDENTITY = ("worker_thread", "worker_host", "worker_root", "turn_id")
 OWNER_FIELDS = OWNER_IDENTITY + ("request_token", "message_id", "remote_dir", "pgid")
-RECONCILE_EXCLUSIVE = ("repair_agent", "external_provider", "post_merge", "execute_unverified", "assigned_repair", "resource_skip")
+RECONCILE_EXCLUSIVE = ("repair_agent", "external_provider", "post_merge", "execute_unverified", "assigned_repair", "resource_skip", "standing_policy")
 RESULT_BEGIN, RESULT_END = "DEPLOY_GATE_RESULT_JSON_BEGIN", "DEPLOY_GATE_RESULT_JSON_END"
 
 

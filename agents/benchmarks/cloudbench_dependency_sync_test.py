@@ -4304,9 +4304,13 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
     # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
+    wmh_defaults = fleet.split("# Begin fleet WMH defaults.", 1)[1].split(
+        "# End fleet WMH defaults.", 1
+    )[0]
     reap = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
+            "fleet_current_disposable_registry() {",
             "machine_status_exact_read() {",
             "registry_machine_details() {",
             "reap_machine() {",
@@ -4337,6 +4341,12 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
 ROOT_DIR={shlex.quote(str(root))}
 CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(root / "scripts"))}
 APP=test-app
+# This fixture owns ordinary test-app clones, never a disposable registry.
+DISPOSABLE_LIFECYCLE=0
+# Use the production initializer instead of inheriting ambient WMH fields.
+WMH_ENGINE=experiential
+unset WMH_MODEL_NAME WMH_EXECUTION_POLICY WMH_ROSE_POOL
+{wmh_defaults}
 FLEET_OWNER_TOKEN=test-owner
 BENCH_REF=test-ref
 BOX_BACKEND_PORT=3001
@@ -4472,6 +4482,8 @@ fi
             timeout=10,
         )
         assert result.returncode == 0, (mode, result.stdout, result.stderr)
+        assert "unbound variable" not in result.stderr, (mode, result.stderr)
+        assert "command not found" not in result.stderr, (mode, result.stderr)
         fly_calls = calls.read_text().splitlines()
         stage_log = (out / "worker-abc123.stage.log").read_text()
         if mode == "storage-not-ready":

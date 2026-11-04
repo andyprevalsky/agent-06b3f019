@@ -4,10 +4,131 @@ import fcntl
 import math
 import os
 from pathlib import Path
+import re
 import time
 
 KIND = 'local-supervisor-cleanup-v1'
 FILES = ('request.json', 'result.json', 'receipt.json', 'output.log.process.json')
+CARD_FILES = ('request.json', 'result.json', 'receipt.json', 'case.log', 'native-result.json',
+              'local-benchmark-owner.json', 'local-stack-owner.json', 'local-stack-cleanup.status', 'services.json')
+
+
+def card_preflight(state, receipt, proof):
+    """Release only a never-admitted local Card producer, never a task outcome."""
+    from deploy_test_cycle import bounded_read, digest, sha_file
+    gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+    root = Path(gate['worker_root']).resolve(strict=True)
+    need(gate.get('category') == gate['name'] == 'agentcard-lifecycle'
+         and gate.get('worker_transport') == 'local-isolated' and gate.get('case_protocol') is True
+         and gate.get('result_transport') == 'stdout' and str(root) == gate['worker_root'] == gate.get('cwd'),
+         'owned local Card binding')
+    command = gate['command']
+    need(receipt.get('command') == command and len(command) == 5
+         and command[1:] == [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root), '--stdio'],
+         'native Card command')
+    # Cleanup belongs to the original source. A later source may repair the
+    # failed startup, but receives no credit from releasing this old owner.
+    binding = receipt.get('execution_binding', {})
+    need(binding.get('contract_digest') == digest(gate)
+         and all(isinstance(binding.get(k), str) and binding[k] for k in ('input_fingerprint', 'environment')),
+         'current Card contract changed')
+    need(receipt.get('host_admission', {}).get('started') is True
+         and receipt['host_admission'].get('lock') == str(root / '.context/native-worker-admission.lock'),
+         'Card admission binding')
+    need(receipt.get('lifecycle') == 'native-producer' and receipt.get('executed') is True
+         and receipt.get('complete') is False and type(receipt.get('native_exit')) is int
+         and receipt['native_exit'] == 1 and receipt.get('lingering_group') is True
+         and all(receipt.get(k) is False for k in ('timed_out', 'cancelled')),
+         'terminal incomplete Card producer required')
+    folder = Path(receipt['log']).parent
+    need(Path(receipt['log']) == folder / 'output.log' and folder.resolve(strict=True) == folder
+         and Path(receipt['worker_result']) == folder / 'result.json'
+         and set(proof['files']) == set(CARD_FILES), 'Card artifact inventory')
+
+    def sealed(path, name, json_file=True):
+        need(not path.is_symlink() and path.resolve(strict=True) == path
+             and sha_file(path) == proof['files'][name], 'Card artifact changed: ' + name)
+        if json_file:
+            return bounded_read(path, 'Card cleanup ' + name)
+        need(path.stat().st_size <= 65536, 'Card text receipt too large')
+        return path.read_text()
+
+    request, result, recorded = (sealed(folder / n, n) for n in CARD_FILES[:3])
+    need(recorded == receipt and all(row.get(k) == receipt.get(k) for row in (request, result)
+                                    for k in ('token', 'source', 'gate')), 'Card identity mismatch')
+    need(request.get('worker_root') == result.get('worker_root') == str(root)
+         and request.get('worker_recipe') == gate.get('worker_recipe')
+         and result.get('recipe_digest') == digest(request['worker_recipe']), 'Card recipe/root mismatch')
+    name = gate['name']
+    need(request.get('checks') == gate['checks'] == [name] and request.get('skips') == {}
+         and receipt.get('cases') == result.get('cases') == {name: 'UNVERIFIED'}
+         and result.get('complete') is False and result.get('cleanup_complete') is True
+         and result.get('reused') is False and not result.get('cleanup_owner'), 'Card incomplete result')
+    reference = receipt.get('native_cleanup_reference', {})
+    need(reference == {'result': str(folder / 'result.json'), 'native_directory': None,
+                      'cleanup_complete': True, 'result_sha256': proof['files']['result.json'],
+                      'native_evidence': result['evidence']}
+         and receipt.get('cleanup_owner') == {'request_token': receipt['token'], 'worker_root': str(root),
+                                             'native_cleanup_reference': reference}, 'Card retained owner changed')
+    recipe = request['worker_recipe']
+    need(recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
+        'bash', '-c', 'bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish']
+         and recipe['cleanup'].get('cwd', '.') == '.' and recipe['cases'][name].get('aggregate') is True,
+         'native Card cleanup recipe')
+    case = result['evidence'][name]
+    need(case.get('status') == 'UNVERIFIED' and type(case.get('native_exit')) is int and case['native_exit'] == 1
+         and case.get('command') == recipe['cases'][name]['command']
+         and all(case.get(k) is False for k in ('timed_out', 'cancelled', 'lingering_group'))
+         and receipt['started_at'] <= case['started_at'] <= case['finished_at'] <= receipt['finished_at'],
+         'Card case was not cleanly joined')
+    import hashlib
+    native = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest()
+    log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
+    need(case.get('log') == str(log) and case.get('sha256') == proof['files']['case.log'], 'Card case log binding')
+    text = sealed(log, 'case.log', False)
+    need(sealed(native / 'result.json', 'native-result.json') == result, 'native Card result changed')
+    errors = re.findall(r'^RuntimeError: run.sh exited early with code 143; see (.+/services\.log)$', text, re.M)
+    need(len(errors) == 1, 'not the pre-admission service startup failure')
+    run = Path(errors[0]).parent
+    need(run.parent == root / '.context/benchmarks' and run.resolve(strict=True) == run, 'foreign Card run')
+    benchmark = sealed(run / 'local-benchmark-owner.json', 'local-benchmark-owner.json')
+    need(benchmark == {'version': 1, 'run_id': run.name, 'state': 'not_started', 'pid': None,
+                       'native_identity': '', 'token': '', 'receipt': str(run / 'benchmark-cleanup.status'),
+                       'signal': None}, 'benchmark was admitted or owner is unknown')
+    need(not any((run / n).exists() or (run / n).is_symlink() for n in
+                 ('run.json', 'report-card.json', 'local-benchmark-results.json'))
+         and not list(run.glob('benchmark-cleanup*.status')), 'benchmark task evidence exists')
+    owner = sealed(run / 'local-stack-owner.json', 'local-stack-owner.json')
+    need(owner.get('version') == 1 and owner.get('run_id') == run.name
+         and type(owner.get('pid')) is int and owner['pid'] > 1
+         and isinstance(owner.get('birth'), str) and bool(owner['birth'])
+         and re.fullmatch(r'[0-9a-f]{32}', owner.get('token', ''))
+         and re.fullmatch('linux:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+                          + r':[0-9]+', owner.get('native_identity', '')),
+         'native stack owner identity')
+    lines = sealed(run / 'local-stack-cleanup.status', 'local-stack-cleanup.status', False).splitlines()
+    pairs = [line.partition('=') for line in lines]
+    need(all(sep and key for key, sep, value in pairs) and len({key for key, _, _ in pairs}) == len(pairs),
+         'malformed stack receipt')
+    cleanup = {key: value for key, _, value in pairs}
+    need(cleanup == {'version': '2', 'state': 'clean', 'token': owner['token'], 'stack_pid': str(owner['pid']),
+                     'stack_birth': owner['birth'], 'stack_native_identity': owner['native_identity']}
+         and not Path('/proc', str(owner['pid'])).exists(), 'stack cleanup not clean or owner still live')
+    services = sealed(run / 'services.json', 'services.json')
+    need(services.get('worktree') == str(root) and services.get('status') == 'stopped'
+         and services.get('run_sh_pid') == owner['pid'], 'Card services identity/state')
+    ports = services.get('ports')
+    need(isinstance(ports, dict) and ports and all(type(p) is int and 0 <= p <= 65535 for p in ports.values()),
+         'Card service ports unknown')
+    listeners = set()
+    for table in ('/proc/net/tcp', '/proc/net/tcp6'):
+        for line in Path(table).read_text().splitlines()[1:]:
+            row = line.split()
+            if row[3] == '0A':
+                listeners.add(int(row[1].rsplit(':', 1)[1], 16))
+    need(not listeners.intersection(p for p in ports.values() if p), 'Card service listener remains')
+    quiet(root)
+    return gate
 
 
 def need(value, message):
@@ -46,6 +167,89 @@ def quiet(root):
                 continue  # process exited during the read; never signal it
 
 
+def structural_cleanup(state, receipt, proof):
+    """A fully reaped failed structural suite may launch again, without test credit."""
+    import hashlib
+    from deploy_test_cycle import bounded_read, digest, sha_file
+    gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+    root = Path(gate['worker_root']).resolve(strict=True)
+    name = gate['name']
+    need(gate.get('category') == name == 'deploy-command-structural'
+         and gate.get('worker_transport') == 'local-isolated' and gate.get('case_protocol') is True
+         and gate.get('result_transport') == 'stdout' and str(root) == gate['worker_root'] == gate.get('cwd')
+         and not gate.get('native_cloud') and not gate.get('native_backend'), 'owned structural binding')
+    command = gate['command']
+    need(receipt.get('command') == command and len(command) == 5
+         and command[1:] == [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root), '--stdio'],
+         'native structural command')
+    binding = receipt.get('execution_binding', {})
+    need(binding.get('contract_digest') == digest(gate)
+         and all(isinstance(binding.get(k), str) and binding[k] for k in ('input_fingerprint', 'environment'))
+         and receipt.get('host_admission', {}).get('started') is True
+         and receipt['host_admission'].get('lock') == str(root / '.context/native-worker-admission.lock'),
+         'structural execution/admission contract changed')
+    need(receipt.get('lifecycle') == 'owned' and receipt.get('executed') is True
+         and receipt.get('complete') is False and receipt.get('status') == 'FAIL'
+         and type(receipt.get('native_exit')) is int and receipt['native_exit'] == 1
+         and receipt.get('lingering_group') is True and not receipt.get('cleanup_owner')
+         and receipt.get('native_cleanup_reference') is None
+         and all(receipt.get(k) is False for k in ('timed_out', 'cancelled')), 'failed structural receipt required')
+    folder = Path(receipt['log']).parent
+    need(Path(receipt['log']) == folder / 'output.log' and folder.resolve(strict=True) == folder
+         and Path(receipt['worker_result']) == folder / 'result.json'
+         and isinstance(proof['files'], dict) and set(proof['files']) == set(FILES), 'structural artifact inventory')
+    docs = {}
+    for item in FILES:
+        path = folder / item
+        need(not path.is_symlink() and path.resolve(strict=True) == path
+             and sha_file(path) == proof['files'][item], 'structural artifact changed: ' + item)
+        docs[item] = bounded_read(path, 'structural cleanup ' + item)
+    request, result, recorded, process = (docs[n] for n in FILES)
+    need(recorded == receipt and all(row.get(k) == receipt.get(k) for row in (request, result)
+                                    for k in ('token', 'source', 'gate')), 'structural identity mismatch')
+    need(request.get('worker_root') == result.get('worker_root') == str(root)
+         and request.get('worker_recipe') == gate.get('worker_recipe')
+         and result.get('recipe_digest') == digest(request['worker_recipe']), 'structural root/recipe mismatch')
+    need(request.get('checks') == gate['checks'] == [name] and request.get('skips') == {}
+         and receipt.get('cases') == result.get('cases') == {name: 'UNVERIFIED'}
+         and result.get('complete') is False and result.get('cleanup_complete') is True
+         and result.get('reused') is False and not result.get('cleanup_owner'), 'structural result incomplete cleanup')
+    recipe = request['worker_recipe']
+    need(recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
+        'bash', '-c', 'bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish']
+         and recipe['cleanup'].get('cwd', '.') == '.' and set(recipe['cases']) == {name}
+         and recipe['cases'][name].get('aggregate') is True, 'native structural cleanup recipe')
+    case = result['evidence'][name]
+    native = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest()
+    log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
+    need(case.get('status') == 'UNVERIFIED' and type(case.get('native_exit')) is int and case['native_exit'] == 1
+         and case.get('command') == recipe['cases'][name]['command'] and case.get('log') == str(log)
+         and log.resolve(strict=True) == log and sha_file(log) == case.get('sha256')
+         and all(case.get(k) is False for k in ('timed_out', 'cancelled', 'lingering_group'))
+         and receipt['started_at'] <= case['started_at'] <= case['finished_at'] <= receipt['finished_at'],
+         'structural case not cleanly joined')
+    need(type(process.get('native_exit')) is int and process['native_exit'] == receipt['native_exit']
+         and process.get('quiescent') is True and process.get('orphaned_children') is True
+         and all(process.get(k) is False for k in ('cancelled', 'timed_out'))
+         and process.get('remaining') == [] and process.get('kill_sent') == []
+         and process.get('error') is None, 'structural supervisor closure incomplete')
+    child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
+    rows, terms = process.get('reaped'), process.get('term_sent')
+    need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
+         and isinstance(rows, list) and len(rows) > 1 and isinstance(terms, list) and terms
+         and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
+                 and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
+                 and type(row['status']) is int and 0 <= row['status'] <= 65535
+                 and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in rows),
+         'unknown structural descendant wait records')
+    reaped = {row['pid']: row['status'] for row in rows}
+    need(len(reaped) == len(rows) and reaped.get(child) == 256
+         and all(type(pid) is int and pid > 1 and pid != child and pid in reaped for pid in terms)
+         and len(set(terms)) == len(terms), 'structural owned descendants not all reaped')
+    quiet(root)
+    return gate
+
+
 def validate(state, receipt, proof):
     from deploy_test_cycle import bounded_read, digest, sha_file
     need(set(proof) == {'kind', 'files', 'confirmed_at', 'observed_by'} and proof['kind'] == KIND,
@@ -56,6 +260,10 @@ def validate(state, receipt, proof):
          and type(receipt.get('finished_at')) in (int, float)
          and receipt['finished_at'] <= confirmed <= time.time(), 'confirmation time')
     name = receipt['gate']
+    if name == 'agentcard-lifecycle':
+        return card_preflight(state, receipt, proof)
+    if name == 'deploy-command-structural':
+        return structural_cleanup(state, receipt, proof)
     gates = [g for g in state['plan']['gates'] if g['name'] == name]
     need(len(gates) == 1, 'current gate binding')
     gate = gates[0]

@@ -62,3 +62,23 @@ None recorded.
 ## Reusable lesson
 
 Capture the failing ephemeral server's launch and readiness phases before attributing an SDK startup deadline failure or claiming that a later pass fixed it.
+
+
+## November 4 b9 display and deploy-resume readiness recurrences
+
+On `b9a1f743`, inline_display_runs_in_production_sandbox failed while the SDK
+started its local ephemeral server at127.0.0.1:35973. The separate
+rolling_deploy_resumes_browser_task_on_the_new_machine and
+cutover_resumes_browser_task_on_the_new_generation cases failed at the same
+SDK startup/readiness boundary on32831 and45283. Each error says the server
+did not start within5s; all occurred before their owning behavior assertions.
+Display/deploy-resume domain elapsed times were17.9/65.2 seconds respectively.
+
+The owning test files, sandbox helper and Python requirements match main0784.
+Original child launch/stderr/readiness/download phase evidence is missing;
+no host-load, port-conflict or stuck-download cause is established. These three
+failures remain separate FAILED/UNKNOWN observations. Neither the later passing
+workflow cutover diagnostic nor the unrelated local seed fixture isolation
+repairs or qualifies them. No domain rerun or5s change was made by this RCA lane.
+Evidence: plan:/var/tmp/pr1662-b9-local-lifecycle-fixture/report.json; original
+logs remain under the agents coverage20261104-031806-510293 directory.
