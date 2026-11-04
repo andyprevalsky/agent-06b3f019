@@ -17,16 +17,23 @@ import {
   parseMessageFilters,
   parseNetworkFilters,
   parseTransactionFilters,
-  rejectUnsupportedFilters,
-  requireFilterObject,
 } from './validate.filters';
 import {
   parseAgentNetworkFilters,
   parseAgentTrajectoryFilters,
   parseAgentPaging,
+  validateAgentSourceSelection,
 } from './validate.agent';
-import { googleSourceOfPath, parseGoogleSourceFilters } from './validate.google';
-import { agentTaskPathParam } from './path';
+import { parseGoogleSourceFilters } from './validate.google';
+import {
+  dropNullParams,
+  filtersBySource,
+  sentParamFor,
+  sharedFilters,
+  sourcesNamedByFilters,
+  splitFilters,
+  type SplitFilters,
+} from './validate.normalize';
 
 function databaseRegexPattern(pattern: string, multiline: boolean): string {
   if (!multiline) return pattern;
@@ -35,16 +42,8 @@ function databaseRegexPattern(pattern: string, multiline: boolean): string {
 
 interface ResolvedSourceSelection {
   resolvedSources: ValidSource[];
-  hasMessageFamily: boolean;
-  hasTransactions: boolean;
-  hasDocuments: boolean;
-  hasNetwork: boolean;
-  hasAgentNetwork: boolean;
-  hasAgentTrajectories: boolean;
-  hasGoogle: boolean;
   /** No pattern means "list": agent sources, or only calendar/drive. */
   patternOptional: boolean;
-  mergeTopLevelNarrowing: boolean;
 }
 import {
   DEFAULT_GREP_SOURCES,
@@ -77,7 +76,7 @@ const ALLOWED_GREP_KEYS = new Set([
   'head_limit',
   'offset',
   'multiline',
-  // messages-source-only narrowing.
+  // Narrowing shorthands applied to every selected source that accepts them.
   'person',
   'since',
   // Internal transport keys, not exposed to the model.
@@ -96,69 +95,9 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
-/** agent_network rows are stored messages, so these kinds select all of them. */
-const AGENT_NETWORK_RECORD_KINDS = new Set(['message', 'all']);
-
-/**
- * Trajectory selectors on an agent_network search. agent_network reads the
- * stored messages of the caller's tree: an agent task path scopes it and the
- * message/all kinds select every row. `order` is an agent_trajectories selector,
- * so a sole agent_network search accepts and ignores it (results stay newest
- * first, as display_order reports). Anything else names itself, so the caller
- * can drop that one parameter.
- */
-function validateAgentNetworkSelectors(params: GrepParams, sources: ValidSource[]): void {
-  if (
-    params.record_kind !== undefined &&
-    !AGENT_NETWORK_RECORD_KINDS.has(String(params.record_kind).toLowerCase())
-  ) {
-    throw new InvalidGrepParamError('record_kind');
-  }
-  if (params.trace_path !== undefined && agentTaskPathParam(params.trace_path) === undefined) {
-    throw new InvalidGrepParamError('trace_path');
-  }
-  for (const key of ['surface', 'until', 'page_after'] as const) {
-    if (params[key] !== undefined) throw new InvalidGrepParamError(key);
-  }
-  if (params.order !== undefined && sources.length !== 1) {
-    throw new InvalidGrepParamError('order/page_after');
-  }
-}
-
-function validateAgentSourceSelection(params: GrepParams, sources: ValidSource[]): void {
-  const hasTrajectories = sources.includes('agent_trajectories');
-  if (!hasTrajectories && sources.includes('agent_network')) {
-    validateAgentNetworkSelectors(params, sources);
-    return;
-  }
-  if (
-    !hasTrajectories &&
-    [
-      params.record_kind,
-      params.surface,
-      params.trace_path,
-      params.until,
-      params.order,
-      params.page_after,
-    ].some((value) => value !== undefined)
-  ) {
-    throw new InvalidGrepParamError('agent_trajectories source');
-  }
-  if (params.role !== undefined && !hasTrajectories) {
-    throw new InvalidGrepParamError('role');
-  }
-  if (
-    (params.order !== undefined || params.page_after !== undefined) &&
-    (sources.length !== 1 || !hasTrajectories)
-  ) {
-    throw new InvalidGrepParamError('order/page_after');
-  }
-}
-
-function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
-  const { source, sources } = params;
-  const rawFilters = requireFilterObject(params);
-  const trajectoryNarrowing =
+function hasTrajectoryNarrowing(params: GrepParams, split: SplitFilters): boolean {
+  const { flat } = split;
+  return (
     params.role !== undefined ||
     params.record_kind !== undefined ||
     params.surface !== undefined ||
@@ -166,106 +105,115 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
     params.until !== undefined ||
     params.order !== undefined ||
     params.page_after !== undefined ||
-    ['role', 'record_kind', 'surface'].some((key) => key in rawFilters) ||
-    (typeof rawFilters.path === 'string' && rawFilters.path.startsWith('agent_trajectories/'));
+    ['role', 'record_kind', 'surface'].some((key) => key in flat) ||
+    (typeof flat.path === 'string' && flat.path.startsWith('agent_trajectories/'))
+  );
+}
+
+function requireKnownSources(params: GrepParams): void {
+  const { source, sources } = params;
   if (source !== undefined && !(source in VALID_SOURCES)) {
     throw new SourceNotFoundError(source);
   }
-  if (sources !== undefined) {
-    if (!Array.isArray(sources)) {
-      throw new InvalidGrepParamError('sources');
-    }
-    for (const entry of sources) {
-      if (typeof entry !== 'string' || !(entry in VALID_SOURCES)) {
-        throw new SourceNotFoundError(typeof entry === 'string' ? entry : String(entry));
-      }
+  if (sources === undefined) return;
+  if (!Array.isArray(sources)) {
+    throw new InvalidGrepParamError('sources', 'sources must be a list such as ["messages"].');
+  }
+  for (const entry of sources) {
+    if (typeof entry !== 'string' || !(entry in VALID_SOURCES)) {
+      throw new SourceNotFoundError(typeof entry === 'string' ? entry : String(entry));
     }
   }
+}
 
-  // A printed calendar or drive path names its own source, so following one
-  // works without repeating the source.
-  const pathSource = googleSourceOfPath(rawFilters.path);
-
-  // Typed trajectory narrowing chooses its source when the caller omits one.
+/**
+ * Sources in precedence order: explicit `sources`/`source`; sources the
+ * filters name (a nested block or a printed path); typed trajectory narrowing;
+ * otherwise the local defaults. Flat filters then apply as they do to any
+ * selection (validate.normalize.ts).
+ */
+function resolveSourceSelection(params: GrepParams, split: SplitFilters): ResolvedSourceSelection {
+  requireKnownSources(params);
+  const { source, sources } = params;
+  const named = sourcesNamedByFilters(split);
   const resolvedSources: ValidSource[] =
     sources !== undefined
       ? [...new Set(sources as ValidSource[])]
       : source !== undefined
         ? [source as ValidSource]
-        : trajectoryNarrowing
-          ? ['agent_trajectories']
-          : pathSource !== undefined
-            ? [pathSource]
+        : named.length > 0
+          ? named
+          : hasTrajectoryNarrowing(params, split)
+            ? ['agent_trajectories']
             : DEFAULT_GREP_SOURCES;
-
-  if (
-    params.filters !== undefined &&
-    source === undefined &&
-    sources === undefined &&
-    !trajectoryNarrowing &&
-    pathSource === undefined
-  ) {
-    throw new InvalidGrepParamError('filters');
-  }
-
-  const hasMessageFamily = resolvedSources.some(isMessageFamilySource);
-  const hasTransactions = resolvedSources.includes('transactions');
-  const hasDocuments = resolvedSources.includes('documents');
-  const hasNetwork = resolvedSources.includes('network');
-  const hasAgentNetwork = resolvedSources.includes('agent_network');
-  const hasAgentTrajectories = resolvedSources.includes('agent_trajectories');
-  const hasGoogle = resolvedSources.some(isGoogleGrepSource);
   validateAgentSourceSelection(params, resolvedSources);
-
-  // Reject filters that NO resolved source can consume. Message/transaction/
-  // document families reject unsupported keys inside their own parse step; the
-  // gap is a purely-local selection (e.g. sources=['network']) where none of
-  // those parsers run — without this the filters would be silently dropped.
-  // Covers both the single-source (byte-identical to pre-`sources` behavior when
-  // resolvedSources===[selectedSource]) and the multi-source path.
-  const filterObj = rawFilters;
-  const filtersParsedBySource = hasMessageFamily || hasTransactions || hasDocuments || hasGoogle;
-  if (Object.keys(filterObj).length > 0 && !filtersParsedBySource) {
-    rejectUnsupportedFilters(resolvedSources[0], filterObj);
-  }
-
   return {
     resolvedSources,
-    hasMessageFamily,
-    hasTransactions,
-    hasDocuments,
-    hasNetwork,
-    hasAgentNetwork,
-    hasAgentTrajectories,
-    hasGoogle,
     patternOptional:
-      hasAgentTrajectories || hasAgentNetwork || resolvedSources.every(isGoogleGrepSource),
-    // Merge top-level `person`/`since` into message filters whenever a message-
-    // family source is EXPLICITLY selected — via singular `source` OR `sources`.
-    // (Not for the implicit default trio, matching historical behavior.)
-    mergeTopLevelNarrowing: (source !== undefined || sources !== undefined) && hasMessageFamily,
+      resolvedSources.includes('agent_trajectories') ||
+      resolvedSources.includes('agent_network') ||
+      resolvedSources.every(isGoogleGrepSource),
   };
 }
 
-export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
+/** Parse each source's filters, reporting a bad value under the name the caller sent. */
+function parseSourceFilters(
+  params: GrepParams,
+  split: SplitFilters,
+  sources: ValidSource[]
+): ValidatedGrepInput['filters'] {
+  try {
+    return parseEachSourceFilters(params, split, sources);
+  } catch (error) {
+    const key =
+      error instanceof InvalidGrepParamError
+        ? /^filters\.(\w+)$/.exec(error.param)?.[1]
+        : undefined;
+    if (error instanceof InvalidGrepParamError && key !== undefined) {
+      const sent = sentParamFor(key, params, split);
+      if (sent !== error.param) throw new InvalidGrepParamError(sent, error.hint);
+    }
+    throw error;
+  }
+}
+
+function parseEachSourceFilters(
+  params: GrepParams,
+  split: SplitFilters,
+  sources: ValidSource[]
+): ValidatedGrepInput['filters'] {
+  const bySource = filtersBySource(params, split, sources);
+  const of = (source: ValidSource) => bySource.get(source) ?? {};
+  const has = (source: ValidSource) => sources.includes(source);
+  return {
+    messages: sources.some(isMessageFamilySource)
+      ? parseMessageFilters(sharedFilters(bySource, 'messages'))
+      : undefined,
+    transactions: has('transactions') ? parseTransactionFilters(of('transactions')) : undefined,
+    documents: has('documents') ? parseDocumentFilters(of('documents')) : undefined,
+    network: has('network') ? parseNetworkFilters(of('network')) : undefined,
+    agentNetwork: has('agent_network')
+      ? parseAgentNetworkFilters(params, of('agent_network'))
+      : undefined,
+    agentTrajectories: has('agent_trajectories')
+      ? parseAgentTrajectoryFilters(params, of('agent_trajectories'))
+      : undefined,
+    google: sources.some(isGoogleGrepSource)
+      ? parseGoogleSourceFilters(sharedFilters(bySource, 'google'), sources)
+      : undefined,
+  };
+}
+
+export function validateGrepInput(rawParams: GrepParams): ValidatedGrepInput {
+  const params = dropNullParams(rawParams);
   for (const key of Object.keys(params)) {
     if (!ALLOWED_GREP_KEYS.has(key)) {
       throw new InvalidGrepParamError(key);
     }
   }
 
-  const {
-    resolvedSources,
-    hasMessageFamily,
-    hasTransactions,
-    hasDocuments,
-    hasNetwork,
-    hasAgentNetwork,
-    hasAgentTrajectories,
-    hasGoogle,
-    patternOptional,
-    mergeTopLevelNarrowing,
-  } = resolveSourceSelection(params);
+  const split = splitFilters(params);
+  const { resolvedSources, patternOptional } = resolveSourceSelection(params, split);
 
   const agentPaging = parseAgentPaging(params);
 
@@ -322,14 +270,6 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     headLimit: parseBoundedNumber(params.head_limit, 20, 1, MAX_RESULTS),
     offset: parseBoundedNumber(params.offset, 0, 0, 10_000),
     ...agentPaging,
-    filters: {
-      messages: hasMessageFamily ? parseMessageFilters(params, mergeTopLevelNarrowing) : undefined,
-      transactions: hasTransactions ? parseTransactionFilters(params) : undefined,
-      documents: hasDocuments ? parseDocumentFilters(params) : undefined,
-      network: hasNetwork ? parseNetworkFilters(params) : undefined,
-      agentNetwork: hasAgentNetwork ? parseAgentNetworkFilters(params) : undefined,
-      agentTrajectories: hasAgentTrajectories ? parseAgentTrajectoryFilters(params) : undefined,
-      google: hasGoogle ? parseGoogleSourceFilters(params, resolvedSources) : undefined,
-    },
+    filters: parseSourceFilters(params, split, resolvedSources),
   };
 }

@@ -743,7 +743,10 @@ class GrepTool(BaseModel):
     )
     order: Optional[Literal["newest_first", "oldest_first"]] = Field(
         default=None,
-        description="Order messages in one agent_trajectories search. Defaults to newest_first.",
+        description=(
+            "Order messages in one agent_trajectories search. Defaults to newest_first. "
+            "Ignored for other sources; display_order reports the order used."
+        ),
     )
     page_after: Optional[str] = Field(
         default=None,
@@ -751,7 +754,10 @@ class GrepTool(BaseModel):
     )
     until: Optional[str] = Field(
         default=None,
-        description="Latest timestamp for agent trajectory results (ISO 8601).",
+        description=(
+            "Latest timestamp (ISO 8601) for each selected source whose filters accept until: "
+            "agent_trajectories, transactions, documents, calendar, drive."
+        ),
     )
     require_source_access: Optional[bool] = Field(
         default=None,
@@ -805,22 +811,26 @@ class GrepTool(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
-            "Nested per-source filters. Each source accepts only its own keys:\n"
+            "Per-source filters. Each source accepts only its own keys:\n"
             "  messages (and email, gmail, imessage, whatsapp): person, since, path\n"
             "  network: path\n"
-            "  agent_network: path\n"
+            "  agent_network: path, role\n"
             "  agent_trajectories: path, since, until, role, surface, record_kind\n"
             "  transactions: since, until, account, min_amount, max_amount, "
             "status ('posted', 'pending', or 'all'), include_pending_in_totals, path\n"
             "  documents: document_source, since, until, tag, path\n"
             "  calendar, drive: since, until, path\n"
+            'A flat key ({"since": "7d"}) applies to every selected source that accepts it. To target one '
+            'source, nest its keys under the source name: {"calendar": {"since": "2026-11-02"}}; a messages '
+            "block covers email, gmail, imessage and whatsapp. "
             "documents is an umbrella corpus, so set document_source to the concrete provider "
             "(chatgpt, claude, apple_notes, obsidian, or granola). granola covers every Granola "
             "meeting; granola_note (title, time, attendees, own notes), granola_summary or "
             "granola_transcript searches just that layer. "
             "`path` takes a path from an earlier result "
             "(e.g. 'network/Andy Prevalsky.contact', 'messages/+15551234567.thread') "
-            "to scope the search to that record or thread. "
+            "to scope that path's own source to the record or thread; for agent_network and agent_trajectories "
+            "it may instead be an agent address such as /root/outreach. "
             "A calendar or drive path may also be a folder of a result path, such as "
             "'calendar/<account>/2026-10-02' or 'drive/<account>/My Drive/Legal'. "
             "Calendar since and until take a date (YYYY-MM-DD) and include that whole day; "
@@ -837,7 +847,7 @@ class GrepTool(BaseModel):
     since: Optional[str] = Field(
         default=None,
         description=(
-            "Messages or agent trajectories at or after this time. "
+            "Results at or after this time, for each selected source whose filters accept since. "
             "ISO 8601 timestamp or a relative form like 7d, 24h, 30m."
         ),
     )
