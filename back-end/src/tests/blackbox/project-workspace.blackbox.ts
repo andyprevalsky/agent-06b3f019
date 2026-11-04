@@ -565,6 +565,55 @@ for (const template of ['claude-code', 'codex-code']) {
   });
 }
 
+test('resume re-points origin at the current clone URL (a rotated GitHub token reaches a paused session)', async () => {
+  // The clone URL carries the backend GITHUB_TOKEN (session.ts withGithubToken).
+  // A resumed workspace keeps its checkout, so its origin must be refreshed from
+  // the URL resolved now; otherwise a rotated token leaves push/fetch failing.
+  const remote = join(fixture, `rotation-${randomUUID()}.git`);
+  sh(fixture, `git init -q --bare -b main ${remote}`);
+  const seed = mkdtempSync(join(fixture, 'rotation-seed-'));
+  sh(
+    seed,
+    `git init -q -b main && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init && git push -q ${remote} main`
+  );
+  const home = mkdtempSync(join(fixture, 'rotation-home-'));
+  const sessionId = `rotation-${randomUUID()}`;
+  const workspace = (cloneUrl: string) => ({
+    project: {
+      id: 'rotation',
+      name: 'PJ-Token-Rotation',
+      repoUrl: remote,
+      defaultBranch: 'main',
+      startupScript: null,
+      startupTimeoutS: 30,
+    },
+    revision: 0,
+    manifest: null,
+    files: [],
+    gitBundle: null,
+    uncommittedPatch: null,
+    redactions: [],
+    cloneUrl,
+  });
+  registerWorkspaceExecutor(sessionId, localWorkspaceExecutor(home, process.env));
+  try {
+    const first = await restoreWorkspace(sessionId, workspace(remote));
+    assert(first.checkout.cloned, `first restore clones: ${JSON.stringify(first.checkout)}`);
+    const repo = join(home, 'workspace');
+    const rotated = `file://${remote}`;
+    const resumed = await restoreWorkspace(sessionId, workspace(rotated));
+    assert(resumed.checkout.source === 'existing', 'resume keeps the checkout');
+    const origin = sh(repo, 'git remote get-url origin').trim();
+    assert(origin === rotated, `origin carries the current credentials: ${origin}`);
+    assert(
+      !JSON.stringify(resumed).includes(rotated),
+      'the credentialed URL never appears in the report'
+    );
+  } finally {
+    unregisterWorkspaceExecutor(sessionId);
+  }
+});
+
 test('project CLI child yields the event loop, drains output and preserves failure status', async () => {
   let advanced = false;
   const heartbeat = setImmediate(() => {

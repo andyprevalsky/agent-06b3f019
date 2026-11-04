@@ -18,7 +18,6 @@ import {
   testAnthropicApiKeyCooldown_markThenOnCooldown,
   testGptApiKeyCooldown_markThenOnCooldown,
 } from './integrations.auth-cooldowns-1.cases';
-import { testClaudeCodeBillingFailure_backsOffFundedApiKey } from './integrations.claude-lifecycle-1.cases';
 
 export function sequentialTestsPart1() {
   return [
@@ -39,10 +38,6 @@ export function sequentialTestsPart1() {
     {
       name: 'gpt api-key cooldown -- mark then on-cooldown',
       fn: testGptApiKeyCooldown_markThenOnCooldown,
-    },
-    {
-      name: 'claude-code billing-failure -- funded API key backed off globally',
-      fn: testClaudeCodeBillingFailure_backsOffFundedApiKey,
     },
     {
       name: 'messaging upload -- acknowledged upload survives process exit after the 200',

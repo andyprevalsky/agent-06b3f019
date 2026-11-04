@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "fs";
 import { spawn, execFileSync } from "child_process";
-import { timingSafeEqual } from "crypto";
+import { createHash, timingSafeEqual } from "crypto";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -161,9 +161,29 @@ function reportedLoginUnusable(message) {
   if (FUNDED_PROVIDER || oauthFallbackReason !== "oauth_refresh_invalid")
     return null;
   return classifyOAuthFallbackReason(message || "") === "oauth_refresh_invalid"
-    ? { reason: "oauth_refresh_invalid" }
+    ? {
+        reason: "oauth_refresh_invalid",
+        ...(CREDENTIAL_FINGERPRINT
+          ? { credential: CREDENTIAL_FINGERPRINT }
+          : {}),
+      }
     : null;
 }
+/**
+ * Which leased login this sandbox holds, as a digest of its access token (never
+ * the token): the backend marks a login for reconnect only when the stored
+ * credential is still this one and has not simply expired (credentialFeedback.ts).
+ */
+const CREDENTIAL_FINGERPRINT = (() => {
+  try {
+    const token = JSON.parse(CODEX_AUTH_JSON || "null")?.tokens?.access_token;
+    return typeof token === "string" && token
+      ? createHash("sha256").update(token).digest("hex").slice(0, 16)
+      : null;
+  } catch {
+    return null;
+  }
+})();
 // C15: Codex's own rate-limit snapshot (the rollout's latest `token_count`
 // event: rate_limits.{primary,secondary}.used_percent / resets_at and
 // rate_limit_reached_type) says whether a failed turn hit a usage limit. A

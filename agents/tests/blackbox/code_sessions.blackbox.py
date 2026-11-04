@@ -105,7 +105,40 @@ if resume is None and os.environ.get("STUB_MODE") == "login_unusable":
           "usage_limit": None, "login_unusable": {"reason": "oauth_refresh_invalid"}}})
     while True:
         time.sleep(0.1)
-if resume is None and os.environ.get("STUB_MODE") not in ("finish", "rate_limit", "billing", "login_unusable"):
+if resume is None and os.environ.get("STUB_MODE") == "auth_expired":
+    # The sandbox's access token expired mid-run: the SDK marks the assistant
+    # message error=authentication_failed and prints the non-interactive 401 banner.
+    notes.write_text("uncommitted work\n")
+    banner = ('Failed to authenticate. API Error: 401 {"type":"error","error":'
+              '{"type":"authentication_error","message":"OAuth token has expired."}}')
+    emit({"type": "assistant", "error": "authentication_failed", "message": {"content": [
+        {"type": "text", "text": banner}]}})
+    emit({"type": "result", "subtype": "success", "is_error": True, "result": banner, "usage": {}})
+    while True:
+        time.sleep(0.1)
+if resume is None and os.environ.get("STUB_MODE") == "mentions_auth_text":
+    # A healthy session whose own tool call, tool output and prose mention every
+    # credential-failure string (e.g. an agent working on the Rose repo).
+    mentions = ("authentication_error | Invalid authentication credentials | API Error: 401 | "
+                "Please run /login | Not logged in | You've hit your limit | /rate-limit-options | "
+                "Credit balance is too low | Credit balance too low | "
+                "Add funds: https://platform.claude.com/settings/billing")
+    # The live repro on 28a7bfc99 (local stack): this exact command aborted the
+    # session non-retryably as CLAUDE_CODE_FATAL, and the parent retried into it.
+    note = "debug note: our log viewer shows the literal text API Error: 401 and Please run /login in old entries"
+    notes.write_text("uncommitted work\n")
+    emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_e", "name": "Bash",
+          "input": {"command": f"echo '{note}'"}}]}})
+    emit({"type": "user", "tool_use_result": {"stdout": note + "\n", "stderr": ""},
+          "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_e", "content": note}]}})
+    emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_g", "name": "Bash",
+          "input": {"command": 'grep -rn "API Error: 401\\|Please run /login" agents/'}}]}})
+    emit({"type": "user", "tool_use_result": {"stdout": mentions, "stderr": ""},
+          "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_g", "content": mentions}]}})
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": f"Found: {mentions}"}]}})
+if resume is None and os.environ.get("STUB_MODE") not in (
+    "finish", "rate_limit", "billing", "login_unusable", "auth_expired", "mentions_auth_text"
+):
     notes.write_text("uncommitted work\n")
     emit({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "sleep 99999"}}]}})
@@ -1671,7 +1704,8 @@ def _codex_events():
 
 
 def test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect():
-    """The ws-server's ``login_unusable`` error: parsed without prose matching, fed back as a revocation."""
+    """The ws-server's ``login_unusable`` error: parsed without prose matching, fed back as a rejected login
+    (the backend disables it only when the stored login is still the held one and not expired)."""
     from domains.spawn_claude_code_agent.service import build_codex_credential_feedback, login_unusable_from_event
 
     event = {
@@ -1683,7 +1717,7 @@ def test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect():
     }
     assert login_unusable_from_event(event) == {"provider": "codex", "reason": "oauth_refresh_invalid"}
     assert login_unusable_from_event({**event, "login_unusable": None}) is None, "the switch path is not a pause"
-    # The backend reads reason oauth_refresh_invalid as a revocation: needs reconnect, never a rate limit.
+    # Never a rate limit; code-agent-login-rejection.blackbox.ts owns revoked vs expired vs replaced.
     assert build_codex_credential_feedback([event]) == [{"source": "initial", "reason": "oauth_refresh_invalid"}]
 
 
@@ -1756,9 +1790,9 @@ async def test_unusable_login_pauses_and_the_retry_switches_to_a_claude_subscrip
             "the persisted feedback marks exactly that login for reconnect",
             backend.credential_feedback,
         )
-        assert first["usage_limit"]["credential_marked"] == "reconnect", first["usage_limit"]
+        assert first["usage_limit"]["credential_marked"] == "login_rejected", first["usage_limit"]
         assert first["message"] == (
-            "Code agent stopped: the Codex login can no longer be used (sign in again to reconnect it). "
+            "Code agent stopped: the Codex login was rejected (its access token expired or was revoked). "
             "Its work is saved on branch rose/write-answer-0a1b2c3d (checkpoint 1); the sandbox is paused, "
             "not killed.\nConnected accounts:\n"
             "- Claude Code me@example.com: available\n"
@@ -1772,7 +1806,7 @@ async def test_unusable_login_pauses_and_the_retry_switches_to_a_claude_subscrip
         assert "rate-limited" not in first["message"] and "out of quota" not in first["message"]
         assert first["code_agent"]["state"] == "paused", first["code_agent"]
         assert first["code_agent"]["failure_message"] == (
-            "Paused: the Codex login needs to be reconnected. Work is saved."
+            "Paused: the Codex login was rejected (expired or revoked). Work is saved."
         ), first["code_agent"]
         assert backend.created[1]["code_provider"] == "claude", backend.created[1]
         assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
@@ -1796,16 +1830,120 @@ async def test_unusable_login_with_nothing_else_stays_paused_with_the_reconnect_
     try:
         assert first["status"] == "usage_limit" and first["failure_kind"] == "login_unusable", first
         assert first["message"].startswith(
-            "Code agent stopped: the Codex login can no longer be used (sign in again to reconnect it). "
+            "Code agent stopped: the Codex login was rejected (its access token expired or was revoked). "
         ), first["message"]
         assert first["message"].endswith(
             _retry_line(
                 "no other credential can be leased right now, so a retry stays paused and starts nothing until "
-                "the login is reconnected or another account is connected."
+                "the login is re-synced or reconnected, or another account is connected."
             )
         ), first["message"]
         assert len(backend.created) == 1, f"no agent may start without a credential: {backend.created}"
         assert retry["status"] == "usage_limit" and retry["failure_kind"] == "no_credentials", retry
+    finally:
+        session_home.cleanup()
+
+
+_STUB_OAUTH_TOKEN = "sk-ant-oat01-stub-expiring-access-token"
+# What the ws-server reports as the credential it held: a digest, never the token.
+_STUB_OAUTH_FINGERPRINT = __import__("hashlib").sha256(_STUB_OAUTH_TOKEN.encode()).hexdigest()[:16]
+
+
+def test_claude_auth_failure_is_structured_and_text_alone_is_ignored():
+    """Claude's structured ``authentication_failed`` is an unusable login; the printed banner alone is not."""
+    from domains.spawn_claude_code_agent.service import build_credential_feedback, login_unusable_from_event
+
+    event = {
+        "type": "cli_message",
+        "raw_type": "assistant.api_error",
+        "cli_message": {"type": "assistant_api_error", "error": "authentication_failed"},
+        "credential": _STUB_OAUTH_FINGERPRINT,
+    }
+    assert login_unusable_from_event(event) == {
+        "provider": "claude",
+        "reason": "authentication_failed",
+        "credential": _STUB_OAUTH_FINGERPRINT,
+    }
+    assert build_credential_feedback([event], "claude") == [
+        {"source": "initial", "reason": "authentication_failed", "credential": _STUB_OAUTH_FINGERPRINT}
+    ]
+    banner_only = [
+        {"type": "assistant", "text": "Failed to authenticate. API Error: 401 authentication_error"},
+        {"type": "tool_result", "text": "Please run /login · Not logged in · Credit balance is too low"},
+    ]
+    assert [login_unusable_from_event(e) for e in banner_only] == [None, None]
+    assert build_credential_feedback(banner_only, "claude") == []
+
+
+async def test_expired_claude_token_pauses_and_the_retry_resumes_on_a_fresh_lease():
+    """The sandbox's Claude access token expires mid-run (structured 401): the session is checkpointed and
+    paused (not a fatal non-retryable abort), the held credential is reported by fingerprint, and the
+    parent's retry re-leases and resumes the same CLI conversation."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "auth_expired", "CLAUDE_CODE_OAUTH_TOKEN": _STUB_OAUTH_TOKEN})
+    backend = _Backend(session_home)
+    available = {"claude": True, "codex": False, "session_provider": "claude"}
+    backend.availability = [available, {**available, "outlook": {"next_lease": dict(_SHARED_CLAUDE_LEASE)}}, available]
+    try:
+        with backend.patched():
+            first = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
+            )
+            retry = await asyncio.wait_for(
+                ActivityEnvironment().run(
+                    service.spawn_claude_code_activity,
+                    *_activity_args(
+                        code_session_request={"code_session_id": (first.get("retry") or {}).get("code_session_id")},
+                        tool_call_id="tc-retry",
+                    ),
+                ),
+                timeout=30,
+            )
+        assert first["status"] == "usage_limit" and first["failure_kind"] == "login_unusable", first
+        assert first["retryable"] is True and first["success"] is False, first
+        assert first["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": _SESSION_ID}, first
+        assert [call.get("reason") for call in backend.closed][0] == "usage_limit", "checkpoint + pause"
+        assert backend.usage_reports == [], "an expired token is never put on a rate-limit cooldown"
+        assert backend.credential_feedback[0] == [
+            {"source": "initial", "reason": "authentication_failed", "credential": _STUB_OAUTH_FINGERPRINT}
+        ], backend.credential_feedback
+        assert first["message"].startswith(
+            "Code agent stopped: the Claude Code login was rejected (its access token expired or was revoked). "
+            "Its work is saved on branch rose/write-answer-0a1b2c3d (checkpoint 1); the sandbox is paused, not killed."
+        ), first["message"]
+        assert _STUB_OAUTH_TOKEN not in json.dumps(first), "the token never reaches the parent"
+        assert first["code_agent"]["state"] == "paused", first["code_agent"]
+        assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
+        runs = session_home.runs()
+        assert len(runs) == 2 and "--resume" in runs[1]["argv"], runs
+        assert retry["code_provider"] == "claude" and retry["status"] == "completed", retry
+        texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
+        assert "notes: uncommitted work" in texts, f"the resumed run kept the paused work: {texts}"
+    finally:
+        session_home.cleanup()
+
+
+async def test_auth_strings_in_tool_output_and_prose_never_abort_a_healthy_session():
+    """An agent grepping for "API Error: 401" (and reading every banner string) finishes normally:
+    only structured CLI signals classify credential failures."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "mentions_auth_text"})
+    backend = _Backend(session_home)
+    backend.availability = [{"claude": True, "codex": True}]
+    try:
+        with backend.patched():
+            result = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
+            )
+        assert result["status"] == "completed", result
+        assert not [m for m in backend.messages if m.get("title") == "Authentication Error"], backend.messages
+        assert all(feedback in (None, []) for feedback in backend.credential_feedback), backend.credential_feedback
     finally:
         session_home.cleanup()
 
@@ -2002,6 +2140,14 @@ async def _run_all_tests():
         test_usage_limit_retry_switches_provider_when_pool_is_exhausted,
     )
     r.record("usage_limit_detection_structured_only", test_usage_limit_detection_reads_structured_events_only)
+    r.record("claude_auth_failure_structured_only", test_claude_auth_failure_is_structured_and_text_alone_is_ignored)
+    await r.record_async(
+        "expired_claude_token_pauses_and_retry_resumes",
+        test_expired_claude_token_pauses_and_the_retry_resumes_on_a_fresh_lease,
+    )
+    await r.record_async(
+        "auth_strings_in_output_never_abort", test_auth_strings_in_tool_output_and_prose_never_abort_a_healthy_session
+    )
     r.record("usage_limit_user_message_names_reset_utc", test_usage_limit_user_message_names_the_reset_in_utc)
     r.record(
         "usage_limit_parent_message_names_earliest_reset",

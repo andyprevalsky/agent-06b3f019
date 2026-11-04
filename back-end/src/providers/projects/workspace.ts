@@ -215,6 +215,11 @@ async function restoreCheckout(ctx: RestoreContext, bundlePath: string | null): 
     if (ws.startedFromSnapshot === true) return refreshSnapshotCheckout(ctx);
     report.checkout.source = 'existing';
     report.warnings.push('Workspace already present; kept its branch and local work');
+    // The clone URL carries the credential resolved now (a rotated GITHUB_TOKEN);
+    // a paused session's origin still holds the one from its first clone.
+    if (ws.cloneUrl && (await git(ctx, `remote set-url origin ${shq(ws.cloneUrl)}`)).exitCode) {
+      report.warnings.push('Workspace origin could not be refreshed');
+    }
     await readHead(ctx);
     return false;
   }

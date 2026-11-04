@@ -6,7 +6,7 @@
 
 import { WebSocketServer } from "ws";
 import { execFileSync, execSync, spawn } from "child_process";
-import { randomUUID, timingSafeEqual } from "crypto";
+import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import {
   appendFileSync,
   copyFileSync,
@@ -50,6 +50,15 @@ const GOAL = process.env.CLAUDE_CODE_GOAL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CLAUDE_CODE_CREDENTIALS = process.env.CLAUDE_CODE_CREDENTIALS;
 const CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+// Which leased credential this sandbox holds, as a digest (never the token):
+// a rejected login names it so the backend can tell an expired or
+// since-replaced token from a revoked one (back-end codeLoginRejection.ts).
+const CREDENTIAL_FINGERPRINT = CLAUDE_CODE_OAUTH_TOKEN
+  ? createHash("sha256")
+      .update(CLAUDE_CODE_OAUTH_TOKEN)
+      .digest("hex")
+      .slice(0, 16)
+  : null;
 // Provider fast mode is the spawning agent's speed request (CLAUDE_CODE_SPEED);
 // CLAUDE_CODE_FAST_MODE=1 is the legacy spelling. Never a cache switch.
 const CLAUDE_CODE_FAST_MODE =
@@ -881,6 +890,9 @@ function emitClaudeMessage(message) {
         type: "cli_message",
         raw_type: "assistant.api_error",
         cli_message: { type: "assistant_api_error", error: message.error },
+        ...(message.error === "authentication_failed" && CREDENTIAL_FINGERPRINT
+          ? { credential: CREDENTIAL_FINGERPRINT }
+          : {}),
       });
     }
     const content = message.message?.content || [];
