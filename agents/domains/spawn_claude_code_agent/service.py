@@ -21,6 +21,7 @@ from temporalio.exceptions import ApplicationError
 from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_DRAIN_YIELD_STATUS,
     CODE_AGENT_ERROR_RETRY_LIMIT,
+    CODE_AGENT_ERRORS_HEARTBEAT_KEY,
     CODE_AGENT_PAUSED_STATUS,
     CODE_AGENT_RESIZE_YIELD_REASON,
     CODE_AGENT_USAGE_LIMIT_STATUS,
@@ -29,7 +30,8 @@ from domains.spawn_claude_code_agent.config import (
     CODE_SESSION_KEEPALIVE_INTERVAL_S,
     CODE_SESSION_RESIZE_HEARTBEAT_S,
     DRAIN_CHECK_INTERVAL_S,
-    E2B_COST_CENTS_PER_SECOND,
+    E2B_COST_CENTS_PER_VCPU_SECOND,
+    E2B_DEFAULT_SANDBOX_VCPUS,
     ECHO_SUPPRESS_S,
     FATAL_ERROR_PATTERNS,
     MAX_UNCHANGED_OUTPUTS,
@@ -1157,6 +1159,7 @@ async def _run_agentic_loop(
 
     loop_start = loop_started_at if loop_started_at is not None else safe_time()
     last_status_update = safe_time()
+    last_status_progress: tuple[int, Optional[int]] = (0, 0 if code_provider == "codex" else None)
     last_drain_check = 0.0
     last_keepalive = safe_time()
 
@@ -1465,20 +1468,23 @@ async def _run_agentic_loop(
 
             await flush_transcript()
 
-            if safe_time() - last_status_update >= 30:
-                elapsed_int = int(elapsed)
+            # A status row only when the reported progress changed: elapsed time
+            # is derivable from started_at, and a row per interval grows the
+            # tool call's lifecycle rows (and their per-write scan) with run time.
+            progress = (interaction_count, completed_codex_turns if code_provider == "codex" else None)
+            if progress != last_status_progress and safe_time() - last_status_update >= 30:
                 await save_claude_code_message(
                     agent_id=agent_id,
-                    title=f"Claude Code working ({elapsed_int}s)",
+                    title="Claude Code working",
                     task_id=task_id,
-                    message=f"Elapsed: {elapsed_int}s, Interactions: {interaction_count}",
+                    message=f"Interactions: {interaction_count}",
                     status=MessageStatus.FINISHED,
                     action_type="agent_observation",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
-                    completed_turns=completed_codex_turns if code_provider == "codex" else None,
+                    completed_turns=progress[1],
                 )
-                action_summary.append(f"Status update at {elapsed_int}s")
+                last_status_progress = progress
                 last_status_update = safe_time()
 
             await asyncio.sleep(0.1)
@@ -2659,8 +2665,13 @@ def build_usage_items(
     model_pricing: Dict[str, Any],
     execution_time_ms: float,
     claude_code_usage: Optional[Dict[str, Any]] = None,
+    code_agent_meta: Optional[Dict[str, Any]] = None,
 ) -> list[Dict[str, Any]]:
-    """Build standardized usage items for cost tracking."""
+    """Build standardized usage items for cost tracking.
+
+    ``code_agent_meta`` prices the sandbox: its ``sandbox_size`` vCPUs (C16),
+    and nothing for a run on the user's own Mac (``target`` "local").
+    """
     usage_items: list[Dict[str, Any]] = []
 
     if total_input_tokens > 0 or total_output_tokens > 0:
@@ -2700,7 +2711,14 @@ def build_usage_items(
                 }
             )
 
-    e2b_cost_cents = round((execution_time_ms / 1000) * E2B_COST_CENTS_PER_SECOND, 4)
+    meta = code_agent_meta or {}
+    if meta.get("target") == "local":
+        return usage_items
+    size = meta.get("sandbox_size") if isinstance(meta.get("sandbox_size"), dict) else {}
+    vcpus = size.get("cpu")
+    if not isinstance(vcpus, (int, float)) or isinstance(vcpus, bool) or vcpus <= 0:
+        vcpus = E2B_DEFAULT_SANDBOX_VCPUS
+    e2b_cost_cents = round((execution_time_ms / 1000) * E2B_COST_CENTS_PER_VCPU_SECOND * vcpus, 4)
     usage_items.append(
         {
             "type": "service",
@@ -2710,6 +2728,11 @@ def build_usage_items(
     )
 
     return usage_items
+
+
+def _sandbox_usage_items(code_agent_meta: Dict[str, Any], started_at: float) -> list[Dict[str, Any]]:
+    """Usage of a run that ends without a verifier call: its sandbox time only."""
+    return build_usage_items(0, 0, "", {}, (safe_time() - started_at) * 1000, code_agent_meta=code_agent_meta)
 
 
 # ---------------------------------------------------------------------------
@@ -3201,23 +3224,47 @@ def _no_credential_result(
     }
 
 
-def _raise_bounded_activity_error(error: BaseException) -> None:
-    """Re-raise an activity error; stop Temporal retrying it after the error limit.
+def _activity_errors_so_far() -> int:
+    """How many errors earlier attempts of this activity raised (from their heartbeats).
+
+    Worker deaths and heartbeat timeouts raise nothing, so they never count.
+    """
+    if not activity.in_activity():
+        return 0
+    for detail in activity.info().heartbeat_details or ():
+        if isinstance(detail, dict):
+            count = detail.get(CODE_AGENT_ERRORS_HEARTBEAT_KEY)
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                return count
+    return 0
+
+
+def _bounded_activity_error(error: BaseException, errors: int) -> BaseException:
+    """The error to raise when this activity has raised ``errors`` errors in total.
 
     Retries are otherwise unlimited (worker crashes and deploys never end a code
-    session), so a deterministic failure must not loop forever.
+    session), so a deterministic failure must not loop forever: the
+    ``CODE_AGENT_ERROR_RETRY_LIMIT``-th error the activity itself raises is
+    non-retryable. Outside an activity nothing retries and the error is final.
     """
     if (
         activity.in_activity()
-        and activity.info().attempt >= CODE_AGENT_ERROR_RETRY_LIMIT
+        and errors >= CODE_AGENT_ERROR_RETRY_LIMIT
         and not (isinstance(error, ApplicationError) and error.non_retryable)
     ):
-        raise ApplicationError(
+        final = ApplicationError(
             extract_error_message(error),
             type=type(error).__name__,
             non_retryable=True,
-        ) from error
-    raise error
+        )
+        final.__cause__ = error
+        return final
+    return error
+
+
+def _error_ends_the_run(error: BaseException) -> bool:
+    """Whether no later attempt of this activity will run after ``error``."""
+    return not activity.in_activity() or (isinstance(error, ApplicationError) and error.non_retryable)
 
 
 # ---------------------------------------------------------------------------
@@ -3364,6 +3411,12 @@ async def spawn_claude_code_activity(
     log_collector: Optional[SandboxLogCollector] = None
     session_record: Optional[Dict[str, Any]] = None
     session_heartbeats = contextlib.ExitStack()
+    # Every heartbeat carries how many errors this activity raised so far, so
+    # the retry budget counts only those, never worker deaths (see
+    # _bounded_activity_error). Entered before anything can heartbeat.
+    retry_state: Dict[str, Any] = {CODE_AGENT_ERRORS_HEARTBEAT_KEY: _activity_errors_so_far()}
+    retry_heartbeats = contextlib.ExitStack()
+    retry_heartbeats.enter_context(heartbeat_resume_details(retry_state))
     generation_yield = not (isinstance(resume_session, dict) and resume_session.get("generation_yield") is False)
     # A retry's heartbeat session is newer than the scheduled resume_session: the
     # earlier attempt may have replaced an unreachable sandbox with a fresh one.
@@ -3603,7 +3656,9 @@ async def spawn_claude_code_activity(
         # throttle interval, so nothing may heartbeat before the session rides
         # along, and the session must ride along before anything else can fail:
         # a crash in either window would hide the sandbox from the retry.
-        session_heartbeats.enter_context(heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}))
+        session_heartbeats.enter_context(
+            heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}, retry_state)
+        )
         safe_heartbeat("Claude Code sandbox attached")
 
         log_collector = SandboxLogCollector(sandbox_id, agent_id, task_id)
@@ -3869,7 +3924,7 @@ async def spawn_claude_code_activity(
                 "task_id": task_id,
                 "ws_url": ws_url,
                 "execution_time_ms": (safe_time() - start_time) * 1000,
-                "usage_items": [],
+                "usage_items": _sandbox_usage_items(code_agent_meta, start_time),
                 "structured_response": None,
                 "output_files": close_data.get("output_files", []),
                 "code_provider": code_provider,
@@ -3975,7 +4030,7 @@ async def spawn_claude_code_activity(
                 "task_id": task_id,
                 "ws_url": ws_url,
                 "execution_time_ms": (safe_time() - start_time) * 1000,
-                "usage_items": [],
+                "usage_items": _sandbox_usage_items(code_agent_meta, start_time),
                 "structured_response": None,
                 "output_files": output_files,
                 "code_provider": code_provider,
@@ -4098,6 +4153,7 @@ async def spawn_claude_code_activity(
             model_pricing,
             execution_time_ms,
             claude_code_usage,
+            code_agent_meta=code_agent_meta,
         )
 
         if log_collector:
@@ -4226,19 +4282,32 @@ async def spawn_claude_code_activity(
             "code_provider": code_provider,
             "code_session": code_session_facts,
             "code_agent": paused_code_agent,
+            "usage_items": _sandbox_usage_items(code_agent_meta, start_time) if task_id else [],
         }
 
     except Exception as e:
+        retry_state[CODE_AGENT_ERRORS_HEARTBEAT_KEY] += 1
+        error = _bounded_activity_error(e, retry_state[CODE_AGENT_ERRORS_HEARTBEAT_KEY])
+        final = _error_ends_the_run(error)
         logger.error(
             "[ClaudeCode] Automation failed",
             agent_id=agent_id,
             task_id=task_id,
             error=extract_error_message(e),
             error_type=type(e).__name__,
+            activity_errors=retry_state[CODE_AGENT_ERRORS_HEARTBEAT_KEY],
+            final=final,
         )
 
         if log_collector:
             await log_collector.stop()
+
+        if not final:
+            # Temporal retries this attempt. The sandbox stays live and rides on
+            # this last heartbeat (with the error count), so the retry reattaches
+            # to the running CLI instead of pausing it and restarting the goal.
+            safe_heartbeat("Code agent error; Temporal retries the attempt")
+            raise e
 
         error_context = f"Failed during: {action_summary[-1] if action_summary else 'initialization'}"
         error_message = build_context_summary(
@@ -4308,7 +4377,8 @@ async def spawn_claude_code_activity(
                     error=str(cleanup_error),
                 )
 
-        _raise_bounded_activity_error(e)
+        raise error
 
     finally:
         session_heartbeats.close()
+        retry_heartbeats.close()

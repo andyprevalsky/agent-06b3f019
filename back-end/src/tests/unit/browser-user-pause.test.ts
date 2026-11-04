@@ -48,7 +48,9 @@ async function main() {
   function fixture(rows: Message[], generation = 'generation') {
     const events: string[] = [];
     const tx = {
-      $queryRaw: async () => {
+      $queryRaw: async (query: TemplateStringsArray) => {
+        // The tool call's lifecycle-row lookup; every other raw query is a lock.
+        if (query.join('').includes('FROM "Message"')) return rows.map(({ id }) => ({ id }));
         events.push('lock');
         return [];
       },
