@@ -100,6 +100,25 @@ the staged runner requests `/RCA` on the first failure of every round.
   must pass on the exact current source/plan before the existing merge gates.
 
 
+## AgentCard election (current and future deploys)
+
+The user or deploy operator may explicitly elect to skip the local AgentCard
+lifecycle gate (Step 6a), the production AgentCard lifecycle gate (Step 13c), or
+both. Record the election, affected step and reason as **SKIPPED** in the plan,
+`TEST_REPORT` and deploy scorecard. For the staged local plan, pass
+`--skip-agentcard "<reason>"` to `scripts/deploy_test_plan.py`; a nonempty reason
+is required and only `agentcard-lifecycle` is omitted as SKIPPED/unexecuted.
+For the legacy planner, omit `--agentcard`. No environment bypass is implied.
+For Step 13c, record the explicit election/reason and do not launch the elected
+production task. Keep an explicit skipped AgentCard row visible.
+
+This election changes only those AgentCard gates. All non-AgentCard gates and
+assertions remain required. Preserve original failures, receipts, cleanup
+obligations and financial debts; a skip is never PASS, cleanup proof, a refund
+or settlement. Any already-started operation still requires its normal owned
+cleanup and financial accounting. The exact release-stall exception below
+remains available independently when AgentCard is selected.
+
 ## Sync without restarting the whole deploy
 
 An hourly `/sync` must not become a global stop or reset the deploy's original
@@ -209,8 +228,8 @@ end and stays active for the user's reply. Only the user ends it early, with
 
     /deploy of <branch> is finished: the PR is merged, every applicable
     production lane is verified or has an exact recorded qualified exception,
-    and the final scorecard is posted with READY TO CLOSE before any external
-    provider alerts. Stopping earlier is allowed only when the last message is one
+    and the final scorecard is posted with its actual completion status in the
+    fixed layout. Stopping earlier is allowed only when the last message is one
     of /deploy's defined stops: a prompt, agent-behavior or
     trajectory-injection approval request (Steps 0p/0b/0c) that the
     golden-reference review did not clear; a credential or
@@ -1690,7 +1709,7 @@ in one assistant message with separate parallel Bash tool calls:
 
 1. CodeRabbit review waiter (Step 9; already running since the freeze push).
 2. Smoke benchmarks (Step 6; skip only under its documented classifier).
-3. AgentCard lifecycle (Step 6a; skip only when its classifier is empty).
+3. AgentCard lifecycle (Step 6a; omit when its classifier is empty or an explicit AgentCard election is recorded).
 4. Semantic tests (Step 6b; complete suite when selected).
 5. Claude Code E2B sandbox smoke (Step 6c; complete suite when selected).
 
@@ -1888,7 +1907,7 @@ Final report (under 200 words):
 
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
-- Skipping or disabling tests, except the standing AgentCard release-stall exception in Step 6a (sandbox AND production) and two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
+- Skipping or disabling tests, except an explicit AgentCard election above, the standing AgentCard release-stall exception in Step 6a (sandbox AND production) and two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
 
 Qualified handoff/provider exceptions under the controlling failure policy
 change deploy disposition only; they do not weaken the original task, its
@@ -1940,8 +1959,9 @@ Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree
 
 ## Step 6a: AgentCard sandbox lifecycle gate
 
-Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Otherwise, start this as
-one Group 4 lane alongside smoke, semantic, and code review. Its local benchmark
+Skip when `$CHANGED_AGENTCARD_PAYMENT` is empty or Step 6a is explicitly elected
+SKIPPED under **AgentCard election** above. Otherwise, start this as one Group 4
+lane alongside smoke, semantic, and code review. Its local benchmark
 runner owns one isolated backend/frontend/worker/Postgres stack, so it never
 tears down or contends with the shared Step 5 stack used by semantic tests.
 The four payment tasks stay sequential inside this lane because they mutate one
@@ -2812,7 +2832,9 @@ open; diagnose and repair it through the normal RCA/deploy loop.
 SHA (Step 13a step 1), launch the Step 13a functional probes and log scan,
 Step 13b production semantics (once Vercel/Fly surfaces it exercises are also
 live) and Step 13c in separate parallel tool calls. Each applicable lane,
-including the Mac release, remains a hard gate; a red probe blocks completion.
+including the Mac release, remains a hard gate subject to its documented
+exceptions; Step 13c may be explicitly elected SKIPPED under **AgentCard election**.
+A red non-skipped probe blocks completion.
 
 Prefix each marker above with
 `python3 scripts/record_factory_event.py`. For example, the full Fly start is
@@ -3335,8 +3357,10 @@ SEMANTIC_WORKERS=1 bash front-end/scripts/run-semantic-tests.sh --prod chat-life
 
 ## Step 13c: AgentCard production lifecycle gate
 
-Skip when `$CHANGED_AGENTCARD_PAYMENT` is empty. The standing release-stall
-exception in Step 6a also applies to this production gate automatically and
+Skip when `$CHANGED_AGENTCARD_PAYMENT` is empty or Step 13c is explicitly elected
+SKIPPED under **AgentCard election** above. Record its reason without a passing
+production result or settlement claim. The standing release-stall exception in
+Step 6a also applies to this production gate automatically and
 without further approval. Run after both the backend
 and frontend merged commits are live. Launch it concurrently with the semantic
 gate because the two checks are isolated:
@@ -3392,7 +3416,7 @@ that waived result. If the process was forcibly killed, recover the printed
 agent's execution/browser resources before assessing the financial exception.
 
 After every applicable production deployment, health, semantic, release, and
-AgentCard gate has passed or has this explicitly permitted warning skip, close
+AgentCard gate has passed or has an explicit election or permitted warning skip, close
 the production-verification lifecycle:
 
 ```bash
@@ -3429,103 +3453,51 @@ events to `main`'s `agents/benchmarks/history/factory_events.jsonl` (see the
 publication rule before Step 0i). `/factory-review` then rebuilds /deploy and /RCA
 timing from the repo on any machine.
 
-After the new branch is created, the final message is only this scorecard in a
-`text` block, with no prose before or after it. Fill every value from recorded
-evidence:
+After the new branch is created, publish only the deploy scorecard using the
+stable `deploy-summary-v1` template in
+`.claude/shared/report-display-format.md` and populate
+`.claude/shared/deploy-scorecard-template.html`. Preserve the user-approved structure
+shown at https://boxes.dev/visuals/vis_1997f1fd05813cc9be440f44d5700ffe:
 
-Apply the controlling scorecard-freshness rule before every publication or
-refresh: verify the latest workspace merge binding, rebuild from its matching
-run, and update the latest-card URL and completion receipt together. Never
-reuse an older release's elapsed time for a newer update from this workspace.
+1. Title with the actual colored **SHIPPED / NOT SHIPPED** status.
+2. Elapsed deploy time immediately below the title.
+3. One **WHAT DEPLOYED** box.
+4. One cumulative **DELEGATED** box, retaining failure descriptions and repair
+   links across refreshes/resumes; independent delegated repairs do not block
+   this deploy.
+5. One **EXTERNAL PROVIDER FAILURES** box with every unresolved alarming
+   `🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING`
+   alert, affected checks and evidence. Qualified provider failures remain
+   non-blocking.
+6. One **FOLLOWUPS** box only when follow-ups exist, including unshipped work,
+   skips, overrides, retained cleanup obligations and unsettled funds.
+7. Lastly, concise colored per-stage bars on **one shared elapsed-time axis**,
+   showing actual overlaps, retries and gaps.
 
-- Lane times come from `.context/deploy-runs/<run-id>/stages.jsonl`: sum every
-  attempt of the lane (passed, failed, interrupted) and show the run count and
-  failure causes. Production lane times come from `.context/factory-events.jsonl`
-  and also cover every attempt. Parallel lanes overlap.
-- `⏱` is the total from `metadata.json` `started_at` to the `deploy outcome` event,
-  broken down so it adds up: active gate/review/prod time (union of intervals) +
-  each blocked window + other time (investigation, fixes, waiting on the user).
-- `💸` is the summed benchmark `cost_cents` of this deploy's runs.
+This explicit user-approved layout supersedes older lane-table layouts and
+provider-alert placement rules. Do not show production/validation hashes,
+observed/producer bookkeeping noise or a second deploy-owner-complete line.
+Keep that provenance in the underlying evidence. A benchmark card may be linked
+as evidence, but must never replace this deploy card or its timeline. Values,
+applicable stage rows and attempt intervals may update; do not redesign the
+fixed structure ad hoc.
 
-Lane marks:
+Apply the existing scorecard-freshness rule before every publication: rebuild
+from the matching current deploy, preserve the original durable start and
+actual outcome timestamps, and update the latest-card URL and completion
+receipt together. Never reuse a prior release's elapsed time. Stage intervals
+come from `stages.jsonl` and production factory events, including failed and
+interrupted attempts; parallel intervals overlap on the same axis. Missing
+boundaries stay explicitly unmeasured, never invented. Preserve costs and
+source/proof bindings in the underlying evidence.
 
-- `✅` means the lane ran and passed.
-- `❌` means failed.
-- `⚠️` marks a recorded skip, delegated waiver, provider exception or override; show its reason and never call it PASS.
-- Omit lanes that did not apply, except TEMPORAL, which is always shown.
-
-TEMPORAL reports Step 13–13ab:
-
-- After a cutover: old → new generation, workflows drained, and force-migrated
-  count.
-- Otherwise: `no cutover needed` and the live pointer generation, read with
-  Step 13's queue-pointer `--read` query.
-
-SHIPPED WITH has one `▲` row per warning, override, skip, substitution, or
-unreviewed commit. Each row shows the wall time it wasted: stopped, failed or
-superseded attempts, review cycles that produced no review, retries, and detours
-around it. Use `0s` when it cost nothing, add a total row, or write `▲ none`.
-
-NOT SHIPPED has one `✖` row per piece of this workspace's work that is absent
-from `origin/main` after the merge, each with a concise explanation of what the
-change is and why it was not included:
-
-- Non-ignored uncommitted or untracked changes.
-- Reverted or unmerged commits on branches this workspace created or pushed.
-
-Ignore other workspaces' branches. Write `✖ none` if there is nothing.
-
-Show the cumulative **DELEGATED** list (failure description and repair-agent link only), retaining entries across refreshes and resumes. Delegated repairs do not block this deploy.
-
-After the `READY TO CLOSE` line, append all unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING** alerts with affected checks and evidence. These are the very last scorecard section and are non-blocking.
-
-Use a `READY TO CLOSE` line: `✅` when this deploy's required work is complete, including qualified exceptions; `⚠️` plus the
-open items when required work remains (unsettled prod state or intended unshipped
-rows); independent delegated repairs and qualified external exceptions do not
-prevent READY TO CLOSE; `❌` when the deploy is not complete.
-
-```text
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 🚀 DEPLOY SCORECARD                                  ✅ SHIPPED
- #1456 · bounded Hub index repair · 014727c → main
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- STATIC     ✅  lint · tsc · structural · 45 gates            4m55s
- COVERAGE   ✅  BE 190/190 domains · 89.2% lines             11m10s
- LIVE       ✅  creds 6/7 · amplitude · failover · seed 156MB  2m15s
- SMOKE      ✅  8/8 benches                                  18m14s
- SEMANTIC   ✅  8/8 UI · latency p50 0.7–1.9s                10m06s
- SANDBOX    ✅  Claude Code E2B 56/56                           37s
- REVIEW     ⚠️  3 cycles · 1 fixed · last skipped (quota)    12m14s
-────────────────────────────────────────────────────────────────
- PROD       ✅  Render live · 14/14 probes · 0 log errors     6m23s
-            ✅  semantic 6/6 · AgentCard $1 → refunded       11m14s
- TEMPORAL   ✅  no cutover needed · gen 7d9946f524be live
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ⏱ <total> = <active> active + <blocked> blocked + <other> other
- 💸 $1.68 LLM   🌿 fix/hub-index-repair-bounded-2
- 🔗 github.com/Rose-Ai-Labs/rose/pull/1456
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ▲ SHIPPED WITH                                          ⌛ wasted
- ▲ last review cycle skipped · CodeRabbit + Claude quota      4m17s
- ▲ history-ledger revert · GitHub merge conflict              2m27s
- ▲ Anthropic API credits exhausted · warn-only                   0s
- ▲ prod semantic run locally · GH token can't dispatch           0s
-                                                    total     6m44s
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ✖ NOT SHIPPED · this workspace
- ✖ 150ba48a0  smoke history: 30 ledger rows + 10,479 spans · reverted
-   because GitHub flagged a ledger merge conflict
- ✖ worktree   prod AgentCard history rows · uncommitted; landing them
-   would have changed HEAD after review
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- READY TO CLOSE  ✅  nothing left open
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-That example is the PR #1456 deploy. Keep the layout and replace every value. For
-a deploy that stops early, the header reads `❌ BLOCKED · <lane> <result>`, the
-failing lane is listed first, and lanes that never ran are omitted.
-
+WHAT DEPLOYED includes the actual production/Temporal state and verified
+coverage. Every elected AgentCard gate remains **SKIPPED — <reason>**, never
+PASS, cleanup or settlement. Original failures, receipts, delegated repairs,
+financial liabilities and intended unshipped work remain accounted for in the
+fixed boxes. SHIPPED requires the remaining required work to be complete under
+the controlling failure policy and explicit elections; missing validation
+must not become a completion claim.
 
 ### Required post-deploy: cloud-origin local Mac execution and computer use
 

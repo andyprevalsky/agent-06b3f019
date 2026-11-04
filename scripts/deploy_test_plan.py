@@ -45,11 +45,19 @@ PATHS = {
 }
 
 
-def select(template: dict, changed: list[str], result: dict, binding: dict, base: str = 'origin/main') -> dict:
+def select(template: dict, changed: list[str], result: dict, binding: dict, base: str = 'origin/main',
+           skip_agentcard: str | None = None) -> dict:
+    if skip_agentcard is not None and not skip_agentcard.strip():
+        raise ValueError('AgentCard opt-out requires a nonempty reason')
     gates, omitted = [], []
     for recipe in template['gates']:
         gate = dict(recipe)
         category = gate.get('category', gate['name'])
+        if category == 'agentcard-lifecycle' and skip_agentcard is not None:
+            omitted.append({'gate': gate['name'], 'category': category,
+                            'reason': 'explicit AgentCard opt-out: ' + skip_agentcard.strip(),
+                            'disposition': 'SKIPPED', 'executed': False})
+            continue
         if category in {'eslint', 'format'} and any(
                 Path(arg).name == 'check_deploy_static.py' for arg in gate['command']):
             command = list(gate['command'])
@@ -167,15 +175,22 @@ def main() -> int:
     workers.add_argument('--inventory', type=Path, help='prepared worker identities; generate full-suite bindings')
     parser.add_argument('--base', default='origin/main')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--skip-agentcard', metavar='REASON',
+                        help='explicitly skip the optional AgentCard lifecycle category, recording why')
     args = parser.parse_args()
+    if args.skip_agentcard is not None and not args.skip_agentcard.strip():
+        parser.error('--skip-agentcard requires a nonempty reason')
     changed = changed_files(args.base, None)
     selected = Selector().select(changed)
     result = {'all': selected.all_lanes, 'reasons': selected.reasons,
               'lanes': {k: sorted(v) for k, v in selected.selected.items()}}
     template = json.loads(args.template.read_text()) if args.template else standard_template()
-    bindings = (generate_bindings(template, json.loads(args.inventory.read_text()), ROOT)
+    binding_template = ({**template, 'gates': [gate for gate in template['gates']
+                         if gate.get('category', gate['name']) != 'agentcard-lifecycle']}
+                        if args.skip_agentcard is not None else template)
+    bindings = (generate_bindings(binding_template, json.loads(args.inventory.read_text()), ROOT)
                 if args.inventory else json.loads(args.workers.read_text()))
-    plan = select(template, changed, result, bindings, base=args.base)
+    plan = select(template, changed, result, bindings, base=args.base, skip_agentcard=args.skip_agentcard)
     write(args.output, plan)
     print(json.dumps({'selected': [g['name'] for g in plan['gates']], 'omitted': plan['omitted']}))
     return 0

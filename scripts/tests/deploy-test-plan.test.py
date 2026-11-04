@@ -57,6 +57,43 @@ class Selection(unittest.TestCase):
         plan=p.select(self.template,['new-language/source'],self.result,self.bindings)
         self.assertEqual(7,len(plan['gates']))
 
+    def test_agentcard_opt_out_records_skip_without_reducing_other_all_categories(self):
+        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
+                                      'command':['true'],'checks':['card']})
+        self.result.update(all=True,reasons=['unmapped source'])
+        plan=p.select(self.template,['new-language/source'],self.result,self.bindings,
+                      skip_agentcard='operator elected no live payment test')
+        self.assertEqual(7,len(plan['gates']))
+        self.assertNotIn('payment',{gate['name'] for gate in plan['gates']})
+        self.assertEqual([{'gate':'payment','category':'agentcard-lifecycle',
+                          'reason':'explicit AgentCard opt-out: operator elected no live payment test',
+                          'disposition':'SKIPPED','executed':False}],plan['omitted'])
+        self.assertEqual('payment',self.template['gates'][-1]['name'])
+
+    def test_agentcard_opt_out_rejects_blank_reason(self):
+        with self.assertRaisesRegex(ValueError,'nonempty reason'):
+            p.select(self.template,[],self.result,self.bindings,skip_agentcard='  ')
+
+    def test_cli_agentcard_opt_out_does_not_require_an_unused_inventory_binding(self):
+        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
+                                      'command':['true'],'checks':['card']})
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); template=root/'template.json'; inventory=root/'inventory.json'; output=root/'plan.json'
+            template.write_text(json.dumps(self.template));inventory.write_text('{}')
+            selected=SimpleNamespace(all_lanes=True,reasons=['unmapped source'],selected=self.result['lanes'])
+            def bindings(actual, *_):
+                self.assertNotIn('payment',{gate['name'] for gate in actual['gates']})
+                return self.bindings
+            with patch.object(sys,'argv',['deploy_test_plan.py','--template',str(template),
+                    '--inventory',str(inventory),'--output',str(output),'--skip-agentcard','user elected skip']), \
+                    patch.object(p,'changed_files',return_value=['new-language/source']), \
+                    patch.object(p.Selector,'select',return_value=selected), \
+                    patch.object(p,'generate_bindings',side_effect=bindings):
+                self.assertEqual(0,p.main())
+            saved=json.loads(output.read_text())
+            self.assertEqual('SKIPPED',saved['omitted'][0]['disposition'])
+            self.assertEqual(7,len(saved['gates']))
+
     def test_unknown_graph_lane_refuses_selection_instead_of_silently_omitting_coverage(self):
         del self.result['lanes']['backend-blackbox']
         for all_lanes in (False, True):
