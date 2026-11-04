@@ -2843,7 +2843,7 @@ async def _reconnect_browser_stack_after_rotation(
         )
 
         # 3. Re-apply the device fingerprint (anti-bot essential on the new IP).
-        if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True):
+        if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", False):
             from helpers.fingerprint_injection import apply_fingerprint_injection
 
             with contextlib.suppress(Exception):
@@ -9043,7 +9043,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     await _install_botsigged_diagnostics(_pw_page, agent_id=agent_id, task_id=task_id)
 
                 t = time.monotonic()
-                fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
+                fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", False)
                 if fingerprint_injection and fingerprint_injection_enabled:
                     from helpers.fingerprint_injection import apply_fingerprint_injection
 

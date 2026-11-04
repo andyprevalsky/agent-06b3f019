@@ -25,6 +25,7 @@ import {
 } from './profileBinding';
 import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 import { steelSessionTimeoutMs } from './sessionLifetime';
+import { fingerprintInjectionEnabled } from './fingerprintSwitch';
 import {
   withSteelLifecycleClaim,
   type SteelNativeEffect,
@@ -228,7 +229,9 @@ export async function createSessionWithContext(
         profileId: profile.profileId, // Use existing profile if available
         persistProfile: profile.persistProfile,
         userAgent:
-          userAgent && envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
+          userAgent &&
+          fingerprintInjectionEnabled() &&
+          envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
             ? userAgent
             : undefined, // Use user's real User-Agent from fingerprint
         useProxy: proxySettings.config,
