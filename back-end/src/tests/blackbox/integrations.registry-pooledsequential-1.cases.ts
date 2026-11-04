@@ -14,6 +14,13 @@ import {
 } from './integrations.compute-rotation-2.cases';
 import { testRotation_userAuthErrorNeverExpiresSiblingAccounts } from './integrations.scoped-auth-expiry.cases';
 import {
+  testLoginWriters_unscopedAuthErrorDisablesNoLogin,
+  testLoginWriters_reportedExpiredOrReplacedLoginIsNotDisabled,
+  testLoginWriters_leaseSkipsExpiredClaudeLoginWithoutDisabling,
+  testLoginWriters_chatRotationDisablesOnlyTheLeasedLogin,
+  testLoginWriters_reportNamingAnotherLoginKindDisablesNothing,
+} from './integrations.login-disable-writers.cases';
+import {
   testRotation_rateLimitWindowIsMonotonic,
   testRotation_gptUserAuthErrorDisablesToken,
   testGptCodeUpload_clearsExpiredAndRateLimitState,
@@ -58,6 +65,26 @@ export function pooledSequentialTestsPart1() {
     {
       name: 'rotation -- user auth_error never expires sibling accounts (S33)',
       fn: testRotation_userAuthErrorNeverExpiresSiblingAccounts,
+    },
+    {
+      name: 'login writers -- an auth_error naming no login disables none (T7)',
+      fn: testLoginWriters_unscopedAuthErrorDisablesNoLogin,
+    },
+    {
+      name: 'login writers -- an expired or re-synced login is not disabled (T7)',
+      fn: testLoginWriters_reportedExpiredOrReplacedLoginIsNotDisabled,
+    },
+    {
+      name: 'login writers -- the lease skips an expired Claude login without disabling (T7)',
+      fn: testLoginWriters_leaseSkipsExpiredClaudeLoginWithoutDisabling,
+    },
+    {
+      name: 'login writers -- chat rotation disables only the leased login (T7)',
+      fn: testLoginWriters_chatRotationDisablesOnlyTheLeasedLogin,
+    },
+    {
+      name: 'login writers -- a report naming another login kind disables nothing (T7)',
+      fn: testLoginWriters_reportNamingAnotherLoginKindDisablesNothing,
     },
     {
       name: 'rotation -- direct auth_error falls back to pool for Claude Code',

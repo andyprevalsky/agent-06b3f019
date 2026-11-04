@@ -658,9 +658,11 @@ async def mock_mark_compute_token_rate_limited_activity(
     source: str,
     user_id: str,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     cooldown_seconds: int = 5 * 60,
     rate_limited_until: Optional[str] = None,
     failure_reason: Optional[str] = None,
+    credential: Optional[str] = None,
 ) -> None:
     return None
 
@@ -8560,6 +8562,7 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
             "accountId": "acct-1",
             "source": "pool",
             "poolTokenId": "pool-1",
+            "integrationId": None,
             "lineageKey": "agent:agent-run-1",
             "agentId": "agent-run-1",
             "rootAgentId": "agent-run-1",
@@ -13218,12 +13221,71 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
         activity_names = [c[0] for c in fake.activity_calls]
         assert "mark_compute_token_rate_limited_activity" in activity_names
         mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
-        assert mark_call[1] == ["claude", "pool", "user-1", "pool-id-1", 5 * 60, None, "auth_error"]
+        from helpers.llm import credential_fingerprint
+
+        assert mark_call[1] == [
+            "claude", "pool", "user-1", "pool-id-1", None, 5 * 60, None, "auth_error",
+            credential_fingerprint("some-token"),
+        ]
         assert "release_compute_token_lineage_activity" in activity_names
         fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
         assert fetch_call[1][-1] == "gpt"
     finally:
         _restore_workflow(original)
+
+
+async def test_workflow_auth_error_report_names_the_leased_login():
+    """T7: the workflow's auth_error report reaches the real activity signature
+    with the failure reason, the leased integration and the held token's
+    fingerprint. S33 inserted ``integration_id`` into the activity's positional
+    parameters; the workflow kept the old layout, so ``auth_error`` arrived as
+    ``rate_limited_until`` and ``300`` as the integration id, and before S33 the
+    report named no login at all (prod expired every claude_code/gpt_code row).
+    """
+    import inspect
+    from helpers.llm import mark_compute_token_rate_limited_activity as real_mark
+
+    for token_type, error_kw in (("claude", "claude_token_error"), ("gpt", "gpt_token_error")):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "a-t7"
+        wf.user_id = "user-t7"
+        wf.input_cents_per_1k = 0.0
+        wf.output_cents_per_1k = 0.0
+        fake = _FakeWorkflowModule()
+        fake.activity_returns["fetch_compute_token_activity"] = None
+        original = _patch_workflow(fake)
+        try:
+            assert wf._remember_compute_token(
+                {
+                    "type": token_type,
+                    "accessToken": f"held-{token_type}-token",
+                    "source": "user",
+                    "integrationId": f"integration-{token_type}-t7",
+                    "lineageKey": "agent:a-t7",
+                }
+            )
+            await wf._on_tokens(
+                tokens_in_delta=1,
+                tokens_out_delta=1,
+                actual_model="google/gemini-3-flash-preview",
+                call_site="test",
+                **{error_kw: "auth_error"},
+            )
+            mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
+            bound = inspect.signature(real_mark).bind(*mark_call[1])
+            bound.apply_defaults()
+            args = bound.arguments
+            assert args["token_type"] == token_type and args["source"] == "user", args
+            assert args["user_id"] == "user-t7", args
+            assert args["failure_reason"] == "auth_error", f"{token_type}: {args}"
+            assert args["rate_limited_until"] is None, f"{token_type}: {args}"
+            assert args["cooldown_seconds"] == 5 * 60, f"{token_type}: {args}"
+            assert args["integration_id"] == f"integration-{token_type}-t7", f"{token_type}: {args}"
+            from helpers.llm import credential_fingerprint
+
+            assert args["credential"] == credential_fingerprint(f"held-{token_type}-token"), args
+        finally:
+            _restore_workflow(original)
 
 
 async def test_workflow_on_tokens_transient_error_keeps_claude_token():
@@ -13375,7 +13437,12 @@ async def test_workflow_on_tokens_rotates_gpt_token_on_auth_error():
         activity_names = [c[0] for c in fake.activity_calls]
         assert "mark_compute_token_rate_limited_activity" in activity_names
         mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
-        assert mark_call[1] == ["gpt", "pool", "user-1", "gpt-pool-1", 5 * 60, None, "auth_error"]
+        from helpers.llm import credential_fingerprint
+
+        assert mark_call[1] == [
+            "gpt", "pool", "user-1", "gpt-pool-1", None, 5 * 60, None, "auth_error",
+            credential_fingerprint("gpt-token"),
+        ]
         assert "release_compute_token_lineage_activity" in activity_names
         fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
         assert fetch_call[1][-1] == "claude"
@@ -14353,6 +14420,7 @@ async def run_all_tests():
     )
     await r.record_async("wf_get_model_pricing_default", test_workflow_get_model_pricing_unknown_uses_default)
     await r.record_async("wf_on_tokens_rotates_claude", test_workflow_on_tokens_rotates_claude_token_on_auth_error)
+    await r.record_async("wf_auth_error_report_names_leased_login", test_workflow_auth_error_report_names_the_leased_login)
     await r.record_async(
         "wf_rotate_compute_token_releases_lineage",
         test_workflow_rotate_compute_token_releases_lineage_and_refetches,
