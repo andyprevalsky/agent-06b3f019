@@ -46,6 +46,7 @@ class CoordinatorFixture:
             _write_owner_record=self.write_record,
             _read_cleanup_receipt=local._read_cleanup_receipt,
             failed_tasks_from_run=local.failed_tasks_from_run,
+            service_base_environ=local.service_base_environ,
         )
 
     def write_record(self, path, value):

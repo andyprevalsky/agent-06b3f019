@@ -10876,6 +10876,86 @@ def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     return scores[-1]
 
 
+def _webdecoy_verify_detections(data: dict) -> Optional[List[str]]:
+    """``category: reason`` of every captured FCaptcha ``/api/verify`` response, in order.
+
+    ``/api/score`` answers with the bare score; the detections behind it arrive on
+    the verify responses. A flag can fire on one verify and not the next (the
+    2026-11-04 datacenter exit only showed on the first), so keep them all.
+    """
+    responses: List[Tuple[int, List[str]]] = []
+    for index_path in _webdecoy_network_recording_paths(data):
+        try:
+            entries = json.loads(index_path.read_text()).get("entries", [])
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict) or "fcaptcha.webdecoy.com/api/verify" not in str(entry.get("url") or ""):
+                continue
+            body_file = entry.get("body_file")
+            if str(entry.get("method") or "").upper() != "POST" or not isinstance(body_file, str) or not body_file:
+                continue
+            try:
+                body = json.loads((index_path.parent / body_file).read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            detections = body.get("detections") if isinstance(body, dict) else None
+            if not isinstance(detections, list):
+                continue
+            reasons = [
+                f"{item.get('category')}: {item.get('reason')}"
+                for item in detections
+                if isinstance(item, dict) and item.get("reason")
+            ]
+            responses.append((int(entry.get("response_ts_ms") or entry.get("request_ts_ms") or 0), reasons))
+    if not responses:
+        return None
+    ordered: List[str] = []
+    for _ts, reasons in sorted(responses, key=lambda item: item[0]):
+        ordered.extend(reason for reason in reasons if reason not in ordered)
+    return ordered
+
+
+def _webdecoy_browser_session(data: dict) -> Dict[str, Any]:
+    """Provider and exit of the terminal browser session the score was measured on."""
+    session: Dict[str, Any] = {}
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        browser = metadata.get("browser_session_metadata") if isinstance(metadata, dict) else None
+        if isinstance(browser, dict) and browser.get("provider"):
+            session = {"provider": browser.get("provider"), "proxy_source": browser.get("proxy_source")}
+    return session
+
+
+def _webdecoy_score_evidence(data: dict) -> Dict[str, Any]:
+    """Everything needed to compare one FCaptcha score with another, pass or fail.
+
+    The gated number comes from a third-party detector and depends on the browser
+    provider/exit as much as on our input synthesis, so every attempt records the
+    score, the engine version, the detections behind it and the browser session.
+    """
+    exact_score = _webdecoy_exact_score_from_recordings(data)
+    structured_score = _webdecoy_structured_score(data)
+    visible_scores = _webdecoy_visible_risk_scores(_agent_data_search_text(data))
+    if exact_score is not None:
+        score, source = exact_score, "captured API"
+    elif structured_score is not None:
+        score, source = structured_score, "structured output"
+    elif visible_scores:
+        score, source = visible_scores[-1], "visible"
+    else:
+        score, source = None, None
+    session = _webdecoy_browser_session(data)
+    return {
+        "fcaptcha_score": score,
+        "fcaptcha_score_source": source,
+        "fcaptcha_engine_version": _webdecoy_engine_version_from_recordings(data),
+        "fcaptcha_detections": _webdecoy_verify_detections(data),
+        "browser_provider": session.get("provider"),
+        "browser_proxy_source": session.get("proxy_source"),
+    }
+
+
 def _webdecoy_parse_score_value(raw_score: object) -> Optional[float]:
     """Parse a structured FCaptcha risk score (numeric or numeric string)."""
     if isinstance(raw_score, bool):
@@ -10990,7 +11070,8 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # distinct egress IPs (2026-07-18..07-26); the v1.18.0 release moved the same
     # unchanged client to 0.18296 while every reported categoryScore sat at 0.
     if final_score > WEBDECOY_RISK_RATCHET:
-        engine_version = _webdecoy_engine_version_from_recordings(data)
+        evidence = _webdecoy_score_evidence(data)
+        engine_version = evidence["fcaptcha_engine_version"]
         version_note = (
             f" [FCaptcha engine v{engine_version}; a version change here means the third-party"
             f" detector was recalibrated — compare against the version on the last passing run"
@@ -10998,9 +11079,14 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
             if engine_version
             else ""
         )
+        detections = evidence["fcaptcha_detections"]
+        evidence_note = (
+            f" [detections: {'; '.join(detections) if detections else 'none captured'}"
+            f"; browser {evidence['browser_provider'] or 'unknown'}/{evidence['browser_proxy_source'] or 'unknown'}]"
+        )
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "
-            f"(lower = more human; this gate only ratchets down, never up){version_note}"
+            f"(lower = more human; this gate only ratchets down, never up){version_note}{evidence_note}"
         )
     return True, None
 
@@ -15497,6 +15583,7 @@ async def _run_single_task_as_run_user(
         # override a pass. evaluate_task still runs so post-completion checks
         # (expected tools, progress score) can provide additional diagnostics.
         passed, failure_reason = evaluate_task(task, data, approvals_triggered)
+        evaluator_evidence = _webdecoy_score_evidence(data) if task.name == BIOMETRICS_WEBDECOY_TASK_NAME else None
         if early_fail_reason:
             passed = False
             if not failure_reason:
@@ -15834,6 +15921,7 @@ async def _run_single_task_as_run_user(
             cost_cents=round(cost_cents, 2),
             message_count=len(messages),
             failure_reason=failure_reason,
+            evaluator_evidence=evaluator_evidence,
             approvals_triggered=approvals_triggered,
             approvals_resolved=approvals_resolved,
             cache_read_input_tokens=cache_read_input_tokens,
