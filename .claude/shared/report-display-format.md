@@ -125,10 +125,43 @@ ends after 15 minutes of comparable history; never reuse cached rates.
 After publishing, atomically update the existing latest-card URL and fixed
 checkpoint fields together; do not create competing URL aliases.
 
-## Stable deploy scorecard template: deploy-summary-v1
+## Work versus waiting — all current and future agents
+
+Every scorecard and timeline must distinguish **active agent work**, **running
+automation**, and **waiting**. Do not combine these as "fixes / other". Active
+work requires actual recorded implementation, diagnosis, coordination or
+reporting intervals. A running test or unattended job is automation, not proof
+that an agent is actively working. Token use or an open process proves neither.
+
+Record each wait's start, end and specific reason: user answer/approval,
+credits/quota, provider response or rollout, queue, dependency, or other
+inactivity. Keep the original clock. Close an agent's active-work interval when
+it stops working; if independent work continues, record that on its own lane.
+Never hide a wait inside a repair bar or count overlapping work twice.
+
+Unrecorded time belongs **only under waiting**, labeled **Wait — reason
+unrecorded**, never under active work. This is an accounting convention, not
+proof that a particular external system caused the gap. Preserve that limit
+for historical records. Future agents must record mode changes as they happen
+so unexplained gaps do not accumulate. Do not invent retrospective activity,
+credit shortages, user delays or start/end timestamps to fill missing history.
+
+For factory workflows, use the existing `scripts/record_factory_event.py`
+`work-start`/`work-finish` and `wait-start`/`wait-finish` events. Supply the same
+`--detail request_id=<interval-id>` and `--detail run_id=<original-run-id>` on
+both ends, plus a short nonsecret `--detail reason=<reason>`. Work values are
+`implementation`, `diagnosis`, `coordination`, `reporting`; wait values are
+`user`, `credits`, `provider`, `queue`, `dependency`, `inactive`. Native stage
+receipts supply automation intervals. `scripts/deploy_timeline.py` pairs native
+activity records and accounts for interval unions, retaining parallel waits;
+unmatched records have unknown duration. Show wall-clock work/wait totals,
+with automation separate from human/agent effort. A wait overlapping productive
+work on another lane is visible but does not count as fully stalled wall time.
+
+## Stable deploy scorecard template: deploy-summary-v2
 
 For every current and future deploy update/final report, populate the stable
-`.claude/shared/deploy-scorecard-template.html` template (`deploy-summary-v1`).
+`.claude/shared/deploy-scorecard-template.html` template (`deploy-summary-v2`).
 Preserve its CSS/layout from the exact user-approved visual
 https://boxes.dev/visuals/vis_1997f1fd05813cc9be440f44d5700ffe:
 
@@ -154,6 +187,12 @@ normalize rows separately, reset clocks at retries or replace bars with duration
 totals alone. Keep live intervals and unknown/missing boundaries explicit
 without inventing timestamps. Retain this visible timeline in progress and
 final cards.
+
+Version 2 preserves the version-1 boxes and shared-axis layout. Its only layout
+addition is the work/automation/wait breakdown inside the final timeline box.
+Use blue for recorded work/automation and amber for waits; historical waits
+whose reason was not recorded use a muted amber pattern. Distinguish the work
+and wait rows by labels as well as color. Keep wait reasons visible.
 
 An explicit user/operator AgentCard election shows **SKIPPED — <reason>** for
 the elected local and/or production gate. Preserve original failures, cleanup

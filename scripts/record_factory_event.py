@@ -74,6 +74,14 @@ VALID_EVENTS = {
     },
 }
 DESCEND_STEP_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+ACTIVITY_EVENTS = {
+    "work-start": {"implementation", "diagnosis", "coordination", "reporting"},
+    "work-finish": {"implementation", "diagnosis", "coordination", "reporting"},
+    "wait-start": {"user", "credits", "provider", "queue", "dependency", "inactive"},
+    "wait-finish": {"user", "credits", "provider", "queue", "dependency", "inactive"},
+}
+for _events in VALID_EVENTS.values():
+    _events.update(ACTIVITY_EVENTS)
 
 
 def git_value(*args: str) -> str:
@@ -174,6 +182,11 @@ def factory_event_payload(
     from factory_metadata import load_metadata, normalize_metadata
 
     validate_event(workflow, event, value)
+    if event in ACTIVITY_EVENTS and not all(
+        isinstance((detail or {}).get(key), str) and (detail or {})[key].strip()
+        for key in ("request_id", "reason")
+    ):
+        raise ValueError("activity events require detail request_id and reason")
     metadata = dict(metadata or {})
     metadata["telemetry"] = (
         normalize_metadata(metadata["telemetry"])
