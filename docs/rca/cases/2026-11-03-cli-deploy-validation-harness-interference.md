@@ -2,10 +2,26 @@
 id: 2026-11-03-cli-deploy-validation-harness-interference
 date: 2026-11-03
 title: CLI deployment validation rejected inherited Node options and nested native tracing
-surface: testing
+surface: harness
 component: deploy-validation-harness
 classification: test-bug
-problem_class: observer-interference
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: Test fixtures omitted inherited preload state and attempted a second ptrace owner
+repro: NODE_OPTIONS=--require=$PWD/back-end/scripts/blackbox-kernel-proxy-custody.cjs bash scripts/tests/backend-coverage-sharded.test.sh
+symptoms:
+  - merged c8 report must run with the raised heap
+  - Exception occurred in preexec_fn
+  - Missing expected rejection
+  - wss.on is not a function
+tags:
+  - validation
+  - fixture
+  - node-options
+  - ptrace
+sources:
+  - commit b759642eab648a0c6868fba1eb5dda85facd3a10
+  - commit 9f34c17ec5a9567a16de5f5484799b7659a7524a
+  - .context/cli-readiness-rca/nov03-two-failures-review.txt
 status: fixed
 ---
 
@@ -22,7 +38,7 @@ neither receipt established a defect in CLI setup, authentication or E2B launch.
    fixture cases themselves use `PTRACE_TRACEME`, which failed before exec when
    the child already belonged to the enclosing tracer.
 
-## Diagnosis and local proof
+## Diagnosis
 
 The shard coordinator passes inherited `NODE_OPTIONS` through
 `coverage-report-heap.sh`, which appends the heap cap. The test asserted an empty
@@ -49,7 +65,7 @@ Private evidence is retained in `.context/cli-readiness-rca/`: the
 The independent review was collected from turn
 `01a1a36e-17a7-7c71-accc-cf6ec07a25be`.
 
-## Solution and validation
+## Solution
 
 Commit `b759642eab648a0c6868fba1eb5dda85facd3a10` fixes the three test lines.
 The local deployment plan invokes the unchanged controller directly, without an
@@ -108,3 +124,11 @@ Private before/after evidence is in `.context/cli-readiness-rca/nov04-kernel-*`
 and `nov04-oauth-*`. The independent OAuth repair was collected from turn
 `01a1a3dc-0c50-73d0-950a-d65240edeefd`. These owning-test passes do not replace
 full backend coverage or establish return of any treasury funds.
+
+## Reusable lesson
+
+Preserve inherited process state explicitly in fixtures. A cached module does not
+reinstall its side effects after a test replaces the target, and a diagnostic
+tracer still owns tracing even when its output is filtered. Test doubles must
+implement the real interfaces executed by the code under test. Native failure
+records and post-repair full validation remain distinct evidence.
