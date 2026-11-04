@@ -219,7 +219,6 @@ class _Backend:
         session_home: _SessionHome,
         *,
         fail_first_persist: bool = False,
-        question_after: int | None = None,
         resize_after: int | None = None,
     ) -> None:
         self.session_home = session_home
@@ -231,9 +230,6 @@ class _Backend:
         self.fail_first_persist = fail_first_persist
         self._persists = 0
         self.credential_feedback: list = []
-        # Keepalive number after which the backend reports a question the code
-        # agent asked its (blocked) spawning agent.
-        self.question_after = question_after
         self.usage_reports: list[tuple] = []
         # Credential availability the backend reports to each spawn (C15).
         self.availability: list[dict] = []
@@ -333,10 +329,7 @@ class _Backend:
 
     async def keepalive(self, *args, **kwargs):
         self.keepalives += 1
-        awaiting = None
-        if self.question_after is not None and self.keepalives >= self.question_after:
-            awaiting = {"message_id": "q-1", "question": "Which database should I use?", "at": "2026-10-20T00:00:00Z"}
-        reply = {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de", "awaiting_parent": awaiting}
+        reply = {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de"}
         if self.resize_after is not None and self.keepalives >= self.resize_after and not self.resize_calls:
             reply["resize_requested"] = {
                 "request_id": _RESIZE_REQUEST_ID,
@@ -565,138 +558,10 @@ async def test_idle_past_every_old_limit_is_paused_not_failed_then_resumes():
         session_home.cleanup()
 
 
-async def test_question_to_blocked_spawner_pauses_session_and_returns_it():
-    """L-A2A deadlock: a code agent asks its spawning agent, which is blocked in this spawn.
-
-    The question arrives through the keepalive while a tool is still in flight
-    (so idle never fires). The session is paused, not failed, and the tool
-    result carries the question so the spawner can answer by resuming it.
-    """
-    from temporalio.testing import ActivityEnvironment
-
-    from domains.spawn_claude_code_agent import service
-
-    session_home = _SessionHome()
-    backend = _Backend(session_home, question_after=3)
-    try:
-        with backend.patched(clock=_virtual_clock(2000.0)):
-            outcome = await asyncio.wait_for(
-                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
-            )
-        assert outcome["status"] == "paused" and outcome["success"] is False, outcome
-        assert "Which database should I use?" in outcome["message"], outcome["message"]
-        assert "code_session_id" in outcome["message"], outcome["message"]
-        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
-        assert outcome["code_agent"]["state"] == "paused", outcome["code_agent"]
-        assert backend.keepalives >= 3, backend.keepalives
-    finally:
-        session_home.cleanup()
-
-
-async def test_question_while_cli_waits_for_its_answer_is_handed_over_before_idle():
-    """L-A2A-ADV 1: the code agent asked and went quiet waiting for its answer.
-
-    Its spawning agent is blocked inside this very spawn, so both would wait.
-    The next keepalive (well before the idle pause) must pause the session for
-    the question exactly once and hand it to the spawner; resuming the session
-    then runs normally with no stale question.
-    """
-    from temporalio.testing import ActivityEnvironment
-
-    from domains.spawn_claude_code_agent import service
-    from domains.spawn_claude_code_agent.config import (
-        CODE_SESSION_IDLE_PAUSE_S,
-        CODE_SESSION_KEEPALIVE_INTERVAL_S,
-    )
-
-    # Advance application time at observed events, never by multiplying
-    # scheduler, transport or process-cleanup latency into virtual seconds.
-    virtual_now = time.time()
-    tool_finished = asyncio.Event()
-    keepalive_replies = asyncio.Queue()
-    session_home = _SessionHome()
-    backend = _Backend(session_home)
-
-    def clock():
-        return virtual_now
-
-    def observe_event(event, **kwargs):
-        if event.get("type") == "tool_result":
-            tool_finished.set()
-
-    async def observe_keepalive(*args, **kwargs):
-        reply = await backend.keepalive(*args, **kwargs)
-        keepalive_replies.put_nowait((clock(), backend.keepalives, reply))
-        return reply
-
-    try:
-        with (
-            backend.patched(clock=clock),
-            patch.object(service, "_log_code_agent_event", side_effect=observe_event),
-            patch.object(service, "keepalive_e2b_session", side_effect=observe_keepalive),
-        ):
-            spawn = asyncio.create_task(
-                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args())
-            )
-            try:
-                async with asyncio.timeout(30):
-                    await _wait_until(lambda: session_home.runs(), "the CLI to start")
-                    session_home.release("tool_done")
-                    await tool_finished.wait()  # the monitor observed the quiet, waiting CLI
-                    virtual_now += CODE_SESSION_KEEPALIVE_INTERVAL_S
-                    _, before_question, first_reply = await keepalive_replies.get()
-                    assert first_reply["awaiting_parent"] is None, first_reply
-                    assert not spawn.done(), "the session is still attached before the question"
-                    asked_at = clock()
-                    backend.question_after = before_question + 1
-                    virtual_now += CODE_SESSION_KEEPALIVE_INTERVAL_S
-                    answered_at, answered_on, reply = await keepalive_replies.get()
-                    assert answered_on == before_question + 1, "question skipped the next keepalive"
-                    assert reply["awaiting_parent"]["message_id"] == "q-1", reply
-                    # Hold application time here. Waiting for another keepalive
-                    # or idle expiry cannot make a missed handoff pass.
-                    outcome = await spawn
-                    assert backend.keepalives == answered_on, "handoff required another keepalive"
-                    handoff_virtual_s = answered_at - asked_at
-            finally:
-                if not spawn.done():
-                    spawn.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await spawn
-        assert outcome["status"] == "paused" and outcome["success"] is False, outcome
-        assert "Which database should I use?" in outcome["message"], outcome["message"]
-        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
-        handoff_bound_s = 2 * CODE_SESSION_KEEPALIVE_INTERVAL_S
-        assert handoff_bound_s < CODE_SESSION_IDLE_PAUSE_S, (handoff_bound_s, CODE_SESSION_IDLE_PAUSE_S)
-        assert handoff_virtual_s <= handoff_bound_s, f"handed over after {handoff_virtual_s:.0f}s, not by a keepalive"
-        paused_rows = [m for m in backend.messages if m.get("action_type") == "session_paused"]
-        assert len(paused_rows) == 1, paused_rows
-        code_session_id = outcome["code_session"]["code_session_id"]
-
-        # The spawner answers by resuming the session; the new task has no question.
-        backend.question_after = None
-        with backend.patched():
-            resumed = await asyncio.wait_for(
-                ActivityEnvironment().run(
-                    service.spawn_claude_code_activity,
-                    *_activity_args(
-                        code_session_request={"code_session_id": code_session_id}, tool_call_id="tc-answer"
-                    ),
-                ),
-                timeout=30,
-            )
-        assert resumed["status"] == "completed" and resumed["success"] is True, resumed
-        assert backend.created[-1]["code_session_id"] == code_session_id, backend.created
-        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent", "close"], backend.closed
-    finally:
-        session_home.cleanup()
-
-
 async def test_cancelled_spawner_unblocks_a_child_waiting_for_its_answer():
     """L-A2A-ADV 10: the spawner is cancelled while its code agent waits for an answer.
 
-    The child asked and is idle; before the keepalive hands the question over,
-    the user cancels the spawning agent (the workflow cancels the activity).
+    The child is idle waiting on its spawner; the user cancels the spawning agent (the workflow cancels the activity).
     The spawn returns a cancelled outcome promptly, the session is closed once,
     and nothing keeps polling for it afterwards.
     """
@@ -1062,7 +927,7 @@ def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_re
         "- Claude Code me@example.com: disconnected (the user must reconnect it)\n"
         "Retry with spawn_agent(type='code', code_session_id='cs-1', goal=<the same goal>) to continue: "
         "no credential is free until 2026-10-20T18:00:00.000Z (the earliest reset: Codex Codex account 1); "
-        "a retry before that stays paused and starts nothing."
+        "a retry before that stays paused and starts nothing, so wait with wait_for(until_timestamp=<that time>) first."
     ), blocked
     unknown = format_usage_limit_message(code_provider="claude", resets_at_iso=None, facts=facts)
     assert unknown == (
@@ -1854,7 +1719,8 @@ async def test_rotation_d_no_credential_keeps_the_session_paused_and_starts_noth
             "- funded Anthropic API key: limited until 2026-10-03T01:20:00.000Z\n"
             "- funded Azure OpenAI deployment: not configured\n"
             "The earliest reset is 2026-10-03T00:50:00.000Z (Claude Code me@example.com). "
-            f"Retry with spawn_agent(type='code', code_session_id='{_SESSION_ID}', goal=<the same goal>) after that."
+            "Wait with wait_for(until_timestamp=<that time>), then retry with "
+            f"spawn_agent(type='code', code_session_id='{_SESSION_ID}', goal=<the same goal>)."
         ), retry["message"]
         assert retry["code_agent"]["state"] == "paused", retry["code_agent"]
         assert retry["code_agent"]["failure_message"] == (
@@ -1967,14 +1833,6 @@ async def _run_all_tests():
     await r.record_async(
         "idle_past_every_old_limit_paused_then_resumes",
         test_idle_past_every_old_limit_is_paused_not_failed_then_resumes,
-    )
-    await r.record_async(
-        "question_to_blocked_spawner_pauses_session",
-        test_question_to_blocked_spawner_pauses_session_and_returns_it,
-    )
-    await r.record_async(
-        "question_while_cli_waits_handed_over_before_idle",
-        test_question_while_cli_waits_for_its_answer_is_handed_over_before_idle,
     )
     await r.record_async(
         "cancelled_spawner_unblocks_waiting_child",

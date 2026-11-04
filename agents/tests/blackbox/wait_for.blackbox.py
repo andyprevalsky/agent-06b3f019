@@ -1992,6 +1992,43 @@ async def test_wait_for_agents_mode_wakes_on_listed_child_only():
     assert "- /root/draft_a: completed" in final["text"], final
 
 
+async def test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes():
+    """Supervising a multi-day agent costs one wait, not one turn per hour.
+
+    wait_for(agents=...) is capped at one hour (Codex wait_agent); a longer wait
+    is one timestamp wait (up to 31 days) that ends as soon as a background
+    agent of ours finishes. The cap's error names that path instead of
+    "call wait_for again", which spent a planner iteration every hour.
+    """
+    from domains.wait_for.handler import wait_for
+    from utils.wait_for_bounds import WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR, resolve_wait_for_agents_timeout
+
+    try:
+        resolve_wait_for_agents_timeout(3 * 24 * 3600)
+    except ValueError as exc:
+        assert str(exc) == WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR
+    else:
+        raise AssertionError("agents-mode waits stay capped at one hour")
+    assert "until_timestamp" in WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR, WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR
+    assert "call wait_for again" not in WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR, WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR
+
+    rows, clock = _Rows(), _Clock()
+    with _real_wf(rows, clock) as wf:
+        gates = {"coder": asyncio.Event()}
+        wf._execute_tool = _gated_spawns(wf, gates)
+        await _spawn_bg(wf, "coder", "toolu_coder")
+        task = asyncio.create_task(
+            wait_for(wf, {"description": "the coder", "until_timestamp": "2026-10-22T12:00:00Z"}, "tc-days")
+        )
+        await _until(lambda: rows.for_call("tc-days"))
+        clock.t = clock.t + timedelta(hours=30)
+        gates["coder"].set()
+        await asyncio.wait_for(task, 2)
+    final = rows.for_call("tc-days")[-1]
+    assert final["metadata"]["wokenBy"] == "agent_notification", final
+    assert "Woken early by a background agent notification (/root/coder)" in final["text"], final
+
+
 async def test_wait_for_wake_text_names_child_by_path_not_id():
     """Repro (bench run 2): "Woken by a sub-agent finishing (65f769fc-…)" showed an agent id.
 
@@ -2720,6 +2757,9 @@ async def run_all_tests():
     )
     await r.record_async("wake_ts_user_message", test_wait_for_timestamp_woken_early_by_user_message)
     await r.record_async("wake_ts_agent_message", test_wait_for_timestamp_woken_early_by_agent_message)
+    await r.record_async(
+        "wake_multi_day_ts_on_background_finish", test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes
+    )
     await r.record_async(
         "wake_ts_ignores_attention_response", test_wait_for_attention_response_does_not_wake_timestamp_wait
     )

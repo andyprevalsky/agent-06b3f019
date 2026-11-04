@@ -1044,6 +1044,87 @@ async def test_root_pause_hands_unread_browser_input_to_the_owner():
             assert "go to instacart instead" in note["text"], note["text"]
 
 
+async def test_paused_code_task_endings_are_recorded_paused_and_resumable():
+    """A code run that ends with its session paused is "paused", never "completed".
+
+    The real code handler posts FINISHED + session_paused for a user pause
+    ("User paused the agent"), an idle pause (C11) and a usage limit (C15);
+    each keeps a resumable session. Recording those as "completed" made
+    send_message_to_agent refuse them ("Spawn a new code agent").
+    """
+    from domains.agent_messaging.handler import send_message_to_agent
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    endings = {
+        # The handler's user-pause row (domains/spawn_claude_code_agent/handler.py cancel branch).
+        "toolu_user": ("Code session paused", "User paused the agent", {"session_paused": True}),
+        # An idle CLI: the session is saved and paused (C11).
+        "toolu_idle": ("Code session paused", "Session idle; paused.", {"session_paused": True}),
+        # A usage limit: saved, paused and retryable (C15).
+        "toolu_limit": (
+            "Code agent hit a usage limit",
+            "Usage limit; retry after reset.",
+            {"session_paused": True, "failure_kind": "usage_limit", "retryable": True},
+        ),
+    }
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        gates = {task_id: asyncio.Event() for task_id in endings}
+        runs = []
+
+        async def _executor(tool_name, tool_args, tool_call_id):
+            runs.append((tool_call_id, dict(tool_args)))
+            if len(runs) > len(endings):
+                return {"success": True, "message": "resumed"}
+            await gates[tool_call_id].wait()
+            title, message, extra = endings[tool_call_id]
+            await wf._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=title,
+                    message=message,
+                    status=MessageStatus.FINISHED,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "action_type": "task_complete",
+                        "success": False,
+                        "task_id": f"sess-{tool_call_id}",
+                        **extra,
+                    },
+                ),
+                tool_call_id,
+                "spawn_agent",
+            )
+            return {"success": False, "message": message}
+
+        wf._execute_tool = _executor
+        for index, task_id in enumerate(endings):
+            await wf._execute_tool_once("spawn_agent", {**CODE_ARGS, "task_name": f"coder{index}"}, task_id)
+        for _ in range(200):
+            if len(runs) == len(endings):
+                break
+            await asyncio.sleep(0.002)
+        await wf.pause()
+        gates["toolu_user"].set()
+        await asyncio.gather(wf._background_handles["toolu_user"], return_exceptions=True)
+        await wf.resume()
+        for task_id in ("toolu_idle", "toolu_limit"):
+            gates[task_id].set()
+        await asyncio.gather(*wf._background_handles.values(), return_exceptions=True)
+
+        statuses = {task_id: wf._background_finished[task_id]["status"] for task_id in endings}
+        assert statuses == {task_id: "paused" for task_id in endings}, statuses
+        harness.activity_results["send_agent_message_activity"] = {"message_id": "m-1", "delivered": False}
+        for index, task_id in enumerate(endings):
+            status, text = await send_message_to_agent(
+                wf,
+                {"to": f"/root/coder{index}", "message": "Continue.", "continue_conversation": True},
+                f"toolu_send_{index}",
+            )
+            assert status.value == "FINISHED" and "its prior conversation continues" in text, (task_id, text)
+
+
 async def run_all_tests():
     print("agent_control blackbox tests:")
     r = BlackboxResult()
@@ -1065,6 +1146,10 @@ async def run_all_tests():
     await r.record_async(
         "send_browser_code_lifecycle_completed_refused_paused_resumes",
         test_send_to_browser_and_code_tasks_follows_their_lifecycle,
+    )
+    await r.record_async(
+        "paused_code_endings_recorded_paused_resumable",
+        test_paused_code_task_endings_are_recorded_paused_and_resumable,
     )
     await r.record_async(
         "root_pause_ends_background_browser_paused_with_session_id",

@@ -582,6 +582,9 @@ class BackgroundAgentsMixin:
         session_id = metadata.get("session_id")
         if isinstance(session_id, str) and session_id:
             outcome["session_id"] = session_id
+        # A code run that ended with its session saved and paused (user pause,
+        # idle C11, usage limit C15): the executor's structured outcome.
+        outcome["session_paused"] = metadata.get("session_paused") is True
 
     # ----------------------------------------------------------- completion
 
@@ -622,8 +625,15 @@ class BackgroundAgentsMixin:
             structured_response = outcome.get("structured_response")
         # A user pause / cost limit cancels activity-backed work exactly like a
         # foreground spawn (helpers/tool_interrupts.py): it reports failed.
-        status = "failed" if failed else "completed"
-        if failed and paused and not kill_reason:
+        notification_status = "failed" if failed else "completed"
+        status = notification_status
+        # Paused = resumable: a user pause ended the run (browser: cancelled as
+        # failed), or the executor reported its session paused (code).
+        if (
+            not kill_reason
+            and record.get("agent_type") in RESUMABLE_TASK_TYPES
+            and ((failed and paused) or outcome.get("session_paused") is True)
+        ):
             status = PAUSED_TASK_STATUS
         record["status"] = status
         record["finished_at"] = workflow.now().isoformat()
@@ -647,7 +657,8 @@ class BackgroundAgentsMixin:
                 recipient=await self._notification_recipient(),
                 sender=str(record.get("path") or record["address"]),
                 agent_type=record["agent_type"],
-                status=status,
+                # FINAL_ANSWER / FAILED follow the run's outcome; "paused" is the task state.
+                status=notification_status,
                 summary=summary,
                 structured_response=structured_response,
                 file_pointers=outcome.get("file_pointers"),

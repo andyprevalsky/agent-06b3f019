@@ -32,6 +32,7 @@ from domains.spawn_claude_code_agent.config import (
 from domains.spawn_claude_code_agent.service import (
     close_detached_code_session_activity,
     code_session_record,
+    format_code_session_summary,
     iso_utc,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
@@ -691,6 +692,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         cancel_metadata["task_id"] = result["task_id"]
                     if result.get("code_provider"):
                         cancel_metadata["code_provider"] = result["code_provider"]
+                    if isinstance(result.get("code_session"), dict):
+                        cancel_metadata["code_session"] = result["code_session"]
                 if not cancel_metadata.get("task_id"):
                     # Last resort: still emit task_complete so routing stays on
                     # ClaudeCodeChip, but log — FE recovers task_id from siblings.
@@ -698,10 +701,17 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "[ClaudeCode] Cancel without task_id; chip may need FE sibling recovery",
                         agent_id=agent_id,
                     )
+                # Same facts as an idle pause: which session is paused, so a resume
+                # targets it (not "the latest session for the repo").
+                pause_message = (
+                    "Code session paused by the user (not failed). Its files, commits and "
+                    "conversation are kept; spawn the code agent again to resume it."
+                )
+                pause_summary = format_code_session_summary(cancel_metadata.get("code_session"))
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Code session paused",
-                    message="User paused the agent",
+                    message=f"{pause_message}\n{pause_summary}" if pause_summary else pause_message,
                     status=MessageStatus.FINISHED,
                     metadata=cancel_metadata,
                 )

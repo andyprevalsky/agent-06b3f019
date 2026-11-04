@@ -5,6 +5,8 @@
  *                                              │
  *                       USER row on target (deterministic id = idempotency)
  *                                              │
+ *            running code task? ──yes──▶ the live CLI's next user turn
+ *                                              │      (deliverToRunningCodeTask), nothing stored
  *            recipient_task_id? ──yes──▶ excludeFromModel, no signal
  *                                              │      (other sender: task_running reported;
  *                                              │       a finished task: signal the owner
@@ -34,6 +36,8 @@ import { listedBackgroundTasks } from './agentTreeBackgroundTasks';
 import { WAKEABLE_TERMINAL_STATUSES, wakeFinishedAgent } from './agentWakeService';
 import { guardAgentMessage, noteAgentMessagesConsumed } from './agentMessageGuardService';
 import { taskMessageRefusal } from './agentTaskMessageRefusal';
+import { AgentGraphError } from './agentGraphService';
+import { deliverToRunningCodeTask } from './agentCodeTurnDelivery';
 
 const log = createLogger('AgentMessages');
 
@@ -175,6 +179,36 @@ async function refusalBeforeStore(
   );
 }
 
+/**
+ * A running code task is a CLI, not an inbox reader: the message is its next
+ * user turn (agentGraphSendService), or the send fails with the reason.
+ */
+async function sendToRunningCodeTask(
+  owner: TreeAgent,
+  sender: TreeAgent,
+  body: AgentMessageBody
+): Promise<AgentMessageDeliveryResult | ServiceError> {
+  try {
+    const delivered = await deliverToRunningCodeTask({
+      ownerAgentId: owner.id,
+      taskAddress: body.recipient_task_id ?? '',
+      sender: { id: sender.id, label: agentTaskPath(sender) ?? 'Agent' },
+      key: `a2a:${sender.id}:${body.idempotency_key}`,
+      text: body.message,
+    });
+    log.info('agent message delivered to code task', {
+      agent_id: owner.id,
+      from_agent_id: sender.id,
+      recipient_task_id: body.recipient_task_id ?? null,
+      status: delivered.status,
+    });
+    return { message_id: delivered.message_id, delivered: true, task_running: true };
+  } catch (error) {
+    if (error instanceof AgentGraphError) return { error: error.message, status: error.status };
+    throw error;
+  }
+}
+
 /** Persist one agent message on the target and wake the target's workflow. */
 export async function sendAgentMessage(
   targetId: string,
@@ -196,6 +230,9 @@ export async function sendAgentMessage(
   } = shape;
   const refused = await refusalBeforeStore(target, sender, body, options, shape);
   if (refused !== null) return refused;
+  if (shape.recipientTask?.type === 'code' && shape.recipientTask.status === 'running') {
+    return sendToRunningCodeTask(target, sender, body);
+  }
 
   const message = await createMessage({
     agentId: target.id,

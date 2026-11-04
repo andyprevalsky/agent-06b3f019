@@ -1597,6 +1597,26 @@ def test_change_environment_size_skill_guards_against_runaways():
         assert phrase not in lower, f"banned phrase {phrase!r} in the skill"
 
 
+_AGENT_GRAPH_SKILL = AGENTS_ROOT.parent / "back-end" / "src" / "assets" / "rose-skills" / "agent-graph" / "SKILL.md"
+
+
+def test_agent_graph_skill_states_when_messages_reach_a_code_agent():
+    """The agent-graph skill matches the ws-server delivery contract.
+
+    ws-server.mjs merges a message that arrives while the CLI works into the
+    running turn, and ends stdin when an autonomous turn finishes (a later
+    turn is rejected session_ended). The skill promised the opposite
+    ("arrive as a new user turn after your current turn"), so a code agent
+    that asked its parent a question and ended its turn never got the answer.
+    """
+    text = _AGENT_GRAPH_SKILL.read_text()
+    lower = " ".join(text.lower().split())
+    assert "after your current turn" not in lower, "a finished turn receives no later messages"
+    for needle in ("while you are still working", "added to your current turn", "your run is over"):
+        assert needle in lower, f"agent-graph SKILL.md must say {needle!r}"
+    assert "\u2014" not in text and "\u2013" not in text, "no em-dashes or en-dashes in the skill"
+
+
 def test_no_banned_phrases_in_prompt_strings():
     """Banned phrases must not appear in prompt-source string literals.
 
@@ -2425,6 +2445,10 @@ async def run_all_tests():
     r.record(
         "change_environment_size_skill_guards_against_runaways",
         test_change_environment_size_skill_guards_against_runaways,
+    )
+    r.record(
+        "agent_graph_skill_states_when_messages_reach_a_code_agent",
+        test_agent_graph_skill_states_when_messages_reach_a_code_agent,
     )
 
     # 12. No restating-the-schema patterns / broken cross-refs (C6, C7)

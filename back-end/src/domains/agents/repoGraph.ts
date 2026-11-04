@@ -161,6 +161,32 @@ export async function findGraphCodeSession(sessionId: string): Promise<GraphCode
   });
 }
 
+/**
+ * The newest code session a spawn tool call ran (its activity rows carry
+ * toolCallId + task_id). Reads one owner's messages through the
+ * (agentId, timestamp) index; null when the call never started a session.
+ */
+export async function findCodeSessionForToolCall(
+  ownerAgentId: string,
+  toolCallId: string
+): Promise<GraphCodeSessionRow | null> {
+  const row = await prisma.message.findFirst({
+    where: {
+      agentId: ownerAgentId,
+      AND: [
+        { metadata: { path: ['toolCallId'], equals: toolCallId } },
+        { metadata: { path: ['task_id'], string_contains: '' } },
+      ],
+    },
+    orderBy: { timestamp: 'desc' },
+    select: { metadata: true },
+  });
+  const sessionId = (row?.metadata as Record<string, unknown> | null | undefined)?.task_id;
+  if (typeof sessionId !== 'string' || sessionId === '') return null;
+  const session = await findGraphCodeSession(sessionId);
+  return session !== null && session.agentId === ownerAgentId ? session : null;
+}
+
 export interface CodeSessionChip {
   /** The spawn tool call whose chip renders this code session. */
   toolCallId: string | null;
