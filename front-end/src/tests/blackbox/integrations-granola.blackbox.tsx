@@ -9,6 +9,7 @@
  *     to the public site's callback), then polls until the backend reports
  *     Granola connected and shows the meeting count
  *   - Mac app reconnect from EXPIRED keeps polling until the new grant lands
+ *   - a slow older status read never overwrites a newer one
  *   - callback page: posts Granola's code and state with the user's own session
  *     and returns to the remembered page; a refusal or Granola error is shown
  *   - status is re-read while history backfills, not once the sign-in expired
@@ -154,6 +155,35 @@ describe('Granola integration', () => {
     await waitFor(() => expect(openExternal).toHaveBeenCalledWith(AUTHORIZE_URL));
     expect(await screen.findByText('4 meetings synced', {}, { timeout: 9000 })).toBeInTheDocument();
   }, 15_000);
+
+  it('Mac app: a slow older status read never restores EXPIRED', async () => {
+    const backend = granolaBackend();
+    backend.connected = true;
+    let reads = 0;
+    server.use(
+      http.get(`${API_BASE}/integrations/granola`, async () => {
+        reads += 1;
+        // Read 2 (first sign-in poll) is slow and still EXPIRED; read 3 sees the new grant.
+        if (reads === 2) {
+          await new Promise((resolve) => setTimeout(resolve, 5_000));
+          return HttpResponse.json({ ...status(true, 4), status: 'EXPIRED' });
+        }
+        return HttpResponse.json(
+          reads === 1 ? { ...status(true, 4), status: 'EXPIRED' } : status(true, 4),
+        );
+      }),
+    );
+    window.api = { isElectron: true, openExternal: vi.fn(async () => undefined) };
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: 'Reconnect Granola' }));
+    expect(await screen.findByText('4 meetings synced', {}, { timeout: 9000 })).toBeInTheDocument();
+    await waitFor(() => expect(reads).toBeGreaterThanOrEqual(3));
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(screen.getByText('4 meetings synced')).toBeInTheDocument();
+    expect(screen.queryByText(/Granola sign-in expired/)).not.toBeInTheDocument();
+  }, 20_000);
 
   it('polls while history backfills, and stops once the sign-in has expired', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });

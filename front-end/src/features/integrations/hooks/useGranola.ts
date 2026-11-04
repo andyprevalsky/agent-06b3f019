@@ -49,14 +49,19 @@ export function useGranola(enabled: boolean, onChange?: () => Promise<void> | vo
   const [busy, setBusy] = useState<'connect' | 'sync' | 'disconnect' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const signInPoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  const latestRead = useRef(0);
 
+  // Only the newest status read is applied: an older request that finishes
+  // last must not restore a stale status (e.g. EXPIRED after a new sign-in).
   const refresh = useCallback(async () => {
+    const read = ++latestRead.current;
     try {
       const next = await fetchGranolaStatusApi();
+      if (read !== latestRead.current) return null;
       setStatus(next);
       return next;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (read === latestRead.current) setError(err instanceof Error ? err.message : String(err));
       return null;
     }
   }, []);
