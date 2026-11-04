@@ -149,7 +149,7 @@ class Cycle(unittest.TestCase):
             self.assertEqual(2, call())
         self.assertEqual(original, state_path.read_bytes())
 
-    def test_native_local_host_slot_serializes_once_and_preserves_original_deadlines(self):
+    def test_native_local_root_refuses_duplicates_and_preserves_original_deadlines(self):
         import time
         gate = {'command': ['fixture'], 'worker_transport': 'local-isolated', 'case_protocol': True}
         active = peak = calls = 0
@@ -166,15 +166,15 @@ class Cycle(unittest.TestCase):
             return 0, False, False, False
         with patch.object(c, 'run_command', side_effect=launch), ThreadPoolExecutor(2) as pool:
             futures = [pool.submit(c.run_with_local_slot, gate, self.root, a, timeout=1) for a in admissions]
-            self.assertEqual([(0, False, False, False)] * 2, [f.result() for f in futures])
-        self.assertEqual((1, 2), (peak, calls))
-        self.assertTrue(all(a['started'] for a in admissions))
+            self.assertCountEqual([(0, False, False, False), (None, False, False, False)], [f.result() for f in futures])
+        self.assertEqual((1, 1), (peak, calls))
+        self.assertEqual(1, sum(a['started'] for a in admissions))
         lock = self.root / '.context/native-worker-admission.lock'
         with lock.open('a') as held:
             c.fcntl.flock(held, c.fcntl.LOCK_EX | c.fcntl.LOCK_NB)
             with patch.object(c, 'run_command') as launch:
                 admission = {}; start = time.monotonic()
-                self.assertEqual((None, True, False, False),
+                self.assertEqual((None, False, False, False),
                                  c.run_with_local_slot(gate, self.root, admission, timeout=.08))
                 self.assertLess(time.monotonic() - start, .3)
                 self.assertFalse(admission['started']); launch.assert_not_called()
@@ -188,7 +188,7 @@ class Cycle(unittest.TestCase):
                 result = c.execute(card, self.state, self.directory, self.root)
                 self.assertEqual({'card': 'UNVERIFIED'}, result['cases'])
                 self.assertFalse(result['executed']); self.assertFalse(result['complete'])
-                self.assertTrue(result['timed_out']); self.assertIsNone(result['native_exit'])
+                self.assertFalse(result['timed_out']); self.assertIsNone(result['native_exit'])
                 self.assertFalse(result['lingering_group']); self.assertNotIn('cleanup_owner', result)
                 launch.assert_not_called()
 
@@ -263,6 +263,164 @@ class Cycle(unittest.TestCase):
         self.assertTrue(process['orphaned_children']); self.assertTrue(process['quiescent'])
         self.assertEqual([], process['remaining'])
         self.assertTrue(failed.is_set()); self.assertFalse(b['executed']); self.assertFalse(forbidden.exists())
+
+    def test_native_distinct_roots_overlap_with_exact_root_admission(self):
+        import time
+        roots = [Path(self.workers.name) / name for name in ('api', 'ui')]
+        def observe(root):
+            target = root / 'native-overlap.json'
+            script = ("import json,time;from pathlib import Path;start=time.monotonic();"
+                      f"Path({str(target) + '.started'!r}).touch();time.sleep(.35);"
+                      f"Path({str(target)!r}).write_text(json.dumps([start,time.monotonic()]))")
+            gate = dict(command=[sys.executable, '-c', script], cwd=str(root), worker_root=str(root),
+                        worker_transport='local-isolated', case_protocol=True)
+            admission = {}
+            with (root / 'output.log').open('wb') as output:
+                result = c.run_with_local_slot(gate, self.root, admission, timeout=2,
+                    cwd=root, env=dict(os.environ), output=output, owned_lifecycle=True)
+            self.assertEqual((0, False, False, False), result)
+            return json.loads(target.read_text()), admission
+        with ThreadPoolExecutor(2) as pool:
+            rows = list(pool.map(observe, roots))
+        self.assertGreater(min(row[0][1] for row in rows), max(row[0][0] for row in rows))
+        self.assertNotEqual(rows[0][1]['lock'], rows[1][1]['lock'])
+        for root, (_, admission) in zip(roots, rows):
+            self.assertEqual(str(root / '.context/native-worker-admission.lock'), admission['lock'])
+
+    def independent_triage_fixture(self, failing=False):
+        import contextlib, io
+        plan = copy.deepcopy(self.plan)
+        for name, port in [('missing', 37000), ('leased', 47000)]:
+            root = Path(self.workers.name) / name; root.mkdir()
+            plan['gates'].append(dict(name=name, worker=name, worker_transport='local-isolated',
+                cwd=str(root), env={'CONDUCTOR_WORKSPACE_NAME': name, 'CONDUCTOR_PORT': str(port)},
+                command=[sys.executable, '-c', 'import sys;sys.exit(' + ('1' if failing and name == 'missing' else '0') + ')'],
+                checks=[name], timeout_seconds=2))
+        state = c.initialize(plan, self.root); state['phase'] = 'initial'
+        api = dict(plan['gates'][1], command=[sys.executable, '-c', 'raise SystemExit(1)'])
+        # Original failure and successful full gate both come through actual native execution.
+        results = [c.execute(api, state, self.directory, self.root),
+                   c.execute(plan['gates'][2], state, self.directory, self.root)]
+        c.advance(state, results)
+        state['reconciled_owners'] = {'historical': {'debt': 'immutable financial/runtime obligation'}}
+        path = self.directory / 'cycle.json'; plan_path = self.directory / 'plan.json'
+        c.write(path, state); c.write(plan_path, plan)
+        lease = Path(self.workers.name) / 'leased'
+        def call():
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return c.main(['triage-independent', '--plan', str(plan_path), '--state-dir', str(self.directory),
+                               '--root', str(self.root), '--exclude-root', str(lease)])
+        return state, plan, path, plan_path, call
+
+    def test_independent_triage_cli_keeps_pending_passes_and_leased_root(self):
+        before, plan, path, _, call = self.independent_triage_fixture()
+        self.assertEqual(0, call())
+        after = c.read(path)
+        self.assertEqual(('triage', False), (after['phase'], after['ready']))
+        for key in ('pending', 'failures', 'reconciled_owners', 'failure_phase', 'source', 'plan_digest'):
+            self.assertEqual(before[key], after[key])
+        self.assertEqual(before['attempts'], after['attempts'][:-1])
+        self.assertEqual(['missing'], [r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertTrue(after['attempts'][-1]['independent_full'])
+        self.assertTrue(c.reusable_full_pass(after, next(g for g in plan['gates'] if g['name'] == 'missing')))
+        focused = copy.deepcopy(after)
+        focused.update(phase='focused', repair_gates=['api', 'ui', 'missing'], focused={
+            g['name']: {'command': g['command'], 'checks': g['checks']} for g in plan['gates'] if not g.get('quick')})
+        self.assertEqual(['api'], [g['name'] for g in c.records(plan, focused)])
+        self.assertEqual(0, call())
+        self.assertEqual(after['attempts'], c.read(path)['attempts'])
+        self.assertFalse(any((self.directory / 'attempts').glob('*/triage/leased/request.json')))
+        original = path.read_bytes()
+        with c.exclusive(self.directory): self.assertEqual(2, call())
+        self.assertEqual(original, path.read_bytes())
+
+    def test_independent_triage_failure_appends_and_unsafe_inputs_refuse(self):
+        before, plan, path, plan_path, call = self.independent_triage_fixture(failing=True)
+        original = path.read_bytes()
+        for update in ({'running': True}, {'live_failures': []}, {'resume_phase': 'triage'}):
+            c.write(path, {**before, **update}); saved = path.read_bytes()
+            self.assertEqual(2, call()); self.assertEqual(saved, path.read_bytes())
+        path.write_bytes(original)
+        changed = copy.deepcopy(plan); changed['gates'][-2]['checks'].append('dropped-contract')
+        c.write(plan_path, changed); self.assertEqual(2, call()); self.assertEqual(original, path.read_bytes())
+        c.write(plan_path, plan)
+        (self.root / 'code').write_text('changed'); self.assertEqual(2, call())
+        self.assertEqual(original, path.read_bytes()); (self.root / 'code').write_text('original')
+        self.assertEqual(0, call()); after = c.read(path)
+        self.assertEqual(before['pending'], after['pending'][:len(before['pending'])])
+        self.assertEqual(before['failures'], after['failures'][:len(before['failures'])])
+        self.assertEqual(1, len(after['pending']) - len(before['pending']))
+        self.assertEqual('missing/missing', after['failures'][-1]['check'])
+        self.assertEqual(('triage', False), (after['phase'], after['ready']))
+        self.assertEqual(before['reconciled_owners'], after['reconciled_owners'])
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(2, c.main(['verify', '--plan', str(plan_path), '--state-dir', str(self.directory),
+                                       '--root', str(self.root)]))
+
+    def test_pending_triage_refresh_keeps_old_debt_and_allows_new_source_independent_work(self):
+        before, old, path, plan_path, call = self.independent_triage_fixture()
+        state = copy.deepcopy(before)
+        (self.root / 'code').write_text('actual new scheduler source')
+        new = copy.deepcopy(old); new['source'] = c.source(self.root)
+        c.refresh(state, old, new, self.root)
+        self.assertEqual(before['pending'], state['pending'])
+        self.assertEqual(before['failures'], state['failures'])
+        self.assertEqual(before['reconciled_owners'], state['reconciled_owners'])
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertEqual(before['source'], state['failures'][0]['source'])
+        self.assertEqual(new['source'], state['source'])
+        self.assertEqual('refresh', state['failure_phase']); self.assertFalse(state['ready'])
+        c.run_phase(new, state, self.directory, self.root)  # only existing quick recipes
+        self.assertEqual('triage', state['phase'])
+        c.write(path, state); c.write(plan_path, new)
+        self.assertEqual(0, call()); after = c.read(path)
+        self.assertEqual({'ui', 'missing'}, {r['gate'] for r in after['attempts'][-1]['results']})
+        self.assertEqual(before['pending'], after['pending'])
+        self.assertEqual(before['failures'], after['failures'])
+        self.assertEqual(before['reconciled_owners'], after['reconciled_owners'])
+        self.assertEqual(('triage', False), (after['phase'], after['ready']))
+        self.assertEqual(1, c.verify_saved(self.directory, self.root))
+
+    def test_old_source_disposition_requires_current_renewal_without_exempting_new_inputs(self):
+        failure = self.failure()
+        old_native = copy.deepcopy(failure)
+        old = copy.deepcopy(self.plan)
+        (self.root / 'code').write_text('new source with unresolved old failure')
+        new = copy.deepcopy(old); new['source'] = c.source(self.root)
+        c.refresh(self.state, old, new, self.root)
+        self.state['phase'] = 'triage'  # source-bound quick observation is unrelated to this guard
+        report = self.report(failure, 'NOT_INTRODUCED', external_provider={'name': 'provider', 'reason': 'outage'})
+        c.adjudicate(self.state, report)
+        self.assertEqual({}, self.state['skips'])
+        self.assertEqual(('triage', False), (self.state['phase'], self.state['ready']))
+        self.assertEqual(old_native, {k: failure[k] for k in old_native})
+        renewal = next(f for f in self.state['failures'] if f['id'] in self.state['pending'])
+        self.assertEqual(new['source'], renewal['source'])
+        self.assertEqual(old_native['source'], renewal['prior_waiver']['source'])
+        self.assertEqual('prior waived failure; changed inputs', renewal['native_result'])
+        explicit = self.report(renewal, 'NOT_INTRODUCED', external_provider={'name': 'provider', 'reason': 'outage'})
+        c.adjudicate(self.state, explicit)
+        self.assertEqual(new['source'], self.state['skips']['api/a']['source'])
+        self.assertEqual(explicit['failures'][0], self.state['skips']['api/a']['rca'])
+        self.assertFalse(self.state['ready'])  # final new-source coverage remains mandatory
+
+    def test_stale_post_merge_packet_routes_current_execution_without_impossible_renewal(self):
+        failure = self.failure(); native = copy.deepcopy(failure)
+        old = copy.deepcopy(self.plan)
+        (self.root / 'code').write_text('new inputs')
+        new = copy.deepcopy(old); new['source'] = c.source(self.root)
+        c.refresh(self.state, old, new, self.root); self.state['phase'] = 'triage'
+        packet = {'test': 'api/a', 'command': failure['command'], 'scope': 'original failure',
+                  'error': 'exact original FAIL', 'source': failure['source'], 'evidence': failure['evidence']}
+        c.adjudicate(self.state, self.report(failure, 'NOT_INTRODUCED', post_merge=packet))
+        self.assertEqual({}, self.state['skips']); self.assertFalse(self.state.get('pending'))
+        self.assertEqual('needs-focused-plan', self.state['phase']); self.assertFalse(self.state['ready'])
+        self.assertIn('api', self.state['repair_gates'])
+        self.assertEqual(native, {k: failure[k] for k in native})
+        self.assertEqual(packet, failure['rca']['post_merge'])
+        self.assertEqual(packet, self.state['superseded_skips'][-1]['rca']['post_merge'])
+        self.assertFalse(self.state.get('pending_post_merge'))
 
     def result(self, gate='api', **cases):
         return {'gate': gate, 'status': 'FAIL' if 'FAIL' in cases.values() else 'PASS',
@@ -458,6 +616,9 @@ class Cycle(unittest.TestCase):
 
     def test_same_source_full_pass_skips_duplicate_final_but_focused_subset_never_does(self):
         old, native = self.carryover_ready_fixture()
+        self.state.update(phase='focused', ready=False, repair_gates=['api', 'ui'], focused={
+            g['name']: {'command': g['command'], 'checks': g['checks']} for g in old['gates'] if not g.get('quick')})
+        self.assertEqual([], c.records(old, self.state))  # historical repair labels cannot repeat healthy FULL gates
         self.state.update(phase='final', ready=False)
         self.assertEqual([], c.records(old, self.state))
         # An exact FULL focused recipe is eligible; a genuine narrowed case set is not.
@@ -2594,11 +2755,18 @@ assert len(list(p.iterdir()))==2
 
     def test_refresh_cannot_rebind_unknown_occurrences_to_a_new_source(self):
         f=self.failure()
+        original=copy.deepcopy(f)
         (self.root/'code').write_text('edit before triage')
         new={**self.plan,'source':c.source(self.root)}
-        with self.assertRaises(ValueError): c.refresh(self.state,self.plan,new,self.root)
-        self.assertEqual('triage',self.state['phase'])
+        c.refresh(self.state,self.plan,new,self.root)
+        self.assertEqual('quick',self.state['phase'])
+        self.assertEqual('triage',self.state['next_after_quick'])
         self.assertEqual([f['id']],self.state['pending'])
+        self.assertEqual(original,f)
+        self.assertNotEqual(f['source'],self.state['source'])
+        self.assertEqual(new['source'],self.state['source'])
+        self.assertFalse(self.state['ready'])
+        self.assertEqual({},self.state['skips'])
 
     def test_cancellation_is_interrupted_not_a_failed_gate_or_ready(self):
         timer=threading.Timer(.04,c.CANCEL.set)

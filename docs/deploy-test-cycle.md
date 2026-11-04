@@ -56,6 +56,42 @@ checkout, database, ports and teardown. It must validate the requested source
 before executing and return results. The orchestrator launches every selected
 worker concurrently; it does not add dependencies between coverage, semantics,
 smoke, AgentCard, live probes or E2B. Existing worker safety and cleanup remain.
+Independent worker roots launch concurrently, including while an unrelated
+failure awaits RCA. There is no host-wide admission queue or capacity-driven
+serial fallback. An active operation on the same isolation root is refused
+before launch; its existing owner and deadline remain authoritative. A concrete
+capacity shortfall must be reported, not converted into hidden suite ordering.
+
+At quiescent TRIAGE, run missing independent full gates without disposing of the
+original failures:
+
+```bash
+python3 scripts/deploy_test_cycle.py triage-independent --plan "$PLAN" \
+  --state-dir "$STATE" --root "$SOURCE" --exclude-root /currently/leased/worker
+```
+
+For changed source, the existing `refresh --input <old-plan>` also accepts
+quiescent TRIAGE: original pending occurrences, source identities and cleanup
+obligations stay recorded. New-source quick checks return to TRIAGE, where this
+action can observe independent full gates. Source/contract/input equivalence is
+still required to carry a full PASS; absent declared input scopes remain `*`, so
+actual source edits conservatively invalidate reuse rather than relabel old runs.
+An old-source nonblocking diagnosis remains historical: it cannot create a
+new-source skip. The existing current-source renewal occurrence must be
+adjudicated explicitly; source-bound resource qualifications require current
+execution. Final full verification on the new source remains mandatory.
+
+Repeat `--exclude-root` for actual leased roots. Gates with pending failures,
+valid complete full receipts, or excluded roots are left untouched. Selected
+gates keep the full original commands, checks and deadlines and launch together.
+The action appends genuine native attempts and any new failures, preserves all
+original pending failures and obligations, and returns to TRIAGE with ready=false.
+It cannot authorize merge or replace the final exact-source coverage verifier.
+The documented focused-then-full rerun sequence still applies to actual failed
+tests. Historical repair labels do not rerun an unchanged, already verified full
+PASS; changed inputs, a newer failure, or unknown cleanup invalidate reuse as
+before. Healthy and unrun independent gates need not wait for that repair.
+
 The planner rejects bindings inside the coordinator checkout, overlapping
 worker roots, or shared workspace/database identities and ports. SSH bindings
 name their actual host and prepared root; the returned receipt must match that

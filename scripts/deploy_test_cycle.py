@@ -286,7 +286,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
     active = [case for case in gate['checks'] if case not in skips]
     expected = {case: 'SKIP' if case in skips else 'PASS' for case in gate['checks']}
     attempt = next((a for a in reversed(state.get('attempts', [])) if any(r is receipt for r in a.get('results', []))), {})
-    if (attempt.get('phase') not in {'initial', 'focused', 'failed-gates', 'final'} or attempt.get('stale') or attempt.get('interrupted')
+    if (not (attempt.get('phase') in {'initial', 'focused', 'failed-gates', 'final'}
+             or attempt.get('phase') == 'triage' and attempt.get('independent_full') is True)
+            or attempt.get('stale') or attempt.get('interrupted')
             or receipt.get('status') != 'PASS' or receipt.get('complete') is not True
             or receipt.get('executed') is not True or type(receipt.get('native_exit')) is not int
             or receipt['native_exit'] != 0 or receipt.get('timed_out') or receipt.get('cancelled')
@@ -347,7 +349,7 @@ def records(plan: dict, state: dict) -> list[dict]:
     if phase == "focused":
         selected = []
         for gate in gates:
-            if gate['name'] not in state['repair_gates']:
+            if gate['name'] not in state['repair_gates'] or reusable_full_pass(state, gate):
                 continue
             task = state['focused'][gate['name']]
             focused = dict(gate, command=task['command'], checks=task['checks'])
@@ -362,8 +364,15 @@ def records(plan: dict, state: dict) -> list[dict]:
     raise ValueError(f"phase {phase} is not executable")
 
 
+def local_admission_root(gate: dict, root: Path) -> Path:
+    location = (root / gate.get('cwd', '.')).resolve()
+    if gate.get('worker_root') and Path(gate['worker_root']).resolve() != location:
+        raise ValueError('local admission root differs from its prepared worker root')
+    return location
+
+
 def run_with_local_slot(gate: dict, root: Path, admission: dict, *, operation=None, local_failure=None, **kwargs):
-    """One prepared local worker at a time; queueing consumes its existing deadline."""
+    """Distinct roots overlap; an already owned root refuses a duplicate launch."""
     if gate.get('worker_transport') != 'local-isolated' or not gate.get('case_protocol'):
         return run_command(gate['command'], **kwargs)
     timeout = kwargs.pop('timeout')
@@ -372,7 +381,7 @@ def run_with_local_slot(gate: dict, root: Path, admission: dict, *, operation=No
     local_failure = local_failure if local_failure is not None else threading.Event()
     queued = time.monotonic()
     deadline = None if timeout is None else queued + timeout
-    lock_path = root / '.context/native-worker-admission.lock'
+    lock_path = local_admission_root(gate, root) / '.context/native-worker-admission.lock'
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     admission.update(lock=str(lock_path), original_budget_seconds=timeout, deadline_monotonic=deadline, started=False)
     with lock_path.open('a') as lock:
@@ -383,14 +392,16 @@ def run_with_local_slot(gate: dict, root: Path, admission: dict, *, operation=No
                 admission.update(queued_seconds=time.monotonic() - queued,
                                  reason='cancelled before local worker launch' if CANCEL.is_set()
                                  else 'prior local worker retained or unverified cleanup' if local_failure.is_set()
-                                 else 'existing deadline exhausted in local host admission',
+                                 else 'existing deadline exhausted in local root admission',
                                  timed_out=expired, cancelled=CANCEL.is_set())
                 return operation(None) if operation is not None else (None, expired, CANCEL.is_set(), False)
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                CANCEL.wait(.05 if remaining is None else min(.05, remaining))
-                continue
+                admission.update(queued_seconds=time.monotonic() - queued,
+                                 reason='isolation root already owns an active worker; refuse duplicate launch',
+                                 timed_out=False, cancelled=False)
+                return operation(None) if operation is not None else (None, False, False, False)
             remaining = None if deadline is None else deadline - time.monotonic()
             if CANCEL.is_set() or local_failure.is_set() or remaining is not None and remaining <= 0:
                 continue  # The next iteration returns without starting a worker.
@@ -808,10 +819,22 @@ def adjudicate(state: dict, report: dict) -> None:
     if any(d == "blocking" and e.get("attribution") != "INTRODUCED" and e.get("assigned_repair") is not True
            for _, e, d in decisions):
         raise ValueError("UNKNOWN or unhanded-off failure still blocks; finish /RCA attribution")
-    repair = set()
+    repair, renewals = set(), []
     for failure, entry, disposition in decisions:
         failure["rca"] = entry
         failure["disposition"] = disposition
+        if failure['source'] != state['source'] and disposition not in {'blocking', 'execution required'}:
+            # Same renewal semantics as refresh: old native facts never become a new-source exclusion.
+            prior = {'source': failure['source'], 'rca': entry, 'disposition': disposition}
+            state.setdefault('superseded_skips', []).append(prior)
+            if disposition in {RESOURCE_SKIP, 'pending post-merge'}:
+                repair.add(failure['gate'])  # same changed-input execution route as refresh
+            else:
+                renewals.append({'id': uuid.uuid4().hex, 'check': failure['check'], 'gate': failure['gate'],
+                    'source': state['source'], 'native_result': 'prior waived failure; changed inputs',
+                    'command': next(g['command'] for g in state['plan']['gates'] if g['name'] == failure['gate']),
+                    'complete': True, 'phase': 'refresh', 'prior_waiver': prior})
+            continue
         if disposition in {"blocking", "execution required"}:
             repair.add(failure["gate"])
         elif disposition == RESOURCE_SKIP:
@@ -836,6 +859,14 @@ def adjudicate(state: dict, report: dict) -> None:
     # Gates routed by `reexecute` during THIS triage are repair work for the same round; the
     # accumulated repair_gates ledger carries stale credit from earlier rounds and is not the signal.
     repair |= set(state.pop("triage_repair_gates", []))
+    if renewals:
+        state['failures'].extend(renewals)
+        state['pending'] = [f['id'] for f in renewals]
+        state.update(phase='triage', ready=False, failure_phase='refresh')
+        if repair:
+            state['repair_gates'] = sorted(set(state['repair_gates']) | repair)
+            state['triage_repair_gates'] = sorted(repair)
+        return
     if repair:
         state["repair_gates"] = sorted(set(state["repair_gates"]) | repair)
         state["phase"] = "needs-focused-plan"
@@ -1194,12 +1225,29 @@ def launch_rca(path: Path, launcher: list[str]) -> None:
 
 
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
-              launcher: list[str] | None = None) -> None:
+              launcher: list[str] | None = None, *, independent: bool = False,
+              excluded_roots=()) -> None:
     if (source(root) != state["source"] or digest(plan) != state["plan_digest"]
             or environment_digest() != state["environment"]
             or input_fingerprints(plan, root) != state["input_fingerprints"]):
         raise ValueError("source/plan changed; refresh after RCA before running")
-    selected = records(plan, state)
+    if independent:
+        if (state.get('phase') != 'triage' or not state.get('pending') or state.get('ready')
+                or CANCEL.is_set() or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
+            raise ValueError('independent FULL observation requires quiescent unresolved triage')
+        validate_plan(plan, root)
+        excluded = {Path(p).resolve() for p in excluded_roots}
+        pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state['pending']}
+        selected = [g for g in plan['gates'] if not g.get('quick') and g['name'] not in pending_gates
+                    and not reusable_full_pass(state, g)
+                    and (g.get('worker_transport') != 'local-isolated'
+                         or local_admission_root(g, root) not in excluded)]
+        for gate in selected:
+            if any(not (p.parent / 'receipt.json').is_file() for p in
+                   (directory / 'attempts').glob('*/' + '*/' + gate['name'] + '/request.json')):
+                raise ValueError('prior independent worker request has no terminal receipt')
+    else:
+        selected = records(plan, state)
     if state['phase'] in {'initial', 'failed-gates', 'final'}:
         selected_names = {g['name'] for g in selected}
         for gate in plan['gates']:
@@ -1217,14 +1265,20 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
         # Universal launch guard: a gate whose latest receipt still owns remote/native cleanup is
         # never relaunched on the same worker until that owner is reconciled (finding 4450239861).
         raise ValueError("gates still own unreconciled cleanup; refuse launch: " + ", ".join(owned))
+    if independent and not selected:
+        return  # No worker ran: do not invent an empty full attempt.
     state["round"] += 1
     state["live_failures"] = []
     results = []
     launched = []
-    local_failure = threading.Event()
+    # A retained/unknown cleanup blocks siblings sharing that exact root, not isolated workers.
+    local_failures = {local_admission_root(g, root): threading.Event() for g in selected
+                      if g.get('worker_transport') == 'local-isolated'}
     with ThreadPoolExecutor(max_workers=max(1, len(selected))) as rc_pool:
         with ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool:
-            futures = {pool.submit(execute, gate, state, directory, root, local_failure=local_failure): gate for gate in selected}
+            futures = {pool.submit(execute, gate, state, directory, root,
+                local_failure=local_failures.get(local_admission_root(gate, root))
+                    if gate.get('worker_transport') == 'local-isolated' else None): gate for gate in selected}
             for future in as_completed(futures):
                 gate = futures[future]
                 try:
@@ -1242,7 +1296,18 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                     if launcher and not CANCEL.is_set() and path.stem in {f["id"] for f in fresh}:
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
         failures = state.pop("live_failures")
-        if CANCEL.is_set():
+        if independent:
+            changed = (source(root) != state['source'] or environment_digest() != state['environment']
+                       or input_fingerprints(plan, root) != state['input_fingerprints'])
+            state['attempts'].append({'phase': 'triage', 'source': state['source'], 'results': results,
+                                     'independent_full': True, 'excluded_roots': sorted(str(p) for p in excluded),
+                                     'interrupted': CANCEL.is_set(), 'stale': changed})
+            for result in results:
+                state.get('carried_passes', {}).pop(result['gate'], None)
+            state['failures'].extend(failures)
+            state['pending'] = list(dict.fromkeys([*state['pending'], *[f['id'] for f in failures]]))
+            state.update(phase='triage', ready=False)
+        elif CANCEL.is_set():
             state["attempts"].append({"phase": state["phase"], "results": results, "interrupted": True})
             state.update(resume_phase=state["phase"], phase="interrupted", ready=False)
         elif (source(root) != state["source"] or environment_digest() != state["environment"]
@@ -1430,8 +1495,10 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
-    if state.get("pending"):
-        raise ValueError("adjudicate pending occurrences before binding a changed source")
+    pending_refresh = bool(state.get('pending'))
+    if pending_refresh and (state.get('phase') != 'triage' or CANCEL.is_set()
+            or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
+        raise ValueError("adjudicate pending occurrences or reach quiescent triage before binding a changed source")
     unstarted_quick = (state["phase"] == "quick" and not state.get('pending')
                        and 'live_failures' not in state and not state.get('resume_phase')
                        and not state.get('running'))
@@ -1502,6 +1569,9 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if revisit:
         state["pending"] = list(dict.fromkeys([*state.get("pending", []), *[f["id"] for f in revisit]]))
         state["failure_phase"] = "refresh"
+    if pending_refresh:
+        # Original occurrences keep their old source; a new source still requires final full coverage.
+        state['failure_phase'] = 'refresh'
     state['carried_passes'] = carried
     if carried:
         state.setdefault('pass_carryover_history', []).append(copy.deepcopy(carried))
@@ -1581,7 +1651,9 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
+    parser.add_argument('--exclude-root', type=Path, action='append', default=[],
+                        help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -1619,6 +1691,10 @@ def main(argv: list[str] | None = None) -> int:
                 if args.input is None:
                     raise ValueError("--input focused command plan required")
                 focused_plan(state, plan, read(args.input))
+            elif args.action == 'triage-independent':
+                with cancellation_handlers():
+                    run_phase(plan, state, directory, args.root, args.rca_launcher,
+                              independent=True, excluded_roots=args.exclude_root)
             elif args.action == "triage-quick":
                 with cancellation_handlers():
                     triage_quick(plan, state, directory, args.root)
