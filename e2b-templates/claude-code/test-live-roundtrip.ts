@@ -23,7 +23,7 @@ import WebSocket from 'ws';
 // ─── Config ──────────────────────────────────────────────
 import { readFileSync } from 'fs';
 
-const TEMPLATE_ID = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID || 'kng6z68u1md05bfdhq47';
+const TEMPLATE_ID = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID || 'claude-code-v21305-c2-m4';
 const E2B_API_KEY = process.env.E2B_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Per-user credentials (claudeAuth) — pass as env var or file path

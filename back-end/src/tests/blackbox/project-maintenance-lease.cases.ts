@@ -220,6 +220,7 @@ function fixture(
         },
       },
       '../e2bSandboxCreate': {},
+      '../claudeCodeTemplate': {},
       '../codeSessions/sandboxSize': {},
       './workspace': { E2B_HOME: '/home/user' },
     }
