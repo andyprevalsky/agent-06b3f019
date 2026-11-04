@@ -38,7 +38,7 @@ import { createLogger } from '../logger';
 import { isRoseDevUser } from '../../utils/roseDevAccess';
 import type { CodeSessionRow } from './store';
 import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
-import { DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from '../claudeCodeTemplate';
+import { CLAUDE_CODE_TEMPLATE, DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from '../claudeCodeTemplate';
 
 const log = createLogger('CodeSandboxSize');
 
@@ -208,8 +208,10 @@ function configuredTemplates(): TemplateMap | 'grid' {
   return {};
 }
 
-function currentTemplate(provider: SandboxProvider): string | null {
-  if (provider === 'claude') return DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
+function currentTemplate(provider: SandboxProvider, size: SandboxSize): string | null {
+  if (provider === 'claude') {
+    return sameSize(size, CLAUDE_CODE_TEMPLATE.size) ? DEFAULT_CLAUDE_CODE_TEMPLATE_ID : null;
+  }
   return process.env.E2B_CODEX_CODE_TEMPLATE_ID?.trim() || DEFAULT_CODEX_CODE_TEMPLATE_ID;
 }
 
@@ -224,7 +226,7 @@ export function sandboxTemplateFor(provider: SandboxProvider, size: SandboxSize)
   if (configured === 'grid') return sizedTemplateName(provider, size);
   const named = configured[provider]?.[sizeKey(size)];
   if (typeof named === 'string' && named.trim() !== '') return named.trim();
-  return sameSize(size, defaultSandboxSize()) ? currentTemplate(provider) : null;
+  return sameSize(size, defaultSandboxSize()) ? currentTemplate(provider, size) : null;
 }
 
 export function availableSizes(provider: SandboxProvider): SandboxSize[] {

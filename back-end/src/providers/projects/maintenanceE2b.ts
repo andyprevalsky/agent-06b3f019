@@ -6,10 +6,9 @@
  */
 import { Sandbox } from 'e2b';
 import { createSandboxWithRetry } from '../e2bSandboxCreate';
-import { DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from '../claudeCodeTemplate';
+import { CLAUDE_CODE_TEMPLATE, DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from '../claudeCodeTemplate';
 import {
   closestAvailableSize,
-  defaultSandboxSize,
   parseSandboxSize,
   sandboxTemplateFor,
   type SandboxSize,
@@ -40,7 +39,7 @@ export function e2bBaseTemplate(project: MaintenanceProject): BaseTemplate {
   if (size !== null && templateId !== null) return { templateId, size };
   return {
     templateId: DEFAULT_CLAUDE_CODE_TEMPLATE_ID,
-    size: defaultSandboxSize(),
+    size: { ...CLAUDE_CODE_TEMPLATE.size },
     warning: `no sandbox template of ${wanted.cpu} vCPU / ${wanted.memoryGb} GB is built; using the default template, which may be too small for a dependency install`,
   };
 }

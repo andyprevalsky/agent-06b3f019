@@ -13,6 +13,8 @@
 export const CLAUDE_CODE_TEMPLATE = {
   alias: 'claude-code-v21305-c2-m4',
   claudeCodeVersion: '2.1.305',
+  /** The template's fixed size; a different configured size needs its own template. */
+  size: { cpu: 2, memoryGb: 4 },
 } as const;
 
 export const DEFAULT_CLAUDE_CODE_TEMPLATE_ID = CLAUDE_CODE_TEMPLATE.alias;

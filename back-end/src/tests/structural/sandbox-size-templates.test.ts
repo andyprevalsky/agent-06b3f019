@@ -127,27 +127,42 @@ check('Claude templates pin a CLI that supports Opus 5.5', () => {
     pin,
     `claudeCodeTemplate.ts claudeCodeVersion != Dockerfile pin ${pin}; build a new template`
   );
-  const size = defaultSandboxSize();
+  const size = CLAUDE_CODE_TEMPLATE.size;
   assert.strictEqual(
     CLAUDE_CODE_TEMPLATE.alias,
     `claude-code-v${pin.replace(/\./g, '')}-c${size.cpu}-m${size.memoryGb}`
   );
+  // The built template's CPU/memory (e2b-templates/.context receipt: 2 vCPU, 4096 MB).
+  assert.deepStrictEqual(size, { cpu: 2, memoryGb: 4 });
   assert.strictEqual(DEFAULT_CLAUDE_CODE_TEMPLATE_ID, CLAUDE_CODE_TEMPLATE.alias);
 });
 
 check('a stale per-environment Claude template id cannot override the pinned template', () => {
   // 2026-11-04: devbox envs still named kng6z68u1md05bfdhq47 (CLI 2.1.138), so the
   // real E2B smoke got "Claude Code 2.1.138 does not support this model".
-  const keys = ['E2B_CLAUDE_CODE_TEMPLATE_ID', 'E2B_SANDBOX_TEMPLATES', 'CODE_SANDBOX_GRID'];
+  const keys = [
+    'E2B_CLAUDE_CODE_TEMPLATE_ID',
+    'E2B_SANDBOX_TEMPLATES',
+    'CODE_SANDBOX_GRID',
+    'CODE_SANDBOX_DEFAULT_CPU',
+    'CODE_SANDBOX_DEFAULT_MEMORY_GB',
+  ];
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   try {
     process.env.E2B_CLAUDE_CODE_TEMPLATE_ID = 'kng6z68u1md05bfdhq47';
     delete process.env.E2B_SANDBOX_TEMPLATES;
     delete process.env.CODE_SANDBOX_GRID;
+    delete process.env.CODE_SANDBOX_DEFAULT_CPU;
+    delete process.env.CODE_SANDBOX_DEFAULT_MEMORY_GB;
     assert.strictEqual(
       sandboxTemplateFor('claude', defaultSandboxSize()),
       DEFAULT_CLAUDE_CODE_TEMPLATE_ID
     );
+    // A configured default of another size never falls back to the 2x4 alias.
+    process.env.CODE_SANDBOX_DEFAULT_CPU = '8';
+    process.env.CODE_SANDBOX_DEFAULT_MEMORY_GB = '8';
+    assert.deepStrictEqual(defaultSandboxSize(), { cpu: 8, memoryGb: 8 });
+    assert.strictEqual(sandboxTemplateFor('claude', { cpu: 8, memoryGb: 8 }), null);
   } finally {
     for (const key of keys) {
       if (saved[key] === undefined) delete process.env[key];
