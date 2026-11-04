@@ -2,7 +2,7 @@
 
 import time
 from datetime import timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, get_args
 
 import structlog
 from temporalio import workflow
@@ -22,6 +22,7 @@ from domains.grep.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
 from tools.base import EventType, MessageStatus, ToolEvent, format_error_message, format_tool_message
 from tools.gate import source_status_activity
+from utils.tool_schemas import GrepTool
 
 logger = structlog.get_logger()
 
@@ -59,8 +60,39 @@ def _format_source(source: str) -> str:
 _MESSAGE_TITLE_SOURCES = {"", "messages", "email", "gmail", "imessage", "whatsapp"}
 
 
-# Sources a printed path selects by itself when the caller names none.
-_PATH_NAMED_SOURCES = {"calendar", "drive"}
+# Every grep source name; a `filters` key with one of these names is that
+# source's nested filter block (backend validate.normalize.ts).
+_GREP_SOURCES = set(get_args(get_args(GrepTool.model_fields["source"].annotation)[0]))
+_MESSAGE_FAMILY_SOURCES = {"messages", "email", "gmail", "imessage", "whatsapp"}
+
+
+def _filters(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    filters = tool_call.get("filters")
+    return filters if isinstance(filters, dict) else {}
+
+
+def _sources_named_by_filters(tool_call: Dict[str, Any]) -> list:
+    """Sources the filters select when the caller names none: nested blocks, then a printed path."""
+    filters = _filters(tool_call)
+    named = [key for key, value in filters.items() if key in _GREP_SOURCES and isinstance(value, dict) and value]
+    path = filters.get("path")
+    if isinstance(path, str):
+        root = path.split("/", 1)[0]
+        if root in _GREP_SOURCES and root not in named:
+            named.append(root)
+    return named
+
+
+def _without_blocks_of(filters: Any, kept_sources: list) -> Any:
+    """Drop nested filter blocks whose source is no longer searched."""
+    if not isinstance(filters, dict):
+        return filters
+    kept_family = any(source in _MESSAGE_FAMILY_SOURCES for source in kept_sources)
+    return {
+        key: value
+        for key, value in filters.items()
+        if key not in _GREP_SOURCES or key in kept_sources or (key == "messages" and kept_family)
+    }
 
 
 def _title_source(tool_call: Dict[str, Any]) -> str:
@@ -112,10 +144,9 @@ def _normalize_source_key(value: Any) -> str:
 
 
 def _document_provider(tool_call: Dict[str, Any]) -> Optional[str]:
-    filters = tool_call.get("filters")
-    if not isinstance(filters, dict):
-        return None
-    raw_provider = filters.get("document_source")
+    filters = _filters(tool_call)
+    nested = filters.get("documents")
+    raw_provider = (nested if isinstance(nested, dict) else filters).get("document_source")
     if not raw_provider:
         return None
     return _normalize_source_key(raw_provider)
@@ -138,15 +169,9 @@ def _extract_sources(tool_call: Dict[str, Any]) -> list:
     single = tool_call.get("source")
     if single:
         return [str(single)]
-    # A printed calendar or drive path names its own source (the backend
-    # resolves it the same way), so the connection check must cover it too.
-    filters = tool_call.get("filters")
-    path = filters.get("path") if isinstance(filters, dict) else None
-    if isinstance(path, str):
-        root = path.split("/", 1)[0]
-        if root in _PATH_NAMED_SOURCES:
-            return [root]
-    return []
+    # A nested filter block or a printed path names its own source (the
+    # backend resolves it the same way), so the connection check covers it too.
+    return _sources_named_by_filters(tool_call)
 
 
 def _source_status_targets(tool_call: Dict[str, Any]) -> tuple[list, Dict[str, set]]:
@@ -273,6 +298,8 @@ async def execute_grep(
                 # Partial: search only the connected sources this call.
                 search_call = {**_backend_grep_call(tool_call), "sources": connected_sources}
                 search_call.pop("source", None)
+                if "filters" in search_call:
+                    search_call["filters"] = _without_blocks_of(search_call["filters"], connected_sources)
 
         logger.info(
             "Calling grep_activity",

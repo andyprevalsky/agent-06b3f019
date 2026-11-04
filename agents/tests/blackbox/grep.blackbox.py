@@ -644,7 +644,6 @@ def test_printed_google_path_names_its_source():
     assert _extract_sources({"filters": {"path": "calendar/a@example.com/2026-10-06"}}) == ["calendar"]
     # An explicit choice wins, and other paths keep the default local sources.
     assert _extract_sources({"sources": ["messages"], "filters": {"path": "drive/a@example.com"}}) == ["messages"]
-    assert _extract_sources({"filters": {"path": "messages/Alice.thread"}}) == []
 
 
 def test_grep_titles_name_the_requested_sources():
@@ -737,6 +736,137 @@ async def test_execute_grep_documents_provider_opportunistic_does_not_gate():
     assert out["unavailable_sources"] == []
 
 
+def test_filters_name_their_sources_like_the_backend():
+    """A nested filter block or a printed path selects its source, as the backend resolves it."""
+    from domains.grep.service import _extract_sources
+
+    assert _extract_sources({"filters": {"drive": {"path": "drive/a@example.com/My Drive"}}}) == ["drive"]
+    assert _extract_sources({"filters": {"documents": {"document_source": "apple_notes"}}}) == ["documents"]
+    assert _extract_sources({"filters": {"path": "transactions/Chase/Checking"}}) == ["transactions"]
+    assert _extract_sources({"filters": {"path": "messages/Alice.thread"}}) == ["messages"]
+    # Flat filter keys are not sources, and an explicit choice still wins.
+    assert _extract_sources({"filters": {"since": "7d"}}) == []
+    assert _extract_sources({"sources": ["email"], "filters": {"drive": {"since": "7d"}}}) == ["email"]
+
+
+async def test_execute_grep_nested_filter_block_gates_its_source():
+    """filters={"drive": {...}} with no sources still checks the Google connection first."""
+    from domains.grep.service import execute_grep
+
+    calls = []
+    status_args = []
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        calls.append(name)
+        if name == "source_status_activity":
+            status_args.extend(args[1])
+            return [{"source": "drive", "connector": "gmail", "connected": False, "connectUrl": "https://x"}]
+        return {"matches": [], "total_matches": 0}
+
+    out = await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={"pattern": "lease", "filters": {"drive": {"path": "drive/a@example.com/My Drive"}}},
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert status_args == ["drive"]
+    assert out["unavailable_sources"][0]["source"] == "drive"
+    assert "grep_activity" not in calls
+
+
+async def test_execute_grep_nested_documents_provider_gate():
+    """filters={"documents": {"document_source": ...}} gates on that provider like the flat form."""
+    from domains.grep.service import execute_grep
+
+    status_args = []
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        if name == "source_status_activity":
+            status_args.extend(args[1])
+            return [{"source": "apple_notes", "connector": "apple_notes", "connected": True, "connectUrl": None}]
+        return {"matches": [], "total_matches": 0}
+
+    await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={
+            "pattern": "renewal clause",
+            "source": "documents",
+            "filters": {"documents": {"document_source": "Apple Notes"}},
+            "require_source_access": True,
+        },
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert status_args == ["apple_notes"]
+
+
+async def test_execute_grep_partial_gate_drops_nested_block_of_skipped_source():
+    """Skipping an unconnected source also drops its nested filter block, which the
+    backend rejects for a source that is no longer selected."""
+    from domains.grep.service import execute_grep
+
+    grep_called_with = {}
+
+    async def mock_execute_activity(activity_fn, *, args, start_to_close_timeout, retry_policy):
+        name = getattr(activity_fn, "__name__", "")
+        if name == "source_status_activity":
+            return [
+                {"source": "email", "connector": "gmail", "connected": False, "connectUrl": "https://x"},
+                {"source": "transactions", "connector": "plaid", "connected": True, "connectUrl": None},
+            ]
+        if name == "grep_activity":
+            grep_called_with.update(args[0])
+            return {"matches": [], "total_matches": 0}
+        return None
+
+    await execute_grep(
+        execute_activity=mock_execute_activity,
+        tool_call={
+            "pattern": "x",
+            "sources": ["email", "transactions"],
+            "filters": {"messages": {"since": "7d"}, "transactions": {"min_amount": 5}},
+        },
+        tool_call_id="tc-1",
+        agent_id="a-1",
+        user_id="u-1",
+    )
+    assert grep_called_with.get("sources") == ["transactions"]
+    assert grep_called_with.get("filters") == {"transactions": {"min_amount": 5}}
+
+
+def test_grep_schema_filter_keys_match_backend_validator():
+    """The GrepTool filters description lists exactly the keys the backend validator
+    accepts per source (back-end DATA_SOURCE_CONFIGS), so the advertised contract
+    and the executor cannot drift apart."""
+    import re
+    from pathlib import Path
+
+    from utils.tool_schemas import GrepTool
+
+    types_ts = (Path(__file__).resolve().parents[3] / "back-end/src/domains/data/types.ts").read_text()
+    configs = types_ts.split("export const DATA_SOURCE_CONFIGS", 1)[1].split("} as const;", 1)[0]
+    backend = {
+        source: [key.strip().strip("'") for key in keys.replace("\n", " ").split(",") if key.strip()]
+        for source, keys in re.findall(r"^  (\w+): \{.*?filters: \[(.*?)\]", configs, re.S | re.M)
+    }
+    advertised = {}
+    for line in GrepTool.model_fields["filters"].description.splitlines():
+        match = re.match(r"^  ([\w ,()]+?): (.+)$", line)
+        if not match:
+            continue
+        names = re.findall(r"\w+", match.group(1).replace("and ", ""))
+        keys = [key.strip() for key in re.sub(r" \([^)]*\)", "", match.group(2)).split(",")]
+        for name in names:
+            advertised[name] = keys
+    assert set(advertised) == set(backend), (sorted(advertised), sorted(backend))
+    for source, keys in backend.items():
+        assert sorted(advertised[source]) == sorted(keys), (source, advertised[source], keys)
+
+
 async def run_all_tests():
     print("grep blackbox tests:")
     r = BlackboxResult()
@@ -775,6 +905,18 @@ async def run_all_tests():
         "execute_grep_documents_provider_opportunistic_does_not_gate",
         test_execute_grep_documents_provider_opportunistic_does_not_gate,
     )
+    r.record("filters_name_their_sources_like_the_backend", test_filters_name_their_sources_like_the_backend)
+    await r.record_async(
+        "execute_grep_nested_filter_block_gates_its_source", test_execute_grep_nested_filter_block_gates_its_source
+    )
+    await r.record_async(
+        "execute_grep_nested_documents_provider_gate", test_execute_grep_nested_documents_provider_gate
+    )
+    await r.record_async(
+        "execute_grep_partial_gate_drops_nested_block_of_skipped_source",
+        test_execute_grep_partial_gate_drops_nested_block_of_skipped_source,
+    )
+    r.record("grep_schema_filter_keys_match_backend_validator", test_grep_schema_filter_keys_match_backend_validator)
     teardown_mock()
     return r.all_passed
 

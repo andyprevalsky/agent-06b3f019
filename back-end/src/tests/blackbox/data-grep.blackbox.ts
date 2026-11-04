@@ -26,6 +26,7 @@ import {
   testSourceStatus,
   testSnapshotEndpoint,
 } from './data-grep-sources.cases';
+import { testGrepParameterContract } from './data-grep-contract.cases';
 
 async function testSchemaAndRemovedParams(userId: string): Promise<void> {
   for (const param of [
@@ -568,6 +569,10 @@ async function runAll(): Promise<void> {
     ['summary includes transactions', () => testTransactionSummary(userId)],
     ['summary includes documents', () => testDocumentSummary(userId)],
     ['multi-source grep with channel routing', () => testMultiSourceGrep(userId)],
+    [
+      'every prod-observed parameter shape is accepted or named with guidance',
+      () => testGrepParameterContract(userId, agentId),
+    ],
     ['per-source connectivity status', () => testSourceStatus(userId)],
     [
       'snapshot endpoint returns distilled snapshot + revisions',
