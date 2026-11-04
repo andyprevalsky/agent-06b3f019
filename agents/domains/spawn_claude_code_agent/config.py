@@ -51,8 +51,7 @@ SDK_POST_RESULT_EXIT_GRACE_S: Final[float] = 180.0
 # The attached activity extends the sandbox's E2B idle window this often
 # (POST /:taskId/keepalive). Well inside the backend's 30-minute window, so an
 # attached session never auto-pauses; once keepalives stop it pauses on its own.
-# The same call reports a question the code agent asked its spawning agent
-# (blocked inside this spawn), so the session pauses and returns the question.
+# The same call reports a pending sandbox resize (C16) for the activity to apply.
 # 10k attached sessions = ~83 keepalives/s, each O(1) indexed reads.
 CODE_SESSION_KEEPALIVE_INTERVAL_S: Final[float] = 120.0
 # C16: applying a size change = checkpoint + new sandbox + restore + ws-server

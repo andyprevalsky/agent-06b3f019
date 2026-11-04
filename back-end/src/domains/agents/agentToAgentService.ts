@@ -5,6 +5,8 @@
  *                                              │
  *                       USER row on target (deterministic id = idempotency)
  *                                              │
+ *            running code task? ──yes──▶ the live CLI's next user turn
+ *                                              │      (deliverToRunningCodeTask), nothing stored
  *            recipient_task_id? ──yes──▶ excludeFromModel, no signal
  *                                              │      (other sender: task_running reported;
  *                                              │       a finished task: signal the owner
@@ -34,6 +36,7 @@ import { listedBackgroundTasks } from './agentTreeBackgroundTasks';
 import { WAKEABLE_TERMINAL_STATUSES, wakeFinishedAgent } from './agentWakeService';
 import { guardAgentMessage, noteAgentMessagesConsumed } from './agentMessageGuardService';
 import { taskMessageRefusal } from './agentTaskMessageRefusal';
+import { sendAgentMessageToRunningCodeTask } from './agentCodeTurnDelivery';
 
 const log = createLogger('AgentMessages');
 
@@ -175,6 +178,28 @@ async function refusalBeforeStore(
   );
 }
 
+/**
+ * A running code task is a CLI, not an inbox reader: the message is its next
+ * user turn or the refusal (agentCodeTurnDelivery.ts). No inbox row is
+ * written, so the unread guard does not apply; that path keeps the send budget.
+ */
+function runningCodeTaskDelivery(
+  owner: TreeAgent,
+  sender: TreeAgent,
+  body: AgentMessageBody,
+  task: ReturnType<typeof deliveryShape>['recipientTask']
+): ReturnType<typeof sendAgentMessageToRunningCodeTask> | null {
+  if (task?.type !== 'code' || task.status !== 'running') return null;
+  return sendAgentMessageToRunningCodeTask({
+    ownerAgentId: owner.id,
+    taskAddress: body.recipient_task_id ?? '',
+    runStartedAt: task.started_at ?? null,
+    sender: { id: sender.id, label: agentTaskPath(sender) ?? 'Agent' },
+    idempotencyKey: body.idempotency_key,
+    text: body.message,
+  });
+}
+
 /** Persist one agent message on the target and wake the target's workflow. */
 export async function sendAgentMessage(
   targetId: string,
@@ -194,6 +219,8 @@ export async function sendAgentMessage(
     messageType,
     toAgentPath,
   } = shape;
+  const codeTask = runningCodeTaskDelivery(target, sender, body, shape.recipientTask);
+  if (codeTask !== null) return codeTask;
   const refused = await refusalBeforeStore(target, sender, body, options, shape);
   if (refused !== null) return refused;
 

@@ -32,7 +32,9 @@ from domains.spawn_claude_code_agent.config import (
 from domains.spawn_claude_code_agent.service import (
     close_detached_code_session_activity,
     code_session_record,
+    format_code_session_summary,
     iso_utc,
+    local_workspace_place,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
@@ -332,6 +334,27 @@ def _workflow_tool_usage(result: Dict[str, Any]) -> Dict[str, list]:
                 }
             )
     return tool_usage
+
+
+def _user_pause_message(metadata: Dict[str, Any]) -> str:
+    """A user pause's tool result: paused (not failed) and how to resume this session.
+
+    Mirrors the idle-pause text (service.py): a Mac session keeps its files in
+    the user's folder and continues with target='local'.
+    """
+    local_place = local_workspace_place(metadata.get("code_agent"))
+    if local_place:
+        return (
+            f"Code session paused by the user (not failed). Its files and commits stay in {local_place}; "
+            "spawn the code agent again with target='local' to continue there."
+        )
+    session = metadata.get("code_session") if isinstance(metadata.get("code_session"), dict) else {}
+    session_id = session.get("code_session_id")
+    resume = f"with code_session_id='{session_id}' " if isinstance(session_id, str) and session_id else ""
+    return (
+        "Code session paused by the user (not failed). Its files, commits and conversation are kept; "
+        f"spawn the code agent again {resume}to resume it."
+    )
 
 
 class SpawnClaudeCodeAgentManager(ToolManager):
@@ -714,6 +737,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         cancel_metadata["task_id"] = result["task_id"]
                     if result.get("code_provider"):
                         cancel_metadata["code_provider"] = result["code_provider"]
+                    if isinstance(result.get("code_session"), dict):
+                        cancel_metadata["code_session"] = result["code_session"]
                 if not cancel_metadata.get("task_id"):
                     # Last resort: still emit task_complete so routing stays on
                     # ClaudeCodeChip, but log — FE recovers task_id from siblings.
@@ -721,10 +746,14 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "[ClaudeCode] Cancel without task_id; chip may need FE sibling recovery",
                         agent_id=agent_id,
                     )
+                # Same facts as an idle pause: which session is paused, so a resume
+                # targets it (not "the latest session for the repo").
+                pause_message = _user_pause_message(cancel_metadata)
+                pause_summary = format_code_session_summary(cancel_metadata.get("code_session"))
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Code session paused",
-                    message="User paused the agent",
+                    message=f"{pause_message}\n{pause_summary}" if pause_summary else pause_message,
                     status=MessageStatus.FINISHED,
                     metadata=cancel_metadata,
                     # The sandbox ran until the pause: its time is billed too.

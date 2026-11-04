@@ -831,116 +831,6 @@ def test_build_usage_items_no_tokens():
     assert items[0]["type"] == "service"
 
 
-# ── call_parent_llm ─────────────────────────────────────────────────
-
-
-async def test_call_parent_llm_completion():
-    """call_parent_llm attempt_completion=True returns None response."""
-    from domains.spawn_claude_code_agent import service
-    from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
-
-    mock_response = ClaudeCodeParentResponse(attempt_completion=True, response="")
-    mock_usage = {"prompt_tokens": 100, "completion_tokens": 50}
-
-    async def fake_streaming(**kwargs):
-        return mock_response, mock_usage, {}
-
-    async def noop_chunk(text, tokens):
-        pass
-
-    with patch("helpers.llm.call_llm_structured_streaming", side_effect=fake_streaming):
-        result = await service.call_parent_llm(
-            goal="do thing",
-            filtered_output="output",
-            conversation_history=[],
-            agent_id="a1",
-            on_chunk=noop_chunk,
-        )
-
-    assert result["attempt_completion"] is True
-    assert result["response"] is None
-    assert result["usage"] == mock_usage
-
-
-async def test_call_parent_llm_continue():
-    """call_parent_llm attempt_completion=False returns the response text."""
-    from domains.spawn_claude_code_agent import service
-    from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
-
-    mock_response = ClaudeCodeParentResponse(attempt_completion=False, response="1")
-    mock_usage = {"prompt_tokens": 10, "completion_tokens": 5}
-
-    async def fake_streaming(**kwargs):
-        return mock_response, mock_usage, {}
-
-    async def noop_chunk(text, tokens):
-        pass
-
-    with patch("helpers.llm.call_llm_structured_streaming", side_effect=fake_streaming):
-        result = await service.call_parent_llm(
-            goal="g",
-            filtered_output="output",
-            conversation_history=[{"role": "user", "content": "hello"}],
-            agent_id="a1",
-            on_chunk=noop_chunk,
-        )
-
-    assert result["attempt_completion"] is False
-    assert result["response"] == "1"
-
-
-async def test_call_parent_llm_exception_safe():
-    """If LLM raises, call_parent_llm returns safe defaults (no raise)."""
-    from domains.spawn_claude_code_agent import service
-
-    async def fake_streaming(**kwargs):
-        raise RuntimeError("boom")
-
-    async def noop_chunk(text, tokens):
-        pass
-
-    with patch("helpers.llm.call_llm_structured_streaming", side_effect=fake_streaming):
-        result = await service.call_parent_llm(
-            goal="g",
-            filtered_output="",
-            conversation_history=[],
-            agent_id="a1",
-            on_chunk=noop_chunk,
-        )
-
-    assert result["attempt_completion"] is False
-    assert result["response"] == ""
-    assert result["usage"] == {"prompt_tokens": 0, "completion_tokens": 0}
-
-
-async def test_call_parent_llm_with_attachments_history():
-    """When history mentions attachments, file_info is injected in system prompt."""
-    from domains.spawn_claude_code_agent import service
-    from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
-
-    captured_messages = {}
-
-    async def fake_streaming(**kwargs):
-        captured_messages["messages"] = kwargs["messages"]
-        return ClaudeCodeParentResponse(attempt_completion=True, response=""), {}, {}
-
-    async def noop_chunk(text, tokens):
-        pass
-
-    with patch("helpers.llm.call_llm_structured_streaming", side_effect=fake_streaming):
-        await service.call_parent_llm(
-            goal="g",
-            filtered_output="",
-            conversation_history=[{"role": "user", "content": "see attachments X"}],
-            agent_id="a1",
-            on_chunk=noop_chunk,
-        )
-
-    # System prompt is the first message
-    sys_msg = captured_messages["messages"][0]["content"]
-    assert "Available Files" in sys_msg
-
-
 # ── spawn_claude_code_agent REPO tests ──────────────────────────────
 
 
@@ -3965,11 +3855,6 @@ async def _run_all_tests():
     # build_usage_items
     r.record("usage_items_both", test_build_usage_items_both_llm_and_service)
     r.record("usage_items_no_tokens", test_build_usage_items_no_tokens)
-    # call_parent_llm
-    await r.record_async("call_parent_llm_completion", test_call_parent_llm_completion)
-    await r.record_async("call_parent_llm_continue", test_call_parent_llm_continue)
-    await r.record_async("call_parent_llm_exception_safe", test_call_parent_llm_exception_safe)
-    await r.record_async("call_parent_llm_attachments_hint", test_call_parent_llm_with_attachments_history)
     # repo
     await r.record_async("repo_save_msg_init", test_repo_save_message_posts_json)
     await r.record_async("repo_save_msg_noninit", test_repo_save_message_non_init_has_subagent)
@@ -4295,6 +4180,10 @@ async def _run_all_tests():
     await r.record_async(
         "cc_manager_user_pause_row_carries_activity_code_agent",
         test_cc_manager_user_pause_row_carries_activity_code_agent,
+    )
+    await r.record_async(
+        "cc_manager_user_pause_result_names_resumable_code_session",
+        test_cc_manager_user_pause_result_names_its_resumable_code_session,
     )
     await r.record_async(
         "cc_manager_usage_limit_row_is_paused_with_user_text",
@@ -6103,7 +5992,64 @@ async def test_cc_manager_user_pause_row_carries_activity_code_agent():
     assert row.metadata["code_agent"] == activity_block, row.metadata["code_agent"]
     assert row.metadata["task_id"] == "cc-task-1" and row.metadata["action_type"] == "task_complete", row.metadata
     assert row.metadata["success"] is False and row.metadata["code_provider"] == "codex", row.metadata
-    assert row.message == "User paused the agent", row.message
+    assert row.message == (
+        "Code session paused by the user (not failed). Its files, commits and "
+        "conversation are kept; spawn the code agent again to resume it."
+    ), row.message
+
+
+async def test_cc_manager_user_pause_result_names_its_resumable_code_session():
+    """A user pause tells the parent which code session is paused and that it resumes.
+
+    The tool result was only "User paused the agent": no code_session_id, so a
+    resume picked "the latest session for the repo" (wrong with parallel code
+    agents in one repo) and the parent treated the run as finished. Live repro
+    (2026-11-04, root c4eaace9): after resume the root spawned an explore agent
+    to inspect the paused agent instead of resuming it.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    facts = {"code_session_id": "6c1d6f1e-0000-4000-8000-0000000000aa", "state": "paused", "branch": "rose/counter"}
+    cancelled = {
+        "status": "cancelled",
+        "task_id": "cc-task-2",
+        "message": "Claude Code agent cancelled by user",
+        "code_provider": "claude",
+        "code_session": dict(facts),
+    }
+    fake = _SequencedCCWorkflow(cancelled)
+    wf = _HandoffCCWorkflowInstance()
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-up2"))
+    finally:
+        restore()
+
+    row = _paused_row(events)
+    assert row.status.value == "FINISHED" and row.metadata["session_paused"] is True, row.metadata
+    assert row.metadata["code_session"] == facts, row.metadata
+    assert "Code session: 6c1d6f1e-0000-4000-8000-0000000000aa (paused)" in row.message, row.message
+    assert row.message.startswith(
+        "Code session paused by the user (not failed). Its files, commits and conversation are kept; "
+        "spawn the code agent again with code_session_id='6c1d6f1e-0000-4000-8000-0000000000aa' to resume it."
+    ), row.message
+
+    # A Mac session keeps its work in the user's folder and continues with target='local'.
+    local = {**cancelled, "code_agent": {"target": "local", "device_name": "Andy's MacBook", "folder": "~/dev/app"}}
+    fake = _SequencedCCWorkflow(local)
+    wf = _HandoffCCWorkflowInstance()
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-up3"))
+    finally:
+        restore()
+    row = _paused_row(events)
+    assert row.message.startswith(
+        "Code session paused by the user (not failed). Its files and commits stay in ~/dev/app on "
+        "Andy's MacBook; spawn the code agent again with target='local' to continue there."
+    ), row.message
 
 
 async def test_cc_manager_usage_limit_row_is_paused_with_user_text():

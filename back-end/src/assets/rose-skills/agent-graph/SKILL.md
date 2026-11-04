@@ -28,8 +28,10 @@ existing tree list/send/grep commands remain available.
 ## When not to use
 
 - Reaching the user: use the talk-to-user skill.
-- Waiting for a reply: do not poll. Messages sent to you arrive as a new user
-  turn after your current turn.
+- Waiting for a reply: do not poll. A message sent to you while you are still
+  working is added to your current turn. Once you finish your turn, your run is
+  over and later messages do not reach it, so put any open question or blocker
+  in your final result for the agent that started you.
 
 ## Commands
 

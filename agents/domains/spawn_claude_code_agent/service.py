@@ -10,7 +10,7 @@ import re
 import time
 import uuid as uuid_module
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import structlog
 import structlog.contextvars
@@ -53,7 +53,6 @@ from domains.spawn_claude_code_agent.repo import (
     save_claude_code_message,
     save_code_transcript_batch,
 )
-from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.activity_generation_drain import activity_drain_reason
 from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
 from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
@@ -440,143 +439,6 @@ def build_context_summary(
             summary_parts.append(f"  • {action}")
 
     return "\n".join(summary_parts)
-
-
-# ---------------------------------------------------------------------------
-# Parent LLM interaction
-# ---------------------------------------------------------------------------
-
-
-async def call_parent_llm(
-    goal: str,
-    filtered_output: str,
-    conversation_history: List[Dict[str, str]],
-    agent_id: str,
-    on_chunk: Callable[[str, int], Awaitable[None]],
-    model: str = "rose-labs/rose-1-flash",
-    claude_token: Optional[str] = None,
-    gpt_token: Optional[str] = None,
-    gpt_account_id: Optional[str] = None,
-    gpt_token_source: Optional[str] = None,
-    gpt_token_pool_id: Optional[str] = None,
-    gpt_token_user_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Call the parent agent's LLM to decide whether to respond or complete.
-
-    Claude Code's terminal output appears as USER messages.
-    Parent LLM's responses are sent to Claude Code's stdin.
-
-    Returns
-    -------
-    Dict with ``attempt_completion`` (bool), ``response`` (str|None),
-    ``usage`` (dict).
-    """
-    from helpers.llm import call_llm_structured_streaming
-    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
-
-    # Build file info for system prompt (static; same body whenever attachments
-    # are present in the conversation, no per-call interpolation).
-    file_info = ""
-    if conversation_history and any("attachments" in str(h) for h in conversation_history):
-        file_info = """
-
-# Available Files
-User attachments are available in /home/user/attachments/
-Claude Code can read and process these files as needed.
-
-# Output Files
-When Claude Code creates files the user needs, it should copy them to /home/user/output/
-Files in this directory will be automatically uploaded and returned to the user."""
-
-    # System prompt is split at SYSTEM_PROMPT_DYNAMIC_BOUNDARY:
-    #   - Static portion (above the marker): identity, role, decision rules,
-    #     response guidelines, attachments info. Globally cacheable across
-    #     every claude-code spawn.
-    #   - Dynamic portion (below the marker): the original goal. Varies per
-    #     spawn so it must NOT contaminate the cacheable prefix.
-    # Per-call timestamps live in the [STATE: ...] line on the user message.
-    static_system = (
-        "You are the parent agent monitoring Claude Code, a terminal-based coding agent. "
-        "You read its terminal output and decide when to respond, intervene, or mark the task complete.\n\n"
-        "Claude Code's terminal output appears as USER messages. Your responses will be sent to Claude Code's stdin.\n\n"
-        "# Your Role\n"
-        "- Monitor Claude Code's progress on the task\n"
-        "- Answer questions Claude Code asks (numbered options can be answered with just the number)\n"
-        "- Provide guidance when Claude Code seems stuck\n"
-        "- Determine when the task is complete\n\n"
-        "# Decision Making\n"
-        "Set attempt_completion=true ONLY when:\n"
-        "- Claude Code has explicitly stated the task is done\n"
-        "- The output shows clear completion (tests passing, task finished, etc.)\n"
-        "- Claude Code is asking \"Is there anything else?\" or similar\n\n"
-        "Set attempt_completion=false when:\n"
-        "- Claude Code is asking questions or requesting input\n"
-        "- Claude Code is still working (you see active tool calls, file operations)\n"
-        "- Claude Code encountered an error that needs addressing\n\n"
-        "# Response Guidelines\n"
-        "- Be concise; Claude Code is a terminal agent\n"
-        "- If Claude asks numbered options (like 1, 2, 3), respond with just the number\n"
-        "- If unsure about a question, let Claude Code decide (respond with \"your choice\" or similar)\n"
-        "- Don't repeat the original goal back to Claude Code; it already knows it"
-        f"{file_info}"
-    )
-
-    dynamic_system = f"# Original Goal\n{goal}"
-
-    system_prompt = static_system + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + dynamic_system
-
-    # Build messages for LLM
-    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
-
-    # Add conversation history
-    for msg in conversation_history:
-        messages.append(msg)
-
-    # Add current output as user message, with a trailing [STATE: time=...] line
-    # so the per-call timestamp lives outside the cacheable prefix.
-    current_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    state_line = f"[STATE: time={current_ts}]"
-    messages.append({"role": "user", "content": f"{filtered_output}\n\n{state_line}"})
-
-    try:
-        result, usage, _ = await call_llm_structured_streaming(
-            messages=messages,
-            model=model,
-            temperature=0.3,
-            max_tokens=500,
-            response_model=ClaudeCodeParentResponse,
-            on_chunk=on_chunk,
-            agent_id=agent_id,
-            claude_token=claude_token,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            gpt_token_source=gpt_token_source,
-            gpt_token_pool_id=gpt_token_pool_id,
-            gpt_token_user_id=gpt_token_user_id,
-            call_site="claude_code_agent",
-        )
-
-        return {
-            "attempt_completion": result.attempt_completion,
-            "response": result.response if not result.attempt_completion else None,
-            "usage": usage,
-        }
-
-    except Exception as e:
-        logger.error(
-            "[ClaudeCode] Parent LLM call failed",
-            agent_id=agent_id,
-            error=extract_error_message(e),
-        )
-        # Return empty response so the loop doesn't send anything to stdin.
-        # Previously this returned "continue" which created infinite loops:
-        # the error kept firing, "continue" was sent to stdin each time,
-        # and the same unchanged terminal output triggered another failed LLM call.
-        return {
-            "attempt_completion": False,
-            "response": "",
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -1254,9 +1116,6 @@ async def _run_agentic_loop(
     last_drain_check = 0.0
     last_keepalive = safe_time()
 
-    async def on_chunk(text: str, tokens: int) -> None:
-        pass  # Parent LLM streaming not needed
-
     try:
         while exit_code is None and not attempt_completion:
             elapsed = safe_time() - loop_start
@@ -1303,20 +1162,6 @@ async def _run_agentic_loop(
             if safe_time() - last_keepalive >= CODE_SESSION_KEEPALIVE_INTERVAL_S:
                 last_keepalive = safe_time()
                 keepalive = await keepalive_e2b_session(task_id, code_provider)
-                awaiting = keepalive.get("awaiting_parent") if isinstance(keepalive, dict) else None
-                if isinstance(awaiting, dict) and awaiting.get("question") and not direct_chat_active:
-                    # The spawning agent is blocked inside this spawn: pause the
-                    # session and hand it the question instead of both waiting.
-                    logger.info(
-                        "[ClaudeCode] Code agent asked its spawner a question; pausing the session",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        message_id=awaiting.get("message_id"),
-                    )
-                    action_summary.append("Code agent asked its parent a question; session paused for the answer")
-                    if loop_outcome is not None:
-                        loop_outcome["awaiting_parent"] = awaiting
-                    break
                 resize = keepalive.get("resize_requested") if isinstance(keepalive, dict) else None
                 if isinstance(resize, dict) and resize.get("request_id") and not direct_chat_active:
                     # C16: the code agent asked for another sandbox size. Detach (the
@@ -1396,8 +1241,6 @@ async def _run_agentic_loop(
                 break
 
             if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
-                # (The parent-LLM relay below is unreachable: every branch
-                # `continue`s before it. Direct chat also never reaches it.)
                 filtered_output = terminal.get_display()
                 pending_output = False
 
@@ -1428,78 +1271,6 @@ async def _run_agentic_loop(
                         silence_s=silence_duration,
                     )
                     continue
-
-                    logger.info(
-                        "[ClaudeCode] Silence detected, calling parent LLM",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        output_len=len(filtered_output),
-                        silence_s=silence_duration,
-                    )
-
-                    llm_response = await call_parent_llm(
-                        goal=goal,
-                        filtered_output=filtered_output,
-                        conversation_history=conversation_history,
-                        agent_id=agent_id,
-                        on_chunk=on_chunk,
-                        model=model,
-                        claude_token=claude_token,
-                        gpt_token=gpt_token,
-                        gpt_account_id=gpt_account_id,
-                        gpt_token_source=gpt_token_source,
-                        gpt_token_pool_id=gpt_token_pool_id,
-                        gpt_token_user_id=gpt_token_user_id,
-                    )
-
-                    usage = llm_response.get("usage", {})
-                    total_input_tokens += usage.get("prompt_tokens", 0)
-                    total_output_tokens += usage.get("completion_tokens", 0)
-
-                    if llm_response.get("attempt_completion"):
-                        attempt_completion = True
-                        logger.info("[ClaudeCode] Parent LLM signaled completion", agent_id=agent_id, task_id=task_id)
-                        action_summary.append("Parent LLM signaled task completion")
-                    elif llm_response.get("response"):
-                        response_text = llm_response["response"]
-                        last_stdin_send_time = safe_time()
-                        sent_ok = await ws_client.send_stdin(response_text)
-
-                        if not sent_ok:
-                            last_stdin_send_time = 0.0
-                            logger.error(
-                                "[ClaudeCode] stdin send FAILED — message did not reach terminal",
-                                agent_id=agent_id,
-                                task_id=task_id,
-                                response=response_text[:100],
-                            )
-                            action_summary.append(f"STDIN SEND FAILED: '{response_text[:50]}'")
-                            pending_output = True
-                            continue
-
-                        interaction_count += 1
-                        conversation_history.append({"role": "user", "content": filtered_output})
-                        conversation_history.append({"role": "assistant", "content": response_text})
-
-                        logger.info(
-                            "[ClaudeCode] Sent stdin response",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            response=response_text[:100],
-                            interaction=interaction_count,
-                        )
-                        action_summary.append(f"Interaction {interaction_count}: sent '{response_text[:50]}'")
-
-                        await save_claude_code_message(
-                            agent_id=agent_id,
-                            title=f"Response #{interaction_count}",
-                            task_id=task_id,
-                            message=response_text,
-                            status=MessageStatus.FINISHED,
-                            action_type="agent_response",
-                            tool_call_id=tool_call_id,
-                            code_provider=code_provider,
-                        )
 
             await flush_transcript()
 
@@ -3018,7 +2789,7 @@ def _respawn_clause(next_lease: Optional[Dict[str, Any]], *, local: bool, from_p
         return (
             f"no credential is free until {next_lease.get('available_at')} "
             f"(the earliest reset: {_lease_name(next_lease)}); a retry before that stays paused and "
-            "starts nothing."
+            "starts nothing, so wait with wait_for(until_timestamp=<that time>) first."
         )
     label = next_lease.get("label")
     funded = next_lease.get("kind") == "funded"
@@ -3132,7 +2903,7 @@ def format_no_credential_message(
     if isinstance(next_lease, dict) and next_lease.get("available_at"):
         when = (
             f"The earliest reset is {next_lease['available_at']} ({_lease_name(next_lease)}). "
-            f"Retry with {retry} after that."
+            f"Wait with wait_for(until_timestamp=<that time>), then retry with {retry}."
         )
     else:
         when = (
@@ -3999,15 +3770,14 @@ async def spawn_claude_code_activity(
         # 5. Close session and extract output files before verifier so the
         # verifier sees the SDK event JSON plus the actual extracted artifacts.
         # A persistent session is checkpointed and paused, never killed.
-        awaiting_parent = loop_outcome.get("awaiting_parent")
-        idle_paused = loop_outcome.get("idle_paused") is True or isinstance(awaiting_parent, dict)
+        idle_paused = loop_outcome.get("idle_paused") is True
         close_data = await close_e2b_session(
             task_id=task_id,
             user_id=user_id,
             agent_id=agent_id,
             additional_paths=[],
             code_provider=code_provider,
-            reason="awaiting_parent" if isinstance(awaiting_parent, dict) else "idle" if idle_paused else "close",
+            reason="idle" if idle_paused else "close",
         )
         output_files = close_data.get("output_files", [])
         claude_code_usage = close_data.get("usage")
@@ -4019,19 +3789,7 @@ async def spawn_claude_code_activity(
             if log_collector:
                 await log_collector.stop()
             local_place = local_workspace_place(code_agent_meta)
-            if isinstance(awaiting_parent, dict) and local_place:
-                message = (
-                    f"The code agent asked you: {awaiting_parent.get('question')}\n"
-                    "It is paused (not failed) and waiting for your answer. Spawn the code agent "
-                    f"again with target='local' and your answer as the goal to continue in {local_place}."
-                )
-            elif isinstance(awaiting_parent, dict):
-                message = (
-                    f"The code agent asked you: {awaiting_parent.get('question')}\n"
-                    "It is paused (not failed) and waiting for your answer. Spawn the code agent "
-                    "again with this code_session_id and your answer as the goal to resume it."
-                )
-            elif local_place:
+            if local_place:
                 # A Mac session cannot be E2B-paused: its CLI is stopped and the
                 # work stays in the user's folder; the next spawn continues there.
                 message = (

@@ -372,7 +372,9 @@ class WaitForTool(BaseModel):
         description=(
             f"Maximum seconds to wait for agents (default {WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS}, at most "
             f"{WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS}; values below {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS} are raised "
-            f"to {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS}). Only valid with agents."
+            f"to {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS}). Only valid with agents. For a longer wait use "
+            "until_timestamp: it ends early as soon as one of your background agents finishes or an agent "
+            "messages you."
         ),
     )
     check_interval_seconds: int = Field(
