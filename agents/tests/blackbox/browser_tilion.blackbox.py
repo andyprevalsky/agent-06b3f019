@@ -89,13 +89,30 @@ class FakeTilionGateway:
                         task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
         finally:
-            self._sockets.discard(downstream)
+            await downstream.close()
+
+    def _release_transport_slot(self, downstream):
+        if downstream in self._sockets:
+            self._sockets.remove(downstream)
             self.active -= 1
 
     async def __aenter__(self):
         quiet = logging.getLogger("browser_tilion.fake_gateway")
         quiet.setLevel(logging.CRITICAL)
-        self._server = await websockets.serve(self._handle, "127.0.0.1", 0, max_size=None, logger=quiet)
+        gateway = self
+        from websockets.asyncio.server import ServerConnection
+
+        class GatewayConnection(ServerConnection):
+            def connection_lost(self, error):
+                super().connection_lost(error)
+                # Relay cleanup may still be awaiting Chromium's close. The
+                # single-client slot belongs to this actual native transport.
+                gateway._release_transport_slot(self)
+
+        self._server = await websockets.serve(
+            self._handle, "127.0.0.1", 0, max_size=None, logger=quiet,
+            create_connection=GatewayConnection,
+        )
         self.port = self._server.sockets[0].getsockname()[1]
         return self
 
@@ -1982,10 +1999,12 @@ class HeldSlotGateway(FakeTilionGateway):
             await asyncio.sleep(0.2)
             await downstream.close(code=4409, reason="another client is attached to this session")
             return
-        try:
-            await super()._handle(downstream)
-        finally:
+        await super()._handle(downstream)
+
+    def _release_transport_slot(self, downstream):
+        if downstream in self._sockets:
             self._held_until = time.monotonic() + self.hold
+        super()._release_transport_slot(downstream)
 
 
 async def test_multiplexer_redials_when_the_slot_frees_late():
@@ -3824,9 +3843,131 @@ async def test_tilion_checkpoint_waits_for_pending_dial_and_real_close():
         await mux.close()
 
 
+async def test_gateway_slot_tracks_closed_transport_while_bridge_retires():
+    """The live slot ends at native transport closure, not relay cleanup."""
+    from websockets.protocol import State
+
+    bridge_retiring = asyncio.Event()
+    retire_bridge = asyncio.Event()
+    real_connect = websockets.connect
+
+    async def echo(connection):
+        async for raw in connection:
+            await connection.send(raw)
+
+    async with websockets.serve(echo, "127.0.0.1", 0) as browser:
+        browser_url = f"ws://127.0.0.1:{browser.sockets[0].getsockname()[1]}"
+
+        class RetiringBridge:
+            def __init__(self, context):
+                self.context = context
+            async def __aenter__(self):
+                return await self.context.__aenter__()
+            async def __aexit__(self, *error):
+                bridge_retiring.set()
+                await retire_bridge.wait()
+                return await self.context.__aexit__(*error)
+
+        def connect(url, *args, **kwargs):
+            context = real_connect(url, *args, **kwargs)
+            return RetiringBridge(context) if url == browser_url else context
+
+        with patch("websockets.connect", connect):
+            async with FakeTilionGateway(browser_url) as gateway:
+                first = second = None
+                try:
+                    first = await real_connect(gateway.cdp_url, proxy=None)
+                    await first.send('{"id":1}')
+                    assert await asyncio.wait_for(first.recv(), 1) == '{"id":1}'
+                    native = next(iter(gateway._sockets))
+                    assert native.state is State.OPEN and gateway.active == 1
+                    async with real_connect(gateway.cdp_url, proxy=None) as rejected:
+                        try:
+                            await asyncio.wait_for(rejected.recv(), 1)
+                        except websockets.ConnectionClosed:
+                            pass
+                        assert rejected.close_code == 4409
+                    assert gateway.accepted == 1 and gateway.rejected_4409 == 1
+                    await first.close()
+                    await native.wait_closed()
+                    await asyncio.wait_for(bridge_retiring.wait(), 1)
+                    assert native.state is State.CLOSED
+                    assert gateway.active == 0, ("closed socket counted during bridge retirement", native.state.name, gateway.active)
+                    second = await real_connect(gateway.cdp_url, proxy=None)
+                    await second.send('{"id":2}')
+                    assert await asyncio.wait_for(second.recv(), 1) == '{"id":2}'
+                    assert gateway.active == 1 and gateway.accepted == 2
+                    assert gateway.max_concurrent == 1
+                    await second.close()
+                finally:
+                    retire_bridge.set()
+                    for connection in (first, second):
+                        if connection is not None:
+                            await connection.close()
+
+
+async def test_held_gateway_starts_hold_at_transport_retirement():
+    """Retiring the browser bridge must not expose a gap in a held slot."""
+    from websockets.protocol import State
+
+    bridge_retiring = asyncio.Event()
+    retire_bridge = asyncio.Event()
+    real_connect = websockets.connect
+
+    async def echo(connection):
+        async for raw in connection:
+            await connection.send(raw)
+
+    async with websockets.serve(echo, "127.0.0.1", 0) as browser:
+        browser_url = f"ws://127.0.0.1:{browser.sockets[0].getsockname()[1]}"
+
+        class RetiringBridge:
+            def __init__(self, context):
+                self.context = context
+            async def __aenter__(self):
+                return await self.context.__aenter__()
+            async def __aexit__(self, *error):
+                bridge_retiring.set()
+                await retire_bridge.wait()
+                return await self.context.__aexit__(*error)
+
+        def connect(url, *args, **kwargs):
+            context = real_connect(url, *args, **kwargs)
+            return RetiringBridge(context) if url == browser_url else context
+
+        with patch("websockets.connect", connect):
+            async with HeldSlotGateway(browser_url, hold=60) as gateway:
+                first = None
+                try:
+                    first = await real_connect(gateway.cdp_url, proxy=None)
+                    await first.send('{"id":1}')
+                    assert await asyncio.wait_for(first.recv(), 1) == '{"id":1}'
+                    native = next(iter(gateway._sockets))
+                    await first.close()
+                    await native.wait_closed()
+                    await asyncio.wait_for(bridge_retiring.wait(), 1)
+                    assert native.state is State.CLOSED and gateway.active == 0
+                    held_until = gateway._held_until
+                    async with real_connect(gateway.cdp_url, proxy=None) as rejected:
+                        await rejected.send('{"id":2}')
+                        try:
+                            await asyncio.wait_for(rejected.recv(), 1)
+                        except websockets.ConnectionClosed:
+                            pass
+                        assert rejected.close_code == 4409, "held slot reopened during bridge retirement"
+                    assert gateway.accepted == 1 and gateway.rejected_4409 == 1
+                    assert gateway._held_until == held_until, "a rejected client must not restart the hold"
+                finally:
+                    retire_bridge.set()
+                    if first is not None:
+                        await first.close()
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("fake_gateway_transport_slot_retirement", test_gateway_slot_tracks_closed_transport_while_bridge_retires),
+        ("held_gateway_transport_slot_retirement", test_held_gateway_starts_hold_at_transport_retirement),
         ("chromium_native_port_discovery", test_chromium_native_discovery_waits_for_valid_port_file),
         ("chromium_native_discovery_budget", test_chromium_native_discovery_preserves_missing_file_budget),
         ("chromium_native_port_ownership", test_full_chromium_port_cannot_be_stolen_after_parent_reservation),
