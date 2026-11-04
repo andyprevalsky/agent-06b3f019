@@ -63,6 +63,7 @@ import {
   type InspectProvider,
 } from './inspectSandbox';
 import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
+import { DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from '../claudeCodeTemplate';
 import {
   claudeCodeModel,
   claudeCodeEffort,
@@ -120,11 +121,7 @@ export function inspectTemplateId(provider: InspectProvider): string | null {
       DEFAULT_CODEX_CODE_TEMPLATE_ID
     );
   }
-  return (
-    process.env.E2B_CODE_INSPECT_TEMPLATE_ID?.trim() ||
-    process.env.E2B_CLAUDE_CODE_TEMPLATE_ID?.trim() ||
-    null
-  );
+  return process.env.E2B_CODE_INSPECT_TEMPLATE_ID?.trim() || DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
 }
 
 async function e2bInspectSandbox(provider: InspectProvider): Promise<InspectSandbox> {

@@ -263,6 +263,12 @@ export async function acquireCodeSandbox(
           });
         }
       }
+      if (sized !== null && sized.templateId === null) {
+        // The unsized fallback is a fixed-size image: never hand it to another size.
+        throw new Error(
+          `No ${label} sandbox template is built for ${sized.size.cpu} vCPU / ${sized.size.memoryGb} GB; configure E2B_SANDBOX_TEMPLATES for that size`
+        );
+      }
       return createSandboxWithRetry(sized?.templateId ?? templateId, createOptions, label);
     },
     spawnSizing
