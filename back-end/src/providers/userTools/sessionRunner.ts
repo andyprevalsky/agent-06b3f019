@@ -341,7 +341,7 @@ async function runInSandbox(
 
 /** Lease one of the caller's tools sessions (at most USER_TOOL_MAX_LIVE_SESSIONS). */
 async function leaseToolSession(params: UserToolRunParams) {
-  sweepExpiredCodeSessions(params.userId);
+  void sweepExpiredCodeSessions(params.userId);
   try {
     return await resolveCodeSession({
       userId: params.userId,

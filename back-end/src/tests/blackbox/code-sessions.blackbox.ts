@@ -27,7 +27,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { Sandbox } from 'e2b';
+import { Sandbox, SandboxNotFoundError } from 'e2b';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
@@ -55,6 +55,8 @@ import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
 import { testResumableCloseListsPaused } from './code-sessions-list.cases';
 import { registerFailedStartPauseCases } from './code-sessions-failed-start.cases';
+import { registerCodeSessionLifecycleCases } from './code-sessions-lifecycle.cases';
+import { registerSandboxAttributionCases } from './code-sessions-sandbox-attribution.cases';
 
 config();
 
@@ -231,7 +233,13 @@ after(async () => {
     else process.env[key] = value;
   }
   await prisma.agentTrajectorySearch.deleteMany({ where: { userId: { in: [userA, userB] } } });
-  await prisma.claudeCodeSession.deleteMany({ where: { agentId: rootAgentId } });
+  const fixtureAgents = await prisma.agent.findMany({
+    where: { userId: { in: [userA, userB] } },
+    select: { id: true },
+  });
+  await prisma.claudeCodeSession.deleteMany({
+    where: { agentId: { in: [rootAgentId, ...fixtureAgents.map((agent) => agent.id)] } },
+  });
   await prisma.codeSessionShare.deleteMany({ where: { userId: { in: [userA, userB] } } });
   await prisma.codeSession.deleteMany({ where: { userId: { in: [userA, userB] } } });
   await prisma.agent.deleteMany({ where: { userId: { in: [userA, userB] } } });
@@ -386,8 +394,9 @@ test('close checkpoints and pauses the sandbox, never kills it; a dead sandbox f
     assert.equal(row.leaseOwner, null, 'a paused session releases its lease for the next spawn');
 
     // Resume path: the paused sandbox is gone, so a new one gets the checkpoint.
-    patchConnect(async () => {
-      throw new Error('sandbox not found');
+    patchConnect(async (id) => {
+      // What E2B's connect throws for a paused sandbox that no longer exists.
+      throw new SandboxNotFoundError(`Paused sandbox ${id} not found`);
     });
     const freshHome = join(fixtureDir, 'home-e2b-fresh');
     mkdirSync(freshHome, { recursive: true });
@@ -595,3 +604,12 @@ test('keepalive extends an attached sandbox and its lease; retire deletes checkp
 });
 
 registerFailedStartPauseCases(userA, rootAgentId);
+registerCodeSessionLifecycleCases({
+  userA,
+  fixtureDir,
+  seedWorkspace,
+  fakeSandbox,
+  patchConnect,
+  restoreConnect: () => patchConnect(originalConnect),
+});
+registerSandboxAttributionCases(userA);

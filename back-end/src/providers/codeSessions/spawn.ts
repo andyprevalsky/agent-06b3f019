@@ -10,7 +10,15 @@ import { createLogger } from '../logger';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
-import { checkpointCodeSession, retireCodeSession, sweepExpiredCodeSessions } from './lifecycle';
+import {
+  checkpointCodeSession,
+  defaultCodeSessionMaintenanceDeps,
+  forgetCodeSessionMaintenance,
+  retireCodeSession,
+  scheduleCodeSessionMaintenance,
+  sweepExpiredCodeSessions,
+  type CodeSessionMaintenanceDeps,
+} from './lifecycle';
 import { e2bSandboxFs, localSandboxFs } from './sandboxFs';
 import {
   CodeSessionBusyError,
@@ -86,7 +94,7 @@ export async function resolveSpawnCodeSession(
     agent?.busId !== undefined && agent.busId !== null && agent.busId !== ''
       ? agent.busId
       : params.agentId;
-  sweepExpiredCodeSessions(userId);
+  void sweepExpiredCodeSessions(userId);
   // "New agent in this branch" works in the shared agent's session; every
   // other agent owns its own worktree and branch (plan §1b).
   const ownerAgentId = await effectiveOwnerAgentId(userId, params.agentId);
@@ -312,14 +320,19 @@ async function sampleAndPublish(
 
 /**
  * Keepalive from the attached code-agent activity (liveness is heartbeat-only;
- * there is no runtime limit): extend the E2B sandbox's idle window and the
- * session lease. Once keepalives stop, the sandbox pauses after the window.
+ * there is no runtime limit): extend the session lease and the E2B sandbox's
+ * idle window, and save the session periodically (cycling the sandbox before
+ * E2B's continuous-runtime cap; lifecycle.ts). Once keepalives stop, the
+ * sandbox pauses after the window. The lease is extended first: a failed E2B
+ * call must not let it lapse, or another spawn could take the session from
+ * under the running CLI.
  */
 export async function keepAliveCodeTask(
   taskId: string,
   setTimeoutFn: (sandboxId: string, timeoutMs: number) => Promise<void> = (sandboxId, timeoutMs) =>
     Sandbox.setTimeout(sandboxId, timeoutMs, { apiKey: process.env.E2B_API_KEY }),
-  resources: CodeResourceDeps = codeResourceDeps
+  resources: CodeResourceDeps = codeResourceDeps,
+  maintenance: CodeSessionMaintenanceDeps = defaultCodeSessionMaintenanceDeps
 ): Promise<{
   alive: boolean;
   code_session_id: string | null;
@@ -331,6 +344,7 @@ export async function keepAliveCodeTask(
 }> {
   const task = await prisma.claudeCodeSession.findUnique({ where: { id: taskId } });
   if (task === null || task.status === 'CLOSED') {
+    forgetCodeSessionMaintenance(task?.codeSessionId ?? null);
     return { alive: false, code_session_id: task?.codeSessionId ?? null, awaiting_parent: null };
   }
   // Only an E2B sandbox has an idle window; a Mac session (C14) lives while its
@@ -340,13 +354,14 @@ export async function keepAliveCodeTask(
   // and resize reads so its bounded E2B read never delays them.
   const e2b =
     !isLocalClaudeCodeSandboxId(task.sandboxId) && !isLocalDeviceSandboxId(task.sandboxId);
-  if (e2b) await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
+  if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
+  if (e2b) {
+    await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
+    scheduleCodeSessionMaintenance(task, maintenance);
+  }
   const [sample, resize] = await Promise.all([
     e2b ? sampleAndPublish(task, resources) : Promise.resolve(null),
-    (async () => {
-      if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
-      return pendingResizeForTask(task.codeSessionId);
-    })(),
+    pendingResizeForTask(task.codeSessionId),
   ]);
   return {
     alive: true,

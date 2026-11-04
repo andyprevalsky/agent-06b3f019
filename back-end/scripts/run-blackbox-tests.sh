@@ -77,6 +77,10 @@ source "$SCRIPT_DIR/local-db-container.sh"
 RUN_ID="${BLACKBOX_TEST_RUN_ID:-${CONTRACT_TEST_RUN_ID:-$(date +%s)-$$-$RANDOM}}"
 export BLACKBOX_TEST_RUN_ID="$RUN_ID"
 export CONTRACT_TEST_RUN_ID="$RUN_ID"
+# E2B sandboxes this run's backend creates carry this stack tag; cleanup kills
+# exactly them (scripts/kill-stack-sandboxes.ts). Passed only to that backend and
+# to the cleanup, never exported, so no nested stack inherits it.
+SANDBOX_STACK_ID="blackbox:$RUN_ID"
 ARTIFACT_ROOT="${BLACKBOX_TEST_ARTIFACT_ROOT:-${CONTRACT_TEST_ARTIFACT_ROOT:-$ROOT_DIR/.context/test-runs}}"
 ARTIFACT_DIR="${BLACKBOX_TEST_ARTIFACT_DIR:-${CONTRACT_TEST_ARTIFACT_DIR:-$ARTIFACT_ROOT/$RUN_ID}}"
 PORT_LOCK_ROOT="$ARTIFACT_ROOT/.port-locks"
@@ -500,6 +504,9 @@ cleanup() {
   if [[ "$cleaned" == 1 && -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
     rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
   fi
+  if [[ "$USE_EXISTING_BACKEND" != "1" ]]; then
+    (cd "$BACKEND_DIR" && ROSE_SANDBOX_STACK_ID="$SANDBOX_STACK_ID" timeout 60 npx tsx scripts/kill-stack-sandboxes.ts) || true
+  fi
   exit "$result"
 }
 # Bash resumes the script after a signal trap returns, so INT/TERM must exit
@@ -578,6 +585,7 @@ EOF
 
   PORT="$PORT" \
   DISABLE_GMAIL_SYNC=1 \
+  ROSE_SANDBOX_STACK_ID="$SANDBOX_STACK_ID" \
   npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!
   trap 'exit 130' INT
