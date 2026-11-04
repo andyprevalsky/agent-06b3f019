@@ -1096,7 +1096,36 @@ def stop_active_child_processes(grace_seconds: float = 10.0) -> None:
         _ACTIVE_CHILD_PROCESSES.discard(process)
 
 
+def _proc_port_listener_pids(port: int) -> set[int]:
+    """Linux: owners of LISTEN sockets on ``port`` from /proc (no lsof needed)."""
+    inodes: set[str] = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        with contextlib.suppress(OSError):
+            for line in Path(table).read_text().splitlines()[1:]:
+                parts = line.split()
+                # local_address is HEX_IP:HEX_PORT; state 0A is TCP_LISTEN.
+                if len(parts) > 9 and parts[3] == "0A" and int(parts[1].rsplit(":", 1)[1], 16) == port:
+                    inodes.add(parts[9])
+    pids: set[int] = set()
+    if not inodes:
+        return pids
+    wanted = {f"socket:[{inode}]" for inode in inodes}
+    for proc_dir in Path("/proc").iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        with contextlib.suppress(OSError):
+            for fd in (proc_dir / "fd").iterdir():
+                with contextlib.suppress(OSError):
+                    if os.readlink(fd) in wanted:
+                        pids.add(int(proc_dir.name))
+                        break
+    return pids
+
+
 def _port_listener_pids(port: int) -> set[int]:
+    # Fresh boxes.dev images ship without lsof; read /proc there instead.
+    if Path("/proc/net/tcp").is_file():
+        return _proc_port_listener_pids(port)
     try:
         out = subprocess.run(
             ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True, timeout=3, check=False
@@ -1157,6 +1186,17 @@ def _pid_cwd_under_worktree(pid: int) -> bool:
     """True iff pid's cwd is inside this worktree. Safety gate: guarantees the
     isolated teardown can never reach a process owned by a sibling worktree,
     even if a PID/port were somehow reused."""
+    root = str(REPO_ROOT)
+    # Linux: read the cwd link directly. lsof is absent on some images (fresh
+    # boxes.dev devboxes), which made every candidate fail this gate and the
+    # isolated teardown reap nothing.
+    proc_cwd = Path("/proc") / str(pid) / "cwd"
+    if Path("/proc").is_dir():
+        try:
+            cwd = os.readlink(proc_cwd)
+        except OSError:
+            return False
+        return cwd == root or cwd.startswith(root + os.sep)
     try:
         out = subprocess.run(
             ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
@@ -1167,7 +1207,6 @@ def _pid_cwd_under_worktree(pid: int) -> bool:
         ).stdout
     except Exception:
         return False
-    root = str(REPO_ROOT)
     for line in out.splitlines():
         if line.startswith("n"):
             cwd = line[1:]
