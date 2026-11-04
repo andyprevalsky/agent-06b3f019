@@ -50,8 +50,17 @@ export class CodeSessionBusyError extends Error {
   }
 }
 
+/**
+ * One key per repository: `owner/repo`, `owner/repo/` and `owner/repo.git` name
+ * the same remote, so they must resolve the same session (and its branch).
+ */
 export function repoKeyFor(repoUrl: string | null | undefined): string {
-  return repoUrl !== undefined && repoUrl !== null ? repoUrl.trim() : '';
+  if (repoUrl === undefined || repoUrl === null) return '';
+  return repoUrl
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\.git$/, '')
+    .replace(/\/+$/, '');
 }
 
 /** Branch a new session works on (see branch.ts). Null fields for repo-less sessions. */
