@@ -58,6 +58,9 @@ class TaskResult:
     owned_roots: list[dict] = field(default_factory=list)
     graded_root_creation_outcome: Optional[str] = None
     failure_reason: Optional[str] = None
+    # Task-specific measurements recorded on passes AND failures so the two are
+    # comparable (e.g. the FCaptcha score, detections and browser session).
+    evaluator_evidence: Optional[dict] = None
     approvals_triggered: int = 0
     approvals_resolved: int = 0
     cache_read_input_tokens: int = 0
@@ -273,6 +276,7 @@ class BenchmarkRun:
                     suite=os.environ.get("BENCHMARK_ATTEMPT_SUITE") or self.suite,
                     run_id=self.run_id,
                     outcome_class=("cleanup-failure" if r.cleanup_failure else "passed" if r.passed else "failed"),
+                    evaluator_evidence=r.evaluator_evidence,
                 )
             except Exception as e:
                 emit_history_diagnostic(f"⚠️  record_attempt failed for {r.name} (non-fatal): {e}")
