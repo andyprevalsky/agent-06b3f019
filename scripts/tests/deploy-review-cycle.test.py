@@ -195,6 +195,53 @@ class SyncInheritanceTest(unittest.TestCase):
         self.assertEqual(cycle["number"], 2)
 
 
+class ApprovedFinalVerificationTest(unittest.TestCase):
+    setUp = ReviewCycleTest.setUp
+    tearDown = ReviewCycleTest.tearDown
+    complete = ReviewCycleTest.complete
+    def prepared(self):
+        self.complete("a" * 40, "initial", "clean", reset=True)
+        self.complete("b" * 40, "incremental", "clean")
+        return MODULE.read_state(self.state_path)["cycles"].copy()
+
+    def test_explicit_admission_preserves_history_and_does_not_finish_review(self):
+        old = self.prepared()
+        MODULE.start_cycle(self.state_path, head="c" * 40, kind="verification",
+                           verification_approval="PR1634-REVIEW-ADMISSION")
+        state = MODULE.read_state(self.state_path)
+        self.assertEqual(state["cycles"][:2], old)
+        self.assertEqual(state["cycles"][2]["verification_approval"], "PR1634-REVIEW-ADMISSION")
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.require_mergeable(self.state_path, head="c" * 40)
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.finish_cycle(self.state_path, head="d" * 40, result="clean")
+        MODULE.finish_cycle(self.state_path, head="c" * 40, result="clean")
+        MODULE.require_mergeable(self.state_path, head="c" * 40)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "cap reached"):
+            MODULE.start_cycle(self.state_path, head="d" * 40, kind="verification",
+                               verification_approval="PR1634-REVIEW-ADMISSION")
+
+    def test_approval_is_not_a_findings_waiver(self):
+        self.prepared()
+        MODULE.start_cycle(self.state_path, head="c" * 40, kind="verification",
+                           verification_approval="PR1634-REVIEW-ADMISSION")
+        MODULE.finish_cycle(self.state_path, head="c" * 40, result="findings")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "not mergeable"):
+            MODULE.require_mergeable(self.state_path, head="c" * 40)
+
+    def test_approval_is_only_valid_at_the_exact_final_boundary(self):
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.start_cycle(self.state_path, head="a" * 40, kind="initial", reset=True,
+                               verification_approval="PR1634-REVIEW-ADMISSION")
+        self.prepared()
+        for ref in ("", "approval with spaces", "a" * 129):
+            with self.assertRaises(MODULE.ReviewCycleError):
+                MODULE.start_cycle(self.state_path, head="c" * 40, kind="verification",
+                                   verification_approval=ref)
+        self.assertEqual(len(MODULE.read_state(self.state_path)["cycles"]), 2)
+
+
+
 
 HEAD_A = "33d8cfbfed95812de3534a74bee0a0caa36f10fe"
 HEAD_B = "f602c1814b6f5fddbbdd71a3f22f6862807ea06c"
@@ -456,6 +503,22 @@ class OverrideDispositionTest(unittest.TestCase):
         with self.assertRaises(MODULE.ReviewCycleError) as raised:
             self.override(self.data)
         self.assertIn("this ledger records 2", str(raised.exception))
+
+    def test_quota_skipped_clean_cycles_do_not_count_as_delivered_rounds(self) -> None:
+        state = MODULE.read_state(self.state_path)
+        first = state["cycles"][0]
+        first.update(result="clean", disposition="skipped", skip_reason="usage-cap")
+        state["cycles"][1].update(result="clean", disposition="skipped", skip_reason="usage-cap")
+        MODULE.write_state(self.state_path, state)
+        before = self.state_path.read_bytes()
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "this ledger records 1"):
+            self.override(self.data, prior_rounds=0)
+        self.assertEqual(self.state_path.read_bytes(), before, "rejection must preserve ledger/history")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "this ledger records 2"):
+            self.override(self.data, prior_rounds=1)
+        cycle = self.override(self.data, prior_rounds=2)
+        self.assertEqual(cycle["rounds"], 3)
+        self.assertEqual(MODULE.read_state(self.state_path)["cycles"][0], first)
 
     def test_override_records_findings_target_and_rounds(self) -> None:
         cycle = self.override(self.data, prior_rounds=1)

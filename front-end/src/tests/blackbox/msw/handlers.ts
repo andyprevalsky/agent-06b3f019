@@ -13,6 +13,17 @@ export const handlers = [
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
   // Rose Desktop left bar groups agents by project; none unless a test overrides.
   http.get(`${API_BASE}/projects`, () => HttpResponse.json({ projects: [] })),
+  // Project settings mints a one-time `rose agent-init` code on open.
+  http.post(`${API_BASE}/projects/cli-login-codes`, () =>
+    HttpResponse.json(
+      {
+        code: 'rlc_defaultdefaultdefaultdefaultdefa',
+        expiresAt: new Date(Date.now() + 30 * 60_000).toISOString(),
+        project: null,
+      },
+      { status: 201 },
+    ),
+  ),
   // Rose profile (left-bar account row name, Settings): no name unless a test overrides.
   http.get(`${API_BASE}/user-settings`, () => HttpResponse.json({})),
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.

@@ -1,6 +1,7 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import { DEMO_CACHE_POOL_LIMIT, prisma } from './database';
 import { demoCacheAllowed } from './demoCachePolicy';
+import { agentSpeedFromRow, type AgentSpeed } from './rose/speed';
 import {
   demoCacheWriteEnabled,
   demoCacheWritesDisabled,
@@ -513,16 +514,22 @@ export async function agentFastMode(agentId: string): Promise<{
   writeEnabled: boolean;
   rootAgentId: string | null;
   rootGoal: string | null;
-  /** Fast Mode button — LLM provider speed (independent of DEMO cache replay). */
+  /**
+   * Legacy Fast Mode button bit. It is part of existing DEMO cache keys only;
+   * it changes no provider request (provider speed is `speed`).
+   */
   providerFastMode: boolean;
+  /** Provider speed for this agent's LLM calls. Never gates a cache. */
+  speed: AgentSpeed;
 }> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
-    select: { fastModeCacheEnabled: true, goal: true, userId: true, busId: true },
+    select: { fastModeCacheEnabled: true, speed: true, goal: true, userId: true, busId: true },
   });
-  // Persisted flag is the Fast Mode *button* (LLM provider_fast_mode). Cache
-  // replay is DEMO-prompt only and ignores the button.
+  // Cache replay is DEMO-prompt only and ignores speed. The legacy button bit
+  // stays in the response because recorded DEMO keys include it.
   const providerFastMode = agent?.fastModeCacheEnabled ?? true;
+  const speed = agent ? agentSpeedFromRow(agent) : 'standard';
   const rootAgentId = agent?.busId ?? agentId;
   let rootGoal = agent?.goal ?? null;
   // Soft-complete / DEMO cache gates on the tree root's exact bench prompt;
@@ -543,6 +550,7 @@ export async function agentFastMode(agentId: string): Promise<{
     rootAgentId,
     rootGoal,
     providerFastMode,
+    speed,
   };
 }
 

@@ -1,0 +1,66 @@
+/**
+ * The real E2B bindings of the template sync runner: which template the
+ * template sandbox boots from, how it is created, and how snapshots are
+ * deleted. Kept apart from maintenanceRunner.ts so tests drive the same
+ * runner with a fake sandbox (no network, no spend).
+ */
+import { Sandbox } from 'e2b';
+import { createSandboxWithRetry } from '../e2bSandboxCreate';
+import {
+  closestAvailableSize,
+  defaultSandboxSize,
+  parseSandboxSize,
+  sandboxTemplateFor,
+  type SandboxSize,
+} from '../codeSessions/sandboxSize';
+import type { BaseTemplate, MaintenanceDeps } from './maintenanceRunner';
+import type { MaintenanceProject } from './maintenanceStore';
+import { E2B_HOME } from './workspace';
+
+/**
+ * A dependency install of the Rose repo was OOM-killed on the 1 GB default
+ * template (measured 2026-10-28), so the template sandbox wants at least this.
+ */
+export const MIN_TEMPLATE_SANDBOX: SandboxSize = { cpu: 2, memoryGb: 4 };
+
+export function wantedTemplateSize(project: Pick<MaintenanceProject, 'sandboxSize'>): SandboxSize {
+  const chosen = parseSandboxSize(project.sandboxSize);
+  return {
+    cpu: Math.max(MIN_TEMPLATE_SANDBOX.cpu, chosen?.cpu ?? 0),
+    memoryGb: Math.max(MIN_TEMPLATE_SANDBOX.memoryGb, chosen?.memoryGb ?? 0),
+  };
+}
+
+/** Claude template (the snapshot is of a Claude code sandbox) of the closest built size. */
+export function e2bBaseTemplate(project: MaintenanceProject): BaseTemplate {
+  const wanted = wantedTemplateSize(project);
+  const size = closestAvailableSize('claude', wanted);
+  const templateId = size !== null ? sandboxTemplateFor('claude', size) : null;
+  if (size !== null && templateId !== null) return { templateId, size };
+  const fallback = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID?.trim();
+  if (!fallback) throw new Error('E2B_CLAUDE_CODE_TEMPLATE_ID is not configured');
+  return {
+    templateId: fallback,
+    size: defaultSandboxSize(),
+    warning: `no sandbox template of ${wanted.cpu} vCPU / ${wanted.memoryGb} GB is built; using the default template, which may be too small for a dependency install`,
+  };
+}
+
+export function e2bMaintenanceDeps(): MaintenanceDeps {
+  const apiKey = process.env.E2B_API_KEY;
+  if (!apiKey) throw new Error('E2B_API_KEY not configured');
+  return {
+    homeDir: E2B_HOME,
+    now: () => new Date(),
+    baseTemplate: e2bBaseTemplate,
+    createSandbox: (templateOrSnapshotId, opts) =>
+      createSandboxWithRetry(
+        templateOrSnapshotId,
+        { apiKey, timeoutMs: opts.timeoutMs, metadata: opts.metadata },
+        'Project sync'
+      ),
+    setSandboxTimeout: (sandboxId, timeoutMs) =>
+      Sandbox.setTimeout(sandboxId, timeoutMs, { apiKey }),
+    deleteSnapshot: (snapshotId) => Sandbox.deleteSnapshot(snapshotId, { apiKey }),
+  };
+}

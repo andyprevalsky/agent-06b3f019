@@ -147,9 +147,14 @@ function verifyNestedArgumentsWithSibling(): void {
 async function verifyResponsesWire(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const keys = [
-    'AZURE_FOUNDRY_ENDPOINT',
-    'AZURE_FOUNDRY_API_KEY',
-    'AZURE_FOUNDRY_DEPLOYMENTS',
+    // Isolate all regions so inherited deployments cannot select another wire fixture.
+    ...Array.from({ length: 9 }, (_, index) => (index === 0 ? '' : `_${index + 1}`)).flatMap(
+      (suffix) => [
+        `AZURE_FOUNDRY_ENDPOINT${suffix}`,
+        `AZURE_FOUNDRY_API_KEY${suffix}`,
+        `AZURE_FOUNDRY_DEPLOYMENTS${suffix}`,
+      ]
+    ),
     'GPT_API_KEY',
     'ANTHROPIC_API_KEY',
     'OPENROUTER_API_KEY',
@@ -159,7 +164,7 @@ async function verifyResponsesWire(): Promise<void> {
   for (const key of keys) delete process.env[key];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://a-4989-resource.openai.azure.com';
   process.env.AZURE_FOUNDRY_API_KEY = 'test-key';
-  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol';
   let requests = 0;
   globalThis.fetch = async (input, init) => {
     const body = record(JSON.parse(String(init?.body)));
@@ -183,6 +188,7 @@ async function verifyResponsesWire(): Promise<void> {
       );
     }
     assert.equal(String(input), 'https://a-4989-resource.openai.azure.com/openai/v1/responses');
+    assert.equal(body.model, 'gpt-6.1-sol', 'Ultra must retain its actual GPT-6.1 wire model');
     verifySchemas(body.tools, true);
     assert.equal(Object.hasOwn(body, 'anthropic_tools'), false);
     assert.equal(body.tool_choice, 'required');

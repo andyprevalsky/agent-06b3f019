@@ -29,7 +29,7 @@ export async function assertResizeMigrationIsolation(): Promise<void> {
     await tx.$executeRawUnsafe(
       `INSERT INTO "CodeSessionResize" (id,"codeSessionId","userId","agentId",
        "fromCpu","fromMemoryGb","toCpu","toMemoryGb",reason)
-       VALUES ('resize-a','session-a','other-user','agent-a',2,4,8,16,'build demand')`
+       VALUES ('resize-a','session-a','other-user','agent-a',2,4,8,8,'build demand')`
     );
     const backendRows = await tx.$queryRawUnsafe<Array<{ count: number }>>(
       'SELECT count(*)::int AS count FROM "CodeSessionResize"'

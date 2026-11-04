@@ -35,13 +35,10 @@ import {
   type ClaudeCodeCredentialResult,
 } from '../claudeCredentials';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
-import { fetchGptCodeCredentialsWithMeta } from '../gptCredentials';
 import {
   CodeAgentCredentialError,
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeSandboxApiKey,
-  resolveCodexAzureFunding,
-  resolveCodexCodeAuthEnvs,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from '../claudeCodeSandboxAuth';
@@ -50,7 +47,8 @@ import { applyCheckpoint } from './checkpoint';
 import { githubAuthRemoteUrl, loadNewestVerifiedCheckpoint, primaryRepoFacts } from './lifecycle';
 import { type CodeSessionFs, e2bSandboxFs } from './sandboxFs';
 import { CODE_SESSION_STATES, findOwnedCodeSession } from './store';
-import { codeCredentialAvailability, parseResetsAt } from './usageLimit';
+import { codeProviderOrder } from './credentialOrder';
+import { codeCredentialTiers, parseResetsAt, resolveCodexSpawnAuth } from './usageLimit';
 import {
   claudeHomeConfig,
   envFileContent,
@@ -65,6 +63,16 @@ import {
   type InspectProvider,
 } from './inspectSandbox';
 import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
+import {
+  claudeCodeModel,
+  claudeCodeEffort,
+  type CodeAgentSettings,
+  type CodeAgentTier,
+  codeAgentSettingsForAgent,
+  codexCodeEffort,
+  codexCodeModel,
+} from '../codeAgentModels';
+import { codexAzureModelCatalogFor } from '../e2bWsServerOverlay';
 
 const log = createLogger('CodeInspect');
 
@@ -155,13 +163,12 @@ function cliTimeoutS(): number {
   return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_CLI_TIMEOUT_S;
 }
 
-function inspectModel(provider: InspectProvider): string {
+/** CODE_INSPECT_*_MODEL, else the tier's code-agent model (codeAgentModels.ts). */
+function inspectModel(provider: InspectProvider, tier: CodeAgentTier): string {
   if (provider === 'codex') {
-    return process.env.CODE_INSPECT_CODEX_MODEL || process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra';
+    return (process.env.CODE_INSPECT_CODEX_MODEL ?? '').trim() || codexCodeModel(tier);
   }
-  return (
-    process.env.CODE_INSPECT_CLAUDE_MODEL || process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5'
-  );
+  return (process.env.CODE_INSPECT_CLAUDE_MODEL ?? '').trim() || claudeCodeModel(tier);
 }
 
 interface ProviderAuth {
@@ -171,10 +178,13 @@ interface ProviderAuth {
 }
 
 /** Same credential order as a code-agent spawn (user → pool → funded key), no Fast Mode. */
-async function providerAuth(provider: InspectProvider, userId: string): Promise<ProviderAuth> {
+async function providerAuth(
+  provider: InspectProvider,
+  userId: string,
+  tier: CodeAgentTier
+): Promise<ProviderAuth> {
   if (provider === 'codex') {
-    const meta = await fetchGptCodeCredentialsWithMeta(userId);
-    return { envs: resolveCodexCodeAuthEnvs(meta, resolveCodexAzureFunding()), claude: null };
+    return { envs: (await resolveCodexSpawnAuth(userId, new Date(), tier)).envs, claude: null };
   }
   const meta = await fetchClaudeCodeCredentialsWithMeta(userId);
   const shared = process.env.ANTHROPIC_API_KEY;
@@ -218,12 +228,13 @@ async function markClaudeUsageLimited(
   }
 }
 
-/** Providers to try, preferring the one the session itself runs on (C15). */
+/**
+ * Providers to try in the C15 order (credentialOrder.ts): the session's own
+ * provider's subscriptions, the other's, then the funded keys in that order.
+ */
 async function providerOrder(userId: string, preferred: string): Promise<InspectProvider[]> {
-  const available = await codeCredentialAvailability(userId);
   const first: InspectProvider = preferred === 'codex' ? 'codex' : 'claude';
-  const second: InspectProvider = first === 'claude' ? 'codex' : 'claude';
-  return [first, second].filter((provider) => available[provider]);
+  return codeProviderOrder(await codeCredentialTiers(userId), first);
 }
 
 export interface InspectCodeParams {
@@ -282,7 +293,8 @@ async function inspectOnce(
   auth: ProviderAuth,
   checkpoint: NonNullable<Awaited<ReturnType<typeof loadNewestVerifiedCheckpoint>>>,
   question: string,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  settings: CodeAgentSettings
 ): Promise<Attempt> {
   const started = Date.now();
   const sandbox = await (sandboxFactoryOverride ?? e2bInspectSandbox)(provider);
@@ -311,6 +323,14 @@ async function inspectOnce(
     await fs.writeFile(paths.env, Buffer.from(envFileContent(auth.envs)));
     await fs.writeFile(paths.prompt, Buffer.from(question));
     await fs.writeFile(paths.instructions, Buffer.from(inspectorInstructions(workDir)));
+    const azureCodex =
+      provider === 'codex' &&
+      auth.envs.CODEX_AUTH_JSON === undefined &&
+      auth.envs.CODEX_AZURE_BASE_URL !== undefined;
+    const azureCatalog = azureCodex
+      ? codexAzureModelCatalogFor(auth.envs.CODEX_AZURE_MODEL ?? '')
+      : null;
+    if (azureCatalog !== null) await fs.writeFile(paths.codexAzureModelCatalog, azureCatalog);
     if (provider === 'claude') {
       await fs.writeFile(
         `${fs.home}/.claude.json`,
@@ -331,14 +351,16 @@ async function inspectOnce(
           provider,
           workDir,
           timeoutS,
-          ...(provider === 'codex' &&
-          auth.envs.CODEX_AUTH_JSON === undefined &&
-          auth.envs.CODEX_AZURE_BASE_URL !== undefined
+          ...(azureCodex
             ? {
                 model: auth.envs.CODEX_AZURE_MODEL,
                 codexAzureBaseUrl: auth.envs.CODEX_AZURE_BASE_URL,
+                codexAzureModelCatalog: azureCatalog !== null,
               }
-            : { model: inspectModel(provider) }),
+            : { model: inspectModel(provider, settings.tier) }),
+          ...(provider === 'codex'
+            ? { codexEffort: codexCodeEffort(settings.tier), codexSpeed: settings.speed }
+            : { claudeEffort: claudeCodeEffort(settings.tier) }),
         },
         paths,
         fs.home
@@ -441,15 +463,24 @@ export async function inspectCodeSession(params: InspectCodeParams): Promise<Cod
   };
   let last: (Attempt & { provider: InspectProvider }) | null = null;
   let resetsAt: Date | null = null;
+  const settings = await codeAgentSettingsForAgent(params.agentId);
+  const tier = settings.tier;
   for (const provider of providers) {
     let auth: ProviderAuth;
     try {
-      auth = await providerAuth(provider, params.userId);
+      auth = await providerAuth(provider, params.userId, tier);
     } catch (error) {
       if (error instanceof CodeAgentCredentialError) continue;
       throw error;
     }
-    const attempt = await inspectOnce(provider, auth, checkpoint, question, params.signal);
+    const attempt = await inspectOnce(
+      provider,
+      auth,
+      checkpoint,
+      question,
+      params.signal,
+      settings
+    );
     last = { ...attempt, provider };
     const limit = attempt.outcome.usageLimit;
     if (limit === null || provider !== 'claude') break;

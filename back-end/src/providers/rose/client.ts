@@ -11,7 +11,10 @@
  *      buffering the metadata chunk so a pre-content failure can fall through
  *      cleanly.
  *   4. Tries gptAuth (direct ChatGPT/Codex) when `options.gpt_token` is set,
- *      using the same pre-content fall-through contract.
+ *      using the same pre-content fall-through contract. On a usage-limit,
+ *      out-of-credits or auth failure it leases every other untried
+ *      subscription from `options.subscription_leases` (subscriptionLegs.ts)
+ *      before any funded key below.
  *   5. Tries the shared OpenAI API key path when configured.
  *   6. Tries the shared Anthropic API key path when configured.
  *   7. Tries GPT-6 Sol through Microsoft Foundry for ultra when configured.
@@ -37,9 +40,10 @@ import {
   markGptApiKeyOnCooldown,
 } from '../computeCredentials';
 import { RoseAllFailed, RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
-import { attemptClaudeAuthWithRecovery } from './claudeAuthAttempt';
-import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
+import { openAiApiKeyComplete } from './gptAuth';
+import { runSubscriptionLegs } from './subscriptionLegs';
 import { getPool, poolForModel } from './pools';
+import { normalizeAgentSpeed } from './speed';
 import { localCompletion } from './local';
 import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
@@ -110,9 +114,8 @@ export async function createStreamingCompletion(
   if (pool === 'rose-local') return localCompletion(options);
   const normalizedOptions: CompletionOptions = {
     ...options,
-    // Provider Anthropic/OpenRouter speed=fast is on by default; callers opt out
-    // with an explicit false (e.g. Fast Mode toggle off on chat).
-    provider_fast_mode: options.provider_fast_mode ?? true,
+    // Speed is explicit: a call without an agent speed runs standard.
+    speed: normalizeAgentSpeed(options.speed),
     response_format: options.response_model
       ? buildOpenAiResponseFormat(options.response_model)
       : options.response_format,
@@ -196,7 +199,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           reasoning_effort: opts.options.effort,
           response_format: opts.options.response_format,
           tool_choice: opts.options.tool_choice,
-          provider_fast_mode: opts.options.provider_fast_mode,
+          speed: opts.options.speed,
           provider_route: opts.options.provider_route,
         },
         ...(opts.options.dump_context.config ?? {}),
@@ -365,7 +368,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
               openAiKey: sharedOpenAiKey,
               requestId: opts.requestId,
               callSite: opts.callSite,
-              providerFastMode: true,
+              speed: opts.options.speed,
               abortSignal: opts.options.abort_signal,
             }),
           emit: emitChunk,
@@ -391,76 +394,35 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
       return;
     }
 
-    // 1. claudeAuth attempt (with fall-through buffering)
+    // 1-2. Subscription legs: the caller's Claude/Codex tokens, then every other
+    // leasable subscription, before any funded key below.
     const allowDirectAuth = poolSpec.directAuthEnabled !== false;
     let claudeAuthFailed: RoseError | null = null;
     let gptAuthFailed: RoseError | null = null;
     let openAiApiKeyFailed: RoseError | null = null;
-    if (allowDirectAuth && opts.options.claude_token) {
-      const failure = yield* attemptClaudeAuthWithRecovery({
-        poolSpec,
-        options: opts.options,
-        requestId: opts.requestId,
-        callSite: opts.callSite,
-        emit: emitChunk,
-        log,
-      });
-      if (failure === null) {
-        log.info('claude_auth.done', {
-          request_id: opts.requestId,
-          pool: opts.pool,
-          elapsed_ms: Date.now() - startedAt,
-        });
-        finalizeDump();
-        return;
-      }
-      claudeAuthFailed = failure;
-      log.info('fall_through_from_claude_auth', {
-        request_id: opts.requestId,
-        reason: failure.name,
-      });
-    }
-
-    // 2. gptAuth attempt (with fall-through buffering)
-    if (allowDirectAuth && opts.options.gpt_token) {
+    const allowSubscriptions = poolSpec.subscriptionAuthEnabled ?? allowDirectAuth;
+    if (allowSubscriptions) {
+      let subscriptions;
       try {
-        yield* runWithFallThrough({
-          produce: () =>
-            gptAuthComplete({
-              poolSpec,
-              messages: opts.options.messages,
-              ...openAiToolFields,
-              temperature: opts.options.temperature,
-              effort: opts.options.effort,
-              gptToken: opts.options.gpt_token!,
-              accountId: opts.options.gpt_account_id,
-              requestId: opts.requestId,
-              callSite: opts.callSite,
-              providerFastMode: opts.options.provider_fast_mode,
-              abortSignal: opts.options.abort_signal,
-            }),
+        subscriptions = yield* runSubscriptionLegs({
+          poolSpec,
+          options: opts.options,
+          openAiToolFields,
+          requestId: opts.requestId,
+          callSite: opts.callSite,
           emit: emitChunk,
+          log,
         });
-        log.info('gpt_auth.done', {
-          request_id: opts.requestId,
-          pool: opts.pool,
-          elapsed_ms: Date.now() - startedAt,
-          claude_auth_failed: claudeAuthFailed?.name ?? null,
-        });
+      } catch (err) {
+        finalizeDump(err);
+        throw err;
+      }
+      if (subscriptions.served) {
         finalizeDump();
         return;
-      } catch (err) {
-        if (err instanceof PreContentFallThroughError) {
-          gptAuthFailed = err.cause;
-          log.info('fall_through_from_gpt_auth', {
-            request_id: opts.requestId,
-            reason: err.cause.name,
-          });
-        } else {
-          finalizeDump(err);
-          throw err;
-        }
       }
+      claudeAuthFailed = subscriptions.claudeAuthFailed;
+      gptAuthFailed = subscriptions.gptAuthFailed;
     }
 
     // 2.5 OpenAI API-key fallback — a funded GPT default for any user. Engages
@@ -485,7 +447,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
               openAiKey: sharedOpenAiKey,
               requestId: opts.requestId,
               callSite: opts.callSite,
-              providerFastMode: true,
+              speed: opts.options.speed,
               abortSignal: opts.options.abort_signal,
             }),
           emit: emitChunk,
@@ -521,7 +483,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     // ANTHROPIC_API_KEY is configured, ahead of the OpenRouter waterfall. Direct Anthropic via
     // x-api-key (billed), reusing the claudeAuth request body.
     let anthropicApiKeyFailed: RoseError | null = null;
-    const anthropicApiKey = process.env[ANTHROPIC_API_KEY_ENV];
+    const anthropicApiKey = allowDirectAuth ? process.env[ANTHROPIC_API_KEY_ENV] : undefined;
     // Shared DB-backed cooldown: skip the key entirely while it's backed off so
     // no worker/workflow hammers an exhausted key. Only query when a key exists.
     const apiKeyOnCooldown = anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
@@ -546,7 +508,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
               auth: { mode: 'apiKey', key: anthropicApiKey },
               requestId: opts.requestId,
               callSite: opts.callSite,
-              providerFastMode: opts.options.provider_fast_mode,
+              speed: opts.options.speed,
               abortSignal: opts.options.abort_signal,
             }),
           emit: emitChunk,
@@ -675,7 +637,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
             openrouterKey: requiredEnv(OPENROUTER_API_KEY_ENV),
             requestId: opts.requestId,
             callSite: opts.callSite,
-            providerFastMode: opts.options.provider_fast_mode,
+            speed: opts.options.speed,
             abortSignal: opts.options.abort_signal,
           }),
         emit: emitChunk,

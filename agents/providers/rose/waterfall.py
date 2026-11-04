@@ -34,6 +34,7 @@ from providers.rose.errors import (
     RoseStepError,
 )
 from providers.rose.pools import PoolSpec
+from providers.rose.speed import openrouter_speed_for
 from providers.rose.streaming import parse_openai_sse
 from providers.rose.transforms import is_anthropic_model, transform_messages_for_openai
 from providers.rose.transport import post_openrouter_stream
@@ -134,7 +135,7 @@ def build_openrouter_body(
     temperature: Optional[float],
     max_tokens: Optional[int],
     seed: Optional[int],
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     effort: Optional[str] = None,
     cache_namespace: Optional[str] = None,
     skip_cache_write: bool = False,
@@ -177,8 +178,9 @@ def build_openrouter_body(
         body["max_tokens"] = max_tokens
     if seed is not None:
         body["seed"] = seed
-    if provider_fast_mode:
-        body["speed"] = "fast"
+    openrouter_speed = openrouter_speed_for(speed)
+    if openrouter_speed is not None:
+        body["speed"] = openrouter_speed
     if cache_namespace:
         # OpenRouter otherwise derives sticky routing from message hashes and
         # only activates it after a cache hit. Agent loops already own one
@@ -204,7 +206,7 @@ async def waterfall_complete(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     seed: Optional[int] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     effort: Optional[str] = None,
     openrouter_key: str,
     request_id: str,
@@ -301,7 +303,7 @@ async def waterfall_complete(
             temperature=temperature,
             max_tokens=max_tokens,
             seed=seed,
-            provider_fast_mode=provider_fast_mode,
+            speed=speed,
             effort=wire_effort,
             cache_namespace=cache_namespace,
             skip_cache_write=skip_cache_write,

@@ -5,12 +5,15 @@
 import { Sandbox } from 'e2b';
 import { createHash } from 'crypto';
 import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { createLogger } from './logger';
+import { CODEX_AZURE_MODEL_CATALOG_FILE } from './codexTemplate';
 
 const log = createLogger('E2bWsOverlay');
 
 const CLAUDE_CODE_WS_SERVER_PATH = '/home/user/ws-server.mjs';
+/** Where ws-server.mjs looks for the Azure catalog: its own directory. */
+export const CODEX_AZURE_MODEL_CATALOG_SANDBOX_PATH = `/home/user/${CODEX_AZURE_MODEL_CATALOG_FILE}`;
 
 export function findLocalClaudeCodeWsServer(): string | null {
   const candidates = [
@@ -28,6 +31,20 @@ export function findLocalCodexCodeWsServer(): string | null {
     join(process.cwd(), 'e2b-templates', 'codex-code', 'ws-server.mjs'),
   ];
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
+}
+
+/**
+ * The shipped Azure Codex model catalog when it describes `deployment`, else
+ * null (the CLI's bundled catalog then applies).
+ */
+export function codexAzureModelCatalogFor(deployment: string): Buffer | null {
+  const serverPath = findLocalCodexCodeWsServer();
+  if (serverPath === null) return null;
+  const catalogPath = join(dirname(serverPath), CODEX_AZURE_MODEL_CATALOG_FILE);
+  if (!existsSync(catalogPath)) return null;
+  const content = readFileSync(catalogPath);
+  const models = (JSON.parse(content.toString('utf8')) as { models?: { slug?: string }[] }).models;
+  return (models ?? []).some((model) => model.slug === deployment) ? content : null;
 }
 
 export function fileHash(path: string | null): string {
@@ -64,6 +81,14 @@ export async function overlayCodexCodeWsServer(
 
   const content = readFileSync(serverPath);
   await sandbox.files.write(CLAUDE_CODE_WS_SERVER_PATH, new Blob([content]));
+  // The funded Azure provider's model catalog travels with the ws-server that reads it.
+  const catalogPath = join(dirname(serverPath), CODEX_AZURE_MODEL_CATALOG_FILE);
+  if (existsSync(catalogPath)) {
+    await sandbox.files.write(
+      CODEX_AZURE_MODEL_CATALOG_SANDBOX_PATH,
+      new Blob([readFileSync(catalogPath)])
+    );
+  }
   await sandbox.commands.run(
     `chmod +x ${CLAUDE_CODE_WS_SERVER_PATH} && chown 1000:1000 ${CLAUDE_CODE_WS_SERVER_PATH}`,
     { timeoutMs: 10000 }

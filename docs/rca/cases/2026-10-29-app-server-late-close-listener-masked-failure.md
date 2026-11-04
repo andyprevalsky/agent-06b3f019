@@ -44,3 +44,24 @@ Parent required read-only frozen-source RCA, deterministic proof, unchanged budg
 ## Reusable lesson
 
 Register child completion when acquiring the process, before any awaited work can let the completion event pass, so teardown preserves the primary failure.
+
+## Recurrence: fixture journal masks early exit (October 30, PR1634)
+
+The retained early-exit regression exposed a separate ordering issue after the
+fallback test was refactored into `runOAuthFailureFixture`. The helper read its
+journal before asserting the expected outcome. An injected startup exit never
+creates that journal, so ENOENT hid the captured `fixture early exit 23` stderr.
+The early close listener itself still worked: neither run reported cancellation.
+
+Add the existing expected-outcome assertion with captured server logs immediately
+before journal parsing. This adds four lines and changes no timeout, polling
+count, existing assertion, or production behavior. If the expected outcome occurs
+but the journal is missing, the original missing-journal error still surfaces.
+
+In an isolated copy, the identical complete Node command failed with 23 passes
+and 1 failure before, then passed all 24 tests after. The unchanged focused early-
+exit test likewise failed before and passed after; both runs had zero cancelled
+or skipped cases. Exact commands, original broad failure and before/after evidence
+are in `.context/pr1634-codex-fixture-rca/report.txt`. The original historical
+server-exit cause above remains unknown; this recurrence fixes only fixture
+failure reporting. Full combined validation follows integration.

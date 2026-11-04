@@ -62,3 +62,11 @@ None recorded.
 ## Reusable lesson
 
 Capture the failing ephemeral server's launch and readiness phases before attributing an SDK startup deadline failure or claiming that a later pass fixed it.
+
+## October30 PR1634 recurrence
+
+At source fa0310f9f6a55cd4f937f59ab4af51bd385b16fb, the normal one-worker agents coverage run failed the workflow domain at its first shared Temporal startup. The exact original error named127.0.0.1:40801 and the unchanged five-second deadline. The domain took20.55s (inner runner16.3s). Evidence is retained in .context/test-runs/agents-coverage-20261030-012155-1751030/workflow.log. The preceding pure check passed; the second parked environment was not reached.
+
+Original child stderr, PID and readiness phase are still missing. The cached84,478,216-byte test-server ELF and dynamic dependencies were present. Earlier root-disk exhaustion is not a demonstrated cause of this startup failure; no direct write failure appears in this log. The complete investigation is .context/pr1634-workflow-startup-rca/report.md.
+
+One small diagnostic subsequently entered the SDK context in under one second, then its extra reporting statement raised TypeError. That reporting error is separate from the original startup failure; this was not a clean workflow pass. After the existing coverage lane ended, the unchanged full owning command `venv/bin/python scripts/run_blackbox_tests.py workflow` passed in141.7s, exit0, one domain. The log is /project/rose-speed-comparison-20261028/workflow-unchanged-rerun-20261030.log. This establishes observed recovery only, not a causal fix. Its recovered getNamespace test-server warning also appears in the previous passing run. No timeout, assertion, cache or runtime configuration was changed.

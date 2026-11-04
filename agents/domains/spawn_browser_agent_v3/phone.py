@@ -48,8 +48,9 @@ The live host decides which operations are supported. An unsupported response
 is a capability limit; do not repeat it or assume back/current-app/tree exists.
 Queue/lease timeout is a tool outcome, not a request for user attention. Pending
 or UNKNOWN input must never be blindly retried: inspect the durable receipt and
-screen, and wait for confirmed cleanup when necessary. Private password refs
-require verified phone app/account binding, which is not available yet.
+screen, and wait for confirmed cleanup when necessary. Private password refs are not accepted from the worker. credentials.fill_saved
+performs its own server-side current form/account binding before using a secret;
+completed phone setup or a signed-in account is not a prerequisite for this operation.
 Use accessible Gmail push approvals and OTP flows autonomously. When a browser
 sign-in asks for device approval, inspect the corresponding account app on the
 owned cloud phone when available. Match the account and current sign-in challenge

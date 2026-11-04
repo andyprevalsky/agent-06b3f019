@@ -1,6 +1,7 @@
 /** Shared setup for the registered backend-native authority contract. */
 import assert from 'assert';
-import { type ChildProcess, spawn } from 'child_process';
+import { type ChildProcess, execFileSync, spawn } from 'child_process';
+import fs from 'fs';
 import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -11,6 +12,25 @@ const serverScript = path.join(__dirname, 'compute-token-authority.server.ts');
 export const USER_ID = `cta-user-${crypto.randomUUID()}`;
 export const GUEST_KEY = `guest-key-${crypto.randomUUID()}`;
 export const AUTHORITY_KEY = `authority-key-${crypto.randomUUID()}`;
+
+export function writeAuthorityFixtureSchema(tmp: string): string {
+  const schemaSql = execFileSync(
+    'npx',
+    [
+      'prisma',
+      'migrate',
+      'diff',
+      '--from-empty',
+      '--to-schema-datamodel',
+      'prisma/schema.prisma',
+      '--script',
+    ],
+    { cwd: backendDir, encoding: 'utf8' }
+  );
+  const schemaFile = path.join(tmp, 'schema.sql');
+  fs.writeFileSync(schemaFile, schemaSql);
+  return schemaFile;
+}
 
 export function localServerUrl(): URL {
   const raw = process.env.DATABASE_URL;

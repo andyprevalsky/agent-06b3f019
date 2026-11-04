@@ -53,7 +53,7 @@ app.post('/test-foundry', async (req, res) => {
   for (const name of FOUNDRY_REGION_ENV_NAMES) delete process.env[name];
   process.env.AZURE_FOUNDRY_ENDPOINT = 'https://foundry-cta.example.test';
   process.env.AZURE_FOUNDRY_API_KEY = 'fixture';
-  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6-sol-a,gpt-6-sol-b';
+  process.env.AZURE_FOUNDRY_DEPLOYMENTS = 'gpt-6.1-sol-a,gpt-6.1-sol-b';
   delete process.env.GPT_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   process.env.OPENROUTER_API_KEY = 'fixture';
