@@ -63,7 +63,8 @@ pre-fix `AssertionError: {'toolu_user': 'completed', 'toolu_idle':
 row; `_finish_background_task` records "paused" for a resumable type when the
 executor reported its session paused, or when a user pause cancelled it
 (browser, unchanged). Kill reasons still win. The notification's Message Type
-follows the run outcome (FINAL_ANSWER unless failed), as Codex sends every
+follows the run outcome through an explicit `failed` flag (FINAL_ANSWER unless
+the run failed; a browser user pause stays FAILED), as Codex sends every
 completion as FINAL_ANSWER with the state in the payload; the payload now says
 the session is paused (see 2026-11-04-code-user-pause-result-omitted-session-id).
 10k agents: O(1) per finished task, workflow-local.

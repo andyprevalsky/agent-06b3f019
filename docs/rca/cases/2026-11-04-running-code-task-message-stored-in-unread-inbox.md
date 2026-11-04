@@ -22,6 +22,7 @@ tags:
 sources:
   - agent 9c84b03a (root, live repro on 28a7bfc99, 2026-11-04 22:46Z)
   - commit 4317820584 (fix, branch fix/code-agent-multiday-t4-parent-orchestration)
+  - commit 350c4b429e (review round: per-run session lookup, retry-free code turns)
   - commit f4c70095f (introduced task-inbox messaging, 2026-10-19)
 repro: back-end/src/tests/blackbox/agents-agent-messages-code.cases.ts "POST /:id/agent-messages — a message to a running code task reaches its live CLI as a turn"
 status: fixed
@@ -62,20 +63,33 @@ new cases; pre-fix: `owner: a running code task must get the turn:
 ## Solution
 
 `sendAgentMessage` now hands a message addressed to a RUNNING code task to
-`deliverToRunningCodeTask` (`back-end/src/domains/agents/agentCodeTurnDelivery.ts`):
-it finds the task's newest code session (owner's rows with metadata.toolCallId
-= task id and task_id set), and delivers the text as the CLI's next user turn
-through the same `deliverToCodeAgent` path agent-graph sends use (sender
-"agent", turn id derived from the sender key, so a retry is `duplicate`), plus
-the per-sender send budget. No live CLI → 409 with the reason
-("has not started yet" / "has finished" / user holds the session), nothing
-stored. The code-turn delivery moved out of agentGraphSendService.ts (one
-implementation for both senders; no import cycle). Owner sends and peer sends
-by address both go through this function.
+`sendAgentMessageToRunningCodeTask` / `deliverToRunningCodeTask`
+(`back-end/src/domains/agents/agentCodeTurnDelivery.ts`) before the inbox
+guard (no inbox row is written, so the unread cap does not apply). It finds the
+task's current-run code session: the owner's newest rows since the run's
+`started_at` (tree state) whose metadata.toolCallId is the task id and that
+name a task_id, so a woken run never reaches the previous run's closed session.
+It delivers the text as the CLI's next user turn through the same
+`deliverToCodeAgent` path agent-graph sends use (sender "agent", turn id from
+the sender key, so a retry is `duplicate`), with the retry-free per-sender send
+budget. No live CLI → 409 with what to do ("has not started yet; send again once
+it runs", or "has finished its turn … resume a paused code agent with
+send_message_to_agent(continue_conversation=true); for new work after it
+completed, spawn a new code agent"), nothing stored. The code-turn delivery
+moved out of agentGraphSendService.ts (one implementation for both senders; no
+import cycle). Owner sends and peer sends by address both go through it.
 
-10k agents: per send, one indexed findFirst on the owner's messages
-((agentId, timestamp) index) plus one PK read and one ws round trip to that
-session; no polling, no fan-in, nothing O(agents).
+10k agents: per send, one findMany (take 20) over that owner's rows since the
+run started ((agentId, timestamp) index range), one session PK read, one
+received-row PK read, one ws round trip and one timeline insert. Cost depends
+on the owner's rows since the current run, not on the number of agents; no
+polling, no fan-in.
+
+Adversarial review (2026-11-04) found the first revision matched run 1's
+session for a woken run, charged retries through the inbox guard and scanned
+the chip row oldest-first; all three were fixed and covered by
+"a woken code task run never gets the previous run session" (also sends a
+4-message burst past the guard's 3-message burst).
 
 Golden reference: claude-code-src/src/tools/SendMessageTool/SendMessageTool.ts
 ~:808-820 queues a message to a running agent for its next tool round;
