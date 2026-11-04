@@ -2,8 +2,25 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import vm from "node:vm";
+
+// Model server readiness without opening a socket in these producer replays.
+class WebSocketServerStub extends EventEmitter {
+  constructor({ port }) {
+    super();
+    this.boundAddress = null;
+    queueMicrotask(() => {
+      this.boundAddress = { port };
+      this.emit("listening");
+    });
+  }
+
+  address() {
+    return this.boundAddress;
+  }
+}
 
 const source = readFileSync(new URL("./ws-server.mjs", import.meta.url), "utf8");
 const producer = source.slice(source.indexOf('let outputBuffer = "";'), source.indexOf("async function shutdown("));
@@ -34,7 +51,7 @@ async function replay(event) {
     };
     ${fallback}
     return JSON.stringify({ output: outputBuffer, events: eventBuffer, runs });
-  })()`, { input: event, PORT: 0, WebSocketServer: class {}, homedir: () => "/unused", readdirSync: () => [] }).then(JSON.parse);
+  })()`, { input: event, PORT: 0, WebSocketServer: WebSocketServerStub, homedir: () => "/unused", readdirSync: () => [] }).then(JSON.parse);
 }
 
 function workerFeedback(events) {
@@ -93,7 +110,7 @@ test("command, tool, prose, raw output and generic auth/quota words do not trigg
   }
   // Non-JSON stdout takes the renderer's raw-text branch, without classification.
   const rawProducer = producer + '\nappendCodexStdout("invalid_grant\\n"); JSON.stringify({ reason: oauthFallbackReason, events: eventBuffer });';
-  assert.deepEqual(JSON.parse(vm.runInNewContext(rawProducer, { PORT: 0, WebSocketServer: class {}, homedir: () => "/unused", readdirSync: () => [] })), { reason: null, events: [] });
+  assert.deepEqual(JSON.parse(vm.runInNewContext(rawProducer, { PORT: 0, WebSocketServer: WebSocketServerStub, log: () => {}, homedir: () => "/unused", readdirSync: () => [] })), { reason: null, events: [] });
 });
 
 test("pure OpenAI plan quota diagnostics retain quota classification", async () => {

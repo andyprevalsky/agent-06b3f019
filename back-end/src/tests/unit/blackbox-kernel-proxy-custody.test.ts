@@ -19,7 +19,12 @@ async function main() {
   };
   try {
     const require = createRequire(import.meta.url);
-    const { isKernelProxyCreate } = require('../../../scripts/blackbox-kernel-proxy-custody.cjs');
+    const {
+      isKernelProxyCreate,
+      installKernelProxyCustody,
+    } = require('../../../scripts/blackbox-kernel-proxy-custody.cjs');
+    // NODE_OPTIONS may have loaded the module before this test replaced fetch.
+    installKernelProxyCustody(globalThis.fetch);
     const kernel = new Kernel({ apiKey: 'fixture', maxRetries: 0 });
     await assert.rejects(
       kernel.proxies.create({ type: 'mobile', name: 'fixture', config: { country: 'US' } }),

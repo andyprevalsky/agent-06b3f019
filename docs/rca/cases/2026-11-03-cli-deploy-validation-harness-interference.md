@@ -78,3 +78,33 @@ Preserve the zero-allocation guard and the 100 verified Kernel proxy deletions.
 Do not weaken assertions, timeouts, coverage thresholds, payment verification,
 Mac acceptance or Freedom protections to make deployment pass. Keep one deploy
 coordinator and do not restart active validation cohorts.
+
+## November 4: preloaded custody and WebSocket replay fixtures
+
+The first full sharded backend run failed two unit files independently of its
+strict treasury failure. The treasury failure remains recorded separately and
+is not cleared by these unit repairs.
+
+`blackbox-kernel-proxy-custody.test.ts` replaced global fetch with its counter
+mock, then required a custody module already cached by `NODE_OPTIONS`. The
+cached require did not reinstall the guard around the new mock, so the SDK
+create call resolved and the expected-rejection assertion failed. The identical
+owning command with the real custody preload failed before the repair and
+passed after explicitly installing custody around the test's replacement
+fetch. The existing SDK rejection, zero upstream create calls, reuse reads,
+gateway matching and real local HTTP proof assertions are unchanged. No
+production guard code changed.
+
+`oauth-feedback.test.mjs` executed the real producer slice with an empty class
+as its WebSocket server. The upstream producer now registers its listening
+handler. All seven cases therefore threw `wss.on is not a function` before
+classification assertions could execute. A network-free EventEmitter stub now
+publishes its address on a queued listening event. Both replay contexts use the
+same stub. All seven original cases pass, with zero skips, both directly and
+through the unchanged backend unit wrapper. Producer and worker source bytes
+were not changed; all positive and negative classification assertions remain.
+
+Private before/after evidence is in `.context/cli-readiness-rca/nov04-kernel-*`
+and `nov04-oauth-*`. The independent OAuth repair was collected from turn
+`01a1a3dc-0c50-73d0-950a-d65240edeefd`. These owning-test passes do not replace
+full backend coverage or establish return of any treasury funds.
