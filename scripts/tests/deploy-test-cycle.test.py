@@ -590,6 +590,172 @@ class Cycle(unittest.TestCase):
         native_paths[0].write_bytes(native_paths[0].read_bytes()+b' ')
         self.assertEqual(5, c.verify_saved(self.directory, self.root))
 
+    def repair_set_refresh_fixture(self):
+        # Real request/receipt/result files: api is a healthy historical repair,
+        # while a newer ui execution fails only c. Both gates have broad inputs.
+        marker = self.root / '.context/fail-ui'
+        worker = ("import json,os,sys;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "bad=Path(" + repr(str(marker)) + ").exists();"
+            "cases={k:('FAIL' if bad and k=='c' else 'PASS') for k in r['checks']};"
+            "v={k:r[k] for k in ('token','source','gate')};"
+            "v.update(cases=cases,complete=True,cleanup_complete=True,reused=False);"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(v));"
+            "sys.exit(int('FAIL' in cases.values()))")
+        ui = self.plan['gates'][2]
+        ui.update(command=[sys.executable, '-c', worker], checks=['c', 'd'], case_protocol=True)
+        self.state = c.initialize(self.plan, self.root)
+        old, _ = self.carryover_ready_fixture()
+        self.state.update(phase='final', ready=False, repair_gates=['api', 'ui'])
+        self.state['round'] += 1
+        marker.touch()
+        failed = c.execute(ui, self.state, self.directory, self.root)
+        c.advance(self.state, [failed])
+        self.assertEqual({'c': 'FAIL', 'd': 'PASS'}, failed['cases'])
+        self.assertTrue(failed['complete'])
+        return old, marker
+
+    def changed_fixture_plan(self, old):
+        for name in ('first-fixture.test.py', 'second-fixture.test.py'):
+            (self.root / name).write_text('unrelated fixture repair\n')
+        new = copy.deepcopy(old)
+        new['source'] = c.source(self.root)
+        return new
+
+    def test_refresh_healthy_old_full_pass_leaves_focused_but_requires_new_final_full(self):
+        old, marker = self.repair_set_refresh_fixture()
+        attempts = copy.deepcopy(self.state['attempts'])
+        failures = copy.deepcopy(self.state['failures'])
+        native = {r['gate']: (Path(r['log']).parent/'receipt.json').read_bytes()
+                  for r in attempts[1]['results']}
+        fingerprints = dict(self.state['input_fingerprints'])
+        round_before = self.state['round']
+        new = self.changed_fixture_plan(old)
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual(['ui'], self.state['repair_gates'])
+        self.assertEqual({}, self.state['carried_passes'])
+        self.assertNotEqual(fingerprints['api'], self.state['input_fingerprints']['api'])
+        self.assertEqual(attempts, self.state['attempts'])
+        self.assertEqual(failures, self.state['failures'])
+        self.assertEqual(round_before, self.state['round'])
+        self.assertEqual(old['gates'], new['gates'])
+        c.run_phase(new, self.state, self.directory, self.root)  # mandatory fresh quick
+        failure = next(f for f in self.state['failures'] if f['id'] in self.state['pending'])
+        c.adjudicate(self.state, self.report(failure, 'INTRODUCED'))
+        c.focused_plan(self.state, new, {'source': new['source'], 'gates': {
+            'ui': {'command': new['gates'][2]['command'], 'checks': ['c']}}})
+        self.assertEqual(['ui'], [g['name'] for g in c.records(new, self.state)])
+        marker.unlink()
+        c.run_phase(new, self.state, self.directory, self.root)
+        self.assertEqual('failed-gates', self.state['phase'])
+        self.assertEqual(['c', 'd'], c.records(new, self.state)[0]['checks'])
+        c.run_phase(new, self.state, self.directory, self.root)  # full failed ui
+        c.run_phase(new, self.state, self.directory, self.root)  # repeat quick
+        self.assertEqual('final', self.state['phase'])
+        self.assertEqual(['api'], [g['name'] for g in c.records(new, self.state)])
+        c.write(self.directory/'cycle.json', self.state)
+        self.assertEqual(1, c.verify_saved(self.directory, self.root))
+        self.assertEqual(old['source'], c.latest_receipts(self.state)['api']['source'])
+        c.run_phase(new, self.state, self.directory, self.root)  # genuine new api full
+        self.assertEqual(0, c.verify_saved(self.directory, self.root))
+        self.assertEqual(new['source'], c.latest_receipts(self.state)['api']['source'])
+        self.assertEqual(attempts, self.state['attempts'][:len(attempts)])
+        for receipt in attempts[1]['results']:
+            self.assertEqual(native[receipt['gate']], (Path(receipt['log']).parent/'receipt.json').read_bytes())
+
+    def test_refresh_repair_retirement_refuses_latest_failure_partial_pending_and_bad_bindings(self):
+        old, _ = self.repair_set_refresh_fixture()
+        original = copy.deepcopy(self.state)
+        receipt = c.latest_receipts(self.state)['api']
+        receipt_path = Path(receipt['log']).parent/'receipt.json'
+        request_path = receipt_path.parent/'request.json'
+        original_receipt, original_request = receipt_path.read_bytes(), request_path.read_bytes()
+        new = self.changed_fixture_plan(old)
+        for mode in ('failed', 'unverified', 'partial', 'pending', 'owner', 'stale',
+                     'receipt', 'request', 'source', 'contract', 'environment'):
+            with self.subTest(mode=mode):
+                self.state = copy.deepcopy(original)
+                receipt_path.write_bytes(original_receipt); request_path.write_bytes(original_request)
+                latest = c.latest_receipts(self.state)['api']
+                candidate = copy.deepcopy(new)
+                if mode in ('failed', 'unverified', 'partial'):
+                    replacement = copy.deepcopy(latest)
+                    replacement.update(status='FAIL' if mode != 'partial' else 'PASS',
+                        complete=mode != 'unverified', native_exit=1 if mode == 'failed' else 0,
+                        cases={'a': 'FAIL', 'b': 'PASS'} if mode == 'failed' else
+                              {'a': 'UNVERIFIED', 'b': 'PASS'} if mode == 'unverified' else {'a': 'PASS'})
+                    self.state['attempts'].append({'phase': 'focused', 'results': [replacement]})
+                elif mode == 'pending':
+                    self.state['failures'].append(dict(id='pending-api', gate='api', check='api/a'))
+                    self.state['pending'].append('pending-api')
+                elif mode == 'owner':
+                    latest.update(lingering_group=True, cleanup_owner={'request_token': latest['token']})
+                    c.write(receipt_path, latest)
+                elif mode == 'stale':
+                    self.state['attempts'][1]['stale'] = True
+                elif mode in ('receipt', 'request'):
+                    path = receipt_path if mode == 'receipt' else request_path
+                    value = c.read(path); value['token'] = 'wrong-native-token'; c.write(path, value)
+                elif mode == 'source':
+                    latest['source'] = {'head': 'foreign', 'digest': 'foreign'}
+                    value = c.read(request_path); value['source'] = latest['source']
+                    c.write(request_path, value); c.write(receipt_path, latest)
+                elif mode == 'contract':
+                    candidate['gates'][1]['checks'].append('new-check')
+                environment = c.environment_digest()
+                with patch.object(c, 'environment_digest', return_value='changed-environment' if mode == 'environment' else environment):
+                    c.refresh(self.state, old, candidate, self.root)
+                self.assertEqual(['api', 'ui'], self.state['repair_gates'])
+                self.assertEqual({}, self.state['carried_passes'])
+        receipt_path.write_bytes(original_receipt); request_path.write_bytes(original_request)
+
+    def test_refresh_qualified_full_retirement_preserves_new_source_renewals_and_native_debt(self):
+        gate, _, _ = self.qualified_full_fixture()
+        old = copy.deepcopy(self.plan)
+        attempts = copy.deepcopy(self.state['attempts'])
+        native = copy.deepcopy(c.latest_receipts(self.state)['smoke'])
+        new = self.changed_fixture_plan(old)
+        c.refresh(self.state, old, new, self.root)
+        self.assertNotIn('smoke', self.state['repair_gates'])
+        self.assertEqual({}, self.state['carried_passes'])
+        self.assertEqual({}, self.state['skips'])
+        self.assertEqual(3, len(self.state['pending']))
+        self.assertTrue(all(f['native_result'] == 'prior waived failure; changed inputs'
+                            for f in self.state['failures'] if f['id'] in self.state['pending']))
+        self.assertEqual(attempts, self.state['attempts'])
+        self.assertEqual(native, c.latest_receipts(self.state)['smoke'])
+        final = {**self.state, 'phase': 'final'}
+        self.assertIn('smoke', [g['name'] for g in c.records(new, final)])
+
+    def test_refresh_repair_retirement_refuses_bad_qualification_and_worker_result(self):
+        gate, _, _ = self.qualified_full_fixture()
+        old = copy.deepcopy(self.plan); original = copy.deepcopy(self.state)
+        result_path = Path(c.latest_receipts(self.state)['smoke']['worker_result'])
+        saved = result_path.read_bytes()
+        new = self.changed_fixture_plan(old)
+        for mode in ('qualification', 'worker-result', 'triage-routing'):
+            with self.subTest(mode=mode):
+                self.state = copy.deepcopy(original); result_path.write_bytes(saved)
+                if mode == 'qualification':
+                    self.state['skips']['smoke/mail-one']['rca']['external_provider']['reason'] = 'auth error'
+                elif mode == 'worker-result':
+                    value = c.read(result_path); value['cleanup_complete'] = False; c.write(result_path, value)
+                else:
+                    self.state['triage_repair_gates'] = ['smoke']
+                c.refresh(self.state, old, new, self.root)
+                self.assertIn('smoke', self.state['repair_gates'])
+                self.assertEqual({}, self.state['carried_passes'])
+        result_path.write_bytes(saved)
+
+    def test_refresh_nonquick_retirement_does_not_invent_quick_pass_binding(self):
+        old, _ = self.carryover_ready_fixture()
+        self.state['repair_gates'] = ['format']
+        new = self.changed_fixture_plan(old)
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual(['format'], self.state['repair_gates'])
+        self.assertEqual('quick', self.state['phase'])
+        self.assertEqual({}, self.state['carried_passes'])
+
     def test_scoped_change_preserves_only_unaffected_full_gate_and_never_newer_failure(self):
         old, native = self.carryover_ready_fixture(scoped=True)
         (self.root / 'backend.txt').write_text('actual backend change')

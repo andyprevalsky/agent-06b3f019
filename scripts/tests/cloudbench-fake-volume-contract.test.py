@@ -59,7 +59,102 @@ def assert_private_ip_proxies(base: Path) -> None:
     )
 
 
+def assert_private_cleanup_storage() -> None:
+    """Actual launcher/reserve rejects shared foreign floors, isolates fake storage."""
+    import ast
+    import hashlib
+    import select
+    import shutil
+    import time
+    fixture = (ROOT / 'agents/benchmarks/fixtures/cloudbench_cleanup_reserve_cohort.py').read_text()
+    constants = [n.value for n in ast.walk(ast.parse(fixture)) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    site = next(s for s in constants if 'def isolated_parent(' in s)
+    df = next(s for s in constants if "free=d['capacity_mb']" in s)
+    fleet = (ROOT / 'scripts/run-bench-fleet').read_text()
+    reserve = fleet.split('reserve_cleanup_disk_space() {', 1)[1].split('\nrelease_cleanup_disk_reserve() {', 1)[0]
+    reserve = 'reserve_cleanup_disk_space() {' + reserve
+    start = SOURCE.index('    env -u CLOUDBENCH_SNAPSHOT_ID')
+    launch = SOURCE[start:SOURCE.index('\n}', start)]
+    launch = launch.rsplit('        "${session_leader[@]}" bash ', 1)[0] + '        bash "$RESERVE_PROBE" > "$log" 2>&1\n'
+    prepare = (shell_function('prepare_fixture_storage_transport')
+               if 'prepare_fixture_storage_transport() {' in SOURCE else '')
+    with tempfile.TemporaryDirectory(prefix='multi-private-storage-') as temporary:
+        base = Path(temporary); host = base / 'host'; host.mkdir(); foreign = host / 'foreign'; foreign.mkdir()
+        ws = base / 'fixture'; ws.mkdir(); transport = base / 'host-transport'; transport.mkdir()
+        (transport / 'sitecustomize.py').write_text(site)
+        (transport / 'df').write_text(df); (transport / 'df').chmod(0o700)
+        state = transport / 'storage.json'; state.write_text(json.dumps({'capacity_mb':500,'allocations':{}}))
+        namespace = 2**49 + int(hashlib.sha256(str(base).encode()).hexdigest()[:12],16)
+        owned_ledgers = {Path('/tmp') / ('rose-cloudbench-cleanup-admission-' + str(os.getuid())) / str(namespace)}
+        env = {**os.environ, 'PATH':str(transport)+os.pathsep+os.environ['PATH'], 'PYTHONPATH':str(transport),
+               'RESERVE_TRANSPORT_STATE':str(state),'RESERVE_TEST_DEVICE':str(namespace),
+               'CLOUDBENCH_CLEANUP_DISK_RESERVE_MB':'32','CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB':'32',
+               'CLOUDBENCH_CLEANUP_DISK_HEADROOM_MB':'256'}
+        # Keep exactly one native foreign owner live; no provider/task/200-way workload.
+        foreign_path = foreign / 'cleanup-disk-reserve'
+        script = ('set -uo pipefail\nCLEANUP_DISK_RESERVE_FILE="$EXACT_RESERVE_PATH"\n' + reserve +
+                  '\nreserve_cleanup_disk_space || exit $?\necho READY\nread -r release\nrm -f "$CLEANUP_DISK_RESERVE_FILE"\n')
+        p = subprocess.Popen(['bash','-c',script], env={**env,'EXACT_RESERVE_PATH':str(foreign_path),
+                             'RESERVE_TEST_PARENT':str(foreign)}, stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+        try:
+            assert p.stdout is not None
+            assert select.select([p.stdout],[],[],15)[0], 'native foreign reserve did not start'
+            first = p.stdout.readline()
+            assert first.strip() == 'READY', first
+            ledger = next(iter(owned_ledgers)) / 'state.json'
+            before = ledger.read_bytes()
+            probe = base / 'reserve-probe.sh'
+            target = ws / 'cleanup-disk-reserve'
+            probe.write_text('set -uo pipefail\nCLEANUP_DISK_RESERVE_FILE="$EXACT_RESERVE_PATH"\n' + reserve +
+                             '\nreserve_cleanup_disk_space\n')
+            run_env = {**env,'EXACT_RESERVE_PATH':str(target),'RESERVE_TEST_PARENT':str(ws),
+                       'RESERVE_PROBE':str(probe),'TMP_ROOT':str(ws),'FAKE_BIN':str(transport),
+                       'SCRIPT_SNAPSHOT_TMP':str(ws),'FAKE_FLY_TOKEN':'fixture-no-call','FAKE_DIR':str(base),
+                       'port':'12000','ws':str(ws),'log':str(base/'probe.log')}
+            bootstrap = prepare + ('\nprepare_fixture_storage_transport\nprintf \"%s\\n\" \"$FIXTURE_STORAGE_DEVICE\" > \"$TMP_ROOT/storage-device\"\n' if prepare else '\n')
+            # This is the actual run_controller env command, with only its final
+            # controller command replaced by the owning native reserve boundary.
+            result = subprocess.run(['bash','-c',bootstrap+'\nsession_leader=()\n'+launch],
+                                    env=run_env,capture_output=True,text=True,timeout=20)
+            output = (base/'probe.log').read_text()
+            device_file=ws/'storage-device'
+            device=device_file.read_text().strip() if device_file.exists() else ''
+            if device.isdigit(): owned_ledgers.add(ledger.parent.parent/device)
+            assert result.returncode == 0, output + result.stderr
+            assert ledger.read_bytes() == before, 'fixture changed foreign native ledger'
+            assert target.stat().st_blocks * 512 < target.stat().st_size, 'fixture allocated real reserve blocks'
+            child_state = ws/'reserve-transport/state.json'
+            allocations = json.loads(child_state.read_text())['allocations']
+            assert allocations[str(target)] == 32*1048576
+            # The real allocator still refuses an insufficient private budget.
+            data=json.loads(child_state.read_text());data['capacity_mb']=200;child_state.write_text(json.dumps(data))
+            # Reuse this already prepared transport (not a newly reset disk).
+            direct = {**run_env,'PATH':str(ws/'reserve-transport')+os.pathsep+run_env['PATH'],
+                      'PYTHONPATH':str(ws/'reserve-transport'),
+                      'CLOUDBENCH_TEST_STORAGE_SCOPE':str(ws),
+                      'CLOUDBENCH_TEST_STORAGE_STATE':str(child_state)}
+            assert device.isdigit()
+            direct['CLOUDBENCH_TEST_STORAGE_DEVICE']=device
+            # Retire the first synthetic file; a new admission must still fail
+            # its native256MB floor against this deliberately insufficient disk.
+            target.unlink()
+            refused = subprocess.run(['bash','-c',script.split('\necho READY',1)[0]],env=direct,
+                                     capture_output=True,text=True,timeout=15)
+            assert refused.returncode != 0 and 'insufficient physical cleanup floors' in refused.stderr, refused.stderr
+            assert ledger.read_bytes()==before
+            print('PASS: native fake-controller disk is private/sparse; foreign ledger unchanged; real private floor refusal retained')
+        finally:
+            if p.poll() is None:
+                p.communicate('release\n',timeout=10)
+            else:
+                p.communicate(timeout=10)
+            # Only namespaces created by these exact private fake disks.
+            for path in owned_ledgers: shutil.rmtree(path,ignore_errors=True)
+
+
 def main() -> None:
+    assert_private_cleanup_storage()
     with tempfile.TemporaryDirectory(prefix="cloudbench-volume-contract-") as temporary:
         base = Path(temporary)
         (base / "markers").mkdir()
@@ -323,5 +418,7 @@ def main() -> None:
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--assert-private-ip-proxies":
         assert_private_ip_proxies(Path(sys.argv[2]))
+    elif len(sys.argv) == 2 and sys.argv[1] == "--assert-private-cleanup-storage":
+        assert_private_cleanup_storage()
     else:
         main()

@@ -1574,16 +1574,28 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
         raise ValueError("refresh requires actual changed source or plan")
     # No scope is inferred: absent input_paths means '*' and any source-file change reruns that gate.
     # History-only/tree-identical syncs work for the current broad production plan; declared scopes may be selective.
-    carried = {}
+    carried, completed_repairs = {}, set()
+    pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state.get('pending', [])}
+    pending_gates.update(state.get('triage_repair_gates', []))
     if state['environment'] == environment_digest():
         for name, gate in old_gates.items():
             binding = full_pass_binding(state, gate)
             if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate))
-                    and digest(gate) == digest(new_gates[name])
-                    and state['input_fingerprints'].get(name) == fingerprints.get(name)):
-                carried[name] = {'native_binding': binding, 'from_source': state['source'],
-                    'validated_source': new['source'], 'input_fingerprint': fingerprints[name],
-                    'contract_digest': digest(new_gates[name]), 'basis': 'identical gate inputs and full execution contract'}
+                    and digest(gate) == digest(new_gates[name])):
+                # Retire historical repair routing using the OLD validated FULL
+                # receipt. This grants no new-source credit: changed inputs
+                # remain selected by FINAL's ordinary full-coverage predicate.
+                if (name in state['repair_gates'] and name not in pending_gates
+                        and not any(key in state for key in ('live_failures', 'running', 'resume_phase'))):
+                    try:
+                        if not retained_owners(state, [name]):
+                            completed_repairs.add(name)
+                    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+                        pass  # Unknown execution ownership cannot retire a repair.
+                if state['input_fingerprints'].get(name) == fingerprints.get(name):
+                    carried[name] = {'native_binding': binding, 'from_source': state['source'],
+                        'validated_source': new['source'], 'input_fingerprint': fingerprints[name],
+                        'contract_digest': digest(new_gates[name]), 'basis': 'identical gate inputs and full execution contract'}
     carry, revisit, superseded_pending = {}, [], []
     for key, skip in state["skips"].items():
         gate = key.split("/", 1)[0]
@@ -1629,7 +1641,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     state['carried_passes'] = carried
     if carried:
         state.setdefault('pass_carryover_history', []).append(copy.deepcopy(carried))
-    state['repair_gates'] = [name for name in state['repair_gates'] if name not in carried]
+    state['repair_gates'] = [name for name in state['repair_gates']
+                            if name not in carried and name not in completed_repairs]
     if interrupted_refresh:
         state.pop('resume_phase')
     state.update(plan=new, source=new["source"], plan_digest=digest(new), ready=False, focused={},

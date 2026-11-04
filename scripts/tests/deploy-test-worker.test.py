@@ -1956,6 +1956,73 @@ class Backend(unittest.TestCase):
         self.request['source'] = cycle.source(self.root)
         return state, calls, env
 
+    def test_qualified_treasury_exclusion_keeps_full_native_peer_outcomes(self):
+        # Actual43: the unchanged full shards include an already-qualified treasury FAIL.
+        (self.root / 'back-end/src/tests/blackbox/treasury-rails.blackbox.ts').write_text('export {}\n')
+        self.request['source'] = cycle.source(self.root)
+        qualification = {'source': self.request['source'], 'disposition': 'treasury / skipped with warning',
+            'rca': {'id': 'prior-native-treasury-failure', 'check': 'backend-coverage-blackbox/blackbox:treasury-rails',
+                    'source': self.request['source'], 'description': 'Recorded historical unused mint',
+                    'evidence': 'saved-native-treasury.log', 'native_result': 'FAIL', 'attribution': 'UNKNOWN',
+                    'standing_policy': {'name': 'treasury-failures-skip-and-warn-2026-10-29',
+                        'reason': 'Original financial return remains unknown', 'affected_records': ['fixture-card / fixture-transfer'],
+                        'evidence_at': 1}}}
+        self.request['skips'] = {'blackbox:treasury-rails': qualification}
+        before = copy.deepcopy(self.request)
+        self.configure(1, self.rows(alpha=True, beta=False, **{'treasury-rails': False}),
+                       unit='❌ Unit pass failed (exit 1)', c8_rc=1)
+        config = cycle.read(self.config)
+        config['extra_summaries'] = {'blackbox-run-shard2': json.dumps({'results': self.rows(gamma=True)})}
+        cycle.write(self.config, config)
+        result = self.backend.execute(self.request, self.root)
+        self.assertEqual('PASS', result['cases']['blackbox:alpha'])
+        self.assertEqual('FAIL', result['cases']['blackbox:beta'])
+        self.assertEqual('PASS', result['cases']['blackbox:gamma'])
+        self.assertEqual('FAIL', result['cases']['units'])
+        self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold'])
+        self.assertEqual('PASS', result['cases']['teardown'])
+        self.assertNotIn('blackbox:treasury-rails', result['cases'])
+        self.assertEqual([], result['evidence']['unknown_domains'])
+        excluded = result['evidence']['qualified_excluded_rows']['blackbox:treasury-rails']
+        self.assertIs(excluded['passed'], False); self.assertIs(excluded['aborted'], False)
+        self.assertEqual(__import__('hashlib').sha256(json.dumps(qualification, sort_keys=True).encode()).hexdigest(),
+                         excluded['qualification_sha256'])
+        self.assertEqual(2, len(result['evidence']['artifacts']['summaries']))
+        self.assertEqual(1, result['native_exit']); self.assertFalse(result['complete'])
+        self.assertTrue(result['cleanup_complete']); self.assertEqual(before, self.request)
+
+    def test_qualified_exclusion_never_accepts_foreign_or_malformed_membership(self):
+        self.test_qualified_treasury_exclusion_keeps_full_native_peer_outcomes()
+        qualification = copy.deepcopy(self.request['skips'])
+        variants = {'missing': {}, 'empty': {'blackbox:treasury-rails': {}},
+                    'wrong-source': copy.deepcopy(qualification), 'wrong-case': copy.deepcopy(qualification),
+                    'blocking': copy.deepcopy(qualification), 'unknown': {'blackbox:foreign': next(iter(qualification.values()))}}
+        variants['wrong-source']['blackbox:treasury-rails']['source'] = {'head': 'foreign', 'digest': 'foreign'}
+        variants['wrong-case']['blackbox:treasury-rails']['rca']['check'] = 'backend-coverage-blackbox/blackbox:beta'
+        variants['blocking']['blackbox:treasury-rails']['disposition'] = 'blocking'
+        for label, skipped in variants.items():
+            with self.subTest(label=label):
+                shutil.rmtree(self.root / '.context')
+                self.request['skips'] = skipped
+                with patch.object(self.backend, 'run_command', side_effect=AssertionError('must refuse before native launch')):
+                    with self.assertRaises(ValueError): self.backend.execute(self.request, self.root)
+        self.request['skips'] = qualification
+        for label in ('unknown-row', 'mixed-row', 'malformed-excluded', 'duplicate-excluded', 'unreadable'):
+            with self.subTest(label=label):
+                shutil.rmtree(self.root / '.context', ignore_errors=True)
+                self.configure(1, self.rows(alpha=True, beta=False, gamma=True, **{'treasury-rails': False}))
+                config = cycle.read(self.config)
+                if label == 'unknown-row': config['results'].append({'domain': 'foreign', 'passed': True, 'aborted': False})
+                if label == 'mixed-row': config['results'].append(None)
+                if label == 'malformed-excluded': config['results'][-1]['passed'] = 'false'
+                if label == 'duplicate-excluded': config['results'].append(dict(config['results'][-1]))
+                if label == 'unreadable': config['extra_summaries'] = {'blackbox-run-shard2': '{'}
+                cycle.write(self.config, config)
+                result = self.backend.execute(self.request, self.root)
+                self.assertTrue(all(v == 'UNVERIFIED' for k, v in result['cases'].items() if k.startswith('blackbox:')))
+                self.assertTrue(result['cleanup_complete'])
+                self.assertNotIn('blackbox:treasury-rails', result['cases'])
+
     def test_stopped_owned_postgres_is_restored_before_the_unchanged_setup_and_sweep(self):
         state, calls, env = self.postgres_fixture()
         self.configure(0, self.rows(alpha=True, beta=True, gamma=True))

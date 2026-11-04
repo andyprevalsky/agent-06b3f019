@@ -99,7 +99,25 @@ def phase(pattern, text):
     return ('PASS', 0) if match.group(2) is None else ('FAIL', int(match.group(2)))
 
 
-def domain_cases(root, domains, started):
+def qualified_exclusions(request, domains):
+    """Bind excluded native rows to existing coordinator dispositions and the frozen inventory."""
+    from deploy_failure_report import decision
+    excluded = {}
+    for name, entry in request.get('skips', {}).items():
+        if not name.startswith('blackbox:'):
+            continue
+        rca = entry.get('rca') if isinstance(entry, dict) else None
+        if (name.split(':', 1)[1] not in domains or not isinstance(rca, dict)
+                or entry.get('source') != request['source']
+                or rca.get('check') != request['gate'] + '/' + name
+                or entry.get('disposition') in (None, 'blocking', 'execution required')
+                or decision(rca) != entry['disposition']):
+            raise ValueError('backend excluded domain lacks its source-bound qualification')
+        excluded[name] = hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()
+    return excluded
+
+
+def domain_cases(root, domains, started, excluded=None):
     cases, seen, hashes, unknown = {f'blackbox:{d}': 'UNVERIFIED' for d in domains}, {}, {}, []
     for path in sorted((root / 'back-end/coverage').glob('blackbox-run-shard*/summary.json')):
         try:
@@ -123,6 +141,15 @@ def domain_cases(root, domains, started):
             if domain in EXCLUSION_REASON:
                 seen.setdefault('excluded_rows', []).append({'domain': domain, 'shard': str(path)})
                 continue  # noted, never a case
+            if name in (excluded or {}):
+                recorded = seen.setdefault('qualified_excluded_rows', {})
+                if (name in recorded or type(row.get('passed')) is not bool
+                        or type(row.get('aborted')) is not bool):
+                    unknown.append(domain)
+                else:
+                    recorded[name] = {'shard': str(path), 'passed': row['passed'], 'aborted': row['aborted'],
+                                      'qualification_sha256': excluded[name]}
+                continue  # retain the native outcome without adding a case or granting PASS
             if name not in cases:
                 unknown.append(domain)
                 continue
@@ -352,6 +379,7 @@ def _execute(request, root, failed_first=False):
         raise ValueError('backend worker root differs from its prepared binding')
     if source(root) != request['source']:
         raise ValueError('backend source differs from the requested freeze')
+    excluded = qualified_exclusions(request, domains)
     directory = root / '.context/deploy-backend' / hashlib.sha256(request['token'].encode()).hexdigest()
     directory.mkdir(parents=True, exist_ok=False)
     recipe = request.get('worker_recipe')
@@ -398,7 +426,7 @@ def _execute(request, root, failed_first=False):
     text = (directory / 'runner.log').read_text(errors='replace')
     interrupted = timed_out or cancelled or lingering or code not in (0, 1)
     active = [c for c in checks]
-    cases, evidence, hashes, unknown = domain_cases(root, [c.split(':', 1)[1] for c in active if c.startswith('blackbox:')], started)
+    cases, evidence, hashes, unknown = domain_cases(root, [c.split(':', 1)[1] for c in active if c.startswith('blackbox:')], started, excluded)
     units, unit_rc = phase(UNIT_LINE, text)
     fps, fps_rc = phase(FPS_LINE, text)
     if fixture is not None:
