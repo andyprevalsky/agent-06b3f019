@@ -32,7 +32,9 @@ type Expectation =
       /** The equivalent flat request, which must return the same matches. */
       sameAs?: Record<string, unknown>;
     }
-  | { reject: string; says: RegExp[] };
+  | { reject: string; says: RegExp[] }
+  /** 400 SOURCE_NOT_FOUND naming this source. */
+  | { unknownSource: string };
 
 interface ContractCase {
   label: string;
@@ -438,6 +440,53 @@ function cases(thread: string): ContractCase[] {
       },
       expect: { reject: 'filters.messages.until', says: [/person, since, path/] },
     },
+    // Object.prototype names are not sources (CodeRabbit 4475153029 / 4475153046).
+    {
+      label: 'inherited name as a nested block key',
+      body: { pattern: 'Ledger', filters: { toString: { a: 1 } } },
+      expect: { reject: 'filters.toString', says: [/accepts/] },
+    },
+    {
+      label: 'inherited name as a path root',
+      body: { pattern: 'Ledger', filters: { path: 'constructor/x' } },
+      expect: { reject: 'filters.path', says: [/earlier/] },
+    },
+    {
+      label: 'inherited name in sources',
+      body: { pattern: 'Ledger', sources: ['constructor'] },
+      expect: { unknownSource: 'constructor' },
+    },
+    {
+      label: 'inherited name as source',
+      body: { pattern: 'Ledger', source: 'hasOwnProperty' },
+      expect: { unknownSource: 'hasOwnProperty' },
+    },
+    // An empty list means no explicit choice, as the agents layer already treats it.
+    {
+      label: 'empty sources list',
+      body: { pattern: 'Aurora', sources: [] },
+      expect: { accept: true, sources: ['messages', 'network', 'agent_network'], some: true },
+    },
+    // The umbrella messages block and a channel block both apply (CodeRabbit 4475153037).
+    {
+      label: 'messages block person + email block since',
+      body: {
+        pattern: 'Ledger',
+        sources: ['email'],
+        filters: { messages: { person: 'Mara Voss' }, email: { since: '2025-01-01' } },
+      },
+      // Mara Voss has no messages, so a kept person filter matches nothing.
+      expect: { accept: true, sources: ['email'], every: () => false },
+    },
+    {
+      label: 'messages and email blocks with conflicting since',
+      body: {
+        pattern: 'Ledger',
+        sources: ['email'],
+        filters: { messages: { since: '2025-01-01' }, email: { since: '2026-01-01' } },
+      },
+      expect: { reject: 'filters.email.since', says: [/given twice/] },
+    },
   ];
 }
 
@@ -467,6 +516,18 @@ export async function testGrepParameterContract(userId: string, agentId: string)
       sources?: string[];
       matches?: Match[];
     };
+    if ('unknownSource' in expect) {
+      const unknown =
+        res.status === 400 &&
+        data.error === 'SOURCE_NOT_FOUND' &&
+        (data.message ?? '').includes(`'${expect.unknownSource}'`);
+      if (!unknown) {
+        failures.push(
+          `${label}: expected SOURCE_NOT_FOUND, got ${res.status} ${JSON.stringify(data)}`
+        );
+      }
+      continue;
+    }
     if ('accept' in expect) {
       const matches = data.matches ?? [];
       if (res.status !== 200) {

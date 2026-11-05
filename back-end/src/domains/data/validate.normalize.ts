@@ -38,8 +38,9 @@ export interface SplitFilters {
 /** Top-level shorthands that broadcast like flat filter keys. */
 const BROADCAST_PARAMS = ['person', 'since', 'until'] as const;
 
+/** Own keys only: `toString` or `__proto__` must not read as a source. */
 export function isSourceName(key: string): key is ValidSource {
-  return key in VALID_SOURCES;
+  return Object.prototype.hasOwnProperty.call(VALID_SOURCES, key);
 }
 
 function acceptedKeys(source: ValidSource): readonly string[] {
@@ -100,13 +101,14 @@ export function splitFilters(params: GrepParams): SplitFilters {
   return { flat, nested };
 }
 
-/** The nested block that addresses `source`, if any. */
-function nestedBlockFor(split: SplitFilters, source: ValidSource): [string, FilterObject] | [] {
-  const own = split.nested[source];
-  if (own !== undefined) return [source, own];
+/** Every nested block that addresses `source`: the umbrella `messages` block, then its own. */
+function nestedBlocksFor(split: SplitFilters, source: ValidSource): [string, FilterObject][] {
+  const blocks: [string, FilterObject][] = [];
   const umbrella = split.nested.messages;
-  if (isMessageFamilySource(source) && umbrella !== undefined) return ['messages', umbrella];
-  return [];
+  if (isMessageFamilySource(source) && umbrella !== undefined) blocks.push(['messages', umbrella]);
+  const own = split.nested[source];
+  if (own !== undefined && source !== 'messages') blocks.push([source, own]);
+  return blocks;
 }
 
 function validateNestedKeys(split: SplitFilters, sources: ValidSource[]): void {
@@ -215,9 +217,10 @@ export function filtersBySource(
     for (const [key, value] of Object.entries(split.flat)) {
       if (flatKeyApplies(key, value, source)) effective[key] = value;
     }
-    const [blockKey, block] = nestedBlockFor(split, source);
-    for (const [key, value] of Object.entries(block ?? {})) {
-      setOnce(effective, key, value, `filters.${blockKey}.${key}`);
+    for (const [blockKey, block] of nestedBlocksFor(split, source)) {
+      for (const [key, value] of Object.entries(block)) {
+        setOnce(effective, key, value, `filters.${blockKey}.${key}`);
+      }
     }
     for (const key of BROADCAST_PARAMS) {
       if (params[key] !== undefined && keys.includes(key)) {

@@ -120,6 +120,14 @@ describe this contract (approval-gated text; golden-reference review attached
 to the branch handoff), and `test_grep_schema_filter_keys_match_backend_validator`
 fails if the schema's per-source key lists ever differ from `DATA_SOURCE_CONFIGS`.
 
+Review follow-up (CodeRabbit, PR #1691): source names are own keys of
+`VALID_SOURCES` only (`toString`, `constructor` and other `Object.prototype`
+names returned 500 as a nested key, path root, `source` or `sources` entry);
+an umbrella `messages` block and a channel block now both apply through the
+same conflict check (a channel block used to hide the umbrella block); and an
+empty `sources` list means no explicit choice, as the agents layer already
+treats it, instead of a zero-source search.
+
 Known remaining design choice (adversarial review): a flat or top-level key
 that only some selected sources accept narrows those sources and leaves the
 others unfiltered, as documented in the schema ("applies to every selected
