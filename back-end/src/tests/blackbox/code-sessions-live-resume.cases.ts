@@ -55,6 +55,10 @@ rl.on('line',line=>{
  if(msg.type!=='user')return;
  turn++;
  const text=msg.message.content.map(p=>p.text||'').join('');
+ // A turn the ws-server acked as delivered is only written to this CLI's stdin:
+ // a loaded host can schedule the CLI much later. Follow-up turns are recorded
+ // late on purpose so a test must wait for the CLI, never read right after the ack.
+ if(turn>1)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,250);
  fs.appendFileSync(dir+'/turns.jsonl',JSON.stringify({turn,text,pid:process.pid})+'\n');
  if(turn===1){
   send({type:'system',subtype:'init',session_id:'stub-session',model:'stub'});
@@ -321,6 +325,7 @@ export function registerCodeSessionLiveResumeCases(ctx: CodeSessionLifecycleCont
         Array.from({ length: LOOP_LINES }, (_, i) => i + 1),
         'the loop ran once, start to finish, across the pause'
       );
+      await until('the CLI to read the goal and the relay', () => turns(server.dir).length >= 3);
       const seen = turns(server.dir);
       assert.deepEqual(
         seen.map((turn) => turn.text),
@@ -372,6 +377,8 @@ export function registerCodeSessionLiveResumeCases(ctx: CodeSessionLifecycleCont
         assert.equal(attached.attached, true, goal);
         assert.equal(attached.reason, 'delivered', goal);
       }
+      // `delivered` means written to the CLI's stdin; wait for the CLI to read both.
+      await until('the CLI to read both follow-up turns', () => turns(server.dir).length >= 3);
       assert.deepEqual(
         turns(server.dir).map((turn) => turn.text),
         ['Task:\nRun the counter loop', 'Task:\nfirst follow-up', 'Task:\nsecond follow-up']
