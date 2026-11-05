@@ -45,8 +45,9 @@ PATHS = {
 }
 
 
-def select(template: dict, changed: list[str], result: dict, binding: dict, base: str = 'origin/main',
+def select(template: dict, changed: list[str], result: dict, binding: dict | None, base: str = 'origin/main',
            skip_agentcard: str | None = None) -> dict:
+    """binding=None is selection-only: the same inclusions/omissions, no worker checks or plan validation."""
     if skip_agentcard is not None and not skip_agentcard.strip():
         raise ValueError('AgentCard opt-out requires a nonempty reason')
     gates, omitted = [], []
@@ -67,7 +68,7 @@ def select(template: dict, changed: list[str], result: dict, binding: dict, base
                 command.extend(['--base', base])
             gate['command'] = command
         quick = category in QUICK
-        if gate.get("platform") and gate["platform"] != sys.platform and gate["name"] not in binding:
+        if gate.get("platform") and gate["platform"] != sys.platform and gate["name"] not in (binding or {}):
             omitted.append({"gate": gate["name"], "reason": "platform not available; not a test pass"})
             continue
         evidence = []
@@ -91,7 +92,7 @@ def select(template: dict, changed: list[str], result: dict, binding: dict, base
             continue
         gate.update(category=category, quick=quick, selection_evidence=evidence)
         gate.pop('after', None)  # no sibling gate is a prerequisite
-        if not quick:
+        if not quick and binding is not None:
             worker = binding.get(gate['name'])
             if not worker:
                 raise ValueError(f"{gate['name']}: independent worker binding missing")
@@ -121,10 +122,11 @@ def select(template: dict, changed: list[str], result: dict, binding: dict, base
                 gate.update(worker_recipe=worker['recipe'], case_protocol=True,
                             result_transport=worker.get('result_transport', 'file'))
         gates.append(gate)
-    planned = {'version': 1, 'base': base, 'source': source(ROOT), 'changed_files': changed,
-               'selection': result, 'gates': gates, 'omitted': omitted,
+    planned = {'version': 1, 'base': base, 'source': source(ROOT) if binding is not None else None,
+               'changed_files': changed, 'selection': result, 'gates': gates, 'omitted': omitted,
                'policy': 'quick-parallel / selected-parallel / RCA / focus / failed-gates / final'}
-    validate_plan(planned)
+    if binding is not None:
+        validate_plan(planned)
     return planned
 
 
@@ -167,24 +169,40 @@ def standard_template() -> dict:
     return {"gates": gates}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--template', type=Path, help='optional case-aware recipes; default existing full gate commands')
-    workers = parser.add_mutually_exclusive_group(required=True)
+    workers = parser.add_mutually_exclusive_group()
     workers.add_argument('--workers', type=Path, help='explicit existing adapter bindings')
     workers.add_argument('--inventory', type=Path, help='prepared worker identities; generate full-suite bindings')
     parser.add_argument('--base', default='origin/main')
-    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--output', type=Path)
     parser.add_argument('--skip-agentcard', metavar='REASON',
                         help='explicitly skip the optional AgentCard lifecycle category, recording why')
-    args = parser.parse_args()
+    parser.add_argument('--list-selected', action='store_true',
+                        help='print the same selection as JSON (selected/quick/needs_worker/omitted) '
+                             'without worker bindings; writes nothing')
+    args = parser.parse_args(argv)
     if args.skip_agentcard is not None and not args.skip_agentcard.strip():
         parser.error('--skip-agentcard requires a nonempty reason')
+    if args.list_selected and (args.workers or args.inventory or args.output):
+        parser.error('--list-selected takes no --workers, --inventory or --output')
+    if not args.list_selected and not (args.workers or args.inventory):
+        parser.error('one of the arguments --workers --inventory is required')
+    if not args.list_selected and args.output is None:
+        parser.error('the following arguments are required: --output')
     changed = changed_files(args.base, None)
     selected = Selector().select(changed)
     result = {'all': selected.all_lanes, 'reasons': selected.reasons,
               'lanes': {k: sorted(v) for k, v in selected.selected.items()}}
     template = json.loads(args.template.read_text()) if args.template else standard_template()
+    if args.list_selected:
+        selection = select(template, changed, result, None, base=args.base, skip_agentcard=args.skip_agentcard)
+        gates = selection['gates']
+        print(json.dumps({'selected': [g['name'] for g in gates], 'quick': [g['name'] for g in gates if g['quick']],
+                          'needs_worker': [g['name'] for g in gates if not g['quick']],
+                          'omitted': selection['omitted']}))
+        return 0
     binding_template = ({**template, 'gates': [gate for gate in template['gates']
                          if gate.get('category', gate['name']) != 'agentcard-lifecycle']}
                         if args.skip_agentcard is not None else template)

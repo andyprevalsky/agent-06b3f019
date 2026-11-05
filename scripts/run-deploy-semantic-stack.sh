@@ -25,6 +25,10 @@
 #                             container on CONDUCTOR_PORT+5 (scripts/lib/deploy-local-env.sh)
 #   DEPLOY_E2B_DB_PORT        explicit Postgres port for the E2B smoke database; default is
 #                             the running stack's manifest port, else LOCAL_DB_PORT
+#   DEPLOY_SEMANTIC_WORKER_PROCESSES
+#                             agent worker processes for the stack's run.sh (WORKER_PROCESSES);
+#                             default 8, the deploy.md Step 5 value. Lower it only to fit a
+#                             memory-bounded host; the specs and their assertions are unchanged
 #
 # Exit codes: 0 every step passed; 1 a step failed or the stack never became
 # ready; 2 usage, environment or prerequisite error (nothing was started).
@@ -124,8 +128,14 @@ if [ "$MODE" = e2b-only ]; then
     exit "$status"
 fi
 
-# Prerequisites before any side effect: the stack database must already be up
-# (deploy.md Step 5 pre-starts it so run.sh never owns or stops it).
+# Prerequisites before any side effect: a valid worker count, and the stack
+# database must already be up (deploy.md Step 5 pre-starts it so run.sh never
+# owns or stops it).
+SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"
+if ! [[ "$SEMANTIC_WORKER_PROCESSES" =~ ^[1-9][0-9]{0,2}$ ]]; then
+    echo "DEPLOY_SEMANTIC_WORKER_PROCESSES must be a positive integer (default 8), got '$SEMANTIC_WORKER_PROCESSES'." >&2
+    exit 2
+fi
 require_postgres "$LOCAL_DB_PORT" "Semantic stack" || exit 2
 require_command jq || exit 2
 require_command curl || exit 2
@@ -146,10 +156,11 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p .context
-BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0 \
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0 \
     bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &
 stack_pid=$!
 printf 'STEP5_STACK_PID=%s\n' "$stack_pid"
+printf 'STEP5_STACK_WORKER_PROCESSES=%s\n' "$SEMANTIC_WORKER_PROCESSES"
 ready=0
 for _ in $(seq 1 300); do
     if ! kill -0 "$stack_pid" 2>/dev/null; then

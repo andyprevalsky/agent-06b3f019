@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import io
 import json
 import os
 import subprocess
@@ -93,6 +94,52 @@ class Selection(unittest.TestCase):
             saved=json.loads(output.read_text())
             self.assertEqual('SKIPPED',saved['omitted'][0]['disposition'])
             self.assertEqual(7,len(saved['gates']))
+
+    def test_selection_only_matches_the_bound_selection_without_worker_checks(self):
+        self.template['gates'].append({'name':'mac','category':'mac-app-coverage-blackbox','platform':'other-os',
+                                      'command':['true'],'checks':['mac']})
+        bound=p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
+        with patch.object(p,'validate_plan',side_effect=AssertionError('selection-only must not validate')), \
+                patch.object(p,'source',side_effect=AssertionError('selection-only must not hash source')):
+            unbound=p.select(self.template,['back-end/src/one.ts'],self.result,None)
+        self.assertEqual([g['name'] for g in bound['gates']],[g['name'] for g in unbound['gates']])
+        self.assertEqual(bound['omitted'],unbound['omitted'])
+        self.assertEqual('mac',unbound['omitted'][-1]['gate'])
+        self.assertTrue(all('worker' not in g for g in unbound['gates']))
+        self.assertIsNone(unbound['source'])
+        with self.assertRaisesRegex(ValueError,'worker binding missing'):
+            p.select(self.template,['back-end/src/one.ts'],self.result,{})
+
+    def test_cli_list_selected_prints_selection_without_bindings_or_output(self):
+        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
+                                      'command':['true'],'checks':['card']})
+        with tempfile.TemporaryDirectory() as folder:
+            template=Path(folder)/'template.json'; template.write_text(json.dumps(self.template))
+            selected=SimpleNamespace(all_lanes=False,reasons=[],selected=self.result['lanes'])
+            out=io.StringIO()
+            with patch.object(p,'changed_files',return_value=['back-end/src/one.ts']) as changed, \
+                    patch.object(p.Selector,'select',return_value=selected), \
+                    patch.object(p,'generate_bindings',side_effect=AssertionError('no bindings in list mode')), \
+                    patch('sys.stdout',out):
+                self.assertEqual(0,p.main(['--template',str(template),'--list-selected','--base','review-base',
+                                           '--skip-agentcard','no card']))
+            changed.assert_called_once_with('review-base',None)
+            self.assertEqual(['template.json'],[x.name for x in Path(folder).iterdir()])
+        listed=json.loads(out.getvalue())
+        self.assertEqual(['lint','be','smoke','format','typescript','backend-structural'],listed['selected'])
+        self.assertEqual(['lint','format','typescript','backend-structural'],listed['quick'])
+        self.assertEqual(['be','smoke'],listed['needs_worker'])
+        self.assertEqual(['fe','payment'],sorted(o['gate'] for o in listed['omitted']))
+        self.assertEqual('SKIPPED',next(o for o in listed['omitted'] if o['gate']=='payment')['disposition'])
+
+    def test_cli_requires_bindings_and_output_outside_list_mode(self):
+        for argv in (['--output','plan.json'],['--workers','w.json'],['--list-selected','--workers','w.json'],
+                     ['--list-selected','--output','plan.json'],['--workers','w.json','--inventory','i.json',
+                     '--output','plan.json']):
+            with self.subTest(argv=argv), patch('sys.stderr',io.StringIO()), \
+                    self.assertRaises(SystemExit) as caught:
+                p.main(argv)
+            self.assertEqual(2,caught.exception.code)
 
     def test_unknown_graph_lane_refuses_selection_instead_of_silently_omitting_coverage(self):
         del self.result['lanes']['backend-blackbox']

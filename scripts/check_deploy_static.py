@@ -39,6 +39,24 @@ def format_files(changed: list[str], base: str) -> list[str]:
     return sorted(files)
 
 
+def lint_files(changed: list[str]) -> list[str]:
+    """Back-end-relative sources to lint; a package/tsconfig/eslint change lints all of src."""
+    backend = ROOT / 'back-end'
+    files = [path.removeprefix('back-end/') for path in changed
+             if path.startswith('back-end/src/') and path.endswith(('.ts', '.tsx'))
+             and (ROOT / path).is_file()]
+    if any(path.startswith('back-end/') and any(key in path for key in
+           ('package', 'tsconfig', 'eslint')) for path in changed):
+        files = [str(path.relative_to(backend)) for path in (backend / 'src').rglob('*')
+                 if path.is_file() and path.suffix in {'.ts', '.tsx'}]
+    return sorted(files)
+
+
+def prettier_binary() -> Path | None:
+    return next((p for p in [ROOT/'node_modules/.bin/prettier', ROOT/'back-end/node_modules/.bin/prettier']
+                 if p.is_file()), None)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('kind', choices=['format', 'lint'])
@@ -46,24 +64,16 @@ def main() -> int:
     args = parser.parse_args()
     changed = changed_files(args.base, None)
     if args.kind == 'lint':
-        backend = ROOT / 'back-end'
-        files = [path.removeprefix('back-end/') for path in changed
-                 if path.startswith('back-end/src/') and path.endswith(('.ts', '.tsx'))
-                 and (ROOT / path).is_file()]
-        if any(path.startswith('back-end/') and any(key in path for key in
-               ('package', 'tsconfig', 'eslint')) for path in changed):
-            files = [str(path.relative_to(backend)) for path in (backend / 'src').rglob('*')
-                     if path.is_file() and path.suffix in {'.ts', '.tsx'}]
+        files = lint_files(changed)
         if not files:
             print('LINT: no affected backend sources')
             return 0
-        return subprocess.run(['node', 'scripts/lint-affected.mjs', *sorted(files)], cwd=backend).returncode
+        return subprocess.run(['node', 'scripts/lint-affected.mjs', *files], cwd=ROOT / 'back-end').returncode
     files = format_files(changed, args.base)
     if not files:
         print('FORMAT: no changed supported files')
         return 0
-    binary = next((p for p in [ROOT/'node_modules/.bin/prettier', ROOT/'back-end/node_modules/.bin/prettier']
-                   if p.is_file()), None)
+    binary = prettier_binary()
     if binary is None:
         print('FORMAT: installed repository Prettier required; install pinned dependencies first', file=sys.stderr)
         return 2

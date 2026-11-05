@@ -264,6 +264,30 @@ footprint_clear() {  # <base> <low> <high>
   last=$((base + 6264))
   [ "$last" -le 65535 ] && { [ "$last" -lt "$low" ] || [ "$base" -gt "$high" ]; }
 }
+# Claims are isolated only when their whole LISTENER_OFFSETS footprints are
+# disjoint, the rule deploy_test_isolation.validate applies to a plan.
+footprints_disjoint() {  # <base>...
+  python3 - "$ROOT_DIR/scripts/deploy-worktree-port.py" "$@" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("deploy_worktree_port", sys.argv[1])
+ports = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ports)
+seen = set()
+for base in map(int, sys.argv[2:]):
+    footprint = {base + offset for offset in ports.LISTENER_OFFSETS}
+    if footprint & seen:
+        raise SystemExit(f"base {base} shares listener ports with an earlier claim in {sys.argv[2:]}")
+    seen |= footprint
+PY
+}
+first_base="$(python3 - "$ROOT_DIR/scripts/deploy-worktree-port.py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("deploy_worktree_port", sys.argv[1])
+ports = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ports)
+print(ports.FIRST_BASE_PORT)
+PY
+)"
 fake_ipv4="$TMP_ROOT/proc-sys-net-ipv4"
 mkdir -p "$fake_ipv4"
 printf '32768\t60999\n' >"$fake_ipv4/ip_local_port_range"
@@ -299,6 +323,12 @@ prepared_port="$(sed -nE 's/^export CONDUCTOR_PORT=([0-9]+)$/\1/p' "$deploy_tmp_
 [ -n "$prepared_port" ] && footprint_clear "$prepared_port" 32768 60999 \
   || fail "prepare-deploy-worktree must record an ephemeral-safe CONDUCTOR_PORT (got '$prepared_port')"
 echo "PASS: deploy worktree port claims land outside the kernel ephemeral range despite host mitigation"
+# Ten-port base spacing once handed these three 20000/20010/20020, whose
+# coverage shards and benchmark hubs overlap, so deploy_test_isolation refused
+# any two freshly prepared local workers (2026-11-05).
+footprints_disjoint "$ephemeral_safe_port" "$reserved_port" "$prepared_port" \
+  || fail "sequential claims must not share a listener port ($ephemeral_safe_port/$reserved_port/$prepared_port)"
+echo "PASS: sequential real-host claims receive pairwise-disjoint listen footprints"
 
 # There must be no warning-and-continue fallback when every candidate overlaps
 # the kernel window. Refuse before publishing an unusable workspace identity.
@@ -403,36 +433,31 @@ set -e
 echo "PASS: malformed, reversed and missing kernel ranges fail closed"
 
 # A new claim must clear the window with its whole 6265-port listen footprint
-# and fit below 65535. The allocator proves a claim by binding its ten ports
-# on the REAL host, so the boundary is exercised at the first base B whose
-# twenty ports (B and B+10) are bindable right now, never at a literal 20000:
-# a window starting at B+10+6265 fits every base <= B+10 exactly (one more
-# port and B+20 would fit too), a sibling worktree listening on 20000-20009
-# no longer fails the scenario ("no free ten-port deploy-worktree range is
-# available" under the structural lane, 2026-10-30), and a listener held on B
-# proves a busy candidate is skipped rather than failing the claim. Below
-# 26264 nothing fits (20000+6264 reaches the window), and above 60999 no base
-# keeps its +5764..+6264 hub under 65535, so those claims fail. Above a narrow
-# window the first base past it is taken and its hub still fits.
-boundary_base="$(python3 - <<'PY'
-import socket
-for base in range(20000, 54000, 10):
-    sockets = []
-    try:
-        for port in range(base, base + 20):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sockets.append(sock)
-            sock.bind(("127.0.0.1", port))
+# and fit below 65535. The allocator proves a claim by binding every listener
+# port of its footprint on the REAL host, so the boundary is exercised at the
+# first base B whose footprints at B and B+10 are bindable right now, never at
+# a literal FIRST_BASE_PORT: a window starting at B+10+6265 fits every base
+# <= B+10 exactly (one more port and B+20 would fit too), a sibling worktree
+# listening at the first base no longer fails the scenario ("no free ten-port
+# deploy-worktree range is available" under the structural lane, 2026-10-30),
+# and a listener held on B proves a busy candidate is skipped rather than
+# failing the claim. Below FIRST_BASE_PORT+6264 nothing fits (the first
+# base's hub reaches the window), and above 60999 no base keeps its
+# +5764..+6264 hub under 65535, so those claims fail. Above a narrow window
+# the first base past it is taken and its hub still fits.
+boundary_base="$(python3 - "$ROOT_DIR/scripts/deploy-worktree-port.py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("deploy_worktree_port", sys.argv[1])
+ports = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ports)
+for base in range(ports.FIRST_BASE_PORT, 54000, 10):
+    wanted = sorted({start + offset for start in (base, base + 10) for offset in ports.LISTENER_OFFSETS})
+    if ports._unbindable_port(wanted) is None:
         print(base)
         break
-    except OSError:
-        pass
-    finally:
-        for sock in sockets:
-            sock.close()
 PY
 )"
-[ -n "$boundary_base" ] || fail "no twenty bindable ports from a ten-aligned base below 54000 on this host"
+[ -n "$boundary_base" ] || fail "no two adjacent bindable listen footprints from a ten-aligned base below 54000 on this host"
 boundary_top=$((boundary_base + 10))
 boundary_low=$((boundary_top + 6265))
 busy_ready="$TMP_ROOT/boundary-busy-ready"
@@ -459,17 +484,129 @@ ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-wor
   || fail "check must accept base $boundary_top, whose footprint ends one port below the window at $boundary_low"
 ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" check --base-port $((boundary_top + 10)) >/dev/null 2>&1 \
   || fail "check must reject base $((boundary_top + 10)), whose footprint reaches into the window at $boundary_low"
-printf '26264\t60999\n' >"$fake_ipv4/ip_local_port_range"
+printf '%s\t60999\n' "$((first_base + 6264))" >"$fake_ipv4/ip_local_port_range"
 ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
   --registry "$TMP_ROOT/tight-ports" --owner "$deploy_tmp_g" >/dev/null 2>&1 \
   || fail "a footprint overlapping the window by one port must not be claimed"
-printf '20000\t26270\n' >"$fake_ipv4/ip_local_port_range"
+above_high=$((first_base + 6270))
+printf '%s\t%s\n' "$first_base" "$above_high" >"$fake_ipv4/ip_local_port_range"
 above_port="$(ROSE_DEPLOY_PROC_SYS_NET_IPV4="$fake_ipv4" python3 "$ROOT_DIR/scripts/deploy-worktree-port.py" claim \
   --registry "$TMP_ROOT/above-ports" --owner "$deploy_tmp_g")"
-[ "$above_port" -gt 26270 ] && footprint_clear "$above_port" 20000 26270 \
-  || fail "a claim above the window must start past it and keep its hub under 65535 (got $above_port with window 20000-26270)"
+[ "$above_port" -gt "$above_high" ] && footprint_clear "$above_port" "$first_base" "$above_high" \
+  || fail "a claim above the window must start past it and keep its hub under 65535 (got $above_port with window $first_base-$above_high)"
 printf '32768\t60999\n' >"$fake_ipv4/ip_local_port_range"
 echo "PASS: new claims keep their whole listen footprint outside the kernel window and below 65535"
+
+# /deploy provisions one local worker per selected gate (~13) on one box, and
+# deploy_test_isolation.validate rejects two workers whose LISTENER_OFFSETS
+# footprints share any port. Ten-port base spacing from 20000 gave every pair
+# of fresh claims overlapping hub windows, and even footprint-aware packing
+# fits only eleven bases between 20000 and Linux's default ephemeral floor
+# (2026-11-05). Packing is judged against the fixture kernel window alone, with
+# the host bind probe stubbed: live listeners of concurrent deploy workers on
+# this box must not make a capacity assertion flaky. The real probe is
+# exercised by the CLI claims above (busy candidate, disjoint real claims).
+capacity_ipv4="$TMP_ROOT/capacity-proc-sys-net-ipv4"
+mkdir -p "$capacity_ipv4"
+printf '32768\t60999\n' >"$capacity_ipv4/ip_local_port_range"
+: >"$capacity_ipv4/ip_local_reserved_ports"
+if ! ROSE_DEPLOY_PROC_SYS_NET_IPV4="$capacity_ipv4" python3 - "$ROOT_DIR/scripts" "$TMP_ROOT/capacity" <<'PY'; then
+import importlib.util, json, sys
+from pathlib import Path
+
+scripts, work = Path(sys.argv[1]), Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("deploy_worktree_port", scripts / "deploy-worktree-port.py")
+ports = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ports)
+sys.path.insert(0, str(scripts))
+from deploy_test_isolation import validate
+
+ports._unbindable_port = lambda _ports: None
+
+
+def need(condition, message):
+    if not condition:
+        raise SystemExit(f"FAIL: {message}")
+
+
+def owner(name):
+    path = work / "owners" / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path.resolve()
+
+
+def footprint(base):
+    return {base + offset for offset in ports.LISTENER_OFFSETS}
+
+
+registry, legacy, coordinator = work / "registry", work / "legacy", work / "coordinator"
+for path in (registry, legacy, coordinator):
+    path.mkdir(parents=True)
+# An earlier allocator recorded the overlapping pair 20000/20010 for two live
+# worktrees, and a TMPDIR-scoped legacy registry holds a live 10000 claim.
+existing = {"old-a": 20000, "old-b": 20010}
+for name, base in existing.items():
+    (registry / f"{base}.json").write_text(json.dumps({"schema_version": 1, "owner": str(owner(name)), "base_port": base}))
+(legacy / "10000.json").write_text(json.dumps({"schema_version": 1, "owner": str(owner("legacy")), "base_port": 10000}))
+before = {path.name: path.read_bytes() for path in registry.glob("*.json")}
+
+
+def claim(name):
+    with ports.Registry(registry) as held:
+        return held.claim(owner(name), (legacy,))
+
+
+for name, base in existing.items():
+    need(claim(name) == base, f"existing claim {name} must keep base {base}")
+need({path.name: path.read_bytes() for path in registry.glob("*.json")} == before,
+     "re-claiming existing identities must not rewrite or migrate them")
+
+fresh, exhausted = [], ""
+for index in range(40):
+    try:
+        fresh.append(claim(f"new-{index}"))
+    except RuntimeError as exc:
+        exhausted = str(exc)
+        break
+print(f"capacity: {len(fresh)} fresh claims beside 3 live ones: {fresh}")
+taken = [10000, *existing.values()]
+seen = set().union(*(footprint(base) for base in taken))
+for base in fresh:
+    need(footprint(base).isdisjoint(seen), f"claim {base} shares a listener port with an earlier or live claim")
+    need(max(footprint(base)) < 32768, f"claim {base} reaches into the kernel window")
+    need((legacy / f"{base}.json").is_file(), f"claim {base} must be mirrored into the legacy registry")
+    seen |= footprint(base)
+need(len(fresh) >= 16, f"only {len(fresh)} isolated claims fit below the 32768-60999 window: {fresh}")
+need("no free deploy-worktree range is available" in exhausted and "live claims" in exhausted,
+     f"capacity exhaustion must name the live claims and the retire remedy (got {exhausted!r})")
+need(claim("new-0") == fresh[0], "a fresh claim stays idempotent")
+for name, base in existing.items():
+    need(claim(name) == base, f"existing claim {name} must survive the packing")
+
+# Retiring a worktree releases its footprint for the next claim.
+(work / "owners" / "new-3").rmdir()
+late = claim("late")
+need(footprint(late).isdisjoint(set().union(*(footprint(b) for b in taken + fresh if b != fresh[3]))),
+     f"a claim after retirement must stay disjoint (got {late})")
+
+
+def plan(bases):
+    return {"gates": [{"name": f"gate-{base}", "worker_transport": "local-isolated", "cwd": str(owner(f"plan-{base}")),
+                       "command": ["true"], "env": {"CONDUCTOR_WORKSPACE_NAME": f"ws-{base}", "CONDUCTOR_PORT": str(base)}}
+                      for base in bases]}
+
+
+validate(plan([20000, *fresh]), coordinator)
+try:
+    validate(plan([20000, 20010]), coordinator)
+except ValueError as exc:
+    need("must not share" in str(exc), f"overlapping footprints must be refused as shared ports (got {exc})")
+else:
+    need(False, "deploy_test_isolation must refuse the overlapping 20000/20010 pair")
+PY
+  fail "footprint-aware claims must pack at least 16 isolated workers below a 32768-60999 kernel window"
+fi
+echo "PASS: footprint-aware claims pack >=16 isolated workers, keep existing claims and satisfy deploy_test_isolation"
 
 # `check` is the deploy preflight's verdict for a recorded base port.
 : >"$fake_ipv4/ip_local_reserved_ports"

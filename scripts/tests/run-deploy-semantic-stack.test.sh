@@ -47,7 +47,10 @@ require_text "$SCRIPT" 'curl -sf --max-time 5 "$SMOKE_BASE_URL/health"' "readine
 EXPORT_LINE=$(grep -n '^export CONDUCTOR_WORKSPACE_NAME=' "$SCRIPT" | head -1 | cut -d: -f1)
 CONFIGURE_LINE=$(grep -n '^configure_deploy_local_env || exit 2' "$SCRIPT" | head -1 | cut -d: -f1)
 [ -n "$EXPORT_LINE" ] && [ -n "$CONFIGURE_LINE" ] && [ "$EXPORT_LINE" -lt "$CONFIGURE_LINE" ] || fail "CONDUCTOR_WORKSPACE_NAME fallback (line ${EXPORT_LINE:-?}) must precede configure_deploy_local_env (line ${CONFIGURE_LINE:-?})"
-require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the deploy.md Step 5 environment"
+require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the deploy.md Step 5 environment"
+# The worker count is overridable for memory-bounded hosts, but the deploy.md Step 5 default stays 8.
+require_text "$SCRIPT" 'SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"' "the stack must default to deploy.md's WORKER_PROCESSES=8"
+[ "$(grep -Ec '(^|[[:space:]])WORKER_PROCESSES=' "$SCRIPT")" = 1 ] || fail "only the defaulted override may set the stack's WORKER_PROCESSES"
 require_text "$SCRIPT" 'bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &' "stack must be the Step 5 run.sh --benchmark launch"
 require_text "$SCRIPT" 'configure_deploy_local_env || exit 2' "the deploy environment library must gate every mode"
 require_text "$SCRIPT" 'bash scripts/resolve-deploy-stack-db.sh' "E2B smoke must prefer the running stack's database port"
@@ -126,6 +129,22 @@ expect_exit 2 env CONDUCTOR_PORT="$closed_base" bash scripts/run-deploy-semantic
 expect_output "Semantic stack: Postgres is not ready on localhost:$((closed_base + 5))" "stack mode must name the missing database port"
 [ ! -e "$SWEEP_MARKER" ] || fail "the stack mode must check Postgres before sweeping the worktree"
 [ ! -e "$FIXTURE/.context/deploy-smoke.log" ] || fail "no stack may start without a database"
+
+# 3b. An invalid DEPLOY_SEMANTIC_WORKER_PROCESSES is refused (exit 2) before the
+#     database check, the sweep or the stack launch; the E2B-only mode ignores it.
+for bad in 0 abc -1 2x 1000 ' 2'; do
+    expect_exit 2 env CONDUCTOR_PORT="$closed_base" DEPLOY_SEMANTIC_WORKER_PROCESSES="$bad" bash scripts/run-deploy-semantic-stack.sh
+    expect_output "DEPLOY_SEMANTIC_WORKER_PROCESSES must be a positive integer (default 8), got '$bad'." "invalid worker count '$bad' must be refused by name"
+done
+# Empty means unset (the default 8), so the next refusal is the missing database.
+expect_exit 2 env CONDUCTOR_PORT="$closed_base" DEPLOY_SEMANTIC_WORKER_PROCESSES= bash scripts/run-deploy-semantic-stack.sh
+expect_output "Semantic stack: Postgres is not ready" "an empty worker count falls back to the default"
+expect_exit 2 env CONDUCTOR_PORT="$closed_base" DEPLOY_SEMANTIC_WORKER_PROCESSES=2 bash scripts/run-deploy-semantic-stack.sh
+expect_output "Semantic stack: Postgres is not ready" "a valid worker count proceeds to the database check"
+expect_exit 2 env CONDUCTOR_PORT="$closed_base" DEPLOY_SEMANTIC_WORKER_PROCESSES=abc bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only
+expect_output "E2B smoke: Postgres is not ready" "the E2B-only mode launches no stack and ignores the worker count"
+[ ! -e "$SWEEP_MARKER" ] || fail "an invalid worker count must be refused before sweeping the worktree"
+[ ! -e "$FIXTURE/.context/deploy-smoke.log" ] || fail "no stack may start with an invalid worker count"
 
 # 4. E2B-only mode resolves its database port: LOCAL_DB_PORT by default, the
 #    running stack's manifest when one exists for this checkout, and
