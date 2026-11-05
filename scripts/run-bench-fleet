@@ -3785,6 +3785,10 @@ def record(path: Path, required):
             raise SystemExit(1)
         fields[key] = value
     allowed = set(required)
+    if path == audit / "meta" and ({"controller_pid", "controller_pid_start"} & set(fields)):
+        allowed.update({"controller_pid", "controller_pid_start"})
+        if not re.fullmatch(r"[1-9][0-9]*", fields.get("controller_pid", "")) or not fields.get("controller_pid_start"):
+            raise SystemExit(1)
     if "source_manifest_sha256" in fields and path.name == "meta":
         allowed.add("source_manifest_sha256")
         digest = fields["source_manifest_sha256"]
@@ -4081,6 +4085,10 @@ PY
             printf 'run_id=%s\n' "$RUN_ID"
             printf 'app=%s\n' "$APP"
             printf 'workspace_root=%s\n' "$ROOT_DIR"
+            if [ -n "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" controller_pid)" ]; then
+                printf 'controller_pid=%s\n' "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" controller_pid)"
+                printf 'controller_pid_start=%s\n' "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" controller_pid_start)"
+            fi
             printf 'status=provider-teardown-verified\n'
             printf 'hub_disposition=%s\n' "$hub_disposition"
             printf 'hub_owner_file=%s\n' "$hub_owner_file"
@@ -15041,6 +15049,8 @@ OWNED_CLONE_NAMES_FILE="$audit_staging/owned-clones.names"
     printf 'run_id=%s\n' "$RUN_ID"
     printf 'app=%s\n' "$APP"
     printf 'workspace_root=%s\n' "$ROOT_DIR"
+    printf 'controller_pid=%s\n' "$$"
+    printf 'controller_pid_start=%s\n' "$FLEET_OWNER_PID_START"
     printf 'status=incomplete\n'
     if [ -n "$CENTRAL_HUB_OWNER_FILE" ]; then
         printf 'hub_disposition=retained-exact-owner-transfer-required\n'

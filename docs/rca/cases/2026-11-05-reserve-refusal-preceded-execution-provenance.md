@@ -80,3 +80,11 @@ The legacy compatibility fixture also now restores its declared historical
 inventory helpers alongside its historical producer. Using current guard
 helpers with the old source label correctly failed strict source comparison;
 the fixture repair preserves that comparison and its negative cases.
+
+Independent review found that mutually consistent sidecars were not enough:
+late-added records could otherwise qualify. The adapter now hashes both early
+records and original native ownership metadata into its original result. Cleanup
+requires those exact original hashes and compares controller PID/start against
+the native owner metadata, not just between sidecars. Retrospective-sidecar and
+self-consistent forged-birth controls fail on the previous implementation and
+pass after these checks, without granting any historical e92 authority.

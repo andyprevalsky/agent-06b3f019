@@ -84,6 +84,23 @@ def verify_source_transport(request, root, provenance):
                         workspace_patch_sha256=binding['workspace_patch_sha256'])
 
 
+def capture_preallocation_evidence(runs):
+    """Seal observed terminal artifacts into the original adapter result."""
+    evidence = {}
+    for fleet in sorted(runs.iterdir()):
+        if not fleet.is_dir() or fleet.is_symlink():
+            continue
+        paths = {name: fleet / name for name in ('preallocation-source.json', 'preallocation-abort.json')}
+        if not all(path.is_file() for path in paths.values()):
+            continue
+        paths['native_owner_sha256'] = fleet / 'teardown-ownership/meta'
+        if any(path.is_symlink() or not path.is_file() for path in paths.values()):
+            raise ValueError('preallocation evidence is not a regular native file')
+        evidence[str(fleet)] = {name: hashlib.sha256(path.read_bytes()).hexdigest()
+                                for name, path in paths.items()}
+    return evidence
+
+
 def collect(request, root, runs, started, native_exit):
     fleets = [p for p in runs.iterdir() if p.is_dir() and (p / '_batch').is_dir()]
     if len(fleets) != 1:
@@ -283,7 +300,9 @@ def execute(request, root):
             raise ValueError('cloud source changed before dispatch')
         code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None)
     reason = None
+    preallocation_evidence = {}
     try:
+        preallocation_evidence = capture_preallocation_evidence(runs)
         if timed_out or cancelled or lingering or source(root) != request['source']:
             raise ValueError('cloud command interrupted or source changed')
         cases, details, cleaned, fleet = collect_campaign(
@@ -292,7 +311,7 @@ def execute(request, root):
         cases, details, cleaned, fleet = dict.fromkeys(checks, 'UNVERIFIED'), {}, False, None
         reason = str(error)
     result = {k: request[k] for k in ('token', 'source', 'gate')}
-    result.update(source_transport=binding, cases=cases, complete=cleaned and all(v != 'UNVERIFIED' for v in cases.values()),
+    result.update(preallocation_evidence=preallocation_evidence, source_transport=binding, cases=cases, complete=cleaned and all(v != 'UNVERIFIED' for v in cases.values()),
                   cleanup_complete=cleaned, reused=False, native_exit=code, native_command=argv,
                   evidence=details, reason=reason, fleet_directory=fleet,
                   runner_log=str(directory / 'cli.log'), started_at=started, finished_at=time.time())

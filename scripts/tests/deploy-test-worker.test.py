@@ -562,6 +562,24 @@ class Cloud(unittest.TestCase):
         self.assertEqual('0',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
 
+    def test_original_adapter_result_seals_preallocation_artifacts(self):
+        def native(argv,**kwargs):
+            run=kwargs['cwd']/'.context/deploy-cloud'/hashlib.sha256(self.request['token'].encode()).hexdigest()/'runs/fixture'
+            (run/'teardown-ownership').mkdir(parents=True)
+            for name in ['preallocation-source.json','preallocation-abort.json','teardown-ownership/meta']:
+                (run/name).write_text(name)
+            return 1,False,False,False
+        with patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'run_command',side_effect=native), \
+             patch.object(self.cloud,'collect_campaign',return_value=(dict.fromkeys(self.request['checks'],'UNVERIFIED'),{},False,None)):
+            result=self.cloud.execute(self.request,self.root)
+        self.assertFalse(result['complete'])
+        run,entry=next(iter(result['preallocation_evidence'].items()))
+        self.assertEqual(hashlib.sha256(b'preallocation-source.json').hexdigest(),entry['preallocation-source.json'])
+        self.assertEqual(hashlib.sha256(b'teardown-ownership/meta').hexdigest(),entry['native_owner_sha256'])
+        Path(run,'preallocation-source.json').write_text('later replacement')
+        self.assertNotEqual(cycle.sha_file(Path(run,'preallocation-source.json')),entry['preallocation-source.json'])
+
     def test_unpublished_request_keeps_head_so_native_fleet_ships_committed_delta(self):
         with patch.object(self.cloud,'source',return_value=self.request['source']), \
              patch.object(self.cloud,'prepare_source_transport',return_value={'base_sha':'b'*40}), \
@@ -714,6 +732,24 @@ class PreallocationProducer(unittest.TestCase):
             self.assertTrue((run/'preallocation-source.json').is_file())
             self.assertTrue((run/'preallocation-abort.json').is_file())
             self.assertFalse((run/'resource-admission.entered').exists())
+
+    def test_native_owner_metadata_pair_is_preserved_and_strict(self):
+        source=(ROOT/'scripts/run-bench-fleet').read_text()
+        self.assertEqual(2,source.count("printf 'controller_pid=%s"))
+        self.assertEqual(2,source.count("printf 'controller_pid_start=%s"))
+        begin=source.index('def record(path: Path, required):')
+        function=source[begin:source.index('\naudit_meta = record',begin)]
+        with tempfile.TemporaryDirectory() as temp:
+            audit=Path(temp);path=audit/'meta'
+            env={'Path':Path,'re':__import__('re'),'hashlib':hashlib,'audit':audit}
+            exec(function,env)
+            for text in ['version=1\n','version=1\ncontroller_pid=123\ncontroller_pid_start=original-start\n']:
+                path.write_text(text);self.assertEqual('1',env['record'](path,{'version'})['version'])
+            for text in ['version=1\ncontroller_pid=123\n','version=1\ncontroller_pid_start=start\n',
+                         'version=1\ncontroller_pid=invalid\ncontroller_pid_start=start\n',
+                         'version=1\nunknown=extra\n']:
+                path.write_text(text)
+                with self.assertRaises(SystemExit):env['record'](path,{'version'})
 
     def test_exact_producer_order_and_authentic_reserve_abort(self):
         import cloudbench_preallocation as producer

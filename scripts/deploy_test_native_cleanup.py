@@ -391,9 +391,18 @@ def startup_campaign(receipt, owner, proof, adapter, request, runs, cli_text, do
             'participants': [], 'native_audit_seals': {}, 'retained_services': [], 'credit_granted': False}
 
 
-def preallocation_binding(fleet, receipt, owner_token, root, document, bound, native_exit):
+def preallocation_binding(fleet, receipt, owner_token, root, document, bound, native_exit, adapter):
     """Only a future producer's sealed reserve refusal can omit runtime provenance."""
+    entry=adapter.get('preallocation_evidence',{}).get(str(fleet))
+    need(isinstance(entry,dict) and set(entry)=={'preallocation-source.json','preallocation-abort.json','native_owner_sha256'},
+         'preallocation evidence absent from original adapter result')
     intent_path=fleet/'preallocation-source.json'
+    for name in ('preallocation-source.json','preallocation-abort.json'):
+        need(entry[name]==hashlib.sha256(bound(fleet/name)).hexdigest(),'original preallocation artifact changed')
+    owner_path=fleet/'teardown-ownership/meta'
+    owner_bytes=bound(owner_path)
+    need(entry['native_owner_sha256']==hashlib.sha256(owner_bytes).hexdigest(),'original native owner changed')
+    native_owner=fields(owner_bytes)
     intent,abort=document(intent_path),document(fleet/'preallocation-abort.json')
     producer=subprocess.check_output(['git','-C',str(root),'show',
         receipt['source']['head']+':scripts/cloudbench_preallocation.py'])
@@ -405,6 +414,10 @@ def preallocation_binding(fleet, receipt, owner_token, root, document, bound, na
          and type(intent.get('pid')) is int and intent['pid'] > 1
          and intent['pid'] == abort.get('pid') and str(intent['pid']) == fleet.name.rsplit('-',1)[-1]
          and isinstance(intent.get('birth'),str) and intent['birth'] and intent['birth']==abort.get('birth')
+         and native_owner.get('controller_pid') == str(intent['pid'])
+         and native_owner.get('controller_pid_start') == intent['birth']
+         and native_owner.get('fleet_owner_token') == owner_token
+         and native_owner.get('run_id') == fleet.name
          and abort.get('source_sha256') == hashlib.sha256(bound(intent_path)).hexdigest()
          and abort.get('stage') in ('cleanup-reserve-refused','preallocation-interrupted')
          and type(abort.get('native_exit')) is int and abort['native_exit'] == native_exit
@@ -633,7 +646,7 @@ def validate(receipt, owner, proof):
         else:
             if not provenance_path.exists() and not matrix_path.exists():
                 need(life['controller_exit_code'] in (1,129,130,143) and fleet in parents, 'preallocation exit/parent')
-                provenance,matrix=preallocation_binding(fleet,receipt,owner_token,root,document,bound,life['controller_exit_code'])
+                provenance,matrix=preallocation_binding(fleet,receipt,owner_token,root,document,bound,life['controller_exit_code'],adapter)
             else:
                 provenance, matrix = document(provenance_path), document(matrix_path)
             need(not validate_provenance(provenance) and not validate_task_matrix_binding(provenance, matrix)

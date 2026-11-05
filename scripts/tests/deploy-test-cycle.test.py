@@ -2282,6 +2282,8 @@ class Cycle(unittest.TestCase):
                 workspace_root=str(self.root), status='provider-teardown-verified',
                 hub_disposition='retained-exact-owner-transfer-required', hub_owner_file=str(hub),
                 hub_owner_token='hub', hub_pid='1234', hub_pid_start=hub_owner['pid_start'], hub_argv_sha256='c' * 64)
+            if preallocation and role == 'parent':
+                meta.update(controller_pid='987654321',controller_pid_start='fixture-birth')
             text_fields(audit / 'meta', meta)
             (audit / 'provider-teardown-verified.epoch').write_text('1793665721\n')
             (audit / 'owned-clones.ids').write_text('machine1\n' if ordinal else '')
@@ -2332,6 +2334,15 @@ class Cycle(unittest.TestCase):
             files={str(p): c.sha_file(p) for p in files})
         return state, occurrence, paths, proof, hub
 
+    def reseal_preallocation_adapter(self,state,paths,proof,adapter):
+        c.write(paths['adapter'],adapter)
+        receipt=state['attempts'][-1]['results'][0]
+        reference={**receipt['native_cleanup_reference'],'result_sha256':c.sha_file(paths['adapter'])}
+        owner={**receipt['cleanup_owner'],'native_cleanup_reference':reference}
+        receipt.update(native_cleanup_reference=reference,cleanup_owner=owner);c.write(paths['receipt'],receipt)
+        proof.update(owner=copy.deepcopy(owner),receipt_sha256=c.sha_file(paths['receipt']),
+                     worker_result_sha256=c.sha_file(paths['adapter']))
+
     def preallocation_recon_state(self):
         import deploy_test_native_cleanup as cleanup
         state,occurrence,paths,proof,hub=self.native_recon_state(preallocation=True)
@@ -2350,6 +2361,10 @@ class Cycle(unittest.TestCase):
             path=fleet/name;path.unlink();proof['files'].pop(str(path))
         for name in ['preallocation-source.json','preallocation-abort.json']:
             proof['files'][str(fleet/name)]=c.sha_file(fleet/name)
+        adapter=c.read(paths['adapter']);adapter['preallocation_evidence']={str(fleet):{
+            item:c.sha_file(fleet/item) for item in ['preallocation-source.json','preallocation-abort.json']}}
+        adapter['preallocation_evidence'][str(fleet)]['native_owner_sha256']=c.sha_file(fleet/'teardown-ownership/meta')
+        self.reseal_preallocation_adapter(state,paths,proof,adapter)
         original=cleanup.subprocess.check_output
         def git_source(args,**kwargs):
             if args[:1]==['git'] and args[-1].endswith(':scripts/cloudbench_preallocation.py'):return producer
@@ -2365,6 +2380,31 @@ class Cycle(unittest.TestCase):
         self.assertEqual(before,state['attempts'])
         entry=state['reconciled_owners'][proof['receipt_sha256']]
         self.assertFalse(entry['credit_granted']);self.assertEqual(str(hub),entry['retained_services'][0]['path'])
+
+    def test_preallocation_sidecars_added_after_original_result_are_rejected(self):
+        import deploy_test_native_cleanup as cleanup
+        state,occurrence,paths,proof,hub,fleet,git_source=self.preallocation_recon_state()
+        adapter=c.read(paths['adapter']);adapter['preallocation_evidence']={}
+        self.reseal_preallocation_adapter(state,paths,proof,adapter)
+        before=copy.deepcopy(state)
+        with patch.object(cleanup.subprocess,'check_output',side_effect=git_source),self.assertRaises(ValueError):
+            c.reconcile(state,occurrence['id'],proof)
+        self.assertEqual(before,state)
+
+    def test_preallocation_birth_must_match_original_native_owner(self):
+        import deploy_test_native_cleanup as cleanup
+        state,occurrence,paths,proof,hub,fleet,git_source=self.preallocation_recon_state()
+        intent=c.read(fleet/'preallocation-source.json');intent['birth']='self-consistent-forgery'
+        c.write(fleet/'preallocation-source.json',intent)
+        abort=c.read(fleet/'preallocation-abort.json');abort.update(birth=intent['birth'],source_sha256=c.sha_file(fleet/'preallocation-source.json'))
+        c.write(fleet/'preallocation-abort.json',abort)
+        adapter=c.read(paths['adapter'])
+        for name in ['preallocation-source.json','preallocation-abort.json']:
+            value=c.sha_file(fleet/name);adapter['preallocation_evidence'][str(fleet)][name]=value
+            proof['files'][str(fleet/name)]=value
+        self.reseal_preallocation_adapter(state,paths,proof,adapter)
+        with patch.object(cleanup.subprocess,'check_output',side_effect=git_source),self.assertRaises(ValueError):
+            c.reconcile(state,occurrence['id'],proof)
 
     def test_native_preallocation_missing_forged_or_resource_evidence_refused(self):
         import deploy_test_native_cleanup as cleanup
