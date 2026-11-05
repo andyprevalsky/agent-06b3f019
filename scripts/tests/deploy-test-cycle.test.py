@@ -4330,7 +4330,6 @@ class LegacyStartupIsolation(StartupCleanup):
     """Original producer format is admitted only for isolated execution, never cleanup credit."""
     def setUp(self):
         import time
-        from deploy_test_startup_compat import observe
         super().setUp()
         failure=c.read(self.campaign/'startup-failure.json')
         seal=c.read(self.campaign/'startup-cleanup.json')
@@ -4369,6 +4368,17 @@ class LegacyStartupIsolation(StartupCleanup):
         publisher_token=f"1.2.{seal['inventory_pid']}.0"
         self.health.write_text(f'publisher_token={publisher_token}\nvalid_until=1\ngeneration=.generation-fixture\n')
         scopes=[str(self.campaign),str(self.runs),c.read(self.campaign/'shared-relay-location.json')['directory'],publisher_token]
+        def fixture_observe(pids, scopes):
+            return dict(schema='startup-current-os-v1', observed_at=time.time(),
+                boot_id=failure['parent_start'].split(':')[1], uid=os.geteuid(),
+                pids=sorted(pids), scopes=sorted(scopes), matched=[], unreadable=[],
+                mutations=0, provider_calls=0)
+        # This admission replay owns synthetic dead controllers, not the host's
+        # unrelated process table. Native observer behavior is tested separately.
+        self.observer_patch = patch('deploy_test_startup_compat.observe', side_effect=fixture_observe)
+        self.observer_patch.start()
+        self.addCleanup(self.observer_patch.stop)
+        from deploy_test_startup_compat import observe
         os_record=observe({failure['parent_pid'],seal['inventory_pid']},scopes)
         c.write(self.observation,dict(schema='legacy-startup-investigation-v1',observed_at=time.time(),
             peer_record=f"pid={failure['parent_pid']} campaign={self.campaign}\n",os=os_record))
@@ -4439,10 +4449,12 @@ class LegacyStartupIsolation(StartupCleanup):
         with self.assertRaises(ValueError):self.validate()
 
     def test_observer_does_not_hide_a_known_native_owner(self):
+        self.observer_patch.stop()
         from deploy_test_startup_compat import observe
         self.assertIn(os.getpid(),observe({os.getpid()},[])['matched'])
 
     def test_deleted_cwd_is_observed_and_still_matches_its_original_scope(self):
+        self.observer_patch.stop()
         from deploy_test_startup_compat import observe
         directory=self.root/'deleted-cwd';directory.mkdir()
         child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],cwd=directory)
@@ -4469,6 +4481,50 @@ class LegacyStartupIsolation(StartupCleanup):
             receipt_sha256=c.sha_file(self.folder/'receipt.json'),worker_result_sha256=c.sha_file(self.folder/'result.json'))
         self.seal_files()
         with self.assertRaisesRegex(ValueError,'unaudited legacy producer'):self.validate()
+
+
+class LegacyStartupFixtureIsolation(unittest.TestCase):
+    def test_original_admission_is_independent_of_unrelated_host_observation_race(self):
+        import time
+        import deploy_test_startup_compat as m
+        calls = 0
+        def host_race(pids, scopes):
+            nonlocal calls
+            calls += 1
+            return dict(schema='startup-current-os-v1', observed_at=time.time(),
+                boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(), uid=os.geteuid(),
+                pids=sorted(pids), scopes=sorted(scopes), matched=[],
+                unreadable=[dict(pid=2333570, error='PermissionError')] if calls == 1 else [],
+                mutations=0, provider_calls=0)
+        result = unittest.TestResult()
+        with patch.object(m, 'observe', side_effect=host_race):
+            LegacyStartupIsolation('test_isolation_retains_debt_and_creates_new_token_binding').run(result)
+        self.assertTrue(result.wasSuccessful(), str(result.errors + result.failures))
+
+
+    def test_real_observer_rejects_unreadable_live_process_and_ignores_only_proven_absence(self):
+        import deploy_test_startup_compat as m
+        real_path, real_read = Path, Path.read_bytes
+        with tempfile.TemporaryDirectory() as directory:
+            proc = Path(directory)
+            (proc/'sys/kernel/random').mkdir(parents=True)
+            (proc/'sys/kernel/random/boot_id').write_text('fixture-boot')
+            task = proc/'777';task.mkdir();(task/'cmdline').write_bytes(b'unrelated')
+            def mapped_path(*parts):
+                path = real_path(*parts)
+                return proc/path.relative_to('/proc') if path.is_relative_to('/proc') else path
+            for vanished in (False, True):
+                (task/'stat').write_text('777 (fixture) ' + ' '.join(['S','1','777'] + ['0']*16 + ['123']))
+                def unreadable(path):
+                    if path == task/'environ':
+                        if vanished:
+                            (task/'stat').unlink()
+                        raise PermissionError('controlled unrelated process')
+                    return real_read(path)
+                with patch.object(m, 'Path', side_effect=mapped_path), patch.object(real_path, 'read_bytes', unreadable):
+                    observation = m.observe(set(), [])
+                self.assertEqual(observation['matched'], [])
+                self.assertEqual(observation['unreadable'], [] if vanished else [{'pid':777,'error':'PermissionError'}])
 
 
 class F87IsolatedCompatibility(unittest.TestCase):
