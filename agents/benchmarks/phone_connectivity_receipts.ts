@@ -44,7 +44,9 @@ export function checkReceipts(
         reads.has(row.operation) ||
         (row.operation === "nav.home" && !launch) ||
         (row.operation === "apps.launch" &&
-          ["Settings", "com.apple.Preferences"].includes(row.request?.args?.name));
+          ["Settings", "com.apple.Preferences"].includes(
+            row.request?.args?.name,
+          ));
       if (!allowed) allCommandsAllowed = false;
       continue;
     }
@@ -59,7 +61,8 @@ export function checkReceipts(
       row.request?.input?.reasonCode === "user_constraint" &&
       row.request?.input?.requestKey === row.requestKey &&
       row.request?.input?.expectedCursor + 1 === row.cursor
-    ) continue;
+    )
+      continue;
     if (row.state !== "SUCCEEDED") {
       allCommandsAllowed = false;
       continue;

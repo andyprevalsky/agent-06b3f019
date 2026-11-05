@@ -97,9 +97,9 @@ async function main() {
         createdAt: row.createdAt.getTime(),
         completedAt: row.completedAt?.getTime() ?? null,
         request:
-          (row.operation === "apps.launch" ||
-            row.operation === "setup.defer" ||
-            row.errorCode === "phone_setup_required")
+          row.operation === "apps.launch" ||
+          row.operation === "setup.defer" ||
+          row.errorCode === "phone_setup_required"
             ? openPhoneValue(row.requestEncrypted)
             : null,
         result: row.resultEncrypted
