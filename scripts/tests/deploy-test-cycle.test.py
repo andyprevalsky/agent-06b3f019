@@ -5097,4 +5097,24 @@ class Round16InheritedAdmission(unittest.TestCase):
         with patch.object(self.m.shared,'validate_execution',side_effect=ValueError('old owner changed')):
             with self.assertRaisesRegex(ValueError,'old owner changed'):c.isolated_admissions(self.state,'smoke')
 
+
+class CloudSealedCanaryTransport(unittest.TestCase):
+    def test_forward_complete_sealed_payload_and_refuse_changed_or_missing_patch(self):
+        import deploy_test_cloud as cloud
+        import hashlib
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'workspace.patch';p.write_bytes(b'whole workspace, not only guard')
+            digest=hashlib.sha256(p.read_bytes()).hexdigest()
+            binding={'patch':str(p),'workspace_patch_sha256':digest,'base_sha':'a'*40}
+            expected={'CLOUDBENCH_LOCAL_PATCH_SOURCE':str(p),'CLOUDBENCH_LOCAL_PATCH_SHA256':digest,'CLOUDBENCH_LOCAL_PATCH_BASE_REF':'a'*40}
+            self.assertEqual(cloud.source_transport_environment(binding),expected)
+            p.write_bytes(b'tampered')
+            with self.assertRaises(ValueError):cloud.source_transport_environment(binding)
+            p.unlink()
+            with self.assertRaises(ValueError):cloud.source_transport_environment(binding)
+            p.write_bytes(b'');binding['workspace_patch_sha256']='none'
+            self.assertEqual(cloud.source_transport_environment(binding),{})
+            link=Path(d)/'link';link.symlink_to(p);binding['patch']=str(link)
+            with self.assertRaises(ValueError):cloud.source_transport_environment(binding)
+
 if __name__ == '__main__': unittest.main()

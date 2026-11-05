@@ -84,6 +84,22 @@ def verify_source_transport(request, root, provenance):
                         workspace_patch_sha256=binding['workspace_patch_sha256'])
 
 
+
+def source_transport_environment(binding):
+    """Forward only the already sealed source payload to every nested controller."""
+    path = Path(binding['patch'])
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('cloud sealed patch is missing or unsafe')
+    actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.stat().st_size else 'none'
+    if actual != binding['workspace_patch_sha256']:
+        raise ValueError('cloud sealed patch changed before launch')
+    if actual == 'none':
+        return {}
+    return {'CLOUDBENCH_LOCAL_PATCH_SOURCE': str(path),
+            'CLOUDBENCH_LOCAL_PATCH_SHA256': actual,
+            'CLOUDBENCH_LOCAL_PATCH_BASE_REF': binding['base_sha']}
+
+
 def capture_preallocation_evidence(runs):
     """Seal observed terminal artifacts into the original adapter result."""
     evidence = {}
@@ -278,9 +294,10 @@ def execute(request, root):
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '0',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
            'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
-    # Do not inherit a foreign patch: the fleet generates from this attested base.
-    for key in ('CLOUDBENCH_LOCAL_PATCH_SOURCE', 'CLOUDBENCH_LOCAL_PATCH_SHA256'):
+    # Replace foreign payloads with the exact prelaunch seal, including parent canary.
+    for key in ('CLOUDBENCH_LOCAL_PATCH_SOURCE', 'CLOUDBENCH_LOCAL_PATCH_SHA256', 'CLOUDBENCH_LOCAL_PATCH_BASE_REF'):
         env.pop(key, None)
+    env.update(source_transport_environment(binding))
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
     catalog = root / 'agents/benchmarks/tasks.json'

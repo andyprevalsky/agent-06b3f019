@@ -46,6 +46,14 @@ failure exit. Existing custody tests verify denied proxy allocations, allowed
 reads/reuse, missing guard rejection and runtime enforcement. Existing patch
 transport tests retain digest and missing-payload rejection.
 
+The adapter forwards its existing prelaunch-attested base and complete patch,
+replacing any inherited foreign payload. Nested fleets verify the base, digest
+and copied bytes, rather than independently reconstructing a patch. Patched
+canary stamps and cohort receipt policy bind requested source, base and patch
+digest. A changed/missing payload, different stamp identity or explicit
+skip-local-patch with an unpublished delta fails closed. No guard-only copy is
+used; native guest transport/provenance consumes the complete sealed patch.
+
 ## Validation and limits
 
 The registered fleet-infra-canary structural test is red before and green after.

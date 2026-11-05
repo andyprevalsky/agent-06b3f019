@@ -15870,7 +15870,19 @@ fleet_scorecard_report launch
 # Freeze one workspace patch before maintenance and reuse it for every guest.
 FLEET_PATCH_FILE=""
 FLEET_PATCH_SHA256=""
-if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
+if [ -n "${CLOUDBENCH_LOCAL_PATCH_SOURCE:-}${CLOUDBENCH_LOCAL_PATCH_SHA256:-}${CLOUDBENCH_LOCAL_PATCH_BASE_REF:-}" ]; then
+    [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != 1 ] \
+        && [ "${CLOUDBENCH_LOCAL_PATCH_BASE_REF:-}" = "$BENCH_REF" ] \
+        && [ -s "${CLOUDBENCH_LOCAL_PATCH_SOURCE:-}" ] \
+        && [ -n "${CLOUDBENCH_LOCAL_PATCH_SHA256:-}" ] \
+        && [ "$(cloudbench_env_sha256 "$CLOUDBENCH_LOCAL_PATCH_SOURCE")" = "$CLOUDBENCH_LOCAL_PATCH_SHA256" ] || {
+        echo "❌ inherited fleet workspace patch identity mismatch" >&2
+        exit 1
+    }
+    FLEET_PATCH_FILE="$(mktemp)"
+    cp "$CLOUDBENCH_LOCAL_PATCH_SOURCE" "$FLEET_PATCH_FILE" || exit 1
+    [ "$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")" = "$CLOUDBENCH_LOCAL_PATCH_SHA256" ] || exit 1
+elif [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
    && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
         || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
     FLEET_PATCH_FILE="$(mktemp)"
@@ -18779,7 +18791,7 @@ fleet_infra_canary_preflight() {
     esac
     # A campaign must check its own abort/failure even when another cohort has
     # a fresh global PASS. The transaction helper owns that check.
-    if [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] && [ -f "$stamp" ]; then
+    if [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] && [ -z "${FLEET_PATCH_FILE:-}" ] && [ -f "$stamp" ]; then
         age=$(( $(date +%s) - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) ))
         if [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ]; then
             echo "🛡  infra canary preflight: stamp fresh (${age}s < ${ttl}s) — $stamp"
@@ -18796,10 +18808,18 @@ fleet_infra_canary_preflight() {
     # The helper holds a shared transaction lock while it rechecks the stamp,
     # runs the canary, and stamps PASS. Its lock is distinct from the nested
     # controller lifecycle lock, so nested fleet entry cannot self-deadlock.
+    if [ "${REQUESTED_BENCH_REF:-${BENCH_REF:-}}" != "${BENCH_REF:-}" ] \
+       && [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = 1 ]; then
+        echo "❌ infra canary cannot omit the requested source patch" >&2
+        return 1
+    fi
     # Preserve the requested source, not just its fetchable transport base:
     # the nested fleet must package the same committed workspace delta.
     if CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="${POOL_COLD_BOOTSTRAP:-0}" \
         CLOUDBENCH_INFRA_CANARY_REF="${REQUESTED_BENCH_REF:-${BENCH_REF:-}}" \
+        CLOUDBENCH_LOCAL_PATCH_SOURCE="${FLEET_PATCH_FILE:-}" \
+        CLOUDBENCH_LOCAL_PATCH_SHA256="${FLEET_PATCH_SHA256:-}" \
+        CLOUDBENCH_LOCAL_PATCH_BASE_REF="${FLEET_PATCH_FILE:+$BENCH_REF}" \
         python3 -S "$INFRA_CANARY_PREFLIGHT_SCRIPT" \
         --stamp "$stamp" \
         --lock "$lock" \
