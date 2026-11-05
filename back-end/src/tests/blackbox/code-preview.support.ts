@@ -18,6 +18,8 @@ const COPIED = [
   'src',
   'index.html',
   'vite.config.ts',
+  // Imported by vite.config.ts; without it the preview dev server cannot start.
+  'vite-build-version.ts',
   'package.json',
   'tsconfig.json',
   'tsconfig.app.json',
