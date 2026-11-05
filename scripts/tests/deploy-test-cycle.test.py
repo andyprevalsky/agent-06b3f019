@@ -4786,6 +4786,52 @@ class Round14WarmIsolation(unittest.TestCase):
         with patch.object(n,'still_bound',return_value=False),patch.object(c,'receipt_owner',return_value={}):
             self.assertFalse(n.round14_isolation_covers_prior(state,prior,latest))
 
+    def test_real_reconcile_renew_and_successor_request_keep_every_debt(self):
+        import time,hashlib
+        import deploy_test_native_cleanup as n
+        self.inherited[:]=[{'original_request_token':t,'original_receipt_sha256':t+'-hash'}
+                           for t in ['ce','e92','round12']]
+        request_file=self.root/'request.json';c.write(request_file,{'checks':['one'],'skips':{}})
+        self.spec['receipt_path']=self.root/'receipt.json';self.spec['pins'][str(self.spec['receipt_path'])]='hash'
+        self.p.update(original_request=str(request_file),campaign=str(self.new.ROOT/'.context/deploy-cloud'/
+            '5fd2d6f32e461c2c744bfbb67234a4e319435c7d91ad8529ee5ae06cebf26bed/campaigns/deploy-5fd2d6f32e461c2c744bfbb67234a4e319435c7d91ad8529ee5ae06cebf26bed'))
+        gate={'name':'smoke','native_cloud':True,'checks':['one'],'command':['python3',str(self.root/'scripts/deploy_test_cloud.py')]}
+        old_entries={t+'-hash':{'kind':n.KIND,'purpose':'isolated-validation','gate':'smoke','token':t,
+            'credit_granted':False,'obligations_preserved':True,'validation_source':self.p['validation_source'],
+            'excluded_resources':{},'proof':{'receipt_sha256':t+'-hash','owner':{'native_cleanup_reference':{'result':str(self.root/'result.json')}}}}
+            for t in ['ce','e92','round12']}
+        old_receipts=[{'gate':'smoke','token':t,'cleanup_owner':{'prior':t}} for t in ['ce','e92','round12']]
+        failure={'id':'failure-14','gate':'smoke','check':'smoke/one','native_result':'UNVERIFIED','complete':False}
+        state={'phase':'triage','ready':False,'source':self.p['validation_source'],
+            'plan':{'gates':[gate],'source':self.p['validation_source']},'failures':[failure],
+            'attempts':[{'results':old_receipts+[self.r]}],'reconciled_owners':copy.deepcopy(old_entries)}
+        original_failures=copy.deepcopy(state['failures']);real_bound=n.still_bound
+        def bound(entry,receipt,owner):
+            return real_bound(entry,receipt,owner) if entry['token']==self.new.TOKEN else True
+        with patch.object(self.new,'operation_spec',return_value=self.spec),patch.object(n,'still_bound',side_effect=bound),             patch.object(c,'source',return_value=self.p['validation_source']):
+            missing=copy.deepcopy(state);del missing['reconciled_owners']['ce-hash']
+            with self.assertRaisesRegex(ValueError,'inherited isolated debt missing'):n.reconcile(missing,'failure-14',self.p)
+            wrong=copy.deepcopy(self.p);wrong['worker_result_sha256']='wrong'
+            with self.assertRaises(ValueError):n.reconcile(state,'failure-14',wrong)
+            n.reconcile(state,'failure-14',self.p)
+            renewed=copy.deepcopy(self.p);now=time.time();renewed['confirmed_at']=now
+            renewed['local_observation']['observed_at']=now
+            renewed['guest_observation']={**self.guest,'state':'stopped','guest':None,'observed_at':now}
+            self.guest_observer.return_value=renewed['guest_observation']
+            missing_failure=copy.deepcopy(state);missing_failure['failures']=[]
+            with self.assertRaisesRegex(ValueError,'original failure obligation missing'):n.reconcile(missing_failure,self.new.TOKEN,renewed)
+            n.reconcile(state,self.new.TOKEN,renewed)
+            self.assertEqual(state['failures'],original_failures);self.assertFalse(state['ready'])
+            self.assertEqual(set(state['reconciled_owners']),{'ce-hash','e92-hash','round12-hash','hash'})
+            entry=state['reconciled_owners']['hash'];self.assertFalse(entry['cleanup_complete']);self.assertFalse(entry['credit_granted'])
+            next_request={'token':'fresh-token','source':self.p['validation_source'],'checks':['one'],'skips':{}}
+            self.assertEqual(len(c.isolated_request(state,gate,next_request,self.root,{})),4)
+            next_request['token']=self.new.TOKEN
+            with self.assertRaises(ValueError):c.isolated_request(state,gate,next_request,self.root,{})
+            next_request['token']='fresh-token'
+            target=self.root/'.context/deploy-cloud'/hashlib.sha256(b'fresh-token').hexdigest();target.mkdir(parents=True)
+            with self.assertRaises(ValueError):c.isolated_request(state,gate,next_request,self.root,{})
+
     def test_each_pinned_hub_and_participant_omission_rejects_before_io(self):
         for path in self.new.PINS:
             if '/runs/_hub/' in path or path.endswith('/lifecycle.json'):

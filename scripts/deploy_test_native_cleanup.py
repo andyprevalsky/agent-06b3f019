@@ -838,11 +838,18 @@ def renew_isolated_validation(state, request_token, proof):
     need(len(previous) == 1, 'one prior reconciliation required')
     key, prior = previous[0]
     need(prior.get('kind') == KIND and prior.get('purpose') == 'isolated-validation'
-         and prior.get('occurrence') == request_token and key == proof.get('receipt_sha256'), 'original reconciliation identity')
+         and key == proof.get('receipt_sha256'), 'original reconciliation identity')
     receipts = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
                 if row.get('gate') == prior['gate'] and row.get('token') == request_token]
     need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
+    if prior.get('occurrence') != request_token:
+        linked_failures = [f for f in state.get('failures', [])
+                           if f.get('id') == prior.get('occurrence') and f.get('gate') == prior['gate']
+                           and f.get('native_result') == 'UNVERIFIED' and f.get('complete') is False
+                           and receipt.get('cases', {}).get(f.get('check', '').split('/', 1)[-1]) == 'UNVERIFIED']
+        need(prior['proof'].get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1'}
+             and len(linked_failures) == 1, 'original failure obligation missing or changed')
     latest = latest_receipts(state).get(prior['gate'])
     if latest != receipt:
         if not round14_isolation_covers_prior(state, prior, latest):

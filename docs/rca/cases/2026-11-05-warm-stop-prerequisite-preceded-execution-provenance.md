@@ -72,3 +72,11 @@ forbidden. Parent and independent review must precede integration.
 ## Reusable lesson
 
 Prove current execution exclusion separately from historical cleanup, and retain every prior obligation when admitting an independently validated successor.
+
+End-to-end synthetic reconcile/renew/request coverage found renewal incorrectly
+required the prior occurrence to be the request token, although normal
+reconciliation records a failure ID. For only the two pinned investigator
+admissions, renewal now also accepts that exact retained UNVERIFIED failure ID
+with matching gate/case. Missing or changed failure obligations still reject.
+The test preserves all failures and four owner entries, rejects missing inherited
+debt and a wrong adapter hash, and rejects reused token/root at next admission.
