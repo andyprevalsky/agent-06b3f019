@@ -4481,6 +4481,8 @@ class F87IsolatedCompatibility(unittest.TestCase):
         self.participants=set();self.jobs=[]
         self.hub=self.runs/'_hub/fixture.owner';self.hub.parent.mkdir()
         self.hub.write_text('pid=123456\npid_start=birth\nargv_sha256=argv\n')
+        self.supplementary=[self.hub.parent/'debt-one.owner',self.hub.parent/'debt-two.owner']
+        for i,path in enumerate(self.supplementary):path.write_text('original-debt-'+str(i))
         self.tree=lambda path:hashlib.sha256(b''.join(str(p.relative_to(path)).encode()+p.read_bytes() for p in sorted(path.rglob('*')) if p.is_file())).hexdigest()
         for i in range(10):
             pid=200000+i;fleet=self.runs/('fixture-'+str(pid));self.participants.add(fleet)
@@ -4493,17 +4495,30 @@ class F87IsolatedCompatibility(unittest.TestCase):
             c.write(fleet/'_batch/lifecycle.json',{'fleet_owner_token':owner,'audit_sha256':self.tree(local)})
         c.write(self.campaign/'summary.json',{'jobs':self.jobs})
         c.write(self.campaign/'shared-relay-location.json',{'directory':str(self.root/'relay')})
-        pins={str(p.relative_to(self.root)):c.sha_file(p) for p in [self.campaign/'summary.json',self.hub,*self.runs.glob('*/_batch/lifecycle.json')]}
+        pins={str(p.relative_to(self.root)):c.sha_file(p) for p in [self.campaign/'summary.json',self.hub,*self.supplementary,*self.runs.glob('*/_batch/lifecycle.json')]}
         self.pin=patch.object(m,'PINNED',pins);self.pin.start();self.addCleanup(self.pin.stop)
         self.ident=patch.object(m,'hub_identity',return_value=('birth','argv'));self.addCleanup(self.ident.stop);self.ident=self.ident.start()
         self.os=lambda pids,scopes:dict(boot_id='boot',uid=1,pids=sorted(pids),scopes=sorted(scopes),matched=[123456],unreadable=[],observed_at=2)
         self.observer=patch.object(m,'observe',side_effect=self.os);self.addCleanup(self.observer.stop);self.observer=self.observer.start()
         self.obs=self.root/'observation.json';c.write(self.obs,{'schema':'f87-isolated-observation-v1','observed_at':2,'os':self.os({123456,*[j['controller_pid'] for j in self.jobs]},[str(self.runs.parent),str(self.root/'relay')])})
         self.receipt={'source':{'head':m.SOURCE},'token':m.TOKEN,'finished_at':1}
-        self.proof={'purpose':'isolated-validation','layout':'campaign-v1','compatibility':'f87-reserve-abort-isolation-v1','receipt_sha256':m.RECEIPT_SHA,'confirmed_at':3,'investigator_observation':str(self.obs)}
+        self.proof={'purpose':'isolated-validation','layout':'campaign-v1','compatibility':'f87-reserve-abort-isolation-v1','receipt_sha256':m.RECEIPT_SHA,'confirmed_at':3,'investigator_observation':str(self.obs),'files':{str(self.root/path):value for path,value in pins.items()}}
     def verify(self):
         return self.m.validate(self.receipt,{},self.proof,self.root,self.runs,self.participants,c.read,lambda p:Path(p).read_bytes(),self.tree)
     def test_exact_execution_only_evidence_is_admitted(self):self.assertTrue(self.verify())
+    def test_each_original_supplementary_debt_is_mandatory(self):
+        for path in self.supplementary:
+            saved=self.proof['files'].pop(str(path))
+            with self.subTest(path=path.name),self.assertRaises(ValueError):self.verify()
+            self.proof['files'][str(path)]=saved
+
+    def test_original_owner_hash_and_path_cannot_be_substituted(self):
+        path=self.supplementary[0];saved=self.proof['files'][str(path)]
+        self.proof['files'][str(path)]='0'*64
+        with self.assertRaises(ValueError):self.verify()
+        self.proof['files'].pop(str(path));self.proof['files'][str(path.parent/'replacement.owner')]=saved
+        with self.assertRaises(ValueError):self.verify()
+
     def test_wrong_authority_or_original_bytes_are_refused(self):
         for key,value in [('purpose',None),('receipt_sha256','bad'),('compatibility','other')]:
             original=self.proof[key];self.proof[key]=value

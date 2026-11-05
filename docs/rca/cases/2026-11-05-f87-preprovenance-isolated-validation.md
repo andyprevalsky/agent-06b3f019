@@ -73,3 +73,9 @@ may integrate and import a proof at the current frozen-source boundary.
 A strictly pinned execution-only compatibility path may retain historical debt
 while admitting a separately identified run. It must never convert missing
 historical provenance into an invented cleanup or success claim.
+
+Independent review found that two supplementary original Hub owner records could
+be omitted from the supplied proof. The compatibility now requires the exact
+three original owner paths and hashes, rejects substitutions or extra Hub owner
+paths, and retains all three debts. Removal of either supplementary record and
+path/hash substitution reproduce rejection failures before this correction.
