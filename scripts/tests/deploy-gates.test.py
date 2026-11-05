@@ -196,7 +196,8 @@ class Inventory(Fixture):
                                   'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1', 'ROSE_DEPLOY_WORKTREE': '1',
                                   'ROSE_DEPLOY_WORKTREE_PATH': str(path), 'ROSE_DEPLOY_SOURCE_WORKSPACE': str(self.root),
                                   'CONDUCTOR_WORKSPACE_PATH': str(path),
-                                  'DEPLOY_RUN_ROOT': str(self.root / '.context/deploy-runs')}},
+                                  'DEPLOY_RUN_ROOT': str(self.root / '.context/deploy-runs'),
+                                  'BENCHMARK_HISTORY_PARK_DIR': str(self.root / '.context/deploy-ledger-park')}},
                          inventory['frontend-coverage-blackbox'])
         backend = self.path('backend-coverage-blackbox')
         self.assertEqual('postgresql://postgres:postgres@localhost:5432/victoria_deploy_backend-coverage-blackbox',
@@ -233,7 +234,8 @@ class Inventory(Fixture):
         with patch.dict(os.environ, {'ROSE_DEPLOY_WORKTREE_PATH': str(self.root), 'DEPLOY_RUN_ROOT': '/srv/runs'}):
             env = g.local_slot(self.root, 'live-probes', path, values)['env']
         self.assertEqual({'CONDUCTOR_WORKSPACE_NAME': 'w', 'CONDUCTOR_PORT': '21530', 'ROSE_DEPLOY_WORKTREE': '1',
-                          'ROSE_DEPLOY_WORKTREE_PATH': str(path), 'DEPLOY_RUN_ROOT': '/srv/runs'}, env)
+                          'ROSE_DEPLOY_WORKTREE_PATH': str(path), 'DEPLOY_RUN_ROOT': '/srv/runs',
+                          'BENCHMARK_HISTORY_PARK_DIR': str(self.root / '.context/deploy-ledger-park')}, env)
         backend = self.path('backend-coverage-blackbox')
         backend.mkdir(parents=True)
         system = {**values, 'ROSE_DEPLOY_WORKTREE_PATH': str(backend), 'ROSE_USE_SYSTEM_PG': 'true'}
@@ -563,6 +565,29 @@ class Retire(Fixture):
         code, out = self.retire(proc=Path(self.tmp.name) / 'no-proc', head=self.old)
         self.assertIn('process working directories cannot be observed on this host', out)
         self.assertTrue(self.path('live-probes', self.old).exists())
+
+    def test_benchmark_history_rows_are_preserved_then_the_worker_is_removed(self):
+        self.provision(['live-probes'])
+        path = self.path('live-probes')
+        (path / 'agents/benchmarks/history/runs.jsonl').write_text('{}\n{"task": "agent-payment-test-shop"}\n')
+        (path / 'agents/benchmarks/history/span_durations.extra.jsonl').write_text('{"span": 1}\n')
+        code, out = self.retire()
+        self.assertEqual(0, code, out)
+        self.assertFalse(path.exists())
+        kept = self.root / '.context/deploy-worker-ledgers' / path.parent.name / path.name / 'agents/benchmarks/history'
+        self.assertEqual('{}\n{"task": "agent-payment-test-shop"}\n', (kept / 'runs.jsonl').read_text())
+        self.assertEqual('{"span": 1}\n', (kept / 'span_durations.extra.jsonl').read_text())
+        self.assertIn(f'PRESERVED 2 benchmark-history file(s) from {path}', out)
+
+    def test_other_edits_beside_ledger_rows_still_block(self):
+        self.provision(['live-probes'])
+        path = self.path('live-probes')
+        (path / 'agents/benchmarks/history/runs.jsonl').write_text('{}\n{"x": 1}\n')
+        (path / 'a.txt').write_text('edited')
+        code, out = self.retire()
+        self.assertEqual(1, code)
+        self.assertIn(f'RETAINED {path}: dirty: 1 changed or untracked paths (e.g. a.txt)', out)
+        self.assertEqual('{}\n{"x": 1}\n', (path / 'agents/benchmarks/history/runs.jsonl').read_text())
 
     @unittest.skipUnless(Path('/proc/self/cwd').exists(), 'Linux /proc required')
     def test_real_proc_scan_sees_a_child_running_inside_the_worker(self):

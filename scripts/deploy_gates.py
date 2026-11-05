@@ -39,6 +39,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKER_ROOT = '/var/tmp/rose-deploy-workers'
 DEFAULT_STATE_DIR = '.context/deploy-pipeline'
 OUTPUT_LEDGER = 'agents/benchmarks/history/'  # same exclusion as deploy_test_worker.prepare_checkout
+PARK_ENV = 'BENCHMARK_HISTORY_PARK_DIR'  # honoured by agents/benchmarks/timeout_history.py + span_history.py
+PARK_DIR = '.context/deploy-ledger-park'  # published by `scripts/deploy finish` (--apply-parked)
+LEDGER_KEEP = '.context/deploy-worker-ledgers'  # retire preserves pre-park worker ledger edits here
 # No standard gate declares its own deadline. Local transports need a finite one, so every
 # slot carries the existing backend handoff deadline (deploy_test_backend.handoff_recipe).
 GATE_DEADLINE_SECONDS = 14400
@@ -198,6 +201,7 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
         raise Blocked('workers', f'{gate}: prepared env belongs to {values["ROSE_DEPLOY_WORKTREE_PATH"]}, not {path}')
     env = {key: values[key] for key in (*SLOT_ENV, *OPTIONAL_ENV) if values.get(key)}
     env[RUN_ROOT_ENV] = str(run_root(root))
+    env[PARK_ENV] = str(root.resolve() / PARK_DIR)
     marker = path / SYSTEM_PG_MARKER
     if gate == BACKEND_GATE and values.get('ROSE_USE_SYSTEM_PG') == 'true' and marker.is_file():
         # run-coverage.sh refuses an isolated system-Postgres worktree without this exact prepared database.
@@ -688,7 +692,8 @@ def retire_blocker(path: Path, entry: dict, proc: Path) -> str | None:
         return 'worktree is locked'
     if not path.is_dir():
         return 'registered directory is missing; inspect it and run git worktree prune'
-    dirty = git(path, 'status', '--porcelain', '--untracked-files=all').splitlines()
+    dirty = [line for line in git(path, 'status', '--porcelain', '--untracked-files=all').splitlines()
+             if not line[3:].startswith(OUTPUT_LEDGER)]
     if dirty:
         return f'dirty: {len(dirty)} changed or untracked paths (e.g. {dirty[0][3:]})'
     pids = live_processes(path, proc)
@@ -697,6 +702,29 @@ def retire_blocker(path: Path, entry: dict, proc: Path) -> str | None:
     if pids:
         return 'live process cwd inside: pid ' + ', '.join(map(str, pids))
     return None
+
+
+def preserve_ledgers(root: Path, path: Path) -> list[dict]:
+    """Copy a worker's benchmark-history edits to the coordinator, then restore its tracked ledgers."""
+    changed = git(path, 'diff', '--name-only', 'HEAD', '--', OUTPUT_LEDGER).splitlines()
+    untracked = git(path, 'ls-files', '--others', '--exclude-standard', '--', OUTPUT_LEDGER).splitlines()
+    kept = []
+    for rel in sorted({*changed, *untracked}):
+        source = path / rel
+        if not source.is_file():
+            continue
+        destination = root / LEDGER_KEEP / path.parent.name / path.name / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        data = source.read_bytes()
+        destination.write_bytes(data)
+        if hashlib.sha256(destination.read_bytes()).hexdigest() != hashlib.sha256(data).hexdigest():
+            raise Blocked('retire', f'{destination}: preserved copy does not match {source}')
+        kept.append({'path': rel, 'copy': str(destination), 'sha256': hashlib.sha256(data).hexdigest()})
+    if changed:
+        git(path, 'checkout', 'HEAD', '--', *changed)
+    for rel in untracked:
+        (path / rel).unlink(missing_ok=True)
+    return kept
 
 
 def resources(path: Path) -> str:
@@ -739,6 +767,13 @@ def retire(args, root: Path, proc: Path = Path('/proc')) -> int:
             print(f'WOULD REMOVE {path}: {note}')
             removed.append(path)
             continue
+        try:
+            kept = preserve_ledgers(root, path)
+        except (Blocked, OSError, subprocess.CalledProcessError) as error:
+            retained.append((path, f'could not preserve its benchmark-history rows: {error}'))
+            continue
+        if kept:
+            print(f'PRESERVED {len(kept)} benchmark-history file(s) from {path} under {root / LEDGER_KEEP}')
         out = subprocess.run(['git', '-C', str(root), 'worktree', 'remove', str(path)], capture_output=True, text=True)
         if out.returncode:
             retained.append((path, 'git worktree remove refused: ' + (out.stderr.strip() or f'exit {out.returncode}')))
