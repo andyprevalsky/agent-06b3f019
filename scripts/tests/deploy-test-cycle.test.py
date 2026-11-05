@@ -4845,8 +4845,9 @@ class Round14WarmIsolation(unittest.TestCase):
     def test_real_reconcile_renew_and_successor_request_keep_every_debt(self):
         import time,hashlib
         import deploy_test_native_cleanup as n
+        old_tokens=['ce','e92','round12','round14'][:self.spec['inherited_count']]
         self.inherited[:]=[{'original_request_token':t,'original_receipt_sha256':t+'-hash'}
-                           for t in ['ce','e92','round12']]
+                           for t in old_tokens]
         request_file=self.root/'request.json';c.write(request_file,{'checks':['one'],'skips':{}})
         self.spec['receipt_path']=self.root/'receipt.json';self.spec['pins'][str(self.spec['receipt_path'])]='hash'
         self.p.update(original_request=str(request_file),campaign=str(self.new.ROOT/'.context/deploy-cloud'/
@@ -4855,8 +4856,8 @@ class Round14WarmIsolation(unittest.TestCase):
         old_entries={t+'-hash':{'kind':n.KIND,'purpose':'isolated-validation','gate':'smoke','token':t,
             'credit_granted':False,'obligations_preserved':True,'validation_source':self.p['validation_source'],
             'excluded_resources':{},'proof':{'receipt_sha256':t+'-hash','owner':{'native_cleanup_reference':{'result':str(self.root/'result.json')}}}}
-            for t in ['ce','e92','round12']}
-        old_receipts=[{'gate':'smoke','token':t,'cleanup_owner':{'prior':t}} for t in ['ce','e92','round12']]
+            for t in old_tokens}
+        old_receipts=[{'gate':'smoke','token':t,'cleanup_owner':{'prior':t}} for t in old_tokens]
         failure={'id':'failure-14','gate':'smoke','check':'smoke/one','native_result':'UNVERIFIED','complete':False}
         state={'phase':'triage','ready':False,'source':self.p['validation_source'],
             'plan':{'gates':[gate],'source':self.p['validation_source']},'failures':[failure],
@@ -4878,10 +4879,10 @@ class Round14WarmIsolation(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'original failure obligation missing'):n.reconcile(missing_failure,self.new.TOKEN,renewed)
             n.reconcile(state,self.new.TOKEN,renewed)
             self.assertEqual(state['failures'],original_failures);self.assertFalse(state['ready'])
-            self.assertEqual(set(state['reconciled_owners']),{'ce-hash','e92-hash','round12-hash','hash'})
+            self.assertEqual(set(state['reconciled_owners']),{t+'-hash' for t in old_tokens}|{'hash'})
             entry=state['reconciled_owners']['hash'];self.assertFalse(entry['cleanup_complete']);self.assertFalse(entry['credit_granted'])
             next_request={'token':'fresh-token','source':self.p['validation_source'],'checks':['one'],'skips':{}}
-            self.assertEqual(len(c.isolated_request(state,gate,next_request,self.root,{})),4)
+            self.assertEqual(len(c.isolated_request(state,gate,next_request,self.root,{})),len(old_tokens)+1)
             next_request['token']=self.new.TOKEN
             with self.assertRaises(ValueError):c.isolated_request(state,gate,next_request,self.root,{})
             next_request['token']='fresh-token'
@@ -4894,5 +4895,56 @@ class Round14WarmIsolation(unittest.TestCase):
                 with self.subTest(path=path),self.assertRaises(ValueError):
                     self.new.snapshot({'files':{k:v for k,v in self.new.PINS.items() if k!=path}})
         with self.assertRaises(ValueError):self.new.snapshot({'files':{'substitution':'hash'}})
+
+
+class Round16CheckoutIsolation(unittest.TestCase):
+    def setUp(self):
+        Round14WarmIsolation.setUp(self)
+        import deploy_test_round16_isolation as m
+        self.new=m;self.r.update(token=m.TOKEN,source={'head':m.SOURCE,'digest':'digest'})
+        self.owner['request_token']=m.TOKEN;self.p.update(compatibility=m.MODE,source=self.r['source'],request_token=m.TOKEN)
+        self.inherited.append({'original_request_token':'round14'});self.original=copy.deepcopy(self.r)
+        self.spec.update(token=m.TOKEN,source=m.SOURCE,mode=m.MODE,inherited_count=4)
+    test_real_reconcile_renew_and_successor_request_keep_every_debt = Round14WarmIsolation.test_real_reconcile_renew_and_successor_request_keep_every_debt
+    def test_all_three_Hubs_and_every_lifecycle_are_mandatory(self):
+        for p in self.new.PINS:
+            if '/runs/_hub/' in p or p.endswith('/lifecycle.json'):
+                with self.subTest(path=p),self.assertRaises(ValueError):
+                    self.new.pinned_files({'files':{k:v for k,v in self.new.PINS.items() if k!=p}})
+        bad=dict(self.new.PINS);bad[next(iter(bad))]='0'*64
+        with self.assertRaises(ValueError):self.new.pinned_files({'files':bad})
+    def test_native_partition_is_get_only_and_rejects_active_resources(self):
+        import io,json
+        m=self.new;config={'fixture':True};hash=__import__('hashlib').sha256(json.dumps(config,sort_keys=True).encode()).hexdigest()
+        expected={'id':'warm-fixture','instance_id':'instance','name':'warm','state':'stopped','config_sha256':hash}
+        f=self.root/'warm.json';f.write_text(json.dumps(expected));requests=[]
+        def response(request,**kwargs):
+            requests.append(request.get_method());path=request.full_url
+            if path.endswith('/machines/warm-fixture'):value={**expected,'config':config}
+            elif '/machines/' in path:
+                raise m.urllib.error.HTTPError(path,404,'missing',{},None)
+            else:value={'id':path.rsplit('/',1)[-1],'state':'pending_destroy','attached_machine_id':None}
+            out=io.BytesIO(json.dumps(value).encode());out.status=200;return out
+        with patch.object(m,'WARM',f),patch.object(m.shared,'fly_token',return_value='fixture'),patch.object(m.urllib.request,'urlopen',side_effect=response),patch.object(m,'hub_socket',return_value={'pid':1793380,'port':18767,'inodes':['123']}):
+            value=m.observe_partition();self.assertEqual(requests,['GET']*6);m.partition_facts(value)
+            expected['state']='started';f.write_text(json.dumps(expected))
+            with self.assertRaises(ValueError):m.observe_partition()
+        value['resources'][next(iter(m.RESOURCES))]['machine_absent_or_destroyed']=False
+        with self.assertRaises(ValueError):m.partition_facts(value)
+    def test_Hub_socket_requires_exact_listener_owner(self):
+        m=self.new;proc=self.root/'proc';fd=proc/'1793380/fd';fd.mkdir(parents=True);net=proc/'net';net.mkdir()
+        (fd/'1').symlink_to('socket:[123]')
+        (net/'tcp').write_text('header\n0: 00000000:494F 00000000:0000 0A 0:0 00:0 0 0 0 123\n')
+        (net/'tcp6').write_text('header\n')
+        self.assertEqual(m.hub_socket(proc)['inodes'],['123'])
+        (fd/'1').unlink();(fd/'1').symlink_to('socket:[456]')
+        with self.assertRaises(ValueError):m.hub_socket(proc)
+
+    def test_wrong_authority_rejected_before_native_reads(self):
+        for key,value in [('request_token','wrong'),('source',{}),('purpose',None),('worker_result_sha256','wrong')]:
+            original=self.p[key];self.p[key]=value
+            with patch.object(self.new,'operation_spec',return_value=self.spec),self.assertRaises(ValueError):
+                self.new.validate(self.r,self.owner,self.p)
+            self.p[key]=original
 
 if __name__ == '__main__': unittest.main()

@@ -175,7 +175,8 @@ def validate_execution(receipt, owner, proof, operation):
     check(type(confirmed) in (float, int) and receipt['finished_at'] <= confirmed <= time.time(), 'confirmation clock')
     saved_guest = proof.get('guest_observation', {})
     check(max(receipt['finished_at'], confirmed - 60) <= saved_guest.get('observed_at', 0) <= confirmed, 'stale guest observation')
-    check(guest_facts(saved_guest) == guest_facts(guest_observe()), 'guest observation changed')
+    facts = operation.get('guest_facts', guest_facts)
+    check(facts(saved_guest) == facts(operation.get('guest_observe', guest_observe)()), 'guest observation changed')
     local = proof.get('local_observation', {})
     pids = {int(p.name.rsplit('-', 1)[-1]) for p in participants}
     retained = []
@@ -199,7 +200,7 @@ def validate_execution(receipt, owner, proof, operation):
             'owner': copy.deepcopy(owner), 'worker_result_sha256': operation['adapter_sha'], 'proof': copy.deepcopy(proof),
             'participants': list(map(str, participants)), 'retained_services': retained,
             'purpose': 'isolated-validation', 'validation_source': proof['validation_source'],
-            'excluded_resources': {}, 'credit_granted': False, 'obligations_preserved': True,
+            'excluded_resources': operation.get('excluded_resources', {}), 'credit_granted': False, 'obligations_preserved': True,
             'cleanup_complete': False}
 
 
@@ -227,7 +228,7 @@ def build_execution(validation_source, operation):
                 source=receipt['source'], request_token=operation['token'], owner=receipt['cleanup_owner'], files=pins,
                 original_request=str(receipt_path.parent/'request.json'), inherited_admissions=request['isolated_validation'],
                 receipt_sha256=pins[str(receipt_path)], validation_source=validation_source,
-                local_observation=observation, guest_observation=guest_observe(), confirmed_at=time.time(), observed_by='round12 pinned investigator proof builder')
+                local_observation=observation, guest_observation=operation.get('guest_observe', guest_observe)(), confirmed_at=time.time(), observed_by='round12 pinned investigator proof builder')
 
 
 if __name__ == '__main__':
