@@ -441,6 +441,14 @@ class Cloud(unittest.TestCase):
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
+        def prepared(request,root,directory):
+            path=directory/'workspace.patch';path.write_bytes(b'')
+            binding={'token':request['token'],'source':request['source'],'workspace_root':str(root.resolve()),
+                     'base_sha':request['source']['head'],'workspace_patch_sha256':'none','patch':str(path)}
+            cycle.write(directory/'source-transport.json',binding)
+            return binding
+        transport=patch.object(cloud,'prepare_source_transport',side_effect=prepared)
+        transport.start();self.addCleanup(transport.stop)
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.runs=self.root/'runs';self.fleet=self.runs/'native-run'
         self.request={'token':'token','source':{'head':'a'*40,'digest':'frozen'},
@@ -550,8 +558,18 @@ class Cloud(unittest.TestCase):
         argv=launch.call_args.args[0]
         self.assertEqual(['bash','scripts/run-bench','passing','--runs','1','--concurrency','1','--retry-infra','0','--ref','a'*40],argv)
         self.assertNotIn('failing',argv)
-        self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
+        self.assertEqual('0',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
+
+    def test_unpublished_request_keeps_head_so_native_fleet_ships_committed_delta(self):
+        with patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'prepare_source_transport',return_value={'base_sha':'b'*40}), \
+             patch.object(self.cloud,'run_command',return_value=(0,False,False,False)) as launch, \
+             patch.object(self.cloud,'collect_campaign',return_value=({'passing':'PASS','failing':'FAIL'},{},True,'native-run')):
+            result=self.cloud.execute(self.request,self.root)
+        self.assertEqual(self.request['source']['head'],launch.call_args.args[0][-1])
+        self.assertEqual('0',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
+        self.assertEqual('b'*40,result['source_transport']['base_sha'])
 
     def test_cloud_launch_records_selected_standing_skip_eligibility_before_dispatch(self):
         names=['browser-auth-guest-purchase','claude-only','ordinary']
@@ -588,6 +606,85 @@ class Cloud(unittest.TestCase):
         self.assertEqual(names,dispatched.call_args.args[0][2:5])
         self.assertEqual(dict.fromkeys(names,'PASS'),result['cases'])
         self.assertTrue(result['complete'])
+
+
+class CloudSourceTransport(unittest.TestCase):
+    def setUp(self):
+        import deploy_test_cloud
+        self.cloud=deploy_test_cloud
+        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
+        self.addCleanup(self.temp.cleanup)
+        self.git('init','-q');self.git('config','user.name','fixture');self.git('config','user.email','fixture@example.test')
+        (self.root/'.git/info/exclude').write_text('.context/\n')
+        scripts=self.root/'scripts';(scripts/'lib').mkdir(parents=True)
+        shutil.copyfile(ROOT/'scripts/create-worktree-patch.sh',scripts/'create-worktree-patch.sh')
+        helper=(ROOT/'scripts/lib/cloudbench-env.sh').read_text()
+        # Keep the real resolver but make its origin advertisement offline/negative.
+        (scripts/'lib/cloudbench-env.sh').write_text(helper+'\ncloudbench_origin_advertises_commit() { return 1; }\n')
+        (self.root/'code').write_text('base\n');self.git('add','.');self.git('commit','-qm','base')
+        self.base=self.git('rev-parse','HEAD');self.git('update-ref','refs/remotes/origin/main',self.base)
+        (self.root/'code').write_text('unpublished commit\n');self.git('commit','-qam','unpublished')
+        (self.root/'new-file').write_text('untracked runtime input\n')
+        (self.root/'new-file').chmod(0o755)
+        self.request={'token':'source-transport-fixture','source':cycle.source(self.root)}
+        self.directory=self.root/'.context/transport';self.directory.mkdir(parents=True)
+    def git(self,*args):
+        return subprocess.check_output(['git',*args],cwd=self.root,text=True).strip()
+    def prepare(self):return self.cloud.prepare_source_transport(self.request,self.root,self.directory)
+    def test_unpublished_commit_and_untracked_executable_replay_exactly(self):
+        before=self.git('status','--porcelain');binding=self.prepare()
+        self.assertEqual(self.base,binding['base_sha']);self.assertNotEqual('none',binding['workspace_patch_sha256'])
+        self.assertEqual(before,self.git('status','--porcelain'))
+        proof={'base_sha':self.base,'workspace_patch_sha256':binding['workspace_patch_sha256']}
+        self.cloud.verify_source_transport({**self.request,'_source_transport':binding},self.root,proof)
+    def test_wrong_source_refused_before_patch(self):
+        self.request['source']['digest']='wrong'
+        with self.assertRaisesRegex(ValueError,'requested freeze'):self.prepare()
+    def test_patch_omitting_runtime_file_is_refused(self):
+        generator=self.root/'scripts/create-worktree-patch.sh'
+        generator.write_text('#!/bin/sh\nexit 0\n');self.request['source']=cycle.source(self.root)
+        with self.assertRaisesRegex(ValueError,'reconstruct'):self.prepare()
+    def test_changed_worktree_stale_patch_wrong_base_and_missing_proof_refused(self):
+        binding=self.prepare();request={**self.request,'_source_transport':binding}
+        good={'base_sha':self.base,'workspace_patch_sha256':binding['workspace_patch_sha256']}
+        for field,value in [('base_sha','b'*40),('workspace_patch_sha256','c'*64)]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.cloud.verify_source_transport(request,self.root,{**good,field:value})
+        with self.assertRaises(ValueError):self.cloud.verify_source_transport(self.request,self.root,good)
+        for field,value in [('token','wrong-token'),('workspace_root','/other')]:
+            with self.subTest(binding=field), self.assertRaisesRegex(ValueError,'mismatch'):
+                self.cloud.verify_source_transport({**request,'_source_transport':{**binding,field:value}},self.root,good)
+        path=Path(binding['patch']);original=path.read_bytes();path.write_bytes(original+b'\n')
+        with self.assertRaisesRegex(ValueError,'changed'):self.cloud.verify_source_transport(request,self.root,good)
+        path.write_bytes(original);(self.root/'code').write_text('changed during native run')
+        with self.assertRaisesRegex(ValueError,'changed'):self.cloud.verify_source_transport(request,self.root,good)
+    def test_native_cleanup_uses_the_same_prelaunch_seal_without_regrading(self):
+        from deploy_test_native_cleanup import execution_source_binding
+        binding=self.prepare();cycle.write(self.directory/'source-transport.json',binding)
+        adapter={'source_transport':binding,'started_at':time.time()}
+        runs=self.directory/'runs'
+        bound=lambda path:Path(path).read_bytes()
+        expected=(binding['base_sha'],binding['workspace_patch_sha256'])
+        self.assertEqual(expected,execution_source_binding(adapter,self.request,self.root,runs,cycle.read,bound))
+        # Cleanup still belongs to this old source after a later repair changes code.
+        (self.root/'code').write_text('later source does not rewrite old cleanup')
+        self.assertEqual(expected,execution_source_binding(adapter,self.request,self.root,runs,cycle.read,bound))
+        for change in ({'token':'wrong'},{'source':{}},{'workspace_root':'/other'},
+                       {'sealed_at':adapter['started_at']+1},{'replayed_tree':'bad'}):
+            altered={**binding,**change};cycle.write(self.directory/'source-transport.json',altered)
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                execution_source_binding({**adapter,'source_transport':altered},self.request,self.root,runs,cycle.read,bound)
+        cycle.write(self.directory/'source-transport.json',binding)
+        Path(binding['patch']).write_bytes(b'stale')
+        with self.assertRaises(ValueError):execution_source_binding(adapter,self.request,self.root,runs,cycle.read,bound)
+        (self.directory/'source-transport.json').unlink()
+        with self.assertRaises(FileNotFoundError):execution_source_binding(adapter,self.request,self.root,runs,cycle.read,bound)
+
+    def test_published_clean_source_keeps_exact_no_patch_binding(self):
+        self.git('add','.');self.git('commit','-qm','publish');self.git('update-ref','refs/remotes/origin/main','HEAD')
+        self.request['source']=cycle.source(self.root);binding=self.prepare()
+        self.assertEqual(self.request['source']['head'],binding['base_sha'])
+        self.assertEqual('none',binding['workspace_patch_sha256'])
 
 
 class CloudCampaign(unittest.TestCase):

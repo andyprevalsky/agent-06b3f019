@@ -15,11 +15,73 @@ from pathlib import Path
 import sys
 import subprocess
 import time
+import tempfile
 
 from cloudbench_execution_provenance import load_provenance, verify_code_binding
 from cloudbench_result import validate_run_document, validate_run_file
 from deploy_test_cycle import NAME, ROOT, read, source, write
 from deploy_test_process import cancellation_handlers, run_command
+
+
+def prepare_source_transport(request, root, directory):
+    """Attest native base+patch transport against the exact requested workspace."""
+    if source(root) != request['source']:
+        raise ValueError('cloud source differs from the requested freeze')
+    helper = root / 'scripts/lib/cloudbench-env.sh'
+    resolved = subprocess.run(['bash', '-c',
+        'source "$1"; cloudbench_fetchable_ref "$2" "$3" 1',
+        'cloud-source', str(helper), str(root), request['source']['head']],
+        cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(['git', 'rev-parse', '--verify', resolved + '^{commit}'],
+                   cwd=root, check=True, capture_output=True)
+    patch = directory / 'workspace.patch'
+    with patch.open('wb') as output:
+        subprocess.run(['bash', str(root / 'scripts/create-worktree-patch.sh'), str(root), resolved],
+                       cwd=root, check=True, stdout=output)
+    patch_hash = hashlib.sha256(patch.read_bytes()).hexdigest() if patch.stat().st_size else 'none'
+    # Two private indexes compare the native replay with actual worktree bytes,
+    # including untracked files, deletions and executable bits. Never edit HEAD/index.
+    trees = []
+    with tempfile.TemporaryDirectory(dir=directory) as temp:
+        for kind in ('replay', 'workspace'):
+            env = {**os.environ, 'GIT_INDEX_FILE': str(Path(temp) / kind)}
+            def git(*args):
+                return subprocess.run(['git', '-c', 'core.filemode=true', *args], cwd=root,
+                                      env=env, check=True, capture_output=True).stdout.strip().decode()
+            git('read-tree', resolved)
+            if kind == 'replay' and patch_hash != 'none':
+                git('apply', '--cached', '--binary', str(patch))
+            if kind == 'workspace':
+                git('add', '--all', '--', '.', ':(exclude)agents/benchmarks/history/*.jsonl')
+            trees.append(git('write-tree'))
+    if trees[0] != trees[1] or source(root) != request['source']:
+        raise ValueError('cloud patch does not reconstruct the exact requested workspace')
+    binding = {'sealed_at': time.time(), 'token': request['token'], 'source': dict(request['source']),
+               'workspace_root': str(root.resolve()), 'base_sha': resolved,
+               'workspace_patch_sha256': patch_hash, 'patch': str(patch.resolve()), 'replayed_tree': trees[0]}
+    write(directory / 'source-transport.json', binding)
+    return binding
+
+
+def verify_source_transport(request, root, provenance):
+    binding = request.get('_source_transport')
+    if binding is None:
+        # Legacy published receipts remain exact-head/no-patch only.
+        verify_code_binding(provenance, base_sha=request['source']['head'], workspace_patch_sha256='none')
+        return
+    if (binding['token'] != request['token'] or binding['source'] != request['source']
+            or binding['workspace_root'] != str(root.resolve())):
+        raise ValueError('cloud transport source/workspace mismatch')
+    path = Path(binding['patch'])
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('cloud transport patch proof missing')
+    if read(path.with_name('source-transport.json')) != binding:
+        raise ValueError('cloud transport seal changed')
+    actual = hashlib.sha256(path.read_bytes()).hexdigest() if path.stat().st_size else 'none'
+    if actual != binding['workspace_patch_sha256'] or source(root) != request['source']:
+        raise ValueError('cloud transport patch or frozen source changed')
+    verify_code_binding(provenance, base_sha=binding['base_sha'],
+                        workspace_patch_sha256=binding['workspace_patch_sha256'])
 
 
 def collect(request, root, runs, started, native_exit):
@@ -33,7 +95,7 @@ def collect_fleet(request, root, fleet, started, native_exit):
     cases = dict.fromkeys(request['checks'], 'UNVERIFIED')
     details = {}
     provenance = load_provenance(fleet / 'execution-provenance.json')
-    verify_code_binding(provenance, base_sha=request['source']['head'], workspace_patch_sha256='none')
+    verify_source_transport(request, root, provenance)
     lifecycle = read(fleet / '_batch/lifecycle.json')
     audit_rows = [line.split('=', 1) for line in
                   (fleet / 'teardown-ownership/source-audit').read_text().splitlines()]
@@ -190,13 +252,18 @@ def execute(request, root):
     directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
     runs = directory / 'runs'
     runs.mkdir(parents=True, exist_ok=False)
+    binding = prepare_source_transport(request, root, directory)
+    request = {**request, '_source_transport': binding}
     width = campaign_width(checks)
     if width < 1:
         raise ValueError('provider capacity cannot admit one smoke task')
     campaign = directory / 'campaigns' / ('deploy-' + directory.name)
-    env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
+    env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '0',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
            'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
+    # Do not inherit a foreign patch: the fleet generates from this attested base.
+    for key in ('CLOUDBENCH_LOCAL_PATCH_SOURCE', 'CLOUDBENCH_LOCAL_PATCH_SHA256'):
+        env.pop(key, None)
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
     catalog = root / 'agents/benchmarks/tasks.json'
@@ -212,6 +279,8 @@ def execute(request, root):
             print(guidance, file=sys.stderr, flush=True)
             log.write((guidance + '\n').encode())
             log.flush()
+        if source(root) != request['source']:
+            raise ValueError('cloud source changed before dispatch')
         code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None)
     reason = None
     try:
@@ -223,7 +292,7 @@ def execute(request, root):
         cases, details, cleaned, fleet = dict.fromkeys(checks, 'UNVERIFIED'), {}, False, None
         reason = str(error)
     result = {k: request[k] for k in ('token', 'source', 'gate')}
-    result.update(cases=cases, complete=cleaned and all(v != 'UNVERIFIED' for v in cases.values()),
+    result.update(source_transport=binding, cases=cases, complete=cleaned and all(v != 'UNVERIFIED' for v in cases.values()),
                   cleanup_complete=cleaned, reused=False, native_exit=code, native_command=argv,
                   evidence=details, reason=reason, fleet_directory=fleet,
                   runner_log=str(directory / 'cli.log'), started_at=started, finished_at=time.time())

@@ -2332,6 +2332,57 @@ class Cycle(unittest.TestCase):
             files={str(p): c.sha_file(p) for p in files})
         return state, occurrence, paths, proof, hub
 
+    def patched_native_recon_state(self):
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        runs = hub.parent.parent
+        patch_path = runs.parent / 'workspace.patch';patch_path.write_bytes(b'fixture-complete-patch')
+        adapter = c.read(paths['adapter'])
+        seal = dict(token=proof['request_token'], source=state['source'], workspace_root=str(self.root),
+                    base_sha='b'*40, workspace_patch_sha256=c.sha_file(patch_path),
+                    patch=str(patch_path), replayed_tree='d'*40, sealed_at=adapter['started_at']-1)
+        seal_path=runs.parent/'source-transport.json';c.write(seal_path,seal)
+        adapter['source_transport']=seal;c.write(paths['adapter'],adapter)
+        receipt=state['attempts'][-1]['results'][0]
+        reference={**receipt['native_cleanup_reference'],'result_sha256':c.sha_file(paths['adapter'])}
+        owner={**receipt['cleanup_owner'],'native_cleanup_reference':reference}
+        receipt.update(native_cleanup_reference=reference,cleanup_owner=owner);c.write(paths['receipt'],receipt)
+        proof.update(owner=copy.deepcopy(owner),receipt_sha256=c.sha_file(paths['receipt']),
+                     worker_result_sha256=c.sha_file(paths['adapter']))
+        for path in runs.glob('*/execution-provenance.json'):
+            value=c.read(path);value.update(base_sha=seal['base_sha'],workspace_patch_sha256=seal['workspace_patch_sha256']);c.write(path,value)
+        for path in [seal_path,patch_path,*map(Path,list(proof['files']))]:
+            proof['files'][str(path)]=c.sha_file(path)
+        return state,occurrence,paths,proof,hub,seal_path,patch_path
+
+    def test_patched_native_cleanup_preserves_original_failure_and_hub(self):
+        state,occurrence,paths,proof,hub,_,_=self.patched_native_recon_state()
+        before=copy.deepcopy(state['attempts'])
+        c.reconcile(state,occurrence['id'],proof)
+        entry=state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']);self.assertEqual(before,state['attempts'])
+        self.assertEqual([],c.retained_owners(state,[occurrence['gate']]))
+        self.assertEqual(str(hub),entry['retained_services'][0]['path'])
+
+    def test_patched_native_cleanup_refuses_changed_source_tree_patch_and_provenance(self):
+        state,occurrence,paths,proof,hub,seal_path,patch_path=self.patched_native_recon_state()
+        before=copy.deepcopy(state);seal=c.read(seal_path)
+        for key,value in [('token','other'),('source',{}),('replayed_tree','e'*40),('base_sha','c'*40)]:
+            c.write(seal_path,{**seal,key:value});bad=copy.deepcopy(proof);bad['files'][str(seal_path)]=c.sha_file(seal_path)
+            with self.subTest(key=key),self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],bad)
+            self.assertEqual(before,state)
+        c.write(seal_path,seal)
+        original=patch_path.read_bytes();patch_path.write_bytes(b'changed');bad=copy.deepcopy(proof);bad['files'][str(patch_path)]=c.sha_file(patch_path)
+        with self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],bad)
+        patch_path.write_bytes(original)
+        native=next((hub.parent.parent).glob('*/execution-provenance.json'));value=c.read(native)
+        for key,wrong in [('base_sha','c'*40),('workspace_patch_sha256','f'*64)]:
+            c.write(native,{**value,key:wrong});bad=copy.deepcopy(proof);bad['files'][str(native)]=c.sha_file(native)
+            with self.subTest(native=key),self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],bad)
+            self.assertEqual(before,state)
+        c.write(native,value)
+        bad=copy.deepcopy(proof);bad['files'].pop(str(seal_path))
+        with self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],bad)
+
     def test_native_cloud_cleanup_overlay_preserves_failed_execution_and_retained_hub(self):
         state, occurrence, paths, proof, hub = self.native_recon_state()
         before = copy.deepcopy(state['attempts'])

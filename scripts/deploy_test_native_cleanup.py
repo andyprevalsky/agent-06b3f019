@@ -390,6 +390,25 @@ def startup_campaign(receipt, owner, proof, adapter, request, runs, cli_text, do
             'participants': [], 'native_audit_seals': {}, 'retained_services': [], 'credit_granted': False}
 
 
+def execution_source_binding(adapter, request, root, runs, document, bound):
+    """Reuse only the adapter's pre-launch sealed source expectation for cleanup."""
+    transport = adapter.get('source_transport')
+    if transport is None:
+        return request['source']['head'], 'none'
+    seal = document(runs.parent / 'source-transport.json')
+    need(seal == transport and seal.get('token') == request['token']
+         and seal.get('source') == request['source'] and seal.get('workspace_root') == str(root)
+         and seal.get('patch') == str(runs.parent / 'workspace.patch')
+         and finite(seal.get('sealed_at')) and seal['sealed_at'] <= adapter['started_at']
+         and isinstance(seal.get('base_sha'), str) and re.fullmatch('[0-9a-f]{40}', seal['base_sha'])
+         and isinstance(seal.get('replayed_tree'), str) and re.fullmatch('[0-9a-f]{40}', seal['replayed_tree']),
+         'pre-launch source transport seal')
+    data = bound(runs.parent / 'workspace.patch')
+    expected = hashlib.sha256(data).hexdigest() if data else 'none'
+    need(seal.get('workspace_patch_sha256') == expected, 'source transport patch changed')
+    return seal['base_sha'], expected
+
+
 def validate(receipt, owner, proof):
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
@@ -551,6 +570,7 @@ def validate(receipt, owner, proof):
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
+    source_base, source_patch = execution_source_binding(adapter, request, root, runs, document, bound)
     for fleet in sorted(participants):
         benches = json.loads(bound(fleet / '_batch/benches.json'))
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
@@ -579,7 +599,7 @@ def validate(receipt, owner, proof):
         else:
             provenance, matrix = document(provenance_path), document(matrix_path)
             need(not validate_provenance(provenance) and not validate_task_matrix_binding(provenance, matrix)
-                 and provenance['base_sha'] == receipt['source']['head'] and provenance['workspace_patch_sha256'] == 'none', 'execution source')
+                 and provenance['base_sha'] == source_base and provenance['workspace_patch_sha256'] == source_patch, 'execution source')
             need(len(benches) == len(matrix['tasks'])
                  and {b['name'] for b in benches} == {t['name'] for t in matrix['tasks']}, 'native inventory')
         if isolated:
