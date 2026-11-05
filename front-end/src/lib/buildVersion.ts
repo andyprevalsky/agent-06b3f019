@@ -6,7 +6,8 @@ export function productionBuildId(): string {
   return `${commit}-${Date.now().toString(36)}`;
 }
 
-/** Publishes the build id as /version.json; open pages poll it to reload onto
+/** Vite build plugin (imported by vite.config.ts, never by the app). Publishes
+ * the build id as /version.json; open pages poll it to reload onto
  * a newer deploy (src/lib/appVersion.ts). */
 export function roseBuildVersion(buildId: string): Plugin {
   return {

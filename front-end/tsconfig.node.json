@@ -18,5 +18,5 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts", "vite-build-version.ts", "production-preview.config.ts"]
+  "include": ["vite.config.ts", "production-preview.config.ts"]
 }

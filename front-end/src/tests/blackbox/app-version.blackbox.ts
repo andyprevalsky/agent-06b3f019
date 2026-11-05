@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { productionBuildId, roseBuildVersion } from '../../../vite-build-version';
+import { productionBuildId, roseBuildVersion } from '@/lib/buildVersion';
 import {
   APP_VERSION_IDLE_BEFORE_RELOAD_MS,
   APP_VERSION_MIN_CHECK_INTERVAL_MS,
