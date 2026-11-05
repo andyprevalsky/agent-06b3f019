@@ -5690,7 +5690,26 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
         stage_explicit_codex_auth /cloudbench-codex-auth.py || exit 1
     else
-    boot_config_payload_guard "${_boot_file_args[@]}" || exit 1
+    if ! boot_config_payload_guard "${_boot_file_args[@]}"; then
+        # No update was dispatched. Preserve this exact pre-boot boundary so
+        # normal cleanup captures the inert cohort before disposable reaping.
+        python3 - "$OUT_DIR/boot-config-unapplied" "$mid" <<'PY_UNAPPLIED' || exit 1
+import os, re, sys
+from pathlib import Path
+path, machine = Path(sys.argv[1]), sys.argv[2]
+assert re.fullmatch(r"[0-9a-f]+", machine)
+with path.open("x") as stream:
+    stream.write(machine + "\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY_UNAPPLIED
+        exit 1
+    fi
     echo "🚀 boot-launch: injecting boot script + setting env/command on $mid (no ssh) ..."
     _upd=0
     _update_log="$OUT_DIR/cloudbench-boot-update.log"

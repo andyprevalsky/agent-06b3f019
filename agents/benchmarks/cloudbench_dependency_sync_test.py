@@ -36947,3 +36947,37 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost_readiness_regr
         text=True, capture_output=True, check=False, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_local_payload_rejection_records_exact_unapplied_config(tmp_path: Path) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    guard = _extract_fleet_function(cloud, "boot_config_payload_guard() {")
+    guarded = '    if ! boot_config_payload_guard "${_boot_file_args[@]}"; then'
+    start = cloud.index(guarded if guarded in cloud else '    boot_config_payload_guard "${_boot_file_args[@]}" || exit 1')
+    end = cloud.index('    echo "🚀 boot-launch: injecting boot script', start)
+    boundary = cloud[start:end]
+    payload = tmp_path / "payload"
+    payload.write_bytes(b"oversized")
+    env = dict(os.environ, OUT_DIR=str(tmp_path), CLOUDBENCH_BOOT_CONFIG_MAX_BYTES="1")
+    command = guard + '\nmid=abcdef1234\n_boot_file_args=(--file-local /payload=' + shlex.quote(str(payload)) + ')\n' + boundary + '\necho UPDATE_DISPATCHED\n'
+    result = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "UPDATE_DISPATCHED" not in result.stdout
+    marker = tmp_path / "boot-config-unapplied"
+    assert marker.is_file(), "local payload rejection lost its no-config proof"
+    assert marker.read_text() == "abcdef1234\n"
+    marker.unlink()
+    env["CLOUDBENCH_BOOT_CONFIG_MAX_BYTES"] = "900000"
+    result = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "UPDATE_DISPATCHED" in result.stdout
+    assert not marker.exists()
+    # A linked or pre-existing marker is never overwritten to manufacture proof.
+    protected = tmp_path / "protected"
+    protected.write_text("unchanged")
+    marker.symlink_to(protected)
+    env["CLOUDBENCH_BOOT_CONFIG_MAX_BYTES"] = "1"
+    result = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "UPDATE_DISPATCHED" not in result.stdout
+    assert protected.read_text() == "unchanged"
