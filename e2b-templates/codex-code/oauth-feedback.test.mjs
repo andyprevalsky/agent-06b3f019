@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { EventEmitter } from "node:events";
 import vm from "node:vm";
 
 const source = readFileSync(new URL("./ws-server.mjs", import.meta.url), "utf8");
@@ -34,7 +35,7 @@ async function replay(event) {
     };
     ${fallback}
     return JSON.stringify({ output: outputBuffer, events: eventBuffer, runs });
-  })()`, { input: event, PORT: 0, WebSocketServer: class {}, homedir: () => "/unused", readdirSync: () => [] }).then(JSON.parse);
+  })()`, { input: event, PORT: 0, WebSocketServer: EventEmitter, homedir: () => "/unused", readdirSync: () => [] }).then(JSON.parse);
 }
 
 function workerFeedback(events) {
@@ -93,47 +94,64 @@ test("command, tool, prose, raw output and generic auth/quota words do not trigg
   }
   // Non-JSON stdout takes the renderer's raw-text branch, without classification.
   const rawProducer = producer + '\nappendCodexStdout("invalid_grant\\n"); JSON.stringify({ reason: oauthFallbackReason, events: eventBuffer });';
-  assert.deepEqual(JSON.parse(vm.runInNewContext(rawProducer, { PORT: 0, WebSocketServer: class {}, homedir: () => "/unused", readdirSync: () => [] })), { reason: null, events: [] });
+  assert.deepEqual(JSON.parse(vm.runInNewContext(rawProducer, { PORT: 0, WebSocketServer: EventEmitter, homedir: () => "/unused", readdirSync: () => [] })), { reason: null, events: [] });
 });
 
-test("pure OpenAI plan quota diagnostics retain quota classification", async () => {
+// C15: a usage limit or out of credits pauses the session; the parent's retry
+// rotates own login -> shared pool -> Azure. The sandbox reports a structured
+// usage_limit and never starts an Azure continuation the pause would discard.
+const pauseLimit = (result) =>
+  result.events.filter((event) => event.type === "error").map((event) => event.usage_limit ?? null);
+
+test("plan quota diagnostics pause with a structured usage limit instead of switching in the sandbox", async () => {
   for (const message of [
     "Quota exceeded. Check your plan and billing details.",
     "insufficient_quota", "You've hit your usage limit", "purchase more credits",
   ]) {
     const result = await replay({ type: "error", message });
-    assert.equal(result.runs, 2, message);
-    assert.equal(result.events.find((event) => event.type === "auth_fallback")?.reason, "usage_limit_reached");
-    assert.equal(workerFeedback(result.events)[0].source, "oauth");
+    assert.equal(result.runs, 1, message);
+    assert.equal(result.events.some((event) => event.type === "auth_fallback"), false, message);
+    assert.deepEqual(pauseLimit(result), [{ reached_type: null, resets_at: null }], message);
+    assert.equal(workerFeedback(result.events)[0].source, "initial");
   }
+});
+
+test("Codex's structured usageLimitExceeded pauses without any wording match", async () => {
+  const result = await replay({ type: "turn.failed", error: { message: "turn failed", codexErrorInfo: "usageLimitExceeded" } });
+  assert.equal(result.runs, 1);
+  assert.deepEqual(pauseLimit(result), [{ reached_type: null, resets_at: null }]);
 });
 
 test("recognized quota retains precedence over overlapping revocation text", async () => {
   for (const type of ["error", "turn.failed"]) {
     for (const message of ["usage_limit_reached\ninvalid_grant", "usage_limit_reached invalid_grant", "invalid_grant usage_limit_reached"]) {
       const result = await replay({ type, error: { message } });
-      assert.equal(result.runs, 2);
-      assert.equal(result.events.find((event) => event.type === "auth_fallback")?.reason, "usage_limit_reached");
+      assert.equal(result.runs, 1, "a usage limit pauses: no in-sandbox switch");
+      assert.equal(result.events.some((event) => event.type === "auth_fallback"), false);
+      assert.deepEqual(pauseLimit(result), [{ reached_type: null, resets_at: null }]);
       // Preserve the actual worker's complete diagnostic mapping unchanged.
-      assert.deepEqual(workerFeedback(result.events), [{ source: "oauth", reason: message }]);
+      assert.deepEqual(workerFeedback(result.events), [{ source: "initial", reason: message }]);
     }
   }
 });
 
-test("the first native classification is preserved across subsequent events", async () => {
+test("the first native classification decides: a limit pauses, an unusable login switches", async () => {
   const quota = { type: "error", message: "usage_limit_reached" };
   const revoked = { type: "turn.failed", error: { message: "invalid_grant" } };
   const command = { type: "item.completed", item: { type: "command_execution", command: "echo fixture", aggregated_output: "invalid_grant", exit_code: 1 } };
-  for (const [events, expected] of [
-    [[quota, revoked], "usage_limit_reached"],
-    [[revoked, quota], "oauth_refresh_invalid"],
-    [[quota, revoked, quota], "usage_limit_reached"],
-    [[quota, quota], "usage_limit_reached"],
-    [[quota, command], "usage_limit_reached"],
+  const limit = { reached_type: null, resets_at: null };
+  for (const [events, runs, fallback, limits] of [
+    [[quota, revoked], 1, null, [limit, null]],
+    // The login is already unusable: a later quota line is not a limit to pause on.
+    [[revoked, quota], 2, "oauth_refresh_invalid", [null, null]],
+    [[quota, revoked, quota], 1, null, [limit, null, limit]],
+    [[quota, quota], 1, null, [limit, limit]],
+    [[quota, command], 1, null, [limit]],
   ]) {
     const result = await replay(events);
-    assert.equal(result.runs, 2);
-    assert.equal(result.events.find((event) => event.type === "auth_fallback")?.reason, expected);
+    assert.equal(result.runs, runs, JSON.stringify(events));
+    assert.equal(result.events.find((event) => event.type === "auth_fallback")?.reason ?? null, fallback);
+    assert.deepEqual(pauseLimit(result), limits, JSON.stringify(events));
   }
 });
 
@@ -142,7 +160,7 @@ test("worker mapping of an earlier quota event remains unchanged", async () => {
     { type: "error", message: "usage_limit_reached" },
     { type: "turn.failed", error: { message: "invalid_grant" } },
   ]);
-  assert.deepEqual(workerFeedback(result.events), [{ source: "oauth", reason: "usage_limit_reached" }]);
+  assert.deepEqual(workerFeedback(result.events), [{ source: "initial", reason: "usage_limit_reached" }]);
 });
 
 // Finite spellings from every producer quota alternative and worker quota/funding
@@ -174,12 +192,17 @@ test("all finite quota dialects retain actual renderer/fallback/worker mapping",
         for (const nested of [false, true]) {
           const diagnostic = nested ? { error: { message } } : { message };
           const result = await replay({ type, ...diagnostic });
-          const expectedFallback = dialect.producerQuota ? "usage_limit_reached" : form === 0 ? null : "oauth_refresh_invalid";
+          // A producer quota pauses (structured limit, no switch); revocation text alone switches.
+          const expectedFallback = dialect.producerQuota || form === 0 ? null : "oauth_refresh_invalid";
           const reasons = result.events.filter((event) => event.type === "auth_fallback").map((event) => event.reason);
           assert.deepEqual(reasons, expectedFallback ? [expectedFallback] : [], `${dialect.id}/${form}/${type}/${nested}`);
           assert.equal(result.runs, expectedFallback ? 2 : 1);
+          assert.deepEqual(pauseLimit(result), [dialect.producerQuota ? { reached_type: null, resets_at: null } : null], `${dialect.id}/${form}: pause signal`);
           assert.ok(result.output.includes(message), "complete native message is retained");
-          rows.push({ dialect: dialect.id, form, type, nested, message, fallbackReason: reasons[0] ?? null, expectedFeedback: [{ source: expectedFallback ? "oauth" : "initial", reason: dialect.workerCaptures ? message : expectedFallback }] });
+          const expectedFeedback = expectedFallback
+            ? [{ source: "oauth", reason: dialect.workerCaptures ? message : expectedFallback }]
+            : dialect.workerCaptures ? [{ source: "initial", reason: message }] : [];
+          rows.push({ dialect: dialect.id, form, type, nested, message, fallbackReason: reasons[0] ?? null, expectedFeedback });
           eventLists.push(result.events);
         }
       }

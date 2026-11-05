@@ -66,6 +66,36 @@ unnecessary campaign resets. Integrate and verify main before binding the final
 After merging runner changes, make fixture inputs and result shapes match the
 real call boundary before trusting their behavioral assertions.
 
+## October 29 recurrence: Foundry speed and shared-authority fixtures
+
+PR1634's merged Rose domain reproduced 279 passing and three failing checks.
+Two cooldown fixtures passed the removed `provider_fast_mode` keyword to the
+real `foundry_complete`, whose required argument is now `speed`. The Ultra
+model-pin fixture intercepted HTTP without serving the shared cooldown
+authority, so the real fail-closed route skipped Foundry before the model
+assertion. These were fixture-contract mismatches, not production cooldown or
+model-pin failures.
+
+Pass `speed=None` in the cooldown cases and explicitly serve the fake shared
+authority with exact method, path, authentication and deployment-key assertions.
+Require that authority read and scope its local cache. All original cooldown,
+200-route model-pin, serving-model and fallback assertions remain intact.
+
+The first corrected run exposed a separate isolation dependency in the offline
+opaque-reasoning timing control: synchronous context archive I/O consumed most
+of its unchanged two-second bound. Disable context dumping only for that
+mocked stream control; its five-second deadline, idle timeout and elapsed
+assertion remain unchanged. This does not establish a production latency fix.
+
+The identical command, `cd agents && venv/bin/python scripts/run_blackbox_tests.py rose`,
+then passed 282/282 in 10.8 seconds, matching the original command and duration.
+The intermediate 281/282 result is retained. Evidence and exact diff are under
+`.context/rca-foundry-fixture-20261029/`; this focused pass does not replace
+aggregate coverage. Searches covered the literal keyword failure and shared
+cooldown mock contract; the October 20 deployment-cooldown case was related
+context rather than a recurring production failure. The user requested fixing
+the remaining deployment gates and explicitly skipped treasury only.
+
 ## October 18 SMS dispatch integration recurrence
 
 Syncing PR1473 with main `c7fc3b3d2a282a93ee4d482fef813fe0c4148fdc`

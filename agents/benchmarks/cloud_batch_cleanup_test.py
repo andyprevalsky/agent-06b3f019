@@ -2615,6 +2615,49 @@ async def test_nonadmission_proof_rejects_copies_and_forged_metadata():
 
 
 @async_case
+async def test_initial_claude_skip_requires_exact_preflight_nonadmission_custody():
+    task = bench.get_task_by_name('claude-code-agent')
+    row = bench._claude_code_credential_skip_result(task)
+    row.graded_root_creation_outcome = 'not_started'
+    row.stop_metadata = {'runner': 'benchmark_preflight', 'admission': 'not_started',
+                         'reason': 'claude_credential_unavailable'}
+    with patch.object(cleanup, 'exact_root_sessions', side_effect=RuntimeError('offline native control')):
+        await bench._finalize_owned_cloud_batch('http://offline.invalid', [row], {}, never_admitted_results=(row,))
+        # Execute the actual initial producer statements, before any dispatch can occur.
+        main = next(n for n in ast.parse(inspect.getsource(bench)).body
+                    if isinstance(n, ast.AsyncFunctionDef) and n.name == 'main_async')
+        nodes = [n for n in main.body if
+            isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'initial_credential_skips' for t in n.targets)
+            or isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == 'initial_credential_skips'
+            or isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute)
+                and n.value.func.attr == 'extend' and any(isinstance(a, ast.Name) and a.id == 'initial_credential_skips' for a in n.value.args)
+            or isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) and n.target.id == '_never_admitted_results']
+        namespace = {**bench.__dict__, 'skipped_claude_tasks': [task], 'run': SimpleNamespace(task_results=[])}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(bench.__file__), 'exec'), namespace)
+        produced = namespace['run'].task_results[0]
+        assert namespace['initial_credential_skips'][0] is produced
+        await bench._finalize_owned_cloud_batch('http://offline.invalid', [produced], {},
+                                                never_admitted_results=tuple(namespace['_never_admitted_results']))
+        clone = copy.deepcopy(row)
+        for rows, proof in [([row], ()), ([clone], (row,)), ([row], (row, row)),
+                            ([row, clone], (row,)), ([row], (clone,))]:
+            with pytest.raises(RuntimeError):
+                await bench._finalize_owned_cloud_batch('http://offline.invalid', rows, {}, never_admitted_results=proof)
+        for key, value in [('graded_root_creation_outcome', 'unknown'), ('passed', True),
+                           ('failure_reason', 'other skip'), ('name', 'parallel-tool-calls'),
+                           ('logs', {'late': 'execution'}), ('owned_roots', [{'root_agent_id': ROOT}]),
+                           ('stop_metadata', {'runner': 'benchmark_preflight', 'admission': 'unknown'})]:
+            changed = copy.deepcopy(row); setattr(changed, key, value)
+            with pytest.raises(RuntimeError):
+                await bench._finalize_owned_cloud_batch('http://offline.invalid', [changed], {}, never_admitted_results=(changed,))
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch('http://offline.invalid', [row], {row.name: [ROOT]}, never_admitted_results=(row,))
+        generic = bench._claude_code_credential_skip_result(task)  # dispatch skip has no initial custody
+        with pytest.raises(RuntimeError):
+            await bench._finalize_owned_cloud_batch('http://offline.invalid', [generic], {}, never_admitted_results=(generic,))
+
+
+@async_case
 async def test_post_verdict_cleanup_failure_never_rewrites_graded_verdicts():
     """T114 (Kernel antibot Run A): the memory watchdog killed the owned backend during batch
     finalization; the verifier could not run for the roots still awaiting cleanup and the run record

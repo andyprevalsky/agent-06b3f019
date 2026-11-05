@@ -605,3 +605,55 @@ for (const [timeSlice, days] of Object.entries(rollingDays)) {
 }
 
 process.stdout.write('admin-health period metrics: passed\n');
+
+// Terra standard API-equivalent rates, not speed/long-context/retention billing.
+// https://developers.openai.com/api/docs/models/gpt-6.1-terra
+// https://openrouter.ai/openai/gpt-6.1-terra/
+for (const model of ['gpt-6.1-terra', 'openai/gpt-6.1-terra']) {
+  for (const [bucket, expected] of [
+    ['input', 1],
+    ['output', 5],
+    ['read', 0.05],
+    ['write', 1.25],
+  ] as const) {
+    const result = calculateTaskCostPerTask(
+      [{ taskId: 'terra-rate' }],
+      [
+        {
+          taskId: 'terra-rate',
+          kind: 'llm',
+          model,
+          fromFastCache: false,
+          tokensIn: bucket === 'output' ? 0 : 1_000_000,
+          tokensOut: bucket === 'output' ? 1_000_000 : 0,
+          cacheReadInputTokens: bucket === 'read' ? 1_000_000 : 0,
+          cacheCreationInputTokens: bucket === 'write' ? 1_000_000 : 0,
+          costCents: 0,
+        },
+      ]
+    );
+    assert.strictEqual(result.apiRateDollars, expected, `${model} ${bucket} standard API rate`);
+    assert.strictEqual(result.unpricedUsageTokens, 0, `${model} ${bucket} is priced`);
+  }
+}
+const stillUnknownTerraRate = calculateTaskCostPerTask(
+  [{ taskId: 'unknown-terra-rate' }],
+  [
+    {
+      taskId: 'unknown-terra-rate',
+      kind: 'llm',
+      model: 'unknown-future-model',
+      fromFastCache: false,
+      tokensIn: 1_000_000,
+      tokensOut: 0,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      costCents: 0,
+    },
+  ]
+);
+assert.strictEqual(
+  stillUnknownTerraRate.unpricedUsageTokens,
+  1_000_000,
+  'unknown models retain coverage loss'
+);

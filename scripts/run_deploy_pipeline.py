@@ -3339,8 +3339,17 @@ def wait(state_dir: Path, timeout: float, stall_seconds: float = 0.0, since: flo
     return code
 
 
-def verify(state_dir: Path, expect_head: str | None = None) -> int:
+def verify(state_dir: Path, expect_head: str | None = None, require_staged: bool = False) -> int:
     """Exit 0 only for a passed receipt bound to the current HEAD and bytes."""
+    if require_staged and not (state_dir / "cycle.json").is_file():
+        print("PIPELINE_VERIFY status=no-staged-cycle exit=2")
+        return 2
+    if (state_dir / "cycle.json").exists():
+        from deploy_test_cycle import verify_saved
+        code = verify_saved(state_dir, SOURCE_ROOT, expect_head)
+        print(f"PIPELINE_VERIFY status={'bound-staged' if code == 0 else 'staged-not-ready'} exit={code} "
+              "reused_scoped=- cross_run=- staged=true")
+        return code
     receipt = _read_receipt(state_dir / "receipt.json")
     if receipt is None:
         print("PIPELINE_VERIFY status=no-receipt exit=2")
@@ -4632,6 +4641,8 @@ def main(argv: list[str] | None = None) -> int:
     verify_parser = sub.add_parser("verify", help="exit 0 only when the receipt passed on the current bytes")
     verify_parser.add_argument("--state-dir", type=Path, required=True)
     verify_parser.add_argument("--expect-head", default=None)
+    verify_parser.add_argument("--require-staged", action="store_true",
+                               help="refuse legacy receipts when staged validation is required")
     plan_parser = sub.add_parser("plan", help="print the standard Group 3/4 plan JSON")
     plan_parser.add_argument("--group", choices=("3", "4", "all"), default="all")
     plan_parser.add_argument("--backend", action="store_true")
@@ -4732,6 +4743,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"invalid plan {args.plan}: {error}", file=sys.stderr)
             return 2
     if args.action == "verify":
+        if args.require_staged:
+            return verify(args.state_dir, args.expect_head, require_staged=True)
         return verify(args.state_dir, args.expect_head)
     if args.action == "production":
         dispatch = list(args.dispatch)

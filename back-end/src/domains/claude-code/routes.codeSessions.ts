@@ -10,7 +10,8 @@
  * GET    /:taskId/preview   - live dev-server preview of the task's session (dev accounts, A1)
  * POST   /:taskId/preview/handoff - one-time code that signs that preview in (routes.previewHandoff.ts)
  * POST   /:taskId/publish   - push its branch + open a PR, never merge (dev accounts, A1)
- * GET    /credential-availability?user_id[&own_only=true] - can a Claude / Codex credential be leased now
+ * GET    /credential-availability?user_id[&own_only=true][&code_session_id&prefer] - can a Claude / Codex
+ *        credential be leased now; with code_session_id also the session's provider and the outlook (C15)
  *
  * Every read/write is scoped to the authenticated user; a foreign id is
  * indistinguishable from an unknown one.
@@ -43,7 +44,7 @@ import { registerPreviewHandoffMintRoute } from './routes.previewHandoff';
 import { resizeSession } from './resizeService';
 import { sandboxResizeHttpError } from '../../providers/codeSessions/sandboxResize';
 import {
-  codeCredentialAvailability,
+  codeSpawnCredentialPlan,
   parseResetsAt,
   reportCodeTaskUsageLimit,
 } from '../../providers/codeSessions/usageLimit';
@@ -117,9 +118,14 @@ export function registerCodeSessionRoutes(router: Router): void {
         res.status(403).json({ error: 'Internal callers only' });
         return;
       }
-      const { user_id, own_only } = credentialAvailabilityQuerySchema.parse(req.query);
+      const { user_id, own_only, code_session_id, prefer } =
+        credentialAvailabilityQuerySchema.parse(req.query);
       res.json(
-        await codeCredentialAvailability(user_id, new Date(), { ownOnly: own_only === 'true' })
+        await codeSpawnCredentialPlan(user_id, {
+          ownOnly: own_only === 'true',
+          ...(code_session_id !== undefined ? { codeSessionId: code_session_id } : {}),
+          ...(prefer !== undefined ? { prefer } : {}),
+        })
       );
     })
   );

@@ -471,7 +471,7 @@ test('archived-agent status backfill settles only archived non-terminal rows, id
 
   const dryRun = await backfillArchivedAgentStatus({ execute: false });
   assert(dryRun.pendingBefore >= 1 && dryRun.updated === 0, 'dry run must count but not write');
-  const first = await backfillArchivedAgentStatus({ execute: true, batchSize: 1 });
+  const first = await backfillArchivedAgentStatus({ execute: true });
   assert(first.updated >= 1, `backfill must settle the stale row, got ${JSON.stringify(first)}`);
   // Idempotency on this test's own row: a global "nothing left" count races
   // concurrent domains archiving agents in the shared database.

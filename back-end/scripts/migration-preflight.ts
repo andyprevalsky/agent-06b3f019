@@ -213,6 +213,8 @@ type PendingBackfill = {
 
 type PendingState = {
   createdTables: Set<string>;
+  /** New tables whose contents cannot be proven empty after pending writes. */
+  populatedTables: Set<string>;
   addedColumns: Map<string, Set<string>>;
   /** Non-null DEFAULT of a pending column (`table.column`): existing rows get it. */
   columnDefaults: Map<string, string>;
@@ -494,6 +496,14 @@ class Preflight {
       'i'
     ).exec(statement);
     if (created) state.createdTables.add(unquote(created[1]));
+    // Do not simulate inserted rows as empty. WITH/procedural statements may
+    // write indirectly; conservatively invalidate all currently new tables.
+    if (
+      /^(INSERT|WITH|COPY|MERGE|DO|CALL)\b/i.test(statement) ||
+      (created && topLevelMatches(statement, /^AS\b/i).length > 0)
+    ) {
+      for (const table of state.createdTables) state.populatedTables.add(table);
+    }
     const alter = new RegExp(
       `^ALTER\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(?:ONLY\\s+)?(${QUALIFIED})\\s+`,
       'i'
@@ -668,6 +678,28 @@ class Preflight {
     ];
   }
 
+  /** One boundary for every constraint count on a relation absent from the target. */
+  private async pendingTableFinding(
+    table: string,
+    check: string,
+    state: PendingState
+  ): Promise<Finding | null> {
+    // IF NOT EXISTS may name a live table: its rows must still be checked.
+    if (!state.createdTables.has(table) || (await this.target.reltuples(table)) !== null)
+      return null;
+    if (state.populatedTables.has(table))
+      return {
+        severity: 'fail',
+        check: 'unverified',
+        message: `cannot verify constraints on "${table}" after pending writes; its future rows are not present on the read-only target`,
+      };
+    return {
+      severity: 'pass',
+      check,
+      message: `"${table}" is created by this deploy; no existing rows`,
+    };
+  }
+
   /** Count rows a constraint would reject, as the target's data stands after pending backfills. */
   private async countViolations(
     table: string,
@@ -676,12 +708,8 @@ class Preflight {
     state: PendingState,
     alias = ''
   ): Promise<Finding> {
-    if (state.createdTables.has(table) || (await this.target.reltuples(table)) === null)
-      return {
-        severity: 'pass',
-        check,
-        message: `"${table}" is created by this deploy; no existing rows`,
-      };
+    const pending = await this.pendingTableFinding(table, check, state);
+    if (pending) return pending;
     const sql = `SELECT count(*)::bigint AS violations FROM ${quote(table)}${alias ? ` ${alias}` : ''} WHERE ${predicate}`;
     try {
       const rows = await this.target.query<{ violations: bigint }>(
@@ -854,6 +882,8 @@ class Preflight {
     state: PendingState,
     check: string
   ): Promise<Finding> {
+    const tableFinding = await this.pendingTableFinding(constraint.table, check, state);
+    if (tableFinding) return tableFinding;
     const pending = pendingColumnsOf(state, constraint.table);
     if (constraint.kind === 'check') {
       const expression = constraint.expression ?? 'TRUE';
@@ -917,6 +947,8 @@ class Preflight {
   }
 
   private async duplicates(table: string, list: string, state: PendingState): Promise<Finding> {
+    const tableFinding = await this.pendingTableFinding(table, `unique (${list})`, state);
+    if (tableFinding) return tableFinding;
     const columns = columnList(list);
     if (columns.some((column) => !/^[\w$]+$|^[^()]+$/.test(column)) || /\(/.test(list))
       return {
@@ -1093,6 +1125,7 @@ export async function runPreflight(options: Options): Promise<number> {
     );
     const state: PendingState = {
       createdTables: new Set(),
+      populatedTables: new Set(),
       addedColumns: new Map(),
       columnDefaults: new Map(),
       constraints: new Map(),

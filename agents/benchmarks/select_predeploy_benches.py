@@ -196,6 +196,8 @@ class Selection:
     # Floor categories with no history-qualified canary.
     uncovered_categories: list[str] = field(default_factory=list)
     pass_streak_required: int = DEFAULT_PASS_STREAK
+    # Catalog eligibility/instructions only; runtime evidence owns every verdict.
+    skip_eligibility: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -238,6 +240,65 @@ def load_tasks(catalog: Path) -> list[TaskRef]:
             )
         )
     return tasks
+
+
+def standing_skip_eligibility(tasks: Sequence[TaskRef], selected: Sequence[str]) -> dict[str, list[str]]:
+    """Describe existing runtime exceptions without deciding or changing a task outcome."""
+    by_name = {task.name: task for task in tasks}
+    eligibility: dict[str, list[str]] = {}
+    for name in selected:
+        task = by_name.get(name)
+        if task is None:
+            continue
+        rules: list[str] = []
+        lifecycle = task.raw.get("expected_payment_lifecycle")
+        transfer = lifecycle.get("orgTransfer") if isinstance(lifecycle, dict) else None
+        # Same literal catalog/mode predicate as run_benchmark._agentcard_release_skip_task.
+        if isinstance(transfer, dict) and (
+            (not task.production_only and "agentcard-lifecycle-sandbox" in task.tags
+             and transfer.get("livemode") is False)
+            or (task.production_only and "agentcard-lifecycle-production" in task.tags
+                and transfer.get("livemode") is True)
+        ):
+            rules.append(
+                "AgentCard release-stall standing warning: runtime "
+                "run_benchmark.py::_agentcard_release_skip_lifecycle / "
+                "_agentcard_release_stalled requires purchase HELD, walletFunding RECLAIMING, "
+                "same nonempty card/transfer IDs, card CLOSED with numeric balanceCents=0, "
+                "orgTransfer consumed with numeric releasedCents=0, "
+                f"livemode={'true' if task.production_only else 'false'}, and stripeRefund=None. "
+                "All independent catalog assertions must still pass; only the exact settlement "
+                "stall qualifies. Default enabled; BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=0 "
+                "restores strict diagnostics. Record loud warning SKIP, unreleased amount and "
+                "pending refund; never PASS or financial/native cleanup credit. "
+                "See .claude/commands/deploy.md Step 6a and "
+                "docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md."
+            )
+        if task.raw.get("requires_claude_code"):
+            rules.append(
+                "Claude Code credential-unavailable standing exception: after successful native "
+                "credential sync, preflight must prove no synced Claude credentials and no pool "
+                "token (native token route 404); auth/sync/transport errors do not prove absence. "
+                "Runtime run_benchmark.py::_check_claude_code_credentials / "
+                "_is_permitted_claude_code_skip controls the recorded outcome; requires "
+                "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 on the permitted deploy path, "
+                "never silently enabled here. Shared ANTHROPIC_API_KEY fallback is not qualifying "
+                "user/pool evidence. Task correctness remains hard-gated. "
+                "See .claude/commands/deploy.md Step 6 pre-deploy smoke."
+            )
+        if rules:
+            eligibility[name] = rules
+    return eligibility
+
+
+def format_skip_eligibility(eligibility: dict[str, list[str]]) -> str:
+    if not eligibility:
+        return ""
+    lines = ["Standing skip eligibility (instructions only, not a SKIP verdict):"]
+    for name, rules in eligibility.items():
+        lines.extend(f"  {name}: {rule}" for rule in rules)
+    lines.append("All other assertions and owned-resource cleanup remain required; preserve native outcomes.")
+    return "\n".join(lines)
 
 
 def categories_for_task(task: TaskRef) -> set[str]:
@@ -585,6 +646,7 @@ def select_predeploy_benches(
         skipped_history=skipped_history,
         uncovered_categories=uncovered_categories,
         pass_streak_required=pass_streak,
+        skip_eligibility=standing_skip_eligibility(tasks, selected),
     )
 
 
@@ -628,6 +690,8 @@ def format_report(selection: Selection) -> str:
         lines.append(f"*** AT HARD CAP ({selection.cap}/{selection.cap}) — no room for further extras ***")
     if selection.dropped and not selection.cap_hit:
         lines.append(f"Dropped: {', '.join(selection.dropped)}")
+    if guidance := format_skip_eligibility(selection.skip_eligibility):
+        lines.append(guidance)
     lines.append("==============================================")
     return "\n".join(lines)
 
@@ -726,6 +790,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.format == "names":
         print("\n".join(selection.selected))
+        if guidance := format_skip_eligibility(selection.skip_eligibility):
+            print(guidance, file=sys.stderr)
         scream_if_cap_hit(selection)
     elif args.format == "report":
         print(format_report(selection))
@@ -749,6 +815,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "pass_streak_required": selection.pass_streak_required,
                     "reasons": selection.reasons,
                     "surface": selection.surface,
+                    "skip_eligibility": selection.skip_eligibility,
                 },
                 indent=2,
                 sort_keys=True,

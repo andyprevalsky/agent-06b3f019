@@ -118,3 +118,43 @@ canonical occurrence, retaining temporary state and child output with a passive
 110s driver traceback before the original120s boundary. Original assertions,
 200concurrency, capacity72705MiB, native deadlines and zero-provider contract
 remain unchanged. Root owns archive integration, full gates and any later fix.
+
+
+## 2026-11-04 b9 parallel-cohort recurrence — UNKNOWN
+
+Frozen `b9a1f743152e29cb6626ed33fdce88d24a919ba1` recorded three errors
+in the original 65-test structural owner (449.485s):
+
+- `test_public_disposable_controller_creates_exports_and_disposes_exact_host`:
+  public wrapper `subprocess.communicate` exceeded its unchanged 30s bound.
+- `test_stress200_existing_allocator_requires_sealed_minimum_plan`, both
+  `sealed=False` and `sealed=True`: each exceeded the unchanged 120s bound.
+
+The structural runner then left 95 jobs unrun. Both original temporary roots
+were already deleted at first read-only observation; partial child output,
+progress, stacks and pipe ownership were lost. The outer supervisor later
+reported quiescent cleanup with orphan adoption: 347 reaped statuses included
+179 SIGPIPE, 10 SIGKILL and 64 SIGTERM. These are terminal observations, not
+proof that any signal, CPU pressure or lock caused the original timeout.
+Evidence: `/var/tmp/pr1662-b9-structural-recurrence/report.json`, SHA256
+`43e80398648bcb4bb1670d77b376019decd5b9a95ff5e7b34966e3045ca26cc7`.
+
+One later parent-owned invocation on diagnostic source
+`149d06d1be4953870a1543e417700d89b0f40a14` ran the two original methods
+unchanged and passed in 71.366s: disposable 5.832s, unsealed 24.833s
+(expected exit1, 95 admitted/105 rejected), sealed 39.942s (exit0, all200
+admitted, nested0). Both reserve drivers reaped200 children; native supervision
+reported exit0, quiescent, no orphans and no signals. Only deploy documentation
+differed from b9; seven owning-source hashes matched. Capacity72705MiB,
+200 concurrency, original30/120/600s bounds and assertions stayed unchanged.
+Temporary evidence/output were retained; no pre25/110s capture fired because
+all children finished before those observation points. Evidence:
+`/var/tmp/pr1662-b9-structural-passive-observation/report.json`, SHA256
+`d0ee51d686244917ee8bfd37e4a61a8547fbe4e412986779b780f6e7ea2f2afa`.
+
+This is successful focused observation, not causal repair, whole-gate credit,
+NOT INTRODUCED attribution or permission to serialize independent validation.
+The original failures remain UNKNOWN/open. The missing discriminator remains
+pre-timeout child execution versus inherited-pipe EOF, plus native progress
+and thread stacks from an actual failing occurrence. No new test was run to
+write this archive update.

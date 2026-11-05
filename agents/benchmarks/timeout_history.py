@@ -160,6 +160,7 @@ def record_attempt(
     counts_for_deploy_eligibility: Optional[bool] = None,
     run_id: Optional[str] = None,
     outcome_class: Optional[str] = None,
+    evaluator_evidence: Optional[dict] = None,
 ) -> None:
     """Append EVERY completed run (pass or fail, local or prod) to the attempts ledger.
 
@@ -209,6 +210,8 @@ def record_attempt(
         entry["group_run_id"] = group_run_id[:128]
     if outcome_class:
         entry["outcome_class"] = outcome_class
+    if evaluator_evidence:
+        entry["evaluator_evidence"] = evaluator_evidence
     try:
         with open(target, "a") as f:
             f.write(json.dumps(entry) + "\n")

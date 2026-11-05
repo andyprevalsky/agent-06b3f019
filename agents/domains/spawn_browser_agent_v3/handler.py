@@ -77,11 +77,13 @@ from helpers.workflow_generation import WorkflowGenerationSealed
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.demo_cache.browser_use_cache import cached_browser_decision
+from providers.demo_cache.client import resolve_agent_speed
 from providers.demo_cache.context import write_through_enabled_for_user
 from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import format_browser_state_for_tool
 from providers.rose.errors import BrowserModelOutputValidationError
 from providers.rose.inter_agent_context import InterAgentText, inter_agent_message, is_inter_agent_message
+from providers.rose.speed import bind_agent_speed
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
@@ -2841,7 +2843,7 @@ async def _reconnect_browser_stack_after_rotation(
         )
 
         # 3. Re-apply the device fingerprint (anti-bot essential on the new IP).
-        if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True):
+        if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", False):
             from helpers.fingerprint_injection import apply_fingerprint_injection
 
             with contextlib.suppress(Exception):
@@ -3188,7 +3190,9 @@ async def _observe_step_page(dom_service: Any, *, needs_dom: bool) -> Dict[str, 
     return await dom_service.get_page_identity()
 
 
-async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
+async def _wait_for_browser_user_control(
+    config: Any, task_id: str, dom_service: Any = None, session_id: str | None = None,
+) -> bool:
     """Yield browser ownership until the user explicitly hands it back.
 
     Returns whether ownership changed, allowing callers to discard any DOM
@@ -3208,6 +3212,12 @@ async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
                 logger.warning("Unable to acknowledge browser user control", error=str(exc))
         if state == "user":
             yielded = True
+            if dom_service is not None and session_id is not None:
+                from .navigation import consume_navigation
+                try:
+                    await consume_navigation(config, task_id, session_id, dom_service)
+                except Exception as exc:
+                    logger.warning("Browser user navigation failed", error=str(exc))
         browser_activity_checkpoint("Waiting for user to hand browser control back")
         await asyncio.sleep(0.5)
         try:
@@ -7066,6 +7076,7 @@ async def _spawn_browser_agent_activity_v3_simulated(
     if not output_schema:
         raise ValueError("output_schema is required for browser agent")
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    bind_agent_speed(await resolve_agent_speed(agent_id))
     config = load_config()
     started_at = safe_time()
     resume = write_lock_resume_state or {}
@@ -7828,6 +7839,8 @@ async def _spawn_browser_agent_activity_v3_real(
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    # Every browser step forwards the spawning agent's provider speed.
+    bind_agent_speed(await resolve_agent_speed(agent_id))
 
     # Fast Mode warm demos (OAi mass-agent): never open Kernel/Steel. Live
     # sessions still hung on YouTube/Instagram navigates after decision
@@ -9030,7 +9043,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     await _install_botsigged_diagnostics(_pw_page, agent_id=agent_id, task_id=task_id)
 
                 t = time.monotonic()
-                fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True)
+                fingerprint_injection_enabled = _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", False)
                 if fingerprint_injection and fingerprint_injection_enabled:
                     from helpers.fingerprint_injection import apply_fingerprint_injection
 
@@ -10140,7 +10153,7 @@ async def _spawn_browser_agent_activity_v3_real(
             iteration += 1
             step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
-            if await _wait_for_browser_user_control(config, task_id):
+            if await _wait_for_browser_user_control(config, task_id, dom_service, session_id):
                 tab_focus_cache.foreground = None
                 state_prefetch.discard()
             step_timer.mark("user_control_wait")
@@ -10582,7 +10595,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
             _rose_request_id = llm_result.get("request_id", "unknown")
 
-            if await _wait_for_browser_user_control(config, task_id):
+            if await _wait_for_browser_user_control(config, task_id, dom_service, session_id):
                 # Never execute an action planned against the pre-handoff DOM.
                 tab_focus_cache.foreground = None
                 state_prefetch.discard()
@@ -14819,6 +14832,11 @@ async def spawn_browser_agent(workflow_instance: Any, tool_call: Dict[str, Any],
                 event.data["usage"],
                 tool_name="spawn_browser_agent",
                 call_site="browser_agent",
+                browser_completed=(
+                    event.status == MessageStatus.FINISHED
+                    and (event.metadata or {}).get("action_type") == "task_complete"
+                    and (event.metadata or {}).get("success") is True
+                ),
             )
 
     return last_status

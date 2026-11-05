@@ -238,7 +238,77 @@ ALTER TABLE "Widget" ALTER COLUMN "flag" SET NOT NULL;`
   );
 }
 
+async function newTableConstraints(): Promise<void> {
+  await withScratchDatabase('new_tables', async (client, url) => {
+    await client.$executeRawUnsafe('CREATE TABLE "User" ("userId" TEXT PRIMARY KEY)');
+    await client.$executeRawUnsafe('CREATE TABLE "Project" (id TEXT PRIMARY KEY)');
+    const actual = preflight(url, [
+      path.join(migrations, '20261028030000_project_cli_login'),
+      path.join(migrations, '20261028040000_project_template_maintenance'),
+    ]);
+    assert.equal(actual.code, 0, actual.output);
+    assert.doesNotMatch(actual.output, /could not count orphan rows/);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'preflight-new-table-'));
+    const file = path.join(dir, 'migration.sql');
+    const create = 'CREATE TABLE "Child" (id TEXT PRIMARY KEY, "userId" TEXT);';
+    const foreign =
+      'ALTER TABLE "Child" ADD CONSTRAINT child_fk FOREIGN KEY ("userId") REFERENCES "User"("userId");';
+    try {
+      // A pending insert makes emptiness unprovable even though the live table is absent.
+      for (const insert of [
+        "INSERT INTO \"Child\" VALUES ('c', 'missing');",
+        "INSERT INTO \"Child\" SELECT 'c', 'missing';",
+        "WITH source AS (SELECT 'c' AS id) INSERT INTO \"Child\" SELECT id, 'missing' FROM source;",
+      ]) {
+        fs.writeFileSync(file, `${create} ${insert} ${foreign}`);
+        const populated = preflight(url, [file]);
+        assert.equal(populated.code, 1, populated.output);
+        assert.match(populated.output, /cannot verify constraints.*pending writes/i);
+      }
+      // CHECK, UNIQUE, NOT NULL and delayed FK validation share the same boundary.
+      for (const constraint of [
+        'ALTER TABLE "Child" ADD CONSTRAINT child_check CHECK ("userId" IS NOT NULL);',
+        'CREATE UNIQUE INDEX child_unique ON "Child" ("userId");',
+        'ALTER TABLE "Child" ALTER COLUMN "userId" SET NOT NULL;',
+        `${foreign.replace(';', ' NOT VALID;')} ALTER TABLE "Child" VALIDATE CONSTRAINT child_fk;`,
+      ]) {
+        fs.writeFileSync(file, `${create} ${constraint}`);
+        const empty = preflight(url, [file]);
+        assert.equal(empty.code, 0, empty.output);
+        fs.writeFileSync(file, `${create} INSERT INTO "Child" VALUES ('c', NULL); ${constraint}`);
+        const populated = preflight(url, [file]);
+        assert.equal(populated.code, 1, populated.output);
+        assert.match(populated.output, /cannot verify constraints.*pending writes/i);
+      }
+      fs.writeFileSync(
+        file,
+        `CREATE TABLE "Child" AS SELECT 'c' AS id, 'missing' AS "userId"; ${foreign}`
+      );
+      const selected = preflight(url, [file]);
+      assert.equal(selected.code, 1, selected.output);
+      assert.match(selected.output, /cannot verify constraints.*pending writes/i);
+      // Existing table data must still be counted, including CREATE IF NOT EXISTS.
+      await client.$executeRawUnsafe(create);
+      await client.$executeRawUnsafe("INSERT INTO \"Child\" VALUES ('c', 'missing')");
+      fs.writeFileSync(
+        file,
+        `${create.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS')} ${foreign}`
+      );
+      const existing = preflight(url, [file]);
+      assert.equal(existing.code, 1, existing.output);
+      assert.match(existing.output, /1 orphan row/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  process.stdout.write(
+    'PASS new empty tables avoid live orphan counts; pending writes and existing orphans fail closed\n'
+  );
+}
+
 async function main(): Promise<void> {
+  await newTableConstraints();
   await orphanRowsFailValidate();
   await wholeTableBackfillFails();
   await columnDefaultsAndBatchedClauses();

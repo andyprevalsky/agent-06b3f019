@@ -10,13 +10,13 @@
  * Requires:
  *   - E2B_API_KEY env var
  *   - ANTHROPIC_API_KEY env var
- *   - E2B_CLAUDE_CODE_TEMPLATE_ID env var (defaults to kng6z68u1md05bfdhq47)
+ *   - E2B_CLAUDE_CODE_TEMPLATE_ID env var (defaults to the backend's claude-code-v21305-c2-m4)
  */
 
 import { Sandbox } from '@e2b/desktop';
 import { exec } from 'child_process';
 
-const TEMPLATE_ID = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID || 'kng6z68u1md05bfdhq47';
+const TEMPLATE_ID = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID || 'claude-code-v21305-c2-m4';
 
 async function openUrl(url: string) {
   const platform = process.platform;

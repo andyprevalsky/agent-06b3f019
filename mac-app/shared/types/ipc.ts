@@ -152,6 +152,8 @@ export interface IPC {
   // Payment events
   onPaymentComplete: (callback: (data: { success: boolean }) => void) => void;
   removePaymentCompleteListener: () => void;
+  /** OAuth (Gmail) callback deep-linked back into the app; returns a disposer. */
+  onOAuthComplete: (callback: (data: { success: boolean }) => void) => () => void;
   onPasskeysImportComplete?: (callback: (result: PasskeyImportResult) => void) => () => void;
 
   // Claude Code credentials

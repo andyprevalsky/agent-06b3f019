@@ -29,11 +29,12 @@ export function benchmarkAgentPreviewEnabled(): boolean {
 }
 
 // Get all agents
-export async function getAllAgents(): Promise<Agent[]> {
+export async function getAllAgents(signal?: AbortSignal): Promise<Agent[]> {
   const headers = getAuthHeaders();
 
   const response = await fetch(`${API_BASE_WITH_PATH}/agents`, {
     headers,
+    signal,
   });
 
   if (!response.ok) {

@@ -1,6 +1,9 @@
 # Minimal E2B template for Claude Code with WebSocket streaming
 FROM ubuntu:22.04
 
+# Opus 5.5 requires CLI >= 2.1.280; pin every template size reproducibly.
+ARG CLAUDE_CODE_VERSION=2.1.305
+
 # Install Node.js, Python, build tools, Claude Code
 RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com/ubuntu|g' /etc/apt/sources.list \
     && apt-get update && apt-get install -y --no-install-recommends \
@@ -15,7 +18,7 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com
     g++ \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
-    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" \
     && rm -rf /var/lib/apt/lists/*
 
 # rose-ui screenshot/record/perf/check (~/.rose/bin/rose-ui, installed per session):

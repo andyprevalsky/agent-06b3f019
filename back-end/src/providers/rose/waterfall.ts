@@ -12,6 +12,7 @@
 import { createLogger } from '../logger';
 import { RoseAllFailed, RoseError, RoseStallError, type RoseStepError } from './errors';
 import type { PoolSpec } from './pools';
+import { openRouterSpeedFor, type AgentSpeed } from './speed';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
 import { openAiChatToolChoice, openAiChatTools } from './toolContract';
@@ -34,7 +35,7 @@ interface WaterfallOptions {
   perStepTimeoutMs?: number;
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
-  providerFastMode?: boolean;
+  speed?: AgentSpeed;
   reasoningEffort?: string;
   tools?: Array<Record<string, unknown>>;
   anthropicTools?: Array<Record<string, unknown>>;
@@ -47,7 +48,7 @@ export function buildOpenRouterBody(opts: {
   responseFormat?: ResponseFormat;
   temperature?: number;
   maxTokens?: number;
-  providerFastMode?: boolean;
+  speed?: AgentSpeed;
   reasoningEffort?: string;
   tools?: Array<Record<string, unknown>>;
   anthropicTools?: Array<Record<string, unknown>>;
@@ -73,7 +74,8 @@ export function buildOpenRouterBody(opts: {
   if (opts.responseFormat) body.response_format = opts.responseFormat;
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
   if (opts.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
-  if (opts.providerFastMode === true) body.speed = 'fast';
+  const openRouterSpeed = openRouterSpeedFor(opts.speed);
+  if (openRouterSpeed !== undefined) body.speed = openRouterSpeed;
   // OpenAI chat function shape, whichever shape the caller supplied; tool_choice
   // only accompanies declared tools (mirrors build_openrouter_body).
   const modelTools =
@@ -114,7 +116,7 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       responseFormat: opts.responseFormat,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
-      providerFastMode: opts.providerFastMode,
+      speed: opts.speed,
       reasoningEffort,
       tools: opts.tools,
       anthropicTools: opts.anthropicTools,

@@ -110,13 +110,37 @@ export function codexSmokeCreditSkipReason(output: string, events: unknown[]): s
   return detectCodexCreditExhaustion(output, events);
 }
 
+/**
+ * A Codex login that proved unusable (revoked, refresh failed) while the sandbox had
+ * no Azure switch armed because another subscription was leasable (subscriptions
+ * first, C15). ws-server then reports the structured `login_unusable`, and the run
+ * pauses for the parent's retry on the next credential. The login is unavailable
+ * until reconnected: the deploy-approved SKIP class for unavailable credentials.
+ * Only that structured field counts: revocation prose alone (or a run that switched
+ * to Azure) still fails hard. Returns the signal, else null.
+ */
+export function codexSmokeLoginUnusableSkipReason(events: unknown[]): string | null {
+  if (events.some((event) => (event as { type?: unknown })?.type === 'auth_fallback')) return null;
+  for (const event of events) {
+    const typed = event as { type?: unknown; login_unusable?: { reason?: unknown } | null };
+    if (
+      typed?.type === 'error' &&
+      typed.login_unusable &&
+      typeof typed.login_unusable === 'object'
+    ) {
+      return `login_unusable: ${String(typed.login_unusable.reason ?? 'unknown')}`;
+    }
+  }
+  return null;
+}
+
 const CODEX_CREATE_UNAVAILABLE_BODY =
   'Code agent credentials are unavailable; the session could not be started';
 
 /**
  * Create-time 500 with a generic "credentials unavailable" body is a hard
- * failure when a credential path still exists. When the funded GPT key is
- * already on its out-of-credits/bad-key cooldown and create still cannot
+ * failure when a credential path still exists. When the funded Azure Codex
+ * deployment is already backed off (codex_funded_cooldown) and create still cannot
  * start a session, every Codex path is unusable — same deploy-approved SKIP
  * as mid-run exhaustion. Observed 2026-10-02: leftover cooldown from a prior
  * coverage process plus no synced OAuth/pool token hard-failed Step 4a.
@@ -128,7 +152,7 @@ export function codexCreateUnavailableSkipReason(
   const exhaustion = detectCodexCreditExhaustion(createBody, []);
   if (exhaustion) return exhaustion;
   if (onCooldown && createBody.includes(CODEX_CREATE_UNAVAILABLE_BODY)) {
-    return 'funded GPT key on out-of-credits/bad-key cooldown and session create reported credentials unavailable';
+    return 'funded Azure Codex deployment backed off and session create reported credentials unavailable';
   }
   return null;
 }

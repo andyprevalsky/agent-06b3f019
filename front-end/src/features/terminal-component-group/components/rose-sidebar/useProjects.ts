@@ -12,6 +12,10 @@
  *   useCreateProjectEnvFile / useDeleteProjectEnvFile: POST / DELETE an env file,
  *                            then refetch that project's files and the project
  *                            list (its envFileCount changed)
+ *   useMaintenance(id)      GET …/maintenance (template snapshot, schedule, recent runs);
+ *                            refetches every 3 s while a sync is running
+ *   useStartMaintenance(id) POST …/maintenance/runs (Run now / Snapshot now), then refetch
+ *   useMaintenanceRun(id,r) GET …/maintenance/runs/:runId (the run's log), only when asked
  * Every mutation also invalidates the list so the server stays the source of truth.
  */
 
@@ -22,9 +26,13 @@ import {
   createProjectEnvFile,
   deleteProject,
   deleteProjectEnvFile,
+  fetchMaintenance,
+  fetchMaintenanceRun,
   fetchProjectEnvFiles,
   fetchProjects,
+  startMaintenanceRun,
   updateProject,
+  type MaintenanceMode,
   type NewProjectEnvFile,
   type Project,
   type ProjectUpdate,
@@ -117,5 +125,42 @@ export function useDeleteProjectEnvFile(projectId: string) {
   return useMutation({
     mutationFn: (fileId: string) => deleteProjectEnvFile(projectId, fileId),
     onSuccess: refresh,
+  });
+}
+
+function maintenanceKey(projectId: string) {
+  return [...PROJECTS_QUERY_KEY, projectId, 'maintenance'] as const;
+}
+
+export function useMaintenance(projectId: string) {
+  return useQuery({
+    queryKey: maintenanceKey(projectId),
+    queryFn: () => fetchMaintenance(projectId),
+    staleTime: 10_000,
+    retry: false,
+    refetchInterval: (query) => (query.state.data?.running ? 3_000 : false),
+  });
+}
+
+export function useStartMaintenance(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (mode: MaintenanceMode) => startMaintenanceRun(projectId, mode),
+    onSettled: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: maintenanceKey(projectId) }),
+        queryClient.invalidateQueries({ queryKey: PROJECTS_QUERY_KEY, exact: true }),
+      ]),
+  });
+}
+
+export function useMaintenanceRun(projectId: string, runId: string | null, running: boolean) {
+  return useQuery({
+    queryKey: [...maintenanceKey(projectId), 'run', runId],
+    queryFn: () => fetchMaintenanceRun(projectId, runId ?? ''),
+    enabled: runId !== null,
+    staleTime: running ? 0 : 60_000,
+    retry: false,
+    refetchInterval: running ? 3_000 : false,
   });
 }

@@ -116,3 +116,79 @@ assertion deterministic. No feedback on the fix itself was recorded.
 ## Reusable lesson
 
 Assert a periodically sampled value against the sampler's own recorded state (peaks, freshness, consistency), never against what the sampled process is assumed to hold at an uncontrolled instant of its lifetime.
+
+
+## 2026-11-02 recurrence: first eligibility assumed to precede the first real observation
+
+Append to `2026-10-31-credit-fixture-bounded-last-deferral-sample-by-block-size`.
+The earlier fix bound the *last* disabled-arm sample to actual recorded state,
+but left the first enabled-arm deferral tied to a 0.3-second gate's assumed
+position before the 1Hz sampler. That first historical record is not guaranteed
+by the workload. The production scheduler may correctly observe the holder
+before the joiner becomes eligible, admit the joiner directly using fresh credit,
+and return `admission.deferred=None`.
+
+Original full owning run: `nov2-stabilization-scheduler-retry.log` fails at the
+unchanged line598 `admission["deferred"]["first"]["reason"]`. Every preceding
+credit, overlap, peak-memory, observation and freshness assertion passed. The
+older total<7 incident passed in that run and remains a separate open issue.
+
+Critical path: gate completion -> joiner eligibility -> latest real holder
+sample classification -> conservative reservation or fresh credit -> optional
+historical deferral -> fixture assertion requiring that history. Deepest owned
+cause is incomplete fixture sequencing of the deliberately asserted unknown ->
+deferred -> fresh -> admitted transition. Product logic correctly permits
+immediate fresh admission; its behavior must not change to satisfy the fixture.
+
+Archive searches used literal `check_materialized_reservation_credit|admission.*deferred`
+and behavioral `sample.*process.*lifetime|unknown.*observation|fixture.*sampl|fixture.*clock`.
+The existing case's Solution and Human feedback were reviewed. This is a
+recurrence of its uncontrolled sampling/fixture-lifetime class on the first
+sample, rather than proof the prior last-sample correction was wrong.
+
+Causal forced ordering: the external private harness preserves the .3-second
+gate sleep, then waits (guarded3s) for a real native sample >=50MB before the
+gate exits. This controls a valid sample-before-eligibility ordering without
+fabricating any memory values or changing the owning assertions. The same
+focused command runs all four arms from the exact private copied owning test.
+Before: exit1 in5.055066s, exact TypeError on missing historical deferral;
+native receipt shows admitted fresh holder and deferred=null.
+After: exit0 in18.609038s, all four arms pass. First deferral is recorded by
+the real scheduler as unknown/headroom; final admission records fresh native
+memory. These are owning-function monotonic timings, excluding fixture repo
+setup and copying durable evidence.
+
+Candidate changes only the fixture's local run helper and the first arm's
+explicit input contract. Its sampler calls the real sampler but withholds
+observations until the actual `_record_waiting` has recorded the required
+unknown headroom decision; the observer invokes the original recorder and
+never creates or edits receipt state itself. Subsequent observations are real.
+The disabled, explicit-enabled and permanently-unobserved arms are unchanged.
+All44 existing Assert ASTs are identical, hash
+`d10eb47a420c22d985ee1659f9286a1af469745ceab969faffc74aff9d8fcb0d`.
+All workload constants, budgets, existing timeouts, production modules and the
+first total<7 assertion remain unchanged. Negative control that credits unknown
+memory incorrectly is rejected (exit1,4.787334s, missing holder peak at the
+existing peak assertion); the fixture does not manufacture passing history.
+
+One preliminary baseline also reproduced the same error. Its harness forced
+all gates; before the canonical pair the harness was narrowed to force only
+the first arm so the deliberately unobserved arm could run normally. That
+exploratory evidence is retained separately; canonical before/after used the
+same harness bytes and identical argv `python3 .../focused.py before`.
+
+No production patch or root edits. Existing deploy structural registration
+already discovers this owning test. Parent application, archive integration
+and full owning gate remain pending: keep this candidate append OPEN until
+those complete. Golden reference is not applicable to an ordinary test-fixture
+change. No provider/DB calls, child agents or full suites were launched. All
+initial root source hashes remain equal; Freedom is untouched.
+
+Human feedback: preserve every assertion, budget and timeout; force the causal
+ordering in a private copy; no production change, five-run retry loop or change
+to the separate total<7 bound. Parent owns integration and all full gates.
+
+Reusable lesson: Explicitly sequence the observation transition asserted by a
+fixture instead of assuming a timed dependency will precede a sampling pass.
+
+Integrated Nov2 follow-up: the full unchanged owning command `python3 scripts/tests/run-deploy-pipeline.test.py` completed exit 0 with `run-deploy-pipeline: all checks passed`; log `/project/rose-speed-comparison-20261028/nov2-stabilization-scheduler-final.log`. This verifies the fixture repair, not release completion.

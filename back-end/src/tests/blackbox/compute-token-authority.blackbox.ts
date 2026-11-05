@@ -19,6 +19,7 @@ import {
   GUEST_KEY,
   USER_ID,
   backendDir,
+  writeAuthorityFixtureSchema,
   localServerUrl,
   databaseUrl,
   encryptEnvelope,
@@ -58,21 +59,7 @@ async function main() {
     for (const name of Object.values(names)) {
       await admin.$executeRawUnsafe(`CREATE DATABASE "${name}"`);
     }
-    const schemaSql = execFileSync(
-      'npx',
-      [
-        'prisma',
-        'migrate',
-        'diff',
-        '--from-empty',
-        '--to-schema-datamodel',
-        'prisma/schema.prisma',
-        '--script',
-      ],
-      { cwd: backendDir, encoding: 'utf8' }
-    );
-    const schemaFile = path.join(tmp, 'schema.sql');
-    fs.writeFileSync(schemaFile, schemaSql);
+    const schemaFile = writeAuthorityFixtureSchema(tmp);
 
     const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
     const privatePem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
@@ -255,6 +242,11 @@ async function main() {
       2,
       'TS must report 429 then use the other deployment'
     );
+    assert.deepStrictEqual(
+      [...rejectedBody.hits].sort(),
+      ['gpt-6.1-sol-a', 'gpt-6.1-sol-b'],
+      'Ultra must rotate through both configured GPT-6.1 fixture deployments'
+    );
     const cooledDeployment = rejectedBody.hits[0];
     for (const [baseUrl, apiKey] of [
       [guestB.baseUrl, GUEST_KEY],
@@ -280,7 +272,7 @@ async function main() {
     console.log('PASS TypeScript guest/authority consumers share cooldown and observe expiry');
 
     const prepareExpiredRoutes = async () => {
-      for (const deployment of ['gpt-6-sol-a', 'gpt-6-sol-b']) {
+      for (const deployment of ['gpt-6.1-sol-a', 'gpt-6.1-sol-b']) {
         await foundryCall(guestA.baseUrl, 'token/rate-limited', {
           type: 'foundry',
           source: 'pool',

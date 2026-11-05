@@ -16,7 +16,7 @@ export async function fetchAgentDetail(agentId: string, signal?: AbortSignal) {
   try {
     return await getAgent(agentId, undefined, signal);
   } catch (error) {
-    if (!benchmarkAgentPreviewEnabled()) {
+    if (signal?.aborted || !benchmarkAgentPreviewEnabled()) {
       throw error;
     }
     return getBenchmarkAgentPreview(agentId, signal);

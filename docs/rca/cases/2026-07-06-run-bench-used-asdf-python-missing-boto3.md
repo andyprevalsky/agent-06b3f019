@@ -161,6 +161,52 @@ fixture was added. All 392 declared controller inputs and qualified runtime,
 tasks, prompts and limits stay unchanged. ROOT owns source adoption, archive
 reindex, aggregate runtime finish and any subsequent live gates.
 
+
+### November 2 PR1662 local-controller recurrence (investigation only)
+
+Occurrence `5b87e32a8845407eb6159a61edc03563` ran frozen
+`7be0644bb164763af1526ead7b426e2d5e909f4a` / source digest
+`8448a1822106d530f7938f3fae5470f9468881d8304949137bb659873e044a3d`.
+The native selected-pytest result was 7 failed, 511 passed, 1028 deselected.
+The seven failures are the two accepted starting-transport cases, recovered /
+already-recovered / publication-rejected terminal publication, and both
+post-seal recovery cases. Six native assertion traces show the shell child
+`hub_upload.py` importing `logs.py:46` and failing to import `httpx`; the
+publication-rejected assertion records zero HTTP requests.
+
+Private copies of the unchanged test at baseline
+`bf92cbd98ab436af20f9a8d647c32e748c67e93a` and frozen head each reproduced
+all seven failures with `/usr/bin:/bin` PATH: 7 failed / 6 passed in the
+13-case owning subset. Prepending the existing project venv, without changing
+any assertion, gave 13 passed on head. Logs and exact argv are under
+`/var/tmp/rca-5b87-cloudbench/{head-red,base-red,head-green}.{log,json}`.
+The test, hub_upload, logs, fleet controller and environment-library Git blobs
+are identical in both revisions. This proves the interpreter mechanism and
+eliminates changes to those source bytes as the cause, but does not waive
+responsibility for the newly introduced local runner / worker preparation.
+
+The newly added `run-cloudbench-controller-local.py::run_case` forwards
+ambient PATH into bash; an absolute venv command only selects pytest's parent.
+The one-line candidate at `/var/tmp/rca-5b87-cloudbench/candidate.patch` pins
+its child environment to `<prepared-root>/agents/venv/bin` while retaining
+all cases, supervision, assertions and deadlines. It is a draft for the deploy
+owner, not an applied or deployed repair. A first patch replay used an invalid
+private fixture without the prepared venv link and remained red; this artifact
+is retained explicitly as fixture error, not evidence against the mechanism.
+
+Through the actual copied run_case and unchanged supervisor, the three-case
+starting-transport subset was 2 failed / 1 passed before the candidate and
+3 passed after it, with native quiescence receipts in both cases. The drafted
+LocalController regression failed on original code and passed five consecutive
+runs on the candidate. Parent independently reviewed the limited attribution:
+the new runner preparation omission is INTRODUCED, even though the underlying
+unchanged tests also fail on baseline when invoked in that invalid environment.
+
+Independent native multi-workstream `EADDRINUSE` remains an attribution gap;
+it is not merged into the Python cause. The original aggregate stays
+UNVERIFIED. No live provider requests, full gate runs, application-source
+changes or Freedom changes occurred during this investigation.
+
 ## Human feedback
 
 None recorded.

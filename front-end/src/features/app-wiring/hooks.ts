@@ -24,74 +24,90 @@ import {
  * Uses a wrapped console.warn so domain callers stay clean of console.log.
  */
 export function logStartupMode(): void {
-  // eslint-disable-next-line no-console -- intentional single startup message
-  console.log(`[Frontend] Mode: ${IS_DEV ? 'DEVELOPMENT' : 'PRODUCTION'}`);
+  console.warn(`[Frontend] Mode: ${IS_DEV ? 'DEVELOPMENT' : 'PRODUCTION'}`);
 }
 
 /** Patches console.log/warn/error to forward logs to the backend in dev mode. */
 export function initDevLogging(): void {
   if (!IS_DEV) return;
 
-  // eslint-disable-next-line no-console -- capturing originals for dev log forwarding
-  const originalLog = console.log;
-  const originalWarn = console.warn;
-  const originalError = console.error;
-
-  // eslint-disable-next-line no-console -- patching console.log with forwarding wrapper
-  console.log = (...args) => {
-    originalLog(...args);
-    sendDevLog('log', args);
-  };
-  console.warn = (...args) => {
-    originalWarn(...args);
-    sendDevLog('warn', args);
-  };
-  console.error = (...args) => {
-    originalError(...args);
-    sendDevLog('error', args);
-  };
+  for (const level of ['log', 'warn', 'error'] as const) {
+    const original = Reflect.get(console, level) as (...args: unknown[]) => void;
+    Reflect.set(console, level, (...args: unknown[]) => {
+      original.apply(console, args);
+      sendDevLog(level, args);
+    });
+  }
 }
 
 /** Initializes Amplitude analytics with session replay. */
 export function initAmplitude(): void {
   analytics.addPlugin(sessionReplayPlugin({ sampleRate: SESSION_REPLAY_SAMPLE_RATE }));
   analytics.init(AMPLITUDE_API_KEY, {
-    autocapture: true,
+    autocapture: {
+      attribution: true,
+      fileDownloads: true,
+      formInteractions: true,
+      pageViews: true,
+      sessions: true,
+      pageUrlEnrichment: true,
+      networkTracking: true,
+      webVitals: true,
+      frustrationInteractions: true,
+      elementInteractions: { viewportContentUpdated: { enabled: true } },
+    },
     transport: { type: 'fetch', enableKeepalive: true },
   });
 }
 
-/** Visual-viewport shrink beyond this is the on-screen keyboard, not iOS's
- * short standalone layout viewport (~status-bar inset) or a toolbar. */
-const KEYBOARD_MIN_HEIGHT_PX = 150;
+/** A shell height change this large is a keyboard opening/closing (or iOS
+ * leaving the viewport short), not toolbar or scroll jitter. */
+const VIEWPORT_REPORT_MIN_CHANGE_PX = 100;
+let reportedShellHeight: number | null = null;
+
+/** Records what iOS reports at each keyboard transition, so the next
+ * on-device layout bug arrives with the real viewport numbers. */
+function reportShellGeometry(height: number, top: number, vv: VisualViewport): void {
+  if (
+    reportedShellHeight !== null &&
+    Math.abs(height - reportedShellHeight) < VIEWPORT_REPORT_MIN_CHANGE_PX
+  ) {
+    return;
+  }
+  reportedShellHeight = height;
+  analytics.track('iOS Viewport Geometry', {
+    shell_height: height,
+    shell_top: top,
+    inner_height: window.innerHeight,
+    client_height: document.documentElement.clientHeight,
+    visual_height: vv.height,
+    visual_offset_top: vv.offsetTop,
+    visual_scale: vv.scale,
+    screen_height: window.screen.height,
+    standalone:
+      (navigator as { standalone?: boolean }).standalone === true ||
+      window.matchMedia?.('(display-mode: standalone)').matches === true,
+  });
+}
 
 /**
  * iOS: pins the app shell (`--app-height` / `--app-top`, read by
- * TerminalContent) to what is actually visible.
- *   keyboard open  -> the visual viewport (iOS shrinks AND pans it), so the
- *                     bottom-anchored query box sits flush on the keyboard
- *   keyboard closed, installed PWA -> the full screen; iOS reports a layout
- *                     viewport short by the status-bar inset, which left a
- *                     gap under the query box with no browser toolbar there
- *   keyboard closed, Safari tab    -> the visual viewport (toolbar excluded)
- * Pinch zoom also shrinks the visual viewport; it is ignored.
+ * TerminalContent) to the visual viewport — exactly what is on screen. The
+ * keyboard shrinks AND pans it, so the bottom-anchored query box sits flush on
+ * the keyboard; with no keyboard it is the screen (PWA) or the area above the
+ * toolbar (Safari tab). After the keyboard closes, an installed PWA can stay
+ * short of the screen by the status-bar inset, and a shell sized to the
+ * screen had its bottom (the query box toolbar) cut off at that boundary.
+ * Pinch zoom also shrinks the visual viewport; it keeps the layout viewport.
  */
 function setAppShellGeometry(vv: VisualViewport): void {
-  const standalone =
-    (navigator as { standalone?: boolean }).standalone === true ||
-    window.matchMedia?.('(display-mode: standalone)').matches === true;
-  const landscape = window.innerWidth > window.innerHeight;
-  const screenHeight = landscape
-    ? Math.min(window.screen.width, window.screen.height)
-    : Math.max(window.screen.width, window.screen.height);
-  const fullHeight = standalone ? Math.max(screenHeight, window.innerHeight) : window.innerHeight;
   const zoomed = Math.abs((vv.scale ?? 1) - 1) > 0.01;
-  const keyboardOpen = !zoomed && fullHeight - vv.height > KEYBOARD_MIN_HEIGHT_PX;
-  const height = keyboardOpen ? vv.height : zoomed || standalone ? fullHeight : vv.height;
-  const top = keyboardOpen ? (vv.offsetTop ?? 0) : 0;
+  const height = zoomed ? window.innerHeight : vv.height;
+  const top = zoomed ? 0 : (vv.offsetTop ?? 0);
   const root = document.documentElement.style;
   root.setProperty('--app-height', `${height}px`);
   root.setProperty('--app-top', `${top}px`);
+  reportShellGeometry(height, top, vv);
 }
 
 /** Sets the `--vh` CSS custom property and installs resize/orientation listeners. */
@@ -111,6 +127,7 @@ export function initViewportHeight(): void {
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
 
   if (isIOS && window.visualViewport) {
+    reportedShellHeight = null;
     const updateVH = () => {
       const vh = window.visualViewport!.height * 0.01;
       document.documentElement.style.setProperty('--vh', `${vh}px`);

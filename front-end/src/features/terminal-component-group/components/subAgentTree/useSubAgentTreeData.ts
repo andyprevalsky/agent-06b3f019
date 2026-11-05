@@ -1,12 +1,6 @@
 import { useMemo, useCallback } from 'react';
 import { useAgentTree, filterTreeBySpawn, indexTreeChildren, type TreeNode } from '../../hooks';
-import {
-  getLeafNodes,
-  getIntermediaryNodes,
-  getTreeDepth,
-  extractEmoji,
-  makePendingNode,
-} from '../subAgentTree.helpers';
+import { summarizeTree, extractEmoji, makePendingNode } from '../subAgentTree.helpers';
 
 const GOAL_MAX_CHARS = 80;
 const NO_CHILDREN: TreeNode[] = [];
@@ -39,24 +33,10 @@ export function useSubAgentTreeData(busId: string, subAgentIds: string[]) {
     [relevantNodes, subAgentIds],
   );
 
-  const maxDepth = useMemo(() => {
-    if (rootNodes.length === 0) return 0;
-    return Math.max(...rootNodes.map((node) => getTreeDepth(node, getChildren)));
-  }, [rootNodes, getChildren]);
-
-  const { leafNodes, intermediaryNodes } = useMemo(() => {
-    const leaves: TreeNode[] = [];
-    const intermediaries: TreeNode[] = [];
-    for (const root of rootNodes) {
-      leaves.push(...getLeafNodes(root, getChildren));
-      const rootChildren = getChildren(root.agentId);
-      if (rootChildren.length > 0) {
-        intermediaries.push(root);
-      }
-      intermediaries.push(...getIntermediaryNodes(root, getChildren));
-    }
-    return { leafNodes: leaves, intermediaryNodes: intermediaries };
-  }, [rootNodes, getChildren]);
+  const { leafNodes, intermediaryNodes, maxDepth } = useMemo(
+    () => summarizeTree(rootNodes, getChildren),
+    [rootNodes, getChildren],
+  );
 
   const goalsList = useMemo(
     () =>

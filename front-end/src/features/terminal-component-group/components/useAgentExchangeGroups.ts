@@ -9,19 +9,23 @@ export function useAgentExchangeGroups(
   animatingId: string | null,
   onComplete: () => void,
   includeCodeOnly = false,
+  suppliedGroups?: ReturnType<typeof groupAgentExchanges>,
 ) {
   const groups = useMemo(
-    () => groupAgentExchanges(enabled ? messages : [], includeCodeOnly),
-    [enabled, messages, includeCodeOnly],
+    () =>
+      enabled && suppliedGroups
+        ? suppliedGroups
+        : groupAgentExchanges(enabled ? messages : [], includeCodeOnly),
+    [enabled, messages, includeCodeOnly, suppliedGroups],
   );
   const [now, setNow] = useState(Date.now);
   const completed = useRef<string | null>(null);
   useEffect(() => {
-    if (!enabled || !groups.groupsByLeadId.size) return;
+    if (!enabled || suppliedGroups || !groups.groupsByLeadId.size) return;
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), 10000);
     return () => clearInterval(timer);
-  }, [enabled, groups.groupsByLeadId.size]);
+  }, [enabled, suppliedGroups, groups.groupsByLeadId.size]);
   useEffect(() => {
     if (!animatingId || !groups.foldedIds.has(animatingId)) {
       completed.current = null;

@@ -50,8 +50,14 @@ const GOAL = process.env.CLAUDE_CODE_GOAL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CLAUDE_CODE_CREDENTIALS = process.env.CLAUDE_CODE_CREDENTIALS;
 const CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-const CLAUDE_CODE_FAST_MODE = process.env.CLAUDE_CODE_FAST_MODE === "1";
-const CLAUDE_CODE_MODEL = process.env.CLAUDE_CODE_MODEL || "claude-sonnet-5";
+// Provider fast mode is the spawning agent's speed request (CLAUDE_CODE_SPEED);
+// CLAUDE_CODE_FAST_MODE=1 is the legacy spelling. Never a cache switch.
+const CLAUDE_CODE_FAST_MODE =
+  (process.env.CLAUDE_CODE_SPEED ||
+    (process.env.CLAUDE_CODE_FAST_MODE === "1" ? "fast" : "")) === "fast";
+// The backend sets CLAUDE_CODE_MODEL from the parent's tier; this fallback is the
+// flash row of back-end/src/providers/codeAgentModels.ts (codex-code-model.case.ts).
+const CLAUDE_CODE_MODEL = process.env.CLAUDE_CODE_MODEL || "claude-opus-5-5";
 const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || "";
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -798,6 +804,16 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "assistant") {
+    if (typeof message.error === "string" && message.error) {
+      // The SDK's structured API-error kind (billing_error = out of credits,
+      // authentication_failed, rate_limit, ...): the activity acts on this
+      // field, never on the printed banner text (C15).
+      appendEvent({
+        type: "cli_message",
+        raw_type: "assistant.api_error",
+        cli_message: { type: "assistant_api_error", error: message.error },
+      });
+    }
     const content = message.message?.content || [];
     const messageId = message.message?.id || streamMessageId || randomUUID();
     for (const [partIndex, part] of content.entries()) {
@@ -1087,8 +1103,12 @@ function settleControl(message) {
   return true;
 }
 function nativeModelOption(models, model) {
+  // An alias entry ("opus") names the full model it serves in resolvedModel;
+  // prefer it over "default", which can resolve to the same model.
   return (
     models.find((m) => m.value === model) ||
+    models.find((m) => m.value !== "default" && m.resolvedModel === model) ||
+    models.find((m) => m.resolvedModel === model) ||
     models.find(
       (m) =>
         ["sonnet", "opus", "haiku"].includes(m.value) &&
@@ -1101,22 +1121,18 @@ function nativeDefaultSettings(models, model, env) {
   const effort =
     env.CLAUDE_CODE_EFFORT ||
     (option?.supportedEffortLevels?.includes("medium") ? "medium" : null);
-  // The native speed selection is independent of the opt-in cache proxy.
-  const speed =
+  // The spawning agent's request (CLAUDE_CODE_SPEED, from its Fast Mode
+  // button); never fast by default. Fast only where the catalog offers it.
+  const requested =
     env.CLAUDE_CODE_SPEED ||
-    (env.CLAUDE_CODE_FAST_MODE
-      ? env.CLAUDE_CODE_FAST_MODE === "1"
-        ? "fast"
-        : "standard"
-      : option?.supportsFastMode
-        ? "fast"
-        : "standard");
+    (env.CLAUDE_CODE_FAST_MODE === "1" ? "fast" : "standard");
   if (
-    !["standard", "fast"].includes(speed) ||
-    (speed === "fast" && !option?.supportsFastMode) ||
+    !["standard", "fast"].includes(requested) ||
     (effort && !option?.supportedEffortLevels?.includes(effort))
   )
     throw new Error("unsupported_settings");
+  const speed =
+    requested === "fast" && option?.supportsFastMode ? "fast" : "standard";
   return { ...(effort ? { effort } : {}), speed };
 }
 async function initializeNativeSettings() {

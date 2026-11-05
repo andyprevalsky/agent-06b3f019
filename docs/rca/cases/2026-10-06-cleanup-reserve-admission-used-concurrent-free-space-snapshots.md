@@ -283,3 +283,123 @@ for this operational correction. Archive searches used the literal
 is related capacity context, not the diagnosed mechanism of this refusal.
 
 No additional human feedback was recorded for this operational incident.
+
+
+## November 4 PR1662: multi-workstream fake provider inherited the host disk ledger
+
+Frozen8c63501f0afa0e3f4c5aafd3e29e01a119eb5f2a, round43 native
+multi-workstream failed scenario1 for both ws-a and ws-b with
+`cleanup reserve admission failed: [Errno 28] insufficient physical cleanup
+floors for pending controllers`. Neither reached the expected measured
+new-Machine refusal. The original result remains failed/UNVERIFIED; its
+supervisor adopted children and recorded quiescence with every child reaped.
+
+Two bounded archive searches used the exact insufficient-physical-floors
+message/private disk ledger fixture and cleanup-reserve fixture/device ledger.
+They lead to this owning case, including its earlier physical-allocation
+fixture namespace repair. That correction held for its callers but missed the
+multi-workstream fake provider. The latter pinned private TMPDIR for script
+snapshots while production reserve accounting deliberately selected
+`/tmp/rose-cloudbench-cleanup-admission-UID/<parent.st_dev>` and actual df.
+It therefore consulted the same physical device ledger as unrelated host
+controllers. The saved device65024 ledger has14 standalone groups with256MiB
+headroom each, zero inflight entries, and a modification time before both
+08:50 native fixture refusals. A later2879MiB free-space observation is not the
+original atomic df result. No contamination by stress200 is inferred: its
+storage transport already uses an independent virtual device.
+
+The permanent existing volume-contract owner now exercises the actual
+run_controller environment stanza and unchanged native reserve function using
+one controlled foreign live reserve on a500MiB simulated host. On the original
+launcher the identical command fails with the same native ENOSPC. The candidate
+passes: all fake workstreams share one finite18000MiB private disk/ledger
+namespace with sparse files, and the foreign native ledger bytes remain exact.
+A deliberately insufficient200MiB private disk still triggers the original
+native256MiB floor refusal. No guard is replaced by a successful stub. The
+complete existing fake-volume-contract owner also passes, retaining every
+original main statement/assertion and its malformed-provider-volume negatives.
+This low-load control starts no provider, task, fleet or200-owner stress run.
+
+The fixture-only repair supplies scoped lstat/fstat/posix_fallocate and df
+transport at the fake-provider launcher. Allocation accounting subtracts live
+private reserve bytes under a fixture-owned lock. Actual native allocator,
+cohort/debit/floor, process-birth and identity checks remain unchanged. After
+its own fixture processes are absent, cleanup retires only its exact synthetic
+namespace. Production run-bench-fleet is byte-identical; no real host ledger,
+physical cleanup reserve blocks, timeout, test assertion or concurrency changes.
+Independent review of full patch
+ecb08595703b3276e193e6b5cba8d1857077d7f59723f32a539364ef5a80c118 is CLEAR.
+
+Exact commands, from the candidate source root, are:
+
+```bash
+python3 scripts/tests/cloudbench-fake-volume-contract.test.py --assert-private-cleanup-storage
+python3 scripts/tests/cloudbench-fake-volume-contract.test.py
+```
+
+The first is the identical causal RED/GREEN invocation. The second is the
+existing low-load owning command, invoked by the ordinary multi-workstream
+fixture; default main now includes this regression. Private candidate root is
+`/var/tmp/pr1662-8c635-controller-rca/candidate`; source preimages and full patch
+bindings are in `multi-report.json` beside it. This is causal fixture proof,
+not an unchanged full multi-workstream/controller PASS. Parent owns source
+integration and the actual full validation.
+
+Two separate original failures remain UNKNOWN: selected-pytest's live uncaptured
+root test took11.711610210011713s against its8s elapsed assertion, and structural
+stress200's sealed driver exceeded120s. The former's only surviving input is
+child.pid; no helper/parse/startup/kill-wait phase timing or stdout/stderr was
+captured. Its12s outer,5s helper,20s sleep and8s assertion stay unchanged.
+The latter retains only an empty storage.lock after its timeout and directory
+removal race; it has its separate open evidence-loss case. Neither unknown
+failure is attributed to this disk fixture or relabeled by these passing
+controls. All original outcomes, source bindings and cleanup obligations remain.
+
+
+## November 4 PR1662: seed inventory fixture shared the host cleanup ledger
+
+Round49 on `0af9bc091328f30cd505fea9c132ba48f7d9c7da` failed
+`test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller`
+at the expected single GET: the recorded call list was empty. The rescued
+original summary records `cleanup_ticket_failure=prepare`, an aborted cohort,
+zero admitted children and no seed-preflight output or prepared budget. Native
+FAIL/UNVERIFIED and the original orphan/cleanup facts remain unchanged.
+
+The fixture already reduced its own policy to1MiB preferred/minimum and zero
+headroom, but still keyed native ticket admission by the real host device.
+The host's separate legacy ledger contained14 groups and3758096384 bytes of
+liability. Its immutable-state hash was `d91711e0...`; a later3146440704-byte
+free-space observation was not the original round49 `df`. The original exact
+prepare error/free-space input remains unavailable, so that historical capacity
+cause stays UNKNOWN. No old ledger entry was removed or reclassified.
+
+The unchanged owning function reproduced the same prepare/zero-GET assertion
+failure in1.833s. Isolating only this fake workspace's directory device in its
+native Python transport made the same function and assertions pass in2.694s:
+one complete loopback GET ran, then the intentionally failed atomic proof
+publication still returned native campaign exit1 with no admitted child. This
+is fixture-boundary proof, not a campaign/task PASS or a production allocator
+repair. The shared host ledger remained byte-identical in these observations.
+
+The one-file candidate scopes `Path.lstat` and `Path.stat` directory identities
+only below this fixture workspace, using an unpredictable invocation-specific
+namespace. File identities, real native `df`, physical allocation,1/1/0 policy,
+30-second subprocess ceiling and all101 existing test function ASTs are
+unchanged. Native campaign, seed and cleanup-ticket helpers are byte-identical.
+The earlier private-device fixes covered reserve/multi-workstream fixtures;
+this separate seed fixture had not adopted that isolation.
+
+A registered same-command control fails with only the isolation call absent
+(2.957s), then passes restored (4.545s). It preserves a self-owned foreign
+ledger byte-for-byte while the original GET/publication assertions pass. The
+same finite debt inside the fixture's own private ledger still causes native
+prepare refusal, zero GETs and zero admitted children. Its pressure derives
+from real device capacity; neither `df` nor native floor checks are replaced.
+It does not assert an unrelated live host ledger stays immutable while
+legitimate sibling producers run.
+
+Exact patch `1f609135...`, logs, source bindings and report `3ac28eaf...` are
+retained under `/var/tmp/pr1662-49-seed-ledger-isolation`. No live provider,
+production accounting cleanup, canonical state/source edit or full structural
+sweep was performed by this reduction. The parent-owned combined-source full
+gate is still required; prior round48 stop timing remains a separate UNKNOWN.

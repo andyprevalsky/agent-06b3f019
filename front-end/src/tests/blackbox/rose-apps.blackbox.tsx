@@ -460,7 +460,7 @@ describe('Browser drawer', () => {
     },
   );
 
-  it('has browser chrome: Back / Forward dimmed, Reload remounts the live view, address bar shows the page', async () => {
+  it('has browser chrome: Back / Forward enabled for a live task, Reload remounts the live view, address bar shows the page', async () => {
     const user = userEvent.setup();
     const navigated: Message = {
       ...ACTION,
@@ -498,8 +498,8 @@ describe('Browser drawer', () => {
     expect(row).toContainElement(within(drawer).getByRole('tablist', { name: 'Browser tabs' }));
     expect(row).toContainElement(within(drawer).getByLabelText('Browser proxy location'));
     expect(within(drawer).queryByTestId('browser-drawer-live')).toBeNull();
-    expect(within(chrome).getByRole('button', { name: 'Back' })).toBeDisabled();
-    expect(within(chrome).getByRole('button', { name: 'Forward' })).toBeDisabled();
+    expect(within(chrome).getByRole('button', { name: 'Back' })).toBeEnabled();
+    expect(within(chrome).getByRole('button', { name: 'Forward' })).toBeEnabled();
     const address = within(chrome).getByTestId('browser-address-bar');
     expect(address.className).toContain('rounded-full');
     expect(within(address).getByText('www.palisadestahoe.com').tagName).toBe('B');

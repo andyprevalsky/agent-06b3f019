@@ -275,12 +275,17 @@ def plan_gates(
 
 
 GATES = (
+    Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py")),
+    Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py")),
+    Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
+    Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
         "cloudbench-controller-linux",
         ("python3", "scripts/tests/cloudbench-controller-linux.test.py"),
     ),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
+    Gate("rose-startup-script", ("bash", "scripts/tests/rose-startup-script.test.sh")),
     Gate("temporal-namespace-isolation", ("python3", "scripts/tests/temporal-namespace-isolation.test.py")),
     Gate("kill-services", ("bash", "scripts/tests/kill-services.test.sh"), expected_seconds=55),
     Gate(
@@ -386,6 +391,7 @@ GATES = (
         ("bash", "scripts/tests/agent-surface-hash.test.sh"),
     ),
     Gate("factory-metadata", ("python3", "scripts/tests/factory-metadata.test.py")),
+    Gate("predeploy-receipts", ("python3", "scripts/tests/predeploy-receipts.test.py")),
     Gate("final-review-script-regressions", ("python3", "scripts/tests/final-review-script-regressions.test.py")),
     Gate("factory-review", ("python3", "scripts/tests/factory-review.test.py")),
     Gate("biz-review", ("python3", "scripts/biz_review.py", "self-test")),

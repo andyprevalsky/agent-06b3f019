@@ -39,9 +39,15 @@ REVIEW_BOT = "coderabbitai[bot]"
 # CodeRabbit wraps its replies to review-thread comments in empty-body
 # COMMENTED reviews on the same HEAD (PR 1656: reviews 5722158877/5722158908
 # carried its "The supplied code addresses this finding" replies). Only a body
-# with a verdict is a review; a review-by-HEAD count is not.
+# with a verdict is a legacy review; native publication bodies instead need
+# review-bound findings and a completed check. A review-by-HEAD count is not proof.
 SUBSTANTIVE_REVIEW = re.compile(
     r"actionable comments posted|lgtm|no actionable|approved|reviewed", re.IGNORECASE
+)
+PUBLICATION_REVIEW = re.compile(
+    r"<!-- coderabbit-review-publication v1 "
+    r"publication=(?P<publication>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) "
+    r"attempt=(?P<attempt>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) batch=1/1 -->"
 )
 FINDINGS_COUNT = re.compile(r"actionable comments posted:\s*(\d+)", re.IGNORECASE)
 # Only these words prove usage exhaustion; "Review rate limited" / "Action not
@@ -134,7 +140,8 @@ def next_cycle(entries: list[object]) -> dict[str, object]:
 
 
 def start_cycle(
-    path: Path, *, head: str, kind: str, reset: bool = False
+    path: Path, *, head: str, kind: str, reset: bool = False,
+    verification_approval: str | None = None,
 ) -> dict[str, object]:
     if not head:
         raise ReviewCycleError("review HEAD must not be empty")
@@ -161,9 +168,19 @@ def start_cycle(
         raise ReviewCycleError(
             f"review cycle {cycle_number} must be {expected['kind']}, not {kind}{hint}"
         )
+    previous = budget_cycles(entries)[-1] if cycle_number == 3 else None
+    if verification_approval is not None:
+        if (
+            cycle_number != 3
+            or previous.get("result") != "clean"
+            or not verification_approval
+            or len(verification_approval) > 128
+            or any(not (c.isalnum() or c in "-_.:") for c in verification_approval)
+        ):
+            raise ReviewCycleError("verification approval needs cycle three after clean cycle two and an approval ID")
     if cycle_number == 3:
-        previous = budget_cycles(entries)[-1]
-        if previous.get("result") != "findings":
+        assert previous is not None
+        if previous.get("result") != "findings" and verification_approval is None:
             raise ReviewCycleError(
                 "verification review is allowed only after cycle two found a valid issue"
             )
@@ -174,6 +191,8 @@ def start_cycle(
         "status": "open",
         "started_at": now(),
     }
+    if verification_approval is not None:
+        cycle["verification_approval"] = verification_approval
     if expected["replaces"]:
         cycle["replaces"] = expected["replaces"]
     entries.append(cycle)
@@ -383,6 +402,21 @@ def _gh_pages(endpoint: str) -> list[object]:
     return items
 
 
+def _gh_check_runs(slug: str, head: str) -> list[object]:
+    """Preserve prior attempts; never accept a silently truncated check inventory."""
+    runs: list[object] = []
+    for page in range(1, GH_MAX_PAGES + 1):
+        payload = _gh_json(["api", f"repos/{slug}/commits/{head}/check-runs"
+                            f"?filter=all&per_page={GH_PAGE_SIZE}&page={page}"])
+        batch = payload.get("check_runs") if isinstance(payload, dict) else None
+        if not isinstance(batch, list):
+            raise ReviewCycleError("check-runs returned an unexpected payload")
+        runs.extend(batch)
+        if len(batch) < GH_PAGE_SIZE:
+            return runs
+    raise ReviewCycleError("check-runs pagination exceeded the existing page bound")
+
+
 def fetch_evidence(*, pr: str, head: str, repo: str | None) -> dict[str, object]:
     """Capture the three CodeRabbit endpoints plus the check runs for HEAD via gh."""
     slug = repo
@@ -391,7 +425,7 @@ def fetch_evidence(*, pr: str, head: str, repo: str | None) -> dict[str, object]
         slug = str(payload.get("nameWithOwner") or "") if isinstance(payload, dict) else ""
         if not slug:
             raise ReviewCycleError("could not resolve OWNER/REPO; pass --repo")
-    check_runs = _gh_json(["api", f"repos/{slug}/commits/{head}/check-runs?per_page={GH_PAGE_SIZE}"])
+    check_runs = _gh_check_runs(slug, head)
     return normalize_evidence(
         {
             "issue_comments": _gh_pages(f"repos/{slug}/issues/{pr}/comments"),
@@ -438,9 +472,64 @@ def coderabbit_reviews(reviews: list[dict[str, object]], head: str) -> list[dict
     return [review for review in reviews if _is_bot(review) and review.get("commit_id") == head]
 
 
-def substantive_reviews(reviews: list[dict[str, object]], head: str) -> list[dict[str, object]]:
-    """CodeRabbit reviews of HEAD with a verdict body; reply wrappers are not reviews."""
-    return [review for review in coderabbit_reviews(reviews, head) if SUBSTANTIVE_REVIEW.search(_body(review))]
+def _publication_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def publication_evidence(
+    review: dict[str, object], head: str, evidence: dict[str, object]
+) -> dict[str, object] | None:
+    """A native publication needs its own finding and a finished exact-HEAD check."""
+    markers = list(PUBLICATION_REVIEW.finditer(_body(review)))
+    review_id = review.get("id")
+    if (len(markers) != 1 or type(review_id) is not int or review_id <= 0
+            or not _is_bot(review) or review.get("commit_id") != head
+            or review.get("state") not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}):
+        return None
+    comments, check_runs = evidence["review_comments"], evidence["check_runs"]
+    assert isinstance(comments, list) and isinstance(check_runs, list)
+    findings = [comment for comment in comments
+                if _is_bot(comment) and comment.get("in_reply_to_id") is None
+                and comment.get("pull_request_review_id") == review_id
+                and comment.get("original_commit_id", comment.get("commit_id")) == head
+                and type(comment.get("id")) is int and comment["id"] > 0
+                and _body(comment).strip()]
+    published = _publication_time(review.get("submitted_at"))
+    check = None
+    # Later usage-exhausted attempts cannot erase an already completed publication.
+    # The marker UUID is not a native check-run ID; bind its submission to the run interval.
+    for run in reversed(coderabbit_check_runs(check_runs, head)):
+        started, completed = (_publication_time(run.get(key)) for key in ("started_at", "completed_at"))
+        if (run.get("head_sha") == head and run.get("status") == "completed"
+                and run.get("conclusion") == "success" and _check_title(run) == "Finished"
+                and published is not None and started is not None and completed is not None
+                and started <= published <= completed):
+            check = run
+            break
+    if not findings or check is None:
+        return None
+    return {
+        "recognition": "publication-with-review-bound-findings",
+        **markers[0].groupdict(), "batch": "1/1",
+        "inline_finding_ids": sorted({comment["id"] for comment in findings}),
+        "check_run_id": check.get("id"),
+        "review_body_sha256": hashlib.sha256(_body(review).encode()).hexdigest(),
+    }
+
+
+def substantive_reviews(
+    reviews: list[dict[str, object]], head: str, evidence: dict[str, object] | None = None
+) -> list[dict[str, object]]:
+    """Verdict bodies or evidenced native publications; reply wrappers are not reviews."""
+    return [review for review in coderabbit_reviews(reviews, head)
+            if SUBSTANTIVE_REVIEW.search(_body(review))
+            or (evidence is not None and publication_evidence(review, head, evidence))]
 
 
 def review_findings(review: dict[str, object]) -> int | None:
@@ -557,7 +646,7 @@ def skip_cycle(
     cycle = _open_cycle(state, head)
     reviews = evidence["reviews"]
     assert isinstance(reviews, list)
-    substantive = substantive_reviews(reviews, head)
+    substantive = substantive_reviews(reviews, head, evidence)
     if substantive:
         summary = ", ".join(
             f"{review.get('id')} ({review_findings(review) if review_findings(review) is not None else 'verdict'})"
@@ -654,7 +743,10 @@ def override_cycle(
     entries = state["cycles"]
     assert isinstance(entries, list)
     # Only cycles that delivered a review count: an `unavailable` cycle consumed no review budget.
-    rounds = len(budget_cycles(entries)) + prior_rounds
+    rounds = sum(
+        cycle.get("disposition") != "skipped" and not cycle.get("skip_reason")
+        for cycle in budget_cycles(entries)
+    ) + prior_rounds
     if rounds < MIN_OVERRIDE_ROUNDS:
         raise ReviewCycleError(
             f"override is pre-authorized only after {MIN_OVERRIDE_ROUNDS} review rounds; "
@@ -662,7 +754,7 @@ def override_cycle(
         )
     reviews = evidence["reviews"]
     assert isinstance(reviews, list)
-    substantive = substantive_reviews(reviews, head)
+    substantive = substantive_reviews(reviews, head, evidence)
     if not substantive:
         raise ReviewCycleError(
             f"no substantive CodeRabbit review on {head[:12]} to override "
@@ -727,6 +819,9 @@ def override_cycle(
             "findings": recorded,
         },
     }
+    publication = publication_evidence(review, head, evidence)
+    if publication is not None and not SUBSTANTIVE_REVIEW.search(_body(review)):
+        fields["evidence"]["review_publication"] = publication
     return _close_with_disposition(
         path, receipts_path, state, cycle, pr=pr, disposition="overridden", report_row=report_row, fields=fields
     )
@@ -740,6 +835,7 @@ def parse_args() -> argparse.Namespace:
     start.add_argument("--head", required=True)
     start.add_argument("--kind", choices=sorted(KINDS), required=True)
     start.add_argument("--reset", action="store_true")
+    start.add_argument("--verification-approval", help="Explicit user approval ID for final verification after a clean second cycle")
 
     finish = subparsers.add_parser("finish")
     finish.add_argument("--head", required=True)
@@ -784,7 +880,8 @@ def main() -> int:
     try:
         if args.command == "start":
             payload = start_cycle(
-                args.state, head=args.head, kind=args.kind, reset=args.reset
+                args.state, head=args.head, kind=args.kind, reset=args.reset,
+                verification_approval=args.verification_approval,
             )
         elif args.command == "finish":
             payload = finish_cycle(args.state, head=args.head, result=args.result)

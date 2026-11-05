@@ -659,10 +659,7 @@ cloudbench_validate_browser_provider_contract() {
     echo "FATAL: production worker BROWSER_PROVIDER is invalid: ${prod_worker:-<unset>}" >&2
     return 1
   esac
-  if [ "$prod_backend" != "$prod_worker" ]; then
-    echo "FATAL: production browser provider drift: backend=$prod_backend worker=$prod_worker" >&2
-    return 1
-  fi
+  # Backend session selection and worker fallback are separate production surfaces.
   if [ "$backend_provider" != "$prod_backend" ]; then
     echo "FATAL: benchmark backend env does not match production: local=${backend_provider:-<unset>} prod=$prod_backend" >&2
     return 1

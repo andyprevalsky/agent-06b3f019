@@ -26,6 +26,7 @@
  *   |
  *   v (prefers-reduced-motion: reduce)
  * [HIDDEN] --> CSS hides animated pills
+ * Mobile canvas: document hidden -> cancel frame; visible -> resume at current time.
  *
  * System context:
  * BackgroundTiles / BackgroundPattern provide the grid pattern.
@@ -333,19 +334,26 @@ export function MobileGridEnergyPillsCanvas({
     };
 
     const draw = (now: number) => {
+      if (document.hidden) return;
       paint(now);
       animationFrame = window.requestAnimationFrame(draw);
+    };
+    const resume = () => {
+      window.cancelAnimationFrame(animationFrame);
+      if (!document.hidden) animationFrame = window.requestAnimationFrame(draw);
     };
 
     resize();
     window.addEventListener('resize', resize);
+    document.addEventListener('visibilitychange', resume);
     paintRef.current = paint;
-    animationFrame = window.requestAnimationFrame(draw);
+    resume();
 
     return () => {
       paintRef.current = null;
       window.cancelAnimationFrame(animationFrame);
       window.removeEventListener('resize', resize);
+      document.removeEventListener('visibilitychange', resume);
     };
   }, []);
 

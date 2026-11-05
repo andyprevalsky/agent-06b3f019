@@ -6,6 +6,7 @@ import {
   createMintedInbox,
   isPrimitiveConfigured,
   primitiveDomain,
+  sendPrimitiveEmail,
 } from '../../providers/primitive';
 
 type TestFn = () => Promise<void>;
@@ -276,6 +277,69 @@ test(
     }
   )
 );
+
+test('sendPrimitiveEmail logs only the captured request origin on 502 and tolerates invalid metadata', async () => {
+  for (const baseUrl of [
+    'https://fake-user:fake-password@relay.primitive.test:8443/private-path?key=fake-query#fake-fragment',
+    'not-a-valid-url',
+  ]) {
+    let calls = 0;
+    let captured = '';
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      captured += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await withPrimitiveEnv(
+        { apiKey: 'fake-api-key', baseUrl },
+        (async (input: RequestInfo | URL, init?: RequestInit) => {
+          calls++;
+          assert(String(input) === `${baseUrl}/send-mail`, 'request URL must remain unchanged');
+          assert(init?.method === 'POST', 'request method must remain unchanged');
+          assert(JSON.parse(String(init?.body)).to === TARGET, 'recipient must remain unchanged');
+          // A later environment change must not rewrite the request provenance.
+          process.env.PRIMITIVE_BASE_URL = 'https://changed-after-fetch.test';
+          return fakeResponse({ status: 502 });
+        }) as typeof fetch,
+        async () => {
+          assert(
+            (await sendPrimitiveEmail({
+              from: 'sender@mail.roselabs.test',
+              to: TARGET,
+              subject: 'Private fixture',
+              bodyText: 'Private fixture',
+            })) === false,
+            '502 must retain the false result even if URL metadata cannot be parsed'
+          );
+        }
+      )();
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    assert(calls === 1, 'failure logging must not retry the request');
+    assert(captured.includes('Primitive send failed'), 'original failure log must remain');
+    assert(!captured.includes('Primitive send threw'), 'metadata must not replace the failure');
+    if (baseUrl.startsWith('https:')) {
+      assert(
+        captured.includes('https://relay.primitive.test:8443'),
+        'failure must identify the captured request origin'
+      );
+    }
+    for (const secret of [
+      'fake-user',
+      'fake-password',
+      'private-path',
+      'fake-query',
+      'fake-fragment',
+      'fake-api-key',
+      'changed-after-fetch.test',
+      'not-a-valid-url',
+    ]) {
+      assert(!captured.includes(secret), `failure metadata must omit ${secret}`);
+    }
+  }
+});
 
 async function main() {
   const results: Array<{ name: string; passed: boolean; error?: string }> = [];

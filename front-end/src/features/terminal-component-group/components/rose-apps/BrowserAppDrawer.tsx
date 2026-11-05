@@ -20,6 +20,7 @@ import { addressParts } from './browserPageUrl';
 import { RootBrowserPane } from './RootBrowserPane';
 import { useRoseApps, type AgentBrowserTab, type RoseAppsValue } from './roseAppsState';
 import { useRootBrowserActions, useRootBrowserState } from './useBrowserWorld';
+import { useBrowserNavigation } from './useBrowserNavigation';
 
 const MUTED = 'text-[hsl(240_8%_45%)] dark:text-[#a3a39d]';
 
@@ -242,21 +243,37 @@ function BrowserChrome({
   isRoot: boolean;
 }) {
   // Reads the cached Root state only (enabled false): never fetches by itself.
-  const rootOpen = (useRootBrowserState(false, apps.selectedAgentId).data?.root ?? null) !== null;
-  const canReload = !isRoot || rootOpen;
+  const root = useRootBrowserState(false, apps.selectedAgentId).data?.root ?? null;
+  const taskId = isRoot ? (root?.task_id ?? null) : (activeTab?.taskId ?? null);
+  const navigation = useBrowserNavigation(taskId, activeTab?.pageUrl ?? null);
+  const canNavigate =
+    !navigation.pending && (isRoot ? root !== null : activeTab?.live === true && !activeTab.ended);
   return (
     <div data-testid="browser-chrome" className="flex flex-none items-center gap-2 px-[18px] py-2">
       <span className="inline-flex flex-none gap-0.5">
-        <NavButton icon={ArrowLeft} label="Back" />
-        <NavButton icon={ArrowRight} label="Forward" />
+        <NavButton
+          icon={ArrowLeft}
+          label="Back"
+          onClick={canNavigate ? () => navigation.navigate('back') : undefined}
+        />
+        <NavButton
+          icon={ArrowRight}
+          label="Forward"
+          onClick={canNavigate ? () => navigation.navigate('forward') : undefined}
+        />
         <NavButton
           icon={RotateCw}
           label="Reload"
-          onClick={canReload ? apps.reloadBrowser : undefined}
+          onClick={!isRoot || root !== null ? apps.reloadBrowser : undefined}
         />
       </span>
+      {navigation.error && (
+        <span role="alert" className="text-xs text-destructive">
+          {navigation.error}
+        </span>
+      )}
       <AddressBar
-        url={activeTab?.pageUrl ?? null}
+        url={navigation.url ?? activeTab?.pageUrl ?? null}
         isRoot={isRoot}
         ended={activeTab?.ended === true}
       />

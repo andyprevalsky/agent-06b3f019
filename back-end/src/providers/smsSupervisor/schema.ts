@@ -105,7 +105,7 @@ const grepCallSchema = z
           'Optional source bucket. Omit to search messages and network. ' +
             'messages searches user communication records. network searches contact records. ' +
             'transactions searches synced Plaid transaction rows. documents searches synced ChatGPT/Claude ' +
-            'exports, Apple Notes, Obsidian vault notes, and generic user documents.'
+            'exports, Apple Notes, Obsidian vault notes, Granola meeting notes, and generic user documents.'
         ),
       '-B': z
         .number()
@@ -158,7 +158,18 @@ const grepCallSchema = z
           status: z.enum(['posted', 'pending', 'all']).nullable(),
           include_pending_in_totals: z.boolean().nullable(),
           person: z.string().nullable(),
-          document_source: z.enum(['chatgpt', 'claude', 'apple_notes', 'obsidian']).nullable(),
+          document_source: z
+            .enum([
+              'chatgpt',
+              'claude',
+              'apple_notes',
+              'obsidian',
+              'granola',
+              'granola_note',
+              'granola_summary',
+              'granola_transcript',
+            ])
+            .nullable(),
           path: z.string().nullable(),
           tag: z.string().nullable(),
         })
@@ -198,7 +209,7 @@ Usage:
 - Use nested \`filters\` for source-specific narrowing. For messages: \`person\` and \`since\`. Legacy top-level \`person\` and \`since\` still work for messages.
 - For transactions: \`filters.since\`, \`filters.until\`, \`filters.account\`, \`filters.min_amount\`, \`filters.max_amount\`, \`filters.status\` (\`posted\`, \`pending\`, or \`all\`), and \`filters.include_pending_in_totals\`.
 - Transaction results include row snippets plus full-result aggregate totals by currency. Pending rows are visible, but excluded from totals unless \`include_pending_in_totals\` is true.
-- Use \`source="documents"\` for synced ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic text documents. For documents: \`filters.document_source\` (\`chatgpt\`, \`claude\`, \`apple_notes\`, \`obsidian\`), \`filters.since\`, \`filters.until\`, \`filters.path\`, and \`filters.tag\`.
+- Use \`source="documents"\` for synced ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, Granola meeting notes, and generic text documents. For documents: \`filters.document_source\` (\`chatgpt\`, \`claude\`, \`apple_notes\`, \`obsidian\`, \`granola\` — or \`granola_note\`, \`granola_summary\`, \`granola_transcript\` for one layer), \`filters.since\`, \`filters.until\`, \`filters.path\`, and \`filters.tag\`.
 
 Returns:
 - matching records with full bodies, aligned per-record metadata, explicit pagination metadata, and oldest-first display for message conversations.`

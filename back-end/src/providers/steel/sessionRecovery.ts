@@ -20,6 +20,7 @@ import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 import { steelSessionTimeoutMs } from './sessionLifetime';
 import { newOwnedSteelSessionId, registerInFlightSteelSession } from './sessionIdentity';
 import { log } from './types';
+import { fingerprintInjectionEnabled } from './fingerprintSwitch';
 import { steelCdpUrl, steelDebugUrl } from './urls';
 
 interface SteelSessionResult {
@@ -37,7 +38,8 @@ export function buildSteelRecoveryBrowserOptions(input: {
   return {
     sessionId: newOwnedSteelSessionId(),
     persistProfile: false,
-    userAgent: input.userAgent,
+    // A carried user agent (the live page's) is a fingerprint override too.
+    userAgent: fingerprintInjectionEnabled() ? input.userAgent : undefined,
     useProxy: input.proxy,
     solveCaptcha: true,
     debugConfig: { systemCursor: false },
