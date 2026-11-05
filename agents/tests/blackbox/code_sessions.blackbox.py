@@ -1700,7 +1700,7 @@ async def test_unusable_login_with_nothing_else_stays_paused_with_the_reconnect_
         assert first["message"].endswith(
             _retry_line(
                 "no other credential can be leased right now, so a retry stays paused and starts nothing until "
-                "the login is re-synced or reconnected, or another account is connected."
+                "the credential is re-synced, reconnected or replaced, or another account is connected."
             )
         ), first["message"]
         assert len(backend.created) == 1, f"no agent may start without a credential: {backend.created}"
@@ -1776,7 +1776,7 @@ async def test_expired_claude_token_pauses_and_the_retry_resumes_on_a_fresh_leas
             {"source": "initial", "reason": "authentication_failed", "credential": _STUB_OAUTH_FINGERPRINT}
         ], backend.credential_feedback
         assert first["message"].startswith(
-            "Code agent stopped: the Claude Code login was rejected (its access token expired or was revoked). "
+            "Code agent stopped: the Claude Code credential was rejected by the provider (authentication failed). "
             "Its work is saved on branch rose/write-answer-0a1b2c3d (checkpoint 1); the sandbox is paused, not killed."
         ), first["message"]
         assert _STUB_OAUTH_TOKEN not in json.dumps(first), "the token never reaches the parent"

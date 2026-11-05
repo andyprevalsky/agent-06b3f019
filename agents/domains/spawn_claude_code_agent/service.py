@@ -880,7 +880,6 @@ async def _run_agentic_loop(
     last_filtered_output = ""
     unchanged_output_count = 0
     last_stdin_send_time: float = 0.0
-    interaction_count = 0
     total_input_tokens = 0
     total_output_tokens = 0
     code_events = code_events if code_events is not None else []
@@ -1112,7 +1111,9 @@ async def _run_agentic_loop(
 
     loop_start = loop_started_at if loop_started_at is not None else safe_time()
     last_status_update = safe_time()
-    last_status_progress: tuple[int, Optional[int]] = (0, 0 if code_provider == "codex" else None)
+    # Codex reports completed turns; Claude runs have no progress counter, so they
+    # write no status rows (their transcript batches carry liveness).
+    last_status_progress: Optional[int] = 0 if code_provider == "codex" else None
     last_drain_check = 0.0
     last_keepalive = safe_time()
 
@@ -1277,18 +1278,18 @@ async def _run_agentic_loop(
             # A status row only when the reported progress changed: elapsed time
             # is derivable from started_at, and a row per interval grows the
             # tool call's lifecycle rows (and their per-write scan) with run time.
-            progress = (interaction_count, completed_codex_turns if code_provider == "codex" else None)
+            progress = completed_codex_turns if code_provider == "codex" else None
             if progress != last_status_progress and safe_time() - last_status_update >= 30:
                 await save_claude_code_message(
                     agent_id=agent_id,
                     title="Claude Code working",
                     task_id=task_id,
-                    message=f"Interactions: {interaction_count}",
+                    message=f"Completed turns: {progress}",
                     status=MessageStatus.FINISHED,
                     action_type="agent_observation",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
-                    completed_turns=progress[1],
+                    completed_turns=progress,
                 )
                 last_status_progress = progress
                 last_status_update = safe_time()
@@ -1319,9 +1320,8 @@ async def _run_agentic_loop(
         task_id=task_id,
         exit_code=exit_code,
         attempt_completion=attempt_completion,
-        interactions=interaction_count,
     )
-    action_summary.append(f"Agentic loop finished: {interaction_count} interactions")
+    action_summary.append("Agentic loop finished")
 
     return (
         exit_code if exit_code is not None else -1,
@@ -2861,10 +2861,17 @@ def format_usage_limit_message(
         saved += f" on branch {facts['branch']}"
     if facts.get("checkpoint_seq"):
         saved += f" (checkpoint {facts['checkpoint_seq']})"
-    if unusable:
+    if unusable and code_provider == "codex":
         stopped = (
             f"the {_provider_label(code_provider)} login{on_account} was rejected "
             "(its access token expired or was revoked)"
+        )
+    elif unusable:
+        # Claude Code's authentication_failed is any 401/403: an expired or revoked
+        # login, or an invalid or disallowed API key.
+        stopped = (
+            f"the {_provider_label(code_provider)} credential{on_account} was rejected by the provider "
+            "(authentication failed)"
         )
     elif limit_type == "billing":
         stopped = (
@@ -2879,7 +2886,7 @@ def format_usage_limit_message(
     if unusable and not (isinstance(next_lease, dict) and next_lease.get("provider")):
         clause = (
             "no other credential can be leased right now, so a retry stays paused and starts nothing "
-            "until the login is re-synced or reconnected, or another account is connected."
+            "until the credential is re-synced, reconnected or replaced, or another account is connected."
         )
     else:
         clause = _respawn_clause(next_lease, local=False, from_provider=code_provider)
@@ -2951,7 +2958,9 @@ def format_usage_limit_user_message(
     resets = f" (resets {reset})" if reset else ""
     saved = f"Work stays in {local_place}." if local_place else "Work is saved."
     if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE:
-        return f"Paused: the {provider} login was rejected (expired or revoked). {saved}"
+        if code_provider == "codex":
+            return f"Paused: the {provider} login was rejected (expired or revoked). {saved}"
+        return f"Paused: the {provider} credential was rejected (authentication failed). {saved}"
     return f"Paused: {provider} usage limit reached{resets}. {saved}"
 
 
@@ -3701,7 +3710,7 @@ async def spawn_claude_code_activity(
             await save_claude_code_message(
                 agent_id=agent_id,
                 title=(
-                    "Code agent login was rejected"
+                    "Code agent credential was rejected"
                     if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE
                     else "Code agent hit a usage limit"
                 ),
