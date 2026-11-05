@@ -14,3 +14,6 @@ export interface RecentInboundMessage {
   personId: string;
 }
 export type { ImessageQueue } from '@prisma/client';
+
+/** Known ownership/lifecycle conflicts; infrastructure failures keep their original error. */
+export class CloudMessageBindingConflictError extends Error {}

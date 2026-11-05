@@ -1,3 +1,4 @@
+import { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -21,7 +22,10 @@ export const messageQueueCases: Case[] = [
         });
         return {
           status: response.status,
-          data: (await response.json()) as Record<string, unknown>,
+          data:
+            response.headers.get('content-type')?.includes('application/json') === true
+              ? ((await response.json()) as Record<string, unknown>)
+              : {},
         };
       };
       const body = {
@@ -41,6 +45,19 @@ export const messageQueueCases: Case[] = [
           .status,
         409
       );
+      const failedTransaction = mock.method(prisma, '$transaction', async () => {
+        throw new Error('fixture database unavailable');
+      });
+      try {
+        assert.equal(
+          (await api(`/queue/${id}/phone-bind`, { user_id: f.userId, browser_task_id: f.taskId }))
+            .status,
+          500,
+          'Database infrastructure failure must not be reported as a task-binding conflict'
+        );
+      } finally {
+        failedTransaction.mock.restore();
+      }
       const bound = await api(`/queue/${id}/phone-bind`, {
         user_id: f.userId,
         browser_task_id: f.taskId,

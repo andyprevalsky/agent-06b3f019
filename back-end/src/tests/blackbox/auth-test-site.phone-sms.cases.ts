@@ -137,3 +137,134 @@ test('phone_sms_otp rejects missing or ineligible cloud phone configuration', as
     await cleanup(userId);
   }
 });
+
+test('phone_sms_otp failed replacement cannot authenticate and cannot revive an earlier challenge', async () => {
+  const userId = await createUser();
+  const saved = {
+    CLOUD_IPHONE_ENABLED: process.env.CLOUD_IPHONE_ENABLED,
+    SURGE_API_KEY: process.env.SURGE_API_KEY,
+    SURGE_ACCOUNT_ID: process.env.SURGE_ACCOUNT_ID,
+    BLACKBOX_TEST_FAKE_SURGE: process.env.BLACKBOX_TEST_FAKE_SURGE,
+  };
+  const originalFetch = globalThis.fetch;
+  try {
+    process.env.CLOUD_IPHONE_ENABLED = '1';
+    await prisma.user.update({
+      where: { userId },
+      data: { phone: '+19729777432', isAnonymous: false },
+    });
+    await prisma.iPhoneDevice.create({
+      data: { userId, providerDeviceId: `failed-sms-${userId}`, enabled: true },
+    });
+    await withLocalSite(async ({ base }) => {
+      const fixture = await createFixture(base, {
+        userId,
+        scenario: 'phone_sms_otp',
+        publicBaseUrl: base,
+      });
+      assert(fixture.status === 201, 'Configured fixture');
+      const manifest = await fixture.json();
+      process.env.SURGE_API_KEY = 'synthetic-sms-key';
+      process.env.SURGE_ACCOUNT_ID = 'synthetic-account';
+      process.env.BLACKBOX_TEST_FAKE_SURGE = '1';
+      const { markMessagingFetchFakesInstalled } = await import('../../providers/smsTransportMock');
+      markMessagingFetchFakesInstalled();
+      let rejectSend = false,
+        throwSend = false,
+        holdSend = false,
+        calls = 0;
+      let entered!: () => void, release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const resumed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      globalThis.fetch = async (input, init) => {
+        if (String(input).startsWith('https://api.surge.app/')) {
+          calls++;
+          if (holdSend) {
+            entered();
+            await resumed;
+          }
+          if (throwSend) throw new Error('synthetic transport failure');
+          return new Response(
+            JSON.stringify(rejectSend ? { error: 'fixture rejected' } : { id: 'synthetic-sms-id' }),
+            { status: rejectSend ? 503 : 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return originalFetch(input, init);
+      };
+      await postForm(base, pagePath(manifest, '/login/sms'), {});
+      const site = findSite(manifest.siteId)!;
+      const first = site.codes.at(-1)!;
+      assert(first.phoneChallenge?.deliveryAck === true, 'Initial send accepted by fake transport');
+      rejectSend = true;
+      await postForm(base, pagePath(manifest, '/login/sms'), {});
+      const failed = site.codes.at(-1)!;
+      assert(calls === 2, 'Both sends exercised actual provider boundary');
+      assert(failed.phoneChallenge?.deliveryAck === false, 'Failed send cannot claim acceptance');
+      assert(
+        (await postForm(base, pagePath(manifest, '/login/sms/verify'), { code: failed.code }))
+          .status !== 303,
+        'Failed replacement remained a valid code'
+      );
+      assert(
+        (await postForm(base, pagePath(manifest, '/login/sms/verify'), { code: first.code }))
+          .status !== 303,
+        'Failed resend revived stale prior code'
+      );
+      rejectSend = false;
+      throwSend = true;
+      await postForm(base, pagePath(manifest, '/login/sms'), {});
+      const thrown = site.codes.at(-1)!;
+      assert(
+        (await postForm(base, pagePath(manifest, '/login/sms/verify'), { code: thrown.code }))
+          .status !== 303,
+        'Thrown transport activated replacement'
+      );
+      throwSend = false;
+      holdSend = true;
+      const delayed = postForm(base, pagePath(manifest, '/login/sms'), {});
+      await held;
+      const pending = site.codes.at(-1)!;
+      try {
+        assert(
+          (await postForm(base, pagePath(manifest, '/login/sms/verify'), { code: pending.code }))
+            .status !== 303,
+          'Pending unacknowledged code authenticated'
+        );
+        holdSend = false;
+        await postForm(base, pagePath(manifest, '/login/sms'), {});
+      } finally {
+        release();
+      }
+      await delayed;
+      const latest = site.codes.at(-1)!;
+      assert(latest !== pending, 'Newer challenge exists');
+      assert(pending.phoneChallenge?.deliveryAck === true, 'Old send eventually accepted');
+      assert(
+        (await postForm(base, pagePath(manifest, '/login/sms/verify'), { code: pending.code }))
+          .status !== 303,
+        'Late acknowledgement reactivated superseded code'
+      );
+      assert(
+        pending.phoneChallenge?.consumedAt === null,
+        'Invalidation claimed successful consumption'
+      );
+      assert(
+        (await postForm(base, pagePath(manifest, '/login/sms/verify'), { code: latest.code }))
+          .status === 303,
+        'Newest acknowledged challenge cannot authenticate'
+      );
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await prisma.iPhoneDevice.deleteMany({ where: { userId } });
+    await cleanup(userId);
+  }
+});

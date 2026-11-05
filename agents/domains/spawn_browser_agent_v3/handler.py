@@ -9868,7 +9868,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
                 raise
             realm_worker_apply = tilion_worker_apply_payload(payload)
-            if realm_worker_apply and not restore_browser_state:
+            if not restore_browser_state and (realm_worker_apply or payload.get("cookies_injected")):
                 raise RuntimeError("Inventory-only credential preparation returned browser-state mutation")
             if realm_worker_apply:
                 await apply_tilion_worker_state(playwright_browser, realm_worker_apply)

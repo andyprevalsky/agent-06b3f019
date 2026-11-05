@@ -1,4 +1,8 @@
-import { phoneSmsTarget, initializePhoneChallenge } from './servicePhoneSms';
+import {
+  phoneSmsTarget,
+  initializePhoneChallenge,
+  acknowledgePhoneChallenge,
+} from './servicePhoneSms';
 /**
  * The sign-in methods beyond password and emailed code. Each one appends to the
  * same attempt log the evaluator reads.
@@ -133,7 +137,7 @@ export async function requestSmsCode(site: AuthTestSite, rawPhone: string): Prom
   site.codes.push(issued);
   const body = `Your ${AUTH_TEST_SITE_NAME} sign-in code is ${code}${issued.phoneChallenge ? ` (request ${issued.phoneChallenge.challengeId})` : ''}`;
   const sent = await sendSms(account.phone, body, { archiveContext: { source: 'auth-test-site' } });
-  if (issued.phoneChallenge) issued.phoneChallenge.deliveryAck = sent.success;
+  acknowledgePhoneChallenge(site, issued, sent.success);
   if (site.scenario !== 'phone_sms_otp' && isLocalBenchmarkAgentPhoneMockEnabled()) {
     await repo.deliverTextToMockPhone({
       userId: site.userId,

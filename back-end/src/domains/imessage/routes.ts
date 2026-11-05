@@ -16,6 +16,7 @@ import {
   StaleQueueClaimError,
   ValidationError,
   bindCloudMessage,
+  CloudMessageBindingConflictError,
 } from './service';
 import { MessageChannel } from './types';
 import { cloudMessageReceipt } from './cloudMessage';
@@ -96,7 +97,8 @@ router.post(
     }
     try {
       res.json(cloudMessageReceipt(await bindCloudMessage(userId, req.params.id, taskId)));
-    } catch {
+    } catch (error) {
+      if (!(error instanceof CloudMessageBindingConflictError)) throw error;
       res.status(409).json({ error: 'Cloud message task binding rejected' });
     }
   })

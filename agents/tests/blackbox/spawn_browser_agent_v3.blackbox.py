@@ -26045,6 +26045,7 @@ async def _run_realm_transition_action_fixture(
     credential_failure=False,
     credential_origin=None,
     unexpected_worker_state=False,
+    reported_cookie_injection=False,
 ):
     """Drive real activity/action/history with synthetic CDP and private hydration."""
     from contextlib import ExitStack
@@ -26099,6 +26100,8 @@ async def _run_realm_transition_action_fixture(
         if kwargs.get("restore_browser_state", True):
             events.append(("restore", realm))
         payload = {"auth_realm": realm, "auth_options": {"realm": realm}, "passwords": [], "passkeys": []}
+        if reported_cookie_injection:
+            payload["cookies_injected"] = True
         if unexpected_worker_state:
             payload["worker_apply"] = {"provider": "tilion", "cookies": [], "local_storage": []}
         if restoration_error or (preapproved_handoff and realm == "new.example"):
@@ -26473,16 +26476,18 @@ async def test_activity_inventory_rejects_unrequested_worker_state():
     """An older or inconsistent server cannot turn an inventory read into a state write."""
     import json
 
-    contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
-        "evaluate", unexpected_worker_state=True
-    )
-    assert not any(event[0] == "apply-worker-state" for event in events), (
-        "inventory-only preparation applied an unrequested browser-state payload"
-    )
-    tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
-    context = json.loads(tools[0]["content"])["auth_context"]
-    assert context["inventory_status"] == "unknown"
-    assert "Inventory-only" in context["credential_preparation_error"]
+    for reported_cookie_injection in (False, True):
+        contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
+            "evaluate", unexpected_worker_state=not reported_cookie_injection,
+            reported_cookie_injection=reported_cookie_injection,
+        )
+        assert not any(event[0] == "apply-worker-state" for event in events), (
+            "inventory-only preparation applied an unrequested browser-state payload"
+        )
+        tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+        context = json.loads(tools[0]["content"])["auth_context"]
+        assert context["inventory_status"] == "unknown"
+        assert "Inventory-only" in context["credential_preparation_error"]
 
 
 @_in_browser_activity_context

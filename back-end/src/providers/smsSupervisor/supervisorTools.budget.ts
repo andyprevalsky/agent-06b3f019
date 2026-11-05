@@ -119,6 +119,8 @@ export async function commitIncreaseBudget(
   // The authoritative committed limit, not the pre-read projection.
   const committedLimitCents = bumpedRows[0].priceLimitCents;
 
+  // Report the committed budget independently from the resume signal outcome.
+  let resumeSignaled = false;
   // If agent was cost-limited, signal workflow to resume
   if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId) {
     try {
@@ -127,6 +129,7 @@ export async function commitIncreaseBudget(
       await handle.signal('price_limit_increased', {
         new_limit_cents: committedLimitCents,
       });
+      resumeSignaled = true;
       log.info('Signaled price_limit_increased', {
         phase: 'budget',
         workflowId: agent.temporalWorkflowId,
@@ -144,6 +147,6 @@ export async function commitIncreaseBudget(
   return {
     tool: 'increase_budget',
     success: true,
-    result: `Budget increased to $${(committedLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? ' — agent resuming' : ''}`,
+    result: `Budget increased to $${(committedLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? (resumeSignaled ? ' — agent resuming' : ' — agent not resumed') : ''}`,
   };
 }

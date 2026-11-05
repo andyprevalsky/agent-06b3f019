@@ -1,3 +1,5 @@
+import { Prisma } from '@prisma/client';
+import { CloudMessageBindingConflictError } from './types';
 /** Cloud message intent ownership; existing relay rows remain on their original transport. */
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { permitted, TERMINAL_AGENT_STATUSES } from '../../providers/phoneAccountPolicy';
@@ -30,25 +32,36 @@ export async function bindCloudMessage(userId: string, id: string, browserTaskId
     const row = await tx.imessageQueue.findFirst({
       where: { id, userId, transport: 'phone_harness' },
     });
-    if (!row) throw new Error('Cloud message not found');
+    if (!row) throw new CloudMessageBindingConflictError('Cloud message not found');
     const task = await tx.browserSession.findFirst({
       where: { id: browserTaskId, agentId: row.agentId, context: { userId } },
       select: { id: true },
     });
-    if (!task) throw new Error('Cloud message browser task is not owned');
+    if (!task)
+      throw new CloudMessageBindingConflictError('Cloud message browser task is not owned');
     const agent = await tx.agent.findFirst({
       where: { id: row.agentId, userId, deletedAt: null },
       select: { status: true },
     });
     if (!agent || TERMINAL_AGENT_STATUSES.some((status) => status === agent.status))
-      throw new Error('Cloud message agent is no longer active');
+      throw new CloudMessageBindingConflictError('Cloud message agent is no longer active');
     if (row.phoneBrowserTaskId !== null && row.phoneBrowserTaskId !== browserTaskId)
-      throw new Error('Cloud message belongs to another browser task');
+      throw new CloudMessageBindingConflictError('Cloud message belongs to another browser task');
     return row.phoneBrowserTaskId !== null
       ? row
       : tx.imessageQueue.update({
           where: { id },
           data: { phoneBrowserTaskId: browserTaskId },
         });
+  }).catch((error: unknown) => {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002' &&
+      Array.isArray(error.meta?.target) &&
+      error.meta.target.length === 1 &&
+      error.meta.target[0] === 'phoneBrowserTaskId'
+    )
+      throw new CloudMessageBindingConflictError('Cloud message task is already bound');
+    throw error;
   });
 }
