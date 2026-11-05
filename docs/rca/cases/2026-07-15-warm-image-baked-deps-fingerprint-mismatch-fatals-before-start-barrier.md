@@ -97,3 +97,30 @@ None recorded.
 When cloud smoke reports "0/N ready at the start barrier", read the per-task
 `fleet-child.log` for a pre-barrier dep-fingerprint FATAL and rebuild the warm
 image — a branch that changes dependencies invalidates the baked donor image.
+
+
+## Round21 recurrence: fresh volumes after verified source patch
+
+On frozen source `460e026e0f08d2ab65cbac836084c972eab3b021`, both original
+canary drivers applied and verified whole-workspace patch
+`231a01e79e1c19db68624f7010d03f2382264adbb1a6be39904ff5b3321e3fed`,
+then failed at `STEP dep_sync` before the barrier or task execution. Their
+primary receipts record fresh volumes and the immutable image's `/app` donor;
+the accepted `/data` snapshot therefore did not establish these guests'
+dependency compatibility.
+
+The required Node fingerprint is
+`23c8518fce516269d1a9d325518c043c1bb5ac0d2c716ad7aab11e68f7661a6d`;
+the required Python fingerprint is
+`9d08ed65778213690792a290d583b22aefd1328a07740814846eafbec59f538e`.
+The exact old donor and installed-marker hashes are **UNKNOWN**; the native
+inequality guard establishes the mismatch but did not log those values.
+
+A matching image, digest
+`f7b491fb57970add133cc9108ea13ebbf6e3149e3b863cea187d3f9d37db9582`,
+was published from source `460e026e` in 264 seconds. It has **not been activated**,
+and publication supplies no runtime acceptance, maintenance authority, cleanup
+credit or cloud gate pass. Original failures and financial/native debts remain.
+
+Evidence: `.context/cli-nov05-review/round21-dependency-rca.json` and
+`.context/cli-nov05-review/round21-image-build/cloudbench-image-build.json`.

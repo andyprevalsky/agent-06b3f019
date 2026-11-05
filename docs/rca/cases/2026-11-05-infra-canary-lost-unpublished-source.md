@@ -76,3 +76,21 @@ is not the intended workspace when the parent carries unpublished commits.
 Preserve the zero-allocation guard and original failed-run evidence. Prove
 the focused repair before repeating the full failed gate; do not restart
 unaffected passing gates merely because the source was synchronized.
+
+
+## Round21 follow-up: unpublished-source test fixture
+
+On frozen source `460e026e0f08d2ab65cbac836084c972eab3b021`, the structural
+worker's original `python3 scripts/tests/deploy-test-worker.test.py` reported
+one error in 136 tests: `Cloud.test_unpublished_request_keeps_head_so_native_fleet_ships_committed_delta`
+raised `KeyError: 'patch'` in `source_transport_environment`. Its mocked
+`prepare_source_transport` returned only `base_sha`; the production guard
+correctly required a real sealed patch path and matching digest.
+
+The isolated fixture repair writes a nonempty patch, computes its SHA256 and
+writes the mock source seal. All three original assertions remain unchanged;
+no runtime guard or timeout changed. The exact focused case was red before and
+green after; the full original worker command passed 136 tests in 83.239 seconds.
+This is fixture validation, not a cloud gate pass or financial release.
+
+Evidence: `.context/cli-nov05-review/round21-fixture-repair.json`.
