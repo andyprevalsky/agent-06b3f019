@@ -497,6 +497,7 @@ GATES = (
     ),
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
     Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
+    Gate("local-stack-retention", ("python3", "scripts/tests/local-stack-retention.test.py")),
     Gate(
         "run-isolated-cloud-kill",
         ("bash", "scripts/tests/run-isolated-cloud-kill.test.sh"),
