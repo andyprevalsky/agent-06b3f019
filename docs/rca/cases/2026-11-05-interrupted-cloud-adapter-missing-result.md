@@ -80,3 +80,16 @@ uses the existing native-release-audit token parser over canonical agents/.env
 when the environment token is absent. It never exports the token or changes
 the environment digest. The exact run-next setup accepted the proof with
 FLY_API_TOKEN absent and unchanged environment/digest.
+
+A later round exposed the stopped-donor contract: native fleets require the
+shared source stopped, while the investigator observer originally required it
+started for exec. Exact-id/instance/config stopped observations now use two
+GETs and no exec. A running-to-stopped transition requires explicit renewal of
+only validation_source, guest_observation, local_observation and confirmed_at;
+the full original evidence and every debt are revalidated. Transitional states
+and changed identities/configuration still reject. This does not reconcile
+round 14 or authorize any provider stop/update.
+
+The stopped-state renewal keeps clean_isolated_successor unchanged. A later
+incomplete round, including round 14, remains a separate blocking owner; a
+positive stopped observation grants neither retry readiness nor cleanup credit.

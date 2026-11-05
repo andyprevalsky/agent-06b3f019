@@ -828,9 +828,15 @@ def renew_isolated_validation(state, request_token, proof):
         clean_isolated_successor(state, prior, receipt, latest)
     need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
     owner = receipt_owner(prior['gate'], receipt)
-    need(still_bound(prior, receipt, owner), 'prior native proof changed')
-    need({k: v for k, v in proof.items() if k != 'validation_source'} ==
-         {k: v for k, v in prior['proof'].items() if k != 'validation_source'}, 'only validation_source may change')
+    if prior['proof'].get('compatibility') == 'round12-interrupted-isolation-v1':
+        from deploy_test_round12_isolation import validate_renewal
+        validate_renewal(prior['proof'], proof)
+        # Full validate below rechecks every pinned original byte and fresh
+        # native observation; an old running-state proof cannot validate a stop.
+    else:
+        need(still_bound(prior, receipt, owner), 'prior native proof changed')
+        need({k: v for k, v in proof.items() if k != 'validation_source'} ==
+             {k: v for k, v in prior['proof'].items() if k != 'validation_source'}, 'only validation_source may change')
     need(proof.get('validation_source') == state['source'] == state['plan'].get('source')
          == source(Path(owner['worker_root'])), 'current source binding')
     entry = validate(receipt, owner, proof)

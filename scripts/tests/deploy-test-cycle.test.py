@@ -4550,7 +4550,7 @@ class F87IsolatedCompatibility(unittest.TestCase):
 class Round12InterruptedIsolation(unittest.TestCase):
     def setUp(self):
         import deploy_test_round12_isolation as m
-        self.m=m;self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.m=m;self.real_guest=m.guest_observe;self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.debts=[]
         for i in range(6):
             p=self.root/(str(i)+'.owner');p.write_text('pid='+str(3912856 if i==0 else 500+i)+'\nstatus='+('live-transfer-required' if i==0 else 'starting')+'\npid_start=birth\nargv_sha256=argv\n');self.debts.append(p)
@@ -4562,7 +4562,7 @@ class Round12InterruptedIsolation(unittest.TestCase):
         self.req={'isolated_validation':self.inherited};self.parts=[self.root/'fleet-42']
         self.obs={'boot_id':'boot','uid':1,'pids':[42,3912856],'scopes':[str(self.root),'relay'],
                   'matched':[3912856],'unreadable':[],'observed_at':2}
-        self.guest={'observed_at':2,'id':'machine','instance_id':'instance','config_sha256':'config','guest':{'uid':0,'observed_at':2,'refresh_scope_pids':[],'unreadable':[],'token_path_metadata':{'path':'/tmp/cloudbench-warm-fetch-token.3934342','exists':False},'processes':[{'pid':1,'exe':'/fly/init'},{'pid':632,'exe':'/.fly/hallpass'},{'pid':633,'exe':'/usr/bin/sleep'}],'sockets':[]}}
+        self.guest={'state':'started','observed_at':2,'id':'machine','instance_id':'instance','config_sha256':'config','guest':{'uid':0,'observed_at':2,'refresh_scope_pids':[],'unreadable':[],'token_path_metadata':{'path':'/tmp/cloudbench-warm-fetch-token.3934342','exists':False},'processes':[{'pid':1,'exe':'/fly/init'},{'pid':632,'exe':'/.fly/hallpass'},{'pid':633,'exe':'/usr/bin/sleep'}],'sockets':[]}}
         self.pins={str(m.RECEIPT):'hash',**{str(p):str(i) for i,p in enumerate(self.debts)}}
         self.p={'kind':'native-cloud-cleanup-v1','compatibility':m.MODE,'purpose':'isolated-validation','layout':'campaign-v1',
                 'source':self.r['source'],'request_token':m.TOKEN,'owner':self.owner,'files':self.pins,
@@ -4612,6 +4612,60 @@ class Round12InterruptedIsolation(unittest.TestCase):
             with self.assertRaises(ValueError):self.verify()
         self.observer.return_value=self.obs;self.identity.return_value=('reused','argv')
         with self.assertRaises(ValueError):self.verify()
+
+    def test_positive_stopped_observation_requires_explicit_renewal(self):
+        stopped={**self.guest,'state':'stopped','guest':None}
+        self.guest_observer.return_value=stopped
+        with self.assertRaises(ValueError):self.verify()
+        self.p['guest_observation']=stopped
+        self.assertFalse(self.verify()['cleanup_complete'])
+        with self.assertRaises(ValueError):self.m.guest_facts({**stopped,'guest':{}})
+        for state in ['stopping','starting','replacing','destroyed']:
+            with self.assertRaises(ValueError):self.m.guest_facts({**stopped,'state':state})
+
+    def test_renewal_changes_only_explicit_observation_fields(self):
+        import time
+        prior=copy.deepcopy(self.p);new=copy.deepcopy(prior)
+        new.update(confirmed_at=time.time(),guest_observation={**self.guest,'state':'stopped','guest':None})
+        self.m.validate_renewal(prior,new)
+        for key,value in [('inherited_admissions',[]),('files',{}),('request_token','wrong'),('owner',{})]:
+            bad=copy.deepcopy(new);bad[key]=value
+            with self.assertRaises(ValueError):self.m.validate_renewal(prior,bad)
+        new['confirmed_at']=time.time()-61
+        with self.assertRaises(ValueError):self.m.validate_renewal(prior,new)
+
+    def test_stopped_native_read_never_executes_or_starts_machine(self):
+        import io,json
+        original={'id':'683e47df5094d8','instance_id':'01M6N4WFPT4NQBETPT18WV716W',
+                  'config':{'immutable':'fixture'},'state':'stopped','name':'cloudbench-warm','region':'iad'}
+        requests=[]
+        def reply(request,**kwargs):
+            requests.append(request.get_method())
+            response=io.BytesIO(json.dumps(original).encode());response.status=200
+            return response
+        with patch.object(self.m,'fly_token',return_value='fixture'),patch.object(self.m.urllib.request,'urlopen',side_effect=reply),             patch.object(self.m.Path,'read_text',return_value=json.dumps(original)):
+            value=self.real_guest()
+        self.assertEqual(requests,['GET','GET']);self.assertEqual(value['state'],'stopped');self.assertIsNone(value['guest'])
+        for key,value in [('state','stopping'),('instance_id','changed'),('config',{})]:
+            bad={**original,key:value};requests=[]
+            def bad_reply(request,**kwargs):
+                requests.append(request.get_method());response=io.BytesIO(json.dumps(bad).encode());response.status=200;return response
+            with patch.object(self.m,'fly_token',return_value='fixture'),patch.object(self.m.urllib.request,'urlopen',side_effect=bad_reply),                 patch.object(self.m.Path,'read_text',return_value=json.dumps(original)):
+                with self.assertRaises(ValueError):self.real_guest()
+            self.assertEqual(requests,['GET'])
+
+    def test_stopped_identity_transition_between_reads_is_rejected_without_exec(self):
+        import io,json
+        original={'id':'683e47df5094d8','instance_id':'01M6N4WFPT4NQBETPT18WV716W',
+                  'config':{'immutable':'fixture'},'state':'stopped','name':'cloudbench-warm','region':'iad'}
+        for changed in [{**original,'state':'started'},{**original,'instance_id':'different'},
+                        {**original,'config':{}}]:
+            methods=[];values=iter([original,changed])
+            def reply(request,**kwargs):
+                methods.append(request.get_method());r=io.BytesIO(json.dumps(next(values)).encode());r.status=200;return r
+            with patch.object(self.m,'fly_token',return_value='fixture'),patch.object(self.m.urllib.request,'urlopen',side_effect=reply),                 patch.object(self.m.Path,'read_text',return_value=json.dumps(original)):
+                with self.assertRaises(ValueError):self.real_guest()
+            self.assertEqual(methods,['GET','GET'])
 
     def test_native_credential_fallback_does_not_change_environment(self):
         import os

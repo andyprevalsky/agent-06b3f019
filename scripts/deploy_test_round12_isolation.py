@@ -94,7 +94,7 @@ def fly_token():
 
 
 def guest_observe():
-    """GET/exec/GET only; native exec never starts a stopped machine."""
+    """Observe a stable native state; stopped machines use GET/GET, never exec."""
     token = fly_token()
     url = 'https://api.machines.dev/v1/apps/navi-whisper-lux-bench/machines/683e47df5094d8'
     def call(method, suffix='', body=None):
@@ -108,19 +108,27 @@ def guest_observe():
     original = json.loads((GUEST.parent / 'wire-00.private.json').read_text())
     check(before.get('config') == original.get('config'), 'original guest config changed; no exec')
     check(before.get('id') == '683e47df5094d8' and before.get('instance_id') == '01M6N4WFPT4NQBETPT18WV716W'
-          and before.get('state') == 'started', 'original running guest instance changed; no exec')
-    code = Path(__file__).with_name('fixtures').joinpath('round12-guest-observe.py').read_text()
-    result = call('POST', '/exec', {'cmd': shlex.join(['python3', '-I', '-B', '-c', code]), 'timeout': 15, 'machine': True})
+          and before.get('state') in {'started', 'stopped'}, 'original guest identity or stable state changed; no exec')
+    guest = None
+    if before['state'] == 'started':
+        code = Path(__file__).with_name('fixtures').joinpath('round12-guest-observe.py').read_text()
+        result = call('POST', '/exec', {'cmd': shlex.join(['python3', '-I', '-B', '-c', code]), 'timeout': 15, 'machine': True})
+        check(result.get('exit_code') == 0 and not result.get('exit_signal'), 'guest native exec failed')
+        guest = json.loads(result['stdout'])
     after = call('GET')
     check(all(before.get(k) == after.get(k) for k in ('id', 'instance_id', 'config', 'name', 'region', 'state')),
           'guest identity/config changed during observation')
-    check(result.get('exit_code') == 0 and not result.get('exit_signal'), 'guest native exec failed')
-    guest = json.loads(result['stdout'])
     return {'observed_at': time.time(), 'id': before['id'], 'instance_id': before['instance_id'],
-            'config_sha256': hashlib.sha256(json.dumps(before['config'], sort_keys=True).encode()).hexdigest(), 'guest': guest}
+            'config_sha256': hashlib.sha256(json.dumps(before['config'], sort_keys=True).encode()).hexdigest(),
+            'state': before['state'], 'guest': guest}
 
 
 def guest_facts(observation):
+    identity = {k: observation[k] for k in ('id', 'instance_id', 'config_sha256', 'state')}
+    if observation['state'] == 'stopped':
+        check(observation.get('guest') is None, 'stopped observation must not contain exec evidence')
+        return {**identity, 'guest': None}
+    check(observation['state'] == 'started', 'transitional guest state')
     g = observation['guest']
     check(g.get('uid') == 0 and g.get('refresh_scope_pids') == [] and g.get('unreadable') == []
           and g.get('token_path_metadata') == {'path': '/tmp/cloudbench-warm-fetch-token.3934342', 'exists': False},
@@ -128,7 +136,7 @@ def guest_facts(observation):
     check([(p['pid'], p['exe']) for p in g['processes']] == [(1, '/fly/init'), (632, '/.fly/hallpass'), (633, '/usr/bin/sleep')]
           and all(s['pids'] == [632] and s['state'] == '0A' and s['local'].endswith(':0016') for s in g['sockets']),
           'guest processes/sockets changed')
-    return {**{k: observation[k] for k in ('id', 'instance_id', 'config_sha256')},
+    return {**identity,
             'guest': {k: v for k, v in g.items() if k != 'observed_at'}}
 
 
@@ -176,6 +184,15 @@ def validate(receipt, owner, proof):
             'purpose': 'isolated-validation', 'validation_source': proof['validation_source'],
             'excluded_resources': {}, 'credit_granted': False, 'obligations_preserved': True,
             'cleanup_complete': False}
+
+
+def validate_renewal(prior, proof):
+    """Explicit renewal can refresh only observations/target source, never old debt."""
+    allowed = {'validation_source', 'guest_observation', 'local_observation', 'confirmed_at'}
+    check({k: v for k, v in prior.items() if k not in allowed}
+          == {k: v for k, v in proof.items() if k not in allowed}, 'immutable original proof changed')
+    check(proof['confirmed_at'] >= prior['confirmed_at'] and 0 <= time.time() - proof['confirmed_at'] <= 60,
+          'renewal must be freshly collected')
 
 
 def build(validation_source):
