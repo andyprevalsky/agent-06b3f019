@@ -4206,6 +4206,10 @@ async def _run_all_tests():
         test_run_agentic_loop_long_run_writes_no_repeated_status_rows,
     )
     await r.record_async(
+        "cc_codex_status_rows_follow_completed_turns",
+        test_run_agentic_loop_codex_status_rows_follow_completed_turns,
+    )
+    await r.record_async(
         "cc_retryable_error_keeps_live_sandbox_for_retry",
         test_claude_code_retryable_error_keeps_the_live_sandbox_for_the_retry,
     )
@@ -6396,6 +6400,80 @@ async def test_run_agentic_loop_long_run_writes_no_repeated_status_rows():
         f"{len(status_rows)} status rows over {simulated_s:.0f}s with no progress change: "
         f"{[row.get('title') for row in status_rows[:3]]}"
     )
+    status_lines = [line for line in summary if line.startswith("Status update at")]
+    assert status_lines == [], f"the parent's action summary filled with {len(status_lines)} status lines"
+
+
+async def test_run_agentic_loop_codex_status_rows_follow_completed_turns():
+    """Codex status rows track completed turns, never the 30s clock.
+
+    For Codex the "working" row reports ``completed_turns`` (the chip's turn
+    counter), so it is written once per completed-turn increase with
+    ``Completed turns: N`` and never while the count is unchanged, however long
+    the run; the parent's action summary gets no "Status update at" lines.
+    """
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+
+    def completed(turn_id: str) -> dict:
+        return {"version": 1, "provider": "codex", "type": "turn", "status": "completed", "turn_id": turn_id}
+
+    phases: list[int] = []
+
+    class LongCodexRun(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("working", True)
+            await self.on_event({"version": 1, "provider": "codex", "type": "tool_use", "name": "shell"})
+            phases.append(len(rows))
+            await aio.sleep(0.6)
+            phases.append(len(rows))
+            await self.on_event(completed("turn-1"))
+            await aio.sleep(0.6)
+            phases.append(len(rows))
+            await self.on_event(completed("turn-2"))
+            await aio.sleep(0.6)
+            phases.append(len(rows))
+            await self.on_exit(0)
+            await aio.Event().wait()
+
+    clock = {"now": 1_000_000.0}
+
+    def fake_time() -> float:
+        # Each read advances 60s: each 0.6s phase spans many 30s status windows.
+        clock["now"] += 60.0
+        return clock["now"]
+
+    rows: list[dict] = []
+
+    async def record_row(**kwargs):
+        if kwargs.get("action_type") == "agent_observation":
+            rows.append(kwargs)
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+    summary: list[str] = []
+    with (
+        patch.object(service, "ClaudeCodeWsClient", LongCodexRun),
+        patch.object(service, "safe_time", fake_time),
+        patch.object(service, "save_claude_code_message", side_effect=record_row),
+        patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+        patch.object(service, "keepalive_e2b_session", AsyncMock(return_value=None)),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        exit_code, *_ = await service._run_agentic_loop(
+            **_loop_kwargs(summary, loop_outcome={}, code_provider="codex")
+        )
+    teardown_mock()
+
+    simulated_s = clock["now"] - 1_000_000.0
+    assert exit_code == 0, (exit_code, summary)
+    assert simulated_s > 3600, f"the run must span hours of loop time, spanned {simulated_s:.0f}s"
+    assert phases[1] == 0, f"{phases[1]} status rows while no Codex turn had completed: {rows[:3]}"
+    assert [row.get("message") for row in rows] == ["Completed turns: 1", "Completed turns: 2"], (
+        f"expected one row per completed-turn increase, got {[row.get('message') for row in rows[:5]]} "
+        f"({len(rows)} rows, counts per phase {phases})"
+    )
+    assert [row.get("completed_turns") for row in rows] == [1, 2], rows
     status_lines = [line for line in summary if line.startswith("Status update at")]
     assert status_lines == [], f"the parent's action summary filled with {len(status_lines)} status lines"
 
