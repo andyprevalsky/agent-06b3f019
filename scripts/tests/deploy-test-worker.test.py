@@ -581,8 +581,18 @@ class Cloud(unittest.TestCase):
         self.assertNotEqual(cycle.sha_file(Path(run,'preallocation-source.json')),entry['preallocation-source.json'])
 
     def test_unpublished_request_keeps_head_so_native_fleet_ships_committed_delta(self):
+        def prepared(request, root, directory):
+            path=directory/'workspace.patch'
+            path.write_bytes(b'diff --git a/fixture.txt b/fixture.txt\nnew file mode 100644\n'
+                             b'--- /dev/null\n+++ b/fixture.txt\n@@ -0,0 +1 @@\n+unpublished fixture\n')
+            binding={'sealed_at':time.time(),'token':request['token'],'source':request['source'],
+                     'workspace_root':str(root.resolve()),'base_sha':'b'*40,
+                     'workspace_patch_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+                     'patch':str(path.resolve()),'replayed_tree':'c'*40}
+            cycle.write(directory/'source-transport.json',binding)
+            return binding
         with patch.object(self.cloud,'source',return_value=self.request['source']), \
-             patch.object(self.cloud,'prepare_source_transport',return_value={'base_sha':'b'*40}), \
+             patch.object(self.cloud,'prepare_source_transport',side_effect=prepared), \
              patch.object(self.cloud,'run_command',return_value=(0,False,False,False)) as launch, \
              patch.object(self.cloud,'collect_campaign',return_value=({'passing':'PASS','failing':'FAIL'},{},True,'native-run')):
             result=self.cloud.execute(self.request,self.root)
