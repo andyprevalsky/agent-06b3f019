@@ -12,6 +12,7 @@ TRAJECTORY_AGENT_SQL="$BACKEND_DIR/prisma/migrations/20261026210002_agent_trajec
 # Supersedes the per-agent trigger above: no row lock when goal/title are unchanged.
 TRAJECTORY_AGENT_UNCHANGED_SQL="$BACKEND_DIR/prisma/migrations/20261027020000_agent_trajectory_agent_skip_unchanged_lock/migration.sql"
 TOOL_SIDE_EFFECT_TRGM_SQL="$BACKEND_DIR/prisma/migrations/20261026210001_tool_side_effect_operation_key_trgm/migration.sql"
+PHONE_MESSAGE_SQL="$BACKEND_DIR/prisma/migrations/20261105233000_cloud_message_unresolved_task/migration.sql"
 
 validate_local_database_url() {
   local variable_name=$1
@@ -61,6 +62,8 @@ WORKFLOW_SQL="$(awk '
 {
   echo "SELECT pg_advisory_xact_lock(hashtext('rose-local-runtime-sql-hooks'));"
   printf '%s\n' "$WORKFLOW_SQL"
+  # Keep the exact DDL in this hook's already-atomic advisory-lock transaction.
+  sed '/^BEGIN;$/d; /^COMMIT;$/d' "$PHONE_MESSAGE_SQL"
   cat "$UTC_CLEANUP_MIGRATION_SQL"
   cat "$TRAJECTORY_SQL"
   cat "$TRAJECTORY_AGENT_SQL"

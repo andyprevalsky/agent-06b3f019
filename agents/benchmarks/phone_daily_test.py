@@ -264,8 +264,7 @@ def test_private_profile_authorizes_exception_only_after_identity_cas(tmp_path, 
     assert [b['allowGooglePasscodeException'] for b in bodies] == [False, True]
 
 
-def test_batch_cleanup_accepts_only_proven_precreation_failure():
-    import asyncio
+async def test_batch_cleanup_accepts_only_proven_precreation_failure():
 
     from benchmarks import run_benchmark as runner
     from benchmarks.results import TaskResult
@@ -274,7 +273,34 @@ def test_batch_cleanup_accepts_only_proven_precreation_failure():
         return TaskResult(name='browser-auth-doordash-cloud-iphone', passed=False, agent_id='', status='ERROR', progress_score=0, duration_seconds=0, cost_cents=0, message_count=0, failure_reason='fixture failed', stop_metadata=metadata)
     proven = result({'root_creation_attempted': False})
     proven.graded_root_creation_outcome = 'not_started'
-    asyncio.run(runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [proven], {}))
+    await runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [proven], {})
     for metadata in ({}, {'root_creation_attempted': True}):
         with pytest.raises(RuntimeError, match='unknown root creation'):
-            asyncio.run(runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [result(metadata)], {}))
+            await runner._finalize_owned_cloud_batch('http://127.0.0.1:3100', [result(metadata)], {})
+
+
+def test_phone_sms_environment_requires_live_without_weakening_synthetic_auth():
+    import json
+    from pathlib import Path
+
+    from benchmarks.long_horizon import validate_task_contract
+
+    tasks = json.loads(Path(__file__).with_name('tasks.json').read_text())
+    if isinstance(tasks, dict):
+        tasks = tasks['tasks']
+    phone = next(t for t in tasks if t['name'] == 'phone-daily-sms-challenge')
+    validate_task_contract(copy.deepcopy(phone))
+    for change in ('synthetic', 'missing_live_tag'):
+        invalid = copy.deepcopy(phone)
+        if change == 'synthetic':
+            invalid['environment']['mode'] = 'synthetic'
+            invalid['environment']['live_fixtures'] = []
+        else:
+            invalid['tags'] = [t for t in invalid['tags'] if t != 'LIVE']
+        with pytest.raises(ValueError):
+            validate_task_contract(invalid)
+    ordinary = next(t for t in tasks if t.get('environment', {}).get('auth_test_site') and t['name'] != phone['name'])
+    invalid = copy.deepcopy(ordinary)
+    invalid['environment']['mode'] = 'live'
+    with pytest.raises(ValueError, match='synthetic'):
+        validate_task_contract(invalid)

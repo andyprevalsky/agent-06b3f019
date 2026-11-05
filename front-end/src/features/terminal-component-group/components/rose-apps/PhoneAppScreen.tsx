@@ -3,6 +3,7 @@ import { useContext } from 'react';
 import { AgentContext } from '../../hooks';
 import { useRoseApps } from './roseAppsState';
 import { phoneAppTarget } from './phoneAppTarget';
+import { PhoneAttentionNotice } from '../browser-status-bar/phone/PhoneAttentionNotice';
 import { PhoneOverlay } from '../browser-status-bar/phone/PhoneOverlay';
 import { phoneActivityKey } from '../browser-status-bar/phone/phoneOverlayState';
 import { usePhoneAttention } from '../browser-status-bar/phone/usePhoneAttention';
@@ -34,8 +35,11 @@ function PhoneSession({
       data-browser-task-id={taskId}
       className="relative flex h-full min-h-0 w-full flex-col overflow-hidden rounded-[36px] bg-[#0d0d0f]"
     >
+      {!phone.visible && attention.error && (
+        <PhoneAttentionNotice attention={attention} lease={phone.snapshot?.lease} />
+      )}
       <PhoneOverlay phone={phone} readOnly={readOnly} attention={attention} />
-      {!phone.visible && !phone.error && !phone.queueTimedOut && (
+      {!phone.visible && !phone.error && !phone.queueTimedOut && !attention.error && (
         <p role="status" className="m-auto px-6 text-center text-sm text-white/70">
           Checking this agent’s phone connection…
         </p>

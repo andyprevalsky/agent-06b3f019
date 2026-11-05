@@ -10,7 +10,11 @@ import {
   recordQueueDeliveryResult,
   markImessageBridgeSeen,
 } from './repo';
-import type { MessageChannel, RecentInboundMessage } from './types';
+import {
+  CloudMessageEligibilityError,
+  type MessageChannel,
+  type RecentInboundMessage,
+} from './types';
 import { cloudMessageEligible } from './repo.cloud';
 import { cloudMessageStatus } from './cloudMessage';
 export { bindCloudMessage } from './repo.cloud';
@@ -79,7 +83,8 @@ export async function queueMessage(
   try {
     if (await cloudMessageEligible(userId, agentId)) transport = 'phone_harness';
   } catch (error) {
-    throw new ValidationError(error instanceof Error ? error.message : 'Cloud phone unavailable');
+    if (!(error instanceof CloudMessageEligibilityError)) throw error;
+    throw new ValidationError(error.message);
   }
   const entry = await createQueueEntry(
     userId,

@@ -1897,7 +1897,7 @@ async def test_queue_phone_transport_preserved_without_mac_polling():
 
 
 async def test_cloud_message_adapter_requires_backend_sent_receipt_and_stable_binding():
-    from domains.message_person import cloud_phone
+    from domains.message_person import handler as cloud_phone
     from tools.base import ToolEvent, EventType, MessageStatus
     from domains.spawn_browser_agent_v3.handler import _logical_browser_task_id
     class Browser:
@@ -1930,7 +1930,7 @@ async def test_cloud_message_adapter_requires_backend_sent_receipt_and_stable_bi
 
 async def test_handler_cloud_route_after_exact_approval_without_mac_fallback():
     from domains.message_person.handler import MessagePersonManager
-    from domains.message_person import cloud_phone
+    from domains.message_person import handler as cloud_phone
     from tools.base import ToolEvent, EventType, MessageStatus
     approvals, delegated = [], []
     async def approval(*args, **kwargs):
@@ -1995,6 +1995,20 @@ async def test_cloud_bind_http_fails_closed_and_after_browser_init():
     model = [n for n in ast.walk(boundary) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_call_browser_use_with_rotation"]
     assert init.lineno < bind.lineno < min(n.lineno for n in model)
 
+    # The real Temporal activity entry must carry the same trusted intent on
+    # initial execution and resume, without changing the logical task identity.
+    import uuid
+    from utils.browser_identity import logical_browser_task_id
+    assert handler._logical_browser_task_id("agent") == logical_browser_task_id("agent") == str(
+        uuid.uuid5(uuid.NAMESPACE_URL, "rose-browser-owner:agent"))
+    for resumed in (False, True):
+        with patch.object(handler.WorldModelToolExecutionAdapter, "from_env", return_value=SimpleNamespace(should_simulate=lambda _: False)), patch.object(handler, "_spawn_browser_agent_activity_v3_real", new_callable=AsyncMock) as real:
+            real.return_value = {"status": "completed"}
+            await handler.spawn_browser_agent_activity_v3("user", "agent", "Approved goal", "call", task_id="owned-task", is_resume=resumed, approved_message_intent="queue/opaque")
+            assert real.await_args.kwargs["approved_message_intent"] == "queue/opaque"
+            assert real.await_args.kwargs["task_id"] == "owned-task"
+            assert real.await_args.kwargs["is_resume"] is resumed
+
 
 async def test_phone_message_commit_rejects_forged_payload_fields():
     from types import SimpleNamespace
@@ -2017,7 +2031,7 @@ async def test_phone_message_commit_rejects_forged_payload_fields():
 
 async def test_cloud_receipt_requires_explicit_success_and_exact_bound_task():
     from domains.message_person.repo import read_phone_message_activity
-    from domains.message_person import cloud_phone
+    from domains.message_person import handler as cloud_phone
     from tools.base import EventType, MessageStatus, ToolEvent
     from domains.spawn_browser_agent_v3.handler import _logical_browser_task_id
     setup_mock_fn(lambda request: httpx.Response(200, json={"provider": "phone_harness", "status": "sent", "sent_at": "2026-10-19T00:00:00Z"}))
@@ -2036,9 +2050,42 @@ async def test_cloud_receipt_requires_explicit_success_and_exact_bound_task():
     assert any(event.status == MessageStatus.ERROR for event in events)
 
 
+async def test_cloud_receipt_activity_failure_is_unconfirmed_but_cancellation_propagates():
+    from domains.message_person import handler as cloud_phone
+    from temporalio.exceptions import ActivityError, CancelledError, RetryState
+    from tools.base import MessageStatus
+
+    class Browser:
+        async def execute_tool(self, *args):
+            if False:
+                yield
+
+    failure = ActivityError("Synthetic status unavailable", scheduled_event_id=1,
+                            started_event_id=2, identity="test", activity_type="read_phone_message_activity",
+                            activity_id="read", retry_state=RetryState.NON_RETRYABLE_FAILURE)
+    for error in (failure, CancelledError("cancelled"), asyncio.CancelledError()):
+        class Fake:
+            async def execute_activity(self, *args, **kwargs):
+                raise error
+        with patch.object(cloud_phone, "workflow", Fake()), patch.object(cloud_phone, "get_browser_manager", lambda: Browser()):
+            if error is failure:
+                events = await _collect(cloud_phone.deliver_cloud_message(_WFInstance(), queue_id="queue", tool_call_id="original", recipient="+15550000000", body="Exact"))
+                assert len(events) == 1 and events[0].status == MessageStatus.ERROR
+                assert "Do not resend" in events[0].message
+                assert not events[0].data
+            else:
+                try:
+                    await _collect(cloud_phone.deliver_cloud_message(_WFInstance(), queue_id="queue", tool_call_id="original", recipient="+15550000000", body="Exact"))
+                except type(error):
+                    pass
+                else:
+                    raise AssertionError("Cancellation swallowed as delivery failure")
+
+
 async def run_all_tests():
     print("message-person blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("cloud_receipt_activity_failure_cancellation", test_cloud_receipt_activity_failure_is_unconfirmed_but_cancellation_propagates)
     await r.record_async("cloud_receipt_explicit_success_binding", test_cloud_receipt_requires_explicit_success_and_exact_bound_task)
     await r.record_async("phone_message_commit_args", test_phone_message_commit_rejects_forged_payload_fields)
     await r.record_async("handler_cloud_exact_approval", test_handler_cloud_route_after_exact_approval_without_mac_fallback)

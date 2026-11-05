@@ -330,25 +330,63 @@ it.each([401, 403, 409])(
 );
 
 it('reports a mismatched linked task instead of opening another browser task', async () => {
-  const { default: Carousel } =
-    await import('@/features/terminal-component-group/components/BrowserStatusBarCarousel');
+  const { PhoneAppScreen } =
+    await import('@/features/terminal-component-group/components/rose-apps/PhoneAppScreen');
+  const { RoseAppsContext } =
+    await import('@/features/terminal-component-group/components/rose-apps/roseAppsState');
+  const { AgentContext } = await import('@/features/terminal-component-group/hooks');
   const f = fixture();
   window.history.replaceState(
     {},
     '',
     '/?agent-id=agent-a&browser-id=missing-task&attention-request-id=request-a',
   );
-  render(<Carousel browsers={[{ taskId: 'task-a', browserUrl: 'https://example.com/browser' }]} />);
+  const original = vi.mocked(fetch).getMockImplementation()!;
+  vi.mocked(fetch).mockImplementation((url, init) =>
+    String(url).endsWith('/interactions/missing-task')
+      ? Promise.resolve(
+          new Response(
+            JSON.stringify({ lease: null, cursor: 0, lastOperation: null, pendingOperation: null }),
+          ),
+        )
+      : original(url, init),
+  );
+  render(
+    <RoseAppsContext.Provider
+      value={
+        {
+          selectedAgentId: 'agent-a',
+          tabs: [],
+        } as unknown as import('@/features/terminal-component-group/components/rose-apps/roseAppsState').RoseAppsValue
+      }
+    >
+      <AgentContext.Provider
+        value={
+          {
+            agent: { agent_id: 'agent-a' },
+            selectedAgentId: 'agent-a',
+            messages: [],
+            isLoadingAgent: false,
+            inspectionContext: null,
+          } as unknown as import('@/features/agent-context/types').AgentContextValue
+        }
+      >
+        <PhoneAppScreen />
+      </AgentContext.Provider>
+    </RoseAppsContext.Provider>,
+  );
   expect(
-    await screen.findByRole('status', { name: 'Phone authentication link status' }),
+    await screen.findByRole('status', { name: 'Phone authentication status' }),
   ).toBeInTheDocument();
   await waitFor(() =>
-    expect(
-      screen.getByRole('status', { name: 'Phone authentication link status' }),
-    ).toHaveTextContent(/stale|match/i),
+    expect(screen.getByRole('status', { name: 'Phone authentication status' })).toHaveTextContent(
+      /stale|match/i,
+    ),
   );
   expect(screen.queryByTitle('Browser')).toBeNull();
+  expect(screen.queryByTestId('phone-private-authentication')).toBeNull();
   expect(f.posts).toEqual([]);
+  expect(f.calls.some((call) => call.includes('/leases/'))).toBe(false);
 });
 
 it.each(['transport', 'server'])(

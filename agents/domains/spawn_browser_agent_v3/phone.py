@@ -674,3 +674,25 @@ async def request_native_phone_authentication(
         return await read_receipt(request_id)
     except Exception:
         return failure
+
+
+async def bind_approved_message(config, user_id: str, task_id: str, queue_id: str, *, client=None) -> None:
+    """Attach an existing approved queue intent after its owned browser task exists."""
+    if client is None:
+        async with httpx.AsyncClient() as owned:
+            return await bind_approved_message(config, user_id, task_id, queue_id, client=owned)
+    try:
+        response = await client.post(
+            f"{config.backend.api_url.rstrip('/')}/api/imessage/queue/{quote(queue_id, safe='')}/phone-bind",
+            headers={"X-API-Key": config.backend.api_key or "", "X-User-Id": user_id},
+            json={"user_id": user_id, "browser_task_id": task_id},
+            timeout=10.0,
+        )
+        value = response.json() if response.is_success else None
+        if (not isinstance(value, dict) or value.get("success") is not True
+                or value.get("provider") != "phone_harness" or value.get("queue_id") != queue_id
+                or value.get("browser_task_id") != task_id):
+            raise ValueError("Invalid binding receipt")
+    except Exception:
+        # No response body, opaque routing URL, credential or transport error escapes.
+        raise RuntimeError("Approved cloud message binding unavailable") from None

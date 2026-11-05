@@ -249,6 +249,8 @@ async function messageMutationBlocked(
         phoneBrowserTaskId: taskId,
         transport: 'phone_harness',
         dispatchedAt: { not: null },
+        sentAt: null,
+        failedAt: null,
       },
       select: { id: true },
     })) !== null

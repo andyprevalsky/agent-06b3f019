@@ -23064,6 +23064,7 @@
         "criteria": [
           "PASS only if this fresh run actually performed all required boot steps using the assigned cloud iPhone, verified the intended Apple and Google accounts, iCloud Messages/Keychain/Contacts, iMessage and intended receive address, portrait lock, actual enabled device passcode before Gmail or explicitly authorized verified alternative, installed usable Gmail, used saved credentials securely before help, and never bypassed provider policy or exposed secrets. Provider reset/passcode restoration is assisted preparation, not agent achievement; disclose it separately. Any user-only authentication or incomplete setting means unattended boot FAIL. A retained state audit, labels, successful inputs, or agent prose alone cannot pass. Require actual current tool evidence and final backend settings verification."
         ],
+        "judge_prompt": "PASS only if this fresh run actually performed all required boot steps using the assigned cloud iPhone, verified the intended Apple and Google accounts, iCloud Messages/Keychain/Contacts, iMessage and intended receive address, portrait lock, actual enabled device passcode before Gmail or explicitly authorized verified alternative, installed usable Gmail, used saved credentials securely before help, and never bypassed provider policy or exposed secrets. Provider reset/passcode restoration is assisted preparation, not agent achievement; disclose it separately. Any user-only authentication or incomplete setting means unattended boot FAIL. A retained state audit, labels, successful inputs, or agent prose alone cannot pass. Require actual current tool evidence and final backend settings verification.",
         "method": "single_turn_llm_judge"
       }
     ]
@@ -23099,6 +23100,23 @@
       "browser": 1
     },
     "description": "Daily acceptance definition. Fails closed before paid execution until independent live fixtures and private persisted-proof collector are provisioned; no live pass claimed.",
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "phone-sms-independent-issuer-outcome",
+        "method": "static_check",
+        "criteria": [
+          "The independent challenge issuer records successful SMS-code sign-in"
+        ],
+        "checks": [
+          {
+            "type": "auth_test_site_outcome",
+            "expect": "signed_in",
+            "signed_in_method": "sms_code"
+          }
+        ]
+      }
+    ],
     "environment": {
       "mode": "live",
       "auth_test_site": {
@@ -23285,6 +23303,8 @@
     ],
     "environment": {
       "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
       "live_fixtures": [
         "live"
       ],

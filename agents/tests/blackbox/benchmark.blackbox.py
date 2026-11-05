@@ -26877,7 +26877,11 @@ async def run_all_tests():
     from benchmarks import phone_daily_test
     for name in sorted(dir(phone_daily_test)):
         if name.startswith("test_"):
-            r.record("phone_daily_" + name[5:], _with_pytest_fixtures(getattr(phone_daily_test, name)))
+            case = _with_pytest_fixtures(getattr(phone_daily_test, name))
+            if asyncio.iscoroutinefunction(case):
+                await r.record_async("phone_daily_" + name[5:], case)
+            else:
+                r.record("phone_daily_" + name[5:], case)
 
     from benchmarks import phone_connectivity_test
     for name in sorted(dir(phone_connectivity_test)):

@@ -55,6 +55,8 @@ test('phone_sms_otp uses only owned configured phone, no minted identity or Agen
         code: first.code,
       });
       assert(denied.status !== 303, 'Old code cannot sign in');
+      // Force a six-digit collision: only the exact accepted replacement gains consumption evidence.
+      first.code = newest.code;
       const ok = await postForm(base, pagePath(manifest, '/login/sms/verify'), {
         code: newest.code,
       });

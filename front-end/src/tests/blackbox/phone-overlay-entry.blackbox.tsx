@@ -1,98 +1,113 @@
-/** [expanded + task phone event] -> existing fullscreen open event once; collapsed/foreign stay idle. */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render } from '@testing-library/react';
-import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
+/** Legacy fullscreen entry: owned events open once; collapsed/foreign events remain idle. */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
+import { usePhoneFullscreenEntry } from '@/features/terminal-component-group/components/browser-status-bar/phone/usePhoneFullscreenEntry';
+import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
+import type { Message } from '@/features/terminal-component-group/hooks';
+import { fixture as transport, props } from './fixtures/phone-attention.fixture';
 
-const fixture = vi.hoisted(() => ({
-  expanded: true,
-  fullscreen: false,
-  messages: [] as unknown[],
+vi.mock('@/hooks/use-mobile', () => ({ useIsMobile: () => false }));
+vi.mock('@/lib/api/client', () => ({
+  API_BASE_WITH_PATH: 'http://localhost:3001/api',
+  getAuthHeaders: () => ({ Authorization: 'Bearer synthetic-user' }),
 }));
-vi.mock('@/features/terminal-component-group/hooks', () => ({
-  useAgentContext: () => ({
-    agent: { agent_id: 'agent-a' },
-    messages: fixture.messages,
-    selectedAgentId: 'agent-a',
-  }),
+vi.mock('@/features/terminal-component-group/components/BrowserBorderGlow', () => ({
+  default: () => null,
+}));
+vi.mock('@/features/terminal-component-group/components/BrowserCursorOverlay', () => ({
+  default: () => null,
 }));
 vi.mock(
-  '@/features/terminal-component-group/components/browser-status-bar/useBrowserStatusBarState',
+  '@/features/terminal-component-group/components/browser-status-bar/BrowserTaskProgressPanel',
   () => ({
-    useBrowserStatusBarState: () => ({
-      readOnly: false,
-      pendingAuthAssistance: null,
-      pendingWriteLockApproval: null,
-      isDisconnected: false,
-      outputSchema: undefined,
-      browserSessionMetadata: null,
-      stepProgress: null,
-    }),
+    TaskProgressSidebar: () => <div>Task progress</div>,
   }),
 );
 vi.mock(
-  '@/features/terminal-component-group/components/browser-status-bar/useBrowserStatusBarUi',
+  '@/features/terminal-component-group/components/browser-status-bar/BrowserProxyLocationChip',
   () => ({
-    useBrowserStatusBarUi: () => ({
-      isExpanded: fixture.expanded,
-      isFullscreen: fixture.fullscreen,
-      browserUrl: 'https://example.com',
-      isLive: true,
-      isUserControlling: false,
-      hasReconnected: false,
-    }),
+    BrowserProxyLocationChip: () => null,
   }),
 );
-vi.mock(
-  '@/features/terminal-component-group/components/browser-status-bar/useRefreshedAuthAssistanceUrl',
-  () => ({ useRefreshedAuthAssistanceUrl: () => null }),
-);
-vi.mock(
-  '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarExpanded',
-  () => ({ BrowserStatusBarExpanded: () => null }),
-);
-vi.mock(
-  '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarMinimized',
-  () => ({ BrowserStatusBarMinimized: () => null }),
-);
-vi.mock(
-  '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen',
-  () => ({ BrowserStatusBarFullscreen: () => null }),
-);
-const event = (taskId: string) => ({
+const state = { expanded: true, fullscreen: false, messages: [] as Message[] };
+export function Entry() {
+  usePhoneFullscreenEntry(
+    'task-a',
+    state.messages,
+    {
+      isExpanded: state.expanded,
+      isFullscreen: state.fullscreen,
+    },
+    false,
+  );
+  return state.fullscreen ? (
+    <BrowserStatusBarFullscreen
+      {...props()}
+      messages={state.messages}
+      isWaitingForAuthAssistance={false}
+    />
+  ) : null;
+}
+const event = (taskId: string): Message => ({
   message_id: 'phone-1',
   timestamp: 'now',
+  role: 'TOOL',
+  text: '',
   metadata: { task_id: taskId, toolName: 'phone' },
 });
 beforeEach(() => {
-  fixture.expanded = true;
-  fixture.fullscreen = false;
-  fixture.messages = [];
+  Object.assign(state, { expanded: true, fullscreen: false, messages: [] });
+  window.history.replaceState({}, '', '/');
+  vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:entry');
+  vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
 });
-describe('expanded browser phone entry', () => {
-  it('opens the existing fullscreen once for the owned phone activity, without reopening on close', () => {
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+describe('legacy expanded browser phone entry', () => {
+  it('opens the real fullscreen once for owned activity and does not reopen on close', async () => {
+    const f = transport();
     const open = vi.fn();
     window.addEventListener('navi-open-browser', open);
-    fixture.messages = [event('task-a')];
-    const view = render(<BrowserStatusBar taskId="task-a" browserUrl="https://example.com" />);
-    expect(open).toHaveBeenCalledOnce();
-    expect((open.mock.calls[0][0] as CustomEvent).detail.taskId).toBe('task-a');
-    fixture.fullscreen = true;
-    view.rerender(<BrowserStatusBar taskId="task-a" browserUrl="https://example.com" />);
-    fixture.fullscreen = false;
-    view.rerender(<BrowserStatusBar taskId="task-a" browserUrl="https://example.com" />);
-    expect(open).toHaveBeenCalledOnce();
-    window.removeEventListener('navi-open-browser', open);
+    try {
+      state.messages = [event('task-a')];
+      const view = render(<Entry />);
+      expect(open).toHaveBeenCalledOnce();
+      expect((open.mock.calls[0][0] as CustomEvent).detail.taskId).toBe('task-a');
+      state.fullscreen = true;
+      view.rerender(<Entry />);
+      expect(await screen.findByRole('region', { name: 'Cloud iPhone' })).toBeVisible();
+      await waitFor(() =>
+        expect(screen.getByAltText('Cloud iPhone screen')).toHaveAttribute('src', 'blob:entry'),
+      );
+      expect(screen.getByTitle('Browser')).toBeInTheDocument();
+      expect(f.calls.some((call) => call.endsWith('/interactions/task-a'))).toBe(true);
+      state.fullscreen = false;
+      view.rerender(<Entry />);
+      expect(screen.queryByRole('region', { name: 'Cloud iPhone' })).toBeNull();
+      expect(open).toHaveBeenCalledOnce();
+      expect(URL.revokeObjectURL).toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('navi-open-browser', open);
+    }
   });
   it('keeps collapsed and foreign task activity passive', () => {
+    const f = transport();
     const open = vi.fn();
     window.addEventListener('navi-open-browser', open);
-    fixture.messages = [event('foreign')];
-    const view = render(<BrowserStatusBar taskId="task-a" browserUrl="https://example.com" />);
-    expect(open).not.toHaveBeenCalled();
-    fixture.expanded = false;
-    fixture.messages = [event('task-a')];
-    view.rerender(<BrowserStatusBar taskId="task-a" browserUrl="https://example.com" />);
-    expect(open).not.toHaveBeenCalled();
-    window.removeEventListener('navi-open-browser', open);
+    try {
+      state.messages = [event('foreign')];
+      const view = render(<Entry />);
+      expect(open).not.toHaveBeenCalled();
+      state.expanded = false;
+      state.messages = [event('task-a')];
+      view.rerender(<Entry />);
+      expect(open).not.toHaveBeenCalled();
+      expect(f.calls).toEqual([]);
+      expect(screen.queryByTitle('Browser')).toBeNull();
+    } finally {
+      window.removeEventListener('navi-open-browser', open);
+    }
   });
 });

@@ -337,6 +337,11 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links = {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-prelaunch-v1':
+        from deploy_test_native_prelaunch import validate_prelaunch
+        result = validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
+        need(used == set(bindings), 'proof file closure')
+        return result
     if layout == 'campaign-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')

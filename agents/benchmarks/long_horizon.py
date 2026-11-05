@@ -231,10 +231,13 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
     # gap rather than an agent capability miss.
     if "auth_test_site" in env:
         try:
-            declared_auth_test_site_scenario(env)
+            auth_scenario = declared_auth_test_site_scenario(env)
         except ValueError as exc:
             raise ValueError(f"{item_id}: {exc}") from exc
-        if mode != "synthetic" or env.get("live_fixtures"):
+        if auth_scenario == "phone_sms_otp":
+            if mode != "live":
+                raise ValueError(f"{item_id}: phone_sms_otp requires mode=live for actual phone transport")
+        elif mode != "synthetic" or env.get("live_fixtures"):
             raise ValueError(
                 f"{item_id}: environment.auth_test_site is a fully seeded synthetic world; "
                 "declare mode=synthetic without live_fixtures"
@@ -379,6 +382,8 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     from benchmarks.process_bench import validate_task_process
 
     validate_task_process(raw)
+    if declared_auth_test_site_scenario(raw.get("environment")) == "phone_sms_otp" and "LIVE" not in (raw.get("tags") or []):
+        raise ValueError("phone_sms_otp requires the LIVE tag")
     item_id = _require_non_empty_string(raw, "name", "<task>")
     status = raw.get("status", "ready")
     if status not in TASK_STATUSES:

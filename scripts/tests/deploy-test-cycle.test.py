@@ -2150,6 +2150,98 @@ class Cycle(unittest.TestCase):
             files={str(p): c.sha_file(p) for p in files})
         return state, occurrence, paths, proof, hub
 
+    def prelaunch_campaign_state(self):
+        import hashlib, shutil, time, runpy
+        from datetime import datetime, timezone
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        runs = hub.parent.parent
+        for item in list(runs.iterdir()):
+            shutil.rmtree(item) if item.is_dir() else item.unlink()
+        producer = self.root / 'scripts/run-bench-campaign.py'
+        producer.parent.mkdir(exist_ok=True)
+        shutil.copyfile(ROOT / 'scripts/run-bench-campaign.py', producer)
+        subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=t@x','commit','-qm','producer'],check=True)
+        source = c.source(self.root)
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        campaign.mkdir(parents=True)
+        receipt = state['attempts'][-1]['results'][0]
+        adapter = c.read(paths['adapter'])
+        start,finish = receipt['started_at'],receipt['finished_at']
+        job = dict(job_id='r001-j0001',task=occurrence['gate'],run=1,attempt=1,attempts=[],status='cancelled',
+                   controller_exit_code=None,started_at=None,log=str(campaign/'r001-j0001.log'))
+        summary = dict(campaign_id=campaign.name,runs=1,retry_infra=0,task_count=1,total_jobs=1,concurrency=1,
+            peak_concurrency=0,status='failed',jobs=[job],shared_inventory_failed=True,
+            started_at=datetime.fromtimestamp(start,timezone.utc).isoformat(),finished_at=datetime.fromtimestamp(finish,timezone.utc).isoformat())
+        c.write(campaign/'summary.json',summary)
+        native=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
+        group=native['campaign_group_record'](summary)
+        c.write(campaign/'hub-group.json',group)
+        c.write(campaign/'hub-group-publication-ack.private.json',dict(pid=2147483000,token='d'*32,record_sha256=hashlib.sha256(json.dumps(group,sort_keys=True).encode()).hexdigest()))
+        relay=Path(tempfile.mkdtemp(prefix='cb-relay-')); self.addCleanup(shutil.rmtree,relay)
+        c.write(campaign/'shared-relay-location.json',dict(directory=str(relay)))
+        inventory=campaign/'shared-inventory';inventory.mkdir()
+        scripts=inventory/'scripts';scripts.mkdir()
+        for name,relative in [('cloudbench-campaign-inventory.sh','scripts/cloudbench-campaign-inventory.sh'),('cloudbench-inventory.sh','scripts/lib/cloudbench-inventory.sh'),('cloudbench-env.sh','scripts/lib/cloudbench-env.sh'),('cloudbench-machine-readiness.py','scripts/cloudbench-machine-readiness.py'),('cloudbench-campaign-machines.py','scripts/cloudbench-campaign-machines.py')]:
+            shutil.copyfile(ROOT/relative,scripts/name)
+        (inventory/'publisher.private.log').write_text('')
+        (inventory/'stop').touch()
+        (inventory/'machines-refresh.lock').write_text('host=fixture\npid=2147483001\npid_start=proc-start:fixture:123\ntoken=2147483001.fixture\n')
+        cli=runs.parent/'cli.log'
+        cli.write_text(f"Campaign inventory: one parent-owned native feed for all cloud controllers; capacity and resource mutation checks remain live\nCampaign inventory did not initialize; see private publisher log (FileNotFoundError: [Errno 2] No such file or directory: 'flyctl')\nsummary={campaign}/summary.json\n")
+        request=paths['receipt'].parent/'request.json';req=c.read(request);req['source']=source;c.write(request,req)
+        receipt['source']=source;adapter['source']=source;adapter['fleet_directory']=str(campaign)
+        c.write(paths['adapter'],adapter)
+        reference=receipt['native_cleanup_reference'];reference.update(native_directory=str(campaign),result_sha256=c.sha_file(paths['adapter']))
+        receipt['cleanup_owner']['native_cleanup_reference']=reference;c.write(paths['receipt'],receipt)
+        files=[request,cli,producer,*campaign.rglob('*')]
+        files=[f for f in files if f.is_file()]
+        proof.update(layout='campaign-prelaunch-v1',campaign=str(campaign),producer_source=str(producer),source=source,owner=copy.deepcopy(receipt['cleanup_owner']),
+            receipt_sha256=c.sha_file(paths['receipt']),worker_result_sha256=c.sha_file(paths['adapter']),confirmed_at=time.time(),files={str(f):c.sha_file(f) for f in files})
+        proof.pop('controller_log')
+        return state,occurrence,paths,proof,campaign
+
+    def test_native_prelaunch_reconciliation_preserves_failure_and_grants_only_retry(self):
+        state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()
+        before=copy.deepcopy(state['attempts'])
+        c.reconcile(state,occurrence['id'],proof)
+        self.assertEqual(before,state['attempts'])
+        entry=next(iter(state['reconciled_owners'].values()))
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual([],entry['participants'])
+        self.assertEqual([],c.retained_owners(state,[occurrence['gate']]))
+
+    def test_native_prelaunch_proof_rejects_started_job_or_missing_positive_failure(self):
+        state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()
+        for mutation in ('started','no-failure','not-stopped','relay-created','live-publisher','changed-source','admitted-controller'):
+            with self.subTest(mutation=mutation):
+                summary=campaign/'summary.json';original=summary.read_bytes()
+                stop=campaign/'shared-inventory/stop'
+                relay=Path(c.read(campaign/'shared-relay-location.json')['directory'])
+                cli=campaign.parent.parent/'cli.log';cli_original=cli.read_bytes()
+                lock=campaign/'shared-inventory/machines-refresh.lock';lock_original=lock.read_bytes()
+                producer=Path(proof['producer_source']);producer_original=producer.read_bytes()
+                admitted=campaign.parent.parent/'runs/admitted'
+                try:
+                    if mutation=='started':
+                        value=c.read(summary);value['jobs'][0]['controller_pid']=23456;c.write(summary,value)
+                    if mutation=='no-failure': cli.write_text('generic inventory failure')
+                    if mutation=='not-stopped':stop.unlink()
+                    if mutation=='relay-created':(relay/'broker-owner.json').write_text('{}')
+                    if mutation=='live-publisher':lock.write_text(f'host=fixture\npid={os.getpid()}\npid_start=proc-start:fixture:123\ntoken={os.getpid()}.fixture\n')
+                    if mutation=='changed-source':producer.write_text('changed')
+                    if mutation=='admitted-controller':admitted.mkdir()
+                    bad=copy.deepcopy(proof)
+                    bad['files']={path:c.sha_file(Path(path)) for path in proof['files'] if Path(path).is_file()}
+                    snapshot=copy.deepcopy(state)
+                    with self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],bad)
+                    self.assertEqual(snapshot,state)
+                finally:
+                    summary.write_bytes(original);cli.write_bytes(cli_original);stop.touch()
+                    (relay/'broker-owner.json').unlink(missing_ok=True)
+                    lock.write_bytes(lock_original);producer.write_bytes(producer_original)
+                    if admitted.exists():admitted.rmdir()
+
     def test_native_cloud_cleanup_overlay_preserves_failed_execution_and_retained_hub(self):
         state, occurrence, paths, proof, hub = self.native_recon_state()
         before = copy.deepcopy(state['attempts'])

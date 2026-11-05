@@ -87,6 +87,7 @@ from providers.rose.speed import bind_agent_speed
 from providers.rose.types import ComputeTokenSource
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.attention_requests import REJECTION_SENTINEL
+from utils.browser_identity import logical_browser_task_id as _logical_browser_task_id
 from utils.error_utils import error_chain_has_type, extract_error_message
 from utils.payment_card import (
     MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
@@ -143,6 +144,7 @@ from .config import (
 )
 from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
 from .download_persist import BrowserDownloadPersister
+from .phone import bind_approved_message
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
@@ -263,11 +265,6 @@ logger = structlog.get_logger()
 # Resume marker for a sign-in-help request the user declined.
 AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
-
-
-def _logical_browser_task_id(agent_id: str) -> str:
-    """One browser identity per GP; activity/tool IDs remain separate."""
-    return str(uuid_module.uuid5(uuid_module.NAMESPACE_URL, f"rose-browser-owner:{agent_id}"))
 
 
 def _browser_task_terminal_metadata(
@@ -6140,6 +6137,7 @@ async def spawn_browser_agent_activity_v3(
     agent_model: Optional[str] = None,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
+    approved_message_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
     browser_pool = browser_pool_for_agent_model(agent_model)
@@ -6204,6 +6202,7 @@ async def spawn_browser_agent_activity_v3(
         browser_pool=browser_pool,
         inbox_address=inbox_address,
         await_owner_cleanup=await_owner_cleanup,
+        approved_message_intent=approved_message_intent,
     )
 
 
@@ -7836,6 +7835,7 @@ async def _spawn_browser_agent_activity_v3_real(
     browser_pool: str = BROWSER_USE_PRICING_POOL,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
+    approved_message_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -8900,6 +8900,8 @@ async def _spawn_browser_agent_activity_v3_real(
             if browser_session_metadata.get("provider") == "tilion":
                 tilion_creates["count"] += 1
             user_profile = session_data.get("user_settings") or {}
+        if approved_message_intent:
+            await bind_approved_message(config, user_id, task_id, approved_message_intent)
         _record_timing("session_init", t_session)
         # Durable Tilion downloads from before a write-lock/payment/auth pause,
         # keyed by the session this activity actually runs on.
@@ -13669,6 +13671,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     activity_args.append(getattr(workflow_instance, "model", None))
                     activity_args.append(inbox_address)
                     activity_args.append(True)
+                    approved_message_intent = tool_call.get("approvedMessageIntent")
+                    if isinstance(approved_message_intent, str) and approved_message_intent:
+                        activity_args.append(approved_message_intent)
                     async with span(
                         "browser_activity_wait",
                         agent_id=agent_id,

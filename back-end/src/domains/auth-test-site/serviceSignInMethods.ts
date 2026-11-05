@@ -165,20 +165,23 @@ export function verifySmsCode(
 ): CodeVerifyResult {
   const account = accountByPhone(site, phoneSmsTarget(site, rawPhone));
   const email = account?.email ?? normalizePhone(rawPhone);
+  // Capture the exact eligible challenge before consumeCode changes its consumed flag.
+  const issued =
+    site.scenario === 'phone_sms_otp'
+      ? site.codes.find(
+          (c) =>
+            c.email === email &&
+            c.purpose === 'sms' &&
+            !c.consumed &&
+            secretsEqual(c.code, rawCode.replace(/\D+/g, ''))
+        )
+      : undefined;
   const result = account === undefined ? 'invalid_code' : consumeCode(site, email, rawCode, 'sms');
   if (result !== 'ok') {
     recordAttempt(site, 'sms_verify', email, 'rejected', result);
     return { ok: false, reason: result };
   }
-  if (site.scenario === 'phone_sms_otp') {
-    const issued = site.codes.find(
-      (c) =>
-        c.email === email &&
-        c.code === rawCode.replace(/\D+/g, '') &&
-        c.phoneChallenge !== undefined
-    );
-    if (issued?.phoneChallenge) issued.phoneChallenge.consumedAt = new Date().toISOString();
-  }
+  if (issued?.phoneChallenge) issued.phoneChallenge.consumedAt = new Date().toISOString();
   recordAttempt(site, 'sms_verify', email, 'signed_in', null);
   return { ok: true, token: startSession(site, email, 'sms_code') };
 }
