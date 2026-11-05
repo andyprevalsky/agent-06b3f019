@@ -7,11 +7,15 @@
  * compares it with its own and reloads onto the new build.
  *
  * [IDLE] --page load / resume (visible, bfcache pageshow)--> [CHECKING]
+ * [IDLE] --every 5 min while visible--> [CHECKING] (an open tab learns of a
+ *         later deploy; it reloads only after 2 min without input)
  * [CHECKING] --GET /version.json (no-store)-->
  *     same build | fetch failed | no build id -----------------> [IDLE]
  *     newer build, no unsent text ------------------------------> [RELOADING]
  *     newer build, the user has typed text ---------------------> [PENDING]
- *         (rechecked on the next resume; a draft is never thrown away)
+ *     newer build, periodic check, input in the last 2 min ------> [PENDING]
+ *         (rechecked on the next resume or tick; a draft or an active
+ *          session is never interrupted)
  *     newer build already reloaded for this session -------------> [IDLE] (no loop)
  * [ANY] --vite:preloadError (a chunk of the replaced deploy is gone)--> [RELOADING]
  *       (once per session per build; with unsent text the error surfaces instead)
@@ -26,7 +30,16 @@ export const APP_VERSION_URL = '/version.json';
 /** Resumes closer together than this share one version check. */
 export const APP_VERSION_MIN_CHECK_INTERVAL_MS = 30_000;
 
+/** While visible, an open page re-checks for a newer deploy this often. */
+export const APP_VERSION_POLL_INTERVAL_MS = 5 * 60_000;
+
+/** A periodic check reloads only after this long without user input. */
+export const APP_VERSION_IDLE_BEFORE_RELOAD_MS = 2 * 60_000;
+
 const RELOAD_GUARD_PREFIX = 'rose:version-reload:';
+
+/** Input events that mark the user as active (passive listeners). */
+const ACTIVITY_EVENTS = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const;
 
 /** Input types whose value is something the user typed (a draft to keep). */
 const TEXT_INPUT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
@@ -88,6 +101,7 @@ export function initAppVersionWatch(options: AppVersionWatchOptions = {}): () =>
   const reload = options.reload ?? (() => window.location.reload());
   const now = options.now ?? (() => Date.now());
   let lastCheck = Number.NEGATIVE_INFINITY;
+  let lastActivity = now();
   let checking = false;
 
   const check = async (trigger: string) => {
@@ -97,7 +111,9 @@ export function initAppVersionWatch(options: AppVersionWatchOptions = {}): () =>
     try {
       const deployed = await fetchDeployedBuildId(fetchImpl);
       if (!deployed || deployed === buildId || document.visibilityState !== 'visible') return;
-      if (hasUnsentText()) {
+      const active =
+        trigger === 'interval' && now() - lastActivity < APP_VERSION_IDLE_BEFORE_RELOAD_MS;
+      if (active || hasUnsentText()) {
         lastCheck = Number.NEGATIVE_INFINITY;
         return;
       }
@@ -114,6 +130,12 @@ export function initAppVersionWatch(options: AppVersionWatchOptions = {}): () =>
     if (event.persisted) void check('bfcache');
   };
   const onLoad = () => void check('load');
+  const onActivity = () => {
+    lastActivity = now();
+  };
+  const onTick = () => {
+    if (document.visibilityState === 'visible') void check('interval');
+  };
   const onPreloadError = (event: Event) => {
     // A typed draft outweighs the failed import: the error surfaces as before.
     if (hasUnsentText()) return;
@@ -124,6 +146,8 @@ export function initAppVersionWatch(options: AppVersionWatchOptions = {}): () =>
   document.addEventListener('visibilitychange', onVisibilityChange);
   window.addEventListener('pageshow', onPageShow);
   window.addEventListener('vite:preloadError', onPreloadError);
+  for (const type of ACTIVITY_EVENTS) window.addEventListener(type, onActivity, { passive: true });
+  const poll = setInterval(onTick, APP_VERSION_POLL_INTERVAL_MS);
   if (document.readyState === 'complete') onLoad();
   else window.addEventListener('load', onLoad, { once: true });
 
@@ -132,5 +156,7 @@ export function initAppVersionWatch(options: AppVersionWatchOptions = {}): () =>
     window.removeEventListener('pageshow', onPageShow);
     window.removeEventListener('vite:preloadError', onPreloadError);
     window.removeEventListener('load', onLoad);
+    for (const type of ACTIVITY_EVENTS) window.removeEventListener(type, onActivity);
+    clearInterval(poll);
   };
 }

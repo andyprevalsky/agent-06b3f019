@@ -8,7 +8,9 @@ import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { productionBuildId, roseBuildVersion } from '../../../vite-build-version';
 import {
+  APP_VERSION_IDLE_BEFORE_RELOAD_MS,
   APP_VERSION_MIN_CHECK_INTERVAL_MS,
+  APP_VERSION_POLL_INTERVAL_MS,
   APP_VERSION_URL,
   hasUnsentText,
   initAppVersionWatch,
@@ -177,6 +179,55 @@ describe('stale build auto refresh', () => {
     window.dispatchEvent(failure);
     expect(reload).not.toHaveBeenCalled();
     expect(failure.defaultPrevented).toBe(false);
+  });
+
+  describe('an open, visible page', () => {
+    beforeEach(() => vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] }));
+    afterEach(() => vi.useRealTimers());
+
+    async function tick() {
+      clock += APP_VERSION_POLL_INTERVAL_MS;
+      vi.advanceTimersByTime(APP_VERSION_POLL_INTERVAL_MS);
+      await settle();
+    }
+
+    it('learns of a later deploy and reloads once the user has been idle', async () => {
+      const fetchImpl = versionFetch(RUNNING);
+      const reload = watch(fetchImpl);
+      await settle();
+      fetchImpl.mockImplementation(async () => new Response(JSON.stringify({ buildId: DEPLOYED })));
+      await tick();
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(reload).toHaveBeenCalledTimes(1);
+    });
+
+    it('never reloads under an active user: waits for 2 idle minutes', async () => {
+      const fetchImpl = versionFetch(RUNNING);
+      const reload = watch(fetchImpl);
+      await settle();
+      fetchImpl.mockImplementation(async () => new Response(JSON.stringify({ buildId: DEPLOYED })));
+      clock += APP_VERSION_POLL_INTERVAL_MS - APP_VERSION_IDLE_BEFORE_RELOAD_MS / 2;
+      window.dispatchEvent(new Event('pointerdown'));
+      clock -= APP_VERSION_POLL_INTERVAL_MS - APP_VERSION_IDLE_BEFORE_RELOAD_MS / 2;
+      await tick();
+      expect(reload).not.toHaveBeenCalled();
+      await tick();
+      expect(reload).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips periodic checks while hidden and stops them on cleanup', async () => {
+      const fetchImpl = versionFetch(RUNNING);
+      watch(fetchImpl);
+      await settle();
+      visibility = 'hidden';
+      await tick();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      visibility = 'visible';
+      cleanup();
+      cleanup = () => {};
+      await tick();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('stays off without a production build id (dev server, tests)', async () => {
