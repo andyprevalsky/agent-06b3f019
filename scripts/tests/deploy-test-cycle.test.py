@@ -372,6 +372,30 @@ class Cycle(unittest.TestCase):
         c.write(path, candidate); saved = path.read_bytes()
         self.assertEqual(2, call()); self.assertEqual(saved, path.read_bytes())
 
+    def test_diagnosed_independent_excluded_roots_cover_ancestors_and_descendants(self):
+        import contextlib, io
+        state, plan, path, plan_path, _ = self.diagnosed_independent_fixture()
+        missing = Path(next(g['cwd'] for g in plan['gates'] if g['name'] == 'missing'))
+        leased = next(g['cwd'] for g in plan['gates'] if g['name'] == 'leased')
+        for excluded in (missing.parent, missing / 'active-child'):
+            c.write(path, state); saved = path.read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = c.main(['triage-independent', '--plan', str(plan_path), '--state-dir', str(self.directory),
+                               '--root', str(self.root), '--exclude-root', leased, '--exclude-root', str(excluded)])
+            self.assertEqual(0, code)
+            self.assertEqual(saved, path.read_bytes(), 'overlapping excluded root must not launch an observation')
+
+    def test_diagnosed_independent_relative_cwd_uses_coordinator_root_for_retention(self):
+        state, plan, path, plan_path, call = self.diagnosed_independent_fixture()
+        missing = next(g for g in plan['gates'] if g['name'] == 'missing')
+        absolute = Path(missing['cwd'])
+        missing['cwd'] = os.path.relpath(absolute, self.root)
+        c.latest_receipts(state)['api']['cleanup_owner']['worker_root'] = str(absolute)
+        state.update(plan=plan, plan_digest=c.digest(plan), input_fingerprints=c.input_fingerprints(plan, self.root))
+        c.write(path, state); c.write(plan_path, plan); saved = path.read_bytes()
+        self.assertEqual(0, call())
+        self.assertEqual(saved, path.read_bytes(), 'relative execution under a retained root must not launch')
+
     def test_diagnosed_independent_new_failure_returns_to_rca_with_old_repairs(self):
         before, plan, path, _, call = self.diagnosed_independent_fixture(failing=True)
         self.assertEqual(0, call())

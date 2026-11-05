@@ -52,7 +52,7 @@ the phase unchanged and ready false; fresh failures return to RCA with prior
 repair obligations carried forward. Normal focused/full/final transitions are
 unchanged. No skips or readiness credit are manufactured.
 
-Seven targeted regressions cover retention, repaired FULL observations, invalid
+Nine targeted regressions cover retention, repaired FULL observations, invalid
 or missing dispositions, stale inputs, non-quiescence, concurrent coordinators,
 new failure routing, no empty attempts, and unchanged focused/final requirements.
 A successful native FULL observation is reusable only through the existing
@@ -72,11 +72,19 @@ Separate independent observation admission from repair completion without weaken
 
 ## Validation
 
-The full registered cycle suite passes 175 tests. The targeted admission cohort
-passes seven tests, deploy static checks pass nine tests, and planner checks pass
+The full registered cycle suite passes 177 tests. The targeted admission cohort
+passes nine tests, deploy static checks pass nine tests, and planner checks pass
 22 tests. The structural-runner suite passes 64 of 65: its unchanged documentation
 control reports that Step 4s does not list the already registered
 `python3 scripts/tests/local-stack-retention.test.py`. The registry, failing test,
 and Step 4s document match the starting source byte-for-byte; the isolated
 single-test control reproduces that independent failure. This patch leaves the
 separate retention work untouched and does not claim that structural suite green.
+
+
+Independent review identified two path-admission holes before parent integration:
+exact-only exclusions did not cover ancestors/descendants, and relative gate cwd
+was compared relative to the invoking shell rather than the explicit source root.
+Two registered regressions fail before correction and pass afterward. All worker
+path comparisons now use the shared execution-root resolution and symmetric
+overlap check; original receipt validation and cleanup code are unchanged.
