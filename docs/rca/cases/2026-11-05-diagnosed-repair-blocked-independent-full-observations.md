@@ -72,8 +72,8 @@ Separate independent observation admission from repair completion without weaken
 
 ## Validation
 
-The full registered cycle suite passes 177 tests. The targeted admission cohort
-passes nine tests, deploy static checks pass nine tests, and planner checks pass
+The full registered cycle suite passes 180 tests. The targeted admission cohort
+passes twelve tests, deploy static checks pass nine tests, and planner checks pass
 22 tests. The structural-runner suite passes 64 of 65: its unchanged documentation
 control reports that Step 4s does not list the already registered
 `python3 scripts/tests/local-stack-retention.test.py`. The registry, failing test,
@@ -88,3 +88,13 @@ was compared relative to the invoking shell rather than the explicit source root
 Two registered regressions fail before correction and pass afterward. All worker
 path comparisons now use the shared execution-root resolution and symmetric
 overlap check; original receipt validation and cleanup code are unchanged.
+
+A second review found cloud-CLI metadata could name a declared worker checkout
+while the actual local driver ran from the coordinator root. Root exclusions
+previously applied only to local-isolated transports. Two exact synthetic
+cloud-CLI admission controls failed on that implementation and passed after
+checking every transport's actual invocation cwd. Declared worker roots remain
+additional host-scoped conflicts; remote paths are not resolved as local paths.
+A separate transport control covers boxes-thread, SSH, cloud-CLI, and explicit
+drivers and rejects ambiguous relative remote roots. No original failure,
+repair obligation, command, timeout, assertion, or readiness rule is relaxed.

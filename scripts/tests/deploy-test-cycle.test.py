@@ -396,6 +396,48 @@ class Cycle(unittest.TestCase):
         self.assertEqual(0, call())
         self.assertEqual(saved, path.read_bytes(), 'relative execution under a retained root must not launch')
 
+    def test_diagnosed_independent_cloud_cli_excludes_actual_local_execution_root(self):
+        import contextlib, io
+        state, plan, path, plan_path, _ = self.diagnosed_independent_fixture()
+        missing = next(g for g in plan['gates'] if g['name'] == 'missing')
+        missing.update(worker_transport='benchmark-cloud-cli', cwd=str(self.root),
+                       native_cloud=True, case_protocol=True,
+                       command=[sys.executable, str(self.root / 'scripts/deploy_test_cloud.py')],
+                       worker_root=str(Path(self.workers.name) / 'declared-cloud-worker'))
+        state.update(plan=plan, plan_digest=c.digest(plan), input_fingerprints=c.input_fingerprints(plan, self.root))
+        c.write(path, state); c.write(plan_path, plan); saved = path.read_bytes()
+        leased = next(g['cwd'] for g in plan['gates'] if g['name'] == 'leased')
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = c.main(['triage-independent', '--plan', str(plan_path), '--state-dir', str(self.directory),
+                           '--root', str(self.root), '--exclude-root', leased, '--exclude-root', str(self.root)])
+        self.assertEqual(0, code)
+        self.assertEqual(saved, path.read_bytes(), 'cloud CLI actual local cwd must respect root exclusion')
+
+    def test_diagnosed_independent_cloud_cli_retained_actual_root_blocks(self):
+        state, plan, path, plan_path, call = self.diagnosed_independent_fixture()
+        missing = next(g for g in plan['gates'] if g['name'] == 'missing')
+        missing.update(worker_transport='benchmark-cloud-cli', cwd=str(self.root),
+                       native_cloud=True, case_protocol=True,
+                       command=[sys.executable, str(self.root / 'scripts/deploy_test_cloud.py')],
+                       worker_root=str(Path(self.workers.name) / 'declared-cloud-worker'))
+        c.latest_receipts(state)['api']['cleanup_owner']['worker_root'] = str(self.root)
+        state.update(plan=plan, plan_digest=c.digest(plan), input_fingerprints=c.input_fingerprints(plan, self.root))
+        c.write(path, state); c.write(plan_path, plan); saved = path.read_bytes()
+        self.assertEqual(0, call())
+        self.assertEqual(saved, path.read_bytes(), 'cloud CLI actual cwd must respect retained roots')
+
+    def test_observation_roots_keep_remote_checkout_separate_from_local_driver(self):
+        for transport in ('boxes-thread', 'ssh', 'benchmark-cloud-cli', 'explicit'):
+            with self.subTest(transport=transport):
+                gate = dict(worker_transport=transport, cwd='driver', worker_host='remote.example',
+                            worker_root='/remote/checkout')
+                self.assertEqual([('local', self.root / 'driver'),
+                                  ('remote.example', Path('/remote/checkout'))],
+                                 c.observation_worker_roots(gate, self.root))
+                gate['worker_root'] = 'relative-remote'
+                with self.assertRaisesRegex(ValueError, 'remote worker root must be absolute'):
+                    c.observation_worker_roots(gate, self.root)
+
     def test_diagnosed_independent_new_failure_returns_to_rca_with_old_repairs(self):
         before, plan, path, _, call = self.diagnosed_independent_fixture(failing=True)
         self.assertEqual(0, call())

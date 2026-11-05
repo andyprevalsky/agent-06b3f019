@@ -371,11 +371,21 @@ def local_admission_root(gate: dict, root: Path) -> Path:
     return location
 
 
-def observation_worker_root(gate: dict, root: Path) -> Path:
-    """Use the execution binding, never the coordinator process's ambient cwd."""
+def observation_worker_roots(gate: dict, root: Path) -> list[tuple[str, Path]]:
+    """Protect the local invocation cwd and separately host-scoped worker checkout."""
+    local = (root / gate.get('cwd', '.')).resolve()
     if gate.get('worker_transport') == 'local-isolated':
-        return local_admission_root(gate, root)
-    return (root / gate.get('worker_root', gate.get('cwd', '.'))).resolve()
+        local = local_admission_root(gate, root)
+    locations = [('local', local)]
+    if gate.get('worker_root'):
+        host = gate.get('worker_host', 'local')
+        declared = Path(gate['worker_root'])
+        if host == 'local':
+            declared = (root / declared).resolve()
+        elif not declared.is_absolute():
+            raise ValueError('remote worker root must be absolute for independent admission')
+        locations.append((host, declared))
+    return locations
 
 
 def roots_overlap(first: Path, second: Path) -> bool:
@@ -1306,23 +1316,23 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
         retained = set(retained_owners(state, [g['name'] for g in plan['gates']]))
         held = [g for g in plan['gates'] if g['name'] in retained]
         held_workers = {g.get('worker') for g in held if g.get('worker')}
-        held_roots = [(g.get('worker_host', 'local'), observation_worker_root(g, root))
-                      for g in held]
+        held_roots = [location for g in held for location in observation_worker_roots(g, root)]
         for name in retained:
             owner = receipt_owner(name, latest_receipts(state)[name])
             if owner.get('worker_root'):
-                held_roots.append((owner.get('worker_host', 'local'), (root / owner['worker_root']).resolve()))
+                held_roots.extend(observation_worker_roots(
+                    {'cwd': str(root), 'worker_host': owner.get('worker_host', 'local'),
+                     'worker_root': owner['worker_root']}, root)[1:])
         def conflicts(gate):
-            location = observation_worker_root(gate, root)
+            locations = observation_worker_roots(gate, root)
             return (gate['name'] in retained or gate.get('worker') in held_workers
-                    or any(gate.get('worker_host', 'local') == host and
-                           roots_overlap(location, path)
-                           for host, path in held_roots))
+                    or any(candidate_host == host and roots_overlap(location, path)
+                           for candidate_host, location in locations for host, path in held_roots))
         pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state.get('pending', [])}
         selected = [g for g in plan['gates'] if not g.get('quick') and g['name'] not in pending_gates
                     and not reusable_full_pass(state, g) and not conflicts(g)
-                    and (g.get('worker_transport') != 'local-isolated'
-                         or not any(roots_overlap(local_admission_root(g, root), path) for path in excluded))]
+                    and not any(host == 'local' and roots_overlap(location, path)
+                                for host, location in observation_worker_roots(g, root) for path in excluded)]
         for gate in selected:
             if any(not (p.parent / 'receipt.json').is_file() for p in
                    (directory / 'attempts').glob('*/' + '*/' + gate['name'] + '/request.json')):
