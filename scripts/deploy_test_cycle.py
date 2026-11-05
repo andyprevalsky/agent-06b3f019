@@ -991,20 +991,28 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
 
 
-def isolated_admissions(state: dict, gate: str):
+def isolated_admissions(state: dict, gate: str, *, _with_sources=False):
     from deploy_test_native_cleanup import still_bound
     entries = [e for e in state.get('reconciled_owners', {}).values()
                if e.get('purpose') == 'isolated-validation' and e.get('gate') == gate]
+    invalid = set()
     for entry in entries:
         receipts = [r for a in state.get('attempts', []) for r in a.get('results', [])
                     if r.get('gate') == gate and r.get('token') == entry.get('token')]
         if len(receipts) != 1 or not still_bound(entry, receipts[0], receipt_owner(gate, receipts[0])):
-            raise ValueError(f'{gate}: original isolated-validation obligation changed; refuse launch/completion')
-    return entries
+            invalid.add(entry['token'])
+    covered = {}
+    if invalid or any(e.get('validation_source') != state.get('source') for e in entries):
+        from deploy_test_round16_isolation import inherited_sources
+        covered = inherited_sources(state, entries)
+    if invalid - covered.keys():
+        raise ValueError(f'{gate}: original isolated-validation obligation changed; refuse launch/completion')
+    return (entries, covered) if _with_sources else entries
 
 
 def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: dict) -> list[dict]:
-    entries = isolated_admissions(state, gate['name'])
+    admitted = isolated_admissions(state, gate['name'], _with_sources=True)
+    entries, covered = admitted if isinstance(admitted, tuple) else (admitted, {})
     if not entries:
         return []
     from deploy_test_native_cleanup import need
@@ -1025,7 +1033,7 @@ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: di
             old = bounded_read(Path(entry['proof']['original_request']), 'old request')
         else:
             old = bounded_read(Path(entry['proof']['owner']['native_cleanup_reference']['result']).parent / 'request.json', 'old request')
-        need(entry['validation_source'] == request['source'] and request['token'] != entry['token']
+        need(covered.get(entry['token'], entry['validation_source']) == request['source'] and request['token'] != entry['token']
              and set(old['checks']) | set(old.get('skips', {})) == set(gate['checks']), 'next source/inventory binding')
         bindings.append({'original_receipt_sha256': entry['proof']['receipt_sha256'],
                          'original_request_token': entry['token'], 'new_request_token': request['token'],

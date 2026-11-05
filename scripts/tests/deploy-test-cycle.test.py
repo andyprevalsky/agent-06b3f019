@@ -4947,4 +4947,76 @@ class Round16CheckoutIsolation(unittest.TestCase):
                 self.new.validate(self.r,self.owner,self.p)
             self.p[key]=original
 
+
+class Round16InheritedAdmission(unittest.TestCase):
+    def setUp(self):
+        import deploy_test_native_cleanup as n
+        import deploy_test_round16_isolation as m
+        import deploy_test_round14_isolation as r14
+        self.m,self.n=m,n
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);self.src={'head':'current','digest':'current-digest'}
+        self.tokens=['ce','e92',m.shared.TOKEN,r14.TOKEN,m.TOKEN]
+        self.entries=[];self.receipts=[]
+        modes=[None,None,m.shared.MODE,r14.MODE,m.MODE]
+        for i,(token,mode) in enumerate(zip(self.tokens,modes)):
+            receipt={'token':token,'gate':'smoke','source':{'head':str(i),'digest':str(i)},
+                     'started_at':i*10,'finished_at':i*10+1,'cleanup_owner':{'token':token}}
+            proof={'receipt_sha256':token+'-hash','compatibility':mode,'inherited_admissions':[]}
+            entry={'token':token,'gate':'smoke','purpose':'isolated-validation','proof':proof,
+                   'cleanup_complete':False,'credit_granted':False,'obligations_preserved':True,
+                   'excluded_resources':{},'validation_source':self.src if i in (0,1,4) else {'head':'old','digest':'old'}}
+            if i>=2:
+                proof['inherited_admissions']=[dict(original_receipt_sha256=p['proof']['receipt_sha256'],
+                    original_request_token=p['token'],new_request_token=token,source=receipt['source'],
+                    new_native_root=str(self.root/'.context/deploy-cloud'/__import__('hashlib').sha256(token.encode()).hexdigest()),
+                    excluded_resources={},credit_granted=False) for p in self.entries]
+                f=self.root/(str(i)+'.json');c.write(f,{'token':token,'isolated_validation':proof['inherited_admissions'],'checks':['one'],'skips':{}})
+                proof['original_request']=str(f)
+            else:
+                folder=self.root/str(i);folder.mkdir();c.write(folder/'request.json',{'checks':['one'],'skips':{}})
+                proof['owner']={'native_cleanup_reference':{'result':str(folder/'result.json')}}
+            self.entries.append(entry);self.receipts.append(receipt)
+        self.state={'source':self.src,'plan':{'source':self.src},'attempts':[{'results':self.receipts}],
+                    'reconciled_owners':{e['proof']['receipt_sha256']:e for e in self.entries}}
+        self.baseline=copy.deepcopy(self.entries)
+        def bound(entry,*args):
+            return entry==next(e for e in self.baseline if e['token']==entry['token']) and entry['token'] not in self.tokens[2:4]
+        def historical(receipt,owner,proof,op,**kw):
+            self.assertTrue(kw.get('_covered_guest'));return copy.deepcopy(next(e for e in self.baseline if e['token']==receipt['token']))
+        for target,name,value in [(m,'ROOT',self.root),(n,'still_bound',bound),(m.shared,'validate_execution',historical)]:
+            p=patch.object(target,name,side_effect=value) if callable(value) else patch.object(target,name,value)
+            p.start();self.addCleanup(p.stop)
+    def test_combined_admission_and_request_preserve_every_original_debt(self):
+        before=copy.deepcopy(self.state)
+        self.assertEqual(c.isolated_admissions(self.state,'smoke'),self.entries)
+        gate={'name':'smoke','native_cloud':True,'command':['python3',str(self.root/'scripts/deploy_test_cloud.py')],'checks':['one']}
+        request={'token':'new','source':self.src,'checks':['one'],'skips':{}}
+        rows=c.isolated_request(self.state,gate,request,self.root,{})
+        self.assertEqual(len(rows),5);self.assertTrue(all(r['credit_granted'] is False for r in rows))
+        self.assertEqual(self.state,before)
+        for changes in ({'source':{'head':'wrong'}},{'token':self.m.TOKEN},{'checks':[]},):
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                c.isolated_request(self.state,gate,{**request,**changes},self.root,{})
+        target=self.root/'.context/deploy-cloud'/__import__('hashlib').sha256(b'new').hexdigest();target.mkdir(parents=True)
+        with self.assertRaises(ValueError):c.isolated_request(self.state,gate,request,self.root,{})
+    def test_missing_foreign_changed_or_credit_ancestor_rejected(self):
+        for index in range(5):
+            for field,value in [('credit_granted',True),('cleanup_complete',True),('gate','foreign'),('obligations_preserved',False)]:
+                state=copy.deepcopy(self.state);entry=list(state['reconciled_owners'].values())[index];entry[field]=value
+                with self.subTest(index=index,field=field),self.assertRaises(ValueError):c.isolated_admissions(state,'smoke')
+            state=copy.deepcopy(self.state);del state['reconciled_owners'][self.entries[index]['proof']['receipt_sha256']]
+            with self.subTest(omitted=index),self.assertRaises(ValueError):c.isolated_admissions(state,'smoke')
+    def test_stale_latest_source_proof_and_historical_pins_rejected(self):
+        for index,field,value in [(4,'validation_source',{'head':'old'}),(4,'proof',{}),(2,'proof',{}),(3,'proof',{})]:
+            state=copy.deepcopy(self.state);list(state['reconciled_owners'].values())[index][field]=value
+            with self.subTest(index=index,field=field),self.assertRaises((ValueError,KeyError)):
+                c.isolated_admissions(state,'smoke')
+        with patch.object(self.n,'still_bound',return_value=False),self.assertRaises(ValueError):
+            c.isolated_admissions(self.state,'smoke')
+    def test_changed_transitive_edge_rejected_even_if_latest_validator_accepts(self):
+        for key,value in [('original_receipt_sha256','wrong'),('new_request_token','wrong'),('source',{}),('excluded_resources',{'foreign':'resource'})]:
+            state=copy.deepcopy(self.state);p=list(state['reconciled_owners'].values())[3]['proof'];p['inherited_admissions'][0][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):self.m.inherited_sources(state,list(state['reconciled_owners'].values()))
+
 if __name__ == '__main__': unittest.main()

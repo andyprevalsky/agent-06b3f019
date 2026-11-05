@@ -175,6 +175,77 @@ def build(source):
     return proof
 
 
+def inherited_sources(state, entries):
+    """Current round16 partition can cover only its exact pinned ancestor graph.
+
+    No entry is renewed or replaced. Original guest snapshots remain historical;
+    every original byte/local owner is checked, and current guest authority comes
+    exclusively from the fully validated latest round16 operation.
+    """
+    from deploy_test_cycle import receipt_owner, latest_receipts
+    from deploy_test_native_cleanup import still_bound
+    import deploy_test_round14_isolation as round14
+    candidates = [e for e in entries if e.get('token') == TOKEN]
+    if not candidates:
+        return {}
+    check(len(candidates) == 1, 'ambiguous latest partition')
+    candidate = candidates[0]
+    latest = latest_receipts(state).get(candidate['gate'])
+    check(latest is not None and latest.get('token') == TOKEN
+          and candidate['proof'].get('compatibility') == MODE
+          and candidate['validation_source'] == state['source'] == state['plan']['source']
+          and still_bound(candidate, latest, receipt_owner(candidate['gate'], latest)),
+          'latest full partition/source changed')
+    by_token = {e['token']: e for e in entries}
+    links = candidate['proof']['inherited_admissions']
+    check(len(by_token) == len(entries) == 5
+          and len(links) == 4
+          and {a['original_request_token'] for a in links} == set(by_token) - {TOKEN},
+          'complete exact ancestor set required')
+    receipts = {}
+    for token, entry in by_token.items():
+        rows = [r for a in state['attempts'] for r in a.get('results', [])
+                if r.get('gate') == candidate['gate'] and r.get('token') == token]
+        check(len(rows) == 1 and entry.get('gate') == candidate['gate']
+              and entry.get('purpose') == 'isolated-validation'
+              and entry.get('cleanup_complete') is False and entry.get('credit_granted') is False
+              and entry.get('obligations_preserved') is True, 'ancestor debt identity')
+        receipts[token] = rows[0]
+    # Validate all edges against the immutable original requests. This rejects
+    # foreign, omitted, duplicate, cyclic, source-swapped and substituted debts.
+    for token, entry in by_token.items():
+        mode = entry['proof'].get('compatibility')
+        if mode not in {shared.MODE, round14.MODE, MODE}:
+            check(still_bound(entry, receipts[token], receipt_owner(entry['gate'], receipts[token])),
+                  'original legacy debt changed')
+            continue
+        request = json.loads(Path(entry['proof']['original_request']).read_text())
+        ancestry = entry['proof']['inherited_admissions']
+        check(request['isolated_validation'] == ancestry and request['token'] == token,
+              'original ancestor request changed')
+        check(len({a['original_request_token'] for a in ancestry}) == len(ancestry), 'duplicate ancestry')
+        for link in ancestry:
+            prior = by_token.get(link['original_request_token'])
+            check(prior is not None and prior['token'] != token
+                  and link == dict(original_receipt_sha256=prior['proof']['receipt_sha256'],
+                      original_request_token=prior['token'], new_request_token=token,
+                      source=receipts[token]['source'],
+                      new_native_root=str(ROOT/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()),
+                      excluded_resources=prior['excluded_resources'], credit_granted=False)
+                  and receipts[prior['token']]['finished_at'] <= receipts[token]['started_at'],
+                  'ancestor edge changed')
+    covered = {}
+    for module in (shared, round14):
+        entry = by_token.get(module.TOKEN)
+        check(entry is not None and entry['proof'].get('compatibility') == module.MODE, 'exact covered ancestor required')
+        receipt = receipts[module.TOKEN]
+        actual = shared.validate_execution(receipt, receipt_owner(entry['gate'], receipt),
+                                           entry['proof'], module.operation_spec(), _covered_guest=True)
+        check(actual == {k:v for k,v in entry.items() if k != 'occurrence'}, 'historical ancestor proof changed')
+        covered[module.TOKEN] = candidate['validation_source']
+    return covered
+
+
 if __name__=='__main__':
     import argparse
     p=argparse.ArgumentParser();p.add_argument('--validation-source',required=True);a=p.parse_args()

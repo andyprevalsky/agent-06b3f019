@@ -149,7 +149,7 @@ def validate(receipt, owner, proof):
     return validate_execution(receipt, owner, proof, operation_spec())
 
 
-def validate_execution(receipt, owner, proof, operation):
+def validate_execution(receipt, owner, proof, operation, *, _covered_guest=False):
     token, source, mode = (operation[k] for k in ('token', 'source', 'mode'))
     pins, receipt_path = operation['pins'], operation['receipt_path']
     check(proof.get('kind') == 'native-cloud-cleanup-v1' and proof.get('compatibility') == mode
@@ -176,7 +176,11 @@ def validate_execution(receipt, owner, proof, operation):
     saved_guest = proof.get('guest_observation', {})
     check(max(receipt['finished_at'], confirmed - 60) <= saved_guest.get('observed_at', 0) <= confirmed, 'stale guest observation')
     facts = operation.get('guest_facts', guest_facts)
-    check(facts(saved_guest) == facts(operation.get('guest_observe', guest_observe)()), 'guest observation changed')
+    saved_facts = facts(saved_guest)
+    # Only the exact round16 transitive validator may supply current shared-guest
+    # authority. Historical facts, pins and local owners still validate below.
+    if not _covered_guest:
+        check(saved_facts == facts(operation.get('guest_observe', guest_observe)()), 'guest observation changed')
     local = proof.get('local_observation', {})
     pids = {int(p.name.rsplit('-', 1)[-1]) for p in participants}
     retained = []

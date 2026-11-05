@@ -68,3 +68,28 @@ The earlier raw-exit diagnostic is observability work, not a cause fix or PASS.
 ## Reusable lesson
 
 Use original native custody plus fresh exact resource partition evidence to authorize only isolated execution while preserving missing historical authority as debt.
+
+## Combined inherited-admission integration failure
+
+At canonical `9f03f9e03009794caabc776e3eb87caa65dc6b75`, round16 itself
+validated but `isolated_admissions(state, 'smoke')` still refused round12's
+old guest configuration. Rebuilding the old proof would replace historical
+observations and cannot establish the current shared guest's identity.
+
+The exact latest round16 admission may now supply current shared-guest and
+successor-source authority only for its pinned round12/14 ancestors. Its full
+validator must pass first on the current plan/source. All five admissions,
+all original request edges, receipt hashes, sources, native roots and exclusions
+must agree. Each old snapshot and current local Hub/process ownership is still
+validated; ce/e92 retain their complete normal validation. Original proofs and
+state are never rewritten. The latest proof alone cannot authorize a foreign,
+missing, changed or credited ancestor. Ordinary cleanup is unchanged.
+
+`Round16InheritedAdmission` in `scripts/tests/deploy-test-cycle.test.py`
+reproduces the old combined admission failure and covers exact future-request
+binding, omitted/foreign/changed debts, changed latest proof/source and
+ancestor edges, wrong next source, reused token/root and unchanged original
+state. The full owning suite passed 220 tests. A read-only check of the real
+canonical five-admission set also passed both admission and successor binding;
+no request was issued, and all original cleanup/credit flags remained false.
+This repairs integration admission only; the original SSH cause is unresolved.
