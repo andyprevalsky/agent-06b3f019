@@ -1152,6 +1152,25 @@ def build_verifier_context_messages(
         for payload in verifier_file_evidence_by_message.get(_verifier_file_evidence_key(msg), []):
             current_batch.append("TOOL_RESULT " + json.dumps(payload, ensure_ascii=False, default=str))
 
+    completion_declarations: dict[str, set[tuple[str, str]]] = {}
+    for declaration in sorted_context:
+        if (declaration.get("role") != "ASSISTANT"
+                or is_excluded_from_model(declaration)
+                or is_internal_subagent_message(declaration)):
+            continue
+        declaration_metadata = declaration.get("metadata") or {}
+        for call in declaration_metadata.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            call_id = call.get("tool_call_id")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            origin = declaration_metadata.get("tool_call_origin")
+            identity = "model" if call.get("tool") == "attempt_completion" and origin == "model" else "other"
+            signature = json.dumps(call, sort_keys=True, default=str)
+            completion_declarations.setdefault(call_id, set()).add((identity, signature))
+
+    seen_completion_invocations: set[str] = set()
     for msg in sorted_context:
         role = msg.get("role", "")
         text = _self_close_trailing_message_reference(msg.get("text", ""))
@@ -1223,6 +1242,19 @@ def build_verifier_context_messages(
                 continue
 
             if metadata.get("toolStatus") == "IN_PROGRESS":
+                call_id = metadata.get("toolCallId")
+                if (metadata.get("toolName") == "attempt_completion"
+                        and isinstance(call_id, str)
+                        and len(completion_declarations.get(call_id, set())) == 1
+                        and next(iter(completion_declarations[call_id]))[0] == "model"
+                        and call_id not in seen_completion_invocations):
+                    seen_completion_invocations.add(call_id)
+                    current_batch.append("TOOL_INVOCATION " + json.dumps({
+                        "tool_name": "attempt_completion",
+                        "tool_call_id": call_id,
+                        "origin": "model",
+                        "event": "started",
+                    }, ensure_ascii=False))
                 continue
 
             if metadata.get("verifierMessage"):
