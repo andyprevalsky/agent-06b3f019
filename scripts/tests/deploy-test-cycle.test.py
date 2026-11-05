@@ -2245,7 +2245,7 @@ class Cycle(unittest.TestCase):
             c.reconcile(state, occurrence['id'], known)
         self.assertEqual(before, state)
 
-    def native_recon_state(self):
+    def native_recon_state(self, preallocation=False):
         import hashlib
         import shutil
         import time
@@ -2274,11 +2274,11 @@ class Cycle(unittest.TestCase):
         files = [hub]
         fleets = []
         for ordinal, role in enumerate(('parent', 'canary')):
-            fleet = runs / role; fleets.append(fleet)
+            fleet = runs / ('fixture-987654321' if preallocation and role == 'parent' else role); fleets.append(fleet)
             names = [gate['name']] if role == 'parent' else ['infra-probe']
             owner = str(ordinal + 1) * 32
             audit = fleet / 'teardown-ownership'; audit.mkdir(parents=True)
-            meta = dict(version='1', fleet_owner_token=owner, run_id=role, app='fixture',
+            meta = dict(version='1', fleet_owner_token=owner, run_id=fleet.name, app='fixture',
                 workspace_root=str(self.root), status='provider-teardown-verified',
                 hub_disposition='retained-exact-owner-transfer-required', hub_owner_file=str(hub),
                 hub_owner_token='hub', hub_pid='1234', hub_pid_start=hub_owner['pid_start'], hub_argv_sha256='c' * 64)
@@ -2287,7 +2287,7 @@ class Cycle(unittest.TestCase):
             (audit / 'owned-clones.ids').write_text('machine1\n' if ordinal else '')
             (audit / 'owned-clones.names').write_text('clone1\n' if ordinal else '')
             if ordinal:
-                text_fields(audit / 'fresh/clone1', dict(fleet_owner_token=owner, run_id=role, app='fixture',
+                text_fields(audit / 'fresh/clone1', dict(fleet_owner_token=owner, run_id=fleet.name, app='fixture',
                     source='fresh-clone', disposition='destroyed-provider-retained', machine_id='machine1',
                     volume_id='vol_fixture', clone_name='clone1'))
             for scaffold in ('pool', 'pool-handoffs', 'volume-migrations'):
@@ -2296,7 +2296,7 @@ class Cycle(unittest.TestCase):
             shutil.copytree(audit, canonical)
             seal = tree_hash(audit)
             text_fields(audit / 'source-audit', dict(path=str(canonical), sha256=seal))
-            c.write(fleet / '_batch/lifecycle.json', dict(version=1, fleet_owner_token=owner, run_id=role,
+            c.write(fleet / '_batch/lifecycle.json', dict(version=1, fleet_owner_token=owner, run_id=fleet.name,
                 workspace_root=str(self.root), status='failed' if not ordinal else 'verified',
                 controller_exit_code=1 if not ordinal else 0, audit_sha256=seal, hub_publication_failed=False))
             c.write(fleet / '_batch/run.json', dict(tasks=[], status='failed' if not ordinal else 'passed'))
@@ -2331,6 +2331,56 @@ class Cycle(unittest.TestCase):
             source=source, controller_log=str(log), confirmed_at=time.time(), observed_by='private-fixture',
             files={str(p): c.sha_file(p) for p in files})
         return state, occurrence, paths, proof, hub
+
+    def preallocation_recon_state(self):
+        import deploy_test_native_cleanup as cleanup
+        state,occurrence,paths,proof,hub=self.native_recon_state(preallocation=True)
+        fleet=hub.parent.parent/'fixture-987654321'
+        producer=(ROOT/'scripts/cloudbench_preallocation.py').read_bytes()
+        provenance=c.read(fleet/'execution-provenance.json');matrix=c.read(fleet/'execution-task-matrix.json')
+        intent=dict(schema='cloudbench-preallocation-v1',source=state['source']['head'],run_id=fleet.name,
+                    owner='1'*32,pid=987654321,birth='fixture-birth',created_at=1793664472,
+                    producer_sha256=__import__('hashlib').sha256(producer).hexdigest(),
+                    execution_provenance=provenance,task_matrix=matrix)
+        c.write(fleet/'preallocation-source.json',intent)
+        c.write(fleet/'preallocation-abort.json',dict(schema=intent['schema'],owner=intent['owner'],
+            pid=intent['pid'],birth=intent['birth'],run_id=fleet.name,stage='cleanup-reserve-refused',
+            native_exit=1,finished_at=1793664473,source_sha256=c.sha_file(fleet/'preallocation-source.json')))
+        for name in ['execution-provenance.json','execution-task-matrix.json']:
+            path=fleet/name;path.unlink();proof['files'].pop(str(path))
+        for name in ['preallocation-source.json','preallocation-abort.json']:
+            proof['files'][str(fleet/name)]=c.sha_file(fleet/name)
+        original=cleanup.subprocess.check_output
+        def git_source(args,**kwargs):
+            if args[:1]==['git'] and args[-1].endswith(':scripts/cloudbench_preallocation.py'):return producer
+            return original(args,**kwargs)
+        return state,occurrence,paths,proof,hub,fleet,git_source
+
+    def test_native_preallocation_refusal_preserves_failure_and_hub(self):
+        import deploy_test_native_cleanup as cleanup
+        state,occurrence,paths,proof,hub,fleet,git_source=self.preallocation_recon_state()
+        before=copy.deepcopy(state['attempts'])
+        with patch.object(cleanup.subprocess,'check_output',side_effect=git_source):
+            c.reconcile(state,occurrence['id'],proof)
+        self.assertEqual(before,state['attempts'])
+        entry=state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']);self.assertEqual(str(hub),entry['retained_services'][0]['path'])
+
+    def test_native_preallocation_missing_forged_or_resource_evidence_refused(self):
+        import deploy_test_native_cleanup as cleanup
+        state,occurrence,paths,proof,hub,fleet,git_source=self.preallocation_recon_state();before=copy.deepcopy(state)
+        path=fleet/'preallocation-abort.json';good=c.read(path)
+        for key,value in [('owner','2'*32),('source_sha256','0'*64),('stage','late-abort'),('native_exit',143)]:
+            c.write(path,{**good,key:value});bad=copy.deepcopy(proof);bad['files'][str(path)]=c.sha_file(path)
+            with self.subTest(key=key),patch.object(cleanup.subprocess,'check_output',side_effect=git_source),self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],bad)
+            self.assertEqual(before,state)
+        c.write(path,good)
+        for marker in ['resource-admission.entered','.cid']:
+            m=fleet/marker;m.write_text('entered')
+            with patch.object(cleanup.subprocess,'check_output',side_effect=git_source),self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],proof)
+            m.unlink()
+        missing=copy.deepcopy(proof);missing['files'].pop(str(path))
+        with patch.object(cleanup.subprocess,'check_output',side_effect=git_source),self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],missing)
 
     def patched_native_recon_state(self):
         state, occurrence, paths, proof, hub = self.native_recon_state()
@@ -4248,6 +4298,12 @@ class LegacyStartupIsolation(StartupCleanup):
         (self.campaign/'startup-cleanup.json').unlink()
         original=subprocess.check_output(['git','-C',str(ROOT),'show','ce2742ae0:scripts/run-bench-campaign.py'])
         (self.root/'scripts/run-bench-campaign.py').write_bytes(original)
+        # Legacy authority binds the complete original helper set, not current helpers.
+        from deploy_test_startup_compat import INVENTORY
+        for name, relative in INVENTORY.items():
+            raw=subprocess.check_output(['git','-C',str(ROOT),'show','ce2742ae0:'+relative])
+            (self.root/relative).write_bytes(raw)
+            (self.campaign/'shared-inventory/scripts'/name).write_bytes(raw)
         subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
         subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com',
                         'commit','-qm','original producer'],check=True)

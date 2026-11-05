@@ -788,6 +788,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-source.py" \
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
        "$ROOT_DIR/scripts/cloudbench_execution_provenance.py" \
+       "$ROOT_DIR/scripts/cloudbench_preallocation.py" \
        "$ROOT_DIR/scripts/cloudbench_result.py" \
        "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
@@ -15307,6 +15308,18 @@ cleanup() {
     # let a second signal interrupt teardown after the EXIT trap has begun.
     trap - EXIT
     trap '' HUP INT TERM
+    # Native terminal evidence only while still before resource admission.
+    if [ -f "$FLEET_DIR/preallocation-source.json" ] \
+       && [ ! -e "$FLEET_DIR/preallocation-abort.json" ] \
+       && [ ! -e "$FLEET_DIR/resource-admission.entered" ]; then
+        case "$result_ec" in
+            1|129|130|143)
+                python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_preallocation.py" abort \
+                    --run "$FLEET_DIR" --owner "$FLEET_OWNER_TOKEN" --pid "$$" \
+                    --birth "$FLEET_OWNER_PID_START" --stage preallocation-interrupted \
+                    --exit-code "$result_ec" || { ec=1; teardown_failed=1; } ;;
+        esac
+    fi
     release_cleanup_disk_reserve || { ec=1; teardown_failed=1; }
     # Both auxiliary loops sleep in child processes. Killing only their Bash
     # roots reparents the current sleep into the detached controller group, so
@@ -15844,7 +15857,58 @@ fleet_scorecard_report() {
         --goal "$goal" "${fields[@]}" >/dev/null 2>&1 || true
 }
 fleet_scorecard_report launch
+# Freeze one workspace patch before maintenance and reuse it for every guest.
+FLEET_PATCH_FILE=""
+FLEET_PATCH_SHA256=""
+if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
+   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
+        || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
+    FLEET_PATCH_FILE="$(mktemp)"
+    fleet_patch_rc=0
+    cloudbench_prepare_workspace_patch \
+        "$ROOT_DIR" "$BENCH_REF" "$FLEET_PATCH_FILE" \
+        "$ROOT_DIR/scripts/create-worktree-patch.sh" || fleet_patch_rc=$?
+    if [ "$fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+        # The unpushed HEAD carries only content the patch generator excludes
+        # (append-only history ledgers), so the base ref already IS the code
+        # under test. Shipping nothing is exactly equivalent here.
+        rm -f "$FLEET_PATCH_FILE"
+        FLEET_PATCH_FILE=""
+        echo "📦 no shippable workspace delta beyond $BENCH_REF (append-only ledgers only); guests run the base ref"
+    elif [ "$fleet_patch_rc" -ne 0 ]; then
+        echo "❌ could not create the fleet local workspace patch" >&2
+        exit 1
+    fi
+fi
+if [ -n "$FLEET_PATCH_FILE" ]; then
+    FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
+    [ -n "$FLEET_PATCH_SHA256" ] || {
+        echo "❌ could not fingerprint the fleet local workspace patch" >&2
+        exit 1
+    }
+fi
+
+
+if [ -z "$PROVISION_POOL" ]; then
+# Seal only pre-allocation identity here; full runtime configuration is frozen later.
+PREALLOCATION_ARGS=()
+for i in "${!BENCHES[@]}"; do
+    preallocation_mode="${CATALOG_MODES[$i]}"
+    is_sim_on "${BENCHES[$i]}" && preallocation_mode=simulate
+    PREALLOCATION_ARGS+=(--task "${BENCHES[$i]}=$preallocation_mode")
+done
+PREALLOCATION_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_preallocation.py"
+python3 "$PREALLOCATION_HELPER" prepare --run "$FLEET_DIR" --root "$ROOT_DIR" \
+    --owner "$FLEET_OWNER_TOKEN" --pid "$$" --birth "$FLEET_OWNER_PID_START" \
+    --base "$BENCH_REF" --patch "${FLEET_PATCH_SHA256:-none}" --app "$APP" \
+    --snapshot "$CLOUDBENCH_SCRIPT_SNAPSHOT" --manifest "$CONTROLLER_SNAPSHOT_MANIFEST" \
+    "${PREALLOCATION_ARGS[@]}" || exit 1
+fi
 reserve_cleanup_disk_space || {
+    if [ -f "$FLEET_DIR/preallocation-source.json" ]; then
+        python3 "$PREALLOCATION_HELPER" abort --run "$FLEET_DIR" --owner "$FLEET_OWNER_TOKEN" \
+            --pid "$$" --birth "$FLEET_OWNER_PID_START" || exit 1
+    fi
     echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
     exit 1
 }
@@ -15854,6 +15918,10 @@ reserve_cleanup_disk_space || {
 if [ -z "$PROVISION_POOL" ]; then
     require_central_hub_visibility || exit 1
     require_in_app_hub_visibility || exit 1
+fi
+# Crossing this boundary disables the pre-allocation-only cleanup path.
+if [ -f "$FLEET_DIR/preallocation-source.json" ]; then
+( set -o noclobber; printf '%s\n' "$FLEET_OWNER_TOKEN" > "$FLEET_DIR/resource-admission.entered" ) || exit 1
 fi
 reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
 normalize_current_pool_shape || exit 1
@@ -16168,38 +16236,6 @@ if [ -z "$SNAP_ID" ]; then
     exit 1
 fi
 fi
-# Freeze one workspace patch before maintenance and reuse it for every guest.
-FLEET_PATCH_FILE=""
-FLEET_PATCH_SHA256=""
-if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
-        || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
-    FLEET_PATCH_FILE="$(mktemp)"
-    fleet_patch_rc=0
-    cloudbench_prepare_workspace_patch \
-        "$ROOT_DIR" "$BENCH_REF" "$FLEET_PATCH_FILE" \
-        "$ROOT_DIR/scripts/create-worktree-patch.sh" || fleet_patch_rc=$?
-    if [ "$fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
-        # The unpushed HEAD carries only content the patch generator excludes
-        # (append-only history ledgers), so the base ref already IS the code
-        # under test. Shipping nothing is exactly equivalent here.
-        rm -f "$FLEET_PATCH_FILE"
-        FLEET_PATCH_FILE=""
-        echo "📦 no shippable workspace delta beyond $BENCH_REF (append-only ledgers only); guests run the base ref"
-    elif [ "$fleet_patch_rc" -ne 0 ]; then
-        echo "❌ could not create the fleet local workspace patch" >&2
-        exit 1
-    fi
-fi
-if [ -n "$FLEET_PATCH_FILE" ]; then
-    FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
-    [ -n "$FLEET_PATCH_SHA256" ] || {
-        echo "❌ could not fingerprint the fleet local workspace patch" >&2
-        exit 1
-    }
-fi
-
-
 # ── Preflight: will clones inherit up-to-date dep trees from this snapshot? ──
 # When the warm snapshot's node_modules/venv are stale vs the current ref's
 # manifests, EVERY clone pays a multi-minute rsync refresh on bring-up — the

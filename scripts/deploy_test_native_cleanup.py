@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import runpy
@@ -390,6 +391,39 @@ def startup_campaign(receipt, owner, proof, adapter, request, runs, cli_text, do
             'participants': [], 'native_audit_seals': {}, 'retained_services': [], 'credit_granted': False}
 
 
+def preallocation_binding(fleet, receipt, owner_token, root, document, bound, native_exit):
+    """Only a future producer's sealed reserve refusal can omit runtime provenance."""
+    intent_path=fleet/'preallocation-source.json'
+    intent,abort=document(intent_path),document(fleet/'preallocation-abort.json')
+    producer=subprocess.check_output(['git','-C',str(root),'show',
+        receipt['source']['head']+':scripts/cloudbench_preallocation.py'])
+    need(intent.get('schema') == abort.get('schema') == 'cloudbench-preallocation-v1'
+         and intent.get('source') == receipt['source']['head']
+         and intent.get('producer_sha256') == hashlib.sha256(producer).hexdigest()
+         and intent.get('owner') == abort.get('owner') == owner_token
+         and intent.get('run_id') == abort.get('run_id') == fleet.name
+         and type(intent.get('pid')) is int and intent['pid'] > 1
+         and intent['pid'] == abort.get('pid') and str(intent['pid']) == fleet.name.rsplit('-',1)[-1]
+         and isinstance(intent.get('birth'),str) and intent['birth'] and intent['birth']==abort.get('birth')
+         and abort.get('source_sha256') == hashlib.sha256(bound(intent_path)).hexdigest()
+         and abort.get('stage') in ('cleanup-reserve-refused','preallocation-interrupted')
+         and type(abort.get('native_exit')) is int and abort['native_exit'] == native_exit
+         and native_exit in (1,129,130,143)
+         and (abort['stage'] != 'cleanup-reserve-refused' or native_exit == 1)
+         and finite(intent.get('created_at')) and finite(abort.get('finished_at'))
+         and receipt['started_at'] <= intent['created_at'] <= abort['finished_at'] <= receipt['finished_at'],
+         'authentic preallocation abort')
+    need(not Path('/proc',str(intent['pid'])).exists(), 'preallocation controller still exists')
+    markers={'resource-admission.entered','.cid','cloudbench-run.json','runtime-evidence.pending',
+             'post-config-start.accepted','runtime-evidence.owner.json','worker-runtime-evidence'}
+    def unreadable(error):
+        raise error
+    for parent,dirs,files in os.walk(fleet,onerror=unreadable):
+        need(not markers.intersection(dirs+files) and all(not (Path(parent)/n).is_symlink() for n in dirs+files),
+             'preallocation resource marker')
+    return intent['execution_provenance'],intent['task_matrix']
+
+
 def execution_source_binding(adapter, request, root, runs, document, bound):
     """Reuse only the adapter's pre-launch sealed source expectation for cleanup."""
     transport = adapter.get('source_transport')
@@ -597,7 +631,11 @@ def validate(receipt, owner, proof):
         if failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
             pass  # Positive linked infra-probe + sealed zero-resource release above; absence alone proves nothing.
         else:
-            provenance, matrix = document(provenance_path), document(matrix_path)
+            if not provenance_path.exists() and not matrix_path.exists():
+                need(life['controller_exit_code'] in (1,129,130,143) and fleet in parents, 'preallocation exit/parent')
+                provenance,matrix=preallocation_binding(fleet,receipt,owner_token,root,document,bound,life['controller_exit_code'])
+            else:
+                provenance, matrix = document(provenance_path), document(matrix_path)
             need(not validate_provenance(provenance) and not validate_task_matrix_binding(provenance, matrix)
                  and provenance['base_sha'] == source_base and provenance['workspace_patch_sha256'] == source_patch, 'execution source')
             need(len(benches) == len(matrix['tasks'])

@@ -12,6 +12,7 @@ import shutil
 import signal
 import threading
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -685,6 +686,64 @@ class CloudSourceTransport(unittest.TestCase):
         self.request['source']=cycle.source(self.root);binding=self.prepare()
         self.assertEqual(self.request['source']['head'],binding['base_sha'])
         self.assertEqual('none',binding['workspace_patch_sha256'])
+
+
+class PreallocationProducer(unittest.TestCase):
+    def test_actual_reserve_boundary_seals_refusal_before_any_provider_action(self):
+        from cloudbench_execution_provenance import build_snapshot_manifest
+        source=(ROOT/'scripts/run-bench-fleet').read_text()
+        start=source.index('if [ -z "$PROVISION_POOL" ]; then\n# Seal only pre-allocation identity here;')
+        end=source.index('# Visibility can fail on imports',start)
+        fragment=source[start:end]
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);subprocess.run(['git','init','-q',str(root)],check=True)
+            subprocess.run(['git','-C',str(root),'-c','user.name=f','-c','user.email=f@f','commit','--allow-empty','-qm','fixture'],check=True)
+            snapshot=root/'snapshot';snapshot.mkdir()
+            for name in ['cloudbench_preallocation.py','cloudbench_execution_provenance.py']:
+                shutil.copyfile(ROOT/'scripts'/name,snapshot/name)
+            manifest=root/'manifest.json';manifest.write_text(json.dumps(build_snapshot_manifest(snapshot)))
+            run=root/'run';run.mkdir()
+            env={**os.environ,'ROOT_DIR':str(root),'FLEET_DIR':str(run),'FLEET_OWNER_TOKEN':'b'*32,
+                 'FLEET_OWNER_PID_START':'fixture-birth','BENCH_REF':'a'*40,'FLEET_PATCH_SHA256':'none',
+                 'APP':'fixture','PROVISION_POOL':'','PYTHONDONTWRITEBYTECODE':'1','CLOUDBENCH_SCRIPT_SNAPSHOT':str(snapshot),'CONTROLLER_SNAPSHOT_MANIFEST':str(manifest)}
+            script="BENCHES=(case); CATALOG_MODES=(real); is_sim_on(){ return 1; }; reserve_cleanup_disk_space(){ echo 'cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers' >&2; return 1; };\n"+fragment+'\necho PROVIDER_ACTION'
+            result=subprocess.run(['bash','-c',script],env=env,capture_output=True,text=True,timeout=10)
+            self.assertEqual(1,result.returncode,result.stderr)
+            self.assertIn('insufficient physical cleanup floors',result.stderr)
+            self.assertNotIn('PROVIDER_ACTION',result.stdout)
+            self.assertTrue((run/'preallocation-source.json').is_file())
+            self.assertTrue((run/'preallocation-abort.json').is_file())
+            self.assertFalse((run/'resource-admission.entered').exists())
+
+    def test_exact_producer_order_and_authentic_reserve_abort(self):
+        import cloudbench_preallocation as producer
+        from cloudbench_execution_provenance import build_snapshot_manifest
+        from types import SimpleNamespace
+        source=(ROOT/'scripts/run-bench-fleet').read_text()
+        prepare=source.index('python3 "$PREALLOCATION_HELPER" prepare')
+        reserve=source.index('reserve_cleanup_disk_space || {',prepare)
+        entered=source.index('resource-admission.entered',reserve)
+        self.assertLess(prepare,reserve);self.assertLess(reserve,entered)
+        self.assertIn('python3 "$PREALLOCATION_HELPER" abort',source[reserve:entered])
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);subprocess.run(['git','init','-q',str(root)],check=True)
+            subprocess.run(['git','-C',str(root),'-c','user.name=fixture','-c','user.email=f@f','commit','--allow-empty','-qm','fixture'],check=True)
+            snapshot=root/'snapshot';snapshot.mkdir();(snapshot/'helper').write_text('snapshot')
+            manifest=root/'manifest.json';manifest.write_text(json.dumps(build_snapshot_manifest(snapshot)))
+            run=root/'run';run.mkdir()
+            args=SimpleNamespace(manifest=manifest,snapshot=snapshot,task=['case=real'],base='a'*40,
+                patch='none',app='fixture',root=root,run=run,owner='b'*32,pid=987654321,birth='fixture',exit_code=1,stage='cleanup-reserve-refused')
+            producer.prepare(args);before=(run/'preallocation-source.json').read_bytes()
+            with self.assertRaises(FileExistsError):producer.prepare(args)
+            self.assertEqual(before,(run/'preallocation-source.json').read_bytes())
+            args.owner='wrong'
+            with self.assertRaises(ValueError):producer.abort(args)
+            args.owner='b'*32;(run/'resource-admission.entered').touch()
+            with self.assertRaises(ValueError):producer.abort(args)
+            (run/'resource-admission.entered').unlink();producer.abort(args)
+            abort=json.loads((run/'preallocation-abort.json').read_text())
+            self.assertEqual('cleanup-reserve-refused',abort['stage']);self.assertEqual(1,abort['native_exit'])
+            self.assertEqual(hashlib.sha256(before).hexdigest(),abort['source_sha256'])
 
 
 class CloudCampaign(unittest.TestCase):
