@@ -92,6 +92,13 @@ Pending: fix is on the branch; the parent integrates it into the combined
 whole-devbox deploy. Existing sandboxes keep their old ws-server until rebuilt,
 which the client's unlimited receive size covers.
 
+Follow-up (2026-11-05, CodeRabbit 4475152990 on PR #1691): a complete replay
+counted as progress even when it resent the same history, so a sandbox that
+replayed and then dropped every connection still refilled the budget (8,843
+reconnects in 10 s). The client now counts a replay as progress only when it
+is longer than the history already delivered (regression
+`test_unchanged_replays_do_not_refill_the_reconnect_budget`).
+
 ## Human feedback
 
 None recorded.
