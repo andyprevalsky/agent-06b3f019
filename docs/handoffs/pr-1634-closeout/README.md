@@ -15,6 +15,18 @@ This records-only follow-up completes that preservation inventory and adds the
 standing deletion-readiness requirement to `/deploy`. It does not change the
 application runtime or repeat the failed benchmark.
 
+The [closeout manifest](closeout-manifest.json) lists all 284 verified encrypted
+objects. The [proof index](private-proof-index.json) locates the private inventories,
+path metadata and recovery maps; [RECOVERY.md](RECOVERY.md) explains their use.
+The [publication record](publication.json) binds the files in this directory to
+the records PR and the original deployed PR.
+
+The private verification files retain their pre-publication state: they require
+the parent to merge and link this records PR. Those publication conditions are
+satisfied by the final merged commit and its link from PR 1634, not by rewriting
+the original verification receipts. The final completion message is issued only
+after both conditions hold.
+
 ## Preservation contract
 
 The committed closeout manifest is the index of record. Large/private evidence
