@@ -14,6 +14,9 @@
  *             chip, shimmer goal, StatusLine activity, ├─ └─ tree lines)
  *             + collapsed output-schema disclosures (DockSchema): per agent,
  *             or one results table per for_each cluster
+ *             + finished (COMPLETED/FAILED) roots of each group folded into
+ *             one CompletedAgentsDrawer row ("▸ X completed agents, Y
+ *             succeeded, Z failed"); expanding lists them at the same level
  *     | click an agent row  -> onNavigate(agentId)
  *     | click an explore/browser task row (selected agent's own task)
  *     v
@@ -41,6 +44,8 @@ import { cn } from '@/lib/utils';
 import type { Message, TreeNode } from '../../hooks';
 import { MessageList } from '../MessageList';
 import { TreeHeader } from '../subAgentTree/TreeHeader';
+import { isTerminalNode } from '../subAgentTree.helpers';
+import { CompletedAgentsDrawer } from './CompletedAgentsDrawer';
 import { ForEachResultsDisclosure, NodeSchemaDisclosure } from './DockSchema';
 import { TreeNodeRow } from '../subAgentTree/TreeNodeRow';
 import { isTaskNodeId, type AgentPanelModel } from './agentsPanelGroups';
@@ -149,20 +154,52 @@ function PanelBody({ groups, getChildren, onNavigate, openTrajectories }: PanelB
         >
           {group.header && <TreeHeader {...group.header} />}
           {group.header && <ForEachResultsDisclosure roots={group.roots} />}
-          {group.roots.map((node, index) => (
-            <TreeNodeRow
-              key={node.agentId}
-              node={node}
-              isLast={index === group.roots.length - 1}
-              prefix=""
-              getChildren={getChildren}
-              onNavigate={onNavigate}
-              // for_each children share the cluster's results table instead.
-              renderAfterNode={afterNode(group.header === null)}
-            />
-          ))}
+          <GroupRows
+            roots={group.roots}
+            getChildren={getChildren}
+            onNavigate={onNavigate}
+            // for_each children share the cluster's results table instead.
+            renderAfterNode={afterNode(group.header === null)}
+          />
         </div>
       ))}
+    </>
+  );
+}
+
+/** Unfinished roots as rows; finished roots folded into one drawer at the same level. */
+function GroupRows({
+  roots,
+  getChildren,
+  onNavigate,
+  renderAfterNode,
+}: {
+  roots: TreeNode[];
+  getChildren: AgentPanelModel['getChildren'];
+  onNavigate: (agentId: string) => void;
+  renderAfterNode: (node: TreeNode, childPrefix: string) => ReactNode;
+}) {
+  const active = roots.filter((node) => !isTerminalNode(node));
+  const finished = roots.filter(isTerminalNode);
+  return (
+    <>
+      {active.map((node, index) => (
+        <TreeNodeRow
+          key={node.agentId}
+          node={node}
+          isLast={finished.length === 0 && index === active.length - 1}
+          prefix=""
+          getChildren={getChildren}
+          onNavigate={onNavigate}
+          renderAfterNode={renderAfterNode}
+        />
+      ))}
+      <CompletedAgentsDrawer
+        nodes={finished}
+        getChildren={getChildren}
+        onNavigate={onNavigate}
+        renderAfterNode={renderAfterNode}
+      />
     </>
   );
 }
