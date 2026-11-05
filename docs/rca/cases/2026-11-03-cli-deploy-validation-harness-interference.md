@@ -163,3 +163,13 @@ Evidence remains under
 `.context/cli-nov05-review/` and the isolated review checkout's
 `.context/nov05-cleanup-repair/`. These proofs do not establish a successful
 smoke campaign, global coverage, financial release, or completed deployment.
+
+The named-workspace setup fixture also inherited an explicit
+`ROSE_SYSTEM_PG_DB_NAME` from its isolated executor. Runtime correctly honored
+that override, while the fixture expected its generated `ws_alpha` name.
+Clearing the inherited override before applying each case's own overrides
+made the identical command pass five consecutive runs. The explicit-override
+negative control still fails when runtime ignores its configured name. This
+two-line fixture repair changes no database code, assertion, timeout or real
+database; its command stubs and proof are retained in
+`.context/cli-nov05-review/setup-db-fixture-current.json`.
