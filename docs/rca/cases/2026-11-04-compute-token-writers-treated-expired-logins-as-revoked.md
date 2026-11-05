@@ -108,6 +108,16 @@ resets the row to CONNECTED.
 every live row. An auth report costs two primary-key reads + one decrypt, only
 on failure.
 
+Update 2026-11-05 (CodeRabbit 4475152998): the workflow no longer reports a
+token failure at all. RoseClient's provider cool-down and stall mark already
+report every failed attempt with that attempt's own login and fingerprint; the
+usage the workflow receives names only the last error, so after an in-call
+rotation the workflow's cached lease was misattributed (lease A reported with
+rotated lease B's auth_error). `AgentWorkflow._on_tokens` now only re-leases.
+Regressions: workflow.blackbox `test_workflow_never_reports_its_cached_login_for_a_call_failure`
+(failed on 99f748064 with lease A reported as auth_error) and rose.blackbox
+`test_rotated_attempt_failures_are_reported_with_their_own_login`.
+
 ## Human feedback
 
 Parent (for Andy, 2026-11-04): an expired access token is "expired", not

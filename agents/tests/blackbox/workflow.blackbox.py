@@ -13208,7 +13208,7 @@ async def test_workflow_rotate_compute_token_releases_lineage_and_refetches():
 
 async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
     """When claude_token is set but actual_model is non-claude and error=auth_error,
-    _on_tokens marks the token rate-limited and clears it."""
+    _on_tokens re-leases and clears it; RoseClient reported the failed attempt."""
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     wf.user_id = "user-1"
@@ -13237,14 +13237,9 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
         assert wf.claude_max_token_source is None
         # mark activity executed
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "mark_compute_token_rate_limited_activity" in activity_names
-        mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
-        from helpers.llm import credential_fingerprint
-
-        assert mark_call[1] == [
-            "claude", "pool", "user-1", "pool-id-1", None, 5 * 60, None, "auth_error",
-            credential_fingerprint("some-token"),
-        ]
+        # RoseClient reports the failed attempt with its own login; the
+        # workflow only re-leases (T7 / CodeRabbit 4475152998).
+        assert "mark_compute_token_rate_limited_activity" not in activity_names
         assert "release_compute_token_lineage_activity" in activity_names
         fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
         assert fetch_call[1][-1] == "gpt"
@@ -13252,17 +13247,14 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
         _restore_workflow(original)
 
 
-async def test_workflow_auth_error_report_names_the_leased_login():
-    """T7: the workflow's auth_error report reaches the real activity signature
-    with the failure reason, the leased integration and the held token's
-    fingerprint. S33 inserted ``integration_id`` into the activity's positional
-    parameters; the workflow kept the old layout, so ``auth_error`` arrived as
-    ``rate_limited_until`` and ``300`` as the integration id, and before S33 the
-    report named no login at all (prod expired every claude_code/gpt_code row).
+async def test_workflow_never_reports_its_cached_login_for_a_call_failure():
+    """T7 / CodeRabbit 4475152998: a token failure inside a Rose call is
+    reported by RoseClient for the attempt that failed, with that attempt's
+    login (rose.blackbox ``rotated_attempt_failures_are_reported_with_their_own_login``).
+    The usage the workflow receives names only the last error, so after an
+    in-call rotation its cached lease is not the failed one: reporting it would
+    disable a healthy login. The workflow only re-leases.
     """
-    import inspect
-    from helpers.llm import mark_compute_token_rate_limited_activity as real_mark
-
     for token_type, error_kw in (("claude", "claude_token_error"), ("gpt", "gpt_token_error")):
         wf = _bare_workflow_instance()
         wf.agent_id = "a-t7"
@@ -13273,12 +13265,14 @@ async def test_workflow_auth_error_report_names_the_leased_login():
         fake.activity_returns["fetch_compute_token_activity"] = None
         original = _patch_workflow(fake)
         try:
+            # The workflow leased A; inside the call A was rate-limited, RoseClient
+            # rotated to B, and B was rejected (auth_error).
             assert wf._remember_compute_token(
                 {
                     "type": token_type,
-                    "accessToken": f"held-{token_type}-token",
+                    "accessToken": f"lease-a-{token_type}",
                     "source": "user",
-                    "integrationId": f"integration-{token_type}-t7",
+                    "integrationId": f"integration-a-{token_type}",
                     "lineageKey": "agent:a-t7",
                 }
             )
@@ -13289,19 +13283,13 @@ async def test_workflow_auth_error_report_names_the_leased_login():
                 call_site="test",
                 **{error_kw: "auth_error"},
             )
-            mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
-            bound = inspect.signature(real_mark).bind(*mark_call[1])
-            bound.apply_defaults()
-            args = bound.arguments
-            assert args["token_type"] == token_type and args["source"] == "user", args
-            assert args["user_id"] == "user-t7", args
-            assert args["failure_reason"] == "auth_error", f"{token_type}: {args}"
-            assert args["rate_limited_until"] is None, f"{token_type}: {args}"
-            assert args["cooldown_seconds"] == 5 * 60, f"{token_type}: {args}"
-            assert args["integration_id"] == f"integration-{token_type}-t7", f"{token_type}: {args}"
-            from helpers.llm import credential_fingerprint
-
-            assert args["credential"] == credential_fingerprint(f"held-{token_type}-token"), args
+            names = [c[0] for c in fake.activity_calls]
+            assert "mark_compute_token_rate_limited_activity" not in names, (
+                f"{token_type}: the workflow reported its cached lease for a failure it cannot attribute: "
+                f"{[c for c in fake.activity_calls if c[0] == 'mark_compute_token_rate_limited_activity']}"
+            )
+            assert "release_compute_token_lineage_activity" in names, f"{token_type}: {names}"
+            assert "fetch_compute_token_activity" in names, f"{token_type}: {names}"
         finally:
             _restore_workflow(original)
 
@@ -13453,14 +13441,9 @@ async def test_workflow_on_tokens_rotates_gpt_token_on_auth_error():
         assert wf.compute_token_provider == "claude"
         assert wf.claude_max_token == "next-claude-token"
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "mark_compute_token_rate_limited_activity" in activity_names
-        mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
-        from helpers.llm import credential_fingerprint
-
-        assert mark_call[1] == [
-            "gpt", "pool", "user-1", "gpt-pool-1", None, 5 * 60, None, "auth_error",
-            credential_fingerprint("gpt-token"),
-        ]
+        # RoseClient reports the failed attempt with its own login; the
+        # workflow only re-leases (T7 / CodeRabbit 4475152998).
+        assert "mark_compute_token_rate_limited_activity" not in activity_names
         assert "release_compute_token_lineage_activity" in activity_names
         fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
         assert fetch_call[1][-1] == "claude"
@@ -14439,7 +14422,10 @@ async def run_all_tests():
     )
     await r.record_async("wf_get_model_pricing_default", test_workflow_get_model_pricing_unknown_uses_default)
     await r.record_async("wf_on_tokens_rotates_claude", test_workflow_on_tokens_rotates_claude_token_on_auth_error)
-    await r.record_async("wf_auth_error_report_names_leased_login", test_workflow_auth_error_report_names_the_leased_login)
+    await r.record_async(
+        "wf_never_reports_cached_login_for_call_failure",
+        test_workflow_never_reports_its_cached_login_for_a_call_failure,
+    )
     await r.record_async(
         "wf_rotate_compute_token_releases_lineage",
         test_workflow_rotate_compute_token_releases_lineage_and_refetches,
