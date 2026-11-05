@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from fnmatch import fnmatchcase
 import fcntl
 import hashlib
@@ -26,6 +26,7 @@ import tempfile
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit, unquote
 
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
@@ -1540,6 +1541,153 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                  phase='quick', next_after_quick='initial', focused={}, ready=False)
 
 
+def _prepared_private_directory(value: str, worker: Path) -> None:
+    path = Path(value)
+    if (not path.is_absolute() or str(path) != value or '..' in path.parts
+            or worker / '.context' not in path.parents or path.resolve() != path or not path.is_dir()):
+        raise ValueError('prepared runtime directory must be private inside its worker')
+    for parent in (path, *path.parents):
+        if parent.is_symlink():
+            raise ValueError('prepared runtime directory cannot traverse symlinks')
+        if parent == worker:
+            break
+
+
+def _prepared_workers_idle(workers: list[Path], proc: Path = Path('/proc')) -> None:
+    """Fail closed on live or unreadable local process ownership; never signal it."""
+    if not proc.is_dir():
+        raise ValueError('prepared binding ownership inspection requires /proc')
+    for entry in proc.glob('[0-9]*'):
+        if int(entry.name) == os.getpid():
+            continue
+        paths = []
+        for field in ('cwd', 'fd', 'maps'):
+            try:
+                if field == 'cwd':
+                    paths.append(Path(os.readlink(entry / field).removesuffix(' (deleted)')))
+                elif field == 'fd':
+                    for fd in (entry / field).iterdir():
+                        try:
+                            paths.append(Path(os.readlink(fd).removesuffix(' (deleted)')))
+                        except (FileNotFoundError, ProcessLookupError):
+                            # A closed descriptor cannot suppress other descriptors or maps.
+                            continue
+                else:
+                    for line in (entry / field).read_text().splitlines():
+                        fields = line.split(maxsplit=5)
+                        if len(fields) == 6 and fields[5].startswith('/'):
+                            paths.append(Path(fields[5].removesuffix(' (deleted)')))
+            except (FileNotFoundError, ProcessLookupError):
+                if entry.exists():
+                    raise ValueError('local process ownership is unreadable')
+            except PermissionError as error:
+                if entry.exists():
+                    raise ValueError('local process ownership is unreadable') from error
+            if any(path == worker or worker in path.parents for path in paths for worker in workers):
+                raise ValueError('prepared worker has an active local consumer')
+
+
+def prepare_bindings(state: dict, old: dict, new: dict, root: Path, directory: Path) -> None:
+    """Add only prepared private runtime locations before the first full attempt."""
+    if (CANCEL.is_set() or state.get('phase') not in {'quick', 'initial'} or state.get('ready')
+            or state.get('pending') or state.get('failures') or state.get('skips')
+            or state.get('carried_passes') or state.get('resource_warnings') or state.get('pending_post_merge')
+            or any(key in state for key in ('running', 'live_failures', 'resume_phase'))
+            or any(not isinstance(a, dict) or a.get('phase') != 'quick'
+                   or a.get('interrupted') or a.get('stale') for a in state.get('attempts', []))):
+        raise ValueError('prepared bindings require quiescent pre-full state')
+    if (old != state['plan'] or digest(old) != state['plan_digest']
+            or old['source'] != state['source'] or state['environment'] != environment_digest()):
+        raise ValueError('prepared binding source/plan/environment identity mismatch')
+    if ({k:v for k,v in old.items() if k not in {'source', 'gates'}} !=
+            {k:v for k,v in new.items() if k not in {'source', 'gates'}}
+            or [g['name'] for g in old['gates']] != [g['name'] for g in new['gates']]):
+        raise ValueError('prepared binding must preserve the complete selection')
+    validate_plan(old, root)
+    validate_plan(new, root)
+    current = source(root)
+    if new['source'] != current:
+        raise ValueError('prepared bindings require current source')
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', old['source']['head'], current['head']],
+                      cwd=root, capture_output=True).returncode:
+        raise ValueError('prepared source must descend from original source')
+    if subprocess.run(['git', 'diff', '--quiet', 'HEAD'], cwd=root).returncode:
+        raise ValueError('commit prepared source before binding')
+    workers, changed = [], []
+    for before, after in zip(old['gates'], new['gates']):
+        if {k:v for k,v in before.items() if k != 'env'} != {k:v for k,v in after.items() if k != 'env'}:
+            raise ValueError('prepared binding cannot change commands/checks/deadlines or workers')
+        prior, env = before.get('env', {}), after.get('env', {})
+        if any(env.get(k) != v for k,v in prior.items()):
+            raise ValueError('prepared binding cannot change existing environment keys')
+        additions = {k:v for k,v in env.items() if k not in prior}
+        if additions and (before.get('quick') or before.get('worker_transport') != 'local-isolated'):
+            raise ValueError('prepared additions require a local full worker')
+        if set(additions) - {'TMPDIR', 'XDG_CACHE_HOME', 'npm_config_cache', 'BACKEND_COVERAGE_DATABASE_URL'}:
+            raise ValueError('unsupported prepared environment addition')
+        if before.get('worker_transport') != 'local-isolated':
+            continue
+        worker = Path(after['worker_root'])
+        if worker.resolve() != worker or not worker.is_dir():
+            raise ValueError('worker root must be a real prepared directory')
+        workers.append(worker)
+        for key, value in additions.items():
+            if key != 'BACKEND_COVERAGE_DATABASE_URL':
+                _prepared_private_directory(value, worker)
+                continue
+            url = urlsplit(value)
+            workspace = env.get('CONDUCTOR_WORKSPACE_NAME', '')
+            expected = 'victoria_' + re.sub(r'[^a-zA-Z0-9]', '_', workspace)
+            if (before['name'] != 'backend-coverage-blackbox' or not before.get('native_backend')
+                    or env.get('ROSE_USE_SYSTEM_PG') != 'true' or env.get('ROSE_DEPLOY_WORKTREE')
+                    or url.scheme not in {'postgres', 'postgresql'}
+                    or url.hostname not in {'localhost', '127.0.0.1', '::1'} or url.port != 5432
+                    or unquote(url.path) != '/' + expected or url.query or url.fragment
+                    or not re.fullmatch(r'victoria_[A-Za-z0-9_]+', expected)
+                    or expected.startswith('victoria_wmh_recording_')):
+                raise ValueError('backend binding must name its own loopback workspace database')
+        if source(worker) != current:
+            raise ValueError('worker source does not match prepared source')
+        for rel in ('.env', 'env.sh', 'back-end/.env', 'agents/.env', 'agents/.env.benchmark-temporal',
+                    'front-end/.env', 'front-end/.env.local'):
+            origin, target = root / rel, worker / rel
+            if (origin.is_file() != target.is_file() or target.is_symlink()
+                    or origin.is_file() and (sha_file(origin) != sha_file(target)
+                                             or target.stat().st_mode & 0o777 != 0o600)):
+                raise ValueError('prepared worker configuration differs or is not private')
+        if additions:
+            changed.append(before['name'])
+    if current == state['source'] and state['input_fingerprints'] != input_fingerprints(old, root):
+        raise ValueError('original frozen inputs changed')
+    if not changed and current == state['source']:
+        raise ValueError('prepared binding has no change')
+    if retained_owners(state, [g['name'] for g in old['gates']]):
+        raise ValueError('prepared binding has retained ownership')
+    for path in (directory / 'attempts').glob('**/request.json'):
+        request = bounded_read(path, 'existing request')
+        if (request.get('phase') != 'quick'
+                or request.get('gate') not in {g['name'] for g in old['gates'] if g.get('quick')}):
+            raise ValueError('full worker request already exists')
+        if not (path.parent / 'receipt.json').is_file():
+            raise ValueError('prior quick request has unknown owner')
+    with ExitStack() as stack:
+        for worker in workers:
+            stack.enter_context(exclusive(worker / '.context' / 'deploy-worker'))
+            stack.enter_context(exclusive(worker / '.context' / 'deploy-backend'))
+            lock = stack.enter_context((worker / '.context' / 'native-worker-admission.lock').open('a'))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _prepared_workers_idle(workers)
+        fingerprints = input_fingerprints(new, root)
+        if (source(root) != current or any(source(worker) != current for worker in workers)
+                or environment_digest() != state['environment'] or CANCEL.is_set()):
+            raise ValueError('prepared source/environment changed during validation')
+        state.setdefault('prepared_binding_history', []).append({
+            'from_plan': copy.deepcopy(old), 'from_source': copy.deepcopy(state['source']),
+            'to_source': current, 'gates': changed, 'at': time.time(), 'credit_granted': False})
+        state.update(plan=copy.deepcopy(new), plan_digest=digest(new), source=current,
+                     input_fingerprints=fingerprints, phase='quick', next_after_quick='initial', ready=False)
+
+
 def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
@@ -1720,7 +1868,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "prepare-bindings", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
@@ -1774,6 +1922,10 @@ def main(argv: list[str] | None = None) -> int:
                 if args.input is None:
                     raise ValueError('--input previous frozen plan required')
                 rebind_local(state, read(args.input), plan, args.root)
+            elif args.action == "prepare-bindings":
+                if args.input is None:
+                    raise ValueError("--input previous plan required")
+                prepare_bindings(state, read(args.input), plan, args.root, directory)
             elif args.action == "rca":
                 requests = rca_requests(state, directory)
                 if state["phase"] != "triage" or not requests or not args.rca_launcher:

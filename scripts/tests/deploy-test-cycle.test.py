@@ -48,6 +48,176 @@ class Cycle(unittest.TestCase):
         self.workers.cleanup()
         self.temp.cleanup()
 
+    def prepared_bindings_fixture(self, changed_source=False):
+        old = copy.deepcopy(self.plan)
+        # Real prepared private repositories, not mocked source equality.
+        for gate in old['gates']:
+            if gate.get('quick'):
+                continue
+            path = Path(gate['cwd'])
+            subprocess.run(['git', 'clone', '-q', str(self.root), str(path)], check=True)
+            (path / '.git/info/exclude').write_text('.context/\n')
+            gate['worker_root'] = str(path)
+        state = c.initialize(old, self.root)
+        state['attempts'] = [{'phase': 'quick', 'source': old['source'], 'results': [
+            {'gate': g['name'], 'status': 'PASS', 'source': old['source']}
+            for g in old['gates'] if g.get('quick')]}]
+        state['phase'] = 'initial'
+        new = copy.deepcopy(old)
+        if changed_source:
+            (self.root / 'code').write_text('tooling repair')
+            subprocess.run(['git', '-C', str(self.root), 'add', 'code'], check=True)
+            subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                            'user.email=test@example.com', 'commit', '-qm', 'repair'], check=True)
+            for gate in new['gates']:
+                if not gate.get('quick'):
+                    subprocess.run(['git', '-C', gate['cwd'], 'fetch', '-q', 'origin'], check=True)
+                    subprocess.run(['git', '-C', gate['cwd'], 'checkout', '-q', '--detach', 'FETCH_HEAD'], check=True)
+            new['source'] = c.source(self.root)
+        for gate in new['gates']:
+            if gate.get('quick'):
+                continue
+            for key, leaf in [('TMPDIR', 'tmp'), ('XDG_CACHE_HOME', 'cache'), ('npm_config_cache', 'npm-cache')]:
+                path = Path(gate['worker_root']) / '.context' / leaf
+                path.mkdir(parents=True)
+                gate['env'][key] = str(path)
+        return old, new, state
+
+    def test_prepare_bindings_before_full_preserves_history_and_restarts_quick(self):
+        old, new, state = self.prepared_bindings_fixture(changed_source=True)
+        with self.assertRaisesRegex(ValueError, 'repair boundary'):
+            c.refresh(copy.deepcopy(state), old, new, self.root)
+        historical = copy.deepcopy(state['attempts'])
+        with patch.object(c, '_prepared_workers_idle') as idle:
+            c.prepare_bindings(state, old, new, self.root, self.directory)
+        idle.assert_called_once()
+        self.assertEqual(historical, state['attempts'])
+        self.assertEqual(new['source'], state['source'])
+        self.assertEqual('quick', state['phase'])
+        self.assertEqual('initial', state['next_after_quick'])
+        self.assertFalse(state['ready'])
+        self.assertEqual(old, state['prepared_binding_history'][0]['from_plan'])
+        self.assertFalse(state['prepared_binding_history'][0]['credit_granted'])
+        unchanged = copy.deepcopy(state)
+        with self.assertRaises(ValueError):
+            c.prepare_bindings(state, new, new, self.root, self.directory)
+        self.assertEqual(unchanged, state)
+
+    def test_prepared_worker_process_ownership_fails_closed(self):
+        proc = self.root / 'fake-proc'; proc.mkdir()
+        entry = proc / '99999999'; entry.mkdir(); (entry / 'fd').mkdir(); (entry / 'maps').write_text('')
+        worker = Path(self.workers.name) / 'api'
+        (entry / 'cwd').symlink_to(worker)
+        with self.assertRaisesRegex(ValueError, 'active local consumer'):
+            c._prepared_workers_idle([worker], proc)
+        (entry / 'cwd').unlink(); (entry / 'cwd').symlink_to(self.root)
+        (entry / 'fd' / '7').symlink_to(worker / 'file')
+        with self.assertRaisesRegex(ValueError, 'active local consumer'):
+            c._prepared_workers_idle([worker], proc)
+        (entry / 'fd' / '7').unlink()
+        c._prepared_workers_idle([worker], proc)
+        (entry / 'maps').write_text('1-2 r--p 0 00:01 7 ' + str(worker / 'loaded.so'))
+        with self.assertRaisesRegex(ValueError, 'active local consumer'):
+            c._prepared_workers_idle([worker], proc)
+        (entry / 'maps').write_text('')
+        # A descriptor can close during enumeration. It must not hide a
+        # still-live process's later mapping into the worker checkout.
+        closed = entry / 'fd' / '8'
+        closed.symlink_to(self.root / 'gone')
+        (entry / 'maps').write_text('1-2 r--p 0 00:01 7 ' + str(worker / 'loaded.so'))
+        real_readlink = c.os.readlink
+        def racing_readlink(path):
+            if Path(path) == closed:
+                raise FileNotFoundError('descriptor closed during scan')
+            return real_readlink(path)
+        with patch.object(c.os, 'readlink', side_effect=racing_readlink):
+            with self.assertRaisesRegex(ValueError, 'active local consumer'):
+                c._prepared_workers_idle([worker], proc)
+        closed.unlink()
+        (entry / 'maps').write_text('')
+        with patch.object(c.os, 'readlink', side_effect=PermissionError('unreadable')):
+            with self.assertRaisesRegex(ValueError, 'unreadable'):
+                c._prepared_workers_idle([worker], proc)
+
+    def test_prepare_bindings_backend_database_and_native_lease(self):
+        old, new, state = self.prepared_bindings_fixture()
+        for plan in (old, new):
+            gate = plan['gates'][1]
+            gate.update(name='backend-coverage-blackbox', native_backend=True)
+            gate['env']['ROSE_USE_SYSTEM_PG']='true'
+        state['plan']=old; state['plan_digest']=c.digest(old)
+        state['input_fingerprints']=c.input_fingerprints(old,self.root)
+        # This fixture tests transition admission, not the backend adapter recipe.
+        new['gates'][1]['env']['BACKEND_COVERAGE_DATABASE_URL']='postgresql://user:p%40ss@localhost:5432/victoria_api'
+        for url in ('postgresql://u:p@remote:5432/victoria_api',
+                    'postgresql://u:p@localhost:5432/victoria',
+                    'postgresql://u:p@localhost:5432/victoria_wmh_recording_old',
+                    'postgresql://u:p@localhost:5432/victoria_ui',
+                    'postgresql://u:p@localhost:5432/victoria_api?options=-cwhatever'):
+            bad=copy.deepcopy(new); bad['gates'][1]['env']['BACKEND_COVERAGE_DATABASE_URL']=url
+            with self.assertRaises(ValueError), patch.object(c, '_prepared_workers_idle'):
+                c.prepare_bindings(copy.deepcopy(state),old,bad,self.root,self.directory)
+        lock_path=Path(new['gates'][1]['worker_root'])/'.context/native-worker-admission.lock'
+        with lock_path.open('a') as held:
+            c.fcntl.flock(held,c.fcntl.LOCK_EX|c.fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError), patch.object(c, '_prepared_workers_idle'):
+                c.prepare_bindings(copy.deepcopy(state),old,new,self.root,self.directory)
+        with patch.object(c, '_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory)
+        self.assertEqual('quick',state['phase'])
+
+    def test_prepare_bindings_cli_preserves_existing_quick_receipts(self):
+        import contextlib, io
+        old, new, state = self.prepared_bindings_fixture()
+        previous=self.directory/'previous.json'; updated=self.directory/'updated.json'
+        c.write(previous,old);c.write(updated,new);c.write(self.directory/'cycle.json',state)
+        with patch.object(c, '_prepared_workers_idle'), contextlib.redirect_stdout(io.StringIO()):
+            code=c.main(['prepare-bindings','--plan',str(updated),'--input',str(previous),
+                         '--state-dir',str(self.directory),'--root',str(self.root)])
+        self.assertEqual(0,code)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual(state['attempts'],after['attempts'])
+        self.assertEqual('quick',after['phase'])
+        self.assertEqual(new,after['plan'])
+        # A request with no terminal receipt is unknown ownership, even without results.
+        other=copy.deepcopy(state)
+        request=self.directory/'attempts/0/initial/api/request.json'
+        c.write(request,{'gate':'api'})
+        with patch.object(c, '_prepared_workers_idle'), self.assertRaisesRegex(ValueError,'full worker request'):
+            c.prepare_bindings(other,old,new,self.root,self.directory)
+        self.assertEqual(state,other)
+
+    def test_prepare_bindings_rejects_unsafe_changes_atomically(self):
+        old, new, base = self.prepared_bindings_fixture()
+        mutations = [
+            lambda p, s: p['gates'][1]['env'].update(CONDUCTOR_PORT='7777'),
+            lambda p, s: p['gates'][1]['env'].update(UNKNOWN='x'),
+            lambda p, s: p['gates'][1]['env'].update(TMPDIR=str(self.root)),
+            lambda p, s: p['gates'][1]['env'].update(TMPDIR=p['gates'][1]['worker_root']),
+            lambda p, s: p['gates'][1]['env'].update(TMPDIR=p['gates'][2]['env']['TMPDIR']),
+            lambda p, s: p['gates'][1]['command'].append('changed'),
+            lambda p, s: p['gates'][1]['checks'].pop(),
+            lambda p, s: p['gates'][1].update(timeout_seconds=1),
+            lambda p, s: p['gates'].pop(),
+            lambda p, s: s.update(phase='triage'),
+            lambda p, s: s.update(running=['api']),
+            lambda p, s: s.update(resume_phase='initial'),
+            lambda p, s: s.update(pending=['unresolved']),
+            lambda p, s: s.update(skips={'api/a': {'unreviewed': True}}),
+            lambda p, s: s['attempts'].append({'phase':'initial','results':[]}),
+        ]
+        for mutate in mutations:
+            candidate, state = copy.deepcopy(new), copy.deepcopy(base)
+            mutate(candidate, state)
+            before = copy.deepcopy(state)
+            with self.assertRaises(ValueError):
+                c.prepare_bindings(state, old, candidate, self.root, self.directory)
+            self.assertEqual(before, state)
+        path = Path(new['gates'][1]['env']['TMPDIR'])
+        path.rmdir();path.symlink_to(Path(new['gates'][2]['env']['TMPDIR']))
+        with self.assertRaises(ValueError):
+            c.prepare_bindings(copy.deepcopy(base), old, new, self.root, self.directory)
+
     def local_rebind_fixture(self):
         import contextlib, io
         old = copy.deepcopy(self.plan)

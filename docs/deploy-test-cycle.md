@@ -197,6 +197,35 @@ unbounded.
 Worker stderr is preserved separately from its stdout JSON receipt. Request
 input and receipt size are bounded; an incomplete transport cannot become PASS.
 
+## Prepared bindings before the first full gate
+
+At a quiescent `quick` or `initial` boundary, `prepare-bindings` can admit
+prepared local runtime locations without resetting a cycle:
+
+```bash
+python3 scripts/deploy_test_cycle.py prepare-bindings --input old-plan.json \
+  --plan prepared-plan.json --state-dir .context/deploy-pipeline --root "$SOURCE"
+```
+
+It permits only new `TMPDIR`, `XDG_CACHE_HOME`, and `npm_config_cache`
+directories inside each existing local worker root, plus the backend native
+worker's own loopback `BACKEND_COVERAGE_DATABASE_URL` on port5432. Existing env
+keys, workers, recipes, checks, commands, deadlines, selection and skips cannot
+change. Every worker must match the current source and private configuration;
+paths cannot traverse symlinks. The backend URL cannot select the canonical,
+recording or another worker's database, or carry connection-option parameters.
+Database readiness remains the preparation owner's responsibility.
+
+No full attempt or outstanding owner may exist. Worker admission locks and
+local process cwd/FD/mapping inspection must prove quiescence; unreadable process
+ownership fails closed. The caller must have sufficient local read access for
+that inspection. This action does not launch, signal or grant test credit.
+It also permits a committed descendant source refresh at that same boundary,
+provided all workers already match it. Original quick receipts and identities
+remain historical, and **all quick checks run again** before any full gate.
+Repeated no-change admission is rejected. Ordinary `refresh` and `rebind-local`
+retain their stricter existing contracts.
+
 ## Result protocol
 
 The coordinator supplies `DEPLOY_GATE_REQUEST` (JSON file) and
