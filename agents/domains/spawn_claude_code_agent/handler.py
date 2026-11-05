@@ -739,6 +739,11 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         cancel_metadata["code_provider"] = result["code_provider"]
                     if isinstance(result.get("code_session"), dict):
                         cancel_metadata["code_session"] = result["code_session"]
+                detached_id = (code_session or {}).get("code_session_id")
+                if "code_session" not in cancel_metadata and isinstance(detached_id, str) and detached_id:
+                    # Paused while detached (no activity result): name the session from
+                    # its reattach record, never the record itself (ws_url, cursors).
+                    cancel_metadata["code_session"] = {"code_session_id": detached_id, "state": "paused"}
                 if not cancel_metadata.get("task_id"):
                     # Last resort: still emit task_complete so routing stays on
                     # ClaudeCodeChip, but log — FE recovers task_id from siblings.

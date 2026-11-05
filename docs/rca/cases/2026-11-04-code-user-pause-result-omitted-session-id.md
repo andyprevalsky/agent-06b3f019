@@ -56,3 +56,10 @@ None recorded.
 ## Reusable lesson
 
 Every resumable ending must name the handle the caller resumes with; a bare status string forces the caller to guess.
+
+Follow-up (2026-11-05, CodeRabbit 4475152946): a pause that lands while the run
+is detached for a deploy builds its cancel result without `code_session`, so the
+text lost the id. The handler now falls back to the detached reattach record's
+`code_session_id` only (`{"code_session_id", "state": "paused"}`), never the
+record itself. Regression:
+test_cc_manager_pause_after_drain_names_the_detached_code_session.

@@ -4166,6 +4166,10 @@ async def _run_all_tests():
         test_cc_manager_pause_after_drain_closes_the_detached_sandbox,
     )
     await r.record_async(
+        "cc_manager_pause_after_drain_names_detached_code_session",
+        test_cc_manager_pause_after_drain_names_the_detached_code_session,
+    )
+    await r.record_async(
         "cc_manager_cancel_before_reattach_closes_detached_sandbox",
         test_cc_manager_cancel_before_reattach_closes_the_detached_sandbox,
     )
@@ -5911,6 +5915,34 @@ async def test_cc_manager_pause_after_drain_closes_the_detached_sandbox():
     ), code_agent
     assert code_agent["ended_at"] == "2026-10-20T00:00:00Z", code_agent
     assert "\u2713 Task Completed" not in _cc_titles(events), _cc_titles(events)
+
+
+async def test_cc_manager_pause_after_drain_names_the_detached_code_session():
+    """A pause while detached for a deploy still names the paused code session (CodeRabbit 4475152946).
+
+    The cancel result built on this path carried no code_session, so the pause
+    text lost its code_session_id and a resume could pick the repo's latest
+    session. Only the session's identity is reported, never its reattach
+    record (ws_url, sandbox id, event cursors).
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    session_id = "6c1d6f1e-0000-4000-8000-0000000000bb"
+    drained = {**_drain_yield(WORKER_SHUTDOWN), "code_session": {**_DRAINED_SESSION, "code_session_id": session_id}}
+    fake = _SequencedCCWorkflow(drained)
+    wf = _HandoffCCWorkflowInstance()
+    wf.is_paused = True
+    restore = _patch_cc_workflow(fake)
+    try:
+        events = await _collect_cc_events(SpawnClaudeCodeAgentManager().execute_tool(wf, {"goal": "g"}, "tc-pause2"))
+    finally:
+        restore()
+
+    chip = _cancel_chip(events)
+    assert chip.metadata["code_session"] == {"code_session_id": session_id, "state": "paused"}, chip.metadata
+    assert f"spawn the code agent again with code_session_id='{session_id}' to resume it." in chip.message, chip.message
+    assert f"Code session: {session_id} (paused)" in chip.message, chip.message
 
 
 async def test_cc_manager_cancel_before_reattach_closes_the_detached_sandbox():
