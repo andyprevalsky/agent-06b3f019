@@ -62,8 +62,8 @@ serial fallback. An active operation on the same isolation root is refused
 before launch; its existing owner and deadline remain authoritative. A concrete
 capacity shortfall must be reported, not converted into hidden suite ordering.
 
-At quiescent TRIAGE, run missing independent full gates without disposing of the
-original failures:
+At quiescent TRIAGE or NEEDS-FOCUSED-PLAN, run independent full gates without
+disposing of the original failures or diagnosed repair obligations:
 
 ```bash
 python3 scripts/deploy_test_cycle.py triage-independent --plan "$PLAN" \
@@ -82,10 +82,14 @@ adjudicated explicitly; source-bound resource qualifications require current
 execution. Final full verification on the new source remains mandatory.
 
 Repeat `--exclude-root` for actual leased roots. Gates with pending failures,
-valid complete full receipts, or excluded roots are left untouched. Selected
-gates keep the full original commands, checks and deadlines and launch together.
+valid complete full receipts, retained cleanup owners, or excluded roots are left
+untouched. Retained worker identities and overlapping roots are also excluded.
+Selected gates keep the full original commands, checks and deadlines and launch together.
 The action appends genuine native attempts and any new failures, preserves all
-original pending failures and obligations, and returns to TRIAGE with ready=false.
+original failures, dispositions and repair obligations. Successful observations
+leave the original phase unchanged with ready=false; new failures enter TRIAGE
+without losing previously diagnosed repairs. A full observation is not a waiver
+or completion of the focused/final cycle.
 It cannot authorize merge or replace the final exact-source coverage verifier.
 The documented focused-then-full rerun sequence still applies to actual failed
 tests. Historical repair labels do not rerun an unchanged, already verified full

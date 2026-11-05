@@ -287,7 +287,7 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
     expected = {case: 'SKIP' if case in skips else 'PASS' for case in gate['checks']}
     attempt = next((a for a in reversed(state.get('attempts', [])) if any(r is receipt for r in a.get('results', []))), {})
     if (not (attempt.get('phase') in {'initial', 'focused', 'failed-gates', 'final'}
-             or attempt.get('phase') == 'triage' and attempt.get('independent_full') is True)
+             or attempt.get('phase') in {'triage', 'needs-focused-plan'} and attempt.get('independent_full') is True)
             or attempt.get('stale') or attempt.get('interrupted')
             or receipt.get('status') != 'PASS' or receipt.get('complete') is not True
             or receipt.get('executed') is not True or type(receipt.get('native_exit')) is not int
@@ -1281,14 +1281,35 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             or input_fingerprints(plan, root) != state["input_fingerprints"]):
         raise ValueError("source/plan changed; refresh after RCA before running")
     if independent:
-        if (state.get('phase') != 'triage' or not state.get('pending') or state.get('ready')
-                or CANCEL.is_set() or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
-            raise ValueError('independent FULL observation requires quiescent unresolved triage')
+        observation_phase = state.get('phase')
+        unresolved = observation_phase == 'triage' and bool(state.get('pending'))
+        diagnosed = (observation_phase == 'needs-focused-plan' and not state.get('pending')
+                     and bool(state.get('repair_gates')) and bool(state.get('failures'))
+                     and all(f.get('disposition') and (f.get('rca') or f.get('reexecution'))
+                             for f in state['failures']))
+        if (not (unresolved or diagnosed) or state.get('ready') or CANCEL.is_set()
+                or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
+            raise ValueError('independent FULL observation requires quiescent triage or diagnosed repair')
         validate_plan(plan, root)
         excluded = {Path(p).resolve() for p in excluded_roots}
-        pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state['pending']}
+        retained = set(retained_owners(state, [g['name'] for g in plan['gates']]))
+        held = [g for g in plan['gates'] if g['name'] in retained]
+        held_workers = {g.get('worker') for g in held if g.get('worker')}
+        held_roots = [(g.get('worker_host', 'local'), Path(g.get('worker_root', g.get('cwd', root))).resolve())
+                      for g in held]
+        for name in retained:
+            owner = receipt_owner(name, latest_receipts(state)[name])
+            if owner.get('worker_root'):
+                held_roots.append((owner.get('worker_host', 'local'), Path(owner['worker_root']).resolve()))
+        def conflicts(gate):
+            location = Path(gate.get('worker_root', gate.get('cwd', root))).resolve()
+            return (gate['name'] in retained or gate.get('worker') in held_workers
+                    or any(gate.get('worker_host', 'local') == host and
+                           (location == path or location in path.parents or path in location.parents)
+                           for host, path in held_roots))
+        pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state.get('pending', [])}
         selected = [g for g in plan['gates'] if not g.get('quick') and g['name'] not in pending_gates
-                    and not reusable_full_pass(state, g)
+                    and not reusable_full_pass(state, g) and not conflicts(g)
                     and (g.get('worker_transport') != 'local-isolated'
                          or local_admission_root(g, root) not in excluded)]
         for gate in selected:
@@ -1348,14 +1369,18 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
         if independent:
             changed = (source(root) != state['source'] or environment_digest() != state['environment']
                        or input_fingerprints(plan, root) != state['input_fingerprints'])
-            state['attempts'].append({'phase': 'triage', 'source': state['source'], 'results': results,
+            state['attempts'].append({'phase': observation_phase, 'source': state['source'], 'results': results,
                                      'independent_full': True, 'excluded_roots': sorted(str(p) for p in excluded),
                                      'interrupted': CANCEL.is_set(), 'stale': changed})
             for result in results:
                 state.get('carried_passes', {}).pop(result['gate'], None)
             state['failures'].extend(failures)
-            state['pending'] = list(dict.fromkeys([*state['pending'], *[f['id'] for f in failures]]))
-            state.update(phase='triage', ready=False)
+            if failures:
+                state['pending'] = list(dict.fromkeys([*state.get('pending', []), *[f['id'] for f in failures]]))
+                if diagnosed:
+                    state['triage_repair_gates'] = sorted(set(state.get('triage_repair_gates', []))
+                                                        | set(state['repair_gates']))
+            state.update(phase='triage' if failures else observation_phase, ready=False)
         elif CANCEL.is_set():
             state["attempts"].append({"phase": state["phase"], "results": results, "interrupted": True})
             state.update(resume_phase=state["phase"], phase="interrupted", ready=False)
@@ -1722,7 +1747,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
-                        help='triage-independent: currently leased worker roots to leave untouched')
+                        help='triage-independent: leased worker roots to exclude in triage or diagnosed repair')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")

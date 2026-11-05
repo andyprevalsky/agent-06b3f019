@@ -312,6 +312,132 @@ class Cycle(unittest.TestCase):
                                '--root', str(self.root), '--exclude-root', str(lease)])
         return state, plan, path, plan_path, call
 
+    def diagnosed_independent_fixture(self, failing=False):
+        state, plan, path, plan_path, call = self.independent_triage_fixture(failing)
+        while len(state['failures']) < 23:
+            failure = copy.deepcopy(state['failures'][0])
+            failure['id'] = 'diagnosed-' + str(len(state['failures']))
+            state['failures'].append(failure)
+            state['pending'].append(failure['id'])
+        c.adjudicate(state, {'failures': [self.report(f)['failures'][0] for f in state['failures']]})
+        self.assertEqual('needs-focused-plan', state['phase'])
+        self.assertEqual(23, len(state['failures']))
+        api = next(g for g in plan['gates'] if g['name'] == 'api')
+        receipt = c.latest_receipts(state)['api']
+        receipt['cleanup_owner'] = {'request_token': receipt['token'], 'worker_root': api['cwd'],
+                                    'financial_obligation': 'consumed4396/released0'}
+        c.write(path, state)
+        return state, plan, path, plan_path, call
+
+    def test_diagnosed_independent_full_keeps_blocking_debt_and_excludes_retained(self):
+        before, plan, path, _, call = self.diagnosed_independent_fixture()
+        self.assertEqual(0, call())
+        after = c.read(path)
+        self.assertEqual(('needs-focused-plan', False), (after['phase'], after['ready']))
+        for key in ('failures', 'repair_gates', 'reconciled_owners', 'failure_phase', 'source', 'plan_digest', 'skips'):
+            self.assertEqual(before[key], after[key])
+        self.assertNotIn('pending', after)
+        self.assertEqual(['missing'], [r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertEqual('needs-focused-plan', after['attempts'][-1]['phase'])
+        self.assertTrue(after['attempts'][-1]['independent_full'])
+        gate = next(g for g in plan['gates'] if g['name'] == 'missing')
+        self.assertTrue(c.reusable_full_pass(after, gate))
+        self.assertFalse(any((self.directory / 'attempts').glob('*/needs-focused-plan/api/request.json')))
+        self.assertEqual(1, c.verify_saved(self.directory, self.root))
+
+    def test_diagnosed_independent_observes_repaired_gate_without_clearing_debt(self):
+        before, plan, path, _, call = self.diagnosed_independent_fixture()
+        latest = c.latest_receipts(before)
+        owner = latest['api'].pop('cleanup_owner')
+        owner['worker_root'] = next(g['cwd'] for g in plan['gates'] if g['name'] == 'ui')
+        latest['ui']['cleanup_owner'] = owner
+        c.write(path, before)
+        self.assertEqual(0, call()); after = c.read(path)
+        self.assertEqual({'api', 'missing'}, {r['gate'] for r in after['attempts'][-1]['results']})
+        self.assertEqual(before['failures'], after['failures'])
+        self.assertEqual(before['repair_gates'], after['repair_gates'])
+        self.assertEqual(('needs-focused-plan', False), (after['phase'], after['ready']))
+        api = next(g for g in plan['gates'] if g['name'] == 'api')
+        self.assertTrue(c.reusable_full_pass(after, api))
+        self.assertEqual(1, c.verify_saved(self.directory, self.root))
+
+    def test_diagnosed_independent_requires_actual_disposition_evidence(self):
+        before, _, path, _, call = self.diagnosed_independent_fixture()
+        for field in ('disposition', 'rca'):
+            candidate = copy.deepcopy(before)
+            candidate['failures'][0].pop(field)
+            c.write(path, candidate); saved = path.read_bytes()
+            self.assertEqual(2, call()); self.assertEqual(saved, path.read_bytes())
+        candidate = copy.deepcopy(before); candidate['failures'] = []
+        c.write(path, candidate); saved = path.read_bytes()
+        self.assertEqual(2, call()); self.assertEqual(saved, path.read_bytes())
+
+    def test_diagnosed_independent_new_failure_returns_to_rca_with_old_repairs(self):
+        before, plan, path, _, call = self.diagnosed_independent_fixture(failing=True)
+        self.assertEqual(0, call())
+        after = c.read(path)
+        self.assertEqual(('triage', False), (after['phase'], after['ready']))
+        self.assertEqual(before['failures'], after['failures'][:23])
+        self.assertEqual(before['repair_gates'], after['repair_gates'])
+        self.assertEqual(1, len(after['pending']))
+        self.assertEqual('missing/missing', after['failures'][-1]['check'])
+        c.adjudicate(after, self.report(after['failures'][-1]))
+        self.assertEqual(('needs-focused-plan', False), (after['phase'], after['ready']))
+        self.assertEqual({'api', 'missing'}, set(after['repair_gates']))
+        self.assertEqual({}, after['skips'])
+
+    def test_diagnosed_independent_excludes_historical_owner_root_and_does_not_invent_attempt(self):
+        state, plan, path, _, call = self.diagnosed_independent_fixture()
+        missing = next(g for g in plan['gates'] if g['name'] == 'missing')
+        c.latest_receipts(state)['api']['cleanup_owner']['worker_root'] = missing['cwd']
+        c.write(path, state); original = path.read_bytes()
+        self.assertEqual(0, call())
+        self.assertEqual(original, path.read_bytes())
+        self.assertFalse(any((self.directory / 'attempts').glob('*/needs-focused-plan/*/request.json')))
+
+    def test_diagnosed_independent_rejects_nonquiescence_and_stale_bindings_atomically(self):
+        before, plan, path, plan_path, call = self.diagnosed_independent_fixture()
+        for update in ({'running': True}, {'live_failures': []}, {'resume_phase': 'focused'},
+                       {'ready': True}, {'pending': ['unresolved']}, {'repair_gates': []},
+                       {'phase': 'focused'}, {'phase': 'ready'}, {'environment': 'stale'},
+                       {'input_fingerprints': {}}):
+            with self.subTest(update=update):
+                c.write(path, {**copy.deepcopy(before), **update}); saved = path.read_bytes()
+                self.assertEqual(2, call()); self.assertEqual(saved, path.read_bytes())
+        c.write(path, before); original = path.read_bytes()
+        with patch.dict(os.environ, {'ADMISSION_FIXTURE_ENV': 'changed'}):
+            self.assertEqual(2, call())
+        self.assertEqual(original, path.read_bytes())
+        (self.root / 'code').write_text('stale source')
+        self.assertEqual(2, call()); self.assertEqual(original, path.read_bytes())
+        (self.root / 'code').write_text('original')
+        changed = copy.deepcopy(plan); changed['gates'][-2]['command'].append('--changed')
+        c.write(plan_path, changed)
+        self.assertEqual(2, call()); self.assertEqual(original, path.read_bytes())
+        c.write(plan_path, plan)
+        with c.exclusive(self.directory): self.assertEqual(2, call())
+        self.assertEqual(original, path.read_bytes())
+
+    def test_diagnosed_observation_keeps_focused_plan_and_final_requirements(self):
+        before, plan, path, _, call = self.diagnosed_independent_fixture()
+        self.assertEqual(0, call()); after = c.read(path)
+        result = after['attempts'][-1]['results'][0]
+        gate = next(g for g in plan['gates'] if g['name'] == 'missing')
+        self.assertEqual(gate['command'], result['command'])
+        self.assertEqual({check: 'PASS' for check in gate['checks']}, result['cases'])
+        self.assertTrue(result['executed']); self.assertTrue(result['complete'])
+        self.assertEqual(0, result['native_exit'])
+        with self.assertRaisesRegex(ValueError, 'every blocking gate'):
+            c.focused_plan(after, plan, {'source': after['source'], 'gates': {}})
+        api = next(g for g in plan['gates'] if g['name'] == 'api')
+        c.focused_plan(after, plan, {'source': after['source'], 'gates': {
+            'api': {'command': api['command'], 'checks': api['checks']}}})
+        self.assertEqual('focused', after['phase']); self.assertFalse(after['ready'])
+        with self.assertRaisesRegex(ValueError, 'unreconciled cleanup'):
+            c.run_phase(plan, after, self.directory, self.root)
+        self.assertEqual(before['failures'], after['failures'])
+        self.assertEqual({}, after['skips'])
+
     def test_independent_triage_cli_keeps_pending_passes_and_leased_root(self):
         before, plan, path, _, call = self.independent_triage_fixture()
         self.assertEqual(0, call())
