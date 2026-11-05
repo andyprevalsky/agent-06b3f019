@@ -4426,6 +4426,10 @@ inventory_machine_field() {{
 worker_operational() {{ [ "$MODE" != readiness-failure ]; }}
 fly_with_timeout() {{
   shift
+  if [ "${{1:-}} ${{2:-}}" = "machine status" ]; then
+    FLY "$@" 2>&1
+    return $?
+  fi
   printf '%s\n' "$*" >> "$CALLS"
   case "$*" in
     *"ssh sftp put"*"cloudbench-local.patch"*)

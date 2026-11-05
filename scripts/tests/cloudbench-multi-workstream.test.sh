@@ -875,7 +875,28 @@ BASE_REF="$(git -C "$SANDBOX" rev-parse HEAD)"
     node_fp="$(cloudbench_node_dependency_fingerprint "$SANDBOX")"
     py_fp="$(cloudbench_manifest_fingerprint "$SANDBOX" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
     printf '%s %s 0 snap_0001\n' "$node_fp" "$py_fp" > "$SANDBOX/.git/cloudbench-warm-deps.fp"
+    # This fake donor models a published image as well as its volume snapshot.
+    # Keep its proof pinned to the original manifests so later drift still fails.
+    python3 - "$TMP_ROOT/image-build.fixture.json" "$node_fp" "$py_fp" <<'PY_IMAGE_PROOF'
+import json, sys
+from pathlib import Path
+image = "registry.fly.io/navi-whisper-lux-bench@sha256:" + "a" * 64
+Path(sys.argv[1]).write_text(json.dumps({
+    "schema": "cloudbench-image-build-v1", "publication_verified": True,
+    "published_image_ref": image, "image_ref": image,
+    "published_digest": "sha256:" + "a" * 64,
+    "node_dependency_fingerprint": sys.argv[2],
+    "python_dependency_fingerprint": sys.argv[3],
+}) + "\n")
+PY_IMAGE_PROOF
 )
+FIXTURE_IMAGE_BUILD_RECEIPT="$TMP_ROOT/image-build.fixture.json"
+FIXTURE_IMAGE_BUILD_RECEIPT_SHA256="$(python3 - "$FIXTURE_IMAGE_BUILD_RECEIPT" <<'PY_IMAGE_HASH'
+import hashlib, sys
+from pathlib import Path
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY_IMAGE_HASH
+)"
 WS_A="$TMP_ROOT/ws-a"
 WS_B="$TMP_ROOT/ws-b"
 git -C "$SANDBOX" worktree add -q -b ws-a "$WS_A" >/dev/null
@@ -988,7 +1009,8 @@ reset_fake_state() {
   "machines": [
     {"id": "aaaa0000000001", "name": "cloudbench-warm", "state": "stopped",
      "region": "iad", "private_ip": "",
-     "config": {"mounts": [{"volume": "vol_aaaa0001", "path": "/data", "size_gb": 40}]}}
+     "config": {"image": "registry.fly.io/navi-whisper-lux-bench@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "mounts": [{"volume": "vol_aaaa0001", "path": "/data", "size_gb": 40}]}}
   ],
   "volumes": [
     {"id": "vol_aaaa0001", "name": "cloudbench_data", "state": "created", "size_gb": 40,
@@ -2762,6 +2784,8 @@ os.execvp(sys.argv[1], sys.argv[1:])')
         CI=1 \
         CLOUDBENCH_FAKE_DIR="$FAKE_DIR" \
         CLOUDBENCH_FAKE_CONTROLLER_WS="$ws" \
+        CLOUDBENCH_IMAGE_BUILD_RECEIPT="$FIXTURE_IMAGE_BUILD_RECEIPT" \
+        CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256="$FIXTURE_IMAGE_BUILD_RECEIPT_SHA256" \
         CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT="${CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT:-}" \
         CLOUDBENCH_FAKE_BREAK_POOL_LEDGER="${CLOUDBENCH_FAKE_BREAK_POOL_LEDGER:-}" \
         CLOUDBENCH_FAKE_FAIL_METRICS_PROXY="${CLOUDBENCH_FAKE_FAIL_METRICS_PROXY:-0}" \
