@@ -162,3 +162,14 @@ write and let a scoped retry handle it.
 
 The guard adds one indexed `count` per unscoped auth report. Scoped reports
 update a single row by primary key. No new channels or fan-out.
+
+### Follow-up 2026-11-05 (CodeRabbit 4475152998)
+
+Gap 1's fix aligned the workflow's positional report. A further review showed
+that the report was wrong in principle: after an in-call rotation, the
+workflow's cached lease is not the lease that failed, and RoseClient already
+reports every failed attempt with that attempt's own login (provider
+cool-down / stall mark). `AgentWorkflow._on_tokens` therefore no longer
+reports token failures at all; it only re-leases. Regressions:
+`workflow.blackbox::test_workflow_never_reports_its_cached_login_for_a_call_failure`
+and `rose.blackbox::test_rotated_attempt_failures_are_reported_with_their_own_login`.
