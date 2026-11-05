@@ -2073,7 +2073,7 @@ warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
     # when flyctl hangs after a mid-sync machine stop (descend I-07).
     # -C argv names only remote paths — never the token bytes (main).
     GIT_SYNC_TO="${CLOUDBENCH_GIT_SYNC_TIMEOUT:-240}"
-    local sync_rc=0
+    local sync_rc=0 sync_started_seconds=$SECONDS
     set +e
     ssh_exec "$mid" "set -e
 trap 'rm -f $remote_token' EXIT
@@ -2086,6 +2086,7 @@ echo \"::CLOUDBENCH-REF::\$REMOTE_REF\"" "$GIT_SYNC_TO" 2>&1 | grep -av '^Connec
     sync_rc=${PIPESTATUS[0]}
     set -e
     if [ "$sync_rc" -ne 0 ]; then
+        echo "warm checkout failure: machine=$mid native_exit=$sync_rc elapsed_seconds=$((SECONDS - sync_started_seconds)) bound_seconds=$GIT_SYNC_TO" >&2
         rm -f "$sync_log"
         echo "❌ exact remote checkout failed (ssh_exec timed out or remote error; bound=${GIT_SYNC_TO}s)" >&2
         return "$sync_rc"

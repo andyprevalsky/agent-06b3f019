@@ -36631,3 +36631,42 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost_readiness_regr
         text=True, capture_output=True, check=False, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_warm_checkout_failure_preserves_native_exit_and_logs_duration(tmp_path: Path) -> None:
+    """The diagnostic observes one failed checkout; it never retries or changes its result."""
+    import re
+    source_path = Path(os.environ.get("CLOUDBENCH_FETCH_DIAGNOSTIC_SOURCE", Path(__file__).resolve().parents[2] / "scripts/run-bench-cloud"))
+    source = source_path.read_text()
+    start = source.index("warm_source_fetch_ref() {")
+    end = source.index("\n}\n", start) + 2
+    function = source[start:end]
+    expected = "e039a2a0bed1cc0bf6d07cd5f935852ae5aee808"
+    for code in (0, 1, 124, 255):
+        trace = tmp_path / (str(code) + ".calls")
+        script = r'''set -euo pipefail
+resolve_github_token() { printf '%s' fixture-private-token; }
+FLY() { :; }
+cloudbench_retry_command() { "${@: -1}"; }
+ssh_exec() {
+    if [[ "$2" == *"::CLOUDBENCH-REF::"* ]]; then
+        printf 'sync timeout=%s\n' "$3" >> "$TRACE"
+        if [ "$TEST_RC" -eq 0 ]; then printf '::CLOUDBENCH-REF::%s\n' "$EXPECTED"; fi
+        return "$TEST_RC"
+    fi
+}
+''' + function + r'''
+if warm_source_fetch_ref warm-test "$EXPECTED"; then result=0; else result=$?; fi
+printf 'RESULT=%s\n' "$result"
+'''
+        env = {**os.environ, "TRACE": str(trace), "TEST_RC": str(code), "EXPECTED": expected,
+               "REMOTE_REPO": "/fixture/repo", "APP": "fixture", "CLOUDBENCH_GUEST_FETCH_REF_SCRIPT": "/fixture/helper"}
+        result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        assert f"RESULT={code}" in result.stdout
+        assert trace.read_text().splitlines() == ["sync timeout=240"]
+        if code:
+            assert re.search(rf"warm checkout failure: machine=warm-test native_exit={code} elapsed_seconds=[0-9]+ bound_seconds=240", result.stderr)
+            assert "fixture-private-token" not in result.stderr
+        else:
+            assert "warm checkout failure:" not in result.stderr
