@@ -616,12 +616,14 @@ def advance(state: dict, results: list[dict], failures: list[dict] | None = None
     if phase == "quick":
         state["phase"] = state.pop("next_after_quick", "initial")
     elif phase == "initial":
+        state.pop("initial_pending", None)
         state.update(phase="ready", ready=True)
     elif phase == "focused":
         state["phase"] = "failed-gates"
     elif phase == "failed-gates":
         state.update(phase="quick", next_after_quick="final")
     elif phase == "final":
+        state.pop("initial_pending", None)
         state.update(phase="ready", ready=True)
 
 
@@ -891,6 +893,8 @@ def adjudicate(state: dict, report: dict) -> None:
             state["next_after_quick"] = "final"
         if state["phase"] == "triage":
             state["phase"] = "needs-focused-plan" if state["repair_gates"] else "final"
+        if state.get("initial_pending") and state["phase"] == "ready":
+            state["phase"] = "initial"
         state["ready"] = state["phase"] == "ready"
 
 
@@ -1167,8 +1171,19 @@ def interrupted_receipt(state: dict, request_token: str) -> dict:
 
 def interrupted_boundary(state: dict) -> None:
     """All original ownership must be accounted before resume or source refresh."""
-    if (state.get('phase') != 'interrupted' or state.get('resume_phase') not in
-            {'quick', 'initial', 'focused', 'failed-gates', 'final'}
+    last = state.get('attempts', [{}])[-1] if state.get('attempts') else {}
+    pending = state.get('pending', [])
+    failures = [f for f in state.get('failures', []) if f.get('id') in pending]
+    triage_resume = (state.get('resume_phase') == 'triage' and state.get('failure_phase') == 'initial'
+        and last.get('phase') == 'initial' and last.get('independent_full') is True
+        and last.get('source') == state.get('source') and bool(pending)
+        and len(failures) == len(set(pending))
+        and all(f.get('source') == state['source'] and any(
+            r.get('gate') == f.get('gate') and r.get('source') == f['source']
+            and r.get('cases', {}).get(f['check'].split('/', 1)[1]) == f.get('native_result')
+            for r in last.get('results', [])) for f in failures))
+    if (state.get('phase') != 'interrupted' or (state.get('resume_phase') not in
+            {'quick', 'initial', 'focused', 'failed-gates', 'final'} and not triage_resume)
             or not state.get('attempts') or state['attempts'][-1].get('interrupted') is not True
             or CANCEL.is_set() or state.get('running') or 'live_failures' in state):
         raise ValueError('quiescent interrupted repair boundary required')
@@ -1274,14 +1289,52 @@ def launch_rca(path: Path, launcher: list[str]) -> None:
         write(receipt, value)
 
 
+def initial_deferrals(plan: dict, state: dict, payload: dict, root: Path) -> dict:
+    """Operator deferrals are pending work, never a waiver or native outcome."""
+    if (state.get('phase') != 'initial' or state.get('ready') or state.get('pending')
+            or CANCEL.is_set() or any(k in state for k in ('running', 'live_failures', 'resume_phase'))):
+        raise ValueError('initial observation requires quiescent initial state')
+    if not isinstance(payload, dict) or set(payload) - {'source', 'gates', 'roots'} or payload.get('source') != state['source']:
+        raise ValueError('initial deferrals require the exact source and gate/root reasons')
+    gates = {g['name']: g for g in plan['gates'] if not g.get('quick')}
+    deferred = {}
+    for kind in ('gates', 'roots'):
+        values = payload.get(kind, {})
+        if not isinstance(values, dict):
+            raise ValueError('deferrals must map gate/root to reason')
+        for key, reason in values.items():
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError('every initial deferral requires a reason')
+            names = ([key] if kind == 'gates' and key in gates else
+                     [name for name, gate in gates.items() if gate.get('worker_transport') == 'local-isolated'
+                      and str(local_admission_root(gate, root)) == key] if kind == 'roots' else [])
+            if len(names) != 1:
+                raise ValueError('deferral must name one existing full gate or exact worker root')
+            name = names[0]
+            if name in deferred:
+                raise ValueError('duplicate initial gate deferral')
+            deferred[name] = {'status': 'PENDING', 'executed': False, 'reason': reason.strip(),
+                              'source': state['source'], 'selector': kind, 'key': key}
+    return deferred
+
+
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
               launcher: list[str] | None = None, *, independent: bool = False,
-              excluded_roots=()) -> None:
+              excluded_roots=(), initial_observation: dict | None = None) -> None:
     if (source(root) != state["source"] or digest(plan) != state["plan_digest"]
             or environment_digest() != state["environment"]
             or input_fingerprints(plan, root) != state["input_fingerprints"]):
         raise ValueError("source/plan changed; refresh after RCA before running")
-    if independent:
+    deferred = None
+    if initial_observation is not None:
+        if independent:
+            raise ValueError('initial and triage observation cannot be combined')
+        validate_plan(plan, root)
+        deferred = initial_deferrals(plan, state, initial_observation, root)
+        if any(entry.get('from_source') != state['source'] for entry in state.get('carried_passes', {}).values()):
+            raise ValueError('initial observation cannot carry old-source execution credit')
+        selected = [g for g in records(plan, state) if g['name'] not in deferred]
+    elif independent:
         if (state.get('phase') != 'triage' or not state.get('pending') or state.get('ready')
                 or CANCEL.is_set() or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
             raise ValueError('independent FULL observation requires quiescent unresolved triage')
@@ -1298,6 +1351,11 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                 raise ValueError('prior independent worker request has no terminal receipt')
     else:
         selected = records(plan, state)
+    if state['phase'] == 'initial':
+        for gate in selected:
+            for path in (directory / 'attempts').glob('*/' + '*/' + gate['name'] + '/request.json'):
+                if not (path.parent / 'receipt.json').is_file():
+                    raise ValueError('prior worker request has unknown terminal ownership')
     if state['phase'] in {'initial', 'failed-gates', 'final'}:
         selected_names = {g['name'] for g in selected}
         for gate in plan['gates']:
@@ -1315,6 +1373,15 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
         # Universal launch guard: a gate whose latest receipt still owns remote/native cleanup is
         # never relaunched on the same worker until that owner is reconciled (finding 4450239861).
         raise ValueError("gates still own unreconciled cleanup; refuse launch: " + ", ".join(owned))
+    if deferred is not None:
+        state.setdefault('initial_deferral_history', []).append({'at': time.time(), 'source': state['source'],
+                                                               'deferrals': copy.deepcopy(deferred)})
+        state['initial_pending'] = {name: row for name, row in deferred.items()
+            if not reusable_full_pass(state, next(g for g in plan['gates'] if g['name'] == name))}
+        state['ready'] = False
+        if not selected:
+            write(directory / 'cycle.json', state)
+            return
     if independent and not selected:
         return  # No worker ran: do not invent an empty full attempt.
     state["round"] += 1
@@ -1346,17 +1413,30 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                     if launcher and not CANCEL.is_set() and path.stem in {f["id"] for f in fresh}:
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
         failures = state.pop("live_failures")
-        if independent:
+        if independent or deferred is not None:
             changed = (source(root) != state['source'] or environment_digest() != state['environment']
                        or input_fingerprints(plan, root) != state['input_fingerprints'])
-            state['attempts'].append({'phase': 'triage', 'source': state['source'], 'results': results,
-                                     'independent_full': True, 'excluded_roots': sorted(str(p) for p in excluded),
+            state['attempts'].append({'phase': 'initial' if deferred is not None else 'triage', 'source': state['source'], 'results': results,
+                                     'independent_full': True, 'excluded_roots': sorted(str(p) for p in excluded) if deferred is None else [],
+                                     **({'initial_deferrals': copy.deepcopy(deferred)} if deferred is not None else {}),
                                      'interrupted': CANCEL.is_set(), 'stale': changed})
             for result in results:
                 state.get('carried_passes', {}).pop(result['gate'], None)
             state['failures'].extend(failures)
-            state['pending'] = list(dict.fromkeys([*state['pending'], *[f['id'] for f in failures]]))
-            state.update(phase='triage', ready=False)
+            state['pending'] = list(dict.fromkeys([*state.get('pending', []), *[f['id'] for f in failures]]))
+            if deferred is not None:
+                if failures:
+                    state['failure_phase'] = 'initial'
+                state['initial_pending'] = {name: row for name, row in state['initial_pending'].items()
+                    if not reusable_full_pass(state, next(g for g in plan['gates'] if g['name'] == name))}
+                if CANCEL.is_set():
+                    state.update(phase='interrupted', resume_phase='triage' if failures else 'initial', ready=False)
+                elif changed:
+                    state.update(phase='stale', ready=False)
+                else:
+                    state.update(phase='triage' if failures else 'initial', ready=False)
+            else:
+                state.update(phase='triage', ready=False)
         elif CANCEL.is_set():
             state["attempts"].append({"phase": state["phase"], "results": results, "interrupted": True})
             state.update(resume_phase=state["phase"], phase="interrupted", ready=False)
@@ -1818,6 +1898,8 @@ def resolve_post_merge(state: dict, occurrence_id: str, repair_agent: str) -> No
 
 
 def pending_completion_block(state: dict) -> str | None:
+    if state.get("initial_pending"):
+        return "initial full gates remain pending; deferral grants no completion credit"
     try:
         for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
                      if e.get('purpose') == 'isolated-validation'}:
@@ -1868,7 +1950,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "prepare-bindings", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "prepare-bindings", "triage-quick", "triage-independent", "initial-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
@@ -1895,6 +1977,11 @@ def main(argv: list[str] | None = None) -> int:
                     if state["phase"] != "interrupted":
                         raise ValueError("resume requires an interrupted cycle")
                     interrupted_boundary(state)
+                    if state['resume_phase'] == 'triage' and (
+                            source(args.root) != state['source'] or digest(plan) != state['plan_digest']
+                            or environment_digest() != state['environment']
+                            or input_fingerprints(plan, args.root) != state['input_fingerprints']):
+                        raise ValueError('interrupted triage source/plan/inputs changed; resume refused')
                     state["phase"] = state.pop("resume_phase")
                 with cancellation_handlers():
                     while state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:
@@ -1907,6 +1994,12 @@ def main(argv: list[str] | None = None) -> int:
                 if args.input is None:
                     raise ValueError("--input focused command plan required")
                 focused_plan(state, plan, read(args.input))
+            elif args.action == 'initial-independent':
+                if args.input is None:
+                    raise ValueError('--input source-bound deferral reasons required')
+                with cancellation_handlers():
+                    run_phase(plan, state, directory, args.root, args.rca_launcher,
+                              initial_observation=read(args.input))
             elif args.action == 'triage-independent':
                 with cancellation_handlers():
                     run_phase(plan, state, directory, args.root, args.rca_launcher,

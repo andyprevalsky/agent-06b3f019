@@ -62,6 +62,27 @@ serial fallback. An active operation on the same isolation root is refused
 before launch; its existing owner and deadline remain authoritative. A concrete
 capacity shortfall must be reported, not converted into hidden suite ordering.
 
+At quiescent INITIAL, an operator can defer a known-unready gate or bound
+worker root while observing all other selected full gates concurrently:
+
+```bash
+python3 scripts/deploy_test_cycle.py initial-independent --plan "$PLAN" \
+  --state-dir "$STATE" --root "$SOURCE" --input initial-deferrals.json
+```
+
+The input must contain the exact plan `source`, plus `gates` and/or `roots`
+maps of existing full-gate names or exact bound local root paths to nonempty
+reasons. For example, `gates: {"smoke": "exact ref/fixture prerequisite pending"}`.
+Deferrals remain **PENDING/unexecuted**, never SKIP or PASS; the action leaves
+ready=false. It adds native full receipts for executed gates and preserves all
+prior attempts. A genuine failure enters ordinary RCA triage; no failure is
+invented to obtain this boundary. Repeated same-source observations reuse only
+validated full native receipts. Old-source credit is refused. Normal `run`
+executes remaining gates, retaining exact valid receipts, and final verification
+still requires the complete selected inventory. Active/unknown ownership on a
+selected worker refuses launch; a deferred worker is left untouched. This is an
+explicit readiness selection, not a host-capacity guarantee or serial scheduler.
+
 At quiescent TRIAGE, run missing independent full gates without disposing of the
 original failures:
 

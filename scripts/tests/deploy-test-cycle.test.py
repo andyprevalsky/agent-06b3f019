@@ -457,6 +457,164 @@ class Cycle(unittest.TestCase):
         for root, (_, admission) in zip(roots, rows):
             self.assertEqual(str(root / '.context/native-worker-admission.lock'), admission['lock'])
 
+    def initial_independent_fixture(self):
+        import contextlib, io
+        plan = copy.deepcopy(self.plan)
+        state = c.initialize(plan, self.root)
+        c.run_phase(plan, state, self.directory, self.root)  # native quick receipts
+        self.assertEqual('initial', state['phase'])
+        plan_path = self.directory/'plan.json'; c.write(plan_path, plan)
+        c.write(self.directory/'cycle.json', state)
+        payload = self.directory/'defer.json'
+        c.write(payload, {'source': state['source'], 'gates': {'ui': 'fixture prerequisite unavailable'}})
+        def call():
+            error = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(error):
+                code = c.main(['initial-independent', '--plan', str(plan_path), '--state-dir', str(self.directory),
+                               '--root', str(self.root), '--input', str(payload)])
+            self.last_initial_error = error.getvalue()
+            return code
+        return plan, state, payload, call
+
+    def test_initial_independent_retains_pending_and_reuses_native_pass(self):
+        plan, before, payload, call = self.initial_independent_fixture()
+        self.assertEqual(0, call())
+        after = c.read(self.directory/'cycle.json')
+        self.assertEqual('initial', after['phase']); self.assertFalse(after['ready'])
+        self.assertEqual(before['attempts'], after['attempts'][:-1])
+        self.assertEqual(['api'], [r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertEqual('fixture prerequisite unavailable', after['initial_pending']['ui']['reason'])
+        self.assertEqual('PENDING', after['initial_pending']['ui']['status'])
+        self.assertTrue(c.reusable_full_pass(after, plan['gates'][1]))
+        self.assertNotEqual(0,c.verify_saved(self.directory,self.root))
+        self.assertEqual(0,call())
+        self.assertEqual(after['attempts'],c.read(self.directory/'cycle.json')['attempts'])
+        # Normal run only executes the still-missing full gate and reaches actual full coverage.
+        c.run_phase(plan,after,self.directory,self.root)
+        self.assertEqual(['ui'],[r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertEqual('ready',after['phase']);self.assertTrue(after['ready'])
+        self.assertFalse(after.get('initial_pending'))
+
+    def test_initial_independent_refuses_invalid_selection_and_active_state(self):
+        plan, state, payload, call = self.initial_independent_fixture()
+        for change in ({'gates': {'no-such-gate':'why'}}, {'gates': {'ui':''}},
+                       {'gates': {'format':'not allowed'}}, {'gates': {'ui':'why'}, 'skip':True},
+                       {'source':{'head':'other'},'gates':{'ui':'why'}}):
+            c.write(payload, {'source':state['source'], **change})
+            original=(self.directory/'cycle.json').read_bytes()
+            self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+        c.write(payload, {'source':state['source'],'gates':{'ui':'why'}})
+        for changes in ({'running':True},{'phase':'ready'},{'pending':['real-failure']}):
+            c.write(self.directory/'cycle.json',{**state,**changes})
+            original=(self.directory/'cycle.json').read_bytes()
+            self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+
+    def test_initial_independent_root_exclusion_and_failure_are_native(self):
+        plan, state, payload, call = self.initial_independent_fixture()
+        # Root deferral has the same required explicit reason and leaves coverage pending.
+        c.write(payload, {'source':state['source'],'roots':{plan['gates'][2]['cwd']:'owned prerequisite'}})
+        plan['gates'][1].update(case_protocol=True,command=[sys.executable,'-c',
+            "import json,os;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "r.update(cases={c:'FAIL' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r));raise SystemExit(1)"])
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        c.write(self.directory/'plan.json',plan);c.write(self.directory/'cycle.json',state)
+        self.assertEqual(0,call(), self.last_initial_error)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('triage',after['phase']);self.assertTrue(after['pending'])
+        self.assertEqual('FAIL',after['attempts'][-1]['results'][0]['status'])
+        self.assertEqual('PENDING',after['initial_pending']['ui']['status'])
+        self.assertEqual('initial',after['failure_phase'])
+        report={'failures': [self.report(f,'NOT_INTRODUCED',
+            external_provider={'name':'fixture','reason':'outage'})['failures'][0]
+            for f in after['failures'] if f['id'] in after['pending']]}
+        c.adjudicate(after,report)
+        self.assertEqual('initial',after['phase']);self.assertFalse(after['ready'])
+        self.assertEqual({'ui'},set(after['initial_pending']))
+
+    def test_initial_independent_cancellation_preserves_failure_triage(self):
+        plan,state,payload,_=self.initial_independent_fixture()
+        plan['gates'][1]['command']=['false']
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        actual=c.execute
+        def execute(*args,**kwargs):
+            result=actual(*args,**kwargs)
+            c.CANCEL.set()
+            return result
+        try:
+            with patch.object(c,'execute',side_effect=execute):
+                c.run_phase(plan,state,self.directory,self.root,
+                    initial_observation=c.read(payload))
+            self.assertEqual('interrupted',state['phase'])
+            self.assertEqual('triage',state['resume_phase'])
+            self.assertEqual('initial',state['failure_phase'])
+            self.assertTrue(state['pending']);self.assertFalse(state['ready'])
+            self.assertEqual('FAIL',state['attempts'][-1]['results'][0]['status'])
+            self.assertEqual({'ui'},set(state['initial_pending']))
+        finally:
+            c.CANCEL.clear()
+        import contextlib, io
+        plan_path=self.directory/'resume-plan.json';c.write(plan_path,plan)
+        state_path=self.directory/'cycle.json'
+        original=copy.deepcopy(state)
+        def resume(value):
+            c.write(state_path,value)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                    patch.object(c,'execute',side_effect=AssertionError('resume must not execute')):
+                result=c.main(['resume','--plan',str(plan_path),'--state-dir',str(self.directory),
+                               '--root',str(self.root)])
+            return result,c.read(state_path)
+        held=copy.deepcopy(original)
+        held['attempts'][-1]['results'][0]['cleanup_owner']={'worker':'unreconciled fixture owner'}
+        rc,saved=resume(held)
+        self.assertEqual(2,rc);self.assertEqual(held,saved)
+        for key,value in (('failure_phase','final'),('pending',[])):
+            invalid=copy.deepcopy(original);invalid[key]=value
+            rc,saved=resume(invalid)
+            self.assertEqual(2,rc);self.assertEqual(invalid,saved)
+        (self.root/'code').write_text('changed')
+        rc,saved=resume(original)
+        self.assertEqual(2,rc);self.assertEqual(original,saved)
+        (self.root/'code').write_text('original')
+        rc,saved=resume(original)
+        self.assertEqual(1,rc)  # pending RCA, not validation success
+        self.assertEqual('triage',saved['phase']);self.assertNotIn('resume_phase',saved)
+        self.assertFalse(saved['ready'])
+        for key in ('pending','failures','attempts','initial_pending','initial_deferral_history',
+                    'source','plan_digest','input_fingerprints','round'):
+            self.assertEqual(original[key],saved[key],key)
+
+    def test_initial_independent_executes_ready_gates_concurrently(self):
+        plan, state, payload, _ = self.initial_independent_fixture()
+        worker=Path(self.workers.name)/'pending';worker.mkdir()
+        gate=dict(plan['gates'][2],name='pending',worker='pending',cwd=str(worker),
+                  env={'CONDUCTOR_WORKSPACE_NAME':'pending','CONDUCTOR_PORT':'37000'})
+        plan['gates'].append(gate)
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        barrier=threading.Barrier(2); actual=c.execute; entered=[]
+        def execute(*args,**kwargs):
+            entered.append(args[0]['name'])
+            barrier.wait(timeout=3)
+            return actual(*args,**kwargs)
+        with patch.object(c,'execute',side_effect=execute):
+            c.run_phase(plan,state,self.directory,self.root,initial_observation={
+                'source':state['source'],'gates':{'pending':'fixture prerequisite'}})
+        self.assertCountEqual(['api','ui'],entered)
+        self.assertTrue(all(r['status']=='PASS' for r in state['attempts'][-1]['results']))
+        self.assertEqual({'pending'},set(state['initial_pending']))
+        self.assertFalse(state['ready'])
+
+    def test_initial_independent_refuses_stale_and_unknown_owner(self):
+        plan, state, payload, call = self.initial_independent_fixture()
+        original=(self.directory/'cycle.json').read_bytes()
+        (self.root/'code').write_text('changed')
+        self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+        (self.root/'code').write_text('original')
+        orphan=self.directory/'attempts/unknown/initial/api/request.json'
+        c.write(orphan,{'gate':'api','phase':'initial'})
+        self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+
     def independent_triage_fixture(self, failing=False):
         import contextlib, io
         plan = copy.deepcopy(self.plan)
