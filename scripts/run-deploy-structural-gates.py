@@ -428,6 +428,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-primary-exact-shape-reuse.test.py"),
     ),
     Gate(
+        "cloudbench-maintenance-authority",
+        ("python3", "scripts/tests/cloudbench-maintenance-authority.test.py"),
+    ),
+    Gate(
         "cloudbench-maintenance-env",
         ("python3", "scripts/tests/cloudbench-maintenance-env.test.py"),
     ),

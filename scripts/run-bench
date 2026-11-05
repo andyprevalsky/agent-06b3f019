@@ -64,7 +64,7 @@ if [[ "${1:-}" == "image-activate" ]]; then
     IMAGE_ACTIVATE_ARGS=()
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --ref|--out-dir)
+            --ref|--out-dir|--maintenance-state|--maintenance-gate|--image-build-receipt)
                 [ "$#" -ge 2 ] || { echo "$1 requires a value" >&2; exit 2; }
                 image_activate_option="$1"
                 image_activate_value="$2"
@@ -72,7 +72,7 @@ if [[ "${1:-}" == "image-activate" ]]; then
                     echo "$image_activate_option requires a nonempty value" >&2
                     exit 2
                 }
-                if [ "$image_activate_option" = --out-dir ]; then
+                if [[ "$image_activate_option" = --out-dir || "$image_activate_option" = --maintenance-state || "$image_activate_option" = --image-build-receipt ]]; then
                     case "$image_activate_value" in
                         /*) ;;
                         *) image_activate_value="$CALLER_DIR/$image_activate_value" ;;

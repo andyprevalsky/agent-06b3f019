@@ -988,8 +988,14 @@ def inherited_native_sources(state, entries):
     need(anchors, 'current shared partition authority missing')
     if not clean:
         anchor = max(anchors, key=lambda e: receipts[e['token']]['finished_at'])
-        need(still_bound(anchor, receipts[anchor['token']], receipt_owner(anchor['gate'], receipts[anchor['token']])),
-             'current shared partition changed; native maintenance authority required')
+        if not still_bound(anchor, receipts[anchor['token']], receipt_owner(anchor['gate'], receipts[anchor['token']])):
+            from cloudbench_maintenance import validate_current, anchor_for
+            try:
+                maintenance_anchor, operation = anchor_for(entries)
+                need(maintenance_anchor == anchor and validate_current(state, entries, anchor, operation),
+                     'current shared partition changed; native maintenance authority required')
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                raise ValueError('current shared partition changed; native maintenance authority required: ' + str(error)) from error
     for token, entry in by_token.items():
         proof, receipt = entry['proof'], receipts[token]
         mode = proof.get('compatibility')

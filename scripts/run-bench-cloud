@@ -317,12 +317,19 @@ DASHBOARD="1"           # proxy + open the live dashboard (auto-off under CI).
 LOCAL_DASH_PORT="${CLOUDBENCH_DASH_BASE:-$(( ${CONDUCTOR_PORT:-3001} + 5764 ))}"
 FLEET_MACHINE_ID=""     # set by run-bench-fleet to pin a per-bench cloned machine.
 OUT_DIR=""              # set by run-bench-fleet to isolate a bench's .context outputs.
+MAINTENANCE_STATE=""
+MAINTENANCE_GATE=""
+MAINTENANCE_BUILD=""
+MAINTENANCE_POINTER=""
 SKIP_CONTROLLER_LOCK="0"  # set by run-bench-fleet (fleet owns one lock for its children).
 NO_OPEN="${NO_OPEN:-0}"   # legacy flag; nothing auto-opens a browser anymore (in-app hub).
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
     case "$1" in
+        --maintenance-state) MAINTENANCE_STATE="${2:-}"; shift 2 ;;
+        --maintenance-gate) MAINTENANCE_GATE="${2:-}"; shift 2 ;;
+        --image-build-receipt) MAINTENANCE_BUILD="${2:-}"; shift 2 ;;
         --setup)          MODE="setup"; shift ;;
         --build-image)    MODE="build-image"; shift ;;
         --no-cache)       IMAGE_BUILD_NO_CACHE=1; shift ;;
@@ -554,6 +561,9 @@ fi
 # Run-scoped output root. Defaults to the shared .context; run-bench-fleet points
 # each per-bench child at its own dir so concurrent children never clobber each
 # other's report-card.json / run.json / live-dashboard dir.
+if [ -n "$MAINTENANCE_STATE$MAINTENANCE_GATE$MAINTENANCE_BUILD" ] && [ "$MODE" != setup ]; then
+    echo "native maintenance receipts require --setup" >&2; exit 2
+fi
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/.context}"
 mkdir -p "$OUT_DIR" 2>/dev/null || true
 
@@ -1327,6 +1337,7 @@ names={a.get("Name") or a.get("name") for a in (apps or [])}
 sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
         echo "✅ App $APP already exists"
     else
+        [ -z "$MAINTENANCE_POINTER" ] || { echo "native maintenance app identity unavailable" >&2; return 1; }
         echo "📦 Creating app $APP ..."
         FLY apps create "$APP" --org personal 2>&1 | sed 's/^/   /' || {
             FLY apps list 2>/dev/null | grep -q "$APP" || { echo "❌ Failed to create app $APP"; exit 1; }
@@ -1808,6 +1819,7 @@ for machine in machines:
 activate_owned_machine_images() {  # activate_owned_machine_images <image_ref>
     local image_ref="$1" activation_targets role machine_id
     activation_targets="$(environment_activation_targets)" || return 1
+    maintenance_targets "$activation_targets" || return 1
     while IFS=$'\t' read -r role machine_id; do
         [ -n "$machine_id" ] || continue
         echo "   activating image on $role machine $machine_id (skip-start)"
@@ -1896,6 +1908,7 @@ _inject_secrets_locked() {
         echo "❌ Could not resolve owned benchmark machines for environment activation." >&2
         exit 1
     }
+    maintenance_targets "$activation_targets" || return 1
     while IFS=$'\t' read -r role machine_id; do
         [ -n "$machine_id" ] || continue
         assert_app_environment_lock_ownership || exit 1
@@ -1932,8 +1945,55 @@ PY
     echo "✅ Secrets set (active)"
 }
 
+maintenance_begin() {
+    [ -n "$MAINTENANCE_STATE$MAINTENANCE_GATE$MAINTENANCE_BUILD" ] || return 0
+    [ -n "$MAINTENANCE_STATE" ] && [ -n "$MAINTENANCE_GATE" ] && [ -n "$MAINTENANCE_BUILD" ] &&
+        [ -n "${WARM_IMAGE_REF:-}" ] && [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ] &&
+        [ "$WARM_PARKED_VM_SIZE" = shared-cpu-1x ] && [ "$WARM_PARKED_VM_MEMORY" = 2048 ] || return 1
+    # Same flock as deploy_test_cycle.exclusive; nonblocking, held by this shell
+    # from intent through final receipt. It cannot race an active coordinator.
+    local state_directory targets
+    state_directory="$(dirname "$MAINTENANCE_STATE")"
+    [ -d "$state_directory" ] || return 1
+    exec {MAINTENANCE_CYCLE_FD}>"$state_directory/lock" || return 1
+    flock -n "$MAINTENANCE_CYCLE_FD" || return 1
+    targets="$(environment_activation_targets)" || return 1
+    MAINTENANCE_POINTER="$OUT_DIR/cloudbench-maintenance.json"
+    python3 "$ROOT_DIR/scripts/cloudbench_maintenance.py" begin \
+        --root "$ROOT_DIR" --pid "$$" --state-fd "$MAINTENANCE_CYCLE_FD" \
+        --state "$MAINTENANCE_STATE" --gate "$MAINTENANCE_GATE" --build "$MAINTENANCE_BUILD" \
+        --image "$WARM_IMAGE_REF" --requested-ref "$BENCH_REF" --app "$APP" --targets "$targets" --pointer "$MAINTENANCE_POINTER" || return 1
+}
+
+maintenance_targets() {
+    [ -n "$MAINTENANCE_POINTER" ] || return 0
+    python3 - "$MAINTENANCE_POINTER" "$1" <<'PY_MAINTENANCE_TARGETS'
+import json,sys
+from pathlib import Path
+pointer=json.loads(Path(sys.argv[1]).read_text())
+intent=json.loads((Path(pointer['directory'])/'intent.json').read_text())
+if [line.split('\t') for line in sys.argv[2].splitlines()] != intent['targets']:
+    raise SystemExit('native maintenance target set changed')
+PY_MAINTENANCE_TARGETS
+}
+
+setup_release() {
+    local native_status="$1" capture_status=0
+    if [ -n "$MAINTENANCE_POINTER" ] && [ -f "$MAINTENANCE_POINTER" ]; then
+        python3 "$ROOT_DIR/scripts/cloudbench_maintenance.py" finish --pid "$$" \
+            --pointer "$MAINTENANCE_POINTER" --native-exit "$native_status" || capture_status=$?
+    fi
+    release_app_environment_lock
+    [ "$native_status" -eq 0 ] || return "$native_status"
+    return "$capture_status"
+}
+
 inject_secrets() {
-    acquire_app_environment_lock || exit 1
+    if [ -n "$MAINTENANCE_POINTER" ]; then
+        assert_app_environment_lock_ownership || exit 1
+    else
+        acquire_app_environment_lock || exit 1
+    fi
     # Setup owns donor maintenance. A canceled refresh may have left it live;
     # quiesce that exact named donor before strict skip-start env activation.
     if [ "${MODE:-}" = setup ] && [ -n "$(resolve_machine_id)" ]; then
@@ -2846,11 +2906,15 @@ if [ "$MODE" = "setup" ]; then
     # warm source is an admission gap, never permission to create another one.
     setup_existing_machine="$(resolve_machine_id)" || { warm_source_machine_creation_admission; exit 78; }
     [ -n "$setup_existing_machine" ] || { warm_source_machine_creation_admission; exit 78; }
-    ensure_app
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
-    trap 'release_app_environment_lock' EXIT
-    trap 'release_app_environment_lock; exit 130' INT
-    trap 'release_app_environment_lock; exit 143' TERM
+    trap 'setup_status=$?; setup_release "$setup_status"; exit "$?"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if [ -n "$MAINTENANCE_STATE$MAINTENANCE_GATE$MAINTENANCE_BUILD" ]; then
+        acquire_app_environment_lock || exit 1
+        maintenance_begin || exit 1
+    fi
+    ensure_app || exit $?
     inject_secrets
 
     # ── Build + push the KEEP-ALIVE image (deps baked; CMD = sleep infinity) ──

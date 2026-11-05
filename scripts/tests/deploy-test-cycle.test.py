@@ -5289,4 +5289,20 @@ class GenericNativeInheritedAdmission(unittest.TestCase):
         with patch.object(self.n,'still_bound',side_effect=changed):
             with self.assertRaisesRegex(ValueError,'shared partition changed'):c.isolated_admissions(self.state,'smoke')
 
+    def test_qualified_native_maintenance_covers_changed_partition_only(self):
+        import cloudbench_maintenance as maintenance
+        previous=self.n.still_bound
+        def changed(entry,*args):
+            return False if entry['token']==self.entries[-2]['token'] else previous(entry,*args)
+        with patch.object(self.n,'still_bound',side_effect=changed), \
+             patch.object(maintenance,'anchor_for',return_value=(self.entries[-2],self.m)), \
+             patch.object(maintenance,'validate_current',return_value=True) as qualified:
+            self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),7)
+            self.assertEqual(self.entries,self.baseline)
+            qualified.assert_called_once()
+        with patch.object(self.n,'still_bound',side_effect=changed), \
+             patch.object(maintenance,'validate_current',side_effect=ValueError('foreign transition')):
+            with self.assertRaisesRegex(ValueError,'shared partition changed'):
+                c.isolated_admissions(self.state,'smoke')
+
 if __name__ == '__main__': unittest.main()
