@@ -499,6 +499,7 @@ GATES = (
     Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
     Gate("cloudbench-kernel-custody", ("python3", "scripts/tests/cloudbench-kernel-custody.test.py")),
     Gate("local-stack-retention", ("python3", "scripts/tests/local-stack-retention.test.py")),
+    Gate("foreign-listener-cleanup", ("python3", "scripts/tests/foreign-listener-cleanup.test.py")),
     Gate(
         "run-isolated-cloud-kill",
         ("bash", "scripts/tests/run-isolated-cloud-kill.test.sh"),

@@ -429,15 +429,25 @@ def interrupted_worker(state, receipt, proof):
         for line in Path(table).read_text().splitlines()[1:]:
             row = line.split()
             if row[3] == '0A': listeners.add(int(row[1].rsplit(':', 1)[1], 16))
-    need(not wanted & listeners, 'interrupted root listener remains')
+    blocked = wanted & listeners
+    if blocked and 'foreign_listeners' in proof:
+        from deploy_test_foreign_listener import validate as foreign_listener
+        foreign_listener(gate, receipt, proof, blocked)
+    else:
+        need(not blocked, 'interrupted root listener remains')
+        need('foreign_listeners' not in proof, 'foreign listener observation is stale')
     quiet(root)
     return gate
 
 
 def validate(state, receipt, proof):
     from deploy_test_cycle import bounded_read, digest, sha_file
-    need(set(proof) == {'kind', 'files', 'confirmed_at', 'observed_by'} and proof['kind'] == KIND,
+    fields = {'kind', 'files', 'confirmed_at', 'observed_by'}
+    need(set(proof) in (fields, fields | {'foreign_listeners'}) and proof['kind'] == KIND,
          'proof fields')
+    if 'foreign_listeners' in proof:
+        need(receipt.get('cancelled') is True and receipt.get('lifecycle') == 'owned',
+             'foreign listener proof requires interrupted owned worker')
     need(isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'independent observer missing')
     confirmed = proof['confirmed_at']
     need(type(confirmed) in (int, float) and math.isfinite(confirmed)
