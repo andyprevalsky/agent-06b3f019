@@ -2381,8 +2381,8 @@ def test_browser_acted_input_is_counted_only_at_the_model_request():
     (observe failure, realm reload, write-lock replay) must not mark synced input
     as acted on, or the post-close read never hands it to the owner.
 
-    The real activity sets ``acted_user_instruction_count`` exactly once, as the
-    statement right before the decision's ``BrowserThinkingStream`` request.
+    The real activity acknowledges input only in the fresh-decision branch,
+    immediately before the cached or live model request; queued actions do not.
     """
     import ast
     import inspect
@@ -2400,23 +2400,30 @@ def test_browser_acted_input_is_counted_only_at_the_model_request():
             for t in node.targets
         )
 
-    def builds_stream(node):
-        return (
-            isinstance(node, ast.Assign)
-            and isinstance(node.value, ast.Call)
-            and getattr(node.value.func, "id", None) == "BrowserThinkingStream"
-        )
-
-    sites = []
-    for block in ast.walk(tree):
-        body = getattr(block, "body", None)
-        if not isinstance(body, list):
-            continue
-        for index, node in enumerate(body):
-            if sets_acted(node):
-                following = body[index + 1] if index + 1 < len(body) else None
-                sites.append(bool(following is not None and builds_stream(following)))
-    assert sites == [True], f"acted count must be set once, right before the model request: {sites}"
+    assignments = [node for node in ast.walk(tree) if sets_acted(node)]
+    assert len(assignments) == 1, "user input must be acknowledged at exactly one model-decision boundary"
+    assignment = assignments[0]
+    guarded = [node for node in ast.walk(tree) if isinstance(node, ast.If)
+               and ast.dump(node.test) == ast.dump(ast.parse("llm_result is None", mode="eval").body)
+               and assignment in node.body]
+    assert len(guarded) == 1, "queued actions must not acknowledge user input"
+    branch = guarded[0]
+    position = branch.body.index(assignment)
+    following = branch.body[position + 1]
+    assert any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+               and node.func.id == "cached_browser_decision" for node in ast.walk(following)), (
+        "acknowledgement must immediately precede the actual new model decision"
+    )
+    # Execute the actual guard and assignment for queued versus fresh decisions.
+    probe = ast.If(test=branch.test, body=[assignment, ast.parse("record_decision()").body[0]], orelse=[])
+    code = compile(ast.fix_missing_locations(ast.Module(body=[probe], type_ignores=[])), "<acted-input-boundary>", "exec")
+    for queued in (object(), None):
+        state = {"acted_user_instruction_count": 1, "delivered_user_instruction_count": 2}
+        seen = []
+        exec(code, {"llm_result": queued, "instruction_state": state,
+                    "record_decision": lambda: seen.append(state["acted_user_instruction_count"])})
+        assert state["acted_user_instruction_count"] == (1 if queued is not None else 2)
+        assert seen == ([] if queued is not None else [2])
 
 
 async def run_all_tests():

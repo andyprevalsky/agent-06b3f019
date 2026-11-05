@@ -10590,12 +10590,6 @@ async def _spawn_browser_agent_activity_v3_real(
                     )
                     return _attach_browser_replay_target(live_result, dom_service_snapshot)
 
-                # The browser-model decision below sees everything delivered so far;
-                # earlier exits this step (observe failure, realm reload, write-lock
-                # replay) never reach a decision, so they must not count as acted on.
-                instruction_state["acted_user_instruction_count"] = int(
-                    instruction_state.get("delivered_user_instruction_count") or 0
-                )
                 batch_state = batch_context(dom_service, current_url, browser_turn_messages,
                                             (_credential_binding(), auth_realm, instruction_state.get("delivered_user_instruction_count"), schema_user_instruction_count))
                 if navigation_policy.active:
@@ -10617,6 +10611,11 @@ async def _spawn_browser_agent_activity_v3_real(
                     fm_write_through = write_through_enabled_for_user(user_id)
                     llm_result = queued_result
                     if llm_result is None:
+                        # Only a new model decision sees the delivered instructions.
+                        # Queued actions and earlier exits must not acknowledge them.
+                        instruction_state["acted_user_instruction_count"] = int(
+                            instruction_state.get("delivered_user_instruction_count") or 0
+                        )
                         llm_result = await asyncio.wait_for(
                             cached_browser_decision(
                                 enabled=bool(fast_mode_cache_enabled) and not phone_before_decision.get("enabled") and not navigation_policy.active,

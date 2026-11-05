@@ -4407,10 +4407,12 @@ async def _execute_screenshot(
 
     capture_started_at = time_module.time()
     capture_identity = None
-    try:
-        capture_identity = dom_service.get_parked_page_identity()
-    except RuntimeError:
-        pass  # Identity is descriptive; an unavailable identity does not block capture.
+    describe_identity = getattr(dom_service, "get_parked_page_identity", None)
+    if callable(describe_identity):
+        try:
+            capture_identity = describe_identity()
+        except RuntimeError:
+            pass  # An unavailable identity does not block capture.
 
     single_cdp_client = getattr(dom_service, "single_cdp_client", False) is True
     if single_cdp_client:
@@ -4459,10 +4461,11 @@ async def _execute_screenshot(
     capture_evidence = getattr(action_history, "capture_screenshot_evidence", None)
     if callable(capture_evidence):
         after_identity = None
-        try:
-            after_identity = dom_service.get_parked_page_identity()
-        except RuntimeError:
-            pass
+        if callable(describe_identity):
+            try:
+                after_identity = describe_identity()
+            except RuntimeError:
+                pass
         capture_evidence(dom_service, session_id, screenshot_b64, capture_identity, after_identity)
 
     return {

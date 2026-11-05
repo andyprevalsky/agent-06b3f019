@@ -2785,8 +2785,18 @@ async def test_tilion_live_view_token_is_redacted_before_persisting():
     assert '"browser_url": browser_url,' not in handler_source, "activity results must redact browser_url"
     # Serial Tilion keyboard (A1 RCA): the initial humanizer and every rebind after a
     # provider handoff (rotation, recovery, auth restart) carry the flag.
-    assert handler_source.count("serial_cdp_keyboard=is_single_cdp_client_provider(") == 4
-    assert handler_source.count("humanizer = await _replace_browser_humanizer(") == 3
+    import ast
+    humanizer_calls = [node for node in ast.walk(ast.parse(handler_source))
+                       if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                       and node.func.id in {"BrowserHumanizer", "_replace_browser_humanizer"}]
+    assert {node.func.id for node in humanizer_calls} == {"BrowserHumanizer", "_replace_browser_humanizer"}
+    for call in humanizer_calls:
+        serial = next((kw.value for kw in call.keywords if kw.arg == "serial_cdp_keyboard"), None)
+        assert isinstance(serial, ast.Call) and isinstance(serial.func, ast.Name)
+        assert serial.func.id == "is_single_cdp_client_provider", (
+            "every actual humanizer constructor and rebind must carry the provider's serial keyboard policy",
+            call.lineno,
+        )
     assert '"browser_url": redact_url_secrets(self.browser_url)' in (root / "recording.py").read_text()
 
 

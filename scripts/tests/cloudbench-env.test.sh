@@ -2415,10 +2415,11 @@ sys.path.insert(0, str(root / "scripts"))
 from cloudbench_catalog import get_task_metadata
 
 rows = get_task_metadata(
-    root / "agents/benchmarks/tasks.json", ["polar-bu-065", "image-handling"]
+    root / "agents/benchmarks/tasks.json", ["anti-bot-google-search", "image-handling", "polar-bu-065"]
 )
 assert rows[0]["requires_browser_agent"] is True
 assert rows[1]["requires_browser_agent"] is not True
+assert rows[2]["requires_browser_agent"] is False
 PY_BROWSER_METADATA
 for function_name in is_sim_on bench_needs_large_primary bench_declares_fanout primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape; do
@@ -2434,11 +2435,11 @@ FLEET_BUNDLED_FRONTEND_VM_SIZE="shared-cpu-4x"
 FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
 INFRA_PROBE=0
 SIM_ON_CSV=""
-CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
+CATALOG_BROWSER_REQUIRED_TASKS=(anti-bot-google-search)
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
 bench_uses_default_pool_shape parallel-tool-calls ||
   fail "ordinary tasks must retain default pool admission"
-if bench_uses_default_pool_shape polar-bu-065; then
+if bench_uses_default_pool_shape anti-bot-google-search; then
   fail "catalog browser tasks must request the large primary shape"
 fi
 if bench_uses_default_pool_shape agent-payment-abandonment; then
@@ -2449,10 +2450,10 @@ bench_uses_default_pool_shape agent-payment-abandonment ||
   fail "opted-in 8GB tasks must be able to claim a stopped pool Machine"
 [ "$(primary_vm_memory_for_bench agent-payment-abandonment)" = 8192 ] ||
   fail "pool resize admission must preserve the large task's requested memory"
-bench_uses_default_pool_shape polar-bu-065 ||
+bench_uses_default_pool_shape anti-bot-google-search ||
   fail "opted-in browser tasks must be able to resize a stopped pool Machine"
 INFRA_PROBE=1
-[ "$(primary_vm_memory_for_bench polar-bu-065)" = "${FLEET_PRIMARY_VM_MEMORY}" ] ||
+[ "$(primary_vm_memory_for_bench anti-bot-google-search)" = "${FLEET_PRIMARY_VM_MEMORY}" ] ||
   fail "task-free infra probes must retain the default primary shape"
 INFRA_PROBE=0
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
@@ -2469,7 +2470,7 @@ if bench_uses_default_pool_shape raise-5m-rose-labs-brex; then
 fi
 [ "$(primary_vm_size_for_bench parallel-tool-calls)/$(primary_vm_memory_for_bench parallel-tool-calls)" = "$FLEET_PRIMARY_VM_SIZE/$FLEET_PRIMARY_VM_MEMORY" ] ||
   fail "tasks outside --sim-on must keep the default primary shape"
-[ "$(primary_vm_size_for_bench polar-bu-065)/$(primary_vm_memory_for_bench polar-bu-065)" = "shared-cpu-4x/8192" ] ||
+[ "$(primary_vm_size_for_bench anti-bot-google-search)/$(primary_vm_memory_for_bench anti-bot-google-search)" = "shared-cpu-4x/8192" ] ||
   fail "browser tasks outside --sim-on must keep the large primary shape"
 bench_uses_default_pool_shape parallel-tool-calls ||
   fail "tasks outside --sim-on must retain default pool admission"
@@ -2487,12 +2488,12 @@ FLEET_FANOUT_MIN_AGENT_COUNT=20
 FLEET_FANOUT_VM_SIZE="performance-2x"
 FLEET_FANOUT_VM_MEMORY="4096"
 CATALOG_FANOUT_TASKS=(test-mass-agent-run-0)
-CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
+CATALOG_BROWSER_REQUIRED_TASKS=(anti-bot-google-search)
 [ "$(primary_vm_size_for_bench test-mass-agent-run-0)/$(primary_vm_memory_for_bench test-mass-agent-run-0)" = "performance-2x/4096" ] ||
   fail "a catalog fan-out task must request dedicated vCPUs"
 [ "$(primary_vm_size_for_bench parallel-tool-calls)/$(primary_vm_memory_for_bench parallel-tool-calls)" = "$FLEET_PRIMARY_VM_SIZE/$FLEET_PRIMARY_VM_MEMORY" ] ||
   fail "tasks without a fan-out declaration must keep the default primary shape"
-[ "$(primary_vm_size_for_bench polar-bu-065)/$(primary_vm_memory_for_bench polar-bu-065)" = "shared-cpu-4x/8192" ] ||
+[ "$(primary_vm_size_for_bench anti-bot-google-search)/$(primary_vm_memory_for_bench anti-bot-google-search)" = "shared-cpu-4x/8192" ] ||
   fail "browser tasks must keep the large shared primary shape beside a fan-out task"
 if bench_uses_default_pool_shape test-mass-agent-run-0; then
   fail "a fan-out task must not claim a default shared-cpu pool Machine"

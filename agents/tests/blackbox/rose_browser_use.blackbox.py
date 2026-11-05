@@ -318,7 +318,8 @@ def test_screenshot_tool_desc_calls_out_misleading_captcha_dom():
     desc = tools[0]["description"]
     assert "misleading shell" in desc
     assert "Bot or Not" in desc
-    assert "drag" in desc
+    assert "never solve captchas unless explicitly asked by the user" in desc
+    assert "Use a screenshot only if you need to confirm the challenge type." in desc
     assert "recover_from_challenge" not in desc
 
 
@@ -446,8 +447,20 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     click = tools[1]
     assert click["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert click["input_schema"]["properties"]["index"]["type"] == "integer"
-    assert "Element index" in click["input_schema"]["properties"]["index"]["description"]
-    assert click["input_schema"]["required"] == ["index"]
+    assert "Current observed DOM element index" in click["input_schema"]["properties"]["index"]["description"]
+    assert "observation_ref" in click["input_schema"]["properties"]
+    from browser_tools.schemas import ClickTool
+    from pydantic import ValidationError
+    assert ClickTool(tool="click", index=3).index == 3
+    reference = {"observation_id": "checkout", "target": "pay"}
+    assert ClickTool(tool="click", observation_ref=reference).observation_ref.target == "pay"
+    for invalid in ({}, {"index": 3, "observation_ref": reference}):
+        try:
+            ClickTool(tool="click", **invalid)
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError("click must require exactly one index or bound observation reference")
 
     auth_help = tools[2]
     assert auth_help["description"] == BROWSER_USE_TOOLS["request_user_assistance_for_authentication"]["description"]
@@ -1834,7 +1847,7 @@ async def test_complete_browser_use_waterfall_only_path():
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
 
-    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
         result = await client.complete_browser_use(
             task="click submit",
             browser_state=_browser_state(),
@@ -2378,16 +2391,17 @@ async def test_complete_browser_use_auth_tokens_are_ignored():
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
 
-    result = await client.complete_browser_use(
-        task="click submit",
-        browser_state=_browser_state(),
-        action_history=[],
-        available_actions=["click"],
-        include_screenshot=False,
-        claude_auth=claude_auth_from_token("expired-token"),
-        gpt_auth=gpt_auth_from_token("expired-gpt", "acct"),
-        call_site="test-bu-auth-ignored",
-    )
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": ""}):
+        result = await client.complete_browser_use(
+            task="click submit",
+            browser_state=_browser_state(),
+            action_history=[],
+            available_actions=["click"],
+            include_screenshot=False,
+            claude_auth=claude_auth_from_token("expired-token"),
+            gpt_auth=gpt_auth_from_token("expired-gpt", "acct"),
+            call_site="test-bu-auth-ignored",
+        )
 
     assert result["mode"] == "waterfall"
     assert result["claude_token_error"] is None

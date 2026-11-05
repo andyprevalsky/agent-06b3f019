@@ -239,7 +239,7 @@ async def test_actual_verifier_stream_retries_count_only():
     async def complete(*args,**kwargs):
         calls.append(copy.deepcopy(kwargs['messages']))
         if len(calls)==1: raise RoseInvalidRequest('at most 2 images')
-        yield StreamChunk('content', {'text':'{"reasoning":"observed","score":0.5}'})
+        yield StreamChunk('content', {'text':'{"reasoning":"observed","score":0.5,"task_completed":false}'})
         yield StreamChunk('done',{})
     with patch('providers.demo_cache.rose_cache.cached_complete',side_effect=complete):
         result,_=await _call_llm_verifier(source,'rose',None)
@@ -315,6 +315,70 @@ async def test_handler_image_projection_preserves_original_result():
     context,_=await admitted(dom,history)
     projected=env['_model_visible_browser_verifier_context'](context,dom,{})
     assert images(build_verifier_context_messages(projected,'system'))==['data:image/png;base64,'+image]
+
+
+async def test_raster_bytes_and_discriminators_survive_repeated_redaction():
+    from browser_tools.secret_refs import mask_secret_values
+    raster = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOY234XAAPGAgJSNphuAAAAAElFTkSuQmCC'
+    url = 'data:image/png;base64,' + raster
+    refs = {'card_cvv': '234', 'pwd:image-kind': 'image_url', 'pwd:text': 'private-text',
+            'pwd:encoding': 'base64', 'pwd:media': 'image/png'}
+    redact = lambda value: mask_secret_values(value, refs)
+    values = [
+        {'image_url': url, 'note': '234 private-text'},
+        {'type': 'image_url', 'image_url': {'url': url}, 'note': 'private-text'},
+        {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': raster,
+                                    'caption': 'private-text'}, 'note': '234'},
+    ]
+    for value in values:
+        original = copy.deepcopy(value)
+        visible = redact_with_screenshots(redact_with_screenshots(value, redact), redact)
+        assert value == original
+        assert visible['note'] != original['note']
+        if isinstance(value.get('image_url'), dict):
+            assert visible['type'] == 'image_url' and visible['image_url']['url'] == url
+        elif 'source' in value:
+            assert visible['source']['data'] == raster
+            assert visible['source']['type'] == 'base64'
+            assert visible['source']['media_type'] == 'image/png'
+            assert visible['source']['caption'] == '{{secret:pwd:text}}'
+        else:
+            assert visible['image_url'] == url
+        Image.open(BytesIO(base64.b64decode(raster, validate=True))).verify()
+    textual = {'screenshot': 'private-text', 'image_url': 'private-text'}
+    assert 'private-text' not in json.dumps(redact_with_screenshots(textual, redact))
+    malformed = {'image_url': 'data:image/png;base64,private-text'}
+    assert 'private-text' not in json.dumps(redact_with_screenshots(malformed, redact))
+    not_an_image = {'type': 'image_url', 'image_url': 'private-text'}
+    masked = redact_with_screenshots(not_an_image, redact)
+    assert masked['type'] == '{{secret:pwd:image-kind}}'
+    assert masked['image_url'] == '{{secret:pwd:text}}'
+    page = {'value': {'function': {'label': 'private-text'}, 'role': 'private-text'}}
+    page_refs = {**refs, 'pwd:function-token': 'function'}
+    visible = redact_with_screenshots(page, lambda value: mask_secret_values(value, page_refs))
+    assert 'function' not in visible['value']
+    assert visible['value']['{{secret:pwd:function-token}}']['label'] == '{{secret:pwd:text}}'
+
+
+async def test_descriptive_identity_preserves_control_exceptions():
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    for error in (asyncio.CancelledError(), WorkflowGenerationSealed('sealed')):
+        for after_capture in (False, True):
+            dom, history = setup()
+            calls = 0
+            def describe():
+                nonlocal calls
+                calls += 1
+                if not after_capture or calls == 2:
+                    raise error
+                return {'url': 'https://example.test/'}
+            dom.get_parked_page_identity = describe
+            try:
+                await capture(dom, history, png())
+            except BaseException as raised:
+                assert raised is error
+            else:
+                raise AssertionError('descriptive identity swallowed a control exception')
 
 
 class ScreenshotRevision(unittest.IsolatedAsyncioTestCase):

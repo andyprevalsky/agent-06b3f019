@@ -8039,3 +8039,5 @@
 {"task": "browser-smoke", "duration_seconds": 139.8, "cost_cents": 15.0, "timestamp": "2026-11-04T15:28:44.606238+00:00", "agent_id": "25daa32d-5761-4bbe-aea5-51b3672e030c"}
 {"task": "chat-mode", "duration_seconds": 13.4, "cost_cents": 0.0, "timestamp": "2026-11-04T15:28:44.606238+00:00", "agent_id": "b09f11c4-6c01-461e-9d39-3223fa0982d1"}
 {"task": "background-agent-message-smoke", "duration_seconds": 151.1, "cost_cents": 4.0, "timestamp": "2026-11-04T15:28:44.606238+00:00", "agent_id": "386d7926-8551-49b2-91e6-c8fafb81c622"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 247.4, "cost_cents": 2.0, "timestamp": "2026-11-05T00:45:06.761224+00:00", "agent_id": "3bee7fe2-ad70-4e60-9dfd-19565dbb76d4"}
+{"task": "agent-payment-test-shop", "duration_seconds": 176.7, "cost_cents": 2.0, "timestamp": "2026-11-05T00:45:06.761224+00:00", "agent_id": "4e53c18a-5414-4351-b2b2-cd6ff3679a58"}

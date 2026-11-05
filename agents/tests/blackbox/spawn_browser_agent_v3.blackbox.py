@@ -9435,7 +9435,8 @@ def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
 
     # 3. Bootstrap and realm transitions seed through the helper.
     assert 'context="session start"' in source
-    assert "realm transition to " in source
+    assert "await captured_dom.inject_passkeys(realm_state.decrypted_passkeys)" in source
+    assert "if not still_current():" in source
 
     # 4. The rotation recovery path re-seeds the held passkeys AFTER restoring the
     #    cookie/localStorage state — parity with the storage restore.
@@ -24128,10 +24129,6 @@ async def test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url():
             "domains.spawn_browser_agent_v3.handler.init_browser_session",
             AsyncMock(return_value=session_data),
         ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
-            AsyncMock(return_value={"realm": "example.com"}),
-        ),
     ):
         try:
             await spawn_browser_agent_activity_v3(
@@ -24253,7 +24250,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     resume_mock.assert_not_awaited()
 
 
@@ -24512,7 +24509,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     # The refreshed live session is the only provider browser that should be
     # used after handoff. Creating another browser races profile persistence.
     resume_mock.assert_not_awaited()
@@ -24605,7 +24602,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_liv
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
@@ -24673,7 +24670,7 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
@@ -24737,7 +24734,7 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
         else:
             raise AssertionError("expected missing fallback cdp_url to raise")
 
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
@@ -26838,6 +26835,13 @@ async def _run_realm_transition_action_fixture(
     active_page = {"url": final_url if preapproved_handoff else old_url, "title": "Sign in", "dom_tree": "Sign in"}
     events = []
     model_contexts = []
+    initial_credentials_ready = asyncio.Event()
+    native_register = _FakeDomService.register_secret_refs
+
+    def register_credentials(dom, refs):
+        native_register(dom, refs)
+        if old_secret in refs.values():
+            initial_credentials_ready.set()
     saved = AsyncMock()
     propagated = AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})
     session_info = {
@@ -26924,6 +26928,12 @@ async def _run_realm_transition_action_fixture(
         return {"success": True, "payment_refs_filled": ["card_number"], "message": "Fields filled"}
 
     async def model_step(**kwargs):
+        if fatal_error is not None or minted_password_text is not None or credential_action is not None:
+            await asyncio.wait_for(initial_credentials_ready.wait(), timeout=2)
+        else:
+            await asyncio.sleep(0)  # Let the already scheduled background work run.
+        if fatal_error is not None:
+            return {"action": {"action": "evaluate", "params": {"code": "1"}}, "usage": {}}
         model_contexts.append(copy.deepcopy(kwargs))
         events.append(("model", len(model_contexts)))
         action = (
@@ -26947,6 +26957,16 @@ async def _run_realm_transition_action_fixture(
             "mode": "waterfall",
         }
 
+    control_calls = 0
+
+    async def user_control(*_args, **_kwargs):
+        nonlocal control_calls
+        control_calls += 1
+        if fatal_error is not None and control_calls > 1:
+            await asyncio.wait_for(initial_credentials_ready.wait(), timeout=2)
+            raise fatal_error
+        return False
+
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     fake_playwright = _FakePlaywright(fake_browser)
     prefix = "domains.spawn_browser_agent_v3.handler."
@@ -26961,12 +26981,13 @@ async def _run_realm_transition_action_fixture(
             AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
         ),
         patch(prefix + "build_realm_credential_state", hydrate),
+        patch.object(_FakeDomService, "register_secret_refs", register_credentials),
         patch(prefix + "activity_drain_reason", AsyncMock(return_value=None)),
         patch(prefix + "prepare_browser_auth", prepare),
         patch(prefix + "_call_browser_use_with_rotation", model_step),
         patch(
             prefix + "_wait_for_browser_user_control",
-            AsyncMock(side_effect=fatal_error) if fatal_error is not None else AsyncMock(return_value=False),
+            user_control,
         ),
         patch(prefix + "_observe_step_page", observe),
         patch.object(_FakeDomService, "get_page_identity", identity),
@@ -27164,7 +27185,7 @@ async def test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temp
     assert secret in captured["private_state"]["secret_redaction_refs"].values(), (
         "fatal fixture did not reach private credential hydration"
     )
-    assert not captured["contexts"], "fatal fixture unexpectedly advanced into model generation"
+    assert not captured["contexts"], "fatal fixture unexpectedly recorded a normal actor decision"
     assert captured["classifier_calls"], "fatal fixture did not exercise actual credential propagation"
     assert secret not in str(captured["classifier_calls"]), (
         "the fatal activity sent a raw password into the credential classifier"
@@ -27203,99 +27224,61 @@ async def test_activity_cross_realm_action_redacts_reused_ref_values():
     assert ("prepare", "new.example") in events, "test did not activate a different private credential realm"
 
 
-@_in_browser_activity_context
-async def test_activity_redirected_goto_reloads_prepared_realm_once():
-    """Successful post-navigation restoration participates before the next model turn."""
-    import json
-
-    for redirect, restoration_error in ((True, False), (False, False), (True, True)):
-        contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
-            "goto",
-            redirect=redirect,
-            restoration_error=restoration_error,
-        )
-        reloads = [event for event in events if event[0] == "reload"]
-        expected = 1 if redirect and not restoration_error else 0
-        assert len(reloads) == expected, "redirect restoration did not reload exactly once before the next model call"
-        if expected:
-            assert reloads[0][1] == "https://new.example/login"
-            assert events.index(("prepare", "new.example")) < events.index(reloads[0]) < events.index(("model", 2))
-        tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
-        context = json.loads(tools[0]["content"])["auth_context"]
-        assert context["auth_realm"] == "new.example"
-        if not redirect:
-            assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
-        if restoration_error:
-            assert "18000ms" in context["credential_preparation_error"]
-
-
-@_in_browser_activity_context
-async def test_activity_open_new_tab_prepares_realm_before_failed_navigation():
-    """The requested realm is prepared before a new tab, even when TLS fails."""
-    import json
-
-    error = "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"
-    contexts, saved, events, prior, active = await _run_realm_transition_action_fixture(
-        "open_new_tab", redirect=False, navigation_error=error, reload_error=error,
-    )
-    navigation = ("navigate", "https://new.example/login")
-    assert events.count(navigation) == 1
-    assert events.index(("prepare", "new.example")) < events.index(navigation)
-    assert not any(event[0] == "reload" for event in events), "failed navigation was automatically repeated"
-    assert events.count(("model", 2)) == 1, "the model never received the real navigation error"
+def _assert_nonblocking_navigation_context(contexts, events, *, realm, success, error=None):
+    assert len(contexts) == 2
+    assert sum(kind == "navigate" for kind, _ in events) == 1, "navigation was repeated"
+    assert events.count(("model", 2)) == 1, "actor missed the navigation result"
+    assert not any(kind == "reload" for kind, _ in events), "credential work forced a navigation reload"
+    assert events.index(next(event for event in events if event[0] == "navigate")) < events.index(("model", 2))
     tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
     result = json.loads(tools[0]["content"])
-    assert result["success"] is False and error in result["error"]
-    assert result["auth_context"]["auth_realm"] == "new.example"
-    assert prior not in str(contexts) and active not in str(contexts)
+    assert result["success"] is success
+    if error is not None:
+        assert error in result["error"]
+    auth = result["auth_context"]
+    assert auth["auth_realm"] == realm
+    assert auth["credential_preparation_status"] in {"pending", "ready", "error"}
+    assert "synthetic-prior-realm-password" not in str(contexts)
+    assert "synthetic-current-realm-password" not in str(contexts)
+    return auth
+
+
+@_in_browser_activity_context
+async def test_activity_redirected_goto_reports_realm_without_credential_reload():
+    """Redirects report current realm and background status without a forced reload."""
+    for redirect, restoration_error in ((True, False), (False, False), (True, True)):
+        contexts, _, events, _, _ = await _run_realm_transition_action_fixture("goto", redirect=redirect, restoration_error=restoration_error)
+        _assert_nonblocking_navigation_context(contexts, events, realm="new.example", success=True)
+
+
+@_in_browser_activity_context
+async def test_activity_open_new_tab_reports_failed_navigation_without_credential_wait():
+    """The real navigation error reaches the actor while credential work is asynchronous."""
+    error = "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"
+    contexts, _, events, _, _ = await _run_realm_transition_action_fixture("open_new_tab", redirect=False, navigation_error=error)
+    _assert_nonblocking_navigation_context(contexts, events, realm="new.example", success=False, error=error)
 
 
 @_in_browser_activity_context
 async def test_activity_open_new_tab_keeps_observed_realm_after_early_failure():
-    import json
-
     error = "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"
-    contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
-        "open_new_tab", redirect=False, navigation_error=error, navigation_stays_on_old_page=True,
-    )
-    assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
-    assert ("reload", "https://new.example/login") not in events
-    assert events.count(("reload", "https://old.example/login")) == 1
-    tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
-    result = json.loads(tools[0]["content"])
-    assert result["success"] is False and error in result["error"]
-    assert result["auth_context"]["auth_realm"] == "old.example", "requested URL replaced observed page identity"
+    contexts, _, events, _, _ = await _run_realm_transition_action_fixture("open_new_tab", redirect=False, navigation_error=error, navigation_stays_on_old_page=True)
+    _assert_nonblocking_navigation_context(contexts, events, realm="old.example", success=False, error=error)
 
 
 @_in_browser_activity_context
 async def test_activity_open_new_tab_success_and_optional_preparation_error():
-    import json
-
     for restoration_error in (False, True):
-        contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
-            "open_new_tab", redirect=False, restoration_error=restoration_error,
-        )
-        assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
-        assert not any(event[0] == "reload" for event in events)
-        tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
-        result = json.loads(tools[0]["content"])
-        assert result["success"] is True
-        if restoration_error:
-            assert "18000ms" in result["auth_context"]["credential_preparation_error"]
+        contexts, _, events, _, _ = await _run_realm_transition_action_fixture("open_new_tab", redirect=False, restoration_error=restoration_error)
+        _assert_nonblocking_navigation_context(contexts, events, realm="new.example", success=True)
 
 
 @_in_browser_activity_context
-async def test_activity_open_new_tab_preserves_redirect_reload_barrier():
+async def test_activity_open_new_tab_does_not_insert_redirect_reload():
+    """Credential-only reload failures cannot invent a second navigation or block the actor."""
     for error in (None, "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"):
-        if error:
-            with pytest.raises(RuntimeError, match="ERR_SSL_PROTOCOL_ERROR"):
-                await _run_realm_transition_action_fixture("open_new_tab", redirect=True, reload_error=error)
-        else:
-            _contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
-                "open_new_tab", redirect=True,
-            )
-            assert events.index(("prepare", "new.example")) < events.index(("reload", "https://new.example/login"))
-            assert events.index(("reload", "https://new.example/login")) < events.index(("model", 2))
+        contexts, _, events, _, _ = await _run_realm_transition_action_fixture("open_new_tab", redirect=True, reload_error=error)
+        _assert_nonblocking_navigation_context(contexts, events, realm="new.example", success=True)
 
 
 @_in_browser_activity_context
@@ -27594,10 +27577,6 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
             "domains.spawn_browser_agent_v3.handler.init_browser_session",
             AsyncMock(return_value=session_data),
         ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
-            AsyncMock(return_value={"realm": "example.com"}),
-        ),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
@@ -27657,10 +27636,6 @@ async def test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner(
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
-            AsyncMock(return_value={"realm": "example.com"}),
-        ),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
@@ -27851,22 +27826,14 @@ async def test_neutral_resume_reaches_first_browser_step():
     await _exercise_first_step_shutdown(neutral=True, resume=True)
 
 
-async def test_neutral_resume_rejects_empty_inventory_at_web_url():
-    try:
-        await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url="https://example.com/account")
-    except RuntimeError as error:
-        assert str(error) == "Credential payload is missing auth_realm"
-    else:
-        raise AssertionError("Resumed HTTPS page accepted a neutral inventory")
+async def test_neutral_resume_defers_inventory_at_web_url():
+    """Resume metadata does not pretend that credential preparation is complete."""
+    await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url="https://example.com/account")
 
 
-async def test_neutral_resume_rejects_missing_session_url():
-    try:
-        await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url=None)
-    except RuntimeError as error:
-        assert str(error) == "Credential payload is missing auth_realm"
-    else:
-        raise AssertionError("Resumed unknown page borrowed the original blank URL")
+async def test_neutral_resume_defers_inventory_without_metadata_url():
+    """The first live page observation supplies the realm without blocking resume."""
+    await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url=None)
 
 async def _run_browser_activity_cancelled_mid_step(cancellation_details):
     """Run the real browser activity and cancel it mid-step with ``cancellation_details``.
@@ -28163,19 +28130,19 @@ async def test_terminal_passkey_failure_still_pauses_without_weakening_approval(
                         assert probe.alive and "checkpoint" not in probe.events and "backend_release" not in probe.events, probe.events
                         assert "recording_finalized" in probe.events and "reset_cdp" in probe.events, probe.events
                     elif scenario == "auth":
-                        # Existing auth observation propagates persistence exceptions
-                        # and cancellation; those are terminal paths, not live handoff.
+                        # Optional parking capture never owns terminal cancellation.
+                        # The matrix's cancelled/error cases still exercise required
+                        # foreground control flow and assert actual provider cleanup.
+                        await test_private_browser_pause_urls_use_protected_continuity(probe)
+                        assert probe.result["status"] == "awaiting_auth_assistance", probe.result
+                        assert probe.alive and "backend_release" not in probe.events, probe.events
+                        assert "checkpoint" not in probe.events and "recording_finalized" in probe.events, probe.events
                         if mode == "save_exception":
-                            with pytest.raises(RuntimeError, match="fixture persistence unavailable"):
-                                await test_private_browser_pause_urls_use_protected_continuity(probe)
-                            await probe.assert_terminal_cleanup(handler)
+                            assert "save_reference" in probe.events, "persistence failure was never exercised"
+                            assert probe.result.get("browser_page_observation") is None
                         elif mode == "cancel_read":
-                            await test_private_browser_pause_urls_use_protected_continuity(probe)
-                            await probe.assert_terminal_cleanup(handler)
-                        else:
-                            await test_private_browser_pause_urls_use_protected_continuity(probe)
-                            assert probe.result["status"] == "awaiting_auth_assistance", probe.result
-                            assert probe.alive and "checkpoint" not in probe.events, probe.events
+                            assert "readback" in probe.events, "read cancellation was never exercised"
+                            assert probe.result.get("browser_page_observation") is None
                     else:
                         if scenario == "error":
                             with pytest.raises(RuntimeError, match="fixture terminal model failure"):
@@ -28596,7 +28563,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                 state = self.model_visible_value(
                     {"url": raw_url, "title": "Checkout", "dom_tree": "Checkout " + secret}
                 )
-                if include_screenshot and not self.secret_values_used:
+                if include_screenshot:
                     state["screenshot"] = screenshot
                 return state
 
@@ -28957,8 +28924,14 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
             )
             assert items[1].get("image_url") == visible_url, "receipt URL leaked private credential"
             assert items[0]["product_url"] == visible_url and items[0]["note"] == "{{secret:pwd:url}}"
-            assert "screenshot" not in items[0] and "image_url" not in items[2], "private raster escaped suppression"
-        if scenario == "raster_completed":
+            # These are scalar receipt fields, not typed captured-image transport.
+            # Keep their ordinary secret redaction while preserving actual image blocks below.
+            redacted_receipt_raster = _FakeDomService.last_instance.model_visible_value(
+                "data:image/png;base64," + screenshot
+            )
+            assert items[0]["screenshot"] == redacted_receipt_raster
+            assert "image_url" not in items[2], "receipt URL schema admitted a data URI"
+        if pause == "completed":
             screenshot_upload.assert_awaited_once_with(
                 user_id="u1",
                 file_content=base64.b64decode(screenshot, validate=True),
@@ -28995,20 +28968,10 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                     "role": "{{secret:pwd:user-token}}",
                     "{{secret:pwd:function-token}}": "{{secret:pwd:url}}",
                 }, "page-controlled protocol-looking values bypassed redaction"
-                if private_entry:
-                    assert "data:image" not in str(messages), "private-entry resume exposed historical raster"
-                else:
-                    actual_url = messages[2]["content"][1]["image_url"]["url"]
-                    assert actual_url == "data:image/png;base64," + screenshot, (
-                        "resumed screenshot transport was text-masked"
-                    )
-                    assert base64.b64decode(actual_url.split(",", 1)[1], validate=True) == base64.b64decode(screenshot)
-                    # A text-masked base64 payload is invalid provider input.
-                    # Untrusted media uses the native omission block instead.
-                    assert messages[3]["content"][1] == {
-                        "type": "text",
-                        "text": "[image omitted from Temporal resume]",
-                    }
+                actual_url = messages[2]["content"][1]["image_url"]["url"]
+                assert actual_url == "data:image/png;base64," + screenshot, "resumed screenshot transport was text-masked"
+                assert base64.b64decode(actual_url.split(",", 1)[1], validate=True) == base64.b64decode(screenshot)
+                assert messages[3]["content"][1]["image_url"]["url"] == actual_url
         if pause in {"drain", "max_steps"}:
             action_saves = [call.kwargs for call in save_action.await_args_list
                             if "coordinates" in (call.kwargs.get("auxiliary") or {})]
@@ -29044,15 +29007,8 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
             validate_transport_images(context)
             assert context[0]["role"] == "USER" and context[-1]["role"] == "TOOL"
             final_frame = context[-1]["metadata"]
-            if private_entry:
-                assert "screenshot_b64" not in final_frame
-                assert "data:image" not in str(context)
-            else:
-                assert final_frame["screenshot_b64"] == screenshot, "trusted final verifier raster was text-masked"
-                assert context[0]["content"][0] == {
-                    "type": "text",
-                    "text": "[image omitted from Temporal resume]",
-                }, "untrusted verifier media reached the provider"
+            assert final_frame["screenshot_b64"] == screenshot, "final verifier raster was text-masked"
+            assert context[0]["content"][0]["image_url"]["url"] == "data:image/png;base64," + screenshot
             assert secret not in str(context)
         if pause in {"completed", "max_steps"}:
             assert result["browser_output_schema"]["fields"][0] == {
@@ -39065,12 +39021,12 @@ async def run_all_tests():
     await r.record_async("initial_credential_hydration_and_upload_do_not_hold_browser_completion", test_initial_credential_hydration_and_upload_do_not_hold_browser_completion)
     await r.record_async("terminal_visual_persistence_error_keeps_verified_completion", test_terminal_visual_persistence_error_keeps_verified_completion)
     await r.record_async(
-        "activity_redirected_goto_reloads_prepared_realm_once",
-        test_activity_redirected_goto_reloads_prepared_realm_once,
+        "activity_redirected_goto_reports_realm_without_credential_reload",
+        test_activity_redirected_goto_reports_realm_without_credential_reload,
     )
     await r.record_async(
-        "activity_open_new_tab_prepares_realm_before_failed_navigation",
-        test_activity_open_new_tab_prepares_realm_before_failed_navigation,
+        "activity_open_new_tab_reports_failed_navigation_without_credential_wait",
+        test_activity_open_new_tab_reports_failed_navigation_without_credential_wait,
     )
     await r.record_async(
         "activity_open_new_tab_keeps_observed_realm_after_early_failure",
@@ -39081,8 +39037,8 @@ async def run_all_tests():
         test_activity_open_new_tab_success_and_optional_preparation_error,
     )
     await r.record_async(
-        "activity_open_new_tab_preserves_redirect_reload_barrier",
-        test_activity_open_new_tab_preserves_redirect_reload_barrier,
+        "activity_open_new_tab_does_not_insert_redirect_reload",
+        test_activity_open_new_tab_does_not_insert_redirect_reload,
     )
     await r.record_async(
         "return_to_quarantined_realm_invalidates_other_auth_context",
@@ -39126,8 +39082,8 @@ async def run_all_tests():
     await r.record_async("disconnected_playwright_handoff_liveness", test_disconnected_playwright_handoff_liveness)
     await r.record_async("neutral_initialization_reaches_first_browser_step", test_neutral_initialization_reaches_first_browser_step)
     await r.record_async("neutral_resume_reaches_first_browser_step", test_neutral_resume_reaches_first_browser_step)
-    await r.record_async("neutral_resume_rejects_empty_inventory_at_web_url", test_neutral_resume_rejects_empty_inventory_at_web_url)
-    await r.record_async("neutral_resume_rejects_missing_session_url", test_neutral_resume_rejects_missing_session_url)
+    await r.record_async("neutral_resume_defers_inventory_at_web_url", test_neutral_resume_defers_inventory_at_web_url)
+    await r.record_async("neutral_resume_defers_inventory_without_metadata_url", test_neutral_resume_defers_inventory_without_metadata_url)
     await r.record_async(
         "timed_out_browser_activity_leaves_the_tool_result_to_the_workflow",
         test_timed_out_browser_activity_leaves_the_tool_result_to_the_workflow,

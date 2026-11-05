@@ -5680,6 +5680,16 @@ async def test_workflow_schema_refresh_coalesces_rapid_feedback():
         _restore_workflow(original)
 
 
+class _SchemaVerificationContinued(BaseException):
+    def __init__(self, args):
+        self.continuation_args = args
+
+
+class _SchemaContinuationWorkflow(_FakeWorkflowModule):
+    def continue_as_new(self, *, args):
+        raise _SchemaVerificationContinued(args)
+
+
 async def _exercise_schema_refresh_persistence(
     *,
     latest_fails: bool,
@@ -5734,7 +5744,7 @@ async def _exercise_schema_refresh_persistence(
             return httpx.Response(200, json={"success": True})
         return httpx.Response(404, json={"error": "unexpected schema fixture request"})
 
-    class SchemaActivityWorkflow(_FakeWorkflowModule):
+    class SchemaActivityWorkflow(_SchemaContinuationWorkflow):
         async def execute_activity(self, fn, args=None, **kwargs):
             name = getattr(fn, "__name__", str(fn))
             if name in {"set_response_schema_activity", "persist_response_schema_activity"}:
@@ -5790,12 +5800,6 @@ async def _exercise_schema_refresh_persistence(
             )
             workflow_module.run_agent = resumed_agent
             restored = _bare_workflow_instance()
-            if completion_calls is not None:
-
-                async def observe_complete(*args, **kwargs):
-                    completion_calls.append((args, kwargs))
-
-                restored._mark_complete = observe_complete
             try:
                 terminal_result = await restored.run(
                     wf.agent_id,
@@ -5809,6 +5813,15 @@ async def _exercise_schema_refresh_persistence(
                     resume_state=state,
                 )
                 assert not (latest_fails or feedback_during_persist), "unaccepted schema produced a terminal result"
+            except _SchemaVerificationContinued as continued:
+                assert latest_fails or feedback_during_persist
+                assert continued.continuation_args[11] == "execute_continued"
+                assert not restored._is_finished
+                assert restored._response_schema_accepted_revision < restored._response_schema_revision
+                assert not any(
+                    name in ("mark_finished", "generate_completion_summary")
+                    for name, _ in fake.activity_calls
+                )
             except RuntimeError as error:
                 if not (latest_fails or feedback_during_persist):
                     raise
@@ -5816,6 +5829,11 @@ async def _exercise_schema_refresh_persistence(
                 # later generation failure; their fake loop cannot certify it.
                 assert "latest schema generation failed" in str(error)
                 assert not restored._is_finished, "schema generation failure invented durable FAILED"
+            if completion_calls is not None:
+                completion_calls.extend(
+                    call for call in fake.activity_calls
+                    if call[0] in ("mark_finished", "generate_completion_summary")
+                )
         return initial_schema, latest_schema, accepted_schema, database["schema"], writes, observed_resume_schema
     finally:
         release_first.set()
@@ -9434,7 +9452,7 @@ async def _exercise_fresh_start_schema_acceptance(
     import workflows.agent_workflow as module
 
     wf = _bare_workflow_instance()
-    fake = _FakeWorkflowModule()
+    fake = _SchemaContinuationWorkflow()
     followup = "get a refund, the doordasher delivered to the wrong location"
     stale_schema = {"fields": [{"name": "order_confirmation_id", "type": "str", "required": True}]}
     replacement = {"fields": [{"name": "refund_status", "type": "str", "required": True}]}
@@ -9488,10 +9506,13 @@ async def _exercise_fresh_start_schema_acceptance(
                 250,
                 {},
             )
+        except _SchemaVerificationContinued as exc:
+            error = exc
+            assert exc.continuation_args[11] == "execute_continued"
         except RuntimeError as exc:
             error = exc
         if generation_fails or invalid_schema:
-            assert isinstance(error, RuntimeError), "fake completion accepted ungenerated requirements"
+            assert isinstance(error, _SchemaVerificationContinued), "fake completion accepted ungenerated requirements"
             assert result is None
             assert wf.output_schema is None, "completion restored a schema from the completed prior task"
             assert not wf._is_finished, "schema prerequisite invented a new terminal-failure policy"

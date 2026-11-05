@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { buildUserMessageSignalValue } from '../../domains/agents/agentMessageSignal';
 
 type SavedRow = { text: string; role: string; metadata?: Record<string, unknown> };
 function harness(accepted = true, status = 'ACTIVE') {
@@ -28,6 +29,7 @@ function harness(accepted = true, status = 'ACTIVE') {
   };
   const modules: Record<string, unknown> = {
     './repo': repo,
+    './agentMessageSignal': { buildUserMessageSignalValue },
     '../../providers/messages': messages,
     '../../providers/agentResume': {
       signalUserResponse: async (_a: string, _w: string, value: string) => signals.push(value),

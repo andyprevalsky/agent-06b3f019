@@ -10640,8 +10640,8 @@ def _blue_bottle_k5_eval_data(fixture: dict) -> dict:
     return data
 
 
-async def _assert_blue_bottle_tree_proof_semantics_passes():
-    """Prove tree-aware evidence: payment facts live only on the browser sub-agent."""
+async def _assert_blue_bottle_tree_proof_rejects_incomplete_purchase():
+    """Keep tree payment facts while rejecting a purchase stopped before payment."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
         _call_declared_llm_judge,
@@ -10660,13 +10660,13 @@ async def _assert_blue_bottle_tree_proof_semantics_passes():
     with live_funded_azure():
         single_turn = await _call_declared_llm_judge(task, semantics, data)
     single_score = float(single_turn.get("score") or 0)
-    assert single_score >= 1.0, (
-        f"Expected tree-aware single-turn judge to pass; got score={single_score}: {single_turn.get('reasoning')}"
-    )
+    assert single_turn.get("task_completed") is False, single_turn
+    assert single_turn.get("extraction_score") == 1.0, single_turn
+    assert single_score < 1.0, "unpaid order must not pass task completion"
 
 
-async def _assert_blue_bottle_k5_replay_single_turn_passes(agent_id: str):
-    """Replay k=5 payment-boundary runs with real judges: static and single-turn both pass."""
+async def _assert_blue_bottle_k5_replay_rejects_incomplete_purchase(agent_id: str):
+    """Keep payment-boundary extraction complete without certifying an unpaid purchase."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
         _call_declared_llm_judge,
@@ -10684,31 +10684,31 @@ async def _assert_blue_bottle_k5_replay_single_turn_passes(agent_id: str):
     with live_funded_azure():
         single_turn = await _call_declared_llm_judge(task, semantics, data)
     single_score = float(single_turn.get("score") or 0)
-    assert single_score >= 1.0, (
-        f"Expected single-turn judge to pass for {agent_id}; got score={single_score}: {single_turn.get('reasoning')}"
-    )
+    assert single_turn.get("task_completed") is False, single_turn
+    assert single_turn.get("extraction_score") == 1.0, single_turn
+    assert single_score < 1.0, "unpaid order must not pass task completion"
 
 
-async def test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics():
-    await _assert_blue_bottle_k5_replay_single_turn_passes(
+async def test_blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase():
+    await _assert_blue_bottle_k5_replay_rejects_incomplete_purchase(
         "b217afca-6595-4eb5-bfd1-9688c2c9826a",
     )
 
 
-async def test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics():
-    await _assert_blue_bottle_k5_replay_single_turn_passes(
+async def test_blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase():
+    await _assert_blue_bottle_k5_replay_rejects_incomplete_purchase(
         "52d717ea-c5be-4bfe-b146-5efd535628ad",
     )
 
 
-async def test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics():
-    await _assert_blue_bottle_k5_replay_single_turn_passes(
+async def test_blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase():
+    await _assert_blue_bottle_k5_replay_rejects_incomplete_purchase(
         "7d282652-2c5b-4dd3-b8c8-461929a37bf8",
     )
 
 
-async def test_blue_bottle_tree_proof_passes_with_subagent_evidence():
-    await _assert_blue_bottle_tree_proof_semantics_passes()
+async def test_blue_bottle_tree_proof_rejects_incomplete_purchase():
+    await _assert_blue_bottle_tree_proof_rejects_incomplete_purchase()
 
 
 def test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate():
@@ -14139,7 +14139,12 @@ async def test_declared_judge_errors_are_not_evaluator_rejections():
 
 
 @contextlib.contextmanager
-def _scripted_judge_provider(verdict_from_invocation: int | None, score: float = 1.0, output: dict | None = None):
+def _scripted_judge_provider(
+    verdict_from_invocation: int | None,
+    score: float = 1.0,
+    output: dict | None = None,
+    task_completed: bool = True,
+):
     """Drive harness judges through the real check_progress → Rose waterfall path.
 
     OpenRouter answers 429 (the d0f65322 incident) until check_progress has been
@@ -14160,7 +14165,12 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
         return await real_check_progress(*args, **kwargs)
 
     verdict = json.dumps(
-        {"reasoning": f"judge verdict score={score}", "score": score, **({"output": output} if output else {})}
+        {
+            "reasoning": f"judge verdict score={score}",
+            "task_completed": task_completed,
+            "score": score,
+            **({"output": output} if output else {}),
+        }
     )
     verdict_stream = "\n".join(
         [
@@ -14374,12 +14384,13 @@ async def test_declared_judge_low_score_verdict_is_not_rejudged():
     """A genuine 0.0 verdict is an ordinary FAIL carrying the judge's reasoning, with no retry."""
     import benchmarks.run_benchmark as bench
 
-    with _scripted_judge_provider(verdict_from_invocation=1, score=0.0) as probe:
+    with _scripted_judge_provider(verdict_from_invocation=1, score=0.0, task_completed=False) as probe:
         passed, reason, results = await bench._run_declared_evaluators(
             _declared_judge_task(), json.loads(json.dumps(_DECLARED_JUDGE_RUN))
         )
     assert passed is False
-    assert reason == "Declared evaluator t7-schema-task-complete failed: judge verdict score=0.0", reason
+    assert reason.startswith("Declared evaluator t7-schema-task-complete failed: judge verdict score=0.0"), reason
+    assert "separate task-completion verdict is not true" in reason
     assert results[0]["score"] == 0.0, results
     assert (probe.invocations, probe.openrouter_calls) == (1, 1), (probe.invocations, probe.openrouter_calls)
     assert probe.sleeps.call_args_list == [], probe.sleeps.call_args_list
@@ -25679,20 +25690,20 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
     ]
     judge_cases = [
         (
-            "test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
-            "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+            "test_blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase",
+            "blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase",
         ),
         (
-            "test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
-            "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+            "test_blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase",
+            "blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase",
         ),
         (
-            "test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
-            "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+            "test_blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase",
+            "blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase",
         ),
         (
-            "test_blue_bottle_tree_proof_passes_with_subagent_evidence",
-            "blue_bottle_tree_proof_passes_with_subagent_evidence",
+            "test_blue_bottle_tree_proof_rejects_incomplete_purchase",
+            "blue_bottle_tree_proof_rejects_incomplete_purchase",
         ),
     ]
     invoked_controllers, invoked_judges, reported_controllers = [], [], []
@@ -26540,12 +26551,12 @@ async def test_all_benchmark_judges_preserve_complete_final_cards():
     summary = "  Actual final answer " + "x" * 13000 + " END-OF-FINAL  "
     card = {"summary": summary, "outputs": outputs}
     final = {"id": "final-root", "role": "TOOL", "text": "existing final prose", "metadata": {
-        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "root-card",
+        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "root-card", "isFinalSummary": True,
         "completionSummary": card,
     }}
     child = {"id": "final-child", "role": "TOOL", "text": "", "metadata": {
-        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "child-card",
-        "completionSummary": {"summary": "child final answer", "outputs": [{"key": "ok", "value": False}]},
+        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "child-card", "isFinalSummary": True,
+        "completionSummary": {"summary": "child final answer", "outputs": [{"key": "ok", "label": "Ok", "value": False}]},
     }}
     pending = {"role": "TOOL", "text": "still working", "metadata": {
         "toolName": "completion_summary", "toolStatus": "IN_PROGRESS", "completionSummary": {"summary": "NOT FINAL"},
@@ -27046,20 +27057,20 @@ async def run_all_tests():
         ],
         [
             (
-                "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
-                test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics,
+                "blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase",
+                test_blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase,
             ),
             (
-                "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
-                test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics,
+                "blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase",
+                test_blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase,
             ),
             (
-                "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
-                test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics,
+                "blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase",
+                test_blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase,
             ),
             (
-                "blue_bottle_tree_proof_passes_with_subagent_evidence",
-                test_blue_bottle_tree_proof_passes_with_subagent_evidence,
+                "blue_bottle_tree_proof_rejects_incomplete_purchase",
+                test_blue_bottle_tree_proof_rejects_incomplete_purchase,
             ),
         ],
     )

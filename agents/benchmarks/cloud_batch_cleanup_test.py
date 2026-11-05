@@ -2699,21 +2699,28 @@ async def test_genuine_cleanup_failure_still_fails_the_task():
     assert getattr(row, "cleanup_failure", None) is None
 
 
-def test_polar_budget_pause_uses_declared_judge_without_lifecycle_score():
+@async_case
+async def test_polar_budget_pause_uses_declared_judge_without_lifecycle_score():
     """R101: budget-paused progress0 is unscored, not a verifier rejection."""
+    # A disabled evaluator stays disabled; ordinary tool requirements remain
+    # enforced, while Polar permits any retrieval method.
     cases = [
-        ("PAUSED", True, True, True, False, False, False, 1),
-        ("PAUSED", False, True, True, False, False, False, 0),
-        ("FAILED", True, True, True, False, False, False, 0),
-        ("CANCELLED", True, True, True, False, False, False, 0),
-        ("PAUSED", True, False, True, False, False, False, 0),
-        ("PAUSED", True, True, False, False, False, False, 0),
-        ("COMPLETED", True, True, True, False, False, False, 0),
-        ("PAUSED", True, True, True, True, False, False, 0),
-        ("PAUSED", True, True, True, False, True, False, 0),
-        ("PAUSED", True, True, True, False, False, True, 0),
+        ("PAUSED", True, True, True, False, False, False, 1, False),
+        ("PAUSED", False, True, True, False, False, False, 0, False),
+        ("FAILED", True, True, True, False, False, False, 0, False),
+        ("CANCELLED", True, True, True, False, False, False, 0, False),
+        ("PAUSED", True, False, True, False, False, False, 0, False),
+        ("PAUSED", True, True, False, False, False, False, 0, True),
+        ("COMPLETED", True, True, True, False, False, False, 1, False),
+        ("PAUSED", True, True, True, True, False, False, 1, False),
+        ("COMPLETED", True, False, True, True, False, False, 0, False),
+        ("PAUSED", True, True, True, False, True, False, 0, False),
+        ("PAUSED", True, True, True, False, False, True, 0, False),
     ]
-    async def run(monkeypatch, status, budget, polar_task, enforce, missing_tool, context_failure, static_failure, expected_judges):
+    async def run(
+        monkeypatch, status, budget, polar_task, enforce, missing_tool,
+        context_failure, static_failure, expected_judges, expected_pass,
+    ):
         task = copy.deepcopy(bench.get_task_by_name("polar-bu-088"))
         task.enforce_declared_evaluators = enforce
         if not polar_task:
@@ -2755,7 +2762,12 @@ def test_polar_budget_pause_uses_declared_judge_without_lifecycle_score():
         monkeypatch.setattr(bench,'collect_tree_messages',AsyncMock(return_value=data['_benchmark']['tree']))
         result=await bench.run_single_task('http://localhost:39999',task)
         assert len(calls)==expected_judges
-        assert result.passed is False
+        assert result.passed is expected_pass, (
+            status, budget, polar_task, enforce, missing_tool,
+            context_failure, static_failure, result.failure_reason,
+        )
+        if not polar_task and missing_tool:
+            assert "Expected tool 'missing-required-tool'" in result.failure_reason
         if calls:
             assert calls[0]['task_prompt']==task.prompt
             assert calls[0]['data']['messages']==data["messages"]
@@ -2764,7 +2776,7 @@ def test_polar_budget_pause_uses_declared_judge_without_lifecycle_score():
             assert any(item["id"] == "fixture-static" and item["passed"] is False for item in result.logs["declared_evaluators"])
     for case in cases:
         with pytest.MonkeyPatch.context() as monkeypatch:
-            asyncio.run(run(monkeypatch, *case))
+            await run(monkeypatch, *case)
 
 
 @async_case

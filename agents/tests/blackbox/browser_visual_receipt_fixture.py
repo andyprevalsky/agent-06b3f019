@@ -12,6 +12,8 @@ from screenshot_revision_cases import (
 
 async def test_dedup_and_recent():
     from screenshot_revision_cases import (
+        test_raster_bytes_and_discriminators_survive_repeated_redaction,
+        test_descriptive_identity_preserves_control_exceptions,
         test_count_fallback_last_n_and_no_mutation,
         test_fallback_is_bounded_and_unrelated_errors_propagate,
         test_actual_browser_client_retries_count_only,
@@ -19,6 +21,8 @@ async def test_dedup_and_recent():
         test_actual_actor_stream_retries_count_only,
     )
     for test in (
+        test_raster_bytes_and_discriminators_survive_repeated_redaction,
+        test_descriptive_identity_preserves_control_exceptions,
         test_count_fallback_last_n_and_no_mutation,
         test_fallback_is_bounded_and_unrelated_errors_propagate,
         test_actual_browser_client_retries_count_only,

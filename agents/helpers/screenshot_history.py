@@ -9,54 +9,77 @@ IMAGE_TYPES = frozenset({"image", "image_url", "input_image"})
 SCREENSHOT_KEYS = frozenset({"screenshot", "screenshot_b64", "__screenshot_base64__"})
 
 
-def _is_raster_transport(value: str) -> bool:
+def _raster_media_type(value: str) -> str | None:
     """Distinguish encoded pixels from ordinary text in a screenshot-named field."""
     if value.startswith("data:image/"):
         value = value.partition(",")[2]
     try:
         pixels = base64.b64decode(value, validate=True)
     except (ValueError, binascii.Error):
-        return False
-    return pixels.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")) or (
-        pixels.startswith(b"RIFF") and pixels[8:12] == b"WEBP"
-    )
+        return None
+    for magic, media_type in ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"),
+                              (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif")):
+        if pixels.startswith(magic):
+            return media_type
+    return "image/webp" if pixels.startswith(b"RIFF") and pixels[8:12] == b"WEBP" else None
 
 
-def redact_with_screenshots(value: Any, redact: Callable[[Any], Any]) -> Any:
-    """Keep original raster bytes; apply existing redaction to surrounding text.
+def _is_raster_transport(value: str) -> bool:
+    return _raster_media_type(value) is not None
 
-    This does not discover images, read files, or decide who owns a capture.
-    The caller supplies the original tool result or conversation message.
-    """
+
+def redact_with_screenshots(value: Any, redact: Callable[[Any], Any], *, _nested: bool = False) -> Any:
+    """Keep original raster transport while retaining nested page-key redaction."""
     if isinstance(value, dict):
-        if isinstance(value.get("type"), str) and value["type"] in IMAGE_TYPES:
-            copied = redact(value)
-            copied = copied if isinstance(copied, dict) else {}
-            if value.get("type") == "image_url" and isinstance(value.get("image_url"), dict):
-                payload = dict(copied.get("image_url") or {})
-                original_url = value["image_url"].get("url")
-                if isinstance(original_url, str) and original_url.startswith("data:image/"):
-                    payload["url"] = original_url
-                copied["image_url"] = payload
-            for key in ("data", "image_url"):
-                if isinstance(value.get(key), str) and _is_raster_transport(value[key]):
-                    copied[key] = value[key]
-            if isinstance(value.get("source"), dict) and isinstance(value["source"].get("data"), str):
-                if _is_raster_transport(value["source"]["data"]):
-                    copied.setdefault("source", {})["data"] = value["source"]["data"]
-            return copied
         safe = redact(value)
         safe = dict(safe) if isinstance(safe, dict) else {}
+        if _nested:
+            safe = {redact(key): item for key, item in safe.items()}
+
+        def restore_transport(key: str, item: Any) -> None:
+            if _nested and redact(key) != key:
+                safe.pop(redact(key), None)
+            safe[key] = item
+
+        raster_candidates = [value.get("data"), value.get("image_url")]
+        if isinstance(value.get("image_url"), dict):
+            raster_candidates.append(value["image_url"].get("url"))
+        if isinstance(value.get("source"), dict):
+            raster_candidates.append(value["source"].get("data"))
+        if (isinstance(value.get("type"), str) and value["type"] in IMAGE_TYPES
+                and any(isinstance(item, str) and _is_raster_transport(item) for item in raster_candidates)):
+            restore_transport("type", value["type"])
+            if value["type"] == "image_url" and isinstance(value.get("image_url"), dict):
+                original_url = value["image_url"].get("url")
+                payload = redact_with_screenshots(value["image_url"], redact, _nested=True)
+                if isinstance(original_url, str) and _is_raster_transport(original_url):
+                    payload.pop(redact("url"), None)
+                    payload["url"] = original_url
+                restore_transport("image_url", payload)
+            for key in ("data", "image_url"):
+                if isinstance(value.get(key), str) and _is_raster_transport(value[key]):
+                    restore_transport(key, value[key])
+            if isinstance(value.get("source"), dict) and isinstance(value["source"].get("data"), str):
+                if _is_raster_transport(value["source"]["data"]):
+                    payload = redact_with_screenshots(value["source"], redact, _nested=True)
+                    payload.pop(redact("data"), None)
+                    payload["data"] = value["source"]["data"]
+                    for key, canonical in (("type", "base64"), ("media_type", _raster_media_type(value["source"]["data"]))):
+                        if value["source"].get(key) == canonical:
+                            payload.pop(redact(key), None)
+                            payload[key] = canonical
+                    restore_transport("source", payload)
+            return safe
         for key, item in value.items():
-            if key in SCREENSHOT_KEYS and isinstance(item, str) and _is_raster_transport(item):
-                safe[key] = item
+            if (key in SCREENSHOT_KEYS or key == "image_url") and isinstance(item, str) and _is_raster_transport(item):
+                restore_transport(key, item)
             elif isinstance(item, (dict, list, tuple)):
-                safe[key] = redact_with_screenshots(item, redact)
+                safe[redact(key) if _nested else key] = redact_with_screenshots(item, redact, _nested=True)
         return safe
     if isinstance(value, list):
-        return [redact_with_screenshots(item, redact) for item in value]
+        return [redact_with_screenshots(item, redact, _nested=True) for item in value]
     if isinstance(value, tuple):
-        return tuple(redact_with_screenshots(item, redact) for item in value)
+        return tuple(redact_with_screenshots(item, redact, _nested=True) for item in value)
     return redact(value)
 
 

@@ -53,7 +53,13 @@ function withSharedAuthority(providerFetch: typeof fetch): typeof fetch {
       assert.equal(init?.method, 'GET');
       assert.equal(init?.body, undefined);
       const keys = (url.searchParams.get('keys') ?? '').split(',');
-      assert(keys.length > 0 && keys.every((key) => key.includes(':gpt-6-sol')));
+      assert.deepEqual(
+        [...keys].sort(),
+        (process.env.AZURE_FOUNDRY_DEPLOYMENTS ?? '')
+          .split(',')
+          .map((deployment) => `a-4989-resource.openai.azure.com:${deployment}`)
+          .sort()
+      );
       return Response.json({
         cooldowns: Object.fromEntries(
           keys.filter((key) => cooldowns[key]).map((key) => [key, cooldowns[key]])

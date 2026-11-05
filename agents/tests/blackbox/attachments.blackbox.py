@@ -749,6 +749,7 @@ async def test_parent_attachment_success_preserves_metadata_and_logs():
         def emit(self, record):
             self.records.append(record)
 
+    original_client = httpx.AsyncClient
     for pointers in [[], [{
         "id": "parent-file-1", "storage_path": "offline/brief.txt",
         "original_filename": "brief.txt", "mime_type": "text/plain",
