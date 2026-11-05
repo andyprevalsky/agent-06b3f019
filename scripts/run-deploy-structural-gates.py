@@ -275,12 +275,17 @@ def plan_gates(
 
 
 GATES = (
+    Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py")),
+    Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py")),
+    Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
+    Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
         "cloudbench-controller-linux",
         ("python3", "scripts/tests/cloudbench-controller-linux.test.py"),
     ),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
+    Gate("rose-startup-script", ("bash", "scripts/tests/rose-startup-script.test.sh")),
     Gate("temporal-namespace-isolation", ("python3", "scripts/tests/temporal-namespace-isolation.test.py")),
     Gate("kill-services", ("bash", "scripts/tests/kill-services.test.sh"), expected_seconds=55),
     Gate(

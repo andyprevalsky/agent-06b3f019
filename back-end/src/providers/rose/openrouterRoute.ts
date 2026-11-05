@@ -28,7 +28,7 @@ export function exclusiveOpenRouterWaterfall(params: {
     openrouterKey,
     requestId: params.requestId,
     callSite: params.callSite,
-    providerFastMode: params.options.provider_fast_mode,
+    speed: params.options.speed,
     reasoningEffort: params.options.effort,
     abortSignal: params.options.abort_signal,
     tools: params.options.tools,

@@ -1923,7 +1923,10 @@ def _live_report_producer_harness(tasks, executor, max_concurrency):
     start = next(
         i
         for i, node in enumerate(main.body)
-        if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card"
+        # Include the real initial preflight custody producer, which the
+        # coordinator's never-admitted list now consumes before dispatch.
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "initial_credential_skips" for target in node.targets)
     )
     end = next(
         i
@@ -2008,6 +2011,8 @@ async def test_live_report_counts_executor_admission_and_drains_cancellation():
         await held.wait()
 
     namespace, cards = _live_report_producer_harness(tasks, executor, 1)
+    assert namespace["initial_credential_skips"] == ()
+    assert namespace["_never_admitted_results"] == []
     with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
         coordinator = asyncio.create_task(namespace["_drive_parallel"]())
         try:
@@ -13221,6 +13226,106 @@ def test_compute_token_sync_propagates_openrouter_claude_fallback_from_backend_e
     assert captured["env"]["OPENROUTER_API_KEY"] == "sk-or-test-fallback"
 
 
+async def test_non_claude_compute_refresh_scopes_seed_opt_in_and_preserves_strict_gates():
+    """Absent Claude OAuth cannot gate explicit non-Claude tasks before dispatch."""
+    import benchmarks.run_benchmark as bench
+    from dataclasses import replace
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    browser = get_task_by_name("browser-smoke")
+    claude = get_task_by_name("claude-code-agent")
+    assert browser.requires_claude_code is False and claude.requires_claude_code is True
+    flag = "SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK"
+    observed = []
+
+    def seed(command, **kwargs):
+        env = kwargs["env"]
+        observed.append(env.copy())
+        # The unchanged seed consumer owns this existing opt-in. Other seed
+        # branches are exercised by the registered seed/fallback controls.
+        admitted = env.get(flag) == "1"
+        return subprocess.CompletedProcess(
+            command, 0 if admitted else 1, "",
+            "" if admitted else "No usable claude_code integrations after sync",
+        )
+
+    async def refresh(tasks, *, require=False, expect_opt_in=False, cost_gate=False):
+        observed.clear()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CODEX_AUTH_PATH", None)
+            os.environ.pop("BENCHMARK_REQUIRE_COMPUTE_TOKENS", None)
+            os.environ.pop(flag, None)
+            if not expect_opt_in:
+                # Ambient launch flags must not authorize Claude/mixed/default callers.
+                os.environ[flag] = "1"
+            if cost_gate:
+                os.environ["BENCHMARK_REQUIRE_COMPUTE_TOKENS"] = "1"
+            error = None
+            try:
+                await bench._refresh_local_compute_tokens_for_run(
+                    "http://localhost:55120", tasks=tasks, require_claude_code=require,
+                )
+            except RuntimeError as exc:
+                error = str(exc)
+        assert len(observed) == 1
+        assert (observed[0].get(flag) == "1") is expect_opt_in
+        assert "SEED_ALLOW_MISSING_CLAUDE_CODE" not in observed[0]
+        if cost_gate:
+            assert error and "BENCHMARK_REQUIRE_COMPUTE_TOKENS=1" in error, error
+        elif expect_opt_in:
+            assert error is None, error
+        else:
+            assert error == "Benchmark run could not refresh local compute tokens", error
+        return observed[0]
+
+    with (
+        anthropic_family(excluded=False),
+        patch.object(bench, "_is_simulate_mode", return_value=False),
+        patch.object(bench, "_local_victoria_database_url", return_value="postgresql://127.0.0.1/local"),
+        patch.object(bench, "_compute_token_source_database_url", return_value=("postgresql://source/rose", "fixture")),
+        patch.object(bench, "_has_usable_anthropic_api_key_fallback", new=AsyncMock(return_value=False)),
+        patch.object(bench, "_run_seed_subprocess", side_effect=seed),
+        patch.object(bench, "_refresh_local_claude_token_from_keychain", return_value=False),
+        patch.object(bench, "_local_db_has_usable_direct_compute_token", return_value=False),
+    ):
+        try:
+            await refresh([browser], expect_opt_in=True)
+            await refresh([browser], require=True)
+            # Unknown/malformed catalog flags are not explicit non-Claude permission.
+            await refresh([replace(browser, requires_claude_code=None)])
+            claude_env = await refresh([claude])
+            assert claude_env["SEED_REQUIRE_COMPUTE_TOKEN_TYPES"] == "claude"
+            mixed_env = await refresh([claude, browser])
+            assert "SEED_REQUIRE_COMPUTE_TOKEN_TYPES" not in mixed_env
+            await refresh([])
+            await refresh([browser], expect_opt_in=True, cost_gate=True)
+            with patch.dict(os.environ, {flag: "1"}, clear=False):
+                observed.clear()
+                assert bench._sync_compute_tokens(
+                    allow_missing_claude_for_non_claude_tasks=1,
+                ) is False
+                assert flag not in observed[0]
+            # Existing AgentCard launchers intentionally inherit this flag.
+            # Their later fixture/default sync must retain that established scope.
+            with (
+                patch.dict(os.environ, {flag: "1"}, clear=False),
+                patch.object(bench, "_sync_email_credentials", return_value=True),
+                patch.object(bench, "_sync_browser_credentials", return_value=True),
+            ):
+                observed.clear()
+                assert bench._sync_compute_tokens() is True
+                assert observed[0][flag] == "1"
+                observed.clear()
+                result = bench._apply_live_fixture(bench.LiveFixtureContext(
+                    base_url="http://localhost:55120", user_id="fixture-user",
+                    auth_realm="example.test", cookie_domains=(),
+                ))
+                assert result["browser_auth"] is True
+                assert observed[0][flag] == "1"
+        finally:
+            bench._withheld_compute_token_types.clear()
+
+
 def test_shared_workspace_compute_source_requires_usable_claude_code():
     """A reachable shared DB without an agent token must not shadow prod."""
     from unittest.mock import patch
@@ -16299,6 +16404,36 @@ async def test_normal_code_preflight_preserves_shared_fallback():
                                 '/api/integrations/compute-code/anthropic-key/cooldown']
 
 
+async def test_codex_harness_preflight_uses_backend_codex_plan_not_gpt_api_key():
+    """No GPT login: the backend's Codex plan (Azure unless backed off) decides; GPT_API_KEY never funds Codex."""
+    import benchmarks.run_benchmark as bench
+    import httpx
+    from unittest.mock import patch
+    original_client = httpx.AsyncClient
+    plan = {}
+    requests = []
+    def respond(request):
+        requests.append((request.url.path, dict(request.url.params), request.headers.get('x-api-key')))
+        if request.url.path == '/api/integrations/gpt-code/credentials/token':
+            return httpx.Response(404, json={'error': 'NoTokensAvailable'})
+        return httpx.Response(200, json=plan)
+    with patch.dict(bench.os.environ, {'GPT_API_KEY': 'unfunded-openai-key'}), \
+         patch.object(bench, 'API_KEY', 'test-key'), \
+         patch.object(bench, '_api_headers', new=AsyncMock(return_value={})), \
+         patch.object(bench, '_current_benchmark_user_id', return_value='bench-user'), \
+         patch.object(bench.httpx, 'AsyncClient', side_effect=lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)):
+        for codex, expected in [(True, True), (False, False)]:
+            plan.clear()
+            plan.update({'claude': True, 'codex': codex})
+            requests.clear()
+            assert await bench._check_codex_harness_credentials('http://fixture.invalid') is expected, plan
+            assert requests == [
+                ('/api/integrations/gpt-code/credentials/token', {}, None),
+                ('/api/claude-code-session/credential-availability', {'user_id': 'bench-user'}, 'test-key'),
+            ], requests
+    assert 'Azure' in bench.CODEX_HARNESS_CREDENTIAL_SKIP_REASON
+
+
 async def test_code_dispatch_skip_remains_opt_in():
     import benchmarks.run_benchmark as bench
     from unittest.mock import patch
@@ -16491,6 +16626,7 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
             "tolerate_gpt_code_unavailable": True,
             "tolerate_claude_code_unavailable": True,
             "required_token_types": None,
+            "allow_missing_claude_for_non_claude_tasks": False,
         }
     ]
     assert http_calls == [
@@ -16536,6 +16672,7 @@ async def test_local_compute_refresh_rehydrates_tokens_after_base_restore():
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=False,
         required_token_types=None,
+        allow_missing_claude_for_non_claude_tasks=False,
     )
 
 
@@ -16698,6 +16835,96 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     passed, reason = _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.44."))
     assert passed is False
     assert "ratchet" in reason.lower()
+
+
+def test_webdecoy_score_evidence_is_recorded_for_comparison():
+    """Replay of the failing predeploy capture (agent 8d029581, FCaptcha 0.187 > 0.163).
+
+    The ledger kept only the failure line, and passes recorded no score at all, so
+    the 0.187 could not be compared with the passes. The capture shows the score is
+    the Kernel-residential baseline 0.153164 (PoW challenge_network_mismatch +
+    teleport click) plus a datacenter-flagged exit (+0.0336): the browser session
+    decides the number. Every attempt therefore records score, engine, the verify
+    detections and the browser provider/exit, and the failure line names them.
+    """
+    import tempfile
+
+    from benchmarks.results import BenchmarkRun, TaskResult
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result, _webdecoy_score_evidence
+    import benchmarks.timeout_history as timeout_history
+
+    fixture = pathlib.Path(__file__).parent / "fixtures" / "webdecoy_kernel_datacenter_fail" / "network" / "index.json"
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. Clicked the checkbox. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "network_recording_path": str(fixture),
+                    "browser_session_metadata": {"provider": "kernel", "proxy_source": "kernel_residential_city"},
+                },
+            }
+        ]
+    }
+
+    evidence = _webdecoy_score_evidence(data)
+    assert evidence == {
+        "fcaptcha_score": 0.18676399999999999,
+        "fcaptcha_score_source": "captured API",
+        "fcaptcha_engine_version": "1.46.1",
+        "fcaptcha_detections": [
+            "bot: PoW verification failed: challenge_network_mismatch",
+            "datacenter: Request from known datacenter IP range",
+            "bot: No local speech synthesis voices",
+            "vision_ai: Click injected with no pointer trajectory (1 teleport clicks)",
+            "captcha_farm: Unusually long interaction time",
+        ],
+        "browser_provider": "kernel",
+        "browser_proxy_source": "kernel_residential_city",
+    }
+
+    passed, reason = _evaluate_webdecoy_biometrics_result(data)
+    assert passed is False
+    assert "risk score 0.187 exceeds ratchet 0.163" in reason
+    assert "FCaptcha engine v1.46.1" in reason
+    assert "vision_ai: Click injected with no pointer trajectory" in reason
+    # The flag that tipped the score over only fired on the first verify.
+    assert "datacenter: Request from known datacenter IP range" in reason
+    assert "browser kernel/kernel_residential_city" in reason
+
+    # Passing attempts carry the same evidence into the attempts ledger.
+    with tempfile.TemporaryDirectory() as scratch:
+        ledger = pathlib.Path(scratch) / "attempts.jsonl"
+        with (
+            patch.object(timeout_history, "HISTORY_DIR", scratch),
+            patch.object(timeout_history, "ATTEMPTS_FILE", str(ledger)),
+            patch.object(timeout_history, "record_pass", lambda **_kwargs: None),
+            patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": "", "BENCHMARK_HISTORY_PARK_DIR": ""}),
+        ):
+            run = BenchmarkRun(suite="predeploy", base_url="http://localhost:3300")
+            run.task_results.append(
+                TaskResult(
+                    name="browser-biometrics-webdecoy",
+                    passed=True,
+                    agent_id="agent-pass",
+                    status="COMPLETED",
+                    progress_score=1.0,
+                    duration_seconds=140.0,
+                    cost_cents=27.0,
+                    message_count=1,
+                    evaluator_evidence={**evidence, "fcaptcha_score": 0.018, "browser_provider": "tilion"},
+                )
+            )
+            run._record_history()
+        (row,) = (json.loads(line) for line in ledger.read_text().splitlines())
+    assert row["passed"] is True
+    assert row["evaluator_evidence"]["fcaptcha_score"] == 0.018
+    assert row["evaluator_evidence"]["fcaptcha_engine_version"] == "1.46.1"
+    assert row["evaluator_evidence"]["browser_provider"] == "tilion"
 
 
 def test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples():
@@ -18847,6 +19074,143 @@ def test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only():
             os.environ.pop("FAST_MODE_CACHE_DATABASE_URL", None)
         else:
             os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
+
+
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
+def test_local_stack_env_excludes_worker_dotenv_loaded_by_launcher_imports():
+    """RCA (browser-biometrics-webdecoy, FCaptcha 0.187 > ratchet 0.163, predeploy only).
+
+    With --max-concurrency > 1, local.py imports run_benchmark (needs_independent_worlds)
+    before starting the stack, and agents config load_dotenv()s agents/.env into the
+    launcher's os.environ. start_services forwarded that to run.sh, so the backend
+    inherited the worker's BROWSER_PROVIDER=kernel over back-end/.env's tilion (the
+    production provider): every predeploy browser task ran on Kernel residential
+    exits, where FCaptcha sits at 0.153 and a datacenter-flagged exit fails the
+    ratchet. Each service loads its own env file; the launcher must forward only
+    what it was launched with or set itself.
+    """
+    from unittest.mock import patch
+
+    from dotenv import load_dotenv
+
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    worker_only = "ROSE_RCA_WORKER_DOTENV_ONLY"
+    exported = "ROSE_RCA_OPERATOR_EXPORTED"
+    launcher_set = "ROSE_RCA_LAUNCHER_SET"
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=False):
+        for key in ("BROWSER_PROVIDER", worker_only, launcher_set):
+            os.environ.pop(key, None)
+        os.environ[exported] = "operator"
+        launch_environ = dict(os.environ)
+        worker_dotenv = Path(tmp) / "agents.env"
+        worker_dotenv.write_text(f"BROWSER_PROVIDER=kernel\n{worker_only}=worker\n{exported}=worker\n")
+        # The import side effect the launcher really executes (agents config.load_config()).
+        load_dotenv(worker_dotenv, override=False)
+        os.environ[launcher_set] = "launcher"
+        assert os.environ["BROWSER_PROVIDER"] == "kernel"
+        context_dir = Path(tmp) / "worker-dotenv-run"
+        stack = local_bench.ServiceStack(
+            run_id="worker-dotenv-run",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-worker-dotenv-run",
+            base_port=55150,
+        )
+        with (
+            patch.object(local_bench.subprocess, "Popen", fake_popen),
+            patch.object(local_bench, "wait_for_services", lambda *_args, **_kwargs: {"ports": {}}),
+            patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack"),
+            patch.object(local_bench, "WORKER_DOTENV_PATH", worker_dotenv, create=True),
+            patch.object(local_bench, "_LAUNCH_ENVIRON", launch_environ, create=True),
+        ):
+            local_bench.start_services(stack, clean_first=False, tasks=["browser-biometrics-webdecoy"])
+
+    env = captured["env"]
+    assert "BROWSER_PROVIDER" not in env, (
+        f"backend inherited the worker dotenv BROWSER_PROVIDER={env.get('BROWSER_PROVIDER')!r} over back-end/.env"
+    )
+    assert worker_only not in env, "worker-only dotenv values must not reach the stack services"
+    # Operator exports and values the launcher sets itself are still forwarded.
+    assert env[exported] == "operator"
+    assert env[launcher_set] == "launcher"
+    assert env["DISABLE_GMAIL_SYNC"] == "1"
+
+
+def test_benchmark_launcher_imports_do_not_load_worker_dotenv():
+    """The real import chain behind the predeploy env leak, in a fresh interpreter.
+
+    local.py imports run_benchmark (needs_independent_worlds) before it starts a
+    stack; helpers/check_usage.py and helpers/fetch_queue_pointer.py call
+    load_config() at import, which load_dotenv()s the worker env file into the
+    launcher. Whatever that import does to os.environ, the env handed to the
+    stack services must not carry a value that only came from the worker dotenv.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    agents_dir = pathlib.Path(__file__).resolve().parents[2]
+    probe = (
+        "import json, os, sys\n"
+        f"sys.path.insert(0, {str(agents_dir)!r})\n"
+        "before = dict(os.environ)\n"
+        "import benchmarks.local as local\n"
+        # Under `python -c` the dotenv loaded is the working directory's (the real
+        # launcher's is agents/.env, which is WORKER_DOTENV_PATH's default).
+        "local.WORKER_DOTENV_PATH = local.Path(os.getcwd()) / '.env'\n"
+        "import benchmarks.run_benchmark\n"
+        "from benchmarks.local_worlds import needs_independent_worlds\n"
+        "needs_independent_worlds(['browser-biometrics-webdecoy', 'agent-payment-new-user-journey'], 2)\n"
+        "stack = local.service_base_environ()\n"
+        "print(json.dumps({\n"
+        "    'stack_leaked': sorted(k for k in stack if stack.get(k) != before.get(k)),\n"
+        "    'stack_provider': stack.get('BROWSER_PROVIDER'),\n"
+        "}))\n"
+    )
+    # Keys agents config.load_config() requires, plus the leaked provider and a sentinel:
+    # every one of them reaches the launcher only through the worker dotenv here.
+    worker_dotenv = {
+        "BROWSER_PROVIDER": "kernel",
+        "ROSE_RCA_WORKER_DOTENV_ONLY": "worker",
+        **{
+            key: "rca-worker-dotenv"
+            for key in (
+                "TEMPORAL_API_KEY",
+                "TEMPORAL_NAMESPACE",
+                "TEMPORAL_ADDRESS",
+                "TEMPORAL_TASK_QUEUE",
+                "OPENROUTER_API_KEY",
+                "OPENAI_API_KEY",
+                "PERPLEXITY_API_KEY",
+                "GEMINI_API_KEY",
+                "BROWSERBASE_API_KEY",
+                "BROWSERBASE_PROJECT_ID",
+            )
+        },
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        # With `python -c`, load_dotenv()'s find_dotenv() starts from the working directory.
+        pathlib.Path(tmp, ".env").write_text("".join(f"{k}={v}\n" for k, v in worker_dotenv.items()))
+        env = {k: v for k, v in os.environ.items() if k not in worker_dotenv}
+        result = subprocess.run(
+            [sys.executable, "-c", probe], cwd=tmp, env=env, capture_output=True, text=True, timeout=300
+        )
+    assert result.returncode == 0, result.stderr[-2000:]
+    observed = json.loads(result.stdout.strip().splitlines()[-1])
+    assert observed == {"stack_leaked": [], "stack_provider": None}, observed
 
 
 async def test_claude_code_only_run_withholds_gpt_compute_credentials():
@@ -27001,6 +27365,10 @@ async def run_all_tests():
     await r.record_async("normal_code_preflight_preserves_shared_fallback", test_normal_code_preflight_preserves_shared_fallback)
     await r.record_async("code_dispatch_skip_remains_opt_in", test_code_dispatch_skip_remains_opt_in)
     await r.record_async(
+        "codex_harness_preflight_uses_backend_codex_plan",
+        test_codex_harness_preflight_uses_backend_codex_plan_not_gpt_api_key,
+    )
+    await r.record_async(
         "claude_code_preflight_uses_runtime_credential_route",
         test_claude_code_preflight_uses_runtime_credential_route,
     )
@@ -27025,6 +27393,10 @@ async def run_all_tests():
         test_compute_token_sync_propagates_openrouter_claude_fallback_from_backend_env,
     )
     await r.record_async(
+        "non_claude_compute_refresh_scopes_seed_opt_in_and_preserves_strict_gates",
+        test_non_claude_compute_refresh_scopes_seed_opt_in_and_preserves_strict_gates,
+    )
+    await r.record_async(
         "anthropic_api_key_fallback_availability_fails_closed",
         test_anthropic_api_key_fallback_availability_fails_closed,
     )
@@ -27034,6 +27406,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_biometrics_evaluator",
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
+    )
+    r.record(
+        "webdecoy_score_evidence_recorded",
+        test_webdecoy_score_evidence_is_recorded_for_comparison,
     )
     r.record(
         "webdecoy_biometrics_grounded_result_precedence",
@@ -27153,6 +27529,14 @@ async def run_all_tests():
     r.record(
         "local_isolated_july_cache_read_only",
         test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only,
+    )
+    r.record(
+        "local_stack_env_excludes_worker_dotenv",
+        test_local_stack_env_excludes_worker_dotenv_loaded_by_launcher_imports,
+    )
+    r.record(
+        "benchmark_launcher_imports_do_not_load_worker_dotenv",
+        test_benchmark_launcher_imports_do_not_load_worker_dotenv,
     )
     r.record(
         "cloudbench_demo_cache_on_guest_read_only_like_local",

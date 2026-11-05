@@ -3,12 +3,42 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import ignore from 'ignore';
 import {
   resolveInstalledPackageRoots,
   UI_LIFECYCLE_PATCHES,
 } from '../../../scripts/patch-ui-lifecycle.mjs';
 
 describe('cloud image frontend install boundary', () => {
+  it('excludes the generated root lock while retaining committed workspace locks', () => {
+    const context = ignore().add(readFileSync(resolve('..', '.dockerignore'), 'utf8'));
+    // Both dependency layers copy package*.json from the root; an ignored,
+    // machine-generated lock must not override their committed manifest inputs.
+    for (const dockerfile of ['Dockerfile.cloudbench', 'Dockerfile.cloudbench-warm']) {
+      expect(readFileSync(resolve('..', dockerfile), 'utf8')).toContain(
+        'COPY --chown=rose:rose package*.json /app/',
+      );
+    }
+    // Use the canonical cloud preparation command as the installation contract,
+    // rather than allowing the image build to re-enter npm's failing peer resolver.
+    const installArgs = (path: string) => {
+      const command = readFileSync(resolve('..', path), 'utf8').match(/^\s*npm install (.+)$/m);
+      expect(command, path).not.toBeNull();
+      return command![1].trim().split(/\s+/).sort();
+    };
+    expect(installArgs('scripts/cloudbench-install-image-deps.sh')).toEqual(
+      installArgs('scripts/cloud-build.sh'),
+    );
+    expect(context.ignores('package-lock.json')).toBe(true);
+    for (const path of [
+      'package.json',
+      'back-end/package-lock.json',
+      'front-end/package-lock.json',
+    ]) {
+      expect(context.ignores(path), path).toBe(false);
+    }
+  });
+
   it.each(['Dockerfile.cloudbench', 'Dockerfile.cloudbench-warm'])(
     'runs the real postinstall from the dependency layer of %s',
     (dockerfile) => {

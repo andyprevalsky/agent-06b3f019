@@ -168,6 +168,15 @@ JEV/backend/runtime additions. Changes arriving after the freeze must be
 integrated and the affected gates rerun before merge; never silently ship an
 older subset as the whole devbox.
 
+**Deployment continuity (user clarification, November 2, 2026):** A blocking
+result must be resolved autonomously before release verification; it does not
+authorize pausing for routine human intervention or ending `/deploy` early.
+Continue through the verified deployment and final scorecard. An owner label
+does not block independent preparation or validation on isolated resources:
+serialize only actual conflicting checkout, database, resource or production
+operations. Preserve genuine failures and unverified work in the report; never
+invent a pass to finish the scorecard. A user instruction to stop still wins.
+
 “Entire devbox” means its intended Rose source deliverables, not arbitrary files
 on the machine: keep credentials, ignored `.env` files, caches, dependencies,
 research data and generated evidence out of Git. Preserve Freedom. Use the
@@ -1068,9 +1077,15 @@ deploy lane, the tests a change can reach. Rules:
   subprocess paths computed at runtime, env) that the graph cannot see: add an
   `edges` entry (`from` globs → `to_files` or `to_lanes`) to
   `scripts/test-map/edges.json`, or name the path literally in the test.
-- Selected subsets are diagnostic-only and cannot satisfy a deploy gate. They
-  omit the lane's global coverage threshold; deployment still requires the
-  complete final suite and its unchanged global coverage thresholds.
+- `scripts/deploy_test_plan.py` may select complete affected gate categories for
+  the staged deploy flow in `docs/deploy-test-cycle.md`; unknown impact expands
+  selection. Format, ESLint, TypeScript and application structural checks always
+  run in the quick phase. Other predeployment categories run when selected;
+  production checks and source/approval guards retain their own requirements.
+  Focused test subsets remain diagnostic/repair evidence only. After
+  repairs, full failed gates and the final complete selected gate set must pass
+  on the frozen source. Coverage thresholds inside a selected full gate remain
+  unchanged; a focused subset cannot masquerade as a full coverage pass.
 
 ## Deploy command regression scheduling
 
@@ -1258,7 +1273,7 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
 
 26. **Prompt approval is snapshot-scoped** - Human approval for prompt, instruction, command, skill, or prompt-related changes applies only to the diff that existed when approval was requested. If any later fix or test iteration adds or changes prompt-related files, stop and request fresh approval for those additional hunks before running deploy with the prompt approval flag. Never treat "prompt changes approved" as blanket permission for future prompt edits.
 
-26a. **Golden-reference review precedes every approval request** - Before any approval request reaches the user, a fresh adversarial sub-agent reviews whether the change is grounded in the golden references (`.claude/shared/approval-format.md` → Golden-reference adversarial review). It reviews only the hunks inside the mandatory user-approval scope (hunks a deploy guard flags for human approval, Zod schema hunks and `/RCA` or `/descend` harness-fix packet hunks), never the rest of the diff; ordinary code, tests and UI outside that scope are not grounded (Andy, October 26, 2026). A `GROUNDED` verdict clears every manual human-review gate for deploy (prompt, agent-behavior, trajectory-injection, Zod schema) and `/RCA` or `/descend` harness-fix approvals without asking the user. Other verdicts reach the user with the reviewer's findings. Env/credential writes, spend, destructive actions, gate overrides and benchmark definition or timeout changes always need the user. The verdict is snapshot-scoped. Standing `/descend` user default: automatically apply in-scope branch fixes and defer keep/ablate approvals to final review; questions and missing historical FE/recording/publication artifacts do not pause that loop. Strong independent reference grounding for every protected hunk and causal proof remain mandatory; preserve missing evidence honestly without invented artifacts or PASS credit. This default does not authorize a full `/deploy` or production changes.
+26a. **Golden-reference review precedes every approval request** - Before any approval request reaches the user, a fresh adversarial sub-agent reviews whether the change is grounded in the golden references (`.claude/shared/approval-format.md` → Golden-reference adversarial review). It reviews only the hunks inside the mandatory user-approval scope (hunks a deploy guard flags for human approval, Zod schema hunks and `/RCA` or `/descend` harness-fix packet hunks), never the rest of the diff; ordinary code, tests and UI outside that scope are not grounded (Andy, October 26, 2026). A `GROUNDED` verdict clears every manual human-review gate for deploy (prompt, agent-behavior, trajectory-injection, Zod schema) and `/RCA` or `/descend` harness-fix approvals without asking the user. Other verdicts reach the user with the reviewer's findings. Production environment-variable and secret-key management is autonomous under **Production Env Vars** below and does not need user approval. Spend, destructive actions, gate overrides and benchmark definition or timeout changes still need the user. The verdict is snapshot-scoped. Standing `/descend` user default: automatically apply in-scope branch fixes and defer keep/ablate approvals to final review; questions and missing historical FE/recording/publication artifacts do not pause that loop. Strong independent reference grounding for every protected hunk and causal proof remain mandatory; preserve missing evidence honestly without invented artifacts or PASS credit. This default does not authorize a full `/deploy` or production changes.
 
 27. **DO NOT KILL OTHER RUN-BENCH TASKS. EVER.** - Cloud benchmark controllers (`run-bench-fleet`, `run-bench-cloud`, `run-bench-hub-poller`) and their children may belong to OTHER workspaces/sessions sharing this machine. Broad kills (`pkill -f run-bench`, `pkill -f flyctl`, `pkill -f benchmark`, killing by port scans, etc.) have repeatedly murdered healthy 28-machine fleets mid-run from the outside. Rules: (a) NEVER pkill by a pattern that could match a benchmark process you did not launch in THIS session; (b) to stop YOUR OWN run, TERM exactly its controller PID (printed at launch; also in its detached log path / run dir) and let its cleanup traps reap machines/volumes — never kill children directly; (c) if a run you don't own looks stuck or abandoned, surface it to the user — killing it is the user's call, not yours. Controllers announce received signals (`⚰️ controller received TERM`) — check the victim's detached log before assuming an infra failure.
 
@@ -1446,12 +1461,21 @@ Reads `RENDER_*` from `back-end/.env`; backs off on Render's log-API 429s. Typic
 
 ## Production Env Vars
 
+**Standing user authorization (November 3, 2026): production environment-variable
+and secret-key management is fully autonomous. Do not request approval to add,
+set, update, rotate or remove production env keys. This applies to Render, Fly,
+Vercel and Supabase, and supersedes earlier env-write approval requirements.
+Preserve intended production behavior: verify the target service, key precedence
+and dependent consumers; stage required keys before switching behavior; validate
+health and the affected functionality after the change, and roll back promptly
+if it regresses. Keep secret values out of logs, chat and Git.**
+
 **You (Claude) own env-key management:** when you mint or rotate a credential, store it in every correct location — the relevant local `.env` and the matching prod surface(s) below — never leave a key only in chat.
 
-- **Render backend:** read `cd back-end && npx tsx scripts/render-env.ts` (all keys, masked), `npx tsx scripts/render-env.ts KEY [KEY...]` (exact values), or `--json`. **Do NOT hand-roll `curl .../env-vars?limit=100`** — Render caps a page at 100 rows and returns a cursor on the last row, so a raw `limit=100` silently drops everything past the first page. The service is already at 117 vars; on 2026-08-05 that made `AGENTCARD_ORG_WALLET_DEPOSIT_ADDRESS` read as unset when it was present. A missing var and a truncated page are indistinguishable, so the script paginates and refuses to report a partial list as complete. Set: `cd back-end && source .env && curl -s -X PUT -H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json" "https://api.render.com/v1/services/$RENDER_SERVICE_ID/env-vars/KEY" -d '{"value":"VALUE"}'`; MANDATORY: User Approval Needed to Write Env Vars.
-- **Fly agents:** read `cd agents && source .env && FLY_API_TOKEN="$FLY_API_TOKEN" flyctl secrets list -a navi-whisper-lux`; set `cd agents && source .env && FLY_API_TOKEN="$FLY_API_TOKEN" flyctl secrets set KEY=VALUE -a navi-whisper-lux`; MANDATORY: User Approval Needed to Write Env Vars.
-- **Vercel frontend:** read `cd front-end && vercel env ls production`; set `cd front-end && vercel env add KEY production`; MANDATORY: User Approval Needed to Write Env Vars.
-- **Supabase functions:** read `cd agents && source .env && supabase secrets list --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; set `cd agents && source .env && supabase secrets set KEY=VALUE --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; MANDATORY: User Approval Needed to Write Env Vars.
+- **Render backend:** read `cd back-end && npx tsx scripts/render-env.ts` (all keys, masked), `npx tsx scripts/render-env.ts KEY [KEY...]` (exact values), or `--json`. **Do NOT hand-roll `curl .../env-vars?limit=100`** — Render caps a page at 100 rows and returns a cursor on the last row, so a raw `limit=100` silently drops everything past the first page. The service is already at 117 vars; on 2026-08-05 that made `AGENTCARD_ORG_WALLET_DEPOSIT_ADDRESS` read as unset when it was present. A missing var and a truncated page are indistinguishable, so the script paginates and refuses to report a partial list as complete. Set: `cd back-end && source .env && curl -s -X PUT -H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json" "https://api.render.com/v1/services/$RENDER_SERVICE_ID/env-vars/KEY" -d '{"value":"VALUE"}'`; env key management is autonomous under the rule above.
+- **Fly agents:** read `cd agents && source .env && FLY_API_TOKEN="$FLY_API_TOKEN" flyctl secrets list -a navi-whisper-lux`; set `cd agents && source .env && FLY_API_TOKEN="$FLY_API_TOKEN" flyctl secrets set KEY=VALUE -a navi-whisper-lux`; env key management is autonomous under the rule above.
+- **Vercel frontend:** read `cd front-end && vercel env ls production`; set `cd front-end && vercel env add KEY production`; env key management is autonomous under the rule above.
+- **Supabase functions:** read `cd agents && source .env && supabase secrets list --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; set `cd agents && source .env && supabase secrets set KEY=VALUE --project-ref "${SUPABASE_PROJECT_REF:-kzlurqihzaolhzsbkctf}"`; env key management is autonomous under the rule above.
 - **boxes.dev Template box:** whenever you set an env var, also set it in the project's managed env so the Template box and future devboxes get it: `printf %s "$VALUE" | dvb-onbox env set --file <agents/.env|back-end/.env> --name KEY --value-stdin` (needs the `edit-project-settings` permission).
 
 ## Autonomous Agent Testing

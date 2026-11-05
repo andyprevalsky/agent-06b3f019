@@ -72,15 +72,17 @@ export { selectedBrowserProvider, tilionEnabled, TilionApiKeyMissingError } from
  * session accepts ONE CDP socket: a second is accepted then closed with 4409
  * while the first is unaffected, and the same token reattaches after the first
  * disconnects. While a CDP client is attached, REST drive calls do not wait:
- * screenshot/act answer 409 `session_driven_by_client` and files/fetch 502
- * `ExternalControlBusy`; only /status keeps working. Backend paths therefore:
+ * act answers 409 `session_driven_by_client` and files/fetch 409/502; /status
+ * keeps working, and since 2026-11 a read-only screenshot is served beside the
+ * client (200, `beside_client: true`). Backend paths therefore:
  *
  *   initSession:   create (validation socket) → injectUserData (reuses it) → close it → worker attaches
  *   prepare-auth / inject-local-storage (JIT):  worker detaches → backend CDP → worker reattaches
  *   closeSession:  worker detaches → persistSignedInBrowserState harvest → provider release
- *   screenshot / press-key / file read+list+upload: REST, valid only while no client is
- *     attached; mid-run they raise TilionSessionBusyError (HTTP 409
- *     `session_driven_by_client`) and the worker uses its own CDP connection instead.
+ *   press-key / file read+list+upload: REST, valid only while no client is attached;
+ *     mid-run they raise TilionSessionBusyError (HTTP 409 `session_driven_by_client`)
+ *     and the worker uses its own CDP connection instead.
+ *   screenshot: read-only REST, served beside an attached client (see above).
  *   health / captcha telemetry / live view: REST status and token mints, safe while attached.
  *
  * A harvest that still collides is logged and the release proceeds, so a busy

@@ -17,6 +17,8 @@ from .select_predeploy_benches import (
     KNOWN_DEPLOY_CATEGORIES,
     has_pass_streak,
     load_attempt_passes,
+    format_report,
+    main,
     select_predeploy_benches,
 )
 
@@ -65,9 +67,13 @@ def test_predeploy_excludes_production_only_even_with_pass_streak(tmp_path: Path
     catalog = tmp_path / "tasks.json"
     attempts = tmp_path / "attempts.jsonl"
     tasks = [
-        {"name": "normal-smoke", "tags": ["smoke"]},
+        {"name": "normal-smoke", "tags": ["smoke"], "requires_claude_code": True},
         {"name": "production-smoke", "tags": ["smoke"], "production_only": True},
-        {"name": "normal-payment", "tags": ["payment"], "deploy_canary": True, "timeout_seconds": 20},
+        {
+            "name": "normal-payment", "tags": ["payment", "agentcard-lifecycle-sandbox"],
+            "expected_payment_lifecycle": {"orgTransfer": {"livemode": False}},
+            "deploy_canary": True, "timeout_seconds": 20,
+        },
         {
             "name": "production-payment",
             "tags": ["payment"],
@@ -94,6 +100,60 @@ def test_predeploy_excludes_production_only_even_with_pass_streak(tmp_path: Path
     assert selection.path_extras == ["normal-depth"]
     assert selection.cap == 20 and selection.pass_streak_required == 3
     assert not selection.cap_hit and not selection.dropped and not selection.skipped_history
+    # This test is also called by benchmark.blackbox.py's registered selector
+    # case: selection-time eligibility must be visible before a native run.
+    report = format_report(selection)
+    assert "Standing skip eligibility" in report
+    assert "normal-payment" in report and "_agentcard_release_skip_lifecycle" in report
+    assert "HELD" in report and "RECLAIMING" in report and "releasedCents=0" in report
+    assert "livemode=false" in report and "stripeRefund" in report
+    assert "_check_claude_code_credentials" in report and "native credential sync" in report
+    assert "no synced Claude credentials and no pool token" in report
+    assert "All other assertions and owned-resource cleanup remain required" in report
+    assert "not a SKIP verdict" in report
+    assert set(selection.skip_eligibility) == {"normal-smoke", "normal-payment"}
+
+
+def test_skip_display_uses_literal_catalog_contract_and_preserves_cli(tmp_path: Path, capsys) -> None:
+    catalog, attempts = tmp_path / "tasks.json", tmp_path / "attempts.jsonl"
+    tasks = [
+        {"name": "unrelated-smoke", "tags": ["smoke"]},
+        {"name": "payment-eligible", "tags": ["smoke", "agentcard-lifecycle-sandbox"],
+         "expected_payment_lifecycle": {"orgTransfer": {"livemode": False}}},
+        {"name": "claude-eligible", "tags": ["smoke"], "requires_claude_code": True},
+        {"name": "boolean-zero-is-not-false", "tags": ["smoke", "agentcard-lifecycle-sandbox"],
+         "expected_payment_lifecycle": {"orgTransfer": {"livemode": 0}}},
+        {"name": "cross-mode", "tags": ["smoke", "agentcard-lifecycle-sandbox"],
+         "expected_payment_lifecycle": {"orgTransfer": {"livemode": True}}},
+        {"name": "tag-without-contract", "tags": ["smoke", "agentcard-lifecycle-sandbox"]},
+        {"name": "contract-without-tag", "tags": ["smoke"],
+         "expected_payment_lifecycle": {"orgTransfer": {"livemode": False}}},
+        {"name": "tagged-claude-without-requirement", "tags": ["smoke", "claude-code"]},
+        {"name": "production-excluded", "tags": ["smoke", "agentcard-lifecycle-production"],
+         "production_only": True, "expected_payment_lifecycle": {"orgTransfer": {"livemode": True}}},
+    ]
+    catalog.write_text(json.dumps(tasks))
+    attempts.write_text("")
+    args = ["--catalog", str(catalog), "--attempts-file", str(attempts),
+            "--changed-file", "README.md", "--repo-root", str(ROOT)]
+    expected = [task["name"] for task in tasks if not task.get("production_only")]
+    assert main([*args, "--format", "names"]) == 0
+    names = capsys.readouterr()
+    assert names.out.splitlines() == expected
+    assert "Standing skip eligibility" in names.err
+    assert "payment-eligible" in names.err and "claude-eligible" in names.err
+    assert main([*args, "--format", "json"]) == 0
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert output.err == ""
+    assert payload["selected"] == expected and payload["total"] == len(expected)
+    assert set(payload["skip_eligibility"]) == {"payment-eligible", "claude-eligible"}
+    assert payload["cap"] == DEFAULT_CAP and not payload["cap_hit"]
+    assert not payload["dropped"] and not payload["skipped_history"]
+    assert main([*args, "--format", "names-and-report"]) == 0
+    combined = capsys.readouterr().out
+    assert combined.split("---PREDEPLOY_BENCH_NAMES---\n")[1].split("---END_PREDEPLOY_BENCH_NAMES---")[0].splitlines() == expected
+    assert combined.index("Standing skip eligibility") < combined.index("---PREDEPLOY_BENCH_NAMES---")
 
 
 def test_smoke_always_selected_canaries_need_last_three_passes() -> None:

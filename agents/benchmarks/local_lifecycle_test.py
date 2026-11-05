@@ -959,7 +959,7 @@ from pathlib import Path
 name=Path(sys.argv[0]).name
 state=Path(os.environ['BOOTSTRAP_DB_STATE'])
 with open(os.environ['BOOTSTRAP_EXTERNAL_LOG'],'a') as log:log.write(name+' '+' '.join(sys.argv[1:])+'\n')
-if name in ('docker','lsof'):sys.exit(1)
+if name in ('docker','lsof','pgrep'):sys.exit(1)
 if name=='pg_isready':sys.exit(0)
 if name=='pg_dump':print('pg_dump (PostgreSQL) 16.4');sys.exit(0)
 if name=='createdb':state.write_text('owned');sys.exit(0)
@@ -980,7 +980,7 @@ if name=='npx':
  if 'scripts/seed-dump-cache.ts' in sys.argv and 'get' in sys.argv:sys.exit(1)
 sys.exit(99)
 """
-    for name in ("docker", "lsof", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"):
+    for name in ("docker", "lsof", "pgrep", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"):
         path = binary / name
         path.write_text(fake)
         path.chmod(0o700)
@@ -1021,7 +1021,7 @@ def _run_native_seed_bootstrap(folder, *, drop_fail=False, lock_fail=False, read
     assert not stack.manifest_path.exists(), "no services may start after failed seed admission"
     assert (folder/"seed.dump.publish.lock").is_symlink() == (lock_fail or read_fail), "seed lock cleanup did not match the external outcome"
     calls = (folder/"external.log").read_text().splitlines()
-    assert all(line.split()[0] in {"docker", "lsof", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"} for line in calls)
+    assert all(line.split()[0] in {"docker", "lsof", "pgrep", "pg_isready", "pg_dump", "createdb", "dropdb", "npx", "rm", "readlink"} for line in calls)
     assert all("npx" != line.split()[0] or "ensure-fast-mode-cache-schema.ts" in line or "seed-dump-cache.ts get" in line for line in calls)
     return local, stack
 
@@ -1468,3 +1468,31 @@ def test_local_stack_reconcile_resolves_pending_receipt_only_when_nothing_is_lef
 
     stack, _, _, pending, _ = fixture()
     assert_stays_pending(stack, pending, "database absence unverifiable", db=unreachable)
+
+
+def test_seed_bootstrap_fixture_does_not_enumerate_ambient_worker_processes():
+    """The pre-service seed proof must not scan a sibling host's worker inventory."""
+    from unittest.mock import patch
+    import shlex
+
+    with tempfile.TemporaryDirectory(prefix="native-seed-inventory-") as directory:
+        folder = Path(directory)
+        ambient = folder / "ambient"
+        ambient.mkdir()
+        observed = folder / "ambient-pgrep.log"
+        probe = ambient / "pgrep"
+        # A large unrelated inventory must never reach the copied bootstrap.
+        # Values exceed the native PID ceiling, so no actual process is targeted.
+        probe.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "$*" >> {shlex.quote(str(observed))}\n'
+            'case "$*" in *worker*) seq 4294967296 4294968295; exit 0;; esac\n'
+            "exit 1\n"
+        )
+        probe.chmod(0o700)
+        with patch.dict(os.environ, {"PATH": f"{ambient}:{os.environ['PATH']}",
+                                    "AMBIENT_PGREP_LOG": str(observed)}):
+            local, stack = _run_native_seed_bootstrap(folder)
+        assert not observed.exists(), "seed fixture consulted ambient process discovery"
+        assert not (folder / "database.state").exists(), "owned fixture database leaked"
+        local.stop_services(None, stack=stack)

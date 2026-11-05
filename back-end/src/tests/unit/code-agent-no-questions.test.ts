@@ -161,7 +161,7 @@ for (const roseDesktop of [false, true]) {
 }
 
 /** Evaluate the real buildCodexArgs from ws-server.mjs with fixed inputs. */
-function codexArgs(withRoseCli: boolean): string[] {
+function codexArgs(withRoseCli: boolean, effort: string): string[] {
   const source = readFileSync(codexWsServer, 'utf8');
   const parsed = ts.createSourceFile(
     codexWsServer,
@@ -178,6 +178,7 @@ function codexArgs(withRoseCli: boolean): string[] {
   const build = runInNewContext(`(${declaration.getText(parsed)})`, {
     workDir: '/home/user/workspace',
     CODEX_MODEL: 'gpt-test',
+    CODEX_REASONING_EFFORT: effort,
     CODEX_RESUME_SESSION_ID: '',
     sanitizedGoal: 'goal',
     home: '/home/user',
@@ -194,11 +195,20 @@ function codexArgs(withRoseCli: boolean): string[] {
 
 test('Codex launches with request_user_input disabled in Default mode', () => {
   for (const withRoseCli of [false, true]) {
-    const args = Array.from(codexArgs(withRoseCli));
-    const overrides = args.flatMap((arg, index) => (args[index - 1] === '-c' ? [arg] : []));
-    assert.ok(
-      overrides.includes('features.default_mode_request_user_input=false'),
-      `REGRESSION: Codex launched without disabling request_user_input: ${JSON.stringify(args)}`
-    );
+    // The extracted function still needs its module-scope CLI settings. Exercise
+    // both tier efforts and the unset CLI default without bypassing the builder.
+    for (const effort of ['medium', 'xhigh', '']) {
+      const args = Array.from(codexArgs(withRoseCli, effort));
+      const overrides = args.flatMap((arg, index) => (args[index - 1] === '-c' ? [arg] : []));
+      assert.ok(
+        overrides.includes('features.default_mode_request_user_input=false'),
+        `REGRESSION: Codex launched without disabling request_user_input: ${JSON.stringify(args)}`
+      );
+      assert.deepEqual(
+        overrides.filter((value) => value.startsWith('model_reasoning_effort=')),
+        effort ? [`model_reasoning_effort=${JSON.stringify(effort)}`] : [],
+        'the real builder must preserve configured effort and omit an unset override'
+      );
+    }
   }
 });

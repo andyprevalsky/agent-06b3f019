@@ -1,7 +1,7 @@
 """Model pool registry — single source of truth for Rose's pool definitions.
 
 Both rose-1-flash and rose-1-ultra share the same router; ultra adds a
-GPT-6 Sol Foundry fallback after direct credentials and before OpenRouter.
+GPT-6.1 Sol Foundry fallback after direct credentials and before OpenRouter.
 
 Model contract — 2026-09-27 live stream bench plus Artificial Analysis
 Intelligence Index v4.3.2. Speed numbers are our OpenRouter medians
@@ -17,8 +17,9 @@ Intelligence Index v4.3.2. Speed numbers are our OpenRouter medians
                                 is downgraded like Fable until a credited call
                                 proves Opus accepts forced tool_choice.
 
-rose-1-flash / rose-1-browser-use skip Claude/GPT auth and funded API keys.
-Primary is Cerebras ``qwen-3.8-27b`` (direct, not OpenRouter). OpenRouter
+Flash chat and browser-use keep their Cerebras-first policy. Root/explore
+overrides in flash_agent.py enable compute subscriptions only for those roles.
+Funded OpenAI/Anthropic API keys remain disabled. Primary is Cerebras ``qwen-3.8-27b`` (direct, not OpenRouter). OpenRouter
 fallback is qwen/qwen3.8-27b then google/gemini-3.8-flash. Planner stays
 on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
 
@@ -30,21 +31,24 @@ on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
         waterfall effort = low
 
     rose-1-flash:  (renamed from rose-1-lite; rose-fast)
+        subscription_auth_enabled = False
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
-        foundry    = gpt-5.6-luna (when configured; after Cerebras)
+        foundry    = gpt-6-luna only (medium; any region whose
+                     AZURE_FOUNDRY_DEPLOYMENTS* lists it; after Cerebras)
         waterfall  = qwen/qwen3.8-27b -> google/gemini-3.8-flash
-        waterfall effort = low
+        waterfall effort = medium
 
     rose-1-ultra:  (frontier — planner / verifier / param-populator)
         claudeAuth = claude-opus-5-5
-        gptAuth    = gpt-6-sol
-        foundry    = gpt-6-sol (when configured)
-        waterfall  = openai/gpt-6-sol -> moonshotai/kimi-k3
+        gptAuth    = gpt-6.1-sol
+        foundry    = gpt-6.1-sol only (when configured)
+        waterfall  = openai/gpt-6.1-sol -> moonshotai/kimi-k3
 
     rose-1-browser-use:  (same rose-fast hop as flash; browser agents normally
                           run on their spawning agent's pool, this one serves
                           non-Rose agent models)
+        subscription_auth_enabled = False
         direct_auth_enabled = False
         cerebras   = qwen-3.8-27b (high; Cerebras max, xhigh 400s)
         foundry    = gpt-5.6-luna (when configured; after Cerebras)
@@ -119,9 +123,13 @@ class PoolSpec:
 
     direct_auth_enabled: bool = True
     """When False, OAuth and funded API-key routes (claudeAuth / gptAuth /
-    ANTHROPIC_API_KEY / GPT_API_KEY) are skipped. The pool then starts at
+    ANTHROPIC_API_KEY / GPT_API_KEY) are skipped unless subscriptions are
+    independently enabled below. The pool then starts at
     `cerebras_model` (if set), then Foundry (if `foundry_enabled`), and falls
     through to `waterfall`."""
+
+    subscription_auth_enabled: bool | None = None
+    """Override subscription eligibility independently of funded API-key routes."""
 
     cerebras_model: str | None = None
     """Bare Cerebras inventory id, posted to api.cerebras.ai (not OpenRouter)."""
@@ -177,22 +185,28 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
             "qwen/qwen3.8-27b",
             "google/gemini-3.8-flash",
         ),
-        waterfall_reasoning_effort="low",
+        # Azure and OpenRouter Qwen/Gemini fallbacks all run at medium.
+        waterfall_reasoning_effort="medium",
         direct_auth_enabled=False,
+        subscription_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
         cerebras_reasoning_effort="high",
         foundry_enabled=True,
+        # Azure serves GPT-6 Luna only (never the 5.6 Luna gpt_auth_model), in
+        # whichever regions list a gpt-6-luna deployment.
+        foundry_model="gpt-6-luna",
     ),
     "rose-1-ultra": PoolSpec(
         name="rose-1-ultra",
         claude_auth_model="claude-opus-5-5",
-        gpt_auth_model="gpt-6-sol",
+        gpt_auth_model="gpt-6.1-sol",
         foundry_enabled=True,
+        foundry_model="gpt-6.1-sol",
         # Opus 5.5 is the AA v4.3.2 leader (58) and cheaper than Fable 5.1
-        # ($4/$20 vs $10/$50). Paid waterfall is gpt-6-sol ($2/$10, index 48)
-        # then kimi-k3 (index 44). Fable stays off this waterfall.
+        # ($4/$20 vs $10/$50). Paid waterfall starts at GPT-6.1 Sol,
+        # then kimi-k3. Fable stays off this waterfall.
         waterfall=(
-            "openai/gpt-6-sol",
+            "openai/gpt-6.1-sol",
             "moonshotai/kimi-k3",
         ),
     ),
@@ -213,6 +227,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         ),
         waterfall_reasoning_effort="low",
         direct_auth_enabled=False,
+        subscription_auth_enabled=False,
         cerebras_model="qwen-3.8-27b",
         cerebras_reasoning_effort="high",
         foundry_enabled=True,

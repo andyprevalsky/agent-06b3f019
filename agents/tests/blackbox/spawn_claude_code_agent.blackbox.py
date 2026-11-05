@@ -3073,7 +3073,7 @@ async def test_spawn_activity_codex_oauth_fallback_success_continues():
     async def fake_loop(**kwargs):
         kwargs["terminal"].feed(
             "[Codex] Error: Quota exceeded. Check your plan and billing details.\n"
-            "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n"
+            "[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n"
             + "".join(f"normal fallback output {index}\n" for index in range(650))
             + "CODEX_E2B_DONE\n"
         )
@@ -3136,7 +3136,7 @@ async def test_spawn_activity_codex_oauth_fallback_success_continues():
     persisted_output = persisted.await_args.args[1]
     assert persisted_output.strip()
     assert "[Codex" in persisted_output
-    assert "ChatGPT OAuth unavailable" not in persisted_output
+    assert "ChatGPT OAuth unusable" not in persisted_output
     assert persisted.await_args.kwargs["credential_feedback"] == [
         {
             "source": "oauth",
@@ -3174,7 +3174,7 @@ async def test_spawn_activity_codex_double_exhaustion_is_terminal_and_persisted(
     async def fake_loop(**kwargs):
         kwargs["terminal"].feed(
             "[Codex] Error: Quota exceeded. Check your plan and billing details.\n"
-            "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n"
+            "[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n"
             + "".join(f"normal fallback output {index}\n" for index in range(650))
             + "[Codex] Error code: insufficient_quota\n"
         )

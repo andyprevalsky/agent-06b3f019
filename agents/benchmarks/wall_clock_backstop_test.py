@@ -209,7 +209,13 @@ def test_backstop_covers_real_task_preparation_and_checkpoint(monkeypatch, tmp_p
         raise DiagnosticsReached
 
     async def unexpected_poll(*args):
-        raise UnexpectedPoll("polling started before the blocked preparation completed")
+        if phase != "archive":
+            raise UnexpectedPoll("polling started before the blocked preparation completed")
+        try:
+            events.append("poll-started")
+            await asyncio.Event().wait()
+        finally:
+            events.append("poll-cancelled")
 
     for name in (
         "_apply_live_fixtures",
@@ -259,7 +265,12 @@ def test_backstop_covers_real_task_preparation_and_checkpoint(monkeypatch, tmp_p
 
     with pytest.raises(DiagnosticsReached):
         asyncio.run(run())
-    assert events == ["created", phase, "preparation-cancelled", "paused", "diagnostics"]
+    if phase == "archive":
+        assert events[:3] == ["created", "archive", "poll-started"]
+        assert set(events[3:5]) == {"preparation-cancelled", "poll-cancelled"}
+        assert events[5:] == ["paused", "diagnostics"]
+    else:
+        assert events == ["created", phase, "preparation-cancelled", "paused", "diagnostics"]
 
 
 def test_delayed_entry_uses_creation_time_instead_of_restarting_clock(monkeypatch):
@@ -286,3 +297,243 @@ def test_delayed_entry_uses_creation_time_instead_of_restarting_clock(monkeypatc
     result = asyncio.run(run())
     assert events == ["paused"]
     assert "Timeout after 300s" in result[3]
+
+
+class _ExecutionObserved(BaseException):
+    """Stop the real task owner after its execution boundary, before scoring I/O."""
+
+
+def _archive_observation_owner(monkeypatch, archive, poll=None):
+    """Exercise real creation/execute_agent/backstop/finally; replace only external I/O."""
+    from unittest.mock import AsyncMock
+
+    task = deepcopy(get_task_by_name("background-agent-message-smoke"))
+    outcome = {}
+    backstop = runner._run_with_agent_execution_backstop
+
+    async def observe_execution(*args, **kwargs):
+        try:
+            outcome["result"] = await backstop(*args, **kwargs)
+        except BaseException as error:
+            outcome["error"] = error
+        raise _ExecutionObserved
+
+    for name in (
+        "prepare_sandbox_payment_residual", "_apply_live_fixtures", "_apply_memory_fixtures",
+        "_apply_auth_test_site", "_restore_live_fixture_scenarios_async", "_release_auth_test_site",
+        "subscribe_supabase_realtime_agent", "post_world_model_update_events",
+        "_warm_cache_gated_root", "get_agent_tree",
+    ):
+        monkeypatch.setattr(runner, name, AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "create_agent", AsyncMock(return_value="private-feedback-root"))
+    monkeypatch.setattr(runner, "archive_agent_start", archive)
+    monkeypatch.setattr(runner, "_run_with_agent_execution_backstop", observe_execution)
+    if poll is not None:
+        monkeypatch.setattr(runner, "_poll_agent", poll)
+
+    async def run():
+        with pytest.raises(_ExecutionObserved):
+            await runner._run_single_task_as_run_user(
+                "https://fixture.invalid", task, True, None, "", None, None, None
+            )
+        return outcome
+
+    return task, run, outcome
+
+
+def test_start_archive_pending_does_not_hide_background_feedback_window(monkeypatch):
+    """A whole explore can finish while required archival is pending; real polling must see it."""
+    from unittest.mock import AsyncMock
+
+    async def case():
+        archive_started, release_archive = asyncio.Event(), asyncio.Event()
+        feedback_posted, poll_finished = asyncio.Event(), asyncio.Event()
+        owned = {}
+        polls = 0
+        real_poll = runner._poll_agent
+
+        async def archive(*args):
+            owned["archive"] = asyncio.current_task()
+            archive_started.set()
+            await release_archive.wait()
+            return "private-start-fixture"
+
+        async def poll(*args):
+            owned["poll"] = asyncio.current_task()
+            try:
+                return await real_poll(*args)
+            finally:
+                poll_finished.set()
+
+        task, run, outcome = _archive_observation_owner(monkeypatch, archive, poll)
+        original_timeout, original_price = task.timeout_seconds, task.price_limit_cents
+        assert original_timeout == 180
+        bg = "private-explore"
+        running_rows = [
+            {"role": "TOOL", "message": "Started explore agent in background.", "metadata": {
+                "toolCallId": bg, "toolName": "spawn_agent", "toolStatus": "FINISHED",
+                "runInBackground": True, "hidden": True, "backgroundTaskId": bg,
+                "backgroundAddress": bg, "backgroundAgentType": "explore"}},
+            {"role": "TOOL", "message": "working", "metadata": {
+                "toolCallId": bg, "toolName": "spawn_agent", "toolStatus": "IN_PROGRESS",
+                "agentType": "explore", "excludeFromModel": True}},
+        ]
+
+        async def get_agent(*args):
+            nonlocal polls
+            polls += 1
+            messages = deepcopy(running_rows)
+            if polls > 1:
+                messages.extend([
+                    {"role": "USER", "text": task.mid_run_feedback["message"]},
+                    {"role": "USER", "message": "explore complete", "metadata": {
+                        "agentNotification": True, "backgroundTaskId": bg,
+                        "agentType": "explore", "status": "completed"}},
+                ])
+            return {"agent": {"agent_id": "private-feedback-root", "status": "ACTIVE" if polls == 1 else "COMPLETED",
+                              "response_schema": task.response_schema}, "messages": messages}
+
+        async def post(*args):
+            assert not release_archive.is_set(), "feedback was delayed until archival completed"
+            assert polls == 1, "feedback missed the active background task"
+            feedback_posted.set()
+            return True
+
+        monkeypatch.setattr(runner, "get_agent", get_agent)
+        monkeypatch.setattr(runner, "post_message", post)
+        monkeypatch.setattr(runner, "get_attention_requests", AsyncMock(return_value=[]))
+        monkeypatch.setattr(runner, "_fetch_tree_stats", AsyncMock(return_value={
+            "agent_count": 0, "total_messages": 0, "total_cost_cents": 0, "active_count": 0,
+            "failed_count": 0, "tree_tokens_in": 0, "tree_tokens_out": 0, "error_agents": [], "all_agents": [],
+        }))
+        monkeypatch.setattr(runner, "POLL_INTERVAL", 0)
+        execution = asyncio.create_task(run())
+        try:
+            await asyncio.wait_for(archive_started.wait(), 1)
+            await asyncio.wait_for(feedback_posted.wait(), 1)
+            await asyncio.wait_for(poll_finished.wait(), 1)
+            assert not execution.done(), "task returned before its required start archive joined"
+            assert "error" not in outcome, repr(outcome.get("error"))
+            assert not owned["archive"].done()
+            release_archive.set()
+            await execution
+            assert "error" not in outcome, outcome
+            assert task._mid_run_feedback_evidence["background_task"]["background_task_id"] == bg
+            assert outcome["result"][0]["agent"]["status"] == "COMPLETED"
+            assert (task.timeout_seconds, task.price_limit_cents) == (original_timeout, original_price)
+        finally:
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+        assert all(task.done() for task in owned.values())
+        assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+
+    asyncio.run(case())
+
+
+@pytest.mark.parametrize("failure", ["archive", "poll", "cancel", "archive-cancel"])
+def test_start_archive_observation_errors_and_cancellation_join_both(monkeypatch, failure):
+    async def case():
+        entered = {name: asyncio.Event() for name in ("archive", "poll")}
+        retired, owned = set(), {}
+        original = RuntimeError(f"{failure} failed")
+
+        async def operation(name):
+            owned[name] = asyncio.current_task()
+            entered[name].set()
+            try:
+                await entered["archive"].wait()
+                await entered["poll"].wait()
+                if failure == name:
+                    raise original
+                if failure == "archive-cancel" and name == "archive":
+                    raise asyncio.CancelledError
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0.05)  # Prove asynchronous cancellation cleanup was joined.
+                retired.add(name)
+
+        async def archive(*args):
+            return await operation("archive")
+
+        async def poll(*args):
+            return await operation("poll")
+
+        _, run, outcome = _archive_observation_owner(monkeypatch, archive, poll)
+        execution = asyncio.create_task(run())
+        try:
+            await asyncio.wait_for(entered["archive"].wait(), 1)
+            await asyncio.wait_for(entered["poll"].wait(), 1)
+            if failure == "cancel":
+                execution.cancel()
+            await asyncio.wait_for(execution, 1)
+            error = outcome["error"]
+            if failure in ("archive", "poll"):
+                assert error is original, "orchestration hid the original failure"
+            else:
+                assert isinstance(error, asyncio.CancelledError)
+            assert retired == {"archive", "poll"}
+            assert all(task.done() for task in owned.values())
+        finally:
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+        assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+
+    asyncio.run(case())
+
+
+@pytest.mark.parametrize("cancel_phase", ["running", "deadline-drain"])
+def test_external_cancel_joins_archive_and_poll_at_actual_backstop_boundary(monkeypatch, cancel_phase):
+    async def case():
+        entered = {name: asyncio.Event() for name in ("archive", "poll")}
+        retired, children = set(), {}
+        boundary = {}
+        finalizing = asyncio.Event()
+        backstop = runner._run_with_agent_execution_backstop
+        if cancel_phase == "deadline-drain":
+            monkeypatch.setattr(runner, "agent_execution_backstop_seconds", lambda task=None: 0.01)
+
+        async def operation(name):
+            children[name] = asyncio.current_task()
+            entered[name].set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalizing.set()
+                await asyncio.sleep(0.05)
+                retired.add(name)
+
+        async def archive(*args):
+            return await operation("archive")
+
+        async def poll(*args):
+            return await operation("poll")
+
+        _, run, _ = _archive_observation_owner(monkeypatch, archive, poll)
+
+        async def check_boundary(*args, **kwargs):
+            owner = asyncio.create_task(backstop(*args, **kwargs))
+            try:
+                for event in entered.values():
+                    await asyncio.wait_for(event.wait(), 1)
+                if cancel_phase == "deadline-drain":
+                    await asyncio.wait_for(finalizing.wait(), 1)
+                owner.cancel()
+                if cancel_phase == "deadline-drain":
+                    await asyncio.sleep(0.01)
+                    owner.cancel()  # Repeated cancellation must not abandon or restart the drain.
+                with pytest.raises(asyncio.CancelledError):
+                    await owner
+                boundary["retired"] = set(retired)
+                boundary["children_done"] = all(child.done() for child in children.values())
+            finally:
+                owner.cancel()
+                await asyncio.gather(owner, *children.values(), return_exceptions=True)
+            raise _ExecutionObserved
+
+        monkeypatch.setattr(runner, "_run_with_agent_execution_backstop", check_boundary)
+        await run()
+        assert boundary["retired"] == {"archive", "poll"}, "backstop returned before async finalizers joined"
+        assert boundary["children_done"]
+        assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+
+    asyncio.run(case())

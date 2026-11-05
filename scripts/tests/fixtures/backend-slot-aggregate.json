@@ -1,0 +1,92 @@
+{
+  "id": "backend-coverage-blackbox-375efdee",
+  "transport": "boxes-thread",
+  "worker_thread": "ph767pw8grs70zkjp12c5hgzeh8henw6",
+  "worker_host": "375efdee-f438-4393-8660-eae080cdd2ba",
+  "worker_root": "/home/boxes/rose",
+  "python": "/home/boxes/rose/agents/venv/bin/python",
+  "timeout_seconds": 14400,
+  "env": {
+    "CONDUCTOR_WORKSPACE_NAME": "pr1662-backend-a",
+    "CONDUCTOR_PORT": "4000",
+    "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME": "1",
+    "ROSE_USE_SYSTEM_PG": "true",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "DEPLOY_RUN_ROOT": "/home/boxes/rose/.context/deploy-runs"
+  },
+  "recipe": {
+    "cases": {
+      "backend-coverage-blackbox": {
+        "command": [
+          "bash",
+          "/home/boxes/rose/scripts/run-deploy-stage",
+          "backend-coverage-blackbox",
+          "--",
+          "npm",
+          "run",
+          "test:coverage:sharded"
+        ],
+        "cwd": "back-end",
+        "env": {
+          "BLACKBOX_TEST_CONCURRENCY": "2",
+          "CONTRACT_TEST_CONCURRENCY": "2",
+          "BACKEND_UNIT_CONCURRENCY": "4",
+          "BACKEND_COVERAGE_SHARDS": "3",
+          "CONDUCTOR_WORKSPACE_NAME": "pr1662-backend-a",
+          "CONDUCTOR_PORT": "4000",
+          "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME": "1",
+          "ROSE_USE_SYSTEM_PG": "true",
+          "PYTHONDONTWRITEBYTECODE": "1",
+          "DEPLOY_RUN_ROOT": "/home/boxes/rose/.context/deploy-runs",
+          "DEPLOY_LANE_SCOPED_REUSE": "0",
+          "DEPLOY_CYCLE_FRESH": "1"
+        },
+        "aggregate": true
+      }
+    },
+    "setup": {
+      "command": [
+        "bash",
+        "scripts/run-deploy-stage",
+        "--start"
+      ],
+      "env": {
+        "BLACKBOX_TEST_CONCURRENCY": "2",
+        "CONTRACT_TEST_CONCURRENCY": "2",
+        "BACKEND_UNIT_CONCURRENCY": "4",
+        "BACKEND_COVERAGE_SHARDS": "3",
+        "CONDUCTOR_WORKSPACE_NAME": "pr1662-backend-a",
+        "CONDUCTOR_PORT": "4000",
+        "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME": "1",
+        "ROSE_USE_SYSTEM_PG": "true",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "DEPLOY_RUN_ROOT": "/home/boxes/rose/.context/deploy-runs",
+        "DEPLOY_LANE_SCOPED_REUSE": "0",
+        "DEPLOY_CYCLE_FRESH": "1"
+      }
+    },
+    "cleanup": {
+      "command": [
+        "bash",
+        "-c",
+        "bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish"
+      ],
+      "env": {
+        "BLACKBOX_TEST_CONCURRENCY": "2",
+        "CONTRACT_TEST_CONCURRENCY": "2",
+        "BACKEND_UNIT_CONCURRENCY": "4",
+        "BACKEND_COVERAGE_SHARDS": "3",
+        "CONDUCTOR_WORKSPACE_NAME": "pr1662-backend-a",
+        "CONDUCTOR_PORT": "4000",
+        "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME": "1",
+        "ROSE_USE_SYSTEM_PG": "true",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "DEPLOY_RUN_ROOT": "/home/boxes/rose/.context/deploy-runs",
+        "DEPLOY_LANE_SCOPED_REUSE": "0",
+        "DEPLOY_CYCLE_FRESH": "1"
+      }
+    },
+    "services": true
+  },
+  "coordinator_thread": "ph7be5xenv5an7pk90zhhzae4n8h50sb"
+}

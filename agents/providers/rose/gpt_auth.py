@@ -29,6 +29,7 @@ from providers.rose.errors import (
     RoseStallError,
 )
 from providers.rose.pools import PoolSpec
+from providers.rose.speed import openai_service_tier_for
 from providers.rose.streaming import parse_responses_sse
 from providers.rose.transport import get_error_body, post_codex_stream, post_openai_responses_stream
 from providers.rose.types import GptAuthContext, StreamChunk
@@ -475,7 +476,7 @@ def build_codex_responses_body(
     tool_choice: Any = None,
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    service_tier: Optional[str] = None,
     cache_namespace: Optional[str] = None,
     request_id: str,
     cache_breakpoints: bool = False,
@@ -531,8 +532,9 @@ def build_codex_responses_body(
                     "schema": json_schema.get("schema") or {},
                 }
             }
-    if provider_fast_mode:
-        body["service_tier"] = "priority"
+    if service_tier is not None:
+        # Resolved per leg by providers/rose/speed.py; standard sends none.
+        body["service_tier"] = service_tier
     return body
 
 
@@ -551,7 +553,7 @@ async def gpt_auth_complete(
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     cache_namespace: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
 ) -> AsyncIterator[StreamChunk]:
@@ -567,7 +569,7 @@ async def gpt_auth_complete(
         tool_choice=tool_choice,
         temperature=temperature,
         effort=effort,
-        provider_fast_mode=provider_fast_mode,
+        service_tier=openai_service_tier_for(speed, pool_spec.gpt_auth_model),
         cache_namespace=(
             cache_namespace
             if cache_namespace is not None
@@ -661,7 +663,7 @@ async def openai_api_key_complete(
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     cache_namespace: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
     max_tokens: Optional[int] = None,
@@ -677,7 +679,7 @@ async def openai_api_key_complete(
         tool_choice=tool_choice,
         temperature=temperature,
         effort=effort,
-        provider_fast_mode=provider_fast_mode,
+        service_tier=openai_service_tier_for(speed, model),
         cache_namespace=(
             cache_namespace
             if cache_namespace is not None

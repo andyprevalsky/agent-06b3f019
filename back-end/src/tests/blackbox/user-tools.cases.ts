@@ -453,7 +453,6 @@ export function userUiToolCases(ctx: UserToolCaseContext) {
         const savedEnv = {
           mode: process.env.USER_TOOLS_SESSION_SANDBOX,
           key: process.env.E2B_API_KEY,
-          template: process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
         };
         (Sandbox as unknown as { connect: unknown }).connect = (id: string) =>
           id === session.sandboxId
@@ -462,7 +461,6 @@ export function userUiToolCases(ctx: UserToolCaseContext) {
         delete process.env.USER_TOOLS_SESSION_SANDBOX;
         // A fake key: an unexpected create must fail, never start a real sandbox.
         process.env.E2B_API_KEY = 'test-e2b-key-not-real';
-        process.env.E2B_CLAUDE_CODE_TEMPLATE_ID = 'test-template';
         try {
           const result = await runUserToolInCodeSession({
             userId: user.userId,
@@ -498,8 +496,6 @@ export function userUiToolCases(ctx: UserToolCaseContext) {
           else process.env.USER_TOOLS_SESSION_SANDBOX = savedEnv.mode;
           if (savedEnv.key === undefined) delete process.env.E2B_API_KEY;
           else process.env.E2B_API_KEY = savedEnv.key;
-          if (savedEnv.template === undefined) delete process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
-          else process.env.E2B_CLAUDE_CODE_TEMPLATE_ID = savedEnv.template;
           await prisma.codeSession.update({
             where: { id: session.id },
             data: { sandboxKind: null, sandboxId: null },

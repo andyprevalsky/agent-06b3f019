@@ -316,7 +316,8 @@ export async function sendPrimitiveEmail(params: {
   }
 
   try {
-    const response = await fetch(`${baseUrl()}/send-mail`, {
+    const sendMailUrl = `${baseUrl()}/send-mail`;
+    const response = await fetch(sendMailUrl, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey()}`,
@@ -342,9 +343,16 @@ export async function sendPrimitiveEmail(params: {
 
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
+      let requestOrigin: string | undefined;
+      try {
+        requestOrigin = new URL(sendMailUrl).origin;
+      } catch {
+        // Failure provenance must not change the send result or expose an invalid URL.
+      }
       log.error('Primitive send failed', {
         to: params.to,
         status: response.status,
+        requestOrigin,
         detail: detail.slice(0, 200),
       });
       return false;

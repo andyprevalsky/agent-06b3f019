@@ -88,15 +88,10 @@ export async function prepareSessionCredentials(
     prepareWorldStateFork(session, userId, targetUrl),
   ]);
 
-  const credentialPayload = buildSessionCredentialPayload(
-    authRealm,
-    authOptions,
-    storedPasswords,
-    passkeys
-  );
+  const creds = buildSessionCredentialPayload(authRealm, authOptions, storedPasswords, passkeys);
   if (logicalHasPrivateState(session)) {
     return {
-      ...credentialPayload,
+      ...creds,
       auth_credential_ref: null,
       cookies_injected: false,
       cookies_count: 0,
@@ -121,7 +116,7 @@ export async function prepareSessionCredentials(
     // The world-state fork needs a backend CDP context, so it is not recorded here.
     const { payload, injection } = await buildTilionWorkerApplyPayload(userId, targetUrl);
     return {
-      ...credentialPayload,
+      ...creds,
       auth_credential_ref: injection.cookies.credentialRef,
       cookies_injected: false,
       cookies_count: injection.cookies.cookieCount,
@@ -130,18 +125,18 @@ export async function prepareSessionCredentials(
       worker_apply: payload,
     };
   }
-  const injectionResult = await preserveSessionCredentialPayload(
+  const injection = await preserveSessionCredentialPayload(
     () => injectUserData(sessionId, userId, targetUrl, { ...options, onCookiesReady }),
-    credentialPayload
+    creds
   );
 
   return {
-    ...credentialPayload,
-    auth_credential_ref: injectionResult.cookies.credentialRef,
-    cookies_injected: injectionResult.cookies.injected,
-    cookies_count: injectionResult.cookies.cookieCount,
-    auth_source: injectionResult.cookies.authSource,
-    browser_state_injection: injectionResult,
+    ...creds,
+    auth_credential_ref: injection.cookies.credentialRef,
+    cookies_injected: injection.cookies.injected,
+    cookies_count: injection.cookies.cookieCount,
+    auth_source: injection.cookies.authSource,
+    browser_state_injection: injection,
   };
 }
 
@@ -202,10 +197,7 @@ export async function initSession(userId: string, agentId: string, startUrl: str
 
       metadata: buildBrowserSessionMetadata,
     });
-    return {
-      ...result,
-      releaseOnDisconnect: () => closeBrowserSession(result.session_id, false),
-    };
+    return { ...result, releaseOnDisconnect: () => closeBrowserSession(result.session_id, false) };
   }
   await waitForBrowserInitialization(logical.id, userId);
   await repo.updateLogicalSessionUrls(
@@ -269,9 +261,7 @@ export { rotateBrowserProxy, ProxyRotationExhaustedError, RotationSessionNotFoun
 // Get context
 // ---------------------------------------------------------------------------
 
-export async function getContext(userId: string) {
-  return repo.findContextByUserId(userId);
-}
+export { findContextByUserId as getContext } from './repo';
 
 export async function resizeBrowserViewport(
   taskId: string,

@@ -68,11 +68,13 @@ from providers.rose.inter_agent_context import settle_trailing_inter_agent_messa
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, foundry_model, get_pool
+from providers.rose.flash_agent import is_flash_agent_call, pool_for_call
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
+from providers.rose.speed import current_agent_speed, normalize_agent_speed
 from providers.rose.streaming import _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import messages_contain_images, route_model_accepts_images
@@ -692,6 +694,20 @@ class RoseClient:
         if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
             kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
+        # Provider speed comes from the agent row (one memoized read per agent per
+        # process); explore and sub-agent calls carry their agent's id, so they
+        # inherit it. Browser tasks bind their agent's speed once at task start,
+        # so a browser step never performs a lookup. No agent = standard.
+        if "speed" not in kwargs:
+            bound_speed = current_agent_speed()
+            if bound_speed is None and not (
+                kwargs.get("browser_use") or pool == "rose-1-browser-use" or str(call_site).startswith("browser_use")
+            ):
+                from providers.demo_cache.client import resolve_agent_speed
+
+                bound_speed = await resolve_agent_speed(agent_id)
+            kwargs = {**kwargs, "speed": normalize_agent_speed(bound_speed)}
+
         # Browser steps run on their spawning agent's pool, so the explicit
         # flag (set by complete_browser_use) identifies them on any pool.
         browser_use = bool(kwargs.pop("browser_use", False))
@@ -968,7 +984,10 @@ class RoseClient:
         idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
         thinking: Optional[Dict[str, Any]] = None,
         effort: Optional[str] = None,
+        # Legacy Fast Mode bit: DEMO cache key material only, never sent to a provider.
         provider_fast_mode: bool = True,
+        # Provider speed (speed.py). None/unknown = standard.
+        speed: Optional[str] = None,
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
         cache_namespace: Optional[str] = None,
@@ -990,7 +1009,12 @@ class RoseClient:
         # cannot consume Anthropic credit. This complements the existing
         # call-scoped flag and covers nested browser/evaluator calls as well.
         _exclude_anthropic_family = anthropic_family_excluded(_exclude_anthropic_family)
-        pool_spec = get_pool(pool)
+        pool_spec = pool_for_call(pool, call_site)
+        if is_flash_agent_call(pool, call_site):
+            # Terra and Opus are compute-token-only leads; chat/browser keep their policy.
+            prefer_azure = False
+            if effort is None:
+                effort = "medium"
         rid = request_id or uuid.uuid4().hex[:12]
         auth_identity = claude_auth or gpt_auth
         foundry_route_key = agent_id or (auth_identity.user_id if auth_identity else rid)
@@ -1062,6 +1086,7 @@ class RoseClient:
                             "ttft_timeout_s": ttft_timeout_s,
                             "idle_timeout_s": idle_timeout_s,
                             "provider_fast_mode": provider_fast_mode,
+                            "speed": speed,
                         },
                         # Effective wire effort: callers may omit; body builders
                         # always stamp DEFAULT_REASONING_EFFORT (xhigh).
@@ -1202,7 +1227,12 @@ class RoseClient:
 
         eligible_claude_auth = claude_auth if model_key(pool_spec.claude_auth_model) not in _skip_models else None
         eligible_gpt_auth = gpt_auth if model_key(pool_spec.gpt_auth_model) not in _skip_models else None
-        if not pool_spec.direct_auth_enabled:
+        allow_subscriptions = (
+            pool_spec.subscription_auth_enabled
+            if pool_spec.subscription_auth_enabled is not None
+            else pool_spec.direct_auth_enabled
+        )
+        if not allow_subscriptions:
             # An open-weights-only pool must never reach a proprietary
             # direct-token provider, or the model guarantee it exists to make
             # is silently void.
@@ -1212,7 +1242,11 @@ class RoseClient:
         elif _exclude_anthropic_family:
             direct_auth = None
         else:
-            direct_auth = eligible_claude_auth or eligible_gpt_auth
+            direct_auth = (
+                (eligible_gpt_auth or eligible_claude_auth)
+                if is_flash_agent_call(pool, call_site)
+                else (eligible_claude_auth or eligible_gpt_auth)
+            )
 
         logger.info(
             "rose.complete.start",
@@ -1537,6 +1571,9 @@ class RoseClient:
 
         try:
             direct_rotations = 0
+            stall_rotations = 0
+            # A credential served twice in one call means its mark did not land.
+            tried_tokens = {direct_auth.token} if direct_auth is not None else set()
             direct_token_errors: Dict[str, str] = {}
             while direct_auth is not None:
                 candidate = (
@@ -1587,8 +1624,8 @@ class RoseClient:
                                 agent_id=agent_id,
                                 call_site=call_site,
                                 thinking=thinking,
-                                effort=effort,
-                                provider_fast_mode=provider_fast_mode,
+                                effort="low" if is_flash_agent_call(pool, call_site) else effort,
+                                speed=speed,
                                 ttft_timeout_s=current_ttft_s,
                                 idle_timeout_s=idle_timeout_s,
                             )
@@ -1607,7 +1644,7 @@ class RoseClient:
                                 agent_id=agent_id,
                                 call_site=call_site,
                                 cache_namespace=cache_namespace,
-                                provider_fast_mode=provider_fast_mode,
+                                speed=speed,
                                 ttft_timeout_s=current_ttft_s,
                                 idle_timeout_s=idle_timeout_s,
                             )
@@ -1729,21 +1766,62 @@ class RoseClient:
                         raise deadline_error
                     raise RoseDeadlineError(f"rose.complete deadline exceeded after {deadline_s}s")
 
-                # Stalls are rotation-eligible immediately: cold-start jitter
-                # is absorbed by the 90s TTFT, and Anthropic's batched-response
-                # silences are absorbed by the 120s idle window. A stall here
-                # means the token/route itself is unhealthy, so rotate.
-                can_rotate = (
-                    token_error in ("auth_error", "rate_limit", "stall")
-                    and direct_rotations < direct_auth.max_rotations
-                    and direct_auth.fetch_fresh is not None
-                )
-                if not can_rotate:
-                    break
-                fresh = await direct_auth.fetch_fresh(direct_auth.user_id)
+                # Every subscription before any funded key (Andy, 2026-10-28): a
+                # usage-limit or auth failure rotates through every lease the
+                # backend still has. Each failed lease is marked, so the store
+                # shrinks; a lease already tried in this call ends rotation, and
+                # so does the call deadline. Stalls are rotation-eligible
+                # immediately (cold-start jitter is absorbed by the 90s TTFT and
+                # batched-response silences by the 120s idle window) but keep the
+                # per-call max_rotations budget. max_rotations=0 means the caller
+                # owns rotation.
+                if token_error == "stall":
+                    within_budget = stall_rotations < direct_auth.max_rotations
+                else:
+                    within_budget = (
+                        token_error in ("auth_error", "rate_limit") or is_flash_agent_call(pool, call_site)
+                    ) and direct_auth.max_rotations > 0
+                can_rotate = within_budget and direct_auth.fetch_fresh is not None and remaining() > 0
+                fresh = None
+                if can_rotate:
+                    try:
+                        fresh = await direct_auth.fetch_fresh(direct_auth.user_id)
+                    except Exception as fetch_error:
+                        # Acquisition is best-effort; keep the original token
+                        # failure and continue to the remaining fallback routes.
+                        # Do not log exception text: backend errors can contain
+                        # credential-bearing request URLs or response bodies.
+                        logger.warning(
+                            "rose.complete.direct_auth.fetch_fresh_failed",
+                            request_id=rid,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            error_type=type(fetch_error).__name__,
+                        )
+                if (fresh is None or fresh.token in tried_tokens) and is_flash_agent_call(pool, call_site):
+                    if (
+                        not _exclude_anthropic_family
+                        and eligible_claude_auth is not None
+                        and eligible_claude_auth.token not in tried_tokens
+                    ):
+                        fresh = eligible_claude_auth
                 if fresh is None:
                     break
+                if fresh.token in tried_tokens:
+                    logger.info(
+                        "rose.complete.direct_auth.rotation_repeated",
+                        request_id=rid,
+                        agent_id=agent_id,
+                        call_site=call_site,
+                        token_type=fresh.token_type,
+                        source=fresh.source,
+                        rotations=direct_rotations,
+                    )
+                    break
+                tried_tokens.add(fresh.token)
                 direct_rotations += 1
+                if token_error == "stall":
+                    stall_rotations += 1
                 direct_auth = fresh
                 logger.info(
                     "rose.complete.direct_auth.rotated",
@@ -1789,7 +1867,7 @@ class RoseClient:
                             response_format=None if gpt_api_key_tools else openrouter_response_format,
                             temperature=temperature,
                             effort=effort,
-                            provider_fast_mode=provider_fast_mode,
+                            speed=speed,
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
@@ -1873,7 +1951,7 @@ class RoseClient:
                             skip_cache_write=skip_cache_write,
                             thinking=thinking,
                             effort=effort,
-                            provider_fast_mode=provider_fast_mode,
+                            speed=speed,
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
@@ -2064,7 +2142,7 @@ class RoseClient:
                                 temperature=temperature,
                                 # A fallback layer: speed pools pin their fast effort (xhigh TTFT is slow).
                                 effort=pool_spec.waterfall_reasoning_effort or effort,
-                                provider_fast_mode=provider_fast_mode,
+                                speed=speed,
                                 request_id=rid,
                                 route_key=foundry_route_key,
                                 agent_id=agent_id,
@@ -2122,7 +2200,7 @@ class RoseClient:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 seed=seed,
-                provider_fast_mode=provider_fast_mode,
+                speed=speed,
                 effort=effort,
                 openrouter_key=self._or_key(),
                 request_id=rid,
@@ -2588,7 +2666,7 @@ async def _try_claude_auth(
     call_site: Optional[str],
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -2613,7 +2691,7 @@ async def _try_claude_auth(
         call_site=call_site,
         thinking=thinking,
         effort=effort,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
     )
@@ -2653,7 +2731,7 @@ async def _try_gpt_auth(
     agent_id: Optional[str],
     call_site: Optional[str],
     cache_namespace: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -2674,7 +2752,7 @@ async def _try_gpt_auth(
         agent_id=agent_id,
         call_site=call_site,
         cache_namespace=cache_namespace,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
     )
@@ -2706,7 +2784,7 @@ async def _try_openai_api_key(
     response_format: Optional[Dict[str, Any]],
     temperature: Optional[float],
     effort: Optional[str],
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
@@ -2735,7 +2813,7 @@ async def _try_openai_api_key(
         agent_id=agent_id,
         call_site=call_site,
         cache_namespace=cache_namespace,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
     )
@@ -2771,7 +2849,7 @@ async def _try_anthropic_api_key(
     call_site: Optional[str],
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -2791,7 +2869,7 @@ async def _try_anthropic_api_key(
         skip_cache_write=skip_cache_write,
         thinking=thinking,
         effort=effort,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,

@@ -25821,7 +25821,7 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
 
 @_in_browser_activity_context
 async def test_auth_handoff_consumes_otp_received_during_decision(
-    case="fresh", resume_step_count=0, expected_exhaustion=False, auth_review=None
+    case="fresh", resume_step_count=0, expected_exhaustion=False, auth_review=None, expected_speed=None
 ):
     """An inbox result received during a model call precedes handoff commit."""
     from contextlib import ExitStack
@@ -26043,6 +26043,10 @@ async def test_auth_handoff_consumes_otp_received_during_decision(
     model_contexts = []
 
     async def model_step(**kwargs):
+        if expected_speed is not None:
+            from providers.rose.speed import current_agent_speed
+
+            assert current_agent_speed() == expected_speed, "browser decision lost its stored agent speed"
         model_contexts.append(copy.deepcopy(kwargs))
         action = (
             "read_browser_state"
@@ -29086,6 +29090,8 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
     from contextlib import ExitStack
 
     from temporalio.testing import ActivityEnvironment
+    from temporalio import activity
+    from helpers import activity_generation_drain
 
     from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -29120,7 +29126,14 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
     resume_mock = AsyncMock()
     close_mock = AsyncMock()
+    async def fixture_queue_pointer(**_kwargs):
+        return {"task_queue": activity.info().task_queue, "surface_hash": None}
+
     patch_targets = [
+        # Session lifetime is independent of another fixture's worker generation.
+        patch.object(activity_generation_drain, "_cached_at", None),
+        patch.object(activity_generation_drain, "_cached_queue", None),
+        patch.object(activity_generation_drain, "read_agent_queue_pointer", fixture_queue_pointer),
         patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_info)),
@@ -29246,6 +29259,18 @@ async def test_browser_task_keeps_stepping_on_a_reused_session_with_time_left():
     assert result["step_count"] == 5, result
     resume_mock.assert_not_awaited()
     close_mock.assert_not_awaited()
+
+
+async def test_reused_session_lifetime_fixture_isolates_cached_generation():
+    from helpers import activity_generation_drain
+
+    with (
+        patch.object(activity_generation_drain, "_cached_at", time_module.monotonic()),
+        patch.object(activity_generation_drain, "_cached_queue", "other-worker-generation"),
+    ):
+        await test_browser_task_on_reused_session_yields_before_the_provider_releases_it()
+        await test_browser_task_keeps_stepping_on_a_reused_session_with_time_left()
+        assert activity_generation_drain._cached_queue == "other-worker-generation"
 
 
 async def test_session_lifetime_is_tracked_only_for_the_reused_session():
@@ -38682,6 +38707,13 @@ async def run_all_tests():
         test_browser_diagnostics_capture_console_and_redacted_network_metadata,
     )
 
+    from otp_retry_behavior import assert_browser_activity_inherits_stored_speed
+
+    await r.record_async(
+        "browser_activity_inherits_stored_speed",
+        lambda: assert_browser_activity_inherits_stored_speed(test_auth_handoff_consumes_otp_received_during_decision),
+    )
+
     from cleanup_sealed_behavior import (
         assert_first_native_seal_during_background_cleanup,
         assert_first_native_seal_during_activity_finally,
@@ -39144,6 +39176,10 @@ async def run_all_tests():
     await r.record_async(
         "reused_session_with_time_left_keeps_stepping",
         test_browser_task_keeps_stepping_on_a_reused_session_with_time_left,
+    )
+    await r.record_async(
+        "reused_session_lifetime_fixture_isolates_cached_generation",
+        test_reused_session_lifetime_fixture_isolates_cached_generation,
     )
     await r.record_async(
         "session_lifetime_tracked_only_for_reused_session",

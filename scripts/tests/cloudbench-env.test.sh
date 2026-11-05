@@ -1039,11 +1039,13 @@ printf 'TILION_API_KEY=tl_fake_contract_key\n' >> "$backend_env"
 tilion_out="$(cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" tilion tilion)"
 case "$tilion_out" in *tl_fake_contract_key*) fail "contract output printed TILION_API_KEY" ;; esac
 if cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" tilion kernel >/dev/null 2>&1; then
-  fail "tilion backend with kernel workers must fail as provider drift"
+  fail "worker env must match its own production fallback"
 fi
 sed -i.bak -e 's/^BROWSER_PROVIDER=tilion$/BROWSER_PROVIDER=kernel/' -e '/^TILION_API_KEY=/d' "$agents_env" "$backend_env"
 rm -f "$agents_env.bak" "$backend_env.bak"
 cloudbench_validate_browser_provider_contract "$agents_env" "$backend_env" kernel kernel >/dev/null
+
+python3 "$ROOT_DIR/scripts/tests/cloudbench-provider-contract.test.py" || fail "per-surface provider contract regression"
 
 agents_digest="$(cloudbench_env_sha256 "$agents_env")"
 backend_digest="$(cloudbench_env_sha256 "$backend_env")"
@@ -2694,7 +2696,7 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   '_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json' \
   "the environment preflight must be a read-only secrets listing"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"' \
+  'REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER CLOUDBENCH_WORKER_BROWSER_PROVIDER GITHUB_TOKEN"' \
   "environment preflight must require GITHUB_TOKEN for on-box private-repo git-sync"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'resolve_durable_github_token' \

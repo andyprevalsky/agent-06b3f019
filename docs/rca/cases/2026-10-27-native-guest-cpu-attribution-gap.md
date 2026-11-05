@@ -52,3 +52,34 @@ The correction reads /proc/<pid>/stat field22 and compares ticks only for the sa
 The optional diagnostic tail also now retains the newest128 samples with cumulative evictions instead of retaining the first128 forever. Its same129-sample control fails before and passes after; normal runtime output is unaffected. This improves future evidence rather than proving the historical first failure. No provider, DB or model request was made; the native owner uses its existing fake psql and joins its owned burner.
 
 Status remains OPEN for the original causal attribution gap. The new lifetime-counter arithmetic correction is proven and applied at4c118e0d, but neither a fresh gate pass nor these controls invent the missing original baseline. Golden review: not applicable (no approval-gated hunk).
+
+
+## 2026-11-04 owned-tick capture proves a distinct fixture assumption
+
+The 4a2 controller failed the same live burner assertion. One authorized
+unchanged owning-function invocation reproduced it in 2.047s and retained the
+exact PID3557763/birth42455717 counters: ticks4->24 over0.524626s at100Hz
+correctly yielded38.1%, rank6; ticks24->36 over0.556301s yielded21.6%, below
+the global top8 cutoff28.8%, so omission was correct. Both samples showed100%
+host CPU. The first-bad contract was the fixture's unconditional expectation
+of at least50% CPU share, rather than a sampler arithmetic or identity defect.
+This does not recover the missing identities of the older historical cases.
+
+Reviewed fixture-only patch `ae90b65f3772d00bdaba476a00750f287fa120647ce03bb87a9a94561113d137`
+checks actual same-birth delta/elapsed and correct globaltop8 rank. It still
+requires positive live exercise, retains an independent controlled100%
+(>=50%) arithmetic/ordering oracle, and refuses wrong delta, wrong birth and
+omitted higher rank. Fixed-input replay of the same captured native data fails
+the old assertion and passes the repaired oracle. A later native candidate
+owning invocation passed1.900s; ambient shares differed, so that later pass is
+not the fixed-input causal comparison. Production sampler bytes, original
+single burner, 0.5s x2 samples, 30s subprocess budgets, redaction/inventory
+checks and exact kill/wait are unchanged. No priority change, extra load,
+weakened application assertion or global gate serialization was introduced.
+
+Evidence: `/var/tmp/pr1662-4a2-cpu-sampler-rca/fixture-repair-report.json` and
+`fixed-input-oracle-replay.json` (SHA256
+`58113838d7841ba612aafaedcbed283f4bf19190f475b780287328c2e76b6b8d`).
+This proves the new fixture boundary; it grants no full-controller or benchmark
+PASS and leaves the original historical attribution gap open. This append
+uses already saved proof and performs no new execution.

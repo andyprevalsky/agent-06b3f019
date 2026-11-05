@@ -211,12 +211,16 @@ async function main(): Promise<void> {
       cardholderIds: ours,
       nowMs: MINTED_AT_MS + 2 * UNUSED_MINT_RECLAIM_DEADLINE_MS,
     });
-    assert.deepEqual(after, [], 'a lost mint fails one run, not every run after it');
-    assert.equal(provider.calls.length, 0);
+    assert.deepEqual(
+      after.map(({ entry, verdict }) => [entry.cardId, verdict.kind]),
+      [['card_lost', 'overdue']],
+      'an unreclaimed mint must keep failing subsequent runs until settlement is proved'
+    );
+    assert.equal(provider.calls.length, 5);
     assert.deepEqual(
       readOpenPendingMints(ledgerPath).map((entry) => entry.cardId),
-      ['card_other_org'],
-      'entries for other credentials stay open for them'
+      ['card_lost', 'card_other_org'],
+      'unreclaimed entries and entries for other credentials must stay open'
     );
     const resolutions = readFileSync(ledgerPath, 'utf8')
       .trim()
@@ -224,10 +228,34 @@ async function main(): Promise<void> {
       .map((line) => JSON.parse(line) as Row)
       .filter((line) => line.event === 'resolved')
       .map((line) => [line.cardId, line.verdict, line.detail]);
-    assert.deepEqual(resolutions, [
-      ['card_slow', 'settled', 'reclaimed 1300c'],
-      ['card_lost', 'overdue', 'consumed'],
-    ]);
+    assert.deepEqual(resolutions, [['card_slow', 'settled', 'reclaimed 1300c']]);
+
+    // Historical non-settlement receipts cannot make an unpaid obligation disappear.
+    for (const verdict of ['overdue', 'failed', 'unobservable']) {
+      appendFileSync(
+        ledgerPath,
+        `${JSON.stringify({
+          event: 'resolved',
+          cardId: 'card_lost',
+          verdict,
+          detail: 'no reclaim proof',
+          resolvedAt: new Date().toISOString(),
+        })}\n`
+      );
+      assert.ok(readOpenPendingMints(ledgerPath).some((entry) => entry.cardId === 'card_lost'));
+    }
+    statuses.set('card_lost', transferRow('card_lost', 'reclaimed', 1300));
+    const reconciled = await checkPendingUnusedMints({
+      callOrgTool: provider.callOrgTool,
+      ledgerPath,
+      cardholderIds: ours,
+      nowMs: MINTED_AT_MS + 3 * UNUSED_MINT_RECLAIM_DEADLINE_MS,
+    });
+    assert.equal(reconciled[0]?.verdict.kind, 'settled');
+    assert.deepEqual(
+      readOpenPendingMints(ledgerPath).map((entry) => entry.cardId),
+      ['card_other_org']
+    );
 
     appendFileSync(ledgerPath, '{"event":"pending","cardId":\n');
     assert.throws(

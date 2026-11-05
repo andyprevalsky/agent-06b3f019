@@ -14,6 +14,8 @@
  *     line `ROSE_PROJECT_STARTUP_REPORT {...}`.
  *
  * Plain CommonJS with no dependencies: it must run on any Node the session has.
+ * It is written as `.cjs` so a `"type": "module"` package.json above it (the
+ * E2B templates' HOME has one) cannot turn it into an ES module.
  */
 export const STARTUP_RUNNER_REPORT_PREFIX = 'ROSE_PROJECT_STARTUP_REPORT ';
 

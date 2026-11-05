@@ -1,3 +1,4 @@
+import { skipProvenSteelPersistenceOutage } from './browser-provider.steel-persistence-outage.support';
 import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
 import { retryWithBackoff } from '../../providers/retry';
 import { chromium } from 'playwright';
@@ -364,6 +365,7 @@ export async function runCrossProviderRotationLadder(
   };
 
   if (!browserUseAvailable) {
+    skipProvenSteelPersistenceOutage();
     let steelRotated: RotationResponse;
     try {
       steelRotated = await postWithSteelRetry('/rotate-proxy', {

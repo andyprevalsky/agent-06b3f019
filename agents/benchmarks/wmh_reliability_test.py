@@ -340,7 +340,7 @@ def test_actual_provider_retry_metadata_reaches_whm_owner_and_is_inactive_elsewh
                 tool_choice=None,
                 temperature=None,
                 effort=None,
-                provider_fast_mode=True,
+                speed="fast",
                 request_id="offline",
                 route_key=None,
                 agent_id=None,
@@ -643,7 +643,7 @@ def test_flash_routes_and_discards_abandoned_partial_reply(monkeypatch, prefer_a
 
         return stream
 
-    monkeypatch.setattr(module, "foundry_complete", route("foundry", "gpt-5.6-luna-foundry"))
+    monkeypatch.setattr(module, "foundry_complete", route("foundry", "gpt-6-luna-foundry"))
     monkeypatch.setattr(module, "cerebras_complete", route("cerebras", "qwen-3.8-27b"))
     response = asyncio.run(
         RoseClient(openrouter_key="offline").collect(

@@ -3,6 +3,7 @@
 import { getX402Endpoints } from '../../providers/x402Endpoints';
 import type * as repo from './repo';
 import type { CreateAgentBody } from './types';
+import { agentSpeedFromRow } from '../../providers/rose/speed';
 
 type CreatedAgent = Awaited<ReturnType<typeof repo.createAgentTransaction>>;
 
@@ -26,6 +27,7 @@ export function createAgentResponse(
     status_message: agent.statusMessage,
     temporal_workflow_id: workflowId,
     fast_mode_cache_enabled: agent.fastModeCacheEnabled,
+    speed: agentSpeedFromRow(agent),
     memory_enabled: agent.memoryEnabled,
     world_model_mode: agent.worldModelMode,
     project_id: agent.projectId,

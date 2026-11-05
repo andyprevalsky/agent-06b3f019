@@ -37,7 +37,7 @@ that process instead of resizing.
    may use, memory and swap use, load average, OOM kills, and the top 5
    processes by memory and by CPU.
 2. Ask for what you need, with a reason that cites what you saw:
-   `rose env size --memory-gb 16 --reason "jest workers OOM-killed 3 times at 4 GB"`
+   `rose env size --memory-gb 8 --reason "jest workers OOM-killed 3 times at 4 GB"`
    or `rose env size --cpu 8 --reason "tsc + vitest CPU-bound for 6 min on 2 vCPU"`.
    Give `--cpu`, `--memory-gb` or both; a dimension you leave out stays as it is.
    You get the closest available size that satisfies the request. The same

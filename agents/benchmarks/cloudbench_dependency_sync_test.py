@@ -4340,9 +4340,13 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
     # Unit isolation: allow this mocked lower allocation mechanism only; real admission is tested separately.
     fleet = fleet_source_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
+    wmh_defaults = fleet.split("# Begin fleet WMH defaults.", 1)[1].split(
+        "# End fleet WMH defaults.", 1
+    )[0]
     reap = "\n".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
+            "fleet_current_disposable_registry() {",
             "machine_status_exact_read() {",
             "registry_machine_details() {",
             "reap_machine() {",
@@ -4373,6 +4377,12 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
 ROOT_DIR={shlex.quote(str(root))}
 CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(root / "scripts"))}
 APP=test-app
+# This fixture owns ordinary test-app clones, never a disposable registry.
+DISPOSABLE_LIFECYCLE=0
+# Use the production initializer instead of inheriting ambient WMH fields.
+WMH_ENGINE=experiential
+unset WMH_MODEL_NAME WMH_EXECUTION_POLICY WMH_ROSE_POOL
+{wmh_defaults}
 FLEET_OWNER_TOKEN=test-owner
 BENCH_REF=test-ref
 BOX_BACKEND_PORT=3001
@@ -4508,6 +4518,8 @@ fi
             timeout=10,
         )
         assert result.returncode == 0, (mode, result.stdout, result.stderr)
+        assert "unbound variable" not in result.stderr, (mode, result.stderr)
+        assert "command not found" not in result.stderr, (mode, result.stderr)
         fly_calls = calls.read_text().splitlines()
         stage_log = (out / "worker-abc123.stage.log").read_text()
         if mode == "storage-not-ready":
@@ -36817,9 +36829,37 @@ main
     assert not (out / 'cloudbench-run.json').exists()
 
 
+def _native_stop_last_tick_exhausted(trace: str, deadline: int) -> bool:
+    """Observe the production clock's actual refusal, not time spent publishing."""
+    lines = trace.splitlines()
+    for index, line in enumerate(lines):
+        denied = re.fullmatch(r"\++TRACE seconds=(\d+) fn=fleet_native_stop_call_budget: return 1", line)
+        if denied and int(denied[1]) >= deadline:
+            return True
+        guard = re.fullmatch(r"\++TRACE seconds=(\d+) fn=fleet_native_stop_verify_guest: '\[' (\d+) -lt (\d+) '\]'", line)
+        if (guard and int(guard[1]) >= deadline and int(guard[2]) >= deadline
+                and int(guard[3]) == deadline and index + 1 < len(lines)
+                and re.fullmatch(r"\++TRACE seconds=\d+ fn=fleet_native_stop_verify_guest: break", lines[index + 1])):
+            return True
+    return False
+
+
+def test_native_stop_last_tick_observer_rejects_premature_or_foreign_clock_refusal() -> None:
+    guard = "+TRACE seconds=6 fn=fleet_native_stop_verify_guest: '[' 6 -lt 6 ']'\n"
+    stop = "+TRACE seconds=6 fn=fleet_native_stop_verify_guest: break\n"
+    assert _native_stop_last_tick_exhausted(guard + stop, 6)
+    assert _native_stop_last_tick_exhausted("++TRACE seconds=6 fn=fleet_native_stop_call_budget: return 1\n", 6)
+    for trace in (guard.replace("seconds=6", "seconds=5") + stop,
+                  guard.replace("6 -lt 6", "5 -lt 6") + stop,
+                  guard.replace("6 -lt 6", "6 -lt 7") + stop,
+                  guard, stop, guard + stop.replace("verify_guest", "unrelated"),
+                  "++TRACE seconds=5 fn=fleet_native_stop_call_budget: return 1\n"):
+        assert not _native_stop_last_tick_exhausted(trace, 6), trace
+
+
 @pytest.mark.parametrize("reaches_stopped", [True, False])
 def test_guest_shutdown_child_confirmation_native_stop_success_is_verified_in_last_budget_tick(tmp_path: Path, reaches_stopped: bool) -> None:
-    """A successful stop still needs an observed state, before the same deadline."""
+    """A sent stop needs observed state; exhausted native time must retain ownership."""
     fleet = fleet_source_text()
     names = (
         "fly_with_timeout() {", "registry_meta_value() {", "machine_status_exact_read() {",
@@ -36835,6 +36875,7 @@ def test_guest_shutdown_child_confirmation_native_stop_success_is_verified_in_la
         (fake / name).write_text(value)
     if reaches_stopped:
         (fake / "stop-to").write_text("stopped")
+    (fake / "calls").touch()
     state_dir = tmp_path / "request"
     state_dir.mkdir()
     (state_dir / "0.request").write_text(
@@ -36852,7 +36893,12 @@ CHILD_MACHINE=({_NATIVE_STOP_MACHINE})
 CLOUDBENCH_GUEST_NATIVE_STOP_CALL_TIMEOUT=2
 {_NATIVE_STOP_FAKE_FLY}
 {functions}
+exec 9>"$FAKE/native-clock.trace"
+BASH_XTRACEFD=9
+PS4='+TRACE seconds=$SECONDS fn=${{FUNCNAME[0]:-top}}: '
+set -x
 deadline=$((SECONDS + 6))
+printf '%s\\n' "$deadline" > "$FAKE/native-deadline"
 # The earlier request/identity phase has consumed five ticks. Do not alter
 # SECONDS or the production deadline: exercise its final valid tick.
 while [ "$SECONDS" -lt "$((deadline - 1))" ]; do sleep 0.01; done
@@ -36865,10 +36911,21 @@ fleet_native_stop_verify_guest 0 {shlex.quote(str(state_dir))} "$deadline"
     calls = (fake / "calls").read_text().splitlines()
     stops = [line for line in calls if line.startswith("machine stop ")]
     assert elapsed < 14, elapsed
-    assert stops == [f"machine stop {_NATIVE_STOP_MACHINE} -a bench-app"], calls
     assert not any("destroy" in line for line in calls), calls
-    assert receipt["stop_requests"] == 2, receipt
     assert receipt["machine_id"] == _NATIVE_STOP_MACHINE and receipt["volume_id"] == _NATIVE_STOP_VOLUME
+    if not stops:
+        # The final tick also pays for request metadata and exact status parsing.
+        # Only an observed native deadline refusal permits zero additional sends.
+        trace = (fake / "native-clock.trace").read_text()
+        deadline = int((fake / "native-deadline").read_text())
+        assert _native_stop_last_tick_exhausted(trace, deadline), trace
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert receipt["stop_requests"] == 1 and receipt["verified"] is False, receipt
+        assert receipt["verified_state"] in {"started", "unknown"}, receipt
+        assert "retaining ownership" in result.stderr
+        return
+    assert stops == [f"machine stop {_NATIVE_STOP_MACHINE} -a bench-app"], calls
+    assert receipt["stop_requests"] == 2, receipt
     if reaches_stopped:
         assert result.returncode == 0, result.stderr
         assert receipt["verified"] is True and receipt["verified_state"] == "stopped", receipt

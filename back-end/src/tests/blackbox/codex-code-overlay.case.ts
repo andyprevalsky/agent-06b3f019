@@ -21,8 +21,18 @@ export async function testCodexWsServerOverlayUsesLocalSource(): Promise<void> {
         commands: { run: async () => ({ exitCode: 0 }) },
       } as unknown as Parameters<typeof overlayCodexCodeWsServer>[0];
       await overlayCodexCodeWsServer(sandbox);
+      // The Azure model catalog travels with the ws-server that reads it.
+      const catalog = writes.find((write) => write.path === '/home/user/azure-model-catalog.json');
       if (
-        writes.length !== 1 ||
+        catalog === undefined ||
+        !(JSON.parse(catalog.source) as { models: { slug: string }[] }).models.some(
+          (model) => model.slug === 'gpt-6.1-sol'
+        )
+      ) {
+        throw new Error('the Azure Codex model catalog was not overlaid next to ws-server.mjs');
+      }
+      if (
+        writes.length !== 2 ||
         writes[0].path !== '/home/user/ws-server.mjs' ||
         !writes[0].source.includes('oauthFallbackReason') ||
         !writes[0].source.includes('refresh_token_invalidated')
