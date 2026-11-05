@@ -110,6 +110,23 @@ describe('mobile query box safe area (#11)', () => {
     expect(html).toMatch(/name="viewport"[\s\S]*?content="[^"]*viewport-fit=cover/);
   });
 
+  it('makes iOS give the installed PWA the full screen, not the status-bar-short viewport', () => {
+    // WebKit 301108: an installed iOS 26 PWA paints only to screen - top inset
+    // (894 of 956pt) until the document is taller than that short viewport.
+    const media = css.indexOf('@media (display-mode: standalone) {\n  html {');
+    expect(media).toBeGreaterThan(-1);
+    const rule = css.slice(media, css.indexOf('\n}\n', media));
+    expect(rule).toMatch(
+      /min-height:\s*min\(100lvh,\s*calc\(100% \+ env\(safe-area-inset-top, 0px\)\)\);/,
+    );
+    // The locked app shell sets height only; a min-height there would cap the growth.
+    const shellRule = css.slice(
+      css.indexOf('html.rose-app-shell,'),
+      css.indexOf('}', css.indexOf('html.rose-app-shell,')),
+    );
+    expect(shellRule).not.toMatch(/min-height|max-height/);
+  });
+
   it('defines the display corner and a gap equal to the mobile column side inset', () => {
     expect(css).toMatch(/--display-corner:\s*55px;/);
     // MainContent pads the chat column px-2 (0.5rem) on mobile; the bottom gap matches.

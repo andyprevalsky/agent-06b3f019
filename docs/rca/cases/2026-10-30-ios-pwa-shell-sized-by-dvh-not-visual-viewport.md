@@ -22,7 +22,9 @@ tags:
 sources:
   - task user-reported iPhone PWA screenshots 2026-10-30 (keyboard open and closed)
   - task user-reported iPhone PWA screenshots 2026-11-04 6:27 PM PST (recurrence, keyboard open and closed)
-repro: front-end/src/tests/blackbox/query-input-layer.blackbox.tsx ("keeps the composer on its slot while the iOS keyboard pans the visible viewport"); front-end/src/tests/blackbox/app-wiring-hooks.blackbox.ts ("never extends past the visible viewport when iOS leaves it short after the keyboard closes"); front-end/src/tests/blackbox/rose-chrome-cleanup.blackbox.tsx (shell vars + mobile trajectory text)
+  - task user-reported iPhone PWA screenshot 2026-11-05 1:51 PM PST (cold landing, 62pt band under the shell)
+  - task Amplitude "iOS Viewport Geometry" events 2026-11-05 (standalone: inner/client/visual height 894, screen 956)
+repro: front-end/src/tests/blackbox/rose-chrome-cleanup.blackbox.tsx ("makes iOS give the installed PWA the full screen"); front-end/src/tests/blackbox/query-input-layer.blackbox.tsx ("keeps the composer on its slot while the iOS keyboard pans the visible viewport"); front-end/src/tests/blackbox/app-wiring-hooks.blackbox.ts ("never extends past the visible viewport when iOS leaves it short after the keyboard closes"); front-end/src/tests/blackbox/rose-chrome-cleanup.blackbox.tsx (shell vars + mobile trajectory text)
 status: mitigated
 ---
 
@@ -120,6 +122,27 @@ the band is canvas or WKWebView under-page are unmeasured — exactly what (c)
 captures. Golden reference: not applicable (no
 approval-gated hunk).
 
+**Recurrence 2026-11-05 (cold launch, no keyboard).** The landing page of the
+installed PWA again ended 62pt above the screen bottom. The telemetry added on
+11-04 settled the open question: every standalone event reports innerHeight,
+documentElement.clientHeight and visualViewport.height = 894 with screen 956,
+on first load as well as after the keyboard; Safari tabs report their real
+viewport. So the short viewport is not a post-keyboard state: iOS 26 gives an
+installed `viewport-fit=cover` + `black-translucent` page a viewport short by
+the status-bar inset whenever the document is no taller than that viewport
+(WebKit 301108), and WebKit stops drawing at the short edge — which is why the
+10-30 screen-height shell was clipped and the 11-04 visual-viewport shell left a
+band. `html.rose-app-shell` pins html/body to `height: 100%`, so the document
+was always exactly the short viewport. Fix: `@media (display-mode: standalone)
+{ html { min-height: min(100lvh, calc(100% + env(safe-area-inset-top, 0px))) } }`
+— a document one inset taller makes iOS hand back the full screen, the cap at
+100lvh keeps it from scrolling, and a zero inset leaves every other surface
+unchanged; the visual-viewport shell then measures 956. Same mechanism and
+simulator measurement (812 → 874 on iPhone 17 Pro) as frappe-ui #1284/#1289.
+Repro limit: jsdom/Chromium cannot reproduce the iOS 26 short viewport, so the
+structural test pins the rule and the shell vars; device confirmation comes
+from the same Amplitude event (standalone visual_height should read 956).
+
 ## Human feedback
 
 User asked for: trajectory font +2px on mobile only; query box flush with the
@@ -132,4 +155,4 @@ replication, then /deploy.
 
 ## Reusable lesson
 
-On iOS, size the shell from `visualViewport` (height + offsetTop, never screen.height or 100dvh) and place anything portaled out of it by the difference of two client rects, never by mixing client rects with `clientHeight`/fixed coordinates.
+On iOS, size the shell from `visualViewport` (height + offsetTop, never screen.height or 100dvh) and place anything portaled out of it by the difference of two client rects, never by mixing client rects with `clientHeight`/fixed coordinates. When an installed PWA's viewport is short of the screen, no shell size can paint into the missing band: make the document taller (standalone html min-height) so iOS returns the full viewport, and instrument the device numbers before the second guess.

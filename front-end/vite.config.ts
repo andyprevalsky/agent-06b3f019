@@ -1,9 +1,11 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react-swc';
 import path from 'path';
+import { productionBuildId, roseBuildVersion } from './vite-build-version';
 
 // https://vitejs.dev/config/
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
+  const buildId = command === 'build' ? productionBuildId() : '';
   const proxy = {
     '/anthropic-proxy': {
       target: `http://localhost:${process.env.BACKEND_PORT || '3000'}`,
@@ -34,7 +36,10 @@ export default defineConfig(() => {
       allowedHosts: process.env.VITE_ALLOWED_HOSTS?.split(',').filter(Boolean),
       proxy,
     },
-    plugins: [react()],
+    plugins: [react(), roseBuildVersion(buildId)],
+    define: {
+      'import.meta.env.VITE_ROSE_BUILD_ID': JSON.stringify(buildId),
+    },
     build: {
       manifest: true,
       // Local semantic stacks serve the bundled preview, which only contains built
