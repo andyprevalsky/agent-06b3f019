@@ -132,3 +132,34 @@ reinstall its side effects after a test replaces the target, and a diagnostic
 tracer still owns tracing even when its output is filtered. Test doubles must
 implement the real interfaces executed by the code under test. Native failure
 records and post-repair full validation remain distinct evidence.
+
+## November 5: isolated checkout and native startup evidence
+
+The first staged run on `ce2742ae0` exposed preparation failures rather than a
+reason to alter production behavior. An interrupted environment copy left the
+structural worker without pytest; the backend worker omitted its Python
+environment. Sparse checkouts also omitted tracked benchmark history consumed
+by the backend, agents and /descend tests. Restore the pinned environment and
+the exact committed history in a terminal worker, retaining its original logs.
+The unchanged subscription test, span-history domain and four affected backend
+domains then passed. The focused backend runner returned its intentional
+partial-coverage exit 3; this is not full coverage acceptance. The original
+browser shutdown assertion was not reproduced by the missing-Python controls,
+so its historical cause remains unknown.
+
+Cloud smoke failed at the native `flyctl status` exec before dispatch because
+the installed binary was outside PATH. Its original producer did not record a
+startup cleanup seal. Later empty process scans cannot manufacture that seal.
+The revised producer writes narrowly typed startup evidence for future runs.
+Compatibility for the audited original producer permits only a different
+token and isolated native directory after fresh exact-scope process checks.
+It preserves the original ten UNVERIFIED outcomes and cleanup debt and grants
+no test or historical cleanup credit. Conflicting resources, unknown source,
+missing observations and live owners remain rejected.
+
+The identical compatibility regression failed before the repair and passed
+after it; five consecutive focused runs and all 168 coordinator tests passed.
+Evidence remains under
+`.context/cli-nov05-review/` and the isolated review checkout's
+`.context/nov05-cleanup-repair/`. These proofs do not establish a successful
+smoke campaign, global coverage, financial release, or completed deployment.
