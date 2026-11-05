@@ -169,6 +169,9 @@ class BenchmarkRun:
         }
 
     def save(self, directory: str = None) -> str:
+        if any(r.benchmark_status == "UNSCORED" or (r.stop_metadata or {}).get("purpose") == "owned_recording_preparation"
+               for r in self.task_results):
+            raise ValueError("Unscored preparation cannot enter benchmark results, history or eligibility")
         if directory is None:
             directory = os.path.join(os.path.dirname(__file__), "runs")
         os.makedirs(directory, exist_ok=True)

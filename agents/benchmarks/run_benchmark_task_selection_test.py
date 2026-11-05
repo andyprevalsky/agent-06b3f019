@@ -469,3 +469,372 @@ def test_agentcard_setup_targets_the_effective_payment_user(monkeypatch):
         "userId": rb.AGENT_PAYMENT_BENCHMARK_USER_ID,
         "action": "complete",
     }
+
+# These cases exercise the same native entrypoints as a recording preparation;
+# no model, database, browser, or provider is contacted.
+def test_owned_preparation_explicit_bounds_and_normal_deadline(monkeypatch):
+    import copy
+    task = copy.copy(rb.get_task_by_name('test-mass-agent-run-0'))
+    task._resolved_timeout_seconds = 900
+    before = copy.deepcopy(vars(task))
+    assert rb._execution_timeout_seconds(task) == 900
+    task._owned_preparation_seconds = 3600
+    assert rb._execution_timeout_seconds(task) == 3600
+    assert rb.agent_execution_backstop_seconds(task) == 3600
+    del task._owned_preparation_seconds
+    assert vars(task) == before
+    for seconds in (0, -1, 3601, True):
+        with pytest.raises(ValueError):
+            local_runner.validate_owned_preparation_options(
+                Namespace(owned_recording_preparation_seconds=seconds), [task.name])
+    args = local_runner.parse_args([task.name, '--owned-recording-preparation-seconds', '3600'])
+    local_runner.validate_owned_preparation_options(args, [task.name])
+    for flag in ('--simulate', '--shared-stack', '--use-existing', '--timeout-seconds'):
+        extra = [flag, '1000'] if flag == '--timeout-seconds' else [flag]
+        with pytest.raises((ValueError, SystemExit)):
+            bad = local_runner.parse_args([task.name, '--owned-recording-preparation-seconds', '3600', *extra])
+            local_runner.validate_owned_preparation_options(bad, [task.name])
+
+
+def test_owned_preparation_admission_checks_empty_real_cache(monkeypatch, tmp_path):
+    import hashlib
+    import json
+    from providers.demo_cache import context
+    root = str(Path(__file__).resolve().parents[2])
+    url = 'postgresql://test@localhost/victoria_wmh_recording_new'
+    manifest = tmp_path / 'owner.json'
+    manifest.write_text(json.dumps({'checkout': root, 'owner_workspace': 'isolated',
+        'database': 'victoria_wmh_recording_new', 'host': 'localhost',
+        'url_sha256': hashlib.sha256(url.encode()).hexdigest(), 'retained_across_iterations': True}))
+    env = {'WMH_OWNED_RECORDING_CACHE_MANIFEST': str(manifest),
+        'WMH_OWNED_RECORDING_CACHE_DATABASE_URL': url, 'DEMO_CACHE_DATABASE_URL': url,
+        'FAST_MODE_CACHE_DATABASE_URL': url, 'DEMO_CACHE_RECORD_DEMO': '1',
+        'FAST_MODE_CACHE_RECORD_DEMO': '1', 'DEMO_CACHE_DISABLE_WRITE_THROUGH': '0',
+        'FAST_MODE_CACHE_DISABLE_WRITE_THROUGH': '0', 'BENCHMARK_ISOLATED_RUN': 'true',
+        'BENCHMARK_WORLD_MODEL_MODE': 'real', 'CONDUCTOR_WORKSPACE_NAME': 'isolated',
+        'DATABASE_URL': 'postgresql://test@localhost/victoria_fixture'}
+    monkeypatch.setattr(os, 'environ', env)
+    monkeypatch.setattr(rb.cloud_batch_cleanup, 'contract', lambda: (tmp_path / 'cleanup', 'token'))
+    reads = []
+    monkeypatch.setattr(rb, '_recording_cache_row_count', lambda value: reads.append(value) or 0)
+    task = rb.get_task_by_name('test-mass-agent-run-0')
+    assert rb._admit_owned_preparation('http://localhost:3100', [task], 100, tmp_path/'prep.json')['cache_rows_before'] == 0
+    assert reads == [url]
+    assert context.DemoCacheContext(True, task.prompt).read_enabled is False
+    assert context.DemoCacheContext(True, task.prompt).soft_complete_allowed is False
+    for key, value in [('BENCHMARK_WORLD_MODEL_MODE', 'simulate'),
+                       ('BENCHMARK_DEMO_CACHE_READ_ONLY', '1'),
+                       ('FAST_MODE_CACHE_DATABASE_URL', 'postgresql://test@localhost/other')]:
+        old = env.get(key)
+        env[key] = value
+        with pytest.raises(ValueError):
+            rb._admit_owned_preparation('http://localhost:3100', [task], 100, tmp_path/(key+'.json'))
+        if old is None: env.pop(key)
+        else: env[key] = old
+    monkeypatch.setattr(rb, '_recording_cache_row_count', lambda value: 1938)
+    with pytest.raises(ValueError, match='empty'):
+        rb._admit_owned_preparation('http://localhost:3100', [task], 100, tmp_path/'occupied.json')
+    with pytest.raises(ValueError):
+        rb._admit_owned_preparation('https://api.roselabs.ai', [task], 100, tmp_path/'remote.json')
+
+
+def test_owned_preparation_never_saves_benchmark_pass(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    from benchmarks.results import TaskResult
+    events = []
+    async def run(base, task, **kwargs):
+        assert kwargs['preparation_seconds'] == 100
+        assert kwargs['keep_failed_agents'] is True
+        kwargs['on_agent_created'](task.name, 'root')
+        events.append('run')
+        return TaskResult(name=task.name, passed=False, agent_id='root', status='COMPLETED',
+            progress_score=1, duration_seconds=2, cost_cents=3, message_count=10,
+            benchmark_status='UNSCORED', logs={'preparation': {'qualification': 'NOT_VALIDATION'}})
+    async def cleanup(base, results, live, **kwargs):
+        assert live == {'test-mass-agent-run-0': ['root']}
+        assert results[0].passed is False
+        events.append('cleanup')
+    monkeypatch.setattr(rb, 'run_single_task', run)
+    monkeypatch.setattr(rb, '_finalize_owned_cloud_batch', cleanup)
+    monkeypatch.setattr(rb, '_begin_interrupt_cleanup', lambda: None)
+    monkeypatch.setattr(rb, '_complete_interrupt_cleanup', lambda: events.append('clean'))
+    monkeypatch.setattr(rb.BenchmarkRun, 'save', lambda *a: pytest.fail('preparation entered benchmark history'))
+    monkeypatch.setattr(rb, 'evaluate_task', lambda *a: pytest.fail('preparation scored'))
+    out = tmp_path/'prep.json'
+    out.write_text('{}')
+    args = SimpleNamespace(owned_recording_preparation_seconds=100, owned_recording_preparation_out=str(out))
+    asyncio.run(rb._run_owned_preparation('http://localhost:3100', rb.get_task_by_name('test-mass-agent-run-0'), args))
+    value = json.loads(out.read_text())
+    assert value['qualification'] == 'NOT_VALIDATION'
+    assert value['mode'] == 'UNSCORED_RECORDING_PREPARATION'
+    assert value['result']['passed'] is False
+    assert value['result']['benchmark_status'] == 'UNSCORED'
+    assert events == ['run', 'cleanup', 'clean']
+
+
+def test_owned_preparation_abort_retains_original_error_and_custody(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    events = []
+    async def run(base, task, **kwargs):
+        kwargs['on_agent_created'](task.name, 'root')
+        raise asyncio.CancelledError('original abort')
+    async def cleanup(base, results, live, **kwargs):
+        assert live["test-mass-agent-run-0"] == ['root']
+        events.append('cleanup')
+    monkeypatch.setattr(rb, 'run_single_task', run)
+    monkeypatch.setattr(rb, '_finalize_owned_cloud_batch', cleanup)
+    monkeypatch.setattr(rb, '_begin_interrupt_cleanup', lambda: None)
+    monkeypatch.setattr(rb, '_complete_interrupt_cleanup', lambda: None)
+    out = tmp_path/'prep.json'; out.write_text('{}')
+    args = SimpleNamespace(owned_recording_preparation_seconds=100, owned_recording_preparation_out=str(out))
+    with pytest.raises(asyncio.CancelledError, match='original abort'):
+        asyncio.run(rb._run_owned_preparation('http://localhost:3100', rb.get_task_by_name('test-mass-agent-run-0'), args))
+    assert events == ['cleanup']
+    assert 'original abort' in out.read_text()
+    assert json.loads(out.read_text())['qualification'] == 'NOT_VALIDATION'
+
+
+def test_owned_preparation_results_refuse_history_even_after_cleanup_error(tmp_path):
+    from benchmarks.results import BenchmarkRun, TaskResult
+    row = TaskResult(name='native', passed=False, agent_id='root', status='COMPLETED',
+        progress_score=1, duration_seconds=2, cost_cents=3, message_count=10,
+        benchmark_status='ERROR', stop_metadata={'purpose': 'owned_recording_preparation'})
+    run = BenchmarkRun(task_results=[row])
+    with pytest.raises(ValueError, match='Unscored preparation'):
+        run.save(str(tmp_path/'normal-results'))
+    assert not (tmp_path/'normal-results').exists()
+
+
+def test_owned_preparation_owner_deadline_uses_existing_exact_abort(monkeypatch, tmp_path):
+    import signal
+    from types import SimpleNamespace
+    events = []
+    state = {'done': False}
+    class Selector:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def register(self, *args): pass
+        def select(self, *args): return []
+    process = SimpleNamespace(pid=12345, stdout=SimpleNamespace(close=lambda: None),
+        poll=lambda: 0 if state['done'] else None, wait=lambda: 130)
+    stack = SimpleNamespace(context_dir=tmp_path, run_id='owned', isolated=True)
+    owner = local_runner.LocalBenchmarkOwner(stack)
+    owner.process = process
+    owner.native_identity = 'exact-fixture-birth'
+    owner.preparation_deadline = 0
+    monkeypatch.setattr(local_runner.selectors, 'DefaultSelector', Selector)
+    def stop(child, identity, signum):
+        assert child is process and identity == 'exact-fixture-birth'
+        events.append(signum)
+        state['done'] = True
+    monkeypatch.setattr(local_runner, '_signal_owned_process', stop)
+    monkeypatch.setattr(local_runner, '_read_cleanup_receipt', lambda path, token: events.append('verified'))
+    code, _ = owner.drain(echo=False)
+    assert code == 130 and owner.signum == signal.SIGTERM
+    assert owner.verified is True
+    assert events == [signal.SIGINT, 'verified']
+
+
+def test_owned_preparation_creation_is_identical_to_normal_route(monkeypatch):
+    import copy
+    import json
+    import httpx
+    requests = []
+    original_client = httpx.AsyncClient
+    def response(request):
+        requests.append((request.method, request.url.path, json.loads(request.content)))
+        return httpx.Response(201, json={'agent_id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'})
+    transport = httpx.MockTransport(response)
+    monkeypatch.setattr(rb.httpx, 'AsyncClient', lambda **kwargs: original_client(transport=transport, **kwargs))
+    async def headers(): return {'Authorization': 'offline-fixture'}
+    monkeypatch.setattr(rb, '_api_headers', headers)
+    monkeypatch.setattr(rb, '_local_benchmark_task_queue', lambda base: 'owned-queue')
+    monkeypatch.setattr(rb, '_resolve_write_lock_enabled', lambda task: None)
+    monkeypatch.setattr(rb, '_benchmark_agent_source_override', lambda: None)
+    task = copy.copy(rb.get_task_by_name('test-mass-agent-run-0'))
+    original = copy.deepcopy(vars(task))
+    async def check():
+        await rb.create_agent('http://localhost:3100', task)
+        preparation = copy.copy(task)
+        preparation._owned_preparation_seconds = 3600
+        await rb.create_agent('http://localhost:3100', preparation)
+    asyncio.run(check())
+    assert requests[0] == requests[1]
+    body = requests[0][2]
+    assert body['goal'] == task.prompt
+    assert body['price_limit_cents'] == task.effective_price_limit_cents()
+    assert body['verifier'] == {'type': 'FLOAT_LLM_JUDGE'}
+    assert body['fast_mode_cache_enabled'] is True
+    assert body['task_queue'] == 'owned-queue'
+    assert 'start_phase' not in body  # preserve chat -> router/schema -> PLAN
+    assert vars(task) == original
+
+
+@pytest.mark.parametrize("outcome", ["normal", "error", "cancel"])
+def test_owned_preparation_actual_runner_preserves_capture_without_evaluation(monkeypatch, outcome):
+    import copy
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    task = copy.copy(rb.get_task_by_name('test-mass-agent-run-0'))
+    task._resolved_timeout_seconds = 900
+    original = copy.deepcopy(vars(task))
+    root = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    snapshot = {'agent': {'id': root, 'status': 'COMPLETED', 'progress': 1, 'tree_cost_cents': 3},
+                'messages': [{'role': 'USER', 'text': task.prompt},
+                             {'role': 'ASSISTANT', 'text': 'partial informational answer'}]}
+    created = []
+    async def create(base, actual):
+        assert actual._resolved_timeout_seconds == 900
+        assert actual._owned_preparation_seconds == 100
+        assert actual.prompt == task.prompt and actual.price_limit_cents == task.price_limit_cents
+        created.append(root)
+        return root
+    async def poll(base, aid, actual, *args):
+        assert rb._execution_timeout_seconds(actual) == 100
+        if outcome == "error":
+            raise RuntimeError("original offline execution error")
+        if outcome == "cancel":
+            raise asyncio.CancelledError("original offline cancellation")
+        return snapshot, 0, 0, None
+    monkeypatch.setattr(rb, 'create_agent', create)
+    monkeypatch.setattr(rb, '_poll_agent', poll)
+    archive = AsyncMock(return_value=('original-final-ref', {'status': 'not_applicable'}))
+    monkeypatch.setattr(rb, 'finalize_archive_and_score_world_model', archive)
+    monkeypatch.setattr(rb.cloud_batch_cleanup, 'contract', lambda: ('owned', 'token'))
+    monkeypatch.setattr(rb, '_should_delete_cancelled_agent', lambda *a: False)
+    for name, result in [('_apply_live_fixtures', []), ('_apply_memory_fixtures', []),
+                         ('_apply_auth_test_site', None), ('_warm_cache_gated_root', None),
+                         ('subscribe_supabase_realtime_agent', 'offline'),
+                         ('post_world_model_update_events', None), ('archive_agent_start', 'original-start-ref'),
+                         ('_restore_live_fixture_scenarios_async', None), ('_release_auth_test_site', None),
+                         ('get_agent', snapshot), ('get_agent_tree', [{'agent_id': root}]),
+                         ('collect_logs', {})]:
+        monkeypatch.setattr(rb, name, AsyncMock(return_value=result))
+    monkeypatch.setattr(rb, 'SupabaseRealtimeSmokeMonitor',
+        lambda *args, **kwargs: SimpleNamespace(start=AsyncMock(), stop=AsyncMock()))
+    monkeypatch.setattr(rb, 'evaluate_task', lambda *a: pytest.fail('preparation called evaluator'))
+    observed = []
+    result = asyncio.run(rb.run_single_task('http://localhost:3100', task,
+        preparation_seconds=100, on_agent_created=lambda name, aid: observed.append(aid)))
+    assert created == observed == [root]
+    assert result.passed is False
+    if outcome == 'normal':
+        assert result.benchmark_status == 'UNSCORED'
+        assert result.logs['preparation']['snapshot'] == snapshot
+        assert result.logs['preparation']['qualification'] == 'NOT_VALIDATION'
+        assert not archive.called
+    else:
+        assert outcome == 'cancel' or 'original offline execution error' in result.failure_reason
+        assert 'original offline' in result.logs['preparation']['execution_error']
+        assert archive.call_args.kwargs['unscored_preparation'] is True
+    assert result.logs['messages']  # actual existing capture projection
+    assert vars(task) == original
+
+
+def test_owned_preparation_empty_cache_probe_is_read_only_and_private(monkeypatch):
+    from types import SimpleNamespace
+    import subprocess
+    url = 'postgresql://private-user:private-password@localhost/victoria_wmh_recording_new'
+    calls = []
+    def execute(command, **kwargs):
+        calls.append((command, kwargs))
+        assert url not in repr(command)
+        assert kwargs['env']['PGDATABASE'] == url
+        assert 'default_transaction_read_only=on' in kwargs['env']['PGOPTIONS']
+        assert kwargs['timeout'] == 15
+        assert command[-1] == 'SELECT COUNT(*) FROM "FastModeCacheEntry"'
+        return SimpleNamespace(returncode=0, stdout='0\n')
+    monkeypatch.setattr(subprocess, 'run', execute)
+    assert rb._recording_cache_row_count(url) == 0
+    assert len(calls) == 1
+
+
+def test_owned_preparation_abort_cleanup_failure_keeps_primary(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    async def run(*args, **kwargs):
+        raise asyncio.CancelledError('primary cancellation')
+    async def cleanup(*args, **kwargs):
+        raise RuntimeError('unverified cleanup')
+    monkeypatch.setattr(rb, 'run_single_task', run)
+    monkeypatch.setattr(rb, '_finalize_owned_cloud_batch', cleanup)
+    monkeypatch.setattr(rb, '_begin_interrupt_cleanup', lambda: None)
+    monkeypatch.setattr(rb, '_complete_interrupt_cleanup', lambda: pytest.fail('must not mark clean'))
+    out = tmp_path/'prep.json'; out.write_text('{}')
+    args = SimpleNamespace(owned_recording_preparation_seconds=100, owned_recording_preparation_out=str(out))
+    with pytest.raises(asyncio.CancelledError, match='primary cancellation') as caught:
+        asyncio.run(rb._run_owned_preparation('http://localhost:3100', rb.get_task_by_name('test-mass-agent-run-0'), args))
+    assert 'unverified cleanup' in caught.value.__notes__[0]
+    receipt = json.loads(out.read_text())
+    assert receipt['state'] == 'INCOMPLETE' and 'unverified cleanup' in receipt['cleanup_error']
+
+
+def test_owned_preparation_local_dispatch_binds_native_owner_without_timeout_override(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    calls = []
+    receipt = tmp_path/'recording-preparation.json'
+    receipt.write_text(json.dumps({'mode': 'UNSCORED_RECORDING_PREPARATION', 'qualification': 'NOT_VALIDATION'}))
+    stack = SimpleNamespace(isolated=True, context_dir=tmp_path, workspace_name='isolated')
+    class Owner:
+        signum = None
+        def __init__(self): self.stack = stack
+        def environment(self, env): calls.append(('owner', dict(env))); return env
+        def bind(self, process): calls.append(('bound', process))
+        def drain(self): return 0, 'Preparation evidence saved: '+str(receipt)
+    owner = Owner()
+    def recording(env, **kwargs):
+        assert kwargs['isolated'] and not kwargs['simulate'] and kwargs['workspace'] == 'isolated'
+        assert kwargs['fixture_database'] == 'fixture'
+        env['BENCHMARK_WORLD_MODEL_MODE'] = 'real'
+        calls.append(('recording', None))
+        return True
+    def spawn(command, **kwargs):
+        assert '--owned-recording-preparation-seconds' in command
+        assert '--timeout-seconds' not in command and '--checkpoint' not in command
+        assert kwargs['env']['BENCHMARK_WORLD_MODEL_MODE'] == 'real'
+        assert kwargs['start_new_session'] is True
+        return SimpleNamespace()
+    monkeypatch.setattr(local_runner, 'benchmark_runner_env', lambda: {'DATABASE_URL': 'postgresql://test@localhost/fixture'})
+    monkeypatch.setattr(local_runner, 'apply_owned_wmh_recording', recording)
+    monkeypatch.setattr(local_runner.subprocess, 'Popen', spawn)
+    result = local_runner.run_benchmark_invocation(
+        local_runner.BenchmarkInvocation('preparation', ['test-mass-agent-run-0'], is_load=False),
+        port=3100, bootstrap=True, anon=False, max_concurrency=1, owner=owner, preparation_seconds=100)
+    assert result == receipt
+    assert [event[0] for event in calls] == ['recording', 'owner', 'bound']
+    assert owner.preparation_deadline > 0
+
+
+def test_owned_preparation_archive_never_publishes_scored_metadata(monkeypatch):
+    from unittest.mock import AsyncMock
+    calls = []
+    async def archive(*args, **kwargs):
+        calls.append(kwargs)
+        return 'original-archive-ref'
+    monkeypatch.setattr(rb.cloud_batch_cleanup, 'contract', lambda: None)
+    monkeypatch.setattr(rb, 'archive_agent_finalize', archive)
+    monkeypatch.setattr(rb, 'evaluate_world_model_fidelity', AsyncMock(side_effect=AssertionError('preparation scored')))
+    async def check():
+        for status in ('ERROR', 'CANCELLED', 'PASSED'):
+            ref, fidelity = await rb.finalize_archive_and_score_world_model(
+                'http://localhost:3100', 'root', 'task', benchmark_passed=True,
+                benchmark_status=status, failure_reason='original error', unscored_preparation=True)
+            assert ref == 'original-archive-ref' and fidelity['status'] == 'not_applicable'
+    asyncio.run(check())
+    assert len(calls) == 3
+    for call in calls:
+        assert call['benchmark_passed'] is None
+        assert call['benchmark_status'] == 'UNSCORED'
+        assert call['failure_reason'] == 'original error'
+
+
+def test_owned_preparation_missing_cost_is_not_zero():
+    for data in ({}, {'agent': {}}, {'agent': {'tree_cost_cents': None}},
+                 {'agent': {'tree_cost_cents': float('nan')}}, {'agent': {'tree_cost_cents': True}}):
+        evidence = rb._preparation_cost_evidence(data)
+        assert evidence['cents'] is None and evidence['coverage'] == 'unknown'
+    assert rb._preparation_cost_evidence({'agent': {'tree_cost_cents': 0}}) == {
+        'cents': 0, 'source': 'agent.tree_cost_cents', 'coverage': 'reported_snapshot'}

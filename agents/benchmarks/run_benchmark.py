@@ -50,7 +50,7 @@ import unicodedata
 import uuid
 import math
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
@@ -3307,11 +3307,15 @@ async def finalize_archive_and_score_world_model(
     benchmark_passed: Optional[bool] = None,
     benchmark_status: Optional[str] = None,
     failure_reason: Optional[str] = None,
+    unscored_preparation: bool = False,
 ) -> tuple[Optional[str], dict]:
     """Finalize durable trace storage and score WMH prediction fidelity for the run."""
 
     if cloud_batch_cleanup.contract() is not None and not owned_batch_final:
         return None, {"status": "deferred", "reason": "owned cloud batch cleanup precedes archive"}
+    if unscored_preparation:
+        benchmark_passed = None
+        benchmark_status = "UNSCORED"
     archive_manifest_ref = await archive_agent_finalize(
         base_url,
         agent_id,
@@ -3323,7 +3327,10 @@ async def finalize_archive_and_score_world_model(
     )
     if archive_manifest_ref:
         print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
-    world_model_fidelity = await evaluate_world_model_fidelity(agent_id)
+    world_model_fidelity = (
+        {"status": "not_applicable", "reason": "unscored recording preparation"}
+        if unscored_preparation else await evaluate_world_model_fidelity(agent_id)
+    )
     if world_model_fidelity.get("status") == "scored":
         print(
             "    🧠 WMH prediction accuracy: "
@@ -4862,9 +4869,20 @@ def benchmark_wall_clock_backstop_seconds() -> int:
     return int(value)
 
 
+def _execution_timeout_seconds(task: BenchmarkTask):
+    preparation = getattr(task, "_owned_preparation_seconds", None)
+    if preparation is not None:
+        if isinstance(preparation, bool) or not isinstance(preparation, int) or not 1 <= preparation <= 3600:
+            raise ValueError("Preparation budget must be 1..3600 seconds")
+        return preparation
+    return getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+
+
 def agent_execution_backstop_seconds(task: Optional[BenchmarkTask] = None) -> int:
     """An operator-set backstop is a hard cap; only the default yields to a longer task timeout."""
     seconds = benchmark_wall_clock_backstop_seconds()
+    if task is not None and getattr(task, "_owned_preparation_seconds", None) is not None:
+        return min(seconds, _execution_timeout_seconds(task)) if "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in os.environ else _execution_timeout_seconds(task)
     if task is None or "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in os.environ:
         return seconds
     resolved = getattr(task, "_resolved_timeout_seconds", None)
@@ -5036,7 +5054,7 @@ async def _poll_agent(
     task._mid_run_feedback_initial_schema = None
     task._mid_run_feedback_evidence = None
 
-    resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+    resolved_timeout = _execution_timeout_seconds(task)
     wall_clock_disabled = polar_wall_clock_disabled(task) or resolved_timeout in (None, 0)
     step_budget = polar_browser_step_budget(task)
 
@@ -7275,6 +7293,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         owned_batch_final=True,
                         benchmark_passed=result.passed,
                         benchmark_status=result.benchmark_status,
+                        unscored_preparation=(result.stop_metadata or {}).get("purpose") == "owned_recording_preparation",
                         failure_reason=result.failure_reason,
                     )
                 logs["cloud_archive_manifest_ref"] = archive_ref
@@ -15007,12 +15026,16 @@ async def run_single_task(
     on_agent_created: Optional[Callable[[str, str], None]] = None,
     on_task_evaluated: Optional[Callable[[TaskResult], None | Awaitable[None]]] = None,
     other_task_roots: Callable[[], set[str]] | None = None,
+    preparation_seconds: int | None = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
     # Repeated catalog selections share a template. Keep native lifecycle
     # ownership on this execution while preserving caller configuration/provenance.
     task = copy.copy(task)
+    if preparation_seconds is not None:
+        task._owned_preparation_seconds = preparation_seconds
+        _execution_timeout_seconds(task)
     task._wmh_seeded_session_id = None
     task._wmh_owned_session = None
     task._wmh_retirement_receipt = None
@@ -15508,6 +15531,23 @@ async def _run_single_task_as_run_user(
         if isinstance(execution_result, TaskResult):
             return execution_result
         data, approvals_triggered, approvals_resolved, early_fail_reason = execution_result
+        if getattr(task, "_owned_preparation_seconds", None) is not None:
+            data, logs = await _capture_task_failure_evidence(base_url, agent_id, task, data, start_time)
+            logs["preparation"] = {
+                "qualification": "NOT_VALIDATION", "snapshot": data,
+                "execution_error": early_fail_reason,
+                "budget_seconds": task._owned_preparation_seconds,
+                "cost_evidence": _preparation_cost_evidence(data),
+            }
+            agent = data.get("agent") or {}
+            return TaskResult(
+                name=task.name, passed=False, agent_id=agent_id,
+                status=agent.get("status", "UNKNOWN"), benchmark_status="UNSCORED",
+                progress_score=agent.get("progress", 0), duration_seconds=round(time.time() - start, 1),
+                cost_cents=_preparation_cost_evidence(data)["cents"],
+                message_count=len(data.get("messages", [])), logs=logs,
+                failure_reason=early_fail_reason, world_model_mode="real",
+            )
         if kill_evidence is not None:
             data["kill_agent_benchmark"] = kill_evidence
         if task.mid_run_feedback:
@@ -16085,6 +16125,7 @@ async def _run_single_task_as_run_user(
                     force=True,
                     benchmark_passed=False,
                     benchmark_status="CANCELLED",
+                    unscored_preparation=getattr(task, "_owned_preparation_seconds", None) is not None,
                     failure_reason="Benchmark interrupted; prod logs were collected before shutdown",
                 )
             except Exception as archive_error:
@@ -16118,6 +16159,8 @@ async def _run_single_task_as_run_user(
             f"    Interrupt cleanup evidence: root_target_known={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
         )
         logs = _native_world_retirement_diagnostics(task, logs, e)
+        if getattr(task, "_owned_preparation_seconds", None) is not None:
+            logs.setdefault("preparation", {})["execution_error"] = f"{type(e).__name__}: {e}"
         retirement_failed = getattr(task, "_wmh_retirement_error", None) is not None
         return TaskResult(
             name=task.name,
@@ -16127,7 +16170,7 @@ async def _run_single_task_as_run_user(
             benchmark_status="ERROR" if retirement_failed else "CANCELLED",
             progress_score=progress_score,
             duration_seconds=round(duration, 1),
-            cost_cents=0,
+            cost_cents=_preparation_cost_evidence(data)["cents"] if getattr(task, "_owned_preparation_seconds", None) is not None else 0,
             message_count=len(messages),
             failure_reason=(
                 "Benchmark interrupted; prod logs were collected before shutdown"
@@ -16187,6 +16230,7 @@ async def _run_single_task_as_run_user(
                     force=True,
                     benchmark_passed=False,
                     benchmark_status=error_status,
+                    unscored_preparation=getattr(task, "_owned_preparation_seconds", None) is not None,
                     failure_reason=str(e),
                 )
             except Exception as archive_error:
@@ -16195,6 +16239,8 @@ async def _run_single_task_as_run_user(
         if release_skip and logs and logs.get("failure_evidence", {}).get("errors"):
             error_status = "ERROR"
         logs = _native_world_retirement_diagnostics(task, logs, e)
+        if getattr(task, "_owned_preparation_seconds", None) is not None:
+            logs.setdefault("preparation", {})["execution_error"] = f"{type(e).__name__}: {e}"
         result = TaskResult(
             name=task.name,
             passed=False,
@@ -16203,7 +16249,7 @@ async def _run_single_task_as_run_user(
             benchmark_status=error_status,
             progress_score=0,
             duration_seconds=round(duration, 1),
-            cost_cents=0,
+            cost_cents=_preparation_cost_evidence(data)["cents"] if getattr(task, "_owned_preparation_seconds", None) is not None else 0,
             message_count=len(data.get("messages", [])),
             failure_reason=(
                 (f"{AGENTCARD_RELEASE_SKIP_REASON}: " if release_skip else "")
@@ -17337,6 +17383,131 @@ def _parallel_task_phases(
     return [("exclusive", exclusive), ("parallel", parallel)]
 
 
+def _preparation_cost_evidence(data: dict) -> dict:
+    agent = data.get("agent") or {}
+    for key in ("tree_cost_cents", "tool_cost_cents"):
+        value = agent.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+            return {"cents": value, "source": f"agent.{key}", "coverage": "reported_snapshot"}
+    return {"cents": None, "source": "unavailable", "coverage": "unknown"}
+
+
+def _recording_cache_row_count(url: str) -> int:
+    # Connection material is environment-only and never included in diagnostics.
+    result = subprocess.run(
+        ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c",
+         'SELECT COUNT(*) FROM "FastModeCacheEntry"'],
+        env={**os.environ, "PGDATABASE": url, "PGCONNECT_TIMEOUT": "5",
+             "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=5000"},
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode or not result.stdout.strip().isdigit():
+        raise ValueError("Could not verify empty owned recording cache (read-only query)")
+    return int(result.stdout.strip())
+
+
+def _admit_owned_preparation(base_url: str, tasks: list, seconds: int, out: Path) -> dict:
+    from providers.demo_cache.context import owned_recording_namespace, cache_writes_disabled
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 3600:
+        raise ValueError("Preparation budget must be 1..3600 seconds")
+    if not _is_local_base_url(base_url) or cloud_batch_cleanup.contract() is None:
+        raise ValueError("Preparation requires local native owned cleanup")
+    if len(tasks) != 1 or tasks[0].demo_cache != "on" or tasks[0].runner != "agent":
+        raise ValueError("Preparation requires one existing demo-cache agent task")
+    if os.environ.get("BENCHMARK_WORLD_MODEL_MODE") != "real":
+        raise ValueError("Preparation requires explicit REAL mode")
+    context_dir = Path(os.environ.get("BENCHMARK_CONTEXT_DIR", str(out.parent))).resolve()
+    if out.parent.resolve() != context_dir or out.is_symlink():
+        raise ValueError("Preparation output must belong to its native owner context")
+    namespace = owned_recording_namespace()
+    if not namespace or cache_writes_disabled():
+        raise ValueError("Preparation requires writable explicit owned recording")
+    count = _recording_cache_row_count(os.environ["WMH_OWNED_RECORDING_CACHE_DATABASE_URL"])
+    if count:
+        raise ValueError("Preparation requires a new empty owned cache")
+    receipt = {"mode": "UNSCORED_RECORDING_PREPARATION", "qualification": "NOT_VALIDATION",
+               "state": "ADMITTED", "cache_rows_before": count, "owner_namespace": namespace,
+               "task": tasks[0].name, "budget_seconds": seconds,
+               "price_limit_cents": tasks[0].effective_price_limit_cents(),
+               "task_definition_sha256": hashlib.sha256(json.dumps(asdict(tasks[0]), sort_keys=True, default=str).encode()).hexdigest(),
+               "manifest_sha256": hashlib.sha256(Path(os.environ["WMH_OWNED_RECORDING_CACHE_MANIFEST"]).read_bytes()).hexdigest()}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # Never replace a prior preparation receipt or silently reuse its run identity.
+    admission = Path(os.environ["WMH_OWNED_RECORDING_CACHE_MANIFEST"] + ".preparation-admission.json")
+    if out.exists():
+        raise ValueError("Preparation output already exists")
+    with admission.open("x") as stream:
+        json.dump({**receipt, "output": str(out.resolve())}, stream, indent=2)
+    with out.open("x") as stream:
+        json.dump(receipt, stream, indent=2)
+    return receipt
+
+
+async def _run_owned_preparation(base_url: str, task: BenchmarkTask, args) -> None:
+    out = Path(args.owned_recording_preparation_out)
+    receipt = json.loads(out.read_text())
+    live_ids: dict[str, list[str]] = {}
+    results = []
+    original_error = None
+    cleanup_error = None
+
+    def remember(name, aid):
+        if aid and aid not in live_ids.setdefault(name, []):
+            live_ids[name].append(aid)
+
+    _begin_interrupt_cleanup()
+    try:
+        result = await run_single_task(
+            base_url, task, keep_failed_agents=True, on_agent_created=remember,
+            preparation_seconds=args.owned_recording_preparation_seconds,
+        )
+        # Exceptions returned as native error outcomes retain their actual status/error.
+        # None of these outcomes can be a benchmark pass or enter result history.
+        result.passed = False
+        result.benchmark_status = "UNSCORED"
+        result.stop_metadata = {**(result.stop_metadata or {}), "purpose": "owned_recording_preparation"}
+        result.logs = result.logs or {}
+        result.logs.setdefault("preparation", {}).setdefault("cost_evidence", {
+            "cents": result.cost_cents, "source": "native_snapshot" if result.cost_cents is not None else "unavailable",
+            "coverage": "reported_snapshot" if result.cost_cents is not None else "unknown",
+        })
+        results.append(result)
+    except BaseException as error:
+        original_error = error
+        raise
+    finally:
+        try:
+            await _finalize_owned_cloud_batch(base_url, results, live_ids)
+            _complete_interrupt_cleanup()
+        except BaseException as error:
+            cleanup_error = error
+            if original_error is not None:
+                original_error.add_note(f"Preparation cleanup failed: {type(error).__name__}: {error}")
+        receipt.update({"mode": "UNSCORED_RECORDING_PREPARATION", "qualification": "NOT_VALIDATION",
+                        "state": "FINISHED_UNQUALIFIED", "roots": live_ids,
+                        "result": asdict(results[0]) if results else None,
+                        "error": f"{type(original_error).__name__}: {original_error}" if original_error else None,
+                        "cleanup_error": f"{type(cleanup_error).__name__}: {cleanup_error}" if cleanup_error else None})
+        if results and (results[0].status != "COMPLETED" or results[0].failure_reason):
+            receipt["state"] = "INCOMPLETE"
+        if original_error or cleanup_error:
+            receipt["state"] = "INCOMPLETE"
+        temporary = out.with_suffix(out.suffix + ".pending")
+        try:
+            with temporary.open("x") as stream:
+                json.dump(receipt, stream, indent=2, default=str)
+            temporary.replace(out)
+            print(f"Preparation evidence saved: {out}")
+        except BaseException as publication_error:
+            if original_error is None:
+                raise
+            original_error.add_note(f"Preparation evidence publication failed: {type(publication_error).__name__}")
+        if cleanup_error is not None and original_error is None:
+            raise cleanup_error
+    if receipt["state"] == "INCOMPLETE":
+        raise RuntimeError("Unscored recording preparation incomplete; original outcome retained in receipt")
+
+
 async def main_async(args):
     benchmark_wall_clock_backstop_seconds()  # Reject invalid limits before live setup.
     if args.list:
@@ -17374,6 +17545,15 @@ async def main_async(args):
     if not tasks:
         print("No tasks matched. Use --list to see available tasks.")
         sys.exit(1)
+    preparation = getattr(args, "owned_recording_preparation_seconds", None)
+    if preparation is not None:
+        forbidden = (args.prod or args.parallel or args.timeout_seconds is not None
+                     or args.checkpoint_source_index is not None or args.row_start is not None
+                     or args.row_end is not None or args.sub_agent_count is not None
+                     or args.wmh_initial_state_file or args.harness or args.anon)
+        if forbidden or not getattr(args, "owned_recording_preparation_out", None):
+            raise ValueError("Preparation cannot alter task/route or use checkpoint/validation options")
+        _admit_owned_preparation(base_url, tasks, preparation, Path(args.owned_recording_preparation_out))
     if args.wmh_initial_state_file:
         if len(tasks) != 1 or len(task_names_from_args(args)) != 1:
             raise ValueError("--wmh-initial-state-file requires exactly one explicit --task")
@@ -17494,6 +17674,10 @@ async def main_async(args):
             continue
         t._resolved_timeout_seconds, note = resolve_task_execution_timeout(t, bootstrap=args.bootstrap)
         print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s ({note})")
+
+    if preparation is not None:
+        await _run_owned_preparation(base_url, tasks[0], args)
+        return
 
     # Start Fly.io log streaming
     fly_status = await start_fly_log_collector(backend_url=base_url)
@@ -17996,6 +18180,9 @@ async def main_async(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Agent Benchmark Harness")
+    parser.add_argument("--owned-recording-preparation-seconds", type=int, default=None,
+                        help="Local owned REAL recording only; UNSCORED, bounded 1..3600s")
+    parser.add_argument("--owned-recording-preparation-out", default=None)
     parser.add_argument("--list", action="store_true", help="List all benchmark tasks")
     parser.add_argument(
         "--task",
