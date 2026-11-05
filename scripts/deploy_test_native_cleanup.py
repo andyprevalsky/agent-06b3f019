@@ -448,6 +448,9 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links = {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-startup-isolated-v1':
+        from deploy_test_startup_compat import validate as legacy_startup
+        return legacy_startup(receipt, owner, proof, adapter, request, runs, cli_text, document, bound, used)
     if layout == 'campaign-startup-v1':
         return startup_campaign(receipt, owner, proof, adapter, request, runs, cli_text, document, bound, used)
     if layout == 'campaign-v1':

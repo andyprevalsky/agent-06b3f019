@@ -3877,6 +3877,7 @@ n['seal_startup_cleanup'](campaign,json.loads((campaign/'summary.json').read_tex
         self.producer = subprocess.run([sys.executable, '-c', script, str(self.root), str(self.campaign)],
                                       capture_output=True, text=True)
         self.assertEqual(self.producer.returncode, 0, self.producer.stderr)
+        self.relay_directory=Path(c.read(self.campaign/'shared-relay-location.json')['directory'])
         cli = native / 'cli.log'
         cli.write_text(str(self.campaign) + "\nCampaign inventory did not initialize (FileNotFoundError: [Errno 2] No such file or directory: 'flyctl')\n")
         module = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
@@ -3904,6 +3905,9 @@ n['seal_startup_cleanup'](campaign,json.loads((campaign/'summary.json').read_tex
         self.seal_files()
 
     def tearDown(self):
+        import shutil
+        if hasattr(self,'relay_directory'):
+            shutil.rmtree(self.relay_directory)
         self.temp.cleanup()
 
     def seal_files(self):
@@ -3988,5 +3992,143 @@ n['seal_startup_cleanup'](campaign,json.loads((campaign/'summary.json').read_tex
         seal=c.read(self.campaign/'startup-cleanup.json');seal['inventory_exit']=1
         c.write(self.campaign/'startup-cleanup.json',seal);self.seal_files()
         with self.assertRaises(ValueError):self.validate()
+
+class LegacyStartupIsolation(StartupCleanup):
+    """Original producer format is admitted only for isolated execution, never cleanup credit."""
+    def setUp(self):
+        import time
+        from deploy_test_startup_compat import observe
+        super().setUp()
+        failure=c.read(self.campaign/'startup-failure.json')
+        seal=c.read(self.campaign/'startup-cleanup.json')
+        (self.campaign/'startup-failure.json').unlink()
+        (self.campaign/'startup-cleanup.json').unlink()
+        original=subprocess.check_output(['git','-C',str(ROOT),'show','ce2742ae0:scripts/run-bench-campaign.py'])
+        (self.root/'scripts/run-bench-campaign.py').write_bytes(original)
+        subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com',
+                        'commit','-qm','original producer'],check=True)
+        (self.root/'.git/info/exclude').write_text('.context/\n')
+        # Read actual immutable historical blobs through shared Git objects. No checkout of them.
+        (self.root/'.git/objects/info/alternates').write_text(str(ROOT/'.git/objects')+'\n')
+        self.source=dict(head='ce2742ae023ceab86a34d39bde2754a356f1cc4e',digest='d'*64)
+        self.request['source']=self.source;self.adapter['source']=self.source;self.receipt['source']=self.source
+        self.adapter['native_command']=['bash','scripts/run-bench','task','--runs','1','--concurrency','1',
+                                        '--retry-infra','0','--ref',self.source['head']]
+        self.receipt['command']=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')]
+        c.write(self.folder/'request.json',self.request);c.write(self.folder/'result.json',self.adapter)
+        self.owner['native_cleanup_reference']['result_sha256']=c.sha_file(self.folder/'result.json')
+        self.receipt['native_cleanup_reference']=self.owner['native_cleanup_reference']
+        self.receipt['cleanup_owner']=self.owner;c.write(self.folder/'receipt.json',self.receipt)
+        cli=Path(self.adapter['runner_log'])
+        cli.write_text(str(self.campaign)+"\nCampaign inventory: one parent-owned native feed for all cloud controllers; capacity and resource mutation checks remain live\nCampaign inventory did not initialize; see private publisher log (FileNotFoundError: [Errno 2] No such file or directory: 'flyctl')\n")
+        lock=self.campaign/'shared-inventory/machines-refresh.lock'
+        lock.write_text(f"host={os.uname().nodename}\npid={seal['inventory_pid']}\npid_start={failure['parent_start']}\ntoken=fixture\n")
+        self.observation=self.root/'.context/observation.json'
+        self.health=self.campaign/'shared-inventory/inventory/.generation-fixture/health'
+        self.health.parent.mkdir(parents=True)
+        publisher_token=f"1.2.{seal['inventory_pid']}.0"
+        self.health.write_text(f'publisher_token={publisher_token}\nvalid_until=1\ngeneration=.generation-fixture\n')
+        scopes=[str(self.campaign),str(self.runs),c.read(self.campaign/'shared-relay-location.json')['directory'],publisher_token]
+        os_record=observe({failure['parent_pid'],seal['inventory_pid']},scopes)
+        c.write(self.observation,dict(schema='legacy-startup-investigation-v1',observed_at=time.time(),
+            peer_record=f"pid={failure['parent_pid']} campaign={self.campaign}\n",os=os_record))
+        self.proof.update(layout='campaign-startup-isolated-v1',purpose='isolated-validation',
+            owner=copy.deepcopy(self.owner),source=self.source,validation_source=self.source,
+            investigator_observation=str(self.observation),inventory_health=str(self.health),confirmed_at=time.time(),
+            receipt_sha256=c.sha_file(self.folder/'receipt.json'),worker_result_sha256=c.sha_file(self.folder/'result.json'))
+        self.seal_files()
+
+    def seal_files(self):
+        if not hasattr(self,'observation'):
+            return super().seal_files()
+        paths=[self.folder/'request.json',Path(self.adapter['runner_log']),*self.campaign.glob('*.json'),
+               *(self.campaign/'shared-inventory/scripts').iterdir(),
+               self.campaign/'shared-inventory/machines-refresh.lock',self.observation,self.health]
+        self.proof['files']={str(p):c.sha_file(p) for p in paths if p.exists()}
+
+    # Do not inherit checkpoint-specific tests; this class exercises a different, historical protocol.
+    def test_native_startup_cleanup_preserves_null_exits_and_original_failures(self):
+        self.test_isolation_retains_debt_and_creates_new_token_binding()
+
+    def test_missing_native_checkpoint_cannot_reconcile_historical_attempt(self):
+        self.test_missing_native_trace_or_current_observation_is_not_admitted()
+
+    def test_native_seal_and_publication_are_mandatory(self):
+        for name in ['hub-group.json','hub-group-publication-ack.private.json','shared-relay-location.json']:
+            path=self.campaign/name;raw=path.read_bytes();path.unlink();self.seal_files()
+            with self.assertRaises(ValueError):self.validate()
+            path.write_bytes(raw)
+
+    def test_partial_resources_source_conflicts_and_live_owner_are_rejected(self):
+        old=c.read(self.observation)
+        for key,value in [('matched',[123]),('unreadable',[{'pid':123}]),('boot_id','wrong')]:
+            bad=copy.deepcopy(old);bad['os'][key]=value;c.write(self.observation,bad);self.seal_files()
+            with self.assertRaises(ValueError):self.validate()
+        c.write(self.observation,old)
+        path=self.campaign/'shared-inventory/scripts/cloudbench-campaign-inventory.sh'
+        path.write_text(path.read_text()+'\n# changed\n');self.seal_files()
+        with self.assertRaisesRegex(ValueError,'executed source mismatch'):self.validate()
+
+    def test_isolation_retains_debt_and_creates_new_token_binding(self):
+        originals={str(p):p.read_bytes() for p in self.folder.glob('*.json')}
+        state=dict(phase='triage',source=self.source,plan=dict(gates=[dict(name='smoke',native_cloud=True,
+            checks=['task'],command=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')],cwd='.')]),
+            failures=[dict(id='old',gate='smoke',check='smoke/task',native_result='UNVERIFIED',complete=False)],
+            attempts=[dict(results=[self.receipt])])
+        c.reconcile(state,'old',self.proof)
+        entry=next(iter(state['reconciled_owners'].values()))
+        self.assertFalse(entry['cleanup_complete']);self.assertFalse(entry['credit_granted'])
+        self.assertTrue(entry['obligations_preserved']);self.assertEqual(len(entry['retained_services']),2)
+        request=dict(token='3'*32,source=self.source,checks=['task'],skips={})
+        binding=c.isolated_request(state,state['plan']['gates'][0],request,self.root,{})
+        self.assertEqual(binding[0]['original_request_token'],self.receipt['token'])
+        self.assertEqual(binding[0]['new_request_token'],'3'*32)
+        self.assertNotEqual(binding[0]['new_native_root'],str(self.runs.parent))
+        self.assertFalse(binding[0]['credit_granted'])
+        self.assertEqual(originals,{p:Path(p).read_bytes() for p in originals})
+        bad=dict(self.proof);bad.pop('purpose')
+        with self.assertRaisesRegex(ValueError,'isolation binding'):
+            import deploy_test_native_cleanup as n
+            n.validate(self.receipt,self.owner,bad)
+
+    def test_missing_native_trace_or_current_observation_is_not_admitted(self):
+        path=Path(self.adapter['runner_log']);raw=path.read_bytes();path.write_text(str(self.campaign))
+        self.seal_files()
+        with self.assertRaisesRegex(ValueError,'pre-dispatch trace'):self.validate()
+        path.write_bytes(raw);self.observation.unlink();self.seal_files()
+        with self.assertRaises(ValueError):self.validate()
+
+    def test_observer_does_not_hide_a_known_native_owner(self):
+        from deploy_test_startup_compat import observe
+        self.assertIn(os.getpid(),observe({os.getpid()},[])['matched'])
+
+    def test_deleted_cwd_is_observed_and_still_matches_its_original_scope(self):
+        from deploy_test_startup_compat import observe
+        directory=self.root/'deleted-cwd';directory.mkdir()
+        child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],cwd=directory)
+        try:
+            directory.rmdir()
+            audit=observe(set(),[str(directory)])
+            self.assertIn(child.pid,audit['matched'])
+            self.assertNotIn(child.pid,[row['pid'] for row in audit['unreadable']])
+        finally:
+            child.terminate();child.wait(timeout=2)
+
+    def test_unknown_source_cannot_use_legacy_compatibility(self):
+        path=self.root/'scripts/run-bench-campaign.py';path.write_bytes(path.read_bytes()+b'\n# unaudited\n')
+        subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com',
+                        'commit','-qm','changed producer'],check=True)
+        source=c.source(self.root)
+        self.request['source']=source;self.adapter['source']=source;self.receipt['source']=source
+        c.write(self.folder/'request.json',self.request);c.write(self.folder/'result.json',self.adapter)
+        self.owner['native_cleanup_reference']['result_sha256']=c.sha_file(self.folder/'result.json')
+        self.receipt['native_cleanup_reference']=self.owner['native_cleanup_reference'];self.receipt['cleanup_owner']=self.owner
+        c.write(self.folder/'receipt.json',self.receipt)
+        self.proof.update(source=source,owner=copy.deepcopy(self.owner),
+            receipt_sha256=c.sha_file(self.folder/'receipt.json'),worker_result_sha256=c.sha_file(self.folder/'result.json'))
+        self.seal_files()
+        with self.assertRaisesRegex(ValueError,'unaudited legacy producer'):self.validate()
 
 if __name__ == '__main__': unittest.main()
