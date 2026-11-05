@@ -1,7 +1,7 @@
 ---
 id: 2026-11-05-private-source-fixture-boundary-drift
 date: 2026-11-05
-title: Private-source fixture sliced to a freeze marker moved before warm admission
+title: Fixture slices drifted when source freezing moved before warm admission
 surface: harness
 component: cloudbench-private-source-fixture
 classification: test-bug
@@ -11,6 +11,7 @@ symptoms:
   - ValueError substring not found
   - fleet.index("# Freeze one workspace patch", start)
   - benchmark-live-results[1/6] failed three recovery controls
+  - bash line 40 PROVISION_POOL unbound variable
 tags:
   - cloudbench
   - fixture
@@ -40,6 +41,16 @@ Archive searches used substring-not-found/freeze/workspace-patch and fixture-ext
 End the real warm-source admission slice at the adjacent dependency-preflight section. Existing helper extraction still supplies the actual dependency functions, and the fixture still calls warm_deps_preflight. Delete the dependency on the unrelated freeze block rather than add a fallback or change runtime order. All existing test functions, assertions, negative controls and timeouts remain byte-for-byte unchanged except the fixture extraction expression. The actual runtime source-freeze integration is covered by the unchanged refresh_deps_applies_exact_workspace_before_rebuild family.
 
 The original tests remain registered through scripts/tests/benchmark-live-results.test.py and the existing six-shard structural gate. All 186 private-source/dependency/source-freeze controls and all 13 additional transitive helper-consumer controls passed. The identical recovery selection passed 15 controls. The identical registered shard DEPLOY_GATE_SHARD=1/6 python3 scripts/tests/benchmark-live-results.test.py completed: 190 passed, 1 skipped, 2191 deselected in 147.95s (0:02:27). Full logs are recorded in the isolated .context/fixture-extraction report. A first unprovisioned-clone shard run resolved the original failures but reported missing installed Node trees; its four failures and one setup error remain retained separately. Existing installed dependency trees were then linked into the isolated clone before repeating the unchanged shard. No live benchmark, provider, payment, database, runtime or worker mutation is part of this repair. Golden reference: not applicable (no approval-gated hunk). This fixture-only change adds no per-agent runtime work at any scale. Status remains open until the parent completes validation and integration; isolated passes grant no deploy readiness or waiver.
+
+### Controller fixture recurrence on the same frozen source
+
+The round-14 cloudbench-controller selected pytest run on 9dccd611b2 reported one failure and 517 passes in 361.42 seconds: test_fleet_patch_packages_clean_unpushed_head_from_fetchable_base aborted with bash line 40 PROVISION_POOL unbound variable. Its exact log remains in the cloudbench-controller worker .context/cloudbench-local/run-ermmccdx/selected-pytest.log. The 11 other components and wallclock checks passed; no application or provider failure is inferred.
+
+The isolated clone preserved commit 3540006663ae5dff27d11918c5202e275af6773d. On that source the identical owning selection reproduced one failure in 1.02 seconds. The sibling ledger-only clean-commit control independently failed the same way in 3.83 seconds. Both extracted from FLEET_PATCH_FILE initialization through the distant dependency-preflight section, so moving patch generation earlier also pulled in preallocation, environment, seed and warm-source startup. Runtime correctly initializes PROVISION_POOL at line 1089, before this path. Initializing only that variable in the fixture would merely expose more unrelated startup dependencies; runtime is not the first-bad boundary.
+
+Gate: INTRODUCED, attributable to the same ecf8f02bf9 freeze reordering compared with its parent, not to 354000666's warm-source fixture repair. This is a sibling failure of the same extraction coupling, so it extends this case instead of creating another incident. Searches for PROVISION_POOL/unbound-variable and workspace-patch/fixture-extraction found this case and the September 10 omitted-bootstrap fixture case. That bootstrap case is a relative; this fixture should exclude unrelated startup rather than simulate its full initialization.
+
+The followup changes only fixture extraction. One shared _fleet_workspace_patch_setup selects the actual complete patch creation/fingerprint region and ends before the adjacent native preallocation conditional. Both executable consumers and the structural patch-disabled consumer use it. The complete real patch block is preserved; no controller, guard, recipe, assertion, negative control or deadline is changed. The identical original selection passed one test in 3.35 seconds. All 39 patch/unpushed/source-freeze controls passed in 11.54 seconds, including clean unpublished source replay, ledger-only no-delta behavior, disabled/missing/staged payload controls and exact maintenance source integration. Exact commands and before/after logs are in isolated .context/patch-fixture/report.json. All 3680 assertions and 438 timeout expressions remain identical by AST comparison. The original selected test remains registered in deploy Step 4cb. The parent owns full controller/deploy validation after the active cohort is terminal; no duplicate full controller was launched. Status remains open.
 
 ## Human feedback
 

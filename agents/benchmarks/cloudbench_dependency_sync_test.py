@@ -2293,7 +2293,7 @@ def test_fleet_patch_packages_clean_unpushed_head_from_fetchable_base(
 ) -> None:
     """A clean local commit still needs a patch when guests can fetch only its base."""
     fleet = fleet_source_text()
-    patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("# ── Preflight:", 1)[0]
+    patch_setup = _fleet_workspace_patch_setup(fleet)
     repo = tmp_path / "repo"
     checkout = tmp_path / "checkout"
     output_patch = tmp_path / "fleet.patch"
@@ -2347,7 +2347,7 @@ def test_fleet_launch_survives_a_ledger_only_unpushed_head(tmp_path: Path) -> No
     the base ref instead of killing the fleet.
     """
     fleet = fleet_source_text()
-    patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("# ── Preflight:", 1)[0]
+    patch_setup = _fleet_workspace_patch_setup(fleet)
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
     (repo / "agents/benchmarks/history").mkdir(parents=True)
@@ -3877,7 +3877,7 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     assert 'create-worktree-patch.sh"' in patch_block
     assert "cloudbench_prepare_workspace_patch" in patch_block
     fleet = fleet_source_text()
-    fleet_patch_block = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("# ── Preflight:", 1)[0]
+    fleet_patch_block = _fleet_workspace_patch_setup(fleet)
     assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in fleet_patch_block
     assert '!= "1"' in fleet_patch_block
     provenance = _extract_fleet_function(fleet, "print_code_provenance() {")
@@ -10619,6 +10619,13 @@ def fleet_source_text() -> str:
         if marker in source:
             source = source.replace(marker, (FLEET_SCRIPT.parent / "lib" / library).read_text())
     return source
+
+
+def _fleet_workspace_patch_setup(source: str) -> str:
+    """Replay patch creation without crossing into native resource admission."""
+    start = source.index('FLEET_PATCH_FILE=""')
+    end = source.index('\n\nif [ -z "$PROVISION_POOL" ]; then', start)
+    return source[start:end]
 
 
 def _extract_fleet_function(source: str, signature: str) -> str:
