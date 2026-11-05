@@ -152,3 +152,38 @@ integration; no live provider success or full backend pass is claimed. User
 required root and leased workers to remain untouched, all assertions/timeouts
 and the guard preserved, no child, no push, no deployment, and no financial or
 provider operations. Those constraints were retained.
+
+
+### November 5: the blackbox stale-cache fixture had the same obsolete write seam
+
+The completed backend shard2 on `ce2742ae023ceab86a34d39bde2754a356f1cc4e`
+failed only the owning stale-cache callback with actual `undefined`, expected
+`existing-geo-proxy`, at `browser-provider.kernel-stale-cache.support.ts:84`.
+Its native log again showed transaction-local `upsert` before the assertion.
+The fixture's Map was updated only by its root-client `create` mock, so the
+actual transaction wrote the private database while the Map stayed empty.
+The earlier unit repair does not alter this independently registered callback.
+
+`Gate: INTRODUCED` by integration of transaction-local publication with the
+unchanged pre-transaction fixture. In the private clone, the original callback
+fails identically under the zero-allocation preloader. The same original
+callback passes when only the provider is substituted with the actual
+pre-integration `7deb1bb` version. The repair mocks the transaction boundary,
+routes its cache delegate to the fixture, and records `upsert` in the Map.
+All seven original assertions remain; five additional assertions require the
+unchanged transaction budget, advisory lock and one publication. The normal
+browser-provider registration is unchanged.
+
+The identical callback command passes after repair. Negative mutations of the
+actual provider still fail when remote reuse is bypassed, the advisory lock is
+omitted, or cache publication is omitted. Production source and guard bytes
+are unchanged; no Kernel requests were made. Prior unit regression passes.
+The unchanged `browser-user-pause-race.test.ts` also passes using the complete
+Python 3.11 environment and private PostgreSQL database, including the real
+Python consumer and both pause/completion lock orderings. Evidence:
+`/home/boxes/cli-nov05-kernel-repair/.context/kernel-stale/`.
+
+The original browser-session worker shutdown timeout remains a separate open
+RCA; this fixture repair makes no claim about it. Parent owns safe-boundary
+integration and the full backend/provider gate. No assertions, deadlines,
+production logic, or live-provider acceptance criteria were weakened.

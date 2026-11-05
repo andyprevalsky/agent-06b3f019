@@ -1,5 +1,7 @@
 /** Exact stale-cache recovery through the real ladder, without mutating shared live proxies. */
 import assert from 'node:assert/strict';
+import { mock } from 'node:test';
+import type { Prisma } from '@prisma/client';
 import type { Kernel } from '@onkernel/sdk';
 import { prisma } from '../../providers/database';
 import {
@@ -12,10 +14,35 @@ export async function assertKernelStaleCacheRecovery(): Promise<void> {
   const originals = {
     findUnique: model.findUnique,
     create: model.create,
+    upsert: model.upsert,
     deleteMany: model.deleteMany,
   };
+  let locked = false;
+  let transactions = 0;
+  let lockQueries = 0;
+  let publications = 0;
+  const transaction = mock.method(prisma, '$transaction', (async (
+    run: (tx: Prisma.TransactionClient) => Promise<unknown>,
+    options: { maxWait: number; timeout: number }
+  ) => {
+    transactions++;
+    assert.deepEqual(options, { maxWait: 2_000, timeout: 60_000 });
+    try {
+      return await run({
+        $queryRaw: async () => {
+          lockQueries++;
+          locked = true;
+          return [{ acquired: true }];
+        },
+        browserProviderProxy: model,
+      } as unknown as Prisma.TransactionClient);
+    } finally {
+      locked = false;
+    }
+  }) as typeof prisma.$transaction);
   try {
     for (const reusable of [true, false]) {
+      transactions = lockQueries = publications = 0;
       const candidates = kernelProxyCandidates({ country: 'US', state: 'GA' }, 'mobile');
       const candidate = candidates[0];
       const rows = new Map([[candidate.proxyKey, 'deleted-proxy']]);
@@ -36,10 +63,15 @@ export async function assertKernelStaleCacheRecovery(): Promise<void> {
         rows.delete(where.proxyKey);
         return { count: 1 };
       }) as unknown as typeof model.deleteMany;
-      model.create = (async ({ data }: { data: { proxyKey: string; proxyId: string } }) => {
-        rows.set(data.proxyKey, data.proxyId);
-        return data;
-      }) as unknown as typeof model.create;
+      model.create = (async () => {
+        throw new Error('cache publication must use the transaction-local upsert');
+      }) as typeof model.create;
+      model.upsert = (async ({ create }: { create: { proxyKey: string; proxyId: string } }) => {
+        assert(locked, 'cache publication requires the advisory lock');
+        publications++;
+        rows.set(create.proxyKey, create.proxyId);
+        return create;
+      }) as unknown as typeof model.upsert;
       const client = {
         proxies: {
           list: async () => ({
@@ -70,6 +102,9 @@ export async function assertKernelStaleCacheRecovery(): Promise<void> {
         if (proxy.proxyId === 'deleted-proxy') throw new Error('proxy not found');
         return proxy;
       });
+      assert.equal(transactions, 1);
+      assert.equal(lockQueries, 1);
+      assert.equal(publications, 1, 'replacement is published to the cache under its lock');
       assert.deepEqual(dropped, ['deleted-proxy']);
       assert.deepEqual(attempts, [
         'deleted-proxy',
@@ -95,6 +130,7 @@ export async function assertKernelStaleCacheRecovery(): Promise<void> {
         });
     }
   } finally {
+    transaction.mock.restore();
     Object.assign(model, originals);
   }
 }
