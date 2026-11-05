@@ -84,6 +84,7 @@ class ClaudeCodeWsClient:
         self._exited = False  # Process has exited, don't reconnect
         self._reconnects_exhausted = False  # All reconnect attempts failed
         self._replay_pending: list[dict[str, Any]] = []  # chunks of an unfinished replay
+        self._events_seen = 0  # events delivered so far (replays resend the whole history)
         self._stdin_ack_event: Optional[asyncio.Event] = None
         self._stdin_ack_result: Optional[bool] = None
 
@@ -252,6 +253,7 @@ class ClaudeCodeWsClient:
 
             elif msg_type == "code_agent_event":
                 event = msg.get("data")
+                self._events_seen += 1
                 self._made_progress()
                 if isinstance(event, dict) and self.on_event:
                     await self.on_event(event)
@@ -275,7 +277,11 @@ class ClaudeCodeWsClient:
                         elif self.on_event:
                             for event in replayed:
                                 await self.on_event(event)
-                        self._made_progress()
+                        # The history is append-only: only a replay longer
+                        # than what was already delivered is progress.
+                        if len(replayed) > self._events_seen:
+                            self._made_progress()
+                        self._events_seen = len(replayed)
 
             elif msg_type == "exit":
                 # Process exited - don't reconnect after this

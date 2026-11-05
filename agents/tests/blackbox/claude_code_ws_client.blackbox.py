@@ -577,6 +577,60 @@ async def test_reconnects_without_progress_exhaust_the_budget():
     assert connections == 4, connections  # the first connect plus max_reconnects
 
 
+
+async def test_unchanged_replays_do_not_refill_the_reconnect_budget():
+    """Resending a history the client already holds is not progress (CodeRabbit 4475152990).
+
+    A sandbox that replays the same events and then drops every connection was
+    retried forever: each complete replay reset the budget. A replay that
+    brings new events still counts, so a session that keeps working survives
+    any number of blips.
+    """
+    history = [{"seq": 0, "type": "agent_message", "text": "a"}, {"seq": 1, "type": "agent_message", "text": "b"}]
+    connections = 0
+
+    async def stuck_sandbox(_request, ws):
+        nonlocal connections
+        connections += 1
+        await ws.send_str(json.dumps({"type": "code_agent_events", "chunk": 0, "last": True, "data": history}))
+        await ws.close()
+
+    url, runner = await _serve_ws(stuck_sandbox)
+    client = _make_client(ws_url=url, max_reconnects=3, reconnect_delay=0.0, on_events_replay=AsyncMock())
+    try:
+        assert await client.connect()
+        try:
+            await asyncio.wait_for(client.listen(), timeout=10)
+        except asyncio.TimeoutError:
+            raise AssertionError(f"identical replays kept the client reconnecting ({connections} connections)") from None
+    finally:
+        await client.disconnect()
+        await runner.cleanup()
+    assert client.reconnects_exhausted is True
+    assert connections == 4, connections  # the first connect plus max_reconnects
+
+    growing = 0
+
+    async def working_sandbox(_request, ws):
+        nonlocal growing
+        growing += 1
+        events = [{"seq": n, "type": "agent_message", "text": str(n)} for n in range(growing)]
+        await ws.send_str(json.dumps({"type": "code_agent_events", "chunk": 0, "last": True, "data": events}))
+        if growing == 8:
+            await ws.send_str(json.dumps({"type": "exit", "code": 0}))
+        await ws.close()
+
+    url, runner = await _serve_ws(working_sandbox)
+    client = _make_client(ws_url=url, max_reconnects=3, reconnect_delay=0.0, on_events_replay=AsyncMock())
+    try:
+        assert await client.connect()
+        await asyncio.wait_for(client.listen(), timeout=10)
+    finally:
+        await client.disconnect()
+        await runner.cleanup()
+    assert client._test_exits == [0] and growing == 8, (client._test_exits, growing)
+
+
 async def run_all_tests():
     print("claude-code-ws-client blackbox tests:")
     r = BlackboxResult()
@@ -611,6 +665,7 @@ async def run_all_tests():
     await r.record_async("reads_single_frame_history_over_default_limit", test_reads_single_frame_history_larger_than_aiohttp_default)
     await r.record_async("chunked_replay_delivered_as_one_history", test_chunked_replay_is_delivered_as_one_history)
     await r.record_async("reconnects_without_progress_exhaust_budget", test_reconnects_without_progress_exhaust_the_budget)
+    await r.record_async("unchanged_replays_do_not_refill_budget", test_unchanged_replays_do_not_refill_the_reconnect_budget)
     teardown_mock()
     return r.summary()
 
