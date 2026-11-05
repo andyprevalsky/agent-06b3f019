@@ -6,7 +6,10 @@ const templateEnvironment = {
   CODE_SANDBOX_GRID: JSON.stringify({ cpu: [2], memoryGb: [4] }),
   CODE_SANDBOX_DEFAULT_CPU: '2',
   CODE_SANDBOX_DEFAULT_MEMORY_GB: '4',
-  E2B_SANDBOX_TEMPLATES: '',
+  E2B_SANDBOX_TEMPLATES: JSON.stringify({
+    claude: { '2x4': 'fixture-claude-template' },
+    codex: { '2x4': 'fixture-codex-template' },
+  }),
   E2B_CLAUDE_CODE_TEMPLATE_ID: 'fixture-claude-template',
   E2B_CODEX_CODE_TEMPLATE_ID: 'fixture-codex-template',
 };
