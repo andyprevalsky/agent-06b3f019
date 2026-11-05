@@ -11,8 +11,43 @@ async function main() {
   let resumes = 0;
   let sizingReads = 0;
   let expectedProvider = 'claude';
+  let expectedBase = 'base-v1';
+  let expectedSize = { cpu: 2, memoryGb: 4 };
+  let rejectSnapshot = false;
+  let slotDepth = 0;
+  let slotCalls = 0;
+  let handoffFails = false;
+  let handoffs = 0;
+  let kills = 0;
+  const templateCalls: unknown[][] = [];
+  await mock.module('../../providers/codeSessions/usageLimit', {
+    namedExports: {
+      writeHandoffTrajectory: async () => {
+        handoffs++;
+        if (handoffFails) throw new Error('handoff write failed');
+      },
+    },
+  });
+  await mock.module('../../providers/e2bCreateSlot', {
+    namedExports: {
+      withClaudeCodeCreateSlot: async (create: () => Promise<unknown>) => {
+        slotCalls++;
+        slotDepth++;
+        try {
+          return await create();
+        } finally {
+          slotDepth--;
+        }
+      },
+    },
+  });
   const held = { sandboxId: 'held', commands: { run: async () => ({}) } };
-  const fresh = { sandboxId: 'fresh' };
+  const fresh = {
+    sandboxId: 'fresh',
+    kill: async () => {
+      kills++;
+    },
+  };
   await mock.module('../../providers/codeSessions/lifecycle', {
     namedExports: {
       connectPausedSandbox: async () => {
@@ -49,9 +84,17 @@ async function main() {
       NATIVE_CLI_PATH: '/fixture/native/bin:/usr/bin',
       resolveNativeCliTemplate: async (...args: unknown[]) => {
         rootReads++;
-        assert.deepEqual(args, ['owner', expectedProvider, { cpu: 2, memoryGb: 4 }, 'base-v1']);
+        templateCalls.push(args);
+        const base = args[3];
+        assert.equal(args[0], 'owner');
+        assert.equal(args[1], expectedProvider);
+        assert.deepEqual(
+          args[2],
+          base === 'project-snapshot' ? expectedSize : { cpu: 2, memoryGb: 4 }
+        );
+        assert.ok(base === expectedBase || (rejectSnapshot && base === 'base-v1'));
         if (missing) throw new Error('native variant missing');
-        return 'snapshot-v1';
+        return args[3] === 'project-snapshot' ? 'overlaid-project' : 'snapshot-v1';
       },
     },
   });
@@ -62,7 +105,14 @@ async function main() {
         options: { envs: Record<string, string> }
       ) => {
         creates++;
-        assert.equal(template, 'snapshot-v1');
+        assert.equal(
+          slotDepth,
+          expectedProvider === 'claude' ? 1 : 0,
+          'every Claude runtime create holds the slot'
+        );
+        assert.ok(template === 'snapshot-v1' || template === 'overlaid-project');
+        if (rejectSnapshot && template === 'overlaid-project')
+          throw new Error('snapshot unavailable');
         assert.equal(options.envs.PATH, '/fixture/native/bin:/usr/bin');
         assert.equal(options.envs.AUTH_FOR_CURRENT_AGENT, 'runtime-only');
         return fresh;
@@ -131,6 +181,96 @@ async function main() {
     /does not belong/
   );
   assert.deepEqual([resumes, sizingReads, rootReads, creates, recorded], beforeForeignNew);
+  expectedProvider = 'claude';
+  expectedBase = 'project-snapshot';
+  expectedSize = { cpu: 4, memoryGb: 8 };
+  const snapshot = { id: 'project-snapshot', size: expectedSize };
+  const newSession = { ...session, sandboxId: null };
+  const options = {
+    provider: 'claude' as const,
+    userId: 'owner',
+    project: {
+      id: 'project',
+      name: 'project',
+      repoUrl: null,
+      defaultBranch: 'main',
+      startupScript: null,
+      startupTimeoutS: 30,
+      templateSnapshot: snapshot,
+    },
+  };
+  let startCalls = templateCalls.length;
+  const fromProject = await acquireCodeSandbox(
+    newSession,
+    'fallback',
+    { AUTH_FOR_CURRENT_AGENT: 'runtime-only' },
+    'project',
+    options
+  );
+  assert.equal(fromProject.fromSnapshot, true);
+  assert.deepEqual(fromProject.size, snapshot.size);
+  assert.equal(templateCalls.length, startCalls + 1);
+  assert.equal(templateCalls.at(-1)?.[3], snapshot.id);
+  expectedSize = { cpu: 2, memoryGb: 4 };
+  const unknownSize = await acquireCodeSandbox(
+    null,
+    'fallback',
+    { AUTH_FOR_CURRENT_AGENT: 'runtime-only' },
+    'unknown size',
+    {
+      ...options,
+      snapshot: { id: snapshot.id, size: null },
+    }
+  );
+  assert.equal(unknownSize.fromSnapshot, true);
+  assert.deepEqual(unknownSize.size, expectedSize);
+  // A failed snapshot create falls back to an overlaid base, never an unconfigured image.
+  rejectSnapshot = true;
+  startCalls = templateCalls.length;
+  expectedSize = snapshot.size;
+  const fallback = await acquireCodeSandbox(
+    null,
+    'fallback',
+    { AUTH_FOR_CURRENT_AGENT: 'runtime-only' },
+    'fallback',
+    options
+  );
+  assert.equal(fallback.fromSnapshot, false);
+  assert.deepEqual(fallback.size, { cpu: 2, memoryGb: 4 });
+  assert.deepEqual(
+    templateCalls.slice(startCalls).map((args) => args[3]),
+    ['project-snapshot', 'base-v1']
+  );
+  rejectSnapshot = false;
+  resume = true;
+  startCalls = templateCalls.length;
+  const resumedWithProject = await acquireCodeSandbox(session, 'fallback', {}, 'resume', options);
+  assert.equal(resumedWithProject.sandbox, held);
+  assert.equal(resumedWithProject.fromSnapshot, false);
+  assert.equal(templateCalls.length, startCalls);
+  resume = false;
+  const slotsBefore = slotCalls;
+  await acquireCodeSandbox(
+    { ...newSession, handoffTrajectory: { id: 'fixture' } } as unknown as CodeSessionRow,
+    'fallback',
+    { AUTH_FOR_CURRENT_AGENT: 'runtime-only' },
+    'handoff',
+    options
+  );
+  assert.equal(handoffs, 1);
+  assert.equal(slotCalls, slotsBefore + 1);
+  handoffFails = true;
+  await assert.rejects(
+    acquireCodeSandbox(
+      { ...newSession, handoffTrajectory: { id: 'fixture' } } as unknown as CodeSessionRow,
+      'fallback',
+      { AUTH_FOR_CURRENT_AGENT: 'runtime-only' },
+      'handoff failure',
+      options
+    ),
+    /handoff write failed/
+  );
+  assert.equal(kills, 1, 'failed handoff closes the exact newly acquired sandbox');
   process.stdout.write(
     'Native CLI provision: resumes unchanged, new allocation selects native root and live auth, missing variant fails closed\n'
   );

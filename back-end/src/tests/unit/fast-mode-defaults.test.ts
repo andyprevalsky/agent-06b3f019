@@ -172,36 +172,7 @@ test('Temporal workflow args force Fast Mode off for shadow mode even if explici
   assert.strictEqual(args[15], false);
 });
 
-test('Rose createStreamingCompletion defaults provider_fast_mode on', () => {
-  const client = readFileSync(join(process.cwd(), 'src', 'providers', 'rose', 'client.ts'), 'utf8');
-  assert.ok(
-    client.includes('provider_fast_mode: options.provider_fast_mode ?? true'),
-    'TS Rose complete must default provider_fast_mode to true'
-  );
-});
-
-test('Python Rose complete defaults provider_fast_mode on and forwards it to OpenAI API-key fallback', () => {
-  const client = readFileSync(
-    join(process.cwd(), '..', 'agents', 'providers', 'rose', 'client.py'),
-    'utf8'
-  );
-  assert.ok(
-    client.includes('provider_fast_mode: bool = True'),
-    'Python RoseClient.complete must default provider_fast_mode to True'
-  );
-  assert.ok(
-    !client.includes('provider_fast_mode: bool = False'),
-    'Python Rose client must not keep a False default for provider_fast_mode'
-  );
-  assert.ok(
-    client.includes('provider_fast_mode=provider_fast_mode'),
-    'OpenAI API-key fallback must receive the caller provider_fast_mode'
-  );
-  assert.ok(
-    !/_try_openai_api_key\([\s\S]*provider_fast_mode=True/.test(client),
-    'OpenAI API-key fallback must not hardcode provider_fast_mode=True'
-  );
-});
+// Provider speed defaults and per-leg forwarding: agent-speed.test.ts.
 
 if (failures.length > 0) {
   process.stderr.write(

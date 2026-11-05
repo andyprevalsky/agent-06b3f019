@@ -75,6 +75,7 @@ describe('Rose Desktop integrations: one account per integration', () => {
       'Messages',
       'Compute',
       'Banks & Financial Accounts',
+      'Meetings',
       'Socials',
       'File System',
       'CLIs',

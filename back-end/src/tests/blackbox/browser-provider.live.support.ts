@@ -31,7 +31,7 @@ import {
   deleteKernelProfile,
   runCrossProviderRotationLadderOrSkipOnSteelOutage,
 } from './browser-provider-rotation.support';
-import { assertResumeReusesExistingProxy } from './browser-provider-stale-proxy.support';
+import { assertResumeReusesExistingProxy } from './browser-provider-proxy-reuse.support';
 
 const AGENT_LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
 

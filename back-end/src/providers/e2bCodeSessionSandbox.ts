@@ -1,3 +1,4 @@
+import { prisma } from './database';
 /**
  * Persistent code-session sandbox acquisition for E2B Claude Code / Codex
  * sessions (see providers/codeSessions/lifecycle.ts for the full flow).
@@ -12,7 +13,11 @@ import {
 } from './claudeCodeLocalSession';
 import { agentToolsForLocalHome } from './agentTools/workspace';
 import type { UserUiWorkspace } from './userUi/workspace';
-import type { ProjectRestoreReport, ProjectWorkspace } from './projects/types';
+import type {
+  ProjectRestoreReport,
+  ProjectTemplateSnapshot,
+  ProjectWorkspace,
+} from './projects/types';
 import {
   checkpointCodeSession,
   connectPausedSandbox,
@@ -28,7 +33,8 @@ import {
   type SandboxProvider,
   type SandboxSize,
 } from './codeSessions/sandboxSize';
-import { e2bSandboxFs } from './codeSessions/sandboxFs';
+import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
+import { writeHandoffTrajectory, type SpawnCodeSession } from './codeSessions/usageLimit';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import { NATIVE_CLI_PATH, resolveNativeCliTemplate } from './nativeCliTemplateBuilder';
@@ -222,7 +228,7 @@ export function codeSandboxUserId(
  * The timeout is the idle window every keepalive extends, not a runtime cap.
  */
 export async function acquireCodeSandbox(
-  codeSession: CodeSessionRow | null,
+  codeSession: SpawnCodeSession | null,
   templateId: string,
   envs: Record<string, string>,
   label: string,
@@ -231,52 +237,108 @@ export async function acquireCodeSandbox(
     projectSize?: unknown;
     agentId?: string;
     userId?: string;
+    /**
+     * The session's project: its default size, and its published template
+     * snapshot, which a BRAND-NEW session sandbox starts from.
+     */
+    project?: ProjectWorkspace['project'] | null;
+    snapshot?: ProjectTemplateSnapshot | null;
   } = {}
 ): Promise<{
   sandbox: Sandbox;
   resumedFrom: ResumedFrom;
   cliSessionId: string | null;
   size?: SandboxSize;
+  /** The sandbox was created from the project's template snapshot. */
+  fromSnapshot: boolean;
 }> {
   const userId = codeSandboxUserId(codeSession, sizing.userId);
   const sized =
     sizing.provider !== undefined
-      ? await resolveSpawnSandbox(codeSession, sizing.provider, sizing.projectSize ?? null)
+      ? await resolveSpawnSandbox(
+          codeSession,
+          sizing.provider,
+          sizing.project?.sandboxSize ?? sizing.projectSize ?? null
+        )
       : null;
+  const spawnSizing: SpawnSizing = {
+    ...(sized !== null ? { size: sized.size } : {}),
+    agentId: sizing.agentId,
+    provider: sizing.provider,
+  };
+  const createOptions = {
+    apiKey: process.env.E2B_API_KEY,
+    timeoutMs: SANDBOX_TIMEOUT_MS,
+    envs: { ...envs, PATH: NATIVE_CLI_PATH },
+    ...codeSessionCreateOptions(codeSession),
+  };
+  // Resolve on the exact base image, including project snapshots, before reserving
+  // the runtime sandbox. Template builds have their own bounded creation slot.
+  const createWithNativeCli = async (baseTemplateId: string, size: SandboxSize) => {
+    const selectedTemplateId =
+      userId && sizing.provider
+        ? await resolveNativeCliTemplate(userId, sizing.provider, size, baseTemplateId)
+        : baseTemplateId;
+    const create = () => createSandboxWithRetry(selectedTemplateId, createOptions, label);
+    return sizing.provider === 'claude' ? withClaudeCodeCreateSlot(create) : create();
+  };
+  let fromSnapshot = false;
   const acquired = await acquireCodeSessionSandbox(
     codeSession,
     async () => {
-      const baseTemplateId = sized?.templateId ?? templateId;
-      const selectedTemplateId =
-        userId && sizing.provider
-          ? await resolveNativeCliTemplate(
-              userId,
-              sizing.provider,
-              sized?.size ?? defaultSandboxSize(),
-              baseTemplateId
-            )
-          : baseTemplateId;
-      const create = () =>
-        createSandboxWithRetry(
-          selectedTemplateId,
-          {
-            apiKey: process.env.E2B_API_KEY,
-            timeoutMs: SANDBOX_TIMEOUT_MS,
-            envs: { ...envs, PATH: NATIVE_CLI_PATH },
-            ...codeSessionCreateOptions(codeSession),
-          },
-          label
+      const snapshot = sizing.snapshot ?? sizing.project?.templateSnapshot ?? null;
+      // Only a session with no sandbox of its own (a new one) starts from the
+      // snapshot; a lost sandbox being replaced or resized keeps the base path.
+      if (snapshot !== null && (codeSession === null || codeSession.sandboxId === null)) {
+        try {
+          const sandbox = await createWithNativeCli(
+            snapshot.id,
+            snapshot.size ?? sized?.size ?? defaultSandboxSize()
+          );
+          fromSnapshot = true;
+          // The held size is the snapshot's: a later resume must not read it as a resize.
+          if (snapshot.size !== null && spawnSizing.size !== undefined) {
+            spawnSizing.size = snapshot.size;
+          }
+          return sandbox;
+        } catch (error) {
+          log.warn('Project template snapshot could not start; using the base template', {
+            snapshotId: snapshot.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      if (sized !== null && sized.templateId === null) {
+        // The unsized fallback is a fixed-size image: never hand it to another size.
+        throw new Error(
+          `No ${label} sandbox template is built for ${sized.size.cpu} vCPU / ${sized.size.memoryGb} GB; configure E2B_SANDBOX_TEMPLATES for that size`
         );
-      // Serialize only reservations, never template installation or checkpoint work.
-      return sizing.provider === 'claude' ? withClaudeCodeCreateSlot(create) : create();
+      }
+      return createWithNativeCli(
+        sized?.templateId ?? templateId,
+        sized?.size ?? defaultSandboxSize()
+      );
     },
-    {
-      ...(sized !== null ? { size: sized.size } : {}),
-      agentId: sizing.agentId,
-      provider: sizing.provider,
-    }
+    spawnSizing
   );
-  return { ...acquired, ...(sized !== null ? { size: sized.size } : {}) };
+  const trajectory = codeSession?.handoffTrajectory ?? null;
+  if (trajectory !== null) {
+    // C15 provider switch: after the checkpoint restore, so the previous CLI's
+    // session log is in the HOME the new CLI starts in, where the handoff points.
+    // The sandbox is new (a switch drops the old one); on a failed write it is
+    // killed and the spawn fails, so no CLI starts on a prompt naming a missing file.
+    try {
+      await writeHandoffTrajectory(e2bSandboxFs(acquired.sandbox), trajectory);
+    } catch (error) {
+      await acquired.sandbox.kill().catch(() => undefined);
+      throw error;
+    }
+  }
+  return {
+    ...acquired,
+    ...(spawnSizing.size !== undefined ? { size: spawnSizing.size } : {}),
+    fromSnapshot,
+  };
 }
 
 /** A resumed sandbox still runs the previous (lingering) ws-server on WS_PORT. */
@@ -323,7 +385,7 @@ export class CodeSessionPauseUnconfirmedError extends Error {
 /** A persistent session's sandbox is paused (never killed) on a failed start. */
 export async function releaseSandboxAfterFailedStart(
   sandbox: Sandbox,
-  codeSession: CodeSessionRow | null
+  codeSession: SpawnCodeSession | null
 ): Promise<void> {
   if (codeSession === null) {
     await sandbox.kill();
@@ -338,7 +400,21 @@ export async function releaseSandboxAfterFailedStart(
     });
     throw new CodeSessionPauseUnconfirmedError(error);
   }
-  await markPaused(codeSession.id);
+  if (codeSession.retainFailedStartLease === true) {
+    // Keep this attempt's unique switch custody until the outer rollback finishes.
+    await prisma.codeSession.updateMany({
+      where: {
+        id: codeSession.id,
+        leaseOwner: codeSession.leaseOwner,
+        codeProvider: codeSession.codeProvider,
+        sandboxId: sandbox.sandboxId,
+        state: { not: 'RETIRED' },
+      },
+      data: { state: 'PAUSED', lastActiveAt: new Date() },
+    });
+  } else {
+    await markPaused(codeSession.id);
+  }
 }
 
 /**
@@ -367,7 +443,7 @@ export function codeSessionCreateOptions(codeSession: CodeSessionRow | null): {
  */
 export async function createLocalCodeSessionFallback(
   err: unknown,
-  codeSession: CodeSessionRow | null,
+  codeSession: SpawnCodeSession | null,
   params: {
     taskId: string;
     agentId: string;
@@ -382,6 +458,13 @@ export async function createLocalCodeSessionFallback(
 ): Promise<CodeAgentSessionResult | null> {
   if (!isLocalClaudeCodeFallbackEligible(err)) return null;
   const localHome = codeSession !== null ? await prepareLocalCodeSessionHome(codeSession) : null;
+  const trajectory = codeSession?.handoffTrajectory ?? null;
+  if (localHome !== null && trajectory !== null) {
+    // C15 provider switch on this host: the log lands under the session HOME
+    // and the handoff prompt names that path instead of the sandbox one.
+    const written = await writeHandoffTrajectory(localSandboxFs(localHome.home), trajectory);
+    params = { ...params, goal: params.goal.split(trajectory.path).join(written) };
+  }
   const resumeId = localHome?.cliSessionId ?? null;
   // Same-host session: loopback tools URL, MCP path under the session HOME
   // (the persistent code-session HOME when there is one, else the task dir).

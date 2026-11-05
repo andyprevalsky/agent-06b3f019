@@ -129,7 +129,11 @@ async function sandboxProgress(ctx: PlaidSuiteContext): Promise<void> {
   const expected = await prisma.plaidTransaction.count({
     where: { plaidItemId: item.id, updatedAt: { gte: rerun.startedAt } },
   });
-  assert(expected > 0, `the webhook applied real transactions, got ${expected}`);
+  // The exchange-time run may already hold the full history (it races Plaid's
+  // history preparation), leaving the webhook run nothing to apply; either way
+  // the Item's history is stored and the bar counts exactly what this run did.
+  const stored = await prisma.plaidTransaction.count({ where: { plaidItemId: item.id } });
+  assert(stored > 0, `the Item's sandbox history is stored, got ${stored}`);
   const rows = await prisma.integrationSyncProgress.count({ where: { userId, provider: 'plaid' } });
   assert(rows === 1, `one progress row for the plaid row, got ${rows}`);
   const after = await plaidBar(ctx, accessToken);

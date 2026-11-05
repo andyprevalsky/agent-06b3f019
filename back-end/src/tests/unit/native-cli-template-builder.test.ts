@@ -221,6 +221,27 @@ async function main() {
     ),
     'rebuilt'
   );
+  assert.equal(
+    await resolveNativeCliTemplate(
+      'owner',
+      'claude',
+      { cpu: 4, memoryGb: 8 },
+      'project-snapshot',
+      existingHead,
+      async (userId, requested) => {
+        assert.equal(userId, 'owner');
+        assert.equal(requested.baseTemplateId, 'project-snapshot');
+        assert.equal(requested.cpu, 4);
+        assert.equal(requested.memoryGb, 8);
+        return {
+          ...(await existingHead()),
+          variants: [{ ...requested, snapshotId: 'project-with-cli' }],
+        };
+      }
+    ),
+    'project-with-cli',
+    'project snapshot and its physical size select an independent CLI overlay'
+  );
   // A long installation must not retain the global Claude reservation slot.
   const { withClaudeCodeCreateSlot } = await import('../../providers/e2bCreateSlot');
   let installationStarted!: () => void;

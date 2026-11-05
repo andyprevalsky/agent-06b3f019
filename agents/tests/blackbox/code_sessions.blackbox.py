@@ -89,7 +89,23 @@ if resume is None and os.environ.get("STUB_MODE") == "rate_limit":
           "resetsAt": 1790988600, "utilization": 1.0}})
     while True:  # the CLI would now fail its turn; the activity must act on the event
         time.sleep(0.1)
-if resume is None and os.environ.get("STUB_MODE") not in ("finish", "rate_limit"):
+if resume is None and os.environ.get("STUB_MODE") == "billing":
+    # Out of credits: the SDK marks the assistant message with error=billing_error.
+    notes.write_text("uncommitted work\n")
+    emit({"type": "assistant", "error": "billing_error", "message": {"content": [
+        {"type": "text", "text": "Credit balance is too low"}]}})
+    while True:
+        time.sleep(0.1)
+if resume is None and os.environ.get("STUB_MODE") == "login_unusable":
+    # The Codex ws-server's structured unusable-login error (app-server.test.mjs
+    # asserts this exact shape), carried through this stub as a CLI line.
+    notes.write_text("uncommitted work\n")
+    emit({"type": "codex_fixture", "event": {"type": "error", "provider": "codex",
+          "message": "Your access token could not be refreshed: refresh_token_invalidated",
+          "usage_limit": None, "login_unusable": {"reason": "oauth_refresh_invalid"}}})
+    while True:
+        time.sleep(0.1)
+if resume is None and os.environ.get("STUB_MODE") not in ("finish", "rate_limit", "billing", "login_unusable"):
     notes.write_text("uncommitted work\n")
     emit({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "sleep 99999"}}]}})
@@ -214,6 +230,7 @@ class _Backend:
         self.verified_events: list[list[dict]] = []
         self.fail_first_persist = fail_first_persist
         self._persists = 0
+        self.credential_feedback: list = []
         # Keepalive number after which the backend reports a question the code
         # agent asked its (blocked) spawning agent.
         self.question_after = question_after
@@ -221,6 +238,11 @@ class _Backend:
         # Credential availability the backend reports to each spawn (C15).
         self.availability: list[dict] = []
         self.availability_own_only: list[bool] = []
+        self.availability_calls: list[dict] = []
+        # The Claude credential the activity resolves (a secret; never in any output).
+        self.claude_token: str | None = None
+        # Shared credential paths the usage-limit answer reports (C15).
+        self.paths: list[dict] | None = None
         self.local = False
         # What the usage-limit answer says a respawn leases (the backend's stored view).
         self.next_lease = dict(_SHARED_CLAUDE_LEASE)
@@ -305,6 +327,7 @@ class _Backend:
 
     async def persist_output(self, *args, **kwargs):
         self._persists += 1
+        self.credential_feedback.append(kwargs.get("credential_feedback"))
         if self.fail_first_persist and self._persists == 1:
             raise RuntimeError("transcript store unavailable")
 
@@ -318,7 +341,7 @@ class _Backend:
             reply["resize_requested"] = {
                 "request_id": _RESIZE_REQUEST_ID,
                 "from": {"cpu": 2, "memory_gb": 4},
-                "to": {"cpu": 2, "memory_gb": 16},
+                "to": {"cpu": 2, "memory_gb": 8},
             }
         return reply
 
@@ -328,20 +351,20 @@ class _Backend:
         self.session_home.pause()
         self.resized_ws_url = await self.session_home.start(
             CLAUDE_CODE_RESUME_SESSION_ID=_CLI_SESSION_ID,
-            CLAUDE_CODE_GOAL="Your environment was resized from 2 vCPU, 4 GB RAM to 2 vCPU, 16 GB RAM.",
+            CLAUDE_CODE_GOAL="Your environment was resized from 2 vCPU, 4 GB RAM to 2 vCPU, 8 GB RAM.",
         )
         return {
             "task_id": "task-resized",
             "sandbox_id": "sb-resized",
             "ws_url": self.resized_ws_url,
             "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de",
-            "sandbox_size": {"cpu": 2, "memory_gb": 16},
+            "sandbox_size": {"cpu": 2, "memory_gb": 8},
             "resized": True,
             "request": {
                 "request_id": request_id,
                 "status": "done",
                 "from": {"cpu": 2, "memory_gb": 4},
-                "to": {"cpu": 2, "memory_gb": 16},
+                "to": {"cpu": 2, "memory_gb": 8},
                 "reason": "jest workers OOM-killed at 4 GB",
             },
         }
@@ -350,13 +373,15 @@ class _Backend:
         self.usage_reports.append((task_id, code_provider, resets_at))
         return {
             "marked": f"{code_provider}_pool:tok-1",
-            "resets_at": "2026-10-03T00:50:00.000Z",
+            "resets_at": "2026-10-03T00:50:00.000Z" if resets_at is not None else None,
             "accounts": [dict(account) for account in _ACCOUNTS],
+            **({"paths": [dict(path) for path in self.paths]} if self.paths is not None else {}),
             "next_lease": dict(self.next_lease),
         }
 
-    async def credential_availability(self, user_id, own_only=False):
+    async def credential_availability(self, user_id, own_only=False, code_session_id=None, prefer=None):
         self.availability_own_only.append(own_only)
+        self.availability_calls.append({"code_session_id": code_session_id, "prefer": prefer})
         return self.availability.pop(0) if self.availability else {"claude": True, "codex": True}
 
     async def verifier(self, **kwargs):
@@ -374,6 +399,7 @@ class _Backend:
             patch.object(service, "close_e2b_session", side_effect=self.close_session),
             patch.object(service, "save_claude_code_message", side_effect=self.save_message),
             patch.object(service, "persist_terminal_output", side_effect=self.persist_output),
+            patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
             patch.object(service, "keepalive_e2b_session", side_effect=self.keepalive),
             patch.object(service, "report_code_usage_limit", side_effect=self.report_usage),
             patch.object(service, "resize_e2b_session", side_effect=self.resize),
@@ -382,7 +408,7 @@ class _Backend:
             patch.object(service, "_log_code_agent_event", lambda event, **kw: None),
             patch.object(service, "REATTACH_PROBE_BACKOFF_S", 0.05),
             patch.object(service, "SandboxLogCollector", lambda *a, **kw: AsyncMock()),
-            patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
+            patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=self.claude_token)),
             patch(
                 "helpers.model_pricing.get_model_pricing_with_fallback",
                 AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
@@ -431,7 +457,9 @@ _RESIZE_REQUEST_ID = "7d2e3f40-0000-4000-8000-00000000c16a"
 _MAC_FOLDER = "~/Developer/rose"
 
 
-def _activity_args(*, code_session_request=None, tool_call_id="tc-code", local=False) -> list:
+def _activity_args(
+    *, code_session_request=None, tool_call_id="tc-code", local=False, code_provider="claude", gpt_token=None
+) -> list:
     return [
         "user-code",
         "agent-code",
@@ -442,8 +470,8 @@ def _activity_args(*, code_session_request=None, tool_call_id="tc-code", local=F
         "rose-labs/rose-1-flash",
         None,
         None,
-        "claude",
-        None,
+        code_provider,
+        gpt_token,
         None,
         None,
         None,
@@ -581,22 +609,60 @@ async def test_question_while_cli_waits_for_its_answer_is_handed_over_before_idl
         CODE_SESSION_KEEPALIVE_INTERVAL_S,
     )
 
-    scale = 200.0
+    # Advance application time at observed events, never by multiplying
+    # scheduler, transport or process-cleanup latency into virtual seconds.
+    virtual_now = time.time()
+    tool_finished = asyncio.Event()
+    keepalive_replies = asyncio.Queue()
     session_home = _SessionHome()
     backend = _Backend(session_home)
+
+    def clock():
+        return virtual_now
+
+    def observe_event(event, **kwargs):
+        if event.get("type") == "tool_result":
+            tool_finished.set()
+
+    async def observe_keepalive(*args, **kwargs):
+        reply = await backend.keepalive(*args, **kwargs)
+        keepalive_replies.put_nowait((clock(), backend.keepalives, reply))
+        return reply
+
     try:
-        with backend.patched(clock=_virtual_clock(scale)):
+        with (
+            backend.patched(clock=clock),
+            patch.object(service, "_log_code_agent_event", side_effect=observe_event),
+            patch.object(service, "keepalive_e2b_session", side_effect=observe_keepalive),
+        ):
             spawn = asyncio.create_task(
                 ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args())
             )
-            await _wait_until(lambda: session_home.runs(), "the CLI to start")
-            session_home.release("tool_done")  # the tool ends; the CLI now waits for the answer
-            await asyncio.sleep(0.3)
-            assert not spawn.done(), "the session is still attached before the question"
-            asked_at = time.monotonic()
-            backend.question_after = backend.keepalives + 1  # the CLI asked its blocked spawner
-            outcome = await asyncio.wait_for(spawn, timeout=30)
-            handoff_virtual_s = (time.monotonic() - asked_at) * scale
+            try:
+                async with asyncio.timeout(30):
+                    await _wait_until(lambda: session_home.runs(), "the CLI to start")
+                    session_home.release("tool_done")
+                    await tool_finished.wait()  # the monitor observed the quiet, waiting CLI
+                    virtual_now += CODE_SESSION_KEEPALIVE_INTERVAL_S
+                    _, before_question, first_reply = await keepalive_replies.get()
+                    assert first_reply["awaiting_parent"] is None, first_reply
+                    assert not spawn.done(), "the session is still attached before the question"
+                    asked_at = clock()
+                    backend.question_after = before_question + 1
+                    virtual_now += CODE_SESSION_KEEPALIVE_INTERVAL_S
+                    answered_at, answered_on, reply = await keepalive_replies.get()
+                    assert answered_on == before_question + 1, "question skipped the next keepalive"
+                    assert reply["awaiting_parent"]["message_id"] == "q-1", reply
+                    # Hold application time here. Waiting for another keepalive
+                    # or idle expiry cannot make a missed handoff pass.
+                    outcome = await spawn
+                    assert backend.keepalives == answered_on, "handoff required another keepalive"
+                    handoff_virtual_s = answered_at - asked_at
+            finally:
+                if not spawn.done():
+                    spawn.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await spawn
         assert outcome["status"] == "paused" and outcome["success"] is False, outcome
         assert "Which database should I use?" in outcome["message"], outcome["message"]
         assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
@@ -691,7 +757,7 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches(*, first
         assert first["yield_reason"] == "environment_resize", first
         moved = first["code_session"]
         assert moved["task_id"] == "task-resized" and moved["ws_url"] == backend.resized_ws_url, moved
-        assert moved["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, moved
+        assert moved["sandbox_size"] == {"cpu": 2, "memory_gb": 8}, moved
         assert moved["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", moved
         assert backend.resize_calls == [("task-1", _RESIZE_REQUEST_ID, "claude")], backend.resize_calls
         assert backend.closed == [], f"the backend's resize owns the old sandbox: {backend.closed}"
@@ -699,11 +765,11 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches(*, first
         assert len(rows) == 1, backend.messages
         row = rows[0]
         assert row["task_id"] == "task-resized" and row["ws_url"] == backend.resized_ws_url, row
-        assert row["title"] == "Environment resized to 2 vCPU, 16 GB RAM", row["title"]
-        assert row["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, row["code_agent"]
+        assert row["title"] == "Environment resized to 2 vCPU, 8 GB RAM", row["title"]
+        assert row["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 8}, row["code_agent"]
         resize_meta = row["code_agent"]["environment_resize"]
         assert resize_meta["from_task_id"] == "task-1" and resize_meta["status"] == "done", resize_meta
-        assert resize_meta["to"] == {"cpu": 2, "memory_gb": 16}, resize_meta
+        assert resize_meta["to"] == {"cpu": 2, "memory_gb": 8}, resize_meta
         await _wait_until(lambda: len(session_home.runs()) >= 2, "the resumed CLI to start")
         resumed_run = session_home.runs()[-1]
         assert "--resume" in resumed_run["argv"], resumed_run
@@ -718,7 +784,7 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches(*, first
         assert second["status"] == "completed" and second["success"] is True, second
         assert len(backend.created) == 1, f"the next attempt reattaches, it does not create: {backend.created}"
         assert [call.get("task_id") for call in backend.closed] == ["task-resized"], backend.closed
-        assert second["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 16}, second["code_agent"]
+        assert second["code_agent"]["sandbox_size"] == {"cpu": 2, "memory_gb": 8}, second["code_agent"]
         texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
         assert "notes: uncommitted work" in texts, f"the resumed session keeps its files: {texts}"
     finally:
@@ -773,11 +839,12 @@ async def test_usage_limit_saves_session_and_retry_leases_next_credential():
         assert first["message"] == (
             "Code agent stopped: the Claude Code usage limit was reached on me@example.com "
             "(resets 2026-10-03T00:50:00.000Z). Its work is saved on branch rose/write-answer-0a1b2c3d "
-            "(checkpoint 1).\n"
+            "(checkpoint 1); the sandbox is paused, not killed.\n"
             + _ACCOUNT_LINES
-            + f"Respawn with spawn_agent(type='code', code_session_id='{session_id}', "
-            "goal=<the same goal>) to continue: the respawn leases an account that is not rate-limited "
-            "(now a shared Claude Code account) and resumes from the latest checkpoint."
+            + f"Retry with spawn_agent(type='code', code_session_id='{session_id}', "
+            "goal=<the same goal>) to continue: the retry leases an account that is not rate-limited "
+            "(now a shared Claude Code account), resumes the paused sandbox and continues the same "
+            "Claude Code conversation."
         ), first["message"]
         assert first["usage_limit"]["resets_at"] == "2026-10-03T00:50:00.000Z", first["usage_limit"]
         assert first["usage_limit"]["accounts"] == _ACCOUNTS, first["usage_limit"]
@@ -990,18 +1057,19 @@ def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_re
     )
     assert blocked == (
         "Code agent stopped: the Codex usage limit was reached (resets 2026-10-20T18:00:00.000Z). "
-        "Its work is saved on branch rose/a-1.\nConnected accounts:\n"
+        "Its work is saved on branch rose/a-1; the sandbox is paused, not killed.\nConnected accounts:\n"
         "- Codex Codex account 1: limited until 2026-10-20T18:00:00.000Z\n"
         "- Claude Code me@example.com: disconnected (the user must reconnect it)\n"
-        "Respawn with spawn_agent(type='code', code_session_id='cs-1', goal=<the same goal>) to continue: "
-        "no account is free until 2026-10-20T18:00:00.000Z (the earliest reset: Codex Codex account 1); "
-        "a respawn after that leases it and resumes from the latest checkpoint."
+        "Retry with spawn_agent(type='code', code_session_id='cs-1', goal=<the same goal>) to continue: "
+        "no credential is free until 2026-10-20T18:00:00.000Z (the earliest reset: Codex Codex account 1); "
+        "a retry before that stays paused and starts nothing."
     ), blocked
     unknown = format_usage_limit_message(code_provider="claude", resets_at_iso=None, facts=facts)
     assert unknown == (
-        "Code agent stopped: the Claude Code usage limit was reached. Its work is saved on branch rose/a-1.\n"
-        "Respawn with spawn_agent(type='code', code_session_id='cs-1', goal=<the same goal>) to continue: "
-        "the respawn leases an account that is not rate-limited and resumes from the latest checkpoint."
+        "Code agent stopped: the Claude Code usage limit was reached. Its work is saved on branch rose/a-1; "
+        "the sandbox is paused, not killed.\n"
+        "Retry with spawn_agent(type='code', code_session_id='cs-1', goal=<the same goal>) to continue: "
+        "the retry leases an account that is not rate-limited and resumes the paused session."
     ), unknown
     shared = format_usage_limit_message(
         code_provider="claude",
@@ -1245,6 +1313,653 @@ async def test_preview_url_rides_every_code_agent_block():
     assert "preview_url" not in result["code_agent"], result["code_agent"]
 
 
+# ── C15 credential rotation end to end: one case per branch (a)–(g) ──────────
+#
+#   spawn ─► CLI hits a structured limit (rate_limit_event rejected / billing_error)
+#     └─► close(reason=usage_limit): checkpoint + pause (sandbox kept) ─► report ─► tool error
+#   retry(code_session_id) ─► availability(code_session_id, prefer)
+#     ├─ same provider leasable ──► create(same session) ─► paused sandbox, `--resume <cli id>`  (b)
+#     ├─ only the other provider ─► create(provider switch) ─► backend handoff + trajectory     (c)
+#     └─ nothing leasable ────────► no create, session stays paused, earliest reset            (d)
+#   root resume(code_session_id) ─► the session's own provider first                          (e)
+#   duplicate concurrent retry ─► backend lease / conditional switch (code-session-usage-limit) (f)
+#   secrets never reach a result, a message, a log or the sandbox ws-server log                (g)
+
+_SESSION_ID = "6c1d6f1e-0000-4000-8000-00000000c0de"
+_SHARED_PATHS = [
+    {
+        "provider": "claude",
+        "kind": "pool",
+        "label": "shared Claude Code subscriptions",
+        "status": "available",
+        "limited_until": None,
+        "available_count": 2,
+        "total_count": 3,
+    },
+    {
+        "provider": "codex",
+        "kind": "pool",
+        "label": "shared Codex subscriptions",
+        "status": "unconfigured",
+        "limited_until": None,
+        "available_count": 0,
+        "total_count": 0,
+    },
+    {
+        "provider": "claude",
+        "kind": "funded",
+        "label": "funded Anthropic API key",
+        "status": "limited",
+        "limited_until": "2026-10-03T01:20:00.000Z",
+    },
+    {
+        "provider": "codex",
+        "kind": "funded",
+        "label": "funded Azure OpenAI deployment",
+        "status": "available",
+        "limited_until": None,
+    },
+]
+_PATH_LINES = (
+    "Shared credential paths:\n"
+    "- shared Claude Code subscriptions: 2 of 3 available\n"
+    "- shared Codex subscriptions: none connected\n"
+    "- funded Anthropic API key: limited until 2026-10-03T01:20:00.000Z\n"
+    "- funded Azure OpenAI deployment: available\n"
+)
+_SECRET_GPT = "sk-proj-SENTINEL-gpt-7f3a9c"
+_SECRET_CLAUDE = "sk-ant-oat01-SENTINEL-claude-7f3a9c"
+
+
+async def _rotation(
+    *,
+    retry_availability: dict,
+    next_lease: dict,
+    stub_mode: str = "rate_limit",
+    secrets: bool = False,
+):
+    """First spawn hits the limit; the retry passes the reported code_session_id."""
+    from structlog.testing import capture_logs
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": stub_mode})
+    backend = _Backend(session_home)
+    backend.paths = [dict(path) for path in _SHARED_PATHS]
+    backend.next_lease = dict(next_lease)
+    backend.availability = [{"claude": True, "codex": True}, retry_availability]
+    gpt_token = _SECRET_GPT if secrets else None
+    if secrets:
+        backend.claude_token = _SECRET_CLAUDE
+    with capture_logs() as logs, backend.patched():
+        first = await asyncio.wait_for(
+            ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(gpt_token=gpt_token)),
+            timeout=30,
+        )
+        retry = await asyncio.wait_for(
+            ActivityEnvironment().run(
+                service.spawn_claude_code_activity,
+                *_activity_args(
+                    code_session_request={"code_session_id": (first.get("retry") or {}).get("code_session_id")},
+                    tool_call_id="tc-retry",
+                    gpt_token=gpt_token,
+                ),
+            ),
+            timeout=30,
+        )
+    return first, retry, backend, session_home, logs
+
+
+def _retry_line(clause: str) -> str:
+    return (
+        f"Retry with spawn_agent(type='code', code_session_id='{_SESSION_ID}', goal=<the same goal>) "
+        f"to continue: {clause}"
+    )
+
+
+async def test_rotation_a_exhaustion_pauses_sandbox_and_lists_every_path():
+    """(a) A usage limit → truthful tool error, sandbox paused (not killed), retry text with every path.
+
+    Also (g): the leased Claude token and the workflow's GPT token never reach
+    the tool result, any saved message, a log record or the sandbox log.
+    """
+    first, retry, backend, session_home, logs = await _rotation(
+        retry_availability={"claude": True, "codex": True, "session_provider": "claude"},
+        next_lease=_SHARED_CLAUDE_LEASE,
+        secrets=True,
+    )
+    try:
+        assert first["status"] == "usage_limit" and first["success"] is False and first["retryable"] is True, first
+        assert first["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": _SESSION_ID}, first
+        assert [call.get("reason") for call in backend.closed][0] == "usage_limit", backend.closed
+        assert backend.usage_reports == [("task-1", "claude", 1790988600)], backend.usage_reports
+        assert first["message"] == (
+            "Code agent stopped: the Claude Code usage limit was reached on me@example.com "
+            "(resets 2026-10-03T00:50:00.000Z). Its work is saved on branch rose/write-answer-0a1b2c3d "
+            "(checkpoint 1); the sandbox is paused, not killed.\n"
+            + _ACCOUNT_LINES
+            + _PATH_LINES
+            + _retry_line(
+                "the retry leases an account that is not rate-limited (now a shared Claude Code account), "
+                "resumes the paused sandbox and continues the same Claude Code conversation."
+            )
+        ), first["message"]
+        assert first["usage_limit"]["paths"] == _SHARED_PATHS, first["usage_limit"]
+        assert first["code_agent"]["state"] == "paused", first["code_agent"]
+        assert retry["status"] == "completed", retry
+
+        # (g) no secret anywhere the model, the user or an operator can read.
+        assert any("usage limit" in str(entry.get("event", "")).lower() for entry in logs), "logs were not captured"
+        surfaces = {
+            "results": json.dumps([first, retry], default=str),
+            "messages": json.dumps(backend.messages, default=str),
+            "creates": json.dumps(backend.created, default=str),
+            "logs": json.dumps(logs, default=str),
+            "sandbox log": session_home.log(),
+        }
+        for name, text in surfaces.items():
+            for secret in (_SECRET_GPT, _SECRET_CLAUDE):
+                assert secret not in text, f"{name} leaks a credential"
+    finally:
+        session_home.cleanup()
+
+
+async def test_rotation_a_out_of_credits_is_a_usage_limit_not_a_crash():
+    """(a) Out of credits (the SDK's structured billing_error): same paused, retryable result, never fatal."""
+    first, retry, backend, session_home, _ = await _rotation(
+        retry_availability={"claude": True, "codex": True, "session_provider": "claude"},
+        next_lease=_SHARED_CLAUDE_LEASE,
+        stub_mode="billing",
+    )
+    try:
+        assert first["status"] == "usage_limit" and first["retryable"] is True, first
+        assert first["usage_limit"]["limit_type"] == "billing", first["usage_limit"]
+        assert backend.usage_reports == [("task-1", "claude", None)], backend.usage_reports
+        assert [call.get("reason") for call in backend.closed][0] == "usage_limit", backend.closed
+        assert first["message"].startswith(
+            "Code agent stopped: the Claude Code credential me@example.com ran out of credits. Its work is saved "
+            "on branch rose/write-answer-0a1b2c3d (checkpoint 1); the sandbox is paused, not killed.\n"
+        ), first["message"]
+        assert retry["status"] == "completed", retry
+    finally:
+        session_home.cleanup()
+
+
+async def test_rotation_b_same_provider_retry_resumes_natively_in_the_same_sandbox():
+    """(b) A same-provider credential left → same session, same sandbox, `claude --resume <cli id>`."""
+    first, retry, backend, session_home, _ = await _rotation(
+        retry_availability={"claude": True, "codex": True, "session_provider": "claude"},
+        next_lease=_SHARED_CLAUDE_LEASE,
+    )
+    try:
+        assert backend.availability_calls[1] == {"code_session_id": _SESSION_ID, "prefer": "claude"}, (
+            "the retry asks for the credentials of the session it resumes",
+            backend.availability_calls,
+        )
+        assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
+        assert backend.created[1]["code_provider"] == "claude", backend.created[1]
+        runs = session_home.runs()
+        assert len(runs) == 2 and "--resume" in runs[1]["argv"], runs
+        assert runs[1]["argv"][runs[1]["argv"].index("--resume") + 1] == _CLI_SESSION_ID, runs[1]
+        assert runs[0]["cwd"] == runs[1]["cwd"], "the same sandbox HOME continues"
+        assert retry["status"] == "completed" and retry["code_provider"] == "claude", retry
+        texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
+        assert "notes: uncommitted work" in texts, texts
+    finally:
+        session_home.cleanup()
+
+
+async def test_rotation_c_only_other_provider_switches_with_a_handoff():
+    """(c) No Claude credential left, Codex is → the retry continues the same session on Codex.
+
+    The backend half (handoff prompt with the trajectory path, the file in the
+    new sandbox) is asserted in the code-session-usage-limit backend blackbox.
+    """
+    first, retry, backend, session_home, _ = await _rotation(
+        retry_availability={"claude": False, "codex": True, "session_provider": "claude"},
+        next_lease=_CODEX_LEASE,
+    )
+    try:
+        assert first["message"].endswith(
+            _retry_line(
+                "no Claude Code credential is left, so the retry continues this session on Codex "
+                "(now Codex codex@example.com) from the latest checkpoint, with a handoff prompt that points it "
+                "at the previous agent's trajectory."
+            )
+        ), first["message"]
+        assert backend.created[1]["code_provider"] == "codex", backend.created[1]
+        assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
+        assert retry["code_provider"] == "codex" and retry["status"] == "completed", retry
+    finally:
+        session_home.cleanup()
+
+
+async def test_rotation_h_another_providers_subscription_beats_the_funded_key():
+    """(h) Subscriptions first (C15): the Claude subscriptions are limited, the funded Anthropic
+    key and a Codex subscription are both left → the retry continues on the Codex subscription
+    with the handoff, as the backend's next_credential says (not on the funded key, which the
+    old "same provider while it has any credential" choice took)."""
+    first, retry, backend, session_home, _ = await _rotation(
+        retry_availability={
+            "claude": True,
+            "codex": True,
+            "session_provider": "claude",
+            "next_credential": {"provider": "codex", "tier": "subscription"},
+        },
+        next_lease={**_CODEX_LEASE, "kind": "own"},
+    )
+    try:
+        assert first["message"].endswith(
+            _retry_line(
+                "no Claude Code subscription is left, so the retry continues this session on Codex "
+                "(now Codex codex@example.com) from the latest checkpoint, with a handoff prompt that points it "
+                "at the previous agent's trajectory."
+            )
+        ), first["message"]
+        assert backend.created[1]["code_provider"] == "codex", backend.created[1]
+        assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
+        assert retry["code_provider"] == "codex" and retry["status"] == "completed", retry
+    finally:
+        session_home.cleanup()
+
+
+async def test_rotation_i_only_the_funded_key_left_resumes_the_same_provider():
+    """(i) Every subscription limited: the session's own funded key, same harness, native resume."""
+    funded_lease = {
+        "provider": "claude",
+        "label": "funded Anthropic API key",
+        "available_now": True,
+        "available_at": None,
+        "kind": "funded",
+    }
+    first, retry, backend, session_home, _ = await _rotation(
+        retry_availability={
+            "claude": True,
+            "codex": True,
+            "session_provider": "claude",
+            "next_credential": {"provider": "claude", "tier": "funded"},
+        },
+        next_lease=funded_lease,
+    )
+    try:
+        assert first["message"].endswith(
+            _retry_line(
+                "no Claude Code subscription is left, so the retry uses the funded Anthropic API key, resumes "
+                "the paused sandbox and continues the same Claude Code conversation."
+            )
+        ), first["message"]
+        assert backend.created[1]["code_provider"] == "claude", backend.created[1]
+        runs = session_home.runs()
+        assert len(runs) == 2 and "--resume" in runs[1]["argv"], runs
+        assert retry["code_provider"] == "claude" and retry["status"] == "completed", retry
+    finally:
+        session_home.cleanup()
+
+
+async def test_fresh_spawn_follows_the_backends_subscription_first_choice():
+    """A fresh spawn asking for Claude takes a Codex subscription before the funded Anthropic key."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "finish"})
+    backend = _Backend(session_home)
+    backend.availability = [
+        {"claude": True, "codex": True, "next_credential": {"provider": "codex", "tier": "subscription"}}
+    ]
+    try:
+        with backend.patched():
+            result = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(code_provider="claude")),
+                timeout=30,
+            )
+        assert backend.availability_calls == [{"code_session_id": None, "prefer": "claude"}], backend.availability_calls
+        assert backend.created[0]["code_provider"] == "codex", backend.created[0]
+        assert result["code_provider"] == "codex" and result["status"] == "completed", result
+    finally:
+        session_home.cleanup()
+
+
+def test_usage_limit_clause_names_a_funded_key_on_the_other_provider():
+    """Every subscription and this provider's funded key gone: the other provider's funded key, named."""
+    from domains.spawn_claude_code_agent.service import format_usage_limit_message
+
+    message = format_usage_limit_message(
+        code_provider="codex",
+        resets_at_iso=None,
+        facts={"code_session_id": "cs-1"},
+        next_lease={
+            "provider": "claude",
+            "label": "funded Anthropic API key",
+            "available_now": True,
+            "available_at": None,
+            "kind": "funded",
+        },
+    )
+    assert message.endswith(
+        "to continue: no Codex credential is left, so the retry continues this session on Claude Code "
+        "(now the funded Anthropic API key) from the latest checkpoint, with a handoff prompt that points it "
+        "at the previous agent's trajectory."
+    ), message
+
+
+def _codex_wire(event):
+    """The Codex ws-server event a ``codex_fixture`` stub line carries; any other event unchanged."""
+    if event.get("type") == "cli_message" and event.get("raw_type") == "codex_fixture":
+        return event["cli_message"]["event"]
+    return event
+
+
+@contextlib.contextmanager
+def _codex_events():
+    """Read ``codex_fixture`` stub lines as the Codex ws-server's events, through the real parsers."""
+    from domains.spawn_claude_code_agent import service
+
+    real_unusable, real_feedback = service.login_unusable_from_event, service.build_codex_credential_feedback
+    with (
+        patch.object(service, "login_unusable_from_event", lambda event: real_unusable(_codex_wire(event))),
+        patch.object(
+            service, "build_codex_credential_feedback", lambda events: real_feedback([_codex_wire(e) for e in events])
+        ),
+    ):
+        yield
+
+
+def test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect():
+    """The ws-server's ``login_unusable`` error: parsed without prose matching, fed back as a revocation."""
+    from domains.spawn_claude_code_agent.service import build_codex_credential_feedback, login_unusable_from_event
+
+    event = {
+        "type": "error",
+        "provider": "codex",
+        "message": "Your access token could not be refreshed: refresh_token_invalidated",
+        "usage_limit": None,
+        "login_unusable": {"reason": "oauth_refresh_invalid"},
+    }
+    assert login_unusable_from_event(event) == {"provider": "codex", "reason": "oauth_refresh_invalid"}
+    assert login_unusable_from_event({**event, "login_unusable": None}) is None, "the switch path is not a pause"
+    # The backend reads reason oauth_refresh_invalid as a revocation: needs reconnect, never a rate limit.
+    assert build_codex_credential_feedback([event]) == [{"source": "initial", "reason": "oauth_refresh_invalid"}]
+
+
+async def _unusable_login_then_retry(availability: list):
+    """A Codex run whose login proves unusable (no Azure switch armed), then the parent's retry."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "login_unusable"})
+    backend = _Backend(session_home)
+    backend.paths = [dict(path) for path in _SHARED_PATHS]
+    backend.availability = availability
+    with backend.patched(), _codex_events():
+        first = await asyncio.wait_for(
+            ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args(code_provider="codex")),
+            timeout=30,
+        )
+        retry = await asyncio.wait_for(
+            ActivityEnvironment().run(
+                service.spawn_claude_code_activity,
+                *_activity_args(
+                    code_session_request={"code_session_id": (first.get("retry") or {}).get("code_session_id")},
+                    tool_call_id="tc-retry",
+                    code_provider="codex",
+                ),
+            ),
+            timeout=30,
+        )
+    return first, retry, backend, session_home
+
+
+_REVOKED_CODEX = {
+    "provider": "codex",
+    "label": "codex@example.com",
+    "status": "reconnect",
+    "limited_until": None,
+    "this_run": False,
+}
+
+
+async def test_unusable_login_pauses_and_the_retry_switches_to_a_claude_subscription():
+    """Revoked Codex login, a Claude subscription left: paused (not fatal), the login marked for
+    reconnect (not rate-limited), and the retry continues the session on Claude with the handoff."""
+    claude_lease = {
+        "provider": "claude",
+        "label": "me@example.com",
+        "available_now": True,
+        "available_at": None,
+        "kind": "own",
+    }
+    accounts = [{**_ACCOUNTS[0], "status": "available", "limited_until": None, "this_run": False}, _REVOKED_CODEX]
+    after_mark = {
+        "claude": True,
+        "codex": False,
+        "session_provider": "codex",
+        "next_credential": {"provider": "claude", "tier": "subscription"},
+        "outlook": {"accounts": accounts, "next_lease": claude_lease},
+    }
+    first, retry, backend, session_home = await _unusable_login_then_retry(
+        [{"claude": True, "codex": True}, after_mark, after_mark]
+    )
+    try:
+        assert first["status"] == "usage_limit" and first["failure_kind"] == "login_unusable", first
+        assert first["retryable"] is True and first["success"] is False, first
+        assert first["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": _SESSION_ID}, first
+        assert [call.get("reason") for call in backend.closed][0] == "usage_limit", "checkpoint + pause"
+        assert backend.usage_reports == [], "an unusable login is never put on a rate-limit cooldown"
+        assert {"source": "initial", "reason": "oauth_refresh_invalid"} in (backend.credential_feedback[0] or []), (
+            "the persisted feedback marks exactly that login for reconnect",
+            backend.credential_feedback,
+        )
+        assert first["usage_limit"]["credential_marked"] == "reconnect", first["usage_limit"]
+        assert first["message"] == (
+            "Code agent stopped: the Codex login can no longer be used (sign in again to reconnect it). "
+            "Its work is saved on branch rose/write-answer-0a1b2c3d (checkpoint 1); the sandbox is paused, "
+            "not killed.\nConnected accounts:\n"
+            "- Claude Code me@example.com: available\n"
+            "- Codex codex@example.com: disconnected (the user must reconnect it)\n"
+            + _retry_line(
+                "no Codex subscription is left, so the retry continues this session on Claude Code "
+                "(now Claude Code me@example.com) from the latest checkpoint, with a handoff prompt that points "
+                "it at the previous agent's trajectory."
+            )
+        ), first["message"]
+        assert "rate-limited" not in first["message"] and "out of quota" not in first["message"]
+        assert first["code_agent"]["state"] == "paused", first["code_agent"]
+        assert first["code_agent"]["failure_message"] == (
+            "Paused: the Codex login needs to be reconnected. Work is saved."
+        ), first["code_agent"]
+        assert backend.created[1]["code_provider"] == "claude", backend.created[1]
+        assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
+        assert retry["code_provider"] == "claude" and retry["status"] == "completed", retry
+    finally:
+        session_home.cleanup()
+
+
+async def test_unusable_login_with_nothing_else_stays_paused_with_the_reconnect_wording():
+    """Revoked Codex login and nothing else leasable: paused with the reconnect wording; the retry starts nothing."""
+    nothing = {
+        "claude": False,
+        "codex": False,
+        "session_provider": "codex",
+        "next_credential": None,
+        "outlook": {"accounts": [_REVOKED_CODEX], "next_lease": None},
+    }
+    first, retry, backend, session_home = await _unusable_login_then_retry(
+        [{"claude": True, "codex": True}, nothing, nothing]
+    )
+    try:
+        assert first["status"] == "usage_limit" and first["failure_kind"] == "login_unusable", first
+        assert first["message"].startswith(
+            "Code agent stopped: the Codex login can no longer be used (sign in again to reconnect it). "
+        ), first["message"]
+        assert first["message"].endswith(
+            _retry_line(
+                "no other credential can be leased right now, so a retry stays paused and starts nothing until "
+                "the login is reconnected or another account is connected."
+            )
+        ), first["message"]
+        assert len(backend.created) == 1, f"no agent may start without a credential: {backend.created}"
+        assert retry["status"] == "usage_limit" and retry["failure_kind"] == "no_credentials", retry
+    finally:
+        session_home.cleanup()
+
+
+async def test_rotation_d_no_credential_keeps_the_session_paused_and_starts_nothing():
+    """(d) Nothing leasable anywhere → no create, no resume, the earliest reset named."""
+    limited_paths = [
+        {**_SHARED_PATHS[0], "status": "limited", "available_count": 0, "limited_until": "2026-10-03T02:00:00.000Z"},
+        _SHARED_PATHS[1],
+        _SHARED_PATHS[2],
+        {**_SHARED_PATHS[3], "status": "unconfigured"},
+    ]
+    accounts = [
+        _ACCOUNTS[0],
+        {**_ACCOUNTS[1], "status": "limited", "limited_until": "2026-10-03T03:00:00.000Z"},
+    ]
+    earliest = {
+        "provider": "claude",
+        "label": "me@example.com",
+        "available_now": False,
+        "available_at": "2026-10-03T00:50:00.000Z",
+        "kind": "own",
+    }
+    first, retry, backend, session_home, _ = await _rotation(
+        retry_availability={
+            "claude": False,
+            "codex": False,
+            "session_provider": "claude",
+            "outlook": {"accounts": accounts, "paths": limited_paths, "next_lease": earliest},
+        },
+        next_lease=earliest,
+    )
+    try:
+        assert first["status"] == "usage_limit", first
+        assert len(backend.created) == 1, f"no agent may start without a credential: {backend.created}"
+        assert len(backend.closed) == 1 and len(backend.usage_reports) == 1, (backend.closed, backend.usage_reports)
+        assert len(session_home.runs()) == 1 and session_home.process is None, "the sandbox stays paused"
+        assert retry["status"] == "usage_limit" and retry["failure_kind"] == "no_credentials", retry
+        assert retry["retryable"] is True and retry["success"] is False, retry
+        assert retry["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": _SESSION_ID}, retry
+        assert retry["message"] == (
+            "Code agent not resumed: no Claude Code or Codex credential can be leased right now, so no agent was "
+            f"started. Code session {_SESSION_ID} stays paused with its work saved.\n"
+            "Connected accounts:\n"
+            "- Claude Code me@example.com: limited until 2026-10-03T00:50:00.000Z (this run)\n"
+            "- Codex codex@example.com: limited until 2026-10-03T03:00:00.000Z\n"
+            "Shared credential paths:\n"
+            "- shared Claude Code subscriptions: all 3 limited until 2026-10-03T02:00:00.000Z\n"
+            "- shared Codex subscriptions: none connected\n"
+            "- funded Anthropic API key: limited until 2026-10-03T01:20:00.000Z\n"
+            "- funded Azure OpenAI deployment: not configured\n"
+            "The earliest reset is 2026-10-03T00:50:00.000Z (Claude Code me@example.com). "
+            f"Retry with spawn_agent(type='code', code_session_id='{_SESSION_ID}', goal=<the same goal>) after that."
+        ), retry["message"]
+        assert retry["code_agent"]["state"] == "paused", retry["code_agent"]
+        assert retry["code_agent"]["failure_message"] == (
+            "Paused: no Claude or Codex credential is available (earliest reset Oct 3, 12:50 AM UTC). Work is saved."
+        ), retry["code_agent"]
+    finally:
+        session_home.cleanup()
+
+
+async def test_rotation_e_resume_from_root_prefers_the_sessions_own_harness():
+    """(e) The root resumes a session last run on Codex: it stays on Codex even though Claude is the default."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "finish"})
+    backend = _Backend(session_home)
+    backend.availability = [{"claude": True, "codex": True, "session_provider": "codex"}]
+    try:
+        with backend.patched():
+            result = await asyncio.wait_for(
+                ActivityEnvironment().run(
+                    service.spawn_claude_code_activity,
+                    *_activity_args(code_session_request={"code_session_id": _SESSION_ID}, code_provider="claude"),
+                ),
+                timeout=30,
+            )
+        assert backend.availability_calls == [{"code_session_id": _SESSION_ID, "prefer": "claude"}], (
+            backend.availability_calls
+        )
+        assert backend.created[0]["code_provider"] == "codex", "no needless provider switch on a resume"
+        assert backend.created[0]["code_session_id"] == _SESSION_ID, backend.created[0]
+        assert result["code_provider"] == "codex" and result["status"] == "completed", result
+    finally:
+        session_home.cleanup()
+
+
+async def test_rotation_f_duplicate_concurrent_retry_starts_one_agent():
+    """(f) Two concurrent retries of one session: one resumes it, the other gets the backend's busy error.
+
+    The backend lease (and its conditional provider switch) is asserted in the
+    code-session-usage-limit backend blackbox; here the stand-in answers like
+    it, and the activity must not start, close or re-report anything for the loser.
+    """
+    from temporalio.exceptions import ApplicationError
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "rate_limit"})
+    backend = _Backend(session_home)
+    backend.availability = [{"claude": True, "codex": True}] + [
+        {"claude": True, "codex": True, "session_provider": "claude"}
+    ] * 2
+    held: set[str] = set()
+    attempts: list[str] = []
+    create, close = backend.create_session, backend.close_session
+
+    async def leased_create(**kwargs):
+        attempts.append(kwargs.get("lease_owner") or "")
+        session_id = kwargs.get("code_session_id")
+        if session_id in held:
+            raise ApplicationError(
+                "Failed to create code session (provider=claude): HTTP 409: "
+                '{"error":"Code session is busy","code":"CODE_SESSION_BUSY"}',
+                type="CodeSessionUnavailable",
+                non_retryable=True,
+            )
+        if session_id:
+            held.add(session_id)
+        return await create(**kwargs)
+
+    async def releasing_close(**kwargs):
+        held.discard(_SESSION_ID)
+        return await close(**kwargs)
+
+    backend.create_session = leased_create
+    backend.close_session = releasing_close
+    try:
+        with backend.patched():
+            first = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
+            )
+            retry_args = [
+                _activity_args(code_session_request={"code_session_id": _SESSION_ID}, tool_call_id=tool_call_id)
+                for tool_call_id in ("tc-retry-1", "tc-retry-2")
+            ]
+            outcomes = await asyncio.wait_for(
+                asyncio.gather(
+                    *(ActivityEnvironment().run(service.spawn_claude_code_activity, *args) for args in retry_args),
+                    return_exceptions=True,
+                ),
+                timeout=30,
+            )
+        assert first["status"] == "usage_limit", first
+        completed = [o for o in outcomes if isinstance(o, dict) and o.get("status") == "completed"]
+        busy = [o for o in outcomes if isinstance(o, ApplicationError) and o.type == "CodeSessionUnavailable"]
+        assert len(completed) == 1 and len(busy) == 1, outcomes
+        assert len(attempts) == 3 and len(session_home.runs()) == 2, "one agent resumed, the duplicate started none"
+        assert backend.usage_reports == [("task-1", "claude", 1790988600)], "no second rotation"
+        assert [call.get("reason") for call in backend.closed] == ["usage_limit", "close"], backend.closed
+    finally:
+        session_home.cleanup()
+
+
 async def _run_all_tests():
     print("code-sessions blackbox tests:")
     r = BlackboxResult()
@@ -1298,6 +2013,58 @@ async def _run_all_tests():
     )
     await r.record_async("ws_server_checks_out_session_branch", test_ws_server_checks_out_the_code_session_branch)
     await r.record_async("preview_url_rides_every_code_agent_block", test_preview_url_rides_every_code_agent_block)
+    # C15 credential rotation end to end, one case per branch.
+    await r.record_async(
+        "rotation_a_exhaustion_pauses_and_lists_paths", test_rotation_a_exhaustion_pauses_sandbox_and_lists_every_path
+    )
+    await r.record_async(
+        "rotation_a_out_of_credits_is_usage_limit", test_rotation_a_out_of_credits_is_a_usage_limit_not_a_crash
+    )
+    await r.record_async(
+        "rotation_b_same_provider_native_resume",
+        test_rotation_b_same_provider_retry_resumes_natively_in_the_same_sandbox,
+    )
+    await r.record_async(
+        "rotation_c_other_provider_handoff", test_rotation_c_only_other_provider_switches_with_a_handoff
+    )
+    await r.record_async(
+        "rotation_d_no_credential_stays_paused",
+        test_rotation_d_no_credential_keeps_the_session_paused_and_starts_nothing,
+    )
+    await r.record_async(
+        "rotation_e_root_resume_prefers_same_harness", test_rotation_e_resume_from_root_prefers_the_sessions_own_harness
+    )
+    await r.record_async(
+        "rotation_f_duplicate_retry_starts_one_agent", test_rotation_f_duplicate_concurrent_retry_starts_one_agent
+    )
+    # Subscriptions before funded keys (C15 order; the backend half is code-session-credential-order.cases.ts).
+    await r.record_async(
+        "rotation_h_other_subscription_beats_funded_key",
+        test_rotation_h_another_providers_subscription_beats_the_funded_key,
+    )
+    await r.record_async(
+        "rotation_i_funded_key_resumes_same_provider",
+        test_rotation_i_only_the_funded_key_left_resumes_the_same_provider,
+    )
+    await r.record_async(
+        "fresh_spawn_follows_subscription_first_choice", test_fresh_spawn_follows_the_backends_subscription_first_choice
+    )
+    r.record(
+        "usage_limit_clause_names_other_funded_key", test_usage_limit_clause_names_a_funded_key_on_the_other_provider
+    )
+    # An unusable Codex login with no Azure switch armed pauses like a usage limit (C15).
+    r.record(
+        "unusable_login_event_marks_login_for_reconnect",
+        test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect,
+    )
+    await r.record_async(
+        "unusable_login_pauses_retry_switches_to_claude",
+        test_unusable_login_pauses_and_the_retry_switches_to_a_claude_subscription,
+    )
+    await r.record_async(
+        "unusable_login_nothing_else_stays_paused",
+        test_unusable_login_with_nothing_else_stays_paused_with_the_reconnect_wording,
+    )
     teardown_mock()
     return r.all_passed
 

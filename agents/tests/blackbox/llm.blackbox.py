@@ -10727,9 +10727,115 @@ async def test_structured_exclusion_counts_no_json_and_non_object_replies():
         assert result is not None and result.tool_calls[0].labels == ["typed"]
 
 
+async def test_flash_anthropic_exclusion_covers_initial_and_rotation_leases():
+    from helpers.llm import _flash_agent_auth_contexts
+    from providers.rose.types import ClaudeAuthContext, GptAuthContext
+
+    calls = []
+
+    async def broker(_user_id, **kwargs):
+        calls.append(kwargs["token_type"])
+        return None
+
+    kwargs = dict(user_id="fixture-user", lineage_key=None, agent_id="fixture-agent",
+                  demo_cache_affinity_key=None, exclude_anthropic_family=True)
+    with patch("helpers.llm.fetch_compute_token_activity", broker):
+        assert await _flash_agent_auth_contexts(None, None, **kwargs) == (None, None)
+        assert calls == ["gpt"]
+        calls.clear()
+        claude = ClaudeAuthContext("fixture-claude", "pool", "fixture-user")
+        assert await _flash_agent_auth_contexts(claude, None, **kwargs) == (None, None)
+        assert calls == ["gpt"]
+        calls.clear()
+        gpt = GptAuthContext("fixture-gpt", "pool", "fixture-user")
+        assert await _flash_agent_auth_contexts(None, gpt, **kwargs) == (None, gpt)
+        assert gpt.fetch_fresh is not None
+        assert await gpt.fetch_fresh("fixture-user") is None
+        assert calls == ["gpt"]
+
+
+async def test_flash_call_llm_process_exclusion_reaches_collect():
+    from helpers.llm import call_llm
+    from providers.rose.types import RoseResponse
+
+    for excluded in (False, True):
+        kinds = []
+        requests = []
+
+        async def broker(_user_id, **kwargs):
+            kinds.append(kwargs["token_type"])
+            if kwargs["token_type"] == "claude":
+                return {"type": "claude", "accessToken": "fixture-claude", "source": "pool",
+                        "userId": "fixture-user", "poolTokenId": "fixture-pool"}
+            return None
+
+        class Client:
+            async def collect(self, **kwargs):
+                requests.append(kwargs)
+                return RoseResponse(content="fixture collected", actual_model="fixture-model",
+                                    usage={"finish_reason": "stop"})
+
+        with patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1" if excluded else "0"}), \
+             patch("helpers.llm.fetch_compute_token_activity", broker), \
+             patch("helpers.llm.RoseClient", Client), patch("helpers.llm._safe_heartbeat"):
+            result = await call_llm(messages=[{"role": "user", "content": "fixture"}],
+                                    model="rose-labs/rose-1-flash", call_site="plan_loop",
+                                    gpt_token_user_id="fixture-user", skip_cache_write=True)
+        assert result["content"] == "fixture collected"
+        assert len(requests) == 1, "actual call_llm must reach the collect boundary without NameError"
+        assert kinds == (["gpt"] if excluded else ["gpt", "claude"])
+        assert (requests[0]["claude_auth"] is None) == excluded
+
+
+async def test_flash_stream_process_and_call_exclusion_reach_stream():
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    Action = create_agent_action_model([])
+    for process_excluded, call_excluded in ((True, False), (False, True), (True, True), (False, False)):
+        kinds = []
+        requests = []
+
+        async def broker(_user_id, **kwargs):
+            kinds.append(kwargs["token_type"])
+            if kwargs["token_type"] == "claude":
+                return {"type": "claude", "accessToken": "fixture-claude", "source": "pool",
+                        "userId": "fixture-user", "poolTokenId": "fixture-pool"}
+            return None
+
+        async def complete(_client, **kwargs):
+            requests.append(kwargs)
+            yield StreamChunk("metadata", {"actual_model": "fixture-model", "pool_name": "rose-1-flash"})
+            yield StreamChunk("content", {"text": '{"response":"fixture streamed","tool_calls":[]}'})
+            yield StreamChunk("usage", {"finish_reason": "stop", "total_tokens": 1})
+            yield StreamChunk("done")
+
+        async def on_chunk(_text, _tokens):
+            pass
+
+        with patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1" if process_excluded else "0"}), \
+             patch("helpers.llm.fetch_compute_token_activity", broker), \
+             patch("helpers.llm.RoseClient"), patch("helpers.llm._safe_heartbeat"), \
+             patch("providers.demo_cache.rose_cache.cached_complete", complete):
+            result, _usage, _detected = await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "fixture"}], model="rose-labs/rose-1-flash",
+                temperature=0, max_tokens=128, response_model=Action, on_chunk=on_chunk,
+                call_site="plan_loop", gpt_token_user_id="fixture-user", skip_cache_write=True,
+                _exclude_anthropic_family=call_excluded)
+        assert result.response == "fixture streamed"
+        excluded = process_excluded or call_excluded
+        assert kinds == (["gpt"] if excluded else ["gpt", "claude"])
+        assert len(requests) == 1, "actual streaming entry point must reach the stream boundary"
+        assert (requests[0]["claude_auth"] is None) == excluded
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("flash_call_llm_process_exclusion", test_flash_call_llm_process_exclusion_reaches_collect)
+    await r.record_async("flash_stream_process_and_call_exclusion", test_flash_stream_process_and_call_exclusion_reach_stream)
+    await r.record_async("flash_anthropic_exclusion_initial_and_rotation", test_flash_anthropic_exclusion_covers_initial_and_rotation_leases)
     await r.record_async("captured_desktop_display_native_json_array", test_captured_desktop_display_native_json_array_reaches_typed_action)
     await r.record_async(
         "structured_validation_exhausted_candidate_typed_error",

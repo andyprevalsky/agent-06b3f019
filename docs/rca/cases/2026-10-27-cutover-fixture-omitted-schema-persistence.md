@@ -182,3 +182,35 @@ The proposal is not applied to canonical source. Neither that capture proof nor
 the later healthy native workflow establishes the historical timeout cause or
 assigns responsibility to this deploy. U1 remains OPEN. Evidence:
 plan:.context/unresolved-six-20261029/workflow-chat/u1/REPORT.md.
+
+
+## November 4 b9 recurrence — original timeout retained, isolated diagnostic passes
+
+On `b9a1f743152e29cb6626ed33fdce88d24a919ba1`, the full agents cohort's
+`wf_cutover_drained_browser_resumes_same_step_on_new_generation` failed with
+`TimeoutError` at `workflow.blackbox.py:2555`, the unchanged 60-second
+`asyncio.wait_for(handle.result(), timeout=60)`. Its workflow-domain result
+remains FAILED (379.6 seconds for the domain). Approval, code and background
+cutover siblings passed. Saved logs show resumed browser and completion
+dispatch before expiry, but not the final pinned-run history or immutable
+fixture state. Replay span `status=error` does not identify an activity failure.
+Ten checked owning Python/fixture/dependency files match main `0784fff6`;
+that parity does not establish this occurrence's causal attribution. The older
+missing-schema cause is not adopted for this recurrence.
+
+After the original root and children joined, one authorized diagnostic invoked
+only the existing `_run_parked_tool_cutover_tests` function on the same clean
+b9 source. All four original cases passed in 49.495 seconds, native exit 0.
+Every original assertion, the 60-second waits and uncached-worker setting
+remained intact. The existing `ROSE_CUTOVER_FAILURE_DIR` capture was enabled;
+its directory stayed empty because no diagnostic case failed. This isolated
+function omits the original domain prefix and concurrent cohort, so its PASS
+is neither a causal fix nor full-gate or original-failure credit.
+
+The existing supervisor records quiescent=true, orphaned_children=false and
+remaining=[]. Parent closure verifies both recorded PIDs absent, all 22 guarded
+inputs unchanged, the same HEAD and released native admission lock. No source,
+fixture, timeout or concurrency correction was made. Gate: UNKNOWN; status
+remains OPEN. Evidence: plan:/var/tmp/pr1662-b9-workflow-cutover-readonly/report.json;
+plan:/var/tmp/pr1662-b9-workflow-cutover-diagnostic-once/results.json, with
+invocation.json, supervisor.json and parent-closure.json in that same directory.

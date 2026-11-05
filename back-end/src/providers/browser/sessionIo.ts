@@ -138,7 +138,7 @@ export async function captureScreenshot(sessionId: string): Promise<{
     return { provider, image: await captureKernelScreenshot(sessionId) };
   }
   if (provider === 'tilion') {
-    // REST screenshot: refused (typed) while the agent holds the CDP slot.
+    // REST screenshot: read-only, served beside an attached CDP client.
     return { provider, image: await captureTilionScreenshot(sessionId) };
   }
   if (provider === 'browser-use') {

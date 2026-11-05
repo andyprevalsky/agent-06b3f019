@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -301,6 +302,28 @@ def _rca_capture(name, value):
         pass  # Diagnostics must not change the fixture outcome or cleanup.
 
 
+def assert_burner_attribution(samples, measurements, pid, born, clock_ticks):
+    """Check the real tick oracle; host contention does not reserve half a core."""
+    assert len(measurements) == len(samples) and samples
+    used = 0
+    for sample, row in zip(samples, measurements):
+        before, after, elapsed = row["before"], row["after"], row["elapsed_s"]
+        assert row["pid"] == pid and before[2] == after[2] == born, row
+        assert row["clock_ticks"] == clock_ticks and elapsed > 0 and math.isfinite(elapsed), row
+        delta = after[1] - before[1]
+        assert delta >= 0, row
+        used += delta
+        expected = {"pid": pid, "comm": after[0], "cpu_pct": round(100 * delta / clock_ticks / elapsed, 1)}
+        assert row["ranked"] == ([expected] if delta else []), row
+        top = sample["top_processes"]
+        visible = [item for item in top if item["pid"] == pid]
+        if visible:
+            assert visible == [expected] and expected["comm"].startswith("python"), (row, top)
+        elif delta:
+            assert len(top) == 8 and expected["cpu_pct"] <= top[-1]["cpu_pct"], (row, top)
+    assert used > 0, "the native burner received no CPU: attribution was not exercised"
+
+
 def guest_diagnostics_sampler_and_inventory():
     """The bounded sampler writes CPU, pool and pg_stat_activity samples that the
     guest inventory seals as optional runtime evidence."""
@@ -403,11 +426,12 @@ def guest_diagnostics_sampler_and_inventory():
         )
         prior_cpu_rca_pid = os.environ.get("CPU_RCA_BURNER_PID")
         prior_cpu_rca_dir = os.environ.get("CPU_RCA_DIR")
-        if prior_cpu_rca_dir:
-            os.environ["CPU_RCA_DIR"] = str(Path(prior_cpu_rca_dir, f"burner-{burner.pid}"))
-            os.environ["CPU_RCA_BURNER_PID"] = str(burner.pid)
-            _rca_capture("burner-start.json", lambda: {"pid": burner.pid, "wall": time.time(), "monotonic": time.monotonic(), "stat": Path(f"/proc/{burner.pid}/stat").read_text()})
+        capture = Path(prior_cpu_rca_dir or directory, f"burner-{burner.pid}")
+        os.environ["CPU_RCA_DIR"] = str(capture)
+        os.environ["CPU_RCA_BURNER_PID"] = str(burner.pid)
+        _rca_capture("burner-start.json", lambda: {"pid": burner.pid, "wall": time.time(), "monotonic": time.monotonic(), "stat": Path(f"/proc/{burner.pid}/stat").read_text()})
         try:
+            born = sampler["process_ticks"]()[burner.pid][2]
             attributed = Path(directory) / "attributed.jsonl"
             result = subprocess.run(
                 [sys.executable, str(ROOT / "scripts/cloudbench-guest-diagnostics.py"), str(attributed),
@@ -440,9 +464,35 @@ def guest_diagnostics_sampler_and_inventory():
             assert [row["cpu_pct"] for row in top] == sorted((row["cpu_pct"] for row in top), reverse=True)
             assert all(set(row) == {"pid", "comm", "cpu_pct"} for row in top), top
             assert "secret-arg" not in json.dumps(sample)
-        burned = [row for sample in samples for row in sample["top_processes"] if row["pid"] == burner.pid]
-        assert burned and max(row["cpu_pct"] for row in burned) >= 50, samples
-        assert burned[0]["comm"].startswith("python"), burned
+        captures = list(capture.glob("sampler-*.json"))
+        assert len(captures) == 1, captures
+        measurements = json.loads(captures[0].read_text())
+        assert measurements["dropped"] == 0, measurements
+        assert_burner_attribution(samples, measurements["samples"], burner.pid, born, ticks)
+
+        # Keep a controlled >=50% oracle independent of the host's scheduling share.
+        controlled = sampler["top_processes"]({123: ("python", 0, 1)}, {123: ("python", ticks, 1)}, 1.0)
+        assert controlled == [{"pid": 123, "comm": "python", "cpu_pct": 100.0}]
+        assert controlled[0]["cpu_pct"] >= 50
+        measure = {"pid": 123, "before": ["python", 0, 1], "after": ["python", ticks, 1],
+                   "elapsed_s": 1.0, "clock_ticks": ticks, "ranked": controlled}
+        assert_burner_attribution([{"top_processes": controlled}], [measure], 123, 1, ticks)
+        for bad in ({**measure, "after": ["python", ticks + 1, 1]},
+                    {**measure, "after": ["python", ticks, 2]}):
+            try:
+                assert_burner_attribution([{"top_processes": controlled}], [bad], 123, 1, ticks)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("wrong CPU delta or process birth was accepted")
+        try:
+            assert_burner_attribution([{"top_processes": [
+                {"pid": index, "comm": "other", "cpu_pct": 50.0} for index in range(8)]}],
+                [measure], 123, 1, ticks)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("a target ranked above the cutoff was silently omitted")
 
 
 def exercise_read_transition(case: str):

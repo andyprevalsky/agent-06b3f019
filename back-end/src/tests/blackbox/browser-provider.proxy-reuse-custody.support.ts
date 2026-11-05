@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import type { Kernel } from '@onkernel/sdk';
-import { assertResumeReusesExistingProxy } from './browser-provider-stale-proxy.support';
+import { assertResumeReusesExistingProxy } from './browser-provider-proxy-reuse.support';
 
 /** Assert success and failure never allocate or delete project-wide shared proxies. */
 export async function assertLiveProxyReuseCustody(): Promise<void> {

@@ -2,7 +2,7 @@
  * STATE MACHINE: DesktopIntegrations (Rose Desktop flag on; stock page unchanged when off)
  *
  *   [MOUNTED] → flat sections in the existing order:
- *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
+ *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts · Meetings
  *     · Socials · File System · CLIs
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute

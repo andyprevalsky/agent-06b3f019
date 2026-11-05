@@ -19,6 +19,7 @@ interface ElectronLocalCodeBridge {
 
 interface ElectronApiBridge {
   isElectron?: boolean;
+  openExternal?: (url: string) => Promise<unknown>;
   auth?: ElectronAuthBridge;
   localCode?: ElectronLocalCodeBridge;
 }

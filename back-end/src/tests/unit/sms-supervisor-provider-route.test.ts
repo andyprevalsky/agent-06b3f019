@@ -122,3 +122,40 @@ test('marks assistant tool_calls as type=function for OpenAI-compatible provider
   assert.equal(toolCalls.length, 4);
   for (const toolCall of toolCalls) assert.equal(toolCall.type, 'function');
 });
+
+test('every document_source the grep description offers is accepted by both schemas', () => {
+  // The description once named Granola values the enums still rejected, so
+  // the supervisor was told to send arguments its own schema refused.
+  const zodSource = readFileSync(
+    join(__dirname, '../../providers/smsSupervisor/schema.ts'),
+    'utf8'
+  );
+  const nativeSource = readFileSync(
+    join(__dirname, '../../providers/smsSupervisor/supervisorTools.schemas.ts'),
+    'utf8'
+  );
+  const enumValues = (source: string, pattern: RegExp): string[] => {
+    const block = source.match(pattern)?.[1];
+    assert.ok(block !== undefined, 'document_source enum present');
+    return [...block.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  };
+  const described = (source: string): string[] => {
+    const line = source.match(/filters\.document_source\\`([^\n]*?)\\`filters\.since/)?.[1];
+    assert.ok(line !== undefined, 'document_source description present');
+    return [...line.matchAll(/\\`([a-z_]+)\\`/g)].map((m) => m[1]);
+  };
+  const zodEnum = enumValues(zodSource, /document_source: z\s*\.enum\(\[([^\]]*)\]/);
+  const nativeEnum = enumValues(nativeSource, /document_source: \{[^}]*?enum: \[([^\]]*)\]/);
+  for (const [name, source] of [
+    ['schema.ts', zodSource],
+    ['supervisorTools.schemas.ts', nativeSource],
+  ] as const) {
+    const offered = described(source);
+    assert.ok(offered.includes('granola_transcript'), `${name} describes Granola layers`);
+    for (const value of offered) {
+      assert.ok(zodEnum.includes(value), `${name}: zod enum accepts ${value}`);
+      assert.ok(nativeEnum.includes(value), `${name}: native enum accepts ${value}`);
+    }
+  }
+  assert.deepEqual([...zodEnum].sort(), [...nativeEnum].sort(), 'both enums list the same values');
+});

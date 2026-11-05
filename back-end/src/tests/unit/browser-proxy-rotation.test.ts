@@ -20,7 +20,10 @@ import {
   isSteelSessionRateLimited,
   runCrossProviderRotationLadder,
 } from '../blackbox/browser-provider-rotation.support';
-import { withKernelProxyCache } from '../blackbox/browser-provider-proxy-health.support';
+import {
+  withKernelProxyCache,
+  withKernelProxyCreationTransaction,
+} from '../blackbox/browser-provider-proxy-health.support';
 
 function testMobileCandidates(): void {
   const candidates = kernelProxyCandidates(
@@ -532,6 +535,11 @@ async function testCrossProviderLadderLabelsSteelExitIpReads(): Promise<void> {
       ws_url: 'wss://steel/2',
     },
   ];
+  // A synthetic ladder must not consume operator waivers for live provider operations.
+  const inheritedOverrides = process.env.DEPLOY_GATE_OVERRIDES;
+  const inheritedEvidence = process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
+  delete process.env.DEPLOY_GATE_OVERRIDES;
+  delete process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
   const stages: unknown[] = [];
   const realFetch = globalThis.fetch;
   globalThis.fetch = async () =>
@@ -556,6 +564,11 @@ async function testCrossProviderLadderLabelsSteelExitIpReads(): Promise<void> {
     });
   } finally {
     globalThis.fetch = realFetch;
+    if (inheritedOverrides === undefined) delete process.env.DEPLOY_GATE_OVERRIDES;
+    else process.env.DEPLOY_GATE_OVERRIDES = inheritedOverrides;
+    if (inheritedEvidence === undefined)
+      delete process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
+    else process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE = inheritedEvidence;
   }
   assert.deepStrictEqual(
     stages,
@@ -567,17 +580,47 @@ async function testCrossProviderLadderLabelsSteelExitIpReads(): Promise<void> {
   );
 }
 
+async function testMockLadderIsolatesAndRestoresLiveOutageEnvironment(): Promise<void> {
+  const inheritedOverrides = process.env.DEPLOY_GATE_OVERRIDES;
+  const inheritedEvidence = process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
+  const overrides =
+    'browser-provider:tilion-residential-live,browser-provider:steel-profile-persistence-live';
+  const evidence = '/fixture/live-outage-evidence-must-not-be-read.json';
+  process.env.DEPLOY_GATE_OVERRIDES = overrides;
+  process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE = evidence;
+  try {
+    await testCrossProviderLadderLabelsSteelExitIpReads();
+    assert.strictEqual(
+      process.env.DEPLOY_GATE_OVERRIDES,
+      overrides,
+      'restore every inherited override'
+    );
+    assert.strictEqual(
+      process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE,
+      evidence,
+      'restore evidence binding'
+    );
+  } finally {
+    if (inheritedOverrides === undefined) delete process.env.DEPLOY_GATE_OVERRIDES;
+    else process.env.DEPLOY_GATE_OVERRIDES = inheritedOverrides;
+    if (inheritedEvidence === undefined)
+      delete process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE;
+    else process.env.STEEL_PROFILE_PERSISTENCE_OUTAGE_EVIDENCE = inheritedEvidence;
+  }
+}
+
 async function main(): Promise<void> {
   testMobileCandidates();
   testResidentialUnchanged();
   testBenchmarkProxyReuseRequiresSameLocationAndTier();
   testRestoredProxyReuse();
-  await testPaginatedProxyReuseAndConcurrentOwnership();
+  await withKernelProxyCreationTransaction(testPaginatedProxyReuseAndConcurrentOwnership);
   await testDeletedCachedProxyKeepsLocation();
   testRotationTierLadder();
   testRotationRequestSchema();
   testSteelOutageDetector();
   await testCrossProviderLadderLabelsSteelExitIpReads();
+  await testMockLadderIsolatesAndRestoresLiveOutageEnvironment();
   process.stdout.write('PASS rotate_ip mobile candidates + escalation ladder\n');
 }
 

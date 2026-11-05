@@ -67,6 +67,20 @@ async function configure() {
     buildCodeAgentSystemPrompt: () => 'fixture',
     buildCodexHarnessSystemPrompt: () => 'fixture',
   });
+  await boundary('../../providers/codeAgentModels', {
+    codeAgentCliEnvs: async (provider: string) => ({
+      settings: { tier: 'standard' },
+      envs: provider === 'claude' ? { CLAUDE_CODE_MODEL: 'fixture' } : { CODEX_MODEL: 'fixture' },
+    }),
+  });
+  await boundary('../../providers/codeSessions/usageLimit', {
+    resolveCodexSpawnAuth: async () => ({
+      credentialMeta: null,
+      azureFunding: null,
+      envs: { AUTH_SETTING: 'preserved' },
+      servedBy: 'azure',
+    }),
+  });
   await boundary('../../providers/e2bAttachments', { uploadAttachmentsToSandbox: async () => [] });
   await boundary('../../providers/e2bCodexHarness', { overlayCodexRoseBridge: async () => {} });
   await boundary('../../providers/e2bWsServerOverlay', {
@@ -190,7 +204,15 @@ async function exercise(modulePath: string, provider: string) {
   assert.equal(launches.length, 0, 'foreign session rejected before launch');
   if (provider === 'claude')
     await runtime.createClaudeCodeSession('agent', 'fixture task', [], undefined, 'owner', false);
-  else await runtime.createCodexCodeSession('agent', 'fixture task', [], undefined, 'owner', 'standard');
+  else
+    await runtime.createCodexCodeSession(
+      'agent',
+      'fixture task',
+      [],
+      undefined,
+      'owner',
+      'standard'
+    );
   checkLaunch(provider);
 }
 async function mutationProof() {
