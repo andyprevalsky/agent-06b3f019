@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import builtins
 import contextlib
+import copy
 import io
 import runpy
 from unittest.mock import patch
@@ -50,6 +51,32 @@ def check_coverage_map_dependency_preflight() -> None:
     check(not runner.called, "missing coverage fails before launching the long agents runner")
     check(code == 2 and "agents/venv/bin/python" in error.getvalue(),
           "missing coverage gives an actionable interpreter preflight diagnostic")
+
+
+def comment_selection_fixture(selector: sat.Selector, *, executed: bool = False) -> sat.Selector:
+    """Freeze comment-only inputs; unrelated real imports must remain conservative.
+
+    Retain the actual lane/root mapping and selector implementation. Only the
+    historical lexical example's source graph is isolated from repository drift.
+    """
+    changed = "agents/tests/blackbox/rose_browser_use.blackbox.py"
+    sources = {
+        changed: "def test_browser(): pass\n",
+        "back-end/src/tests/blackbox/rose.blackbox.ts":
+            f"// Historical cross-language coverage: {changed}\nconst goal = `browser ${{name}}`;\n",
+        "back-end/src/tests/blackbox/models.blackbox.ts":
+            f"/* Historical cross-language coverage: {changed} */\nconst model = 'fixture';\n",
+        "back-end/src/tests/unit/worker-process-deployment.test.ts":
+            "mkdirSync(join(repository, 'agents/tests'), { recursive: true });\n",
+    }
+    if executed:
+        sources["back-end/src/tests/blackbox/rose.blackbox.ts"] += f"execFileSync('python3', ['{changed}']);\n"
+    graph = sat.Graph(list(sources))
+    graph.text.update(sources)
+    graph.build()
+    controlled = copy.copy(selector)
+    controlled.graph, controlled.rev, controlled.rev_data = graph, graph.reverse(), graph.reverse_data()
+    return controlled
 
 
 def check_extraction_precision(selector: sat.Selector) -> None:
@@ -164,12 +191,26 @@ def check_extraction_precision(selector: sat.Selector) -> None:
           "a new docs/rca case selects no backend blackbox/unit test (directory named only in a comment)")
     sel = selector.select(["agents/tests/blackbox/rose_browser_use.blackbox.py"])
     check("rose-browser-use" in sel.selected["agents-blackbox"], "agents rose_browser_use blackbox selects its own domain")
+    # This assertion diagnoses comment extraction, not the absence of any
+    # future executable path through the live repository graph. Native
+    # maintenance now legitimately imports the deployment/selector pipeline.
+    sel = comment_selection_fixture(selector).select(["agents/tests/blackbox/rose_browser_use.blackbox.py"])
     check(not sel.selected["backend-blackbox"],
           "agents rose_browser_use blackbox selects no backend blackbox domain (rose/models reached it only via comments)")
     # back-end/src/tests/unit/worker-process-deployment.test.ts names 'agents/tests' in
     # code (a fixture directory it creates); a code literal is never dropped.
     check(sel.selected["backend-unit"] <= {"back-end/src/tests/unit/worker-process-deployment.test.ts"},
           "agents rose_browser_use blackbox reaches backend-unit only through the code literal 'agents/tests'")
+
+    check(sel.selected["backend-unit"] == {"back-end/src/tests/unit/worker-process-deployment.test.ts"},
+          "controlled comment fixture retains the genuine agents/tests data-reader edge")
+    executed = comment_selection_fixture(selector, executed=True).select(["agents/tests/blackbox/rose_browser_use.blackbox.py"])
+    check("rose" in executed.selected["backend-blackbox"],
+          "controlled fixture retains a genuine executable cross-package dependency")
+    with patch.object(sat, "strip_comments", lambda rel, text, masked=None: text):
+        raw = comment_selection_fixture(selector).select(["agents/tests/blackbox/rose_browser_use.blackbox.py"])
+    check(bool(raw.selected["backend-blackbox"]),
+          "comment-only selection assertions reject an unstripped-source mutant")
 
     # Every declared edge in scripts/test-map/edges.json still selects its targets.
     for edge in selector.config.get("edges", []):
