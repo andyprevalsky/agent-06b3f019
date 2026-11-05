@@ -40,6 +40,8 @@ interface ContractCase {
   label: string;
   body: Record<string, unknown>;
   expect: Expectation;
+  /** Upper bound on the request's wall time. */
+  maxMs?: number;
 }
 
 function cases(thread: string): ContractCase[] {
@@ -487,6 +489,14 @@ function cases(thread: string): ContractCase[] {
       },
       expect: { reject: 'filters.email.since', says: [/given twice/] },
     },
+    // Trailing-slash trimming must be linear (CodeRabbit 4480317502): a quadratic
+    // regex took ~2.4s for 80k slashes, so this blocked the event loop for minutes.
+    {
+      label: 'long slash run in filters.path',
+      body: { pattern: 'Ledger', filters: { path: `${'/'.repeat(200_000)}a` } },
+      expect: { reject: 'filters.path', says: [/earlier/] },
+      maxMs: 5_000,
+    },
   ];
 }
 
@@ -508,8 +518,13 @@ export async function testGrepParameterContract(userId: string, agentId: string)
   if (!thread.startsWith('messages/')) throw new Error(`no message thread in ${messagePath}`);
 
   const failures: string[] = [];
-  for (const { label, body, expect } of cases(thread)) {
+  for (const { label, body, expect, maxMs } of cases(thread)) {
+    const started = Date.now();
     const res = await requestGrep(userId, { ...body, agent_id: agentId });
+    const elapsedMs = Date.now() - started;
+    if (maxMs !== undefined && elapsedMs > maxMs) {
+      failures.push(`${label}: took ${elapsedMs}ms, over ${maxMs}ms`);
+    }
     const data = res.data as {
       error?: string;
       message?: string;

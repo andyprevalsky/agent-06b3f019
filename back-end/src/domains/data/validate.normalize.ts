@@ -17,6 +17,7 @@
  */
 
 import { InvalidGrepParamError } from './errors';
+import { stripTrailingSlashes } from './format.snippets';
 import { isAgentTaskPath } from './path';
 import {
   DATA_SOURCE_CONFIGS,
@@ -148,7 +149,7 @@ function setOnce(target: FilterObject, key: string, value: unknown, param: strin
 function pathOwners(path: unknown): ((source: ValidSource) => boolean) | undefined {
   if (typeof path !== 'string') return undefined;
   const root = path.split('/', 1)[0];
-  if (isAgentTaskPath(path.trim().replace(/\/+$/, ''))) {
+  if (isAgentTaskPath(stripTrailingSlashes(path.trim()))) {
     return (source) => source === 'agent_network' || source === 'agent_trajectories';
   }
   if (!isSourceName(root)) return undefined;
