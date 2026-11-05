@@ -4613,6 +4613,19 @@ class Round12InterruptedIsolation(unittest.TestCase):
         self.observer.return_value=self.obs;self.identity.return_value=('reused','argv')
         with self.assertRaises(ValueError):self.verify()
 
+    def test_native_credential_fallback_does_not_change_environment(self):
+        import os
+        folder=self.root/'agents';folder.mkdir();(folder/'.env').write_text('FLY_API_TOKEN="private-fixture"\n')
+        with patch.object(self.m,'ROOT',self.root),patch.dict(os.environ,{},clear=True):
+            before=dict(os.environ)
+            self.assertEqual(self.m.fly_token(),'private-fixture')
+            self.assertEqual(dict(os.environ),before)
+            with patch.dict(os.environ,{'FLY_API_TOKEN':'explicit-fixture'}):
+                self.assertEqual(self.m.fly_token(),'explicit-fixture')
+            (folder/'.env').write_text('UNRELATED=fixture\n')
+            with self.assertRaises(ValueError):self.m.fly_token()
+            self.assertEqual(dict(os.environ),before)
+
     def test_live_guest_stale_changed_active_or_unavailable_rejected(self):
         old=copy.deepcopy(self.guest)
         self.p['guest_observation']={**old,'observed_at':-100}

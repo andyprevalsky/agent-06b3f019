@@ -74,3 +74,9 @@ Independent parent review is required before integration.
 ## Reusable lesson
 
 Separate proved retirement of an interrupted execution from missing historical cleanup authority, retaining every obligation when admitting isolated future validation.
+
+The normal coordinator does not export FLY_API_TOKEN. The read-only observer
+uses the existing native-release-audit token parser over canonical agents/.env
+when the environment token is absent. It never exports the token or changes
+the environment digest. The exact run-next setup accepted the proof with
+FLY_API_TOKEN absent and unchanged environment/digest.

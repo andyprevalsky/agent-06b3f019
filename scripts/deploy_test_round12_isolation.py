@@ -11,6 +11,7 @@ import time
 import os
 import shlex
 import urllib.request
+import runpy
 from deploy_test_startup_compat import observe
 from deploy_test_f87_isolation import hub_identity
 
@@ -82,10 +83,19 @@ def snapshot(proof):
     return receipt, request, root, participants, debts, relay
 
 
+def fly_token():
+    """Use the existing native-audit credential convention without exporting it."""
+    token = os.environ.get('FLY_API_TOKEN')
+    if not token:
+        loader = runpy.run_path(str(Path(__file__).with_name('cloudbench-native-release-audit.py')))
+        token = loader['token_from_env_file'](ROOT / 'agents/.env')
+    check(bool(token), 'read-only guest credentials unavailable')
+    return token
+
+
 def guest_observe():
     """GET/exec/GET only; native exec never starts a stopped machine."""
-    token = os.environ.get('FLY_API_TOKEN')
-    check(bool(token), 'read-only guest credentials unavailable')
+    token = fly_token()
     url = 'https://api.machines.dev/v1/apps/navi-whisper-lux-bench/machines/683e47df5094d8'
     def call(method, suffix='', body=None):
         request = urllib.request.Request(url + suffix, method=method,
