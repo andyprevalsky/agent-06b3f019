@@ -14,7 +14,7 @@
  *         (rechecked on the next resume; a draft is never thrown away)
  *     newer build already reloaded for this session -------------> [IDLE] (no loop)
  * [ANY] --vite:preloadError (a chunk of the replaced deploy is gone)--> [RELOADING]
- *       (once per session per build)
+ *       (once per session per build; with unsent text the error surfaces instead)
  */
 
 /** Build id baked in by vite.config.ts (production builds only). */
@@ -28,6 +28,9 @@ export const APP_VERSION_MIN_CHECK_INTERVAL_MS = 30_000;
 
 const RELOAD_GUARD_PREFIX = 'rose:version-reload:';
 
+/** Input types whose value is something the user typed (a draft to keep). */
+const TEXT_INPUT_TYPES = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+
 interface AppVersionWatchOptions {
   buildId?: string;
   fetchImpl?: typeof fetch;
@@ -37,10 +40,11 @@ interface AppVersionWatchOptions {
 
 /** True when an input, textarea or editable region holds text the user has not sent. */
 export function hasUnsentText(root: ParentNode = document): boolean {
-  const fields = root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-    'textarea, input:not([type]), input[type="text"], input[type="search"]',
-  );
-  for (const field of fields) if (field.value.trim()) return true;
+  const fields = root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('textarea, input');
+  for (const field of fields) {
+    const typed = field instanceof HTMLTextAreaElement || TEXT_INPUT_TYPES.has(field.type);
+    if (typed && field.value.trim()) return true;
+  }
   for (const editable of root.querySelectorAll('[contenteditable="true"]')) {
     if (editable.textContent?.trim()) return true;
   }
@@ -111,6 +115,8 @@ export function initAppVersionWatch(options: AppVersionWatchOptions = {}): () =>
   };
   const onLoad = () => void check('load');
   const onPreloadError = (event: Event) => {
+    // A typed draft outweighs the failed import: the error surfaces as before.
+    if (hasUnsentText()) return;
     const reason = `a code chunk of build ${buildId} failed to load`;
     if (reloadOnce(`chunk:${buildId}`, reason, reload)) event.preventDefault();
   };

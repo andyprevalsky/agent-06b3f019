@@ -119,6 +119,16 @@ describe('ASCII loader frame ticks', () => {
     }
   });
 
+  it('keeps animating the new layers when fitContainer swaps the layer container', () => {
+    const { container, rerender } = render(<AsciiLoader showWarmingUp={false} variant="engine" />);
+    act(() => vi.advanceTimersByTime(40 * 2));
+    rerender(<AsciiLoader showWarmingUp={false} variant="engine" fitContainer />);
+    const layers = () => [...container.querySelectorAll('pre')].map((pre) => pre.textContent);
+    expect(layers()).toEqual([FRAMES[2], FRAMES[2], FRAMES[2]]);
+    act(() => vi.advanceTimersByTime(40));
+    expect(layers()).toEqual([FRAMES[3], FRAMES[3], FRAMES[3]]);
+  });
+
   it('keeps every animated layer out of session replay recording', () => {
     const { container } = render(
       <AsciiLoader

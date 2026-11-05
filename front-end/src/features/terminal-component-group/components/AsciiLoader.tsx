@@ -281,7 +281,7 @@ function useAsciiFrames(
       document.removeEventListener('visibilitychange', sync);
       if (interval !== null) clearInterval(interval);
     };
-  }, [containerRef, frames]);
+  }, [containerRef, frames, layersKey]);
 }
 
 function useAnimatedDots(enabled: boolean): number {

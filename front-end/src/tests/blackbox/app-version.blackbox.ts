@@ -169,6 +169,16 @@ describe('stale build auto refresh', () => {
     expect(again.defaultPrevented).toBe(false);
   });
 
+  it('keeps a typed draft when a chunk fails to load: no reload, the error surfaces', async () => {
+    const reload = watch(versionFetch(RUNNING));
+    await settle();
+    document.body.innerHTML = '<input type="email" value="me@example.com">';
+    const failure = new Event('vite:preloadError', { cancelable: true });
+    window.dispatchEvent(failure);
+    expect(reload).not.toHaveBeenCalled();
+    expect(failure.defaultPrevented).toBe(false);
+  });
+
   it('stays off without a production build id (dev server, tests)', async () => {
     const fetchImpl = versionFetch(DEPLOYED);
     cleanup = initAppVersionWatch({ buildId: '', fetchImpl, reload: vi.fn() });
@@ -178,8 +188,13 @@ describe('stale build auto refresh', () => {
 
   it('counts only non-empty fields as unsent text', () => {
     document.body.innerHTML =
-      '<input type="checkbox" value="on"><input type="text" value="  "><textarea></textarea>';
+      '<input type="checkbox" value="on"><input type="hidden" value="csrf"><input type="text" value="  "><textarea></textarea>';
     expect(hasUnsentText()).toBe(false);
+    for (const type of ['email', 'url', 'tel', 'password', 'number', 'search']) {
+      document.body.innerHTML = `<input type="${type}" value="7">`;
+      expect(hasUnsentText()).toBe(true);
+    }
+    document.body.innerHTML = '';
     document.body.insertAdjacentHTML('beforeend', '<div contenteditable="true">hi</div>');
     expect(hasUnsentText()).toBe(true);
   });
