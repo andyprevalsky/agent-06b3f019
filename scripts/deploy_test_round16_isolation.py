@@ -180,10 +180,11 @@ def inherited_sources(state, entries):
 
     No entry is renewed or replaced. Original guest snapshots remain historical;
     every original byte/local owner is checked, and current guest authority comes
-    exclusively from the fully validated latest round16 operation.
+    from the fully validated latest round16 operation or an exact full native
+    successor validated for every original debt.
     """
     from deploy_test_cycle import receipt_owner, latest_receipts
-    from deploy_test_native_cleanup import still_bound
+    from deploy_test_native_cleanup import still_bound, clean_isolated_successor
     import deploy_test_round14_isolation as round14
     candidates = [e for e in entries if e.get('token') == TOKEN]
     if not candidates:
@@ -191,11 +192,13 @@ def inherited_sources(state, entries):
     check(len(candidates) == 1, 'ambiguous latest partition')
     candidate = candidates[0]
     latest = latest_receipts(state).get(candidate['gate'])
-    check(latest is not None and latest.get('token') == TOKEN
-          and candidate['proof'].get('compatibility') == MODE
-          and candidate['validation_source'] == state['source'] == state['plan']['source']
-          and still_bound(candidate, latest, receipt_owner(candidate['gate'], latest)),
+    check(latest is not None and candidate['proof'].get('compatibility') == MODE
+          and candidate['validation_source'] == state['source'] == state['plan']['source'],
           'latest full partition/source changed')
+    successor = latest.get('token') != TOKEN
+    if not successor:
+        check(still_bound(candidate, latest, receipt_owner(candidate['gate'], latest)),
+              'latest full partition/source changed')
     by_token = {e['token']: e for e in entries}
     links = candidate['proof']['inherited_admissions']
     check(len(by_token) == len(entries) == 5
@@ -211,6 +214,17 @@ def inherited_sources(state, entries):
               and entry.get('cleanup_complete') is False and entry.get('credit_granted') is False
               and entry.get('obligations_preserved') is True, 'ancestor debt identity')
         receipts[token] = rows[0]
+    if successor:
+        # A later receipt may replace only current shared-guest authority, and
+        # only through the existing full native cleanup contract for every debt.
+        # Historical evidence and local owner validation below remain mandatory.
+        check(latest.get('source') == state['source'], 'successor current source changed')
+        bindings = latest.get('isolated_validation', [])
+        check(len(bindings) == len(by_token)
+              and {b.get('original_request_token') for b in bindings} == set(by_token),
+              'successor exact original debt set')
+        for token, entry in by_token.items():
+            clean_isolated_successor(state, entry, receipts[token], latest)
     # Validate all edges against the immutable original requests. This rejects
     # foreign, omitted, duplicate, cyclic, source-swapped and substituted debts.
     for token, entry in by_token.items():
@@ -235,14 +249,18 @@ def inherited_sources(state, entries):
                   and receipts[prior['token']]['finished_at'] <= receipts[token]['started_at'],
                   'ancestor edge changed')
     covered = {}
-    for module in (shared, round14):
-        entry = by_token.get(module.TOKEN)
-        check(entry is not None and entry['proof'].get('compatibility') == module.MODE, 'exact covered ancestor required')
-        receipt = receipts[module.TOKEN]
+    operations = [(shared.TOKEN, shared.MODE, shared.operation_spec),
+                  (round14.TOKEN, round14.MODE, round14.operation_spec)]
+    if successor:
+        operations.append((TOKEN, MODE, operation_spec))
+    for token, mode, specification in operations:
+        entry = by_token.get(token)
+        check(entry is not None and entry['proof'].get('compatibility') == mode, 'exact covered ancestor required')
+        receipt = receipts[token]
         actual = shared.validate_execution(receipt, receipt_owner(entry['gate'], receipt),
-                                           entry['proof'], module.operation_spec(), _covered_guest=True)
+                                           entry['proof'], specification(), _covered_guest=True)
         check(actual == {k:v for k,v in entry.items() if k != 'occurrence'}, 'historical ancestor proof changed')
-        covered[module.TOKEN] = candidate['validation_source']
+        covered[token] = candidate['validation_source']
     return covered
 
 

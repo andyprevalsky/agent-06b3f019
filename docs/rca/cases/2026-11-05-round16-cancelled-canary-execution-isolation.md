@@ -93,3 +93,25 @@ state. The full owning suite passed 220 tests. A read-only check of the real
 canonical five-admission set also passed both admission and successor binding;
 no request was issued, and all original cleanup/credit flags remained false.
 This repairs integration admission only; the original SSH cause is unresolved.
+
+## Clean successor lifecycle correction
+
+Independent review reproduced a follow-on error: a complete native successor
+passed the existing `clean_isolated_successor` checks for all five debts, but
+inherited admission still required the latest token to be round16. The exact
+independent lifecycle reproduction was run before and after the correction.
+
+A distinct post-successor branch now calls the unchanged full native successor
+validator for every original debt, requires exactly those five bindings and
+current source, then revalidates the original ancestry, snapshots and local
+owners. Only this authenticated cleanup substitutes for the obsolete guest
+observation. The pre-successor branch still requires the complete live round16
+partition proof. No historical entries or credit/cleanup flags are rewritten.
+
+Registered lifecycle regressions cover clean PASS, complete clean FAIL that
+stays FAIL, focused/final admission, next-request binding, and rejection of
+incomplete/owned/cancelled/timed-out/lingering executions, wrong source/command/
+contract, omitted/foreign bindings, altered native evidence or requests, and
+changed original proofs/local owners. The final full owning suite passed
+224 tests. The production cloud failure and unknown SSH cause are not repaired
+or credited by this controller admission correction.

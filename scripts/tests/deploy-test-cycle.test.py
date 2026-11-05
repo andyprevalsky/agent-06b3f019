@@ -5019,4 +5019,82 @@ class Round16InheritedAdmission(unittest.TestCase):
             state=copy.deepcopy(self.state);p=list(state['reconciled_owners'].values())[3]['proof'];p['inherited_admissions'][0][key]=value
             with self.subTest(key=key),self.assertRaises(ValueError):self.m.inherited_sources(state,list(state['reconciled_owners'].values()))
 
+    def clean_successor_fixture(self, status='PASS'):
+        import hashlib
+        gate={'name':'smoke','native_cloud':True,'command':['python3',str(self.root/'scripts/deploy_test_cloud.py')],'checks':['one']}
+        self.state['plan']['gates']=[gate];self.state['environment']={}
+        for entry in self.entries:entry['owner']={'worker_root':str(self.root)}
+        self.baseline=copy.deepcopy(self.entries)
+        request={'gate':'smoke','token':'clean-successor','source':self.src,'checks':['one'],'skips':{}}
+        request['isolated_validation']=c.isolated_request(self.state,gate,request,self.root,{})
+        folder=self.root/'successor';native=self.root/'.context/deploy-cloud'/hashlib.sha256(request['token'].encode()).hexdigest()
+        leaf=folder/'native-task.json';c.write(leaf,{'passed':status=='PASS'})
+        evidence={'one':{'path':str(leaf),'sha256':c.sha_file(leaf)}}
+        worker={k:request[k] for k in ('token','gate','source')}
+        worker.update(cases={'one':status},complete=True,cleanup_complete=True,reused=False,evidence=evidence,
+                      fleet_directory=str(native/'campaigns'/('deploy-'+native.name)),runner_log=str(native/'cli.log'))
+        c.write(folder/'result.json',worker);c.write(folder/'request.json',request)
+        successor={k:request[k] for k in ('token','gate','source','isolated_validation')}
+        successor.update(status=status,executed=True,complete=True,native_exit=0 if status=='PASS' else 1,
+            timed_out=False,cancelled=False,lingering_group=False,cleanup_owner=None,cases={'one':status},case_complete={'one':True},
+            command=gate['command'],log=str(folder/'output.log'),worker_result=str(folder/'result.json'),started_at=51,finished_at=52,
+            execution_binding={'contract_digest':c.digest(gate),'environment':{},'input_fingerprint':'fixture'},
+            native_cleanup_reference={'result':str(folder/'result.json'),'native_directory':worker['fleet_directory'],
+                'cleanup_complete':True,'result_sha256':c.sha_file(folder/'result.json'),'native_evidence':evidence})
+        c.write(folder/'receipt.json',successor)
+        self.state['attempts'].append({'phase':'focused','results':[successor]})
+        return gate,request,successor,folder
+
+    def test_real_clean_pass_successor_preserves_admission_and_next_request(self):
+        gate,request,successor,folder=self.clean_successor_fixture()
+        for phase in ('focused','final'):
+            self.state['attempts'][-1]['phase']=phase
+            before=copy.deepcopy(self.state)
+            for entry,original in zip(self.entries,self.receipts):
+                self.n.clean_isolated_successor(self.state,entry,original,successor)
+            self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),5)
+            self.assertEqual(c.retained_owners(self.state,['smoke']),[])
+            self.assertEqual(len(c.isolated_request(self.state,gate,{**request,'token':'next'},self.root,{})),5)
+            self.assertEqual(self.state,before)
+        self.assertTrue(all(not e['credit_granted'] and not e['cleanup_complete'] for e in self.entries))
+
+    def test_real_clean_fail_successor_keeps_failure_and_all_debts(self):
+        gate,request,successor,folder=self.clean_successor_fixture('FAIL')
+        before=copy.deepcopy(self.state)
+        self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),5)
+        self.assertEqual(len(c.isolated_request(self.state,gate,{**request,'token':'next'},self.root,{})),5)
+        self.assertEqual(successor['status'],'FAIL');self.assertEqual(successor['native_exit'],1)
+        self.assertEqual(self.entries,self.baseline);self.assertEqual(self.state,before)
+
+    def test_real_successor_incomplete_owned_cancelled_timeout_and_tampering_rejected(self):
+        gate,request,successor,folder=self.clean_successor_fixture()
+        original=copy.deepcopy(successor)
+        controls=[('complete',False),('cleanup_owner',{'unknown':'owner'}),('cancelled',True),
+                  ('timed_out',True),('lingering_group',True),('executed',False),('native_exit',-9),
+                  ('source',{'head':'other','digest':'other'}),('command',['other']),
+                  ('execution_binding',{'contract_digest':'wrong','environment':{},'input_fingerprint':'fixture'}),
+                  ('isolated_validation',successor['isolated_validation'][:-1]),
+                  ('isolated_validation',successor['isolated_validation']+[{'original_request_token':'foreign'}])]
+        for key,value in controls:
+            successor.clear();successor.update(copy.deepcopy(original));successor[key]=value;c.write(folder/'receipt.json',successor)
+            with self.subTest(key=key,value=value),self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
+        successor.clear();successor.update(copy.deepcopy(original));c.write(folder/'receipt.json',successor)
+        leaf=folder/'native-task.json';old=leaf.read_bytes();leaf.write_text('tampered')
+        with self.assertRaisesRegex(ValueError,'evidence changed'):c.isolated_admissions(self.state,'smoke')
+        leaf.write_bytes(old)
+        for key in ('source','isolated_validation'):
+            bad=copy.deepcopy(request);bad[key]={} if key=='source' else [];c.write(folder/'request.json',bad)
+            with self.subTest(request_key=key),self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
+        c.write(folder/'request.json',request)
+        self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),5)
+
+    def test_clean_successor_does_not_skip_original_static_or_local_validation(self):
+        self.clean_successor_fixture()
+        for index in range(5):
+            saved=copy.deepcopy(self.entries[index]);self.entries[index]['proof']['tampered']=True
+            with self.subTest(index=index),self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
+            self.entries[index].clear();self.entries[index].update(saved)
+        with patch.object(self.m.shared,'validate_execution',side_effect=ValueError('old owner changed')):
+            with self.assertRaisesRegex(ValueError,'old owner changed'):c.isolated_admissions(self.state,'smoke')
+
 if __name__ == '__main__': unittest.main()
