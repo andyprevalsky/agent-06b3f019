@@ -5,8 +5,23 @@ import { resolve } from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 
-function load(path: string, modules: Record<string, unknown>) {
-  const exports: Record<string, any> = {};
+type TaskInfoModule = typeof import('../../domains/browser-session/service.task-info');
+type TaskInfoOptions = NonNullable<Parameters<TaskInfoModule['getTaskInfo']>[1]>;
+type RouteRequest = {
+  params: { taskId: string };
+  query: Record<string, string>;
+  userId: string;
+  isInternal: boolean;
+};
+type RouteResponse = {
+  code: number;
+  status(code: number): RouteResponse;
+  json(): void;
+};
+type RouteHandler = (request: RouteRequest, response: RouteResponse) => Promise<void>;
+
+function load<T extends object>(path: string, modules: Record<string, unknown>): T {
+  const exports: Partial<T> = {};
   const code = ts.transpileModule(readFileSync(path, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
@@ -18,7 +33,7 @@ function load(path: string, modules: Record<string, unknown>) {
     },
     console,
   });
-  return exports;
+  return exports as T;
 }
 
 async function main() {
@@ -26,7 +41,7 @@ async function main() {
   let rejectCredentials = true;
   let ttlMs = 600_000;
   let healthReads = 0;
-  let session: any = {
+  const fixtureSession = {
     id: 'task',
     sessionId: 'same-session',
     status: 'ACTIVE',
@@ -40,6 +55,7 @@ async function main() {
     providerProfileSource: 'session',
     context: { userId: 'owner', contextId: 'shared-profile', providerProfiles: [] },
   };
+  let session: typeof fixtureSession | null = fixtureSession;
   const calls: string[] = [];
   const credentials = async (kind: string) => {
     credentialReads++;
@@ -47,7 +63,7 @@ async function main() {
     if (rejectCredentials) throw new Error('credential store unavailable');
     return [kind];
   };
-  const service = load(
+  const service = load<TaskInfoModule>(
     process.env.TASK_INFO_SOURCE ??
       resolve(__dirname, '../../domains/browser-session/service.task-info.ts'),
     {
@@ -91,6 +107,7 @@ async function main() {
     includeCredentials: false,
     validateLive: true,
   });
+  assert.ok(result);
   assert.equal(
     credentialReads,
     0,
@@ -98,24 +115,31 @@ async function main() {
   );
   assert.equal(result.session_id, 'same-session');
   assert.equal(result.browser_session_metadata.profile_id, 'bound-profile');
+  assert.ok(
+    typeof result.fingerprint_injection === 'object' && result.fingerprint_injection !== null
+  );
+  assert.ok('timezone' in result.fingerprint_injection);
   assert.equal(result.fingerprint_injection.timezone, 'UTC');
+  assert.ok(result.user_settings !== null && 'locale' in result.user_settings);
   assert.equal(result.user_settings.locale, 'en');
   assert.equal(result.passwords.length + result.passkeys.length, 0);
   assert.equal(result.same_session_available, true);
   assert.equal(healthReads, 1, 'metadata-only still checks live session health');
   assert.deepEqual(calls, ['fingerprint:owner', 'settings:owner']);
   ttlMs = 0;
-  assert.equal(
-    (await service.getTaskInfo('task', { includeCredentials: false, validateLive: true }))
-      .same_session_available,
-    false
-  );
+  const expired = await service.getTaskInfo('task', {
+    includeCredentials: false,
+    validateLive: true,
+  });
+  assert.ok(expired);
+  assert.equal(expired.same_session_available, false);
   session.status = 'CLOSED';
-  assert.equal(
-    (await service.getTaskInfo('task', { includeCredentials: false, validateLive: true }))
-      .same_session_unavailable_reason,
-    'db_status_closed'
-  );
+  const closed = await service.getTaskInfo('task', {
+    includeCredentials: false,
+    validateLive: true,
+  });
+  assert.ok(closed);
+  assert.equal(closed.same_session_unavailable_reason, 'db_status_closed');
   session.status = 'ACTIVE';
   await assert.rejects(
     service.getTaskInfo('task'),
@@ -124,20 +148,23 @@ async function main() {
   );
   rejectCredentials = false;
   const legacy = await service.getTaskInfo('task');
+  assert.ok(legacy);
   assert.equal(legacy.passwords[0], 'password');
   assert.equal(legacy.passkeys[0], 'passkey-reservation');
   session = null;
   assert.equal(await service.getTaskInfo('missing', { includeCredentials: false }), null);
-  console.log(
-    'PASS metadata-only: unavailable credential store bypassed; fingerprint/profile/settings, live expiry/closed checks and legacy credential loading preserved'
+  process.stdout.write(
+    'PASS metadata-only: unavailable credential store bypassed; fingerprint/profile/settings, live expiry/closed checks and legacy credential loading preserved\n'
   );
 
   let owner = 'owner';
-  const forwarded: any[] = [];
-  const routes: Record<string, any> = {};
+  const forwarded: Array<[taskId: string, options: TaskInfoOptions]> = [];
+  const routes: Record<string, RouteHandler> = {};
   const router = {
-    get: (path: string, ...handlers: any[]) => {
-      routes[path] = handlers.at(-1);
+    get: (path: string, ...handlers: RouteHandler[]) => {
+      const handler = handlers.at(-1);
+      assert.ok(handler);
+      routes[path] = handler;
     },
     post() {},
   };
@@ -148,10 +175,10 @@ async function main() {
     '../../providers/auth': {},
     '../../providers/hybridAuth': {},
     '../../providers/logger': { createLogger: () => ({ error() {} }) },
-    '../../utils/asyncHandler': { asyncHandler: (fn: any) => fn },
+    '../../utils/asyncHandler': { asyncHandler: (fn: RouteHandler) => fn },
     './service': {
       getTaskOwnerUserId: async () => owner,
-      getTaskInfo: async (...args: any[]) => {
+      getTaskInfo: async (...args: [taskId: string, options: TaskInfoOptions]) => {
         forwarded.push(args);
         return { session_id: 'same-session' };
       },
@@ -194,11 +221,11 @@ async function main() {
   owner = 'owner';
   await routes['/task/:taskId']({ ...request, query: {} }, response);
   assert.equal(forwarded[1][1].includeCredentials, true, 'route default preserves legacy callers');
-  console.log(
-    'PASS route: explicit opt-in forwarded with validateLive; wrong owner rejected; default unchanged'
+  process.stdout.write(
+    'PASS route: explicit opt-in forwarded with validateLive; wrong owner rejected; default unchanged\n'
   );
 }
 main().catch((error) => {
-  console.error(error);
+  process.stderr.write(`${String(error)}\n`);
   process.exitCode = 1;
 });

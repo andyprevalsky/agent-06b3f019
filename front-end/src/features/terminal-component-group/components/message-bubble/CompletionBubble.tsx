@@ -29,10 +29,17 @@ export function CompletionBubble({
   }
   const completionData = message.metadata?.completionSummary as CompletionSummaryData | undefined;
   if (!completionData) return null;
-  if (!completionData.error && completionData.presentation?.version === 1
-      && completionData.presentation.mode === 'value'
-      && typeof completionData.answerText === 'string') {
-    return <div className="whitespace-pre-wrap break-words" data-final-answer>{completionData.answerText}</div>;
+  if (
+    !completionData.error &&
+    completionData.presentation?.version === 1 &&
+    completionData.presentation.mode === 'value' &&
+    typeof completionData.answerText === 'string'
+  ) {
+    return (
+      <div className="whitespace-pre-wrap break-words" data-final-answer>
+        {completionData.answerText}
+      </div>
+    );
   }
 
   return (

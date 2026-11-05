@@ -165,7 +165,9 @@ export interface ToolUsage {
 }
 
 export interface CompletionSummaryData {
-  presentation?: { version: 1; mode: 'value'; field: string; encoding: 'text' | 'json' } | { version: 1; mode: 'report' };
+  presentation?:
+    | { version: 1; mode: 'value'; field: string; encoding: 'text' | 'json' }
+    | { version: 1; mode: 'report' };
   answerText?: string;
   /** Brief summary of what was accomplished */
   summary: string;
