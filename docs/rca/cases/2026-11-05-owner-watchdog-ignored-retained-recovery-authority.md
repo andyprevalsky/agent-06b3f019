@@ -94,6 +94,11 @@ bindings, empty/missing controller incarnation, and the actual producer method.
 The existing run-process-cleanup suite retains its SIGKILL, zombie and normal
 stop controls. No timeout or assertion from that suite changed.
 
+Parent integration exposed the structural documentation guard: the newly
+registered retention test was absent from deploy Step 4s. The unchanged guard
+failed with the exact missing command. Adding that command to the canonical
+list makes the same guard pass; registration and assertions remain unchanged.
+
 Nonempty /proc start ticks are currently produced only on Linux. An empty
 incarnation on another platform grants no new retention exemption; this patch
 does not claim exact-incarnation recovery support there. Native identity tests

@@ -1122,6 +1122,7 @@ their assertions or test counts:
 `python3 scripts/tests/final-review-script-regressions.test.py`,
 `python3 scripts/tests/deploy-live-probes.test.py`,
 `bash scripts/tests/run-process-cleanup.test.sh`,
+`python3 scripts/tests/local-stack-retention.test.py`,
 `bash scripts/tests/run-isolated-cloud-kill.test.sh`,
 `bash scripts/tests/run-seed-exit-code.test.sh`,
 `bash scripts/tests/run-public-tunnel-routing.test.sh`,
