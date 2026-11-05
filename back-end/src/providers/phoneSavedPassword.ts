@@ -9,6 +9,58 @@ const APPLE_HOSTS = new Set([
   'idmsa.apple.com',
   'account.apple.com',
 ]);
+const GOOGLE_HOSTS = new Set(['accounts.google.com', 'google.com']);
+
+/**
+ * Every enabled Google password saved for exactly this account, newest-used
+ * first, decrypted and de-duplicated. Used to try each one in turn when a human
+ * reaches Google's password challenge (connect + auth assistance). Ordering is
+ * by Chromium's `dateLastUsed` (a password the user actually signs in with wins
+ * over a stale one), then `dateCreated`, both descending; nulls sort last.
+ */
+export async function googlePasswordCandidates(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  identity: string
+): Promise<string[]> {
+  const origins = [...GOOGLE_HOSTS].flatMap((host) =>
+    ['https://', 'http://', ''].flatMap((scheme) => [
+      { origin: { equals: `${scheme}${host}`, mode: 'insensitive' as const } },
+      { origin: { startsWith: `${scheme}${host}/`, mode: 'insensitive' as const } },
+    ])
+  );
+  const rows = await tx.browserPassword.findMany({
+    where: {
+      userId,
+      username: { equals: identity, mode: 'insensitive' },
+      disabledAt: null,
+      OR: origins,
+    },
+    take: 32,
+  });
+  const key = process.env.PAYMENT_DECRYPTION_KEY;
+  if (key === undefined || key === '') return [];
+  const rank = (value: bigint | null): bigint => value ?? -1n;
+  const ordered = rows
+    .filter((r) => GOOGLE_HOSTS.has(hostnameFromRealmInput(r.origin)))
+    .sort((a, b) => {
+      const byUsed = rank(b.dateLastUsed) - rank(a.dateLastUsed);
+      if (byUsed !== 0n) return byUsed > 0n ? 1 : -1;
+      const byCreated = rank(b.dateCreated) - rank(a.dateCreated);
+      return byCreated > 0n ? 1 : byCreated < 0n ? -1 : 0;
+    });
+  const seen = new Set<string>();
+  const values: string[] = [];
+  for (const row of ordered) {
+    const value = decryptCredentialEnvelope(row.encryptedPassword, key);
+    if (value !== null && value !== '' && !seen.has(value)) {
+      seen.add(value);
+      values.push(value);
+    }
+  }
+  return values;
+}
+
 export async function selectedPassword(
   tx: Prisma.TransactionClient,
   userId: string,

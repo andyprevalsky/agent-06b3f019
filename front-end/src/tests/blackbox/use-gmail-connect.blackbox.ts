@@ -39,11 +39,62 @@ describe('useGmailConnect', () => {
     const { result, unmount } = renderHook(() => useGmailConnect(fetchIntegrations));
 
     await act(async () => result.current.handleEmailConnect('gmail'));
+    const callsAtUnmount = vi.mocked(fetchIntegrationsApi).mock.calls.length;
     unmount();
 
     expect(clearIntervalSpy).toHaveBeenCalled();
     expect(clearTimeoutSpy).toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(120_000);
-    expect(fetchIntegrationsApi).not.toHaveBeenCalled();
+    expect(fetchIntegrationsApi).toHaveBeenCalledTimes(callsAtUnmount);
+  });
+
+  it('desktop: returns via the app deep link and refreshes integrations when it lands', async () => {
+    let deliver: ((data: { success: boolean }) => void) | undefined;
+    const dispose = vi.fn();
+    Object.defineProperty(window, 'api', {
+      configurable: true,
+      value: {
+        openExternal: vi.fn().mockResolvedValue({ success: true }),
+        onOAuthComplete: vi.fn((cb: (data: { success: boolean }) => void) => {
+          deliver = cb;
+          return dispose;
+        }),
+      },
+    });
+    const fetchIntegrations = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() => useGmailConnect(fetchIntegrations));
+
+    await act(async () => result.current.handleEmailConnect('gmail'));
+    expect(startGmailOAuthApi).toHaveBeenCalledWith('roselabs://oauth-complete');
+    expect(result.current.connectingProvider).toBe('gmail');
+
+    await act(async () => deliver?.({ success: true }));
+    expect(fetchIntegrations).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalled();
+    expect(result.current.connectingProvider).toBeNull();
+  });
+
+  it('desktop poll waits for the callback to land, not for the pre-created row', async () => {
+    const row = (stamp?: string) => ({
+      id: 'i1',
+      name: 'gmail',
+      status: 'SYNCING' as const,
+      isActive: false,
+      lastSuccessfulSyncAt: stamp,
+    });
+    // The OAuth start upserts the gmail row BEFORE consent, so it already exists.
+    vi.mocked(fetchIntegrationsApi).mockResolvedValue([row()]);
+    const fetchIntegrations = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() => useGmailConnect(fetchIntegrations));
+
+    await act(async () => result.current.handleEmailConnect('gmail'));
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchIntegrations).not.toHaveBeenCalled();
+    expect(result.current.connectingProvider).toBe('gmail');
+
+    vi.mocked(fetchIntegrationsApi).mockResolvedValue([row('2026-10-28T06:00:00.000Z')]);
+    await act(async () => vi.advanceTimersByTimeAsync(2_500));
+    expect(fetchIntegrations).toHaveBeenCalledTimes(1);
+    expect(result.current.connectingProvider).toBeNull();
   });
 });

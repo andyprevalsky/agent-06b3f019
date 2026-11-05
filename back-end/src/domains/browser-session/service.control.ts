@@ -3,6 +3,7 @@ import { getTilionLiveViewUrl, isTilionSessionEndedError } from '../../providers
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
+import { startTakeControlAutofill } from './googleAutofillWatch';
 import { SessionNotFoundError } from './service.local-storage';
 import { isLiveBrowserStatus } from './service.task-info';
 import { BrowserControlState as PrismaControlState, BrowserSessionStatus } from './types';
@@ -172,19 +173,42 @@ export async function setBrowserControlState(
 
   if (mode === 'acknowledge') {
     await repo.transitionBrowserControlState(taskId, [USER_REQUESTED], USER, leaseExpiry());
-    return getBrowserControlState(taskId, userId);
+    return onControlState(taskId, session, await getBrowserControlState(taskId, userId));
   }
 
   if (session.status !== ACTIVE) throw new BrowserControlUnavailableError(session.status);
   if (session.controlState === USER || session.controlState === USER_REQUESTED) {
     // Leftover USER_REQUESTED from the old handshake must also become USER
     // immediately so a mid-action lease cannot expire back to AGENT.
-    return grantUserControl(taskId, [session.controlState], userId);
+    return onControlState(
+      taskId,
+      session,
+      await grantUserControl(taskId, [session.controlState], userId)
+    );
   }
 
   // Same-session handover is immediate. The activity still yields when it
   // next observes USER; do not block the live view on an action-boundary ack.
-  return grantUserControl(taskId, [AGENT], userId);
+  return onControlState(taskId, session, await grantUserControl(taskId, [AGENT], userId));
+}
+
+/**
+ * The human now holds the live session: start Google saved-password autofill.
+ *
+ * Idempotent (the watcher dedupes by taskId), so repeated take-control calls or
+ * a re-acknowledge do not stack watchers; it self-stops when control returns to
+ * the agent. Owner is the session's user, not the caller (internal callers have
+ * no userId).
+ */
+function onControlState(
+  taskId: string,
+  session: { wsUrl: string | null; context: { userId: string } },
+  result: Awaited<ReturnType<typeof getBrowserControlState>>
+) {
+  if (result.state === 'user') {
+    startTakeControlAutofill(taskId, session.context.userId, session.wsUrl);
+  }
+  return result;
 }
 
 async function grantUserControl(

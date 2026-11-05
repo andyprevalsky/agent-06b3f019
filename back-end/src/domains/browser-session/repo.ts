@@ -135,6 +135,7 @@ export async function findBrowserControlRecord(taskId: string) {
       controlState: true,
       controlLeaseExpiresAt: true,
       debugUrl: true,
+      wsUrl: true,
       agentId: true,
       context: { select: { userId: true } },
     },
