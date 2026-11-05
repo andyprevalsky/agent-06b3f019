@@ -973,8 +973,24 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
     agent_socket = directory / 'fly-agent.sock'
     environment['FLY_AGENT_SOCKET_PATH'] = str(agent_socket)
     environment['FLY_AGENT_ISOLATED'] = '1'
-    metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
-                              env=environment, capture_output=True, timeout=30)
+    try:
+        metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
+                                  env=environment, capture_output=True, timeout=30)
+    except FileNotFoundError as error:
+        if error.errno == 2 and error.filename == 'flyctl':
+            # This is before bootstrap/relay creation and before the dispatch loop.
+            # A separate terminal seal is required; this checkpoint alone grants nothing.
+            write_json_atomic(campaign_dir / 'startup-failure.json', {
+                'schema': 'campaign-startup-failure-v1', 'stage': 'shared-relay-app-status',
+                'source_ref': ref, 'producer_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                'parent_pid': os.getpid(), 'parent_start': parent_start,
+                'errno': error.errno, 'filename': error.filename,
+                'operation': ['flyctl', 'status', '-a', app, '--json'],
+                'inventory_sources': {name: hashlib.sha256((inventory / 'scripts' / name).read_bytes()).hexdigest()
+                    for name in ('cloudbench-campaign-inventory.sh', 'cloudbench-inventory.sh',
+                                 'cloudbench-env.sh', 'cloudbench-machine-readiness.py', 'cloudbench-campaign-machines.py')},
+            })
+        raise
     metadata_path = directory / 'app-metadata.private.json'
     metadata_path.write_bytes(metadata.stdout); metadata_path.chmod(0o600)
     if metadata.returncode: raise ValueError('shared transport app metadata unavailable')
@@ -1061,6 +1077,28 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
         try: archive_shared_relay(directory, archive)
         except OSError: pass  # Preserve the original startup failure and records.
         raise
+
+
+def seal_startup_cleanup(campaign, state, inventory_process, shared_relay):
+    """Seal only the known pre-dispatch ENOENT path after native child joins."""
+    failure = campaign / 'startup-failure.json'
+    if (not failure.is_file() or shared_relay is not None or inventory_process is None
+            or inventory_process.returncode != 0 or state.get('status') != 'failed'
+            or state.get('peak_concurrency') != 0 or not state.get('shared_inventory_failed')
+            or not state.get('jobs') or any(j.get('status') != 'cancelled'
+                or j.get('attempts') != [] or j.get('started_at') is not None
+                or j.get('controller_exit_code') is not None for j in state['jobs'])):
+        return
+    checkpoint = json.loads(failure.read_text())
+    if checkpoint['parent_pid'] != os.getpid():
+        return
+    write_json_atomic(campaign / 'startup-cleanup.json', {
+        'schema': 'campaign-startup-cleanup-v1', 'failure_sha256': hashlib.sha256(failure.read_bytes()).hexdigest(),
+        'summary_sha256': hashlib.sha256((campaign / 'summary.json').read_bytes()).hexdigest(),
+        'parent_pid': checkpoint['parent_pid'], 'parent_start': checkpoint['parent_start'],
+        'inventory_pid': inventory_process.pid, 'inventory_exit': inventory_process.returncode,
+        'relay_started': False, 'task_controllers_started': 0, 'resource_mutations': 0,
+    })
 
 
 def stop_shared_relay(value: dict) -> bool:
@@ -2552,6 +2590,7 @@ def main() -> int:
                       state={"passed": "COMPLETE", "failed": "FAILED", "cancelled": "ABORTED"}.get(state["status"], "ENDED"))
     if scorecard is not None:
         scorecard["print_instruction"](campaign_dir)
+    seal_startup_cleanup(campaign_dir, state, inventory_process, shared_relay)
     return result
 
 

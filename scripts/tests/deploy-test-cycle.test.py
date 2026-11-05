@@ -3812,4 +3812,181 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
 
 
+class StartupCleanup(unittest.TestCase):
+    """Real ENOENT at the native relay boundary; no Fly client/provider execution."""
+    def setUp(self):
+        import shutil
+        import runpy
+        import time
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        for name in ('run-bench-campaign.py', 'cloudbench-cleanup-tickets.py',
+                     'cloudbench-shared-relay.py', 'run-bench-cloud', 'run-bench-fleet',
+                     'lib/cloudbench-inventory.sh', 'lib/cloudbench-env.sh',
+                     'cloudbench-campaign-inventory.sh', 'cloudbench-machine-readiness.py',
+                     'cloudbench-campaign-machines.py'):
+            path = self.root / 'scripts' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / 'scripts' / name, path)
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'native source'], check=True)
+        self.source = c.source(self.root)
+        self.folder = self.root / '.context/cycle/attempts/2/initial/smoke'
+        self.folder.mkdir(parents=True)
+        token = '1' * 32
+        native = self.root / '.context/deploy-cloud' / c.hashlib.sha256(token.encode()).hexdigest()
+        self.runs = native / 'runs'; self.runs.mkdir(parents=True)
+        self.campaign = native / 'campaigns' / ('deploy-' + native.name)
+        self.campaign.mkdir(parents=True)
+        now = time.time()
+        from datetime import datetime, timezone
+        stamp = datetime.fromtimestamp(now, timezone.utc).isoformat()
+        self.summary = dict(campaign_id=self.campaign.name, runs=1, retry_infra=0,
+            task_count=1, total_jobs=1, concurrency=1, peak_concurrency=0, status='failed',
+            started_at=stamp, finished_at=stamp, wall_clock_seconds=0, shared_inventory_failed=True,
+            jobs=[dict(index=1, job_id='r001-j0001', task='task', run=1, status='cancelled',
+                controller_exit_code=None, started_at=None, finished_at=None, wall_clock_seconds=None,
+                controller_lock='unused.lock', log=str(self.campaign / 'r001-j0001.log'), attempt=1, attempts=[])])
+        c.write(self.campaign / 'summary.json', self.summary)
+        inventory = self.campaign / 'shared-inventory'; inventory.mkdir()
+        (inventory / 'owner').write_text('app=fixture\n')
+        copies=inventory/'scripts';copies.mkdir()
+        for name in ('cloudbench-campaign-inventory.sh','cloudbench-machine-readiness.py','cloudbench-campaign-machines.py'):
+            shutil.copyfile(self.root/'scripts'/name,copies/name)
+        for name in ('cloudbench-inventory.sh','cloudbench-env.sh'):
+            shutil.copyfile(self.root/'scripts/lib'/name,copies/name)
+        script = '''import runpy,sys,subprocess,os,json
+from pathlib import Path
+from unittest.mock import patch
+root,campaign=map(Path,sys.argv[1:])
+n=runpy.run_path(str(root/'scripts/run-bench-campaign.py'))
+original=subprocess.check_output
+def output(argv,**kw):
+    if argv[:2]==['bash','-c']: return 'not-a-real-credential'
+    return original(argv,**kw)
+with patch.dict(os.environ,{'PATH':'/usr/bin:/bin'}),patch.object(subprocess,'check_output',side_effect=output):
+    try:n['_start_shared_relay'](root,campaign,root,campaign/'shared-inventory',None,-1)
+    except FileNotFoundError as e:
+        assert e.errno==2 and e.filename=='flyctl'
+    else:raise AssertionError('expected native missing flyctl')
+p=subprocess.Popen([sys.executable,'-c','pass']);p.wait()
+n['seal_startup_cleanup'](campaign,json.loads((campaign/'summary.json').read_text()),p,None)
+'''
+        self.producer = subprocess.run([sys.executable, '-c', script, str(self.root), str(self.campaign)],
+                                      capture_output=True, text=True)
+        self.assertEqual(self.producer.returncode, 0, self.producer.stderr)
+        cli = native / 'cli.log'
+        cli.write_text(str(self.campaign) + "\nCampaign inventory did not initialize (FileNotFoundError: [Errno 2] No such file or directory: 'flyctl')\n")
+        module = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+        group = module['campaign_group_record'](self.summary)
+        c.write(self.campaign / 'hub-group.json', group)
+        c.write(self.campaign / 'hub-group-publication-ack.private.json', dict(pid=2147483000,
+            token='2' * 32, record_sha256=c.hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest()))
+        self.request = dict(token=token, source=self.source, gate='smoke', checks=['task'])
+        c.write(self.folder / 'request.json', self.request)
+        self.adapter = dict(**{k:self.request[k] for k in ('token','source','gate')},
+            cases={'task':'UNVERIFIED'}, complete=False, cleanup_complete=False,
+            native_exit=1, runner_log=str(cli), started_at=now-1, finished_at=time.time())
+        c.write(self.folder / 'result.json', self.adapter)
+        reference = dict(result=str(self.folder / 'result.json'), result_sha256=c.sha_file(self.folder / 'result.json'),
+                         native_directory=str(self.campaign), cleanup_complete=False, native_evidence={})
+        self.owner = dict(request_token=token, worker_root=str(self.root), native_cleanup_reference=reference)
+        self.receipt = dict(**self.adapter, lifecycle='native-producer', timed_out=False, cancelled=False,
+            lingering_group=True, log=str(self.folder/'output.log'), worker_result=str(self.folder/'result.json'),
+            cleanup_owner=self.owner, native_cleanup_reference=reference)
+        c.write(self.folder / 'receipt.json', self.receipt)
+        self.proof = dict(kind='native-cloud-cleanup-v1', layout='campaign-startup-v1', owner=copy.deepcopy(self.owner),
+            request_token=token, source=self.source, receipt_sha256=c.sha_file(self.folder/'receipt.json'),
+            worker_result_sha256=c.sha_file(self.folder/'result.json'), confirmed_at=time.time(), observed_by='native-regression',
+            campaign=str(self.campaign), files={})
+        self.seal_files()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def seal_files(self):
+        paths = [self.folder/'request.json', Path(self.adapter['runner_log']),
+                 *self.campaign.glob('*.json'), self.root/'scripts/run-bench-campaign.py',
+                 *(self.campaign/'shared-inventory/scripts').iterdir()]
+        self.proof['files'] = {str(p):c.sha_file(p) for p in paths}
+
+    def validate(self):
+        import deploy_test_native_cleanup as n
+        return n.validate(self.receipt,self.owner,self.proof)
+
+    def test_native_startup_cleanup_preserves_null_exits_and_original_failures(self):
+        originals={str(p):p.read_bytes() for p in self.folder.glob('*.json')}
+        entry=self.validate()
+        self.assertFalse(entry['credit_granted'])
+        failure=dict(id='startup',gate='smoke',check='smoke/task',native_result='UNVERIFIED',complete=False)
+        state=dict(phase='triage',plan=dict(gates=[dict(name='smoke',native_cloud=True)]),
+                   failures=[failure],attempts=[dict(results=[self.receipt])])
+        original_attempts=copy.deepcopy(state['attempts'])
+        c.reconcile(state,'startup',self.proof)
+        self.assertEqual(c.retained_owners(state,['smoke']),[])
+        self.assertEqual(state['attempts'],original_attempts)
+        self.assertEqual(failure['native_result'],'UNVERIFIED')
+        self.assertEqual(entry['participants'],[])
+        self.assertEqual(entry['retained_services'],[])
+        self.assertEqual(originals,{p:Path(p).read_bytes() for p in originals})
+        self.assertIsNone(c.read(self.campaign/'summary.json')['jobs'][0]['controller_exit_code'])
+        self.assertTrue(c.read(self.campaign/'summary.json')['shared_inventory_failed'])
+
+    def test_missing_native_checkpoint_cannot_reconcile_historical_attempt(self):
+        (self.campaign/'startup-failure.json').unlink()
+        self.seal_files()
+        with self.assertRaises(ValueError):self.validate()
+
+    def test_dispatch_resource_and_conflicting_evidence_remain_blocked(self):
+        variants = [('peak_concurrency',1),('resources',['machine-1']),('shared_transport_cleanup_pending',True)]
+        for field,value in variants:
+            with self.subTest(field=field):
+                bad=copy.deepcopy(self.summary);bad[field]=value
+                c.write(self.campaign/'summary.json',bad);self.seal_files()
+                with self.assertRaises(ValueError):self.validate()
+        for field,value in [('attempts',[{}]),('controller_pid',123),('resource_id','machine-1'),
+                            ('started_at',self.summary['started_at']),('controller_exit_code',0)]:
+            with self.subTest(field=field):
+                bad=copy.deepcopy(self.summary);bad['jobs'][0][field]=value
+                c.write(self.campaign/'summary.json',bad);self.seal_files()
+                with self.assertRaises(ValueError):self.validate()
+
+    def test_partial_resources_source_conflicts_and_live_owner_are_rejected(self):
+        failure_path=self.campaign/'startup-failure.json'
+        seal_path=self.campaign/'startup-cleanup.json'
+        original_failure=failure_path.read_bytes(); original_seal=seal_path.read_bytes()
+        for field,value in [('errno',13),('filename','other'),('source_ref','a'*40),
+                            ('producer_sha256','b'*64),('resource_id','machine-1')]:
+            with self.subTest(field=field):
+                bad=json.loads(original_failure);bad[field]=value;c.write(failure_path,bad)
+                seal=json.loads(original_seal);seal['failure_sha256']=c.sha_file(failure_path)
+                c.write(seal_path,seal);self.seal_files()
+                with self.assertRaises(ValueError):self.validate()
+        failure_path.write_bytes(original_failure);seal_path.write_bytes(original_seal)
+        helper=self.campaign/'shared-inventory/scripts/cloudbench-campaign-inventory.sh'
+        raw=helper.read_bytes();helper.write_bytes(raw+b'\n# changed execution input\n');self.seal_files()
+        with self.assertRaisesRegex(ValueError,'inventory source binding'):self.validate()
+        helper.write_bytes(raw)
+        for name in ['fleet', '_hub']:
+            with self.subTest(name=name):
+                path=self.runs/name;path.mkdir();self.seal_files()
+                with self.assertRaises(ValueError):self.validate()
+                path.rmdir()
+        bad=json.loads(original_failure);bad['parent_pid']=os.getpid();c.write(failure_path,bad)
+        seal=json.loads(original_seal);seal['parent_pid']=os.getpid()
+        seal['failure_sha256']=c.sha_file(failure_path);c.write(seal_path,seal);self.seal_files()
+        with self.assertRaisesRegex(ValueError,'still live'):self.validate()
+
+    def test_native_seal_and_publication_are_mandatory(self):
+        for name in ['startup-cleanup.json','hub-group.json','hub-group-publication-ack.private.json']:
+            with self.subTest(name=name):
+                path=self.campaign/name;raw=path.read_bytes();path.unlink();self.seal_files()
+                with self.assertRaises(ValueError):self.validate()
+                path.write_bytes(raw)
+        seal=c.read(self.campaign/'startup-cleanup.json');seal['inventory_exit']=1
+        c.write(self.campaign/'startup-cleanup.json',seal);self.seal_files()
+        with self.assertRaises(ValueError):self.validate()
+
 if __name__ == '__main__': unittest.main()

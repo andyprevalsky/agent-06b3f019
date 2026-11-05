@@ -279,6 +279,117 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     return not rows  # Missing provenance is supported only before ANY native guest allocation.
 
 
+def startup_campaign(receipt, owner, proof, adapter, request, runs, cli_text, document, bound, used):
+    """A native no-dispatch checkpoint is not a substitute for allocated-resource cleanup."""
+    root = Path(owner['worker_root'])
+    campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+    need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
+         and proof.get('purpose') is None and not proof.get('recovered_runtime')
+         and owner['native_cleanup_reference']['native_directory'] == str(campaign)
+         and str(campaign) in cli_text, 'startup campaign binding')
+    summary = document(campaign / 'summary.json')
+    allowed = {'campaign_id', 'started_at', 'finished_at', 'status', 'runs', 'concurrency',
+               'task_count', 'total_jobs', 'peak_concurrency', 'jobs', 'retry_infra',
+               'e2e_started_at_epoch', 'e2e_timeout_seconds', 'e2e_timeout_exceeded',
+               'shared_inventory_failed', 'wall_clock_seconds', 'e2e_wall_clock_seconds'}
+    checks, jobs = request['checks'], summary.get('jobs')
+    need(set(summary) <= allowed and summary.get('status') == 'failed'
+         and summary.get('shared_inventory_failed') is True
+         and type(summary.get('peak_concurrency')) is int and summary['peak_concurrency'] == 0
+         and summary.get('e2e_timeout_exceeded', False) is False
+         and summary.get('campaign_id') == campaign.name and summary.get('runs') == 1
+         and summary.get('retry_infra') == 0 and type(summary.get('concurrency')) is int
+         and 0 < summary['concurrency'] <= len(checks)
+         and summary.get('task_count') == summary.get('total_jobs') == len(checks)
+         and checks and len(set(checks)) == len(checks) and isinstance(jobs, list)
+         and len(jobs) == len(checks) and all(isinstance(j, dict) for j in jobs), 'startup-only inventory')
+    keys = {'index', 'job_id', 'task', 'run', 'status', 'controller_exit_code', 'started_at',
+            'finished_at', 'wall_clock_seconds', 'controller_lock', 'log', 'attempt', 'attempts'}
+    need({j.get('task') for j in jobs} == set(checks)
+         and len({j.get('job_id') for j in jobs}) == len(jobs)
+         and all(set(j) == keys and j['index'] == i and j['job_id'] == f'r001-j{i:04d}'
+                 and j['run'] == j['attempt'] == 1 and j['status'] == 'cancelled'
+                 and j['attempts'] == [] and j['controller_exit_code'] is None
+                 and j['started_at'] is j['finished_at'] is j['wall_clock_seconds'] is None
+                 and j['log'] == str(campaign / (j['job_id'] + '.log'))
+                 for i, j in enumerate(jobs, 1)), 'startup dispatch/resource evidence conflict')
+    # Even an undisclosed participant/resource file is ambiguous; do not infer closure from empty jobs.
+    need(runs.is_dir() and not runs.is_symlink() and not any(runs.iterdir())
+         and not any(campaign.glob('r001-*.log')) and not (campaign / 'shared-relay').exists(),
+         'startup participant/resource artifacts')
+    location = document(campaign / 'shared-relay-location.json')
+    need(set(location) == {'directory'} and isinstance(location['directory'], str), 'startup relay location')
+    relay = Path(location['directory'])
+    need(relay.is_absolute() and relay.resolve() == relay and relay.is_dir()
+         and not relay.is_symlink() and not any(relay.iterdir()), 'startup relay artifacts')
+    failure_path, seal_path = campaign / 'startup-failure.json', campaign / 'startup-cleanup.json'
+    failure, seal = document(failure_path), document(seal_path)
+    need(set(failure) == {'schema', 'stage', 'source_ref', 'producer_sha256', 'parent_pid',
+                         'parent_start', 'errno', 'filename', 'operation', 'inventory_sources'}
+         and failure['schema'] == 'campaign-startup-failure-v1'
+         and failure['stage'] == 'shared-relay-app-status' and failure['errno'] == 2
+         and failure['filename'] == 'flyctl' and failure['source_ref'] == receipt['source']['head']
+         and isinstance(failure['operation'], list) and len(failure['operation']) == 5
+         and failure['operation'][:3] == ['flyctl', 'status', '-a']
+         and isinstance(failure['operation'][3], str) and failure['operation'][3]
+         and failure['operation'][4] == '--json'
+         and type(failure['parent_pid']) is int and failure['parent_pid'] > 1
+         and isinstance(failure['parent_start'], str) and failure['parent_start'], 'native startup checkpoint')
+    producer = root / 'scripts/run-bench-campaign.py'
+    raw = bound(producer)
+    frozen = subprocess.check_output(['git', '-C', str(root), 'show',
+                                     receipt['source']['head'] + ':scripts/run-bench-campaign.py'])
+    need(raw == frozen and hashlib.sha256(raw).hexdigest() == failure['producer_sha256'],
+         'startup source binding')
+    inventory_sources = {'cloudbench-campaign-inventory.sh': 'scripts/cloudbench-campaign-inventory.sh',
+        'cloudbench-inventory.sh': 'scripts/lib/cloudbench-inventory.sh',
+        'cloudbench-env.sh': 'scripts/lib/cloudbench-env.sh',
+        'cloudbench-machine-readiness.py': 'scripts/cloudbench-machine-readiness.py',
+        'cloudbench-campaign-machines.py': 'scripts/cloudbench-campaign-machines.py'}
+    need(isinstance(failure['inventory_sources'], dict)
+         and set(failure['inventory_sources']) == set(inventory_sources), 'startup inventory source closure')
+    for name, relative in inventory_sources.items():
+        copied = bound(campaign / 'shared-inventory/scripts' / name)
+        expected = subprocess.check_output(['git', '-C', str(root), 'show',
+                                           receipt['source']['head'] + ':' + relative])
+        need(copied == expected and hashlib.sha256(copied).hexdigest() == failure['inventory_sources'][name],
+             'startup inventory source binding')
+    need(set(seal) == {'schema', 'failure_sha256', 'summary_sha256', 'parent_pid', 'parent_start',
+                      'inventory_pid', 'inventory_exit', 'relay_started', 'task_controllers_started', 'resource_mutations'}
+         and seal['schema'] == 'campaign-startup-cleanup-v1'
+         and seal['failure_sha256'] == hashlib.sha256(bound(failure_path)).hexdigest()
+         and seal['summary_sha256'] == hashlib.sha256(bound(campaign / 'summary.json')).hexdigest()
+         and all(seal[k] == failure[k] for k in ('parent_pid', 'parent_start'))
+         and type(seal['inventory_pid']) is int and seal['inventory_pid'] > 1
+         and type(seal['inventory_exit']) is int and seal['inventory_exit'] == 0
+         and seal['relay_started'] is False
+         and type(seal['task_controllers_started']) is int and seal['task_controllers_started'] == 0
+         and type(seal['resource_mutations']) is int and seal['resource_mutations'] == 0, 'native startup cleanup seal')
+    from datetime import datetime
+    start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
+    need(adapter['started_at'] <= start <= finish <= receipt['finished_at'] <= proof['confirmed_at']
+         and adapter.get('native_exit') == receipt.get('native_exit') == 1
+         and adapter.get('cleanup_complete') is False
+         and adapter.get('complete') is False
+         and adapter.get('cases') == receipt.get('cases') == dict.fromkeys(checks, 'UNVERIFIED'),
+         'startup original result/clocks')
+    # Direct child joins in the native seal plus current OS group absence close only local auxiliaries.
+    processes = subprocess.check_output(['ps', '-ax', '-o', 'pid=,pgid=,stat='], text=True)
+    ids = {failure['parent_pid'], seal['inventory_pid']}
+    need(not any((int(row.split()[0]) in ids or int(row.split()[1]) in ids)
+                 and not row.split()[2].startswith('Z') for row in processes.splitlines()),
+         'startup parent/inventory still live')
+    from deploy_test_cloud import campaign_published
+    native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+    for name in ('hub-group.json', 'hub-group-publication-ack.private.json'):
+        document(campaign / name)
+    need(campaign_published(summary, campaign, adapter['started_at'], native), 'startup publication/cleanup')
+    need(used == set(proof['files']), 'startup proof file closure')
+    return {'kind': KIND, 'gate': receipt['gate'], 'token': receipt['token'], 'owner': copy.deepcopy(owner),
+            'worker_result_sha256': proof['worker_result_sha256'], 'proof': copy.deepcopy(proof),
+            'participants': [], 'native_audit_seals': {}, 'retained_services': [], 'credit_granted': False}
+
+
 def validate(receipt, owner, proof):
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
@@ -337,6 +448,8 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links = {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-startup-v1':
+        return startup_campaign(receipt, owner, proof, adapter, request, runs, cli_text, document, bound, used)
     if layout == 'campaign-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
