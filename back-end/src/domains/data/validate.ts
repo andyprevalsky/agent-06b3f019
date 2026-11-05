@@ -28,6 +28,7 @@ import { parseGoogleSourceFilters } from './validate.google';
 import {
   dropNullParams,
   filtersBySource,
+  isSourceName,
   sentParamFor,
   sharedFilters,
   sourcesNamedByFilters,
@@ -47,7 +48,6 @@ interface ResolvedSourceSelection {
 }
 import {
   DEFAULT_GREP_SOURCES,
-  VALID_SOURCES,
   isGoogleGrepSource,
   isMessageFamilySource,
   type GrepParams,
@@ -112,7 +112,7 @@ function hasTrajectoryNarrowing(params: GrepParams, split: SplitFilters): boolea
 
 function requireKnownSources(params: GrepParams): void {
   const { source, sources } = params;
-  if (source !== undefined && !(source in VALID_SOURCES)) {
+  if (source !== undefined && !isSourceName(source)) {
     throw new SourceNotFoundError(source);
   }
   if (sources === undefined) return;
@@ -120,7 +120,7 @@ function requireKnownSources(params: GrepParams): void {
     throw new InvalidGrepParamError('sources', 'sources must be a list such as ["messages"].');
   }
   for (const entry of sources) {
-    if (typeof entry !== 'string' || !(entry in VALID_SOURCES)) {
+    if (typeof entry !== 'string' || !isSourceName(entry)) {
       throw new SourceNotFoundError(typeof entry === 'string' ? entry : String(entry));
     }
   }
@@ -134,7 +134,9 @@ function requireKnownSources(params: GrepParams): void {
  */
 function resolveSourceSelection(params: GrepParams, split: SplitFilters): ResolvedSourceSelection {
   requireKnownSources(params);
-  const { source, sources } = params;
+  const { source } = params;
+  // An empty list is no explicit choice, as the agents layer treats it (_extract_sources).
+  const sources = params.sources?.length === 0 ? undefined : params.sources;
   const named = sourcesNamedByFilters(split);
   const resolvedSources: ValidSource[] =
     sources !== undefined
