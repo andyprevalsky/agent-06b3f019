@@ -16,8 +16,7 @@
  */
 
 import { createLogger } from '../../providers/logger';
-import { prisma } from '../../providers/database';
-import { googlePasswordCandidates } from '../../providers/phoneSavedPassword';
+import { findGooglePasswordCandidates } from './repo.googlePassword';
 import type { CdpClient } from './cdp';
 
 /** Progress through one account's saved passwords, newest-used first. */
@@ -87,7 +86,7 @@ export type GooglePasswordLookup = (userId: string, email: string) => Promise<st
 
 export const lookupStoredGooglePasswords: GooglePasswordLookup = async (userId, email) => {
   try {
-    return await googlePasswordCandidates(prisma, userId, email);
+    return await findGooglePasswordCandidates(userId, email);
   } catch {
     return []; // none stored or undecryptable: leave it to the human.
   }
