@@ -4727,4 +4727,70 @@ class Round12InterruptedIsolation(unittest.TestCase):
                 snap({'files':{k:v for k,v in self.pins.items() if k!=key}})
         with self.assertRaises(ValueError):snap({'files':{'replacement':'hash'}})
 
+
+class Round14WarmIsolation(unittest.TestCase):
+    def setUp(self):
+        Round12InterruptedIsolation.setUp(self)
+        import deploy_test_round14_isolation as m
+        self.new=m
+        self.r.update(token=m.TOKEN,source={'head':m.SOURCE,'digest':'digest'},cancelled=False,native_exit=1,
+                      worker_result='original-result',native_cleanup_reference={'original':'reference'})
+        self.owner.update(request_token=m.TOKEN,native_cleanup_reference=self.r['native_cleanup_reference'])
+        self.inherited.append({'original_request_token':'round12'})
+        self.p.update(compatibility=m.MODE,request_token=m.TOKEN,source=self.r['source'],worker_result_sha256='original-hash')
+        self.original=copy.deepcopy(self.r)
+        self.spec=dict(token=m.TOKEN,source=m.SOURCE,mode=m.MODE,pins=self.pins,receipt_path=self.m.RECEIPT,
+                       interrupted=False,snapshot=lambda p:(self.original,self.req,self.root,self.parts,self.debts[:2],'relay'),
+                       inherited_count=3,live_pid=3912856,adapter_sha='original-hash')
+    def verify(self):return self.m.validate_execution(self.r,self.owner,self.p,self.spec)
+    def test_original_result_kept_and_no_cleanup_credit(self):
+        v=self.verify();self.assertEqual(v['worker_result_sha256'],'original-hash')
+        self.assertEqual(len(v['retained_services']),2)
+        self.assertFalse(v['cleanup_complete']);self.assertFalse(v['credit_granted']);self.assertTrue(v['obligations_preserved'])
+    def test_wrong_source_token_result_owner_and_cleanup_purpose_reject(self):
+        for key,val in [('source',{}),('request_token','wrong'),('purpose',None),('owner',{})]:
+            old=self.p[key];self.p[key]=val
+            with self.subTest(key=key),self.assertRaises(ValueError):self.verify()
+            self.p[key]=old
+        self.r['worker_result']='substitution'
+        with self.assertRaises(ValueError):self.verify()
+    def test_missing_prior_debt_and_active_or_stale_guest_reject(self):
+        self.p['inherited_admissions']=self.inherited[:2]
+        with self.assertRaises(ValueError):self.verify()
+        self.p['inherited_admissions']=self.inherited
+        self.guest_observer.return_value={**self.guest,'guest':{**self.guest['guest'],'refresh_scope_pids':[777]}}
+        with self.assertRaises(ValueError):self.verify()
+        self.guest_observer.return_value=self.guest;self.p['guest_observation']={**self.guest,'observed_at':0}
+        with self.assertRaises(ValueError):self.verify()
+    def test_proof_builder_keeps_original_adapter_and_scope(self):
+        with patch.object(self.new,'snapshot',side_effect=self.spec['snapshot']):
+            proof=self.new.build({'head':'next','digest':'digest'})
+        self.assertEqual(proof['request_token'],self.new.TOKEN)
+        self.assertEqual(proof['worker_result_sha256'],self.new.PINS[str(self.new.RECEIPT.parent/'result.json')])
+        self.assertIn('deploy-5fd2d6f32e461c2c744bfbb67234a4e319435c7d91ad8529ee5ae06cebf26bed',proof['campaign'])
+        self.assertEqual(len(proof['inherited_admissions']),3)
+
+    def test_only_verified_linked_round14_covers_prior_debt_renewal(self):
+        import deploy_test_native_cleanup as n
+        prior={'purpose':'isolated-validation','token':'old','gate':'smoke','proof':{'receipt_sha256':'old-hash'}}
+        latest={'token':'new'}
+        candidate={'token':'new','proof':{'compatibility':self.new.MODE,
+            'inherited_admissions':[{'original_request_token':'old','original_receipt_sha256':'old-hash'}]}}
+        state={'reconciled_owners':{'new-hash':candidate}}
+        with patch.object(n,'still_bound',return_value=True),patch.object(c,'receipt_owner',return_value={}):
+            self.assertTrue(n.round14_isolation_covers_prior(state,prior,latest))
+            self.assertFalse(n.round14_isolation_covers_prior({},prior,latest))
+            candidate['proof']['inherited_admissions'][0]['original_receipt_sha256']='changed'
+            self.assertFalse(n.round14_isolation_covers_prior(state,prior,latest))
+        candidate['proof']['inherited_admissions'][0]['original_receipt_sha256']='old-hash'
+        with patch.object(n,'still_bound',return_value=False),patch.object(c,'receipt_owner',return_value={}):
+            self.assertFalse(n.round14_isolation_covers_prior(state,prior,latest))
+
+    def test_each_pinned_hub_and_participant_omission_rejects_before_io(self):
+        for path in self.new.PINS:
+            if '/runs/_hub/' in path or path.endswith('/lifecycle.json'):
+                with self.subTest(path=path),self.assertRaises(ValueError):
+                    self.new.snapshot({'files':{k:v for k,v in self.new.PINS.items() if k!=path}})
+        with self.assertRaises(ValueError):self.new.snapshot({'files':{'substitution':'hash'}})
+
 if __name__ == '__main__': unittest.main()

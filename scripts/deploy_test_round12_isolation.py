@@ -140,24 +140,41 @@ def guest_facts(observation):
             'guest': {k: v for k, v in g.items() if k != 'observed_at'}}
 
 
+def operation_spec():
+    return dict(token=TOKEN, source=SOURCE, mode=MODE, pins=PINS, receipt_path=RECEIPT,
+                interrupted=True, snapshot=snapshot, inherited_count=2, live_pid=3912856, adapter_sha=None)
+
+
 def validate(receipt, owner, proof):
-    check(proof.get('kind') == 'native-cloud-cleanup-v1' and proof.get('compatibility') == MODE
+    return validate_execution(receipt, owner, proof, operation_spec())
+
+
+def validate_execution(receipt, owner, proof, operation):
+    token, source, mode = (operation[k] for k in ('token', 'source', 'mode'))
+    pins, receipt_path = operation['pins'], operation['receipt_path']
+    check(proof.get('kind') == 'native-cloud-cleanup-v1' and proof.get('compatibility') == mode
           and proof.get('purpose') == 'isolated-validation' and proof.get('layout') == 'campaign-v1', 'execution-only purpose')
-    check(receipt['source']['head'] == SOURCE and receipt['token'] == TOKEN and proof.get('source') == receipt['source']
-          and proof.get('request_token') == TOKEN and proof.get('owner') == owner == receipt['cleanup_owner'], 'original identity')
-    check(receipt.get('worker_result') is None and receipt.get('native_cleanup_reference') is None
-          and receipt.get('cancelled') is True and receipt.get('complete') is False and receipt.get('native_exit') == -9
-          and all(x == 'UNVERIFIED' for x in receipt['cases'].values()), 'original missing authority/failure must remain')
-    original, request, root, participants, debts, relay = snapshot(proof)
-    check(receipt == original and proof.get('receipt_sha256') == PINS[str(RECEIPT)], 'original receipt bytes')
-    check(proof.get('original_request') == str(RECEIPT.parent / 'request.json')
-          and proof.get('inherited_admissions') == request['isolated_validation'] and len(request['isolated_validation']) == 2,
+    check(receipt['source']['head'] == source and receipt['token'] == token and proof.get('source') == receipt['source']
+          and proof.get('request_token') == token and proof.get('owner') == owner == receipt['cleanup_owner'], 'original identity')
+    if operation['interrupted']:
+        check(receipt.get('worker_result') is None and receipt.get('native_cleanup_reference') is None
+              and receipt.get('cancelled') is True and receipt.get('native_exit') == -9, 'original missing authority must remain')
+    else:
+        check(isinstance(receipt.get('worker_result'), str) and isinstance(receipt.get('native_cleanup_reference'), dict)
+              and receipt.get('cancelled') is False and receipt.get('native_exit') == 1
+              and proof.get('worker_result_sha256') == operation['adapter_sha'], 'original adapter authority must remain')
+    check(receipt.get('complete') is False and all(x == 'UNVERIFIED' for x in receipt['cases'].values()),
+          'original failure must remain')
+    original, request, root, participants, debts, relay = operation['snapshot'](proof)
+    check(receipt == original and proof.get('receipt_sha256') == pins[str(receipt_path)], 'original receipt bytes')
+    check(proof.get('original_request') == str(receipt_path.parent / 'request.json')
+          and proof.get('inherited_admissions') == request['isolated_validation'] and len(request['isolated_validation']) == operation['inherited_count'],
           'inherited ce/e92 debts required')
     check(isinstance(proof.get('validation_source'), dict) and set(proof['validation_source']) == {'head', 'digest'}, 'next source')
     confirmed = proof.get('confirmed_at')
     check(type(confirmed) in (float, int) and receipt['finished_at'] <= confirmed <= time.time(), 'confirmation clock')
     saved_guest = proof.get('guest_observation', {})
-    check(confirmed - 60 <= saved_guest.get('observed_at', 0) <= confirmed, 'stale guest observation')
+    check(max(receipt['finished_at'], confirmed - 60) <= saved_guest.get('observed_at', 0) <= confirmed, 'stale guest observation')
     check(guest_facts(saved_guest) == guest_facts(guest_observe()), 'guest observation changed')
     local = proof.get('local_observation', {})
     pids = {int(p.name.rsplit('-', 1)[-1]) for p in participants}
@@ -170,16 +187,16 @@ def validate(receipt, owner, proof):
             birth, argv = hub_identity(pid)
             check((birth, argv) == (fields['pid_start'], fields['argv_sha256']), 'Hub incarnation changed')
             live.append(pid)
-        retained.append({'path': str(path), 'sha256': PINS[str(path)], 'owner': fields,
+        retained.append({'path': str(path), 'sha256': pins[str(path)], 'owner': fields,
                          'disposition': 'retained-original-debt'})
     current = observe(pids, [str(root), relay])
     keys = ('boot_id', 'uid', 'pids', 'scopes', 'matched', 'unreadable')
-    check(live == [3912856] and current['matched'] == live and current['unreadable'] == []
+    check(live == [operation['live_pid']] and current['matched'] == live and current['unreadable'] == []
           and all(local.get(k) == current[k] for k in keys)
           and receipt['finished_at'] <= local.get('observed_at', 0) <= confirmed
           and confirmed - local.get('observed_at', 0) <= 60, 'current local execution/identity')
-    return {'kind': 'native-cloud-cleanup-v1', 'gate': receipt['gate'], 'token': TOKEN,
-            'owner': copy.deepcopy(owner), 'worker_result_sha256': None, 'proof': copy.deepcopy(proof),
+    return {'kind': 'native-cloud-cleanup-v1', 'gate': receipt['gate'], 'token': token,
+            'owner': copy.deepcopy(owner), 'worker_result_sha256': operation['adapter_sha'], 'proof': copy.deepcopy(proof),
             'participants': list(map(str, participants)), 'retained_services': retained,
             'purpose': 'isolated-validation', 'validation_source': proof['validation_source'],
             'excluded_resources': {}, 'credit_granted': False, 'obligations_preserved': True,
@@ -196,15 +213,20 @@ def validate_renewal(prior, proof):
 
 
 def build(validation_source):
-    receipt, request, root, participants, debts, relay = snapshot({'files': PINS})
+    return build_execution(validation_source, operation_spec())
+
+
+def build_execution(validation_source, operation):
+    pins, receipt_path = operation['pins'], operation['receipt_path']
+    receipt, request, root, participants, debts, relay = operation['snapshot']({'files': pins})
     pids = {int(p.name.rsplit('-', 1)[-1]) for p in participants}
     for p in debts:
         pids.add(int(dict(l.split('=', 1) for l in p.read_text().splitlines() if '=' in l)['pid']))
     observation = observe(pids, [str(root), relay])
-    return dict(kind='native-cloud-cleanup-v1', compatibility=MODE, purpose='isolated-validation', layout='campaign-v1',
-                source=receipt['source'], request_token=TOKEN, owner=receipt['cleanup_owner'], files=PINS,
-                original_request=str(RECEIPT.parent/'request.json'), inherited_admissions=request['isolated_validation'],
-                receipt_sha256=PINS[str(RECEIPT)], validation_source=validation_source,
+    return dict(kind='native-cloud-cleanup-v1', compatibility=operation['mode'], purpose='isolated-validation', layout='campaign-v1',
+                source=receipt['source'], request_token=operation['token'], owner=receipt['cleanup_owner'], files=pins,
+                original_request=str(receipt_path.parent/'request.json'), inherited_admissions=request['isolated_validation'],
+                receipt_sha256=pins[str(receipt_path)], validation_source=validation_source,
                 local_observation=observation, guest_observation=guest_observe(), confirmed_at=time.time(), observed_by='round12 pinned investigator proof builder')
 
 
