@@ -36,6 +36,11 @@ export async function googlePasswordCandidates(
       disabledAt: null,
       OR: origins,
     },
+    // Order before the limit so >32 rows can't drop the newest-used password.
+    orderBy: [
+      { dateLastUsed: { sort: 'desc', nulls: 'last' } },
+      { dateCreated: { sort: 'desc', nulls: 'last' } },
+    ],
     take: 32,
   });
   const key = process.env.PAYMENT_DECRYPTION_KEY;

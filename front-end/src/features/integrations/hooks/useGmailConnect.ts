@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 
 import {
   disconnectGmailAccountApi,
-  fetchIntegrationsApi,
+  fetchIntegrationsOrNullApi,
   resyncGmailAccountApi,
   startGmailOAuthApi,
 } from '../api';
@@ -22,8 +22,10 @@ interface ElectronExternalApi {
  */
 function gmailFingerprint(integrations: ConnectedIntegration[], provider: string): string {
   const row = integrations.find((i) => i.name === provider);
-  if (row?.lastSuccessfulSyncAt === undefined || row.lastSuccessfulSyncAt === '') return '';
-  return `${row.lastSuccessfulSyncAt}|${(row.config?.connectedEmails ?? []).join(',')}`;
+  // The API can send null for an unstamped row despite the optional-string type.
+  const stamp: unknown = row?.lastSuccessfulSyncAt;
+  if (typeof stamp !== 'string' || stamp === '') return '';
+  return `${stamp}|${(row?.config?.connectedEmails ?? []).join(',')}`;
 }
 
 function electronExternalApi(): ElectronExternalApi | null {
@@ -47,11 +49,11 @@ async function pollOnce(
   settle: () => void,
 ): Promise<void> {
   try {
-    const integrations = await fetchIntegrationsApi();
+    const integrations = await fetchIntegrationsOrNullApi();
+    if (integrations === null || isStale()) return; // failed poll: try next tick
     const now = gmailFingerprint(integrations, provider);
-    // Only a NEW callback stamp settles: a failed fetch (which yields []) or the
-    // pre-consent row both read '' and must keep polling.
-    if (!isStale() && now !== '' && now !== before) settle();
+    // Only a NEW callback stamp settles; the pre-consent row reads ''.
+    if (now !== '' && now !== before) settle();
   } catch {
     /* retry on the next tick */
   }
@@ -165,7 +167,11 @@ function useGmailOAuthConnect(fetchIntegrations: () => Promise<void>) {
         // deep-links back into the app. The row already exists before consent
         // (the start upserts it), so the fallback poll waits for the callback's
         // sync stamp to CHANGE rather than for the row to exist.
-        const before = gmailFingerprint(await fetchIntegrationsApi(), provider);
+        // A failed baseline is unknown, not empty: comparing against '' would
+        // read an existing account's stamp as the callback. Without a baseline
+        // only the deep link (or the timeout) ends the attempt.
+        const baseline = await fetchIntegrationsOrNullApi();
+        const before = baseline === null ? null : gmailFingerprint(baseline, provider);
         const payload = await startGmailOAuthApi(returnUrl);
         if (attempt !== oauthAttemptRef.current) return;
 
@@ -182,9 +188,11 @@ function useGmailOAuthConnect(fetchIntegrations: () => Promise<void>) {
         await electronApi.openExternal(payload.authUrl);
         if (isStale()) return;
 
-        pollIntervalRef.current = setInterval(() => {
-          void pollOnce(provider, before, isStale, settle);
-        }, GMAIL_POLL_INTERVAL_MS);
+        if (before !== null) {
+          pollIntervalRef.current = setInterval(() => {
+            void pollOnce(provider, before, isStale, settle);
+          }, GMAIL_POLL_INTERVAL_MS);
+        }
         pollTimeoutRef.current = setTimeout(() => {
           if (isStale()) return;
           clearPolling();

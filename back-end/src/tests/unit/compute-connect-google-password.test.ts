@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { chromium, type Page } from '@playwright/test';
 import type { CdpClient } from '../../domains/compute-grants/cdp';
 import { autofillGooglePassword } from '../../domains/compute-grants/connectSession.googlePassword';
+import { googlePasswordCandidates } from '../../providers/phoneSavedPassword';
 import type { PendingConnect } from '../../domains/compute-grants/connectSession.types';
 
 const PWD_PAGE = `<!doctype html><html><body>
@@ -39,7 +40,27 @@ function entryFor(page: Page): PendingConnect {
   };
 }
 
+/** The DB query orders newest-used first BEFORE its 32-row limit. */
+async function queryOrdersBeforeLimit(): Promise<void> {
+  let args: { orderBy?: unknown; take?: number } | undefined;
+  const tx = {
+    browserPassword: {
+      findMany: async (a: typeof args) => {
+        args = a;
+        return [];
+      },
+    },
+  } as unknown as Parameters<typeof googlePasswordCandidates>[0];
+  await googlePasswordCandidates(tx, 'user-1', 'andy@example.com');
+  assert.equal(args?.take, 32);
+  assert.deepEqual(args?.orderBy, [
+    { dateLastUsed: { sort: 'desc', nulls: 'last' } },
+    { dateCreated: { sort: 'desc', nulls: 'last' } },
+  ]);
+}
+
 async function main(): Promise<void> {
+  await queryOrdersBeforeLimit();
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
@@ -91,6 +112,23 @@ async function main(): Promise<void> {
     assert.equal(await page.evaluate("document.querySelector('[name=Passwd]').value"), '');
     assert.equal(await autofillGooglePassword(retryEntry, flakyLookup), true);
     assert.equal(await page.evaluate('window.__submitted'), 'after-retry');
+
+    // A fill that no-ops (challenge changed mid-tick) keeps its candidate.
+    await page.goto('https://accounts.google.com/v3/signin/challenge/pwd');
+    const noopEntry = entryFor(page);
+    const realCdp = noopEntry.cdp!;
+    let noop = true;
+    noopEntry.cdp = {
+      evaluateAnyTarget: async <T>(expression: string) =>
+        noop && expression.includes('only-one')
+          ? ('' as unknown as T)
+          : realCdp.evaluateAnyTarget<T>(expression),
+    } as unknown as typeof realCdp;
+    const single = async () => ['only-one'];
+    assert.equal(await autofillGooglePassword(noopEntry, single), false);
+    noop = false;
+    assert.equal(await autofillGooglePassword(noopEntry, single), true);
+    assert.equal(await page.evaluate('window.__submitted'), 'only-one');
 
     // A different account with no saved password is also left alone.
     await page.goto('https://accounts.google.com/v3/signin/challenge/pwd');

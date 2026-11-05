@@ -126,8 +126,10 @@ export async function autofillGooglePassword(
   }
 
   const password = progress.candidates[progress.tried]!;
-  progress.tried += 1;
   const filled = await cdp.evaluateAnyTarget<string>(googlePasswordFillScript(email, password));
+  // Only a confirmed submit consumes the candidate: if the challenge changed
+  // between the email read and the fill, keep it for the next tick.
+  if (filled === 'filled') progress.tried += 1;
   log.info('connect.google_password_autofill', {
     connect_id: entry.connectId,
     provider: entry.provider,
