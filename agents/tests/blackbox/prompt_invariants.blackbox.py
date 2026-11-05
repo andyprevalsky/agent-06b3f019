@@ -2267,6 +2267,84 @@ def test_browser_identity_facts_in_spawn_goal_and_auth_contract():
         assert rule in build_authentication_contract(recover_enabled=recover)
 
 
+_CODE_AGENT_NAME = re.compile(r"spawn_code_agent|spawn_claude_code_agent|code agent|type='code'|type=\"code\"", re.I)
+_LIFETIME_WORD = re.compile(r"lifetime|deadline|time limit|time-limit|timeout|expires|at most", re.I)
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|min|hours?|hrs?|h|days?|d)\b", re.I)
+_DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _stated_durations(line):
+    for amount, unit in _DURATION.findall(line):
+        key = unit.lower()[0] if not unit.lower().startswith("mi") else "m"
+        yield float(amount) * _DURATION_UNIT_SECONDS[key]
+
+
+def test_planner_prompt_states_no_code_agent_lifetime_shorter_than_runtime():
+    """The planner prompt must not give code agents a lifetime the runtime does not enforce.
+
+    The code-agent activity runs with CODE_AGENT_ACTIVITY_NO_DEADLINE (C11: no
+    runtime limit, liveness is the heartbeat; an idle session pauses and
+    resumes). The planner prompt said "spawn_code_agent has a 10 min lifetime",
+    so plans cut multi-day code work into 10-minute pieces. Any line of the
+    prompt the planner receives that names a code agent together with a
+    lifetime/deadline word may only state a duration at least that long.
+    """
+    from domains.set_plan.service import get_planner_tools_description
+    from domains.spawn_claude_code_agent.config import CODE_AGENT_ACTIVITY_NO_DEADLINE
+    from utils.prompts import build_planner_system_prompt
+
+    runtime_seconds = CODE_AGENT_ACTIVITY_NO_DEADLINE.total_seconds()
+    assert runtime_seconds >= 365 * 86400, "the code-agent activity has no practical deadline (C11)"
+    for rose_desktop in (False, True):
+        prompt = build_planner_system_prompt(get_planner_tools_description(rose_desktop=rose_desktop))
+        for line in prompt.splitlines():
+            if not (_CODE_AGENT_NAME.search(line) and _LIFETIME_WORD.search(line)):
+                continue
+            for seconds in _stated_durations(line):
+                assert seconds >= runtime_seconds, (
+                    f"planner prompt states a {seconds:.0f}s code-agent lifetime; the runtime deadline is "
+                    f"{runtime_seconds:.0f}s (CODE_AGENT_ACTIVITY_NO_DEADLINE): {line!r}"
+                )
+
+
+def test_wait_for_timeout_description_points_long_waits_to_until_timestamp():
+    """WaitForTool.timeout_seconds names the event-driven long wait the runtime implements.
+
+    agents-mode waits are capped at WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS (Codex
+    wait_agent parity). A longer wait is one until_timestamp wait (up to
+    MAX_WAIT_SECONDS) that ends early on GENERAL_WAKE_KINDS: a background agent
+    finishing (agent_notification) or an agent message (agent_message). The
+    runtime behavior is proven by wait_for.blackbox.py
+    test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes.
+    """
+    import importlib.util
+
+    from domains.wait_for.config import MAX_WAIT_SECONDS
+    from helpers.wait_wake import GENERAL_WAKE_KINDS
+    from utils.tool_schemas import WaitForTool
+    from utils.wait_for_bounds import WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS
+
+    # The runtime the text describes.
+    assert MAX_WAIT_SECONDS > WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS, "until_timestamp must outlast the agents cap"
+    assert {"agent_notification", "agent_message"} <= set(GENERAL_WAKE_KINDS), GENERAL_WAKE_KINDS
+    spec = importlib.util.spec_from_file_location(
+        "wait_for_blackbox_for_invariant", AGENTS_ROOT / "tests" / "blackbox" / "wait_for.blackbox.py"
+    )
+    wait_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wait_tests)
+    assert callable(
+        getattr(wait_tests, "test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes", None)
+    )
+
+    description = " ".join(WaitForTool.model_json_schema()["properties"]["timeout_seconds"]["description"].split())
+    assert f"at most {WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS}" in description, description
+    lower = description.lower()
+    assert "for a longer wait use until_timestamp" in lower, description
+    assert "ends early" in lower, "the description must state the early wake"
+    assert "background agents finishes" in lower, "agent_notification wake must be described"
+    assert "messages you" in lower, "agent_message wake must be described"
+
+
 async def run_all_tests():
     print("prompt-invariants blackbox tests:")
     r = BlackboxResult()
@@ -2449,6 +2527,14 @@ async def run_all_tests():
     r.record(
         "agent_graph_skill_states_when_messages_reach_a_code_agent",
         test_agent_graph_skill_states_when_messages_reach_a_code_agent,
+    )
+    r.record(
+        "planner_prompt_no_code_agent_lifetime_shorter_than_runtime",
+        test_planner_prompt_states_no_code_agent_lifetime_shorter_than_runtime,
+    )
+    r.record(
+        "wait_for_timeout_description_points_long_waits_to_until_timestamp",
+        test_wait_for_timeout_description_points_long_waits_to_until_timestamp,
     )
 
     # 12. No restating-the-schema patterns / broken cross-refs (C6, C7)
