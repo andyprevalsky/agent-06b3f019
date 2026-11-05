@@ -21,6 +21,13 @@ function forwardPaymentComplete(getMainWindow: () => BrowserWindow | null, succe
   mainWindow.webContents.send('payment-complete', { success });
 }
 
+/** OAuth callbacks (Gmail) redirect to `roselabs://oauth-complete?oauth_result=…`. */
+function forwardOAuthComplete(getMainWindow: () => BrowserWindow | null, success: boolean): void {
+  const mainWindow = focusAvailableMainWindow(getMainWindow);
+  if (mainWindow === null) return;
+  mainWindow.webContents.send('oauth-complete', { success });
+}
+
 export function registerDeepLinkProtocol(protocol: string): void {
   if (process.defaultApp === true && process.argv.length >= 2) {
     app.setAsDefaultProtocolClient(protocol, process.execPath, [path.resolve(process.argv[1])]);
@@ -44,6 +51,9 @@ export function handleDeepLink(
     } else if (parsed.host === 'payment-success') {
       console.log('[App] Payment success deep link received');
       forwardPaymentComplete(getMainWindow, true);
+    } else if (parsed.host === 'oauth-complete') {
+      console.log('[App] OAuth complete deep link received');
+      forwardOAuthComplete(getMainWindow, parsed.searchParams.get('oauth_result') === 'success');
     } else if (parsed.host === 'payment-cancel') {
       console.log('[App] Payment cancel deep link received');
       forwardPaymentComplete(getMainWindow, false);

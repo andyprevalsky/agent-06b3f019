@@ -249,11 +249,12 @@ describe('app-wiring/hooks', () => {
   });
 
   describe('iOS app shell follows the visible viewport (installed PWA)', () => {
-    // iPhone Pro Max PWA: 430x932 screen, but iOS reports a layout viewport
-    // short by the status-bar inset (873), which left a ~60px band under the
-    // query box. The keyboard shrinks AND pans the visual viewport; a shell
-    // sized by 100dvh then floated the query box far above the keyboard.
-    const SCREEN = { width: 430, height: 932 };
+    // iPhone 17 Pro Max PWA (440x956, 62pt status-bar inset). The keyboard
+    // shrinks AND pans the visual viewport. After it closes, iOS can leave the
+    // web content short of the screen by the status-bar inset (894): nothing
+    // is painted below that, so a shell sized to the screen had its bottom
+    // 62pt — the query box's toolbar row — cut off (user screenshot 2026-11-04).
+    const SCREEN = { width: 440, height: 956 };
     let vv: { height: number; offsetTop: number; scale: number };
     let fire: () => void;
 
@@ -268,9 +269,9 @@ describe('app-wiring/hooks', () => {
         value: { ...SCREEN },
         configurable: true,
       });
-      Object.defineProperty(window, 'innerWidth', { value: 430, configurable: true });
-      Object.defineProperty(window, 'innerHeight', { value: 873, configurable: true });
-      vv = { height: 873, offsetTop: 0, scale: 1 };
+      Object.defineProperty(window, 'innerWidth', { value: 440, configurable: true });
+      Object.defineProperty(window, 'innerHeight', { value: 956, configurable: true });
+      vv = { height: 956, offsetTop: 0, scale: 1 };
       const listeners: Array<() => void> = [];
       Object.defineProperty(window, 'visualViewport', {
         configurable: true,
@@ -302,30 +303,77 @@ describe('app-wiring/hooks', () => {
       top: document.documentElement.style.getPropertyValue('--app-top'),
     });
 
-    it('fills the whole screen with the keyboard closed, leaving no bottom gap', () => {
+    it('fills the whole screen when iOS shows the whole screen', () => {
       initViewportHeight();
-      expect(shell()).toEqual({ height: '932px', top: '0px' });
+      expect(shell()).toEqual({ height: '956px', top: '0px' });
     });
 
     it('ends exactly at the keyboard top while typing, then returns to full screen', () => {
       initViewportHeight();
-      vv = { height: 560, offsetTop: 300, scale: 1 };
+      vv = { height: 577, offsetTop: 335, scale: 1 };
       fire();
-      expect(shell()).toEqual({ height: '560px', top: '300px' });
+      expect(shell()).toEqual({ height: '577px', top: '335px' });
+      vv = { height: 956, offsetTop: 0, scale: 1 };
+      fire();
+      expect(shell()).toEqual({ height: '956px', top: '0px' });
+    });
+
+    it('never extends past the visible viewport when iOS leaves it short after the keyboard closes', () => {
+      initViewportHeight();
+      vv = { height: 577, offsetTop: 335, scale: 1 };
+      fire();
+      Object.defineProperty(window, 'innerHeight', { value: 894, configurable: true });
+      vv = { height: 894, offsetTop: 0, scale: 1 };
+      fire();
+      expect(shell()).toEqual({ height: '894px', top: '0px' });
+    });
+
+    it('at rest with a short standalone viewport (10-30 report: 873 of 932), matches it rather than the screen', () => {
+      // Deliberate trade-off: if iOS reports less than the screen, the box sits
+      // at that boundary (a band may show below it) instead of being cut off.
+      Object.defineProperty(window, 'screen', {
+        value: { width: 430, height: 932 },
+        configurable: true,
+      });
+      Object.defineProperty(window, 'innerWidth', { value: 430, configurable: true });
+      Object.defineProperty(window, 'innerHeight', { value: 873, configurable: true });
       vv = { height: 873, offsetTop: 0, scale: 1 };
+      initViewportHeight();
+      expect(shell()).toEqual({ height: '873px', top: '0px' });
+    });
+
+    it('reports the real viewport numbers once per keyboard transition, not on jitter', () => {
+      vi.mocked(analytics.track).mockClear();
+      initViewportHeight();
+      vv = { height: 577, offsetTop: 335, scale: 1 };
       fire();
-      expect(shell()).toEqual({ height: '932px', top: '0px' });
+      vv = { height: 560, offsetTop: 352, scale: 1 };
+      fire();
+      Object.defineProperty(window, 'innerHeight', { value: 894, configurable: true });
+      vv = { height: 894, offsetTop: 0, scale: 1 };
+      fire();
+      const reports = vi
+        .mocked(analytics.track)
+        .mock.calls.filter(([event]) => event === 'iOS Viewport Geometry')
+        .map(([, props]) => props);
+      expect(reports).toEqual([
+        expect.objectContaining({ shell_height: 956, inner_height: 956, standalone: true }),
+        expect.objectContaining({ shell_height: 577, shell_top: 335, visual_offset_top: 335 }),
+        expect.objectContaining({ shell_height: 894, inner_height: 894, visual_height: 894 }),
+      ]);
     });
 
     it('ignores pinch zoom, which shrinks the visual viewport without a keyboard', () => {
       initViewportHeight();
       vv = { height: 400, offsetTop: 120, scale: 2 };
       fire();
-      expect(shell()).toEqual({ height: '932px', top: '0px' });
+      expect(shell()).toEqual({ height: '956px', top: '0px' });
     });
 
-    it('in a Safari tab, keeps the browser-owned toolbar space (no full-screen override)', () => {
+    it('in a Safari tab, keeps the browser-owned toolbar space', () => {
       delete (navigator as { standalone?: boolean }).standalone;
+      Object.defineProperty(window, 'innerHeight', { value: 873, configurable: true });
+      vv = { height: 873, offsetTop: 0, scale: 1 };
       initViewportHeight();
       expect(shell()).toEqual({ height: '873px', top: '0px' });
     });
