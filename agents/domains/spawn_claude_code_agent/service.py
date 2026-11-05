@@ -1385,6 +1385,8 @@ async def _apply_sandbox_resize(
             "ws_url": continuing["ws_url"],
             "logged_events": 0,
             "transcript_events": 0,
+            # The resized sandbox's ws-server is new: none of its events are history.
+            "history_events": int(resized.get("history_events") or 0),
             "sandbox_size": size or session_record.get("sandbox_size"),
             "code_session_id": resized.get("code_session_id") or session_record.get("code_session_id"),
         }
@@ -3632,7 +3634,10 @@ async def spawn_claude_code_activity(
 
         # 4. Persist terminal output (durable fallback when PTY display is empty)
         filtered_output = terminal.get_display()
-        credential_feedback = build_credential_feedback(code_events, code_provider)
+        # Only this spawn's events: an attached live CLI's earlier turns are history.
+        credential_feedback = build_credential_feedback(
+            code_events[int(session_record.get("history_events") or 0) :], code_provider
+        )
         durable_output = build_durable_terminal_transcript(
             filtered_output,
             code_events,
