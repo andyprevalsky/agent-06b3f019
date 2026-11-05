@@ -66,3 +66,11 @@ None recorded.
 ## Reusable lesson
 
 A terminal state must have exactly one writer, the path that also releases the resources; a second bare status write hides the row from that path.
+
+Follow-up 2026-11-05 (CodeRabbit 4475153051): `deleteCheckpoint` turned a
+manifest read error into "no manifest" and swallowed artifact delete errors, then
+deleted the manifest anyway. That left artifacts stored with no index, and the
+session was still marked RETIRED. Read and delete errors now propagate and keep
+the manifest, and retire stops before `markRetired`. The sweep catches the error
+per session, so the others still retire and the stuck one is retried on the next
+sweep. Regression: `code-sessions-checkpoint-deletion.cases.ts`.

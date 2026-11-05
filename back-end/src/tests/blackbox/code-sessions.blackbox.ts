@@ -57,6 +57,7 @@ import { registerFailedStartPauseCases } from './code-sessions-failed-start.case
 import { registerCodeSessionLifecycleCases } from './code-sessions-lifecycle.cases';
 import { registerCodeSessionLiveResumeCases } from './code-sessions-live-resume.cases';
 import { registerSandboxAttributionCases } from './code-sessions-sandbox-attribution.cases';
+import { registerCheckpointDeletionCases } from './code-sessions-checkpoint-deletion.cases';
 
 config();
 
@@ -616,3 +617,4 @@ registerCodeSessionLiveResumeCases({
   restoreConnect: () => patchConnect(originalConnect),
 });
 registerSandboxAttributionCases(userA);
+registerCheckpointDeletionCases({ fixtureDir, seedWorkspace });
