@@ -26044,6 +26044,7 @@ async def _run_realm_transition_action_fixture(
     credential_action=None,
     credential_failure=False,
     credential_origin=None,
+    unexpected_worker_state=False,
 ):
     """Drive real activity/action/history with synthetic CDP and private hydration."""
     from contextlib import ExitStack
@@ -26095,7 +26096,11 @@ async def _run_realm_transition_action_fixture(
     async def prepare(_config, **kwargs):
         realm = urlparse(kwargs["target_url"]).hostname
         events.append(("prepare", realm))
+        if kwargs.get("restore_browser_state", True):
+            events.append(("restore", realm))
         payload = {"auth_realm": realm, "auth_options": {"realm": realm}, "passwords": [], "passkeys": []}
+        if unexpected_worker_state:
+            payload["worker_apply"] = {"provider": "tilion", "cookies": [], "local_storage": []}
         if restoration_error or (preapproved_handoff and realm == "new.example"):
             payload["credential_preparation_error"] = "Browser state injection timed out after 18000ms"
         return payload
@@ -26182,6 +26187,10 @@ async def _run_realm_transition_action_fixture(
         patch(prefix + "build_realm_credential_state", hydrate),
         patch(prefix + "activity_drain_reason", AsyncMock(return_value=None)),
         patch(prefix + "prepare_browser_auth", prepare),
+        patch(
+            prefix + "apply_tilion_worker_state",
+            AsyncMock(side_effect=lambda *_args: events.append(("apply-worker-state", "new.example"))),
+        ),
         patch(prefix + "_call_browser_use_with_rotation", model_step),
         patch(
             prefix + "_wait_for_browser_user_control",
@@ -26419,8 +26428,8 @@ async def test_activity_cross_realm_action_redacts_reused_ref_values():
 
 
 @_in_browser_activity_context
-async def test_activity_redirected_goto_reloads_prepared_realm_once():
-    """Successful post-navigation restoration participates before the next model turn."""
+async def test_activity_redirected_goto_preserves_active_auth_transaction():
+    """Discover redirected credentials without replacing an already-started transaction."""
     import json
 
     for redirect, restoration_error in ((True, False), (False, False), (True, True)):
@@ -26430,11 +26439,11 @@ async def test_activity_redirected_goto_reloads_prepared_realm_once():
             restoration_error=restoration_error,
         )
         reloads = [event for event in events if event[0] == "reload"]
-        expected = 1 if redirect and not restoration_error else 0
-        assert len(reloads) == expected, "redirect restoration did not reload exactly once before the next model call"
-        if expected:
-            assert reloads[0][1] == "https://new.example/login"
-            assert events.index(("prepare", "new.example")) < events.index(reloads[0]) < events.index(("model", 2))
+        assert not reloads, "observed redirect restarted the active authentication transaction"
+        assert events.index(("prepare", "new.example")) < events.index(("model", 2))
+        assert (("restore", "new.example") in events) is (not redirect), (
+            "observed redirect must use inventory only; explicit navigation must still restore before navigation"
+        )
         tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
         context = json.loads(tools[0]["content"])["auth_context"]
         assert context["auth_realm"] == "new.example"
@@ -26442,6 +26451,38 @@ async def test_activity_redirected_goto_reloads_prepared_realm_once():
             assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
         if restoration_error:
             assert "18000ms" in context["credential_preparation_error"]
+
+
+@_in_browser_activity_context
+async def test_activity_observed_realm_preserves_state_and_private_inventory():
+    """A tool-observed realm change hydrates secrets without replacing live cookies."""
+    import json
+
+    contexts, _saved, events, prior, active = await _run_realm_transition_action_fixture("evaluate")
+    assert ("prepare", "new.example") in events
+    assert ("restore", "new.example") not in events, "observation overwrote the active realm's browser state"
+    assert not any(event[0] == "reload" for event in events), "observation restarted the active page"
+    tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+    context = json.loads(tools[0]["content"])["auth_context"]
+    assert context["auth_realm"] == "new.example" and context["inventory_status"] == "available"
+    assert prior not in str(contexts) and active not in str(contexts)
+
+
+@_in_browser_activity_context
+async def test_activity_inventory_rejects_unrequested_worker_state():
+    """An older or inconsistent server cannot turn an inventory read into a state write."""
+    import json
+
+    contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
+        "evaluate", unexpected_worker_state=True
+    )
+    assert not any(event[0] == "apply-worker-state" for event in events), (
+        "inventory-only preparation applied an unrequested browser-state payload"
+    )
+    tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+    context = json.loads(tools[0]["content"])["auth_context"]
+    assert context["inventory_status"] == "unknown"
+    assert "Inventory-only" in context["credential_preparation_error"]
 
 
 @_in_browser_activity_context
@@ -37083,8 +37124,16 @@ async def run_all_tests():
         test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure,
     )
     await r.record_async(
-        "activity_redirected_goto_reloads_prepared_realm_once",
-        test_activity_redirected_goto_reloads_prepared_realm_once,
+        "activity_redirected_goto_preserves_active_auth_transaction",
+        test_activity_redirected_goto_preserves_active_auth_transaction,
+    )
+    await r.record_async(
+        "activity_observed_realm_preserves_state_and_private_inventory",
+        test_activity_observed_realm_preserves_state_and_private_inventory,
+    )
+    await r.record_async(
+        "activity_inventory_rejects_unrequested_worker_state",
+        test_activity_inventory_rejects_unrequested_worker_state,
     )
     await r.record_async(
         "return_to_quarantined_realm_invalidates_other_auth_context",

@@ -9764,7 +9764,6 @@ async def _spawn_browser_agent_activity_v3_real(
                 raise RuntimeError("Approved payment card has no pending browser tool result to complete")
         failed_credential_prep_realms: Dict[str, str] = {}
         credential_preparation_error: Optional[str] = None
-        pending_credential_reload_realm: Optional[str] = None
         action_redaction_refs: Optional[List[Dict[str, str]]] = None
 
         def _credential_binding() -> tuple:
@@ -9844,6 +9843,8 @@ async def _spawn_browser_agent_activity_v3_real(
 
         async def _prepare_credentials_for_url_unquarantined(
             target_url: str,
+            *,
+            restore_browser_state: bool = True,
         ) -> Optional[Dict[str, Any]]:
             """Atomically activate every saved credential type for a new realm."""
             target_realm = auth_realm_from_url(target_url)
@@ -9859,6 +9860,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     user_id=user_id,
                     session_id=session_id,
                     target_url=target_url,
+                    **({"restore_browser_state": False} if not restore_browser_state else {}),
                 )
             except Exception as prep_error:
                 failed_credential_prep_realms[target_realm] = (
@@ -9866,6 +9868,8 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
                 raise
             realm_worker_apply = tilion_worker_apply_payload(payload)
+            if realm_worker_apply and not restore_browser_state:
+                raise RuntimeError("Inventory-only credential preparation returned browser-state mutation")
             if realm_worker_apply:
                 await apply_tilion_worker_state(playwright_browser, realm_worker_apply)
             realm_state = await build_realm_credential_state(
@@ -9922,7 +9926,9 @@ async def _spawn_browser_agent_activity_v3_real(
                 )
             return summary
 
-        async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
+        async def _prepare_credentials_for_url(
+            target_url: str, *, restore_browser_state: bool = True
+        ) -> Optional[Dict[str, Any]]:
             previous_auth_realm = auth_realm
             if _credential_binding() != active_credential_binding:
                 # A replaced browser or selected credential invalidates both
@@ -9934,21 +9940,22 @@ async def _spawn_browser_agent_activity_v3_real(
                 # Invalidate unrelated context before discovery, including a
                 # return to a quarantined realm. Missing inventory is unknown.
                 _activate_realm_credentials(unknown_realm_credential_state(target_realm), {})
+            async def prepare_target(url: str) -> Optional[Dict[str, Any]]:
+                return await _prepare_credentials_for_url_unquarantined(
+                    url, restore_browser_state=restore_browser_state
+                )
+
             return await prepare_optional_realm_credentials(
                 target_url=target_url,
                 current_auth_realm=previous_auth_realm,
                 failed_realms=failed_credential_prep_realms,
-                prepare_credentials=_prepare_credentials_for_url_unquarantined,
+                prepare_credentials=prepare_target,
             )
 
         async def _auth_context_for_url(observed_url: str) -> Dict[str, Any]:
             """Publish only safe inventory for an actual browser tool observation."""
-            nonlocal pending_credential_reload_realm
             realm = auth_realm_from_url(observed_url)
-            realm_changed = bool(realm and not auth_realm_matches_url(auth_realm, observed_url))
-            prepared = await _prepare_credentials_for_url(observed_url)
-            if realm_changed and prepared is not None and not prepared.get("credential_preparation_error"):
-                pending_credential_reload_realm = auth_realm
+            await _prepare_credentials_for_url(observed_url, restore_browser_state=False)
             if not realm:
                 # Non-web pages have no authentication inventory. In particular,
                 # about:blank must not inherit another tab's realm.
@@ -10280,41 +10287,21 @@ async def _spawn_browser_agent_activity_v3_real(
             step_timer.mark("passkey_usage")
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
 
-            # Clicks, form submissions, and server redirects can cross an auth
-            # realm without a goto tool call. Prepare that realm before the
-            # model observes or interacts with it, then reload once so newly
-            # injected cookies and origin state participate in the first page
-            # request the agent acts on.
+            # A redirect or popup has already started its authentication
+            # transaction. Refresh its credential inventory without replacing
+            # live cookies or navigating its transaction URL again.
             observed_auth_realm = auth_realm_from_url(current_url)
             observed_realm_changed = observed_auth_realm != auth_realm and not auth_realm_matches_url(
                 auth_realm, current_url
             )
-            reload_prepared_realm = bool(
-                pending_credential_reload_realm and auth_realm_matches_url(pending_credential_reload_realm, current_url)
-            )
-            pending_credential_reload_realm = None
             if _credential_binding() != active_credential_binding or observed_realm_changed:
-                prepared_realm = await _prepare_credentials_for_url(current_url)
-                reload_prepared_realm = bool(
-                    observed_realm_changed
-                    and prepared_realm is not None
-                    and not prepared_realm.get("credential_preparation_error")
+                prepared_realm = await _prepare_credentials_for_url(
+                    current_url, restore_browser_state=False
                 )
-            if reload_prepared_realm:
-                from browser_use.browser.events import NavigateToUrlEvent
-
-                reload_event = dom_service.session.event_bus.dispatch(
-                    NavigateToUrlEvent(url=current_url, wait_until="commit")
-                )
-                await reload_event
-                await reload_event.event_result(raise_if_any=True, raise_if_none=False)
-                await wait_for_navigation_ready(dom_service, url=current_url)
-                logger.info(
-                    "Reloaded page after redirected realm credential preparation",
-                    auth_realm=auth_realm,
-                    current_url=current_url,
-                )
-                continue
+                if prepared_realm is not None and not prepared_realm.get("credential_preparation_error"):
+                    # Reobserve under the newly hydrated secret-redaction
+                    # scope; the page itself remains untouched.
+                    continue
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)

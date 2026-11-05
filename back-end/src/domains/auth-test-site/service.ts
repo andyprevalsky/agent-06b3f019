@@ -8,12 +8,7 @@ import * as repo from './repo';
 import * as sites from './repoSites';
 import { AUTH_TEST_SITE_BASE_PATH, AUTH_TEST_SITE_REALM_PREFIX, fixtureApiKey } from './config';
 import { buildFixtureManifest } from './serviceManifest';
-import {
-  NEEDS_MINTED_IDENTITY,
-  planScenario,
-  type PlanContext,
-  type ScenarioPlan,
-} from './serviceScenarios';
+import { planScenario, type PlanContext, type ScenarioPlan } from './serviceScenarios';
 import { seedMintedLogin, seedPasskey, seedSavedPasswords, seedSavedSession } from './serviceSeed';
 import { recordAttempt } from './serviceSignIn';
 import {

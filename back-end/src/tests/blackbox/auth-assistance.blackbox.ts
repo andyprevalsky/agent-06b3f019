@@ -6,7 +6,6 @@
  *   npx tsx src/tests/blackbox/auth-assistance.blackbox.ts
  */
 
-import { authAssistanceNativeTests } from './auth-assistance.native-cases';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';

@@ -24,39 +24,9 @@
  *   signed_in | guest ──checkout──► order placed (exactly once per submit)
  */
 
-export const AUTH_TEST_SITE_SCENARIOS = [
-  'password_retry',
-  'saved_logins_fail',
-  'user_signs_in',
-  'all_fail',
-  'minted_otp',
-  'saved_session',
-  'stale_session',
-  'passkey',
-  'passkey_rejected',
-  'password_email_2fa',
-  'password_app_approval',
-  'account_locked',
-  'code_never_arrives',
-  'expired_code',
-  'minted_sms_otp',
-  'phone_sms_otp',
-  'magic_link',
-  'email_otp',
-  'signup',
-  'signup_already_registered',
-  'guest_purchase',
-  'member_discount_purchase',
-  'member_discount_signup_fails_purchase',
-  'paid_membership_purchase',
-  'signup_purchase',
-  'signup_fails_purchase',
-  'session_expires_at_checkout',
-  'failed_login_not_reoffered',
-  'created_account_reused',
-  'named_account',
-] as const;
-export type AuthTestSiteScenario = (typeof AUTH_TEST_SITE_SCENARIOS)[number];
+import type { AuthTestSiteScenario } from './types.scenarios';
+export { AUTH_TEST_SITE_SCENARIOS } from './types.scenarios';
+export type { AuthTestSiteScenario } from './types.scenarios';
 
 export type SignInMethod =
   | 'password'
