@@ -28546,7 +28546,7 @@ def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, c
     (common / "cloudbench-warm-deps.fp").write_text(f"{node} {python} 1000 vs_shared\n")
     fleet = fleet_source_text()
     start = fleet.index("# ── Resolve the warm machine (clone source)")
-    end = fleet.index("# Freeze one workspace patch", start)
+    end = fleet.index("# ── Preflight: will clones inherit up-to-date dep trees", start)
     init = ""
     if "# ── Capture an explicit immutable fleet source" in fleet:
         at = fleet.index("# ── Capture an explicit immutable fleet source")
