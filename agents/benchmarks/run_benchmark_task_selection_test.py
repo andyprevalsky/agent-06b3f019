@@ -733,22 +733,59 @@ def test_owned_preparation_actual_runner_preserves_capture_without_evaluation(mo
     assert vars(task) == original
 
 
-def test_owned_preparation_empty_cache_probe_is_read_only_and_private(monkeypatch):
+@pytest.mark.parametrize("url, expected", [
+    ('postgresql://private-user:private-password@localhost/victoria_wmh_recording_new',
+     {'PGHOST': 'localhost', 'PGPORT': '5432', 'PGUSER': 'private-user',
+      'PGPASSWORD': 'private-password', 'PGDATABASE': 'victoria_wmh_recording_new'}),
+    ('postgres://user%40name:pass%3A%2F%25%20word@127.0.0.1:5433/db%20with%2Fslash',
+     {'PGHOST': '127.0.0.1', 'PGPORT': '5433', 'PGUSER': 'user@name',
+      'PGPASSWORD': 'pass:/% word', 'PGDATABASE': 'db with/slash'}),
+    ('postgresql://user:p%2Bass@[::1]:5434/cache',
+     {'PGHOST': '::1', 'PGPORT': '5434', 'PGUSER': 'user', 'PGPASSWORD': 'p+ass', 'PGDATABASE': 'cache'}),
+])
+def test_owned_preparation_empty_cache_probe_is_read_only_and_private(monkeypatch, url, expected):
     from types import SimpleNamespace
     import subprocess
-    url = 'postgresql://private-user:private-password@localhost/victoria_wmh_recording_new'
     calls = []
+    monkeypatch.setenv('PGSERVICE', 'foreign-service')
+    monkeypatch.setenv('PGHOSTADDR', '203.0.113.1')
     def execute(command, **kwargs):
         calls.append((command, kwargs))
         assert url not in repr(command)
-        assert kwargs['env']['PGDATABASE'] == url
-        assert 'default_transaction_read_only=on' in kwargs['env']['PGOPTIONS']
+        assert expected['PGPASSWORD'] not in repr(command)
+        for key, value in expected.items():
+            assert kwargs['env'][key] == value
+        assert 'PGHOSTADDR' not in kwargs['env'] and 'PGSERVICE' not in kwargs['env']
+        assert kwargs['env']['PGOPTIONS'] == '-c default_transaction_read_only=on -c statement_timeout=5000'
+        assert kwargs['env']['PGCONNECT_TIMEOUT'] == '5'
         assert kwargs['timeout'] == 15
         assert command[-1] == 'SELECT COUNT(*) FROM "FastModeCacheEntry"'
-        return SimpleNamespace(returncode=0, stdout='0\n')
+        return SimpleNamespace(returncode=0, stdout='1938\n')
     monkeypatch.setattr(subprocess, 'run', execute)
-    assert rb._recording_cache_row_count(url) == 0
+    assert rb._recording_cache_row_count(url) == 1938
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('url', [
+    'postgresql://user:secret@remote.example/cache',
+    'postgresql://user:secret@localhost/cache?options=-c%20default_transaction_read_only=off',
+    'postgresql://user:secret@localhost/cache?sslmode=require',
+    'postgresql://user:secret@localhost/cache?host=remote.example',
+    'postgresql://user:secret@localhost/cache?connect_timeout=100',
+    'postgresql://user:secret@localhost/cache#fragment',
+    'postgresql://user:secret@localhost:99999/cache',
+    'postgresql://user:secret@localhost:0/cache',
+    'postgresql://localhost/cache',
+    'postgresql://user:sec%FFret@localhost/cache',
+    'postgresql://user:secret@localhost/',
+    'postgresql://user:sec%00ret@localhost/cache',
+])
+def test_owned_preparation_cache_probe_rejects_unsupported_uri_before_connect(monkeypatch, url):
+    import subprocess
+    monkeypatch.setattr(subprocess, 'run', lambda *a, **k: pytest.fail('invalid connection attempted'))
+    with pytest.raises(ValueError) as error:
+        rb._recording_cache_row_count(url)
+    assert 'secret' not in str(error.value) and url not in str(error.value)
 
 
 def test_owned_preparation_abort_cleanup_failure_keeps_primary(monkeypatch, tmp_path):

@@ -17393,11 +17393,36 @@ def _preparation_cost_evidence(data: dict) -> dict:
 
 
 def _recording_cache_row_count(url: str) -> int:
-    # Connection material is environment-only and never included in diagnostics.
+    # PGDATABASE is a database name, not a connection URI. Decode explicit
+    # libpq fields; never forward URI options that could override read-only.
+    try:
+        parsed = urlparse(url)
+        if (parsed.scheme not in {"postgres", "postgresql"}
+                or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+                or parsed.query or parsed.fragment or not parsed.username
+                or not parsed.path.startswith("/") or parsed.path == "/"):
+            raise ValueError
+        port = parsed.port if parsed.port is not None else 5432
+        if not 1 <= port <= 65535:
+            raise ValueError
+        fields = {
+            "PGHOST": parsed.hostname,
+            "PGPORT": str(port),
+            "PGUSER": unquote(parsed.username, errors="strict"),
+            "PGPASSWORD": unquote(parsed.password or "", errors="strict"),
+            "PGDATABASE": unquote(parsed.path[1:], errors="strict"),
+        }
+        if any("\0" in value for value in fields.values()):
+            raise ValueError
+    except (ValueError, UnicodeError):
+        raise ValueError("Unsupported owned recording cache connection URI") from None
+    # Ignore inherited libpq routing/service settings. All connection material
+    # stays in the child environment and never appears in argv or diagnostics.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
     result = subprocess.run(
         ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c",
          'SELECT COUNT(*) FROM "FastModeCacheEntry"'],
-        env={**os.environ, "PGDATABASE": url, "PGCONNECT_TIMEOUT": "5",
+        env={**env, **fields, "PGCONNECT_TIMEOUT": "5",
              "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=5000"},
         capture_output=True, text=True, timeout=15,
     )
