@@ -90,7 +90,7 @@ from providers.rose import (
     gpt_auth_from_token,
     pool_for_model,
 )
-from providers.rose.errors import RoseAllFailed
+from providers.rose.errors import RoseAllFailed, RoseRefusalError
 from providers.rose.inter_agent_context import inter_agent_message, is_inter_agent_message
 from providers.rose.policy import anthropic_family_excluded, benchmark_compute_token_type
 from providers.rose.schema import (
@@ -4996,6 +4996,9 @@ async def _call_llm_verifier(
                 stream_usage = dict(chunk.data)
             elif kind == "done":
                 pass
+    except RoseRefusalError:
+        # A provider refusal invalidates any preceding partial verdict.
+        raise
     except RoseError as e:
         provider_error = e
         logger.warning(
