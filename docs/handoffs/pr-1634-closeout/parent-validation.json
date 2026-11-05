@@ -1,0 +1,56 @@
+{
+  "format": "PR1634-PARENT-CLOSEOUT-VALIDATION-V1",
+  "observed_at": "2026-11-05T08:38:17.500836+00:00",
+  "deployed_source": "172328eb96b9bf2a6b1ff6b0e81d1076d55253da",
+  "checked_policy_source": "49dba66a958a7ddf7faff117e449f3f079e426f8",
+  "documentation_contract_tests": {
+    "command": "python3 scripts/tests/run-deploy-structural-gates.test.py StructuralGateDocumentationTests",
+    "passed": 8,
+    "failed": 0,
+    "elapsed_seconds": 0.395
+  },
+  "archive_index_check": {
+    "unique_objects": 284,
+    "member_instances": 778742,
+    "original_member_bytes": 263121305320,
+    "ciphertext_bytes": 168576533917,
+    "all_four_verification_flags": true,
+    "all_captured_manifest_sha256_matches": true,
+    "all_member_counts_and_byte_sums_match": true,
+    "duplicate_object_identities_consistent": true,
+    "method": "Independent local receipt and captured-manifest audit; authenticated remote payload verification was performed by the preservation producer."
+  },
+  "content_coverage": {
+    "recorded_content_entries": 1333936,
+    "bound_content_entries": 1333936,
+    "producer_selected_paths": 599153,
+    "uncovered_records": 0,
+    "missing_selected_paths": 0,
+    "unverified_receipts": 0,
+    "raw_invalid_journal_records": 2,
+    "qualified_verified_overrides": 2,
+    "unreconciled_invalid_records": 0
+  },
+  "scope": "Records-only closeout. Does not relabel the original deployment benchmark failure, claim recovery of previously lost data, or perform devbox deletion.",
+  "private_proof_index_check": {
+    "unique_roles": 55,
+    "authenticated_packet_manifests": 11,
+    "all_exact_member_size_sha256_pointers_match": true
+  },
+  "final_catalog_check": {
+    "passed": true,
+    "exact_canonical_object_and_sidecar_identity_matches": 284,
+    "historical_receipt_v3_preserved": true,
+    "initial_local_checker_error": "An assumed uniform .receipt.aesgcm suffix rejected a valid historical .receipt-v3.aesgcm. Corrected to compare exact canonical receipt identities; no archive checks changed."
+  },
+  "final_documentation_contract_tests": {
+    "passed": 8,
+    "failed": 0,
+    "elapsed_seconds": 0.336
+  },
+  "public_packet_checks": {
+    "known_managed_credential_values_absent": true,
+    "json_parse": true,
+    "git_diff_check": true
+  }
+}
