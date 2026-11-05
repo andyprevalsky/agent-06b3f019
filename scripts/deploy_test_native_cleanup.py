@@ -618,6 +618,10 @@ def validate(receipt, owner, proof):
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
     source_base, source_patch = execution_source_binding(adapter, request, root, runs, document, bound)
+    legacy_isolated=False
+    if proof.get('compatibility') == 'f87-reserve-abort-isolation-v1':
+        from deploy_test_f87_isolation import validate as validate_f87
+        legacy_isolated=validate_f87(receipt,adapter,proof,root,runs,participants,document,bound,tree)
     for fleet in sorted(participants):
         benches = json.loads(bound(fleet / '_batch/benches.json'))
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
@@ -643,6 +647,8 @@ def validate(receipt, owner, proof):
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
         if failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
             pass  # Positive linked infra-probe + sealed zero-resource release above; absence alone proves nothing.
+        elif legacy_isolated and not provenance_path.exists() and not matrix_path.exists():
+            pass  # Exact old debt stays unverified; only isolated execution is admitted.
         else:
             if not provenance_path.exists() and not matrix_path.exists():
                 need(life['controller_exit_code'] in (1,129,130,143) and fleet in parents, 'preallocation exit/parent')

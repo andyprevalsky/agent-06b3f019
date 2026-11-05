@@ -4470,4 +4470,65 @@ class LegacyStartupIsolation(StartupCleanup):
         self.seal_files()
         with self.assertRaisesRegex(ValueError,'unaudited legacy producer'):self.validate()
 
+
+class F87IsolatedCompatibility(unittest.TestCase):
+    def setUp(self):
+        import deploy_test_f87_isolation as m
+        import hashlib
+        self.m=m;self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);self.runs=self.root/'scope/runs';self.runs.mkdir(parents=True)
+        self.campaign=self.root/'scope/campaigns/deploy-scope';self.campaign.mkdir(parents=True)
+        self.participants=set();self.jobs=[]
+        self.hub=self.runs/'_hub/fixture.owner';self.hub.parent.mkdir()
+        self.hub.write_text('pid=123456\npid_start=birth\nargv_sha256=argv\n')
+        self.tree=lambda path:hashlib.sha256(b''.join(str(p.relative_to(path)).encode()+p.read_bytes() for p in sorted(path.rglob('*')) if p.is_file())).hexdigest()
+        for i in range(10):
+            pid=200000+i;fleet=self.runs/('fixture-'+str(pid));self.participants.add(fleet)
+            self.jobs.append({'controller_pid':pid})
+            owner=str(i)*32;local=fleet/'teardown-ownership';local.mkdir(parents=True)
+            (local/'meta').write_text('hub_owner_file='+str(self.hub)+'\n')
+            for name in ['owned-clones.ids','owned-clones.names']:(local/name).write_bytes(b'')
+            canonical=self.root/'.git/cloudbench-fleet-audits'/owner
+            __import__('shutil').copytree(local,canonical)
+            c.write(fleet/'_batch/lifecycle.json',{'fleet_owner_token':owner,'audit_sha256':self.tree(local)})
+        c.write(self.campaign/'summary.json',{'jobs':self.jobs})
+        c.write(self.campaign/'shared-relay-location.json',{'directory':str(self.root/'relay')})
+        pins={str(p.relative_to(self.root)):c.sha_file(p) for p in [self.campaign/'summary.json',self.hub,*self.runs.glob('*/_batch/lifecycle.json')]}
+        self.pin=patch.object(m,'PINNED',pins);self.pin.start();self.addCleanup(self.pin.stop)
+        self.ident=patch.object(m,'hub_identity',return_value=('birth','argv'));self.addCleanup(self.ident.stop);self.ident=self.ident.start()
+        self.os=lambda pids,scopes:dict(boot_id='boot',uid=1,pids=sorted(pids),scopes=sorted(scopes),matched=[123456],unreadable=[],observed_at=2)
+        self.observer=patch.object(m,'observe',side_effect=self.os);self.addCleanup(self.observer.stop);self.observer=self.observer.start()
+        self.obs=self.root/'observation.json';c.write(self.obs,{'schema':'f87-isolated-observation-v1','observed_at':2,'os':self.os({123456,*[j['controller_pid'] for j in self.jobs]},[str(self.runs.parent),str(self.root/'relay')])})
+        self.receipt={'source':{'head':m.SOURCE},'token':m.TOKEN,'finished_at':1}
+        self.proof={'purpose':'isolated-validation','layout':'campaign-v1','compatibility':'f87-reserve-abort-isolation-v1','receipt_sha256':m.RECEIPT_SHA,'confirmed_at':3,'investigator_observation':str(self.obs)}
+    def verify(self):
+        return self.m.validate(self.receipt,{},self.proof,self.root,self.runs,self.participants,c.read,lambda p:Path(p).read_bytes(),self.tree)
+    def test_exact_execution_only_evidence_is_admitted(self):self.assertTrue(self.verify())
+    def test_wrong_authority_or_original_bytes_are_refused(self):
+        for key,value in [('purpose',None),('receipt_sha256','bad'),('compatibility','other')]:
+            original=self.proof[key];self.proof[key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):self.verify()
+            self.proof[key]=original
+        self.receipt['source']['head']='0'*40
+        with self.assertRaises(ValueError):self.verify()
+        self.receipt['source']['head']=self.m.SOURCE
+        (self.campaign/'summary.json').write_text('{}')
+        with self.assertRaises(ValueError):self.verify()
+    def test_unknown_execution_changed_hub_and_retroactive_provenance_refused(self):
+        self.observer.side_effect=lambda p,s:{**self.os(p,s),'matched':[123456,999]}
+        with self.assertRaises(ValueError):self.verify()
+        self.observer.side_effect=lambda p,s:{**self.os(p,s),'unreadable':[{'pid':999}]}
+        with self.assertRaises(ValueError):self.verify()
+        self.observer.side_effect=self.os;self.ident.return_value=('other-birth','argv')
+        with self.assertRaises(ValueError):self.verify()
+        self.ident.return_value=('birth','argv')
+        fleet=next(iter(self.participants));(fleet/'execution-provenance.json').write_text('{}')
+        with self.assertRaises(ValueError):self.verify()
+    def test_resource_or_stale_observation_refused(self):
+        c.write(self.obs,{'schema':'f87-isolated-observation-v1','observed_at':0,'os':{}})
+        with self.assertRaises(ValueError):self.verify()
+        c.write(self.obs,{'schema':'f87-isolated-observation-v1','observed_at':2,'os':self.os({123456,*[j['controller_pid'] for j in self.jobs]},[str(self.runs.parent),str(self.root/'relay')])})
+        fleet=next(iter(self.participants));(fleet/'teardown-ownership/fresh').mkdir();(fleet/'teardown-ownership/fresh/claim').write_text('owned')
+        with self.assertRaises(ValueError):self.verify()
+
 if __name__ == '__main__': unittest.main()
