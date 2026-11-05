@@ -16,6 +16,16 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
 
+class EnvironmentIdentity(unittest.TestCase):
+    def test_tool_call_nonce_is_not_runtime_configuration(self):
+        with patch.dict(os.environ, {"CODEX_TOOL_CALL_ID": "call-a", "BACKEND_API_KEY": "test-key-a"}, clear=True):
+            initial = c.environment_digest()
+            os.environ["CODEX_TOOL_CALL_ID"] = "call-b"
+            self.assertEqual(initial, c.environment_digest())
+            os.environ["BACKEND_API_KEY"] = "test-key-b"
+            self.assertNotEqual(initial, c.environment_digest())
+
+
 class Cycle(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
