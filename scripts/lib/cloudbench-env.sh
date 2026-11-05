@@ -2855,3 +2855,31 @@ for name in ("TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"):
     print("export %s=%s" % (name, shlex.quote(values[name])))
 PY
 }
+
+# Guest-only Node launch policy; never rewrite production or staged dotenv blobs.
+cloudbench_kernel_proxy_node_options() {
+    local guard="$1/back-end/scripts/blackbox-kernel-proxy-custody.cjs"
+    if [ ! -f "$guard" ] || [ ! -r "$guard" ] || [ -L "$guard" ]; then
+        echo '❌ cloud guest Kernel proxy custody preload is missing or unsafe' >&2
+        return 1
+    fi
+    case "$guard" in
+        *'"'*|*'\'*|*$'\n'*|*$'\r'*)
+            echo '❌ cloud guest Kernel proxy custody path cannot be encoded safely' >&2
+            return 1 ;;
+    esac
+    printf '%s--require="%s"\n' "${NODE_OPTIONS:+$NODE_OPTIONS }" "$guard"
+}
+
+# Project a controller's existing custody preload into a fixed guest policy bit.
+# Never forward its checkout-specific NODE_OPTIONS path to another machine.
+cloudbench_kernel_proxy_custody_policy() {
+    case "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" in
+        0|1) ;;
+        *) echo '❌ invalid cloud guest Kernel proxy custody policy' >&2; return 1 ;;
+    esac
+    case "${NODE_OPTIONS:-}" in
+        *blackbox-kernel-proxy-custody.cjs*) printf '1\n' ;;
+        *) printf '%s\n' "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" ;;
+    esac
+}

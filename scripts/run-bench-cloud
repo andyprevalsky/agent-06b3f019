@@ -111,6 +111,7 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+CLOUDBENCH_KERNEL_PROXY_CUSTODY="$(cloudbench_kernel_proxy_custody_policy)" || exit 1
 # Every guest refuses bench-app secrets lacking the committed guest namespace,
 # whichever launcher (or older checkout) staged them; a launcher may bind its own.
 CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"
@@ -5333,6 +5334,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
+        --env "CLOUDBENCH_KERNEL_PROXY_CUSTODY=$CLOUDBENCH_KERNEL_PROXY_CUSTODY"
         --env CODEX_AUTH_PATH=
         --env CLOUDBENCH_CODEX_AUTH_HELPER=/cloudbench-codex-auth.py
         --env "CLOUDBENCH_CODEX_AUTH_SHA256=$CODEX_AUTH_SHA256"
@@ -5817,6 +5819,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo '}'
     echo "chmod +x /data/cloudbench-run.sh"
     echo "export REF=$(printf '%q' "$BENCH_REF")"
+    echo "export CLOUDBENCH_KERNEL_PROXY_CUSTODY=$CLOUDBENCH_KERNEL_PROXY_CUSTODY"
     echo "export CLOUDBENCH_GITHUB_TOKEN_B64=$(printf '%q' "$CONTROLLER_GITHUB_TOKEN_B64")"
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
