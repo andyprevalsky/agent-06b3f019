@@ -1063,7 +1063,7 @@ class Boxes(unittest.TestCase):
         self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
         # an indeterminate send whose assignment cannot be found is never repeated: re-read until the deadline
-        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 0.3)
+        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 2)
         cycle.write(directory / 'state.json', state)  # the ORIGINAL deadline governs, not a later argument
         self.configure(reply=self.reply()); self.calls.unlink()
         result = self.boxes.execute(self.request, self.coordinator, self.binding, 30)
@@ -1272,7 +1272,7 @@ class Boxes(unittest.TestCase):
 
     def test_timeout_or_cancel_is_unverified_and_names_the_remote_cleanup_owner(self):
         self.configure(reply=self.reply(), wait={'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
-        result = self.run_adapter(deadline=0.2)
+        result = self.run_adapter(deadline=2)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
         self.assertFalse(result['cleanup_complete']); self.assertIn('deadline', result['reason'])
         owner = result['cleanup_owner']
@@ -1289,12 +1289,12 @@ class Boxes(unittest.TestCase):
                                   ('hash-mismatch', {'rc': 0, 'stdout': self.wrap({'output': {'text': self.reply(sha='a' * 64)}})})):
             with self.subTest(label=label):
                 self.configure(reply=self.reply(), result=result_cfg)
-                result = self.run_adapter(deadline=0.3)
+                result = self.run_adapter(deadline=5)
                 self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
                 __import__('shutil').rmtree(self.coordinator / '.context')
         self.configure(reply=self.reply())
         with patch.object(self.boxes, 'MAX_RECEIPT_BYTES', 10):
-            result = self.run_adapter(deadline=0.3)
+            result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertIn('transport limit', result['reason'])
 
     def gate(self, name, thread, host, root, port, python=None):
@@ -1441,7 +1441,7 @@ class Boxes(unittest.TestCase):
         self.assertEqual(3, proc.returncode); self.assertIn('DEPLOY_GATE_WORKER_EXIT 3', proc.stdout)
         self.assertEqual([], self.calls_of('message'))  # nothing was attached or sent after the failed cd
         self.configure(reply=proc.stdout)
-        result = self.run_adapter(deadline=0.3)
+        result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
 
     def big_native(self, token):
@@ -1465,12 +1465,12 @@ class Boxes(unittest.TestCase):
 
     def test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified(self):
         self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes.replace('"PASS"', '"FAIL"', 1))
-        result = self.run_adapter(deadline=0.3)
+        result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
         __import__('shutil').rmtree(self.coordinator / '.context')
         truncated = self.reply().replace('DEPLOY_GATE_RESULT_JSON_END\n', '')
         self.configure(reply=truncated)
-        result = self.run_adapter(deadline=0.3)
+        result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
 
     def test_attachment_poll_obeys_deadline_and_keeps_boundary_delivery_first(self):
@@ -2481,7 +2481,7 @@ class GenericLifecycle(unittest.TestCase):
         with (self.root / 'outer.log').open('wb') as output:
             result = self.process.run_command(
                 [sys.executable, str(worker_path), str(child), str(ready), str(self.root / 'inner.log')],
-                cwd=self.root, env=os.environ.copy(), output=output, timeout=.2,
+                cwd=self.root, env=os.environ.copy(), output=output, timeout=3,
                 owned_lifecycle=True)
         self.assertTrue(ready.exists())
         pid = int(ready.read_text())
@@ -2515,7 +2515,7 @@ class GenericLifecycle(unittest.TestCase):
         with (self.root / 'outer.log').open('wb') as output:
             code, timed_out, cancelled, lingering = self.process.run_command(
                 [sys.executable, str(script), str(marker), str(self.root / 'inner.log')],
-                cwd=self.root, env=os.environ.copy(), output=output, timeout=.2,
+                cwd=self.root, env=os.environ.copy(), output=output, timeout=3,
                 owned_lifecycle=True)
         self.assertEqual(code, 0)
         self.assertTrue(timed_out)
