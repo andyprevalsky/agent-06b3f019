@@ -146,6 +146,10 @@ if resume is None and os.environ.get("STUB_MODE") == "loop":
                              "sh", str(home / "counter.txt")])
     emit({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": "toolu_loop", "name": "Bash", "input": {"command": "counter loop"}}]}})
+    if os.environ.get("STUB_LOOP_AUTH_FAILED"):
+        # The sandbox's login is rejected mid-run (structured SDK error, as in auth_expired).
+        emit({"type": "assistant", "error": "authentication_failed", "message": {"content": [
+            {"type": "text", "text": "Failed to authenticate. API Error: 401"}]}})
     if os.environ.get("STUB_LOOP_RATE_LIMIT"):
         # The subscription's limit hits while the tool runs (the parent pauses on it).
         emit({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour",
@@ -324,6 +328,8 @@ class _Backend:
         self.resize_after = resize_after
         self.resize_calls: list[tuple] = []
         self.resized_ws_url: str | None = None
+        # history_events the create response reports (T8 live attach); 0 = a fresh CLI.
+        self.history_events = 0
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -359,6 +365,8 @@ class _Backend:
             "uploaded_files": [],
             "code_session_id": code_session_id,
             "resumed_from": "paused_sandbox" if len(self.created) > 1 else "new",
+            # A spawn attached to a live CLI: the ws-server's events before its goal turn.
+            **({"history_events": self.history_events} if self.history_events else {}),
             "branch": "rose/write-answer-0a1b2c3d",
             "base_branch": None,
             "merge_target": None,
@@ -691,6 +699,9 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches(*, first
 
     session_home = _SessionHome(extra_env={"STUB_FIRST_START_DELAY_S": str(first_start_delay_s)})
     backend = _Backend(session_home, resize_after=2)
+    # The first spawn attached to a live CLI with a long history (T8); the
+    # resized sandbox's ws-server is new, so none of its events are history.
+    backend.history_events = 10_000
     try:
         with backend.patched(clock=_virtual_clock(2000.0)):
             first = await asyncio.wait_for(
@@ -702,6 +713,7 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches(*, first
         assert moved["task_id"] == "task-resized" and moved["ws_url"] == backend.resized_ws_url, moved
         assert moved["sandbox_size"] == {"cpu": 2, "memory_gb": 8}, moved
         assert moved["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", moved
+        assert not moved.get("history_events"), f"a resized sandbox starts with no history: {moved}"
         assert backend.resize_calls == [("task-1", _RESIZE_REQUEST_ID, "claude")], backend.resize_calls
         assert backend.closed == [], f"the backend's resize owns the old sandbox: {backend.closed}"
         rows = [m for m in backend.messages if m.get("action_type") == "environment_resized"]
@@ -2098,7 +2110,9 @@ def _counter(session_home: _SessionHome) -> list[int]:
     return [int(line) for line in path.read_text().split()] if path.exists() else []
 
 
-async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(*, rate_limited: bool = False):
+async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(
+    *, rate_limited: bool = False, auth_failed: bool = False
+):
     """T8: a resumed spawn attaches to the CLI still running in the paused sandbox.
 
     Spawn 1 runs a Bash loop writing counter.txt; the user pauses (activity
@@ -2108,6 +2122,8 @@ async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(*,
     completes with every loop line written once — no restart, no ``--resume``.
     ``rate_limited``: spawn 1 pauses on a usage limit instead; spawn 2 resumes on
     the same (reset) credential and must not act on spawn 1's limit event.
+    ``auth_failed``: spawn 1's login is rejected; spawn 2 attaches and must not
+    report spawn 1's rejection as its own credential feedback.
     """
     from temporalio.testing import ActivityEnvironment
 
@@ -2121,6 +2137,7 @@ async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(*,
             "STUB_MODE": "loop",
             "STUB_LOOP_LINES": str(lines),
             **({"STUB_LOOP_RATE_LIMIT": "1"} if rate_limited else {}),
+            **({"STUB_LOOP_AUTH_FAILED": "1"} if auth_failed else {}),
             # Spawn 1's ws-server addresses task-1 (backend e2b.ts sets this per task).
             "CODE_SESSION_TURN_TOKEN": code_session_turn_token("task-1"),
         }
@@ -2130,12 +2147,18 @@ async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(*,
         with backend.patched():
             env = ActivityEnvironment()
             first = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_activity_args()))
-            if not rate_limited:  # a usage limit pauses spawn 1 by itself
+            if not rate_limited and not auth_failed:  # these pause spawn 1 by themselves
                 await _wait_until(lambda: len(_counter(session_home)) >= 5, "the loop to start writing")
                 env.cancel()  # the user pauses the root
             paused = await asyncio.wait_for(first, timeout=15)
-        expected_close = "usage_limit" if rate_limited else "cancel"
-        assert [call.get("reason") for call in backend.closed] == [expected_close], backend.closed
+        if auth_failed:
+            assert len(backend.closed) == 1, backend.closed
+            assert backend.credential_feedback and backend.credential_feedback[0], (
+                f"spawn 1 reports its rejected login: {backend.credential_feedback}"
+            )
+        else:
+            expected_close = "usage_limit" if rate_limited else "cancel"
+            assert [call.get("reason") for call in backend.closed] == [expected_close], backend.closed
         assert len(backend.usage_reports) == (1 if rate_limited else 0), backend.usage_reports
         frozen = len(_counter(session_home))
         await asyncio.sleep(0.4)
@@ -2164,7 +2187,12 @@ async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(*,
         assert any(f"answer is {lines} lines" in str(text) for text in results) or any(
             f"answer is {lines} lines" in json.dumps(e) for e in backend.verified_events[-1]
         ), backend.verified_events[-1]
-        assert paused["status"] == ("usage_limit" if rate_limited else "cancelled"), paused
+        if auth_failed:
+            assert not backend.credential_feedback[-1], (
+                f"spawn 1's rejected login is history to spawn 2: {backend.credential_feedback}"
+            )
+        else:
+            assert paused["status"] == ("usage_limit" if rate_limited else "cancelled"), paused
         assert len(backend.usage_reports) == (1 if rate_limited else 0), (
             f"spawn 1's limit is history to spawn 2: {backend.usage_reports}"
         )
@@ -2175,6 +2203,11 @@ async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(*,
 async def test_usage_limit_pause_then_resume_attach_ignores_the_old_limit():
     """T8 + T2: spawn 1 pauses on a usage limit; spawn 2 attaches on the reset credential and completes."""
     await test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(rate_limited=True)
+
+
+async def test_rejected_login_pause_then_resume_attach_reports_no_old_feedback():
+    """T8 + T2: spawn 1's login is rejected; spawn 2 attaches and reports no credential feedback of its own."""
+    await test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(auth_failed=True)
 
 
 async def _run_all_tests():
@@ -2197,6 +2230,10 @@ async def _run_all_tests():
     await r.record_async(
         "usage_limit_pause_resume_attach_ignores_old_limit",
         test_usage_limit_pause_then_resume_attach_ignores_the_old_limit,
+    )
+    await r.record_async(
+        "rejected_login_pause_resume_attach_no_old_feedback",
+        test_rejected_login_pause_then_resume_attach_reports_no_old_feedback,
     )
     await r.record_async(
         "resize_request_moves_session_and_reattaches",

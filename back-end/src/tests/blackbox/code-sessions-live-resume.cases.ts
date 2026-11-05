@@ -231,7 +231,8 @@ type AttachLive = (
     text: string;
     envs: Record<string, string>;
     credentialKeys: readonly string[];
-  }
+  },
+  turnToken?: (taskId: string) => string
 ) => Promise<{ attached: boolean; reason: string; historyEvents?: number }>;
 
 function attachLiveCodeCli(): AttachLive {
@@ -437,6 +438,69 @@ wss.on('connection', (ws) => ws.on('message', (raw) => {
       }
     }
   });
+
+  for (const failure of [
+    {
+      label: 'no-token',
+      why: 'no turn token can be minted (BACKEND_API_KEY unset)',
+      // codeSessionTurnToken's own error, injected: the env is shared by concurrent cases.
+      turnToken: (): string => {
+        throw new Error('BACKEND_API_KEY is required to address a code session');
+      },
+      failLookup: false,
+      reason: 'attach_error: BACKEND_API_KEY is required to address a code session',
+    },
+    {
+      label: 'lookup-error',
+      why: 'the previous-task lookup fails',
+      turnToken: undefined,
+      failLookup: true,
+      reason: 'attach_error: transient lookup failure',
+    },
+  ]) {
+    test(`a resume falls back to the restart path when ${failure.why}`, async () => {
+      process.env.BACKEND_API_KEY ??= 'code-sessions-live-resume-key';
+      const { home, row, previous, fake } = await pausedSession(ctx, failure.label);
+      const server = await startLiveServer(home, previous.id);
+      const delegate = prisma.claudeCodeSession as unknown as {
+        findFirst: (args: { where?: { codeSessionId?: string } }) => Promise<unknown>;
+      };
+      const findFirst = delegate.findFirst;
+      if (failure.failLookup) {
+        // Only this session's lookup fails; concurrent cases keep the real one.
+        delegate.findFirst = (args) =>
+          args.where?.codeSessionId === row.id
+            ? Promise.reject(new Error('transient lookup failure'))
+            : findFirst.call(prisma.claudeCodeSession, args);
+      }
+      try {
+        await until('the loop to start writing', () => counterLines(server.dir).length >= 3);
+        const attached = await attachLiveCodeCli()(
+          fake.sandbox,
+          row,
+          {
+            provider: 'claude',
+            wsUrl: `ws://127.0.0.1:${server.port}`,
+            taskId: randomUUID(),
+            text: 'Task:\nContinue',
+            envs: { ANTHROPIC_API_KEY: 'stub-key' },
+            credentialKeys: CLAUDE_KEYS,
+          },
+          failure.turnToken
+        );
+        assert.deepEqual(attached, { attached: false, reason: failure.reason });
+        await until('the stale ws-server to stop', () => !server.alive(), 8_000);
+        assert.equal(turns(server.dir).length, 1, 'nothing reached the old CLI');
+      } finally {
+        delegate.findFirst = findFirst;
+        try {
+          process.kill(-(server.child.pid as number), 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    });
+  }
 
   for (const scenario of [
     {

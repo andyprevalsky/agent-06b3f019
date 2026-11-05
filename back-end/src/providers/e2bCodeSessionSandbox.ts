@@ -385,58 +385,18 @@ export async function attachLiveCodeCli(
     envs: Record<string, string | undefined>;
     credentialKeys: readonly string[];
     configKeys?: readonly string[];
-  }
+  },
+  turnToken: (taskId: string) => string = codeSessionTurnToken
 ): Promise<{ attached: boolean; reason: string; historyEvents?: number }> {
-  const previous =
-    codeSession !== null
-      ? await prisma.claudeCodeSession.findFirst({
-          where: { codeSessionId: codeSession.id, sandboxId: sandbox.sandboxId },
-          orderBy: { createdAt: 'desc' },
-          select: { id: true, codeProvider: true },
-        })
-      : null;
-  let reason = 'no_previous_task';
-  if (previous !== null && (previous.codeProvider ?? 'claude') === params.provider) {
-    const { envs } = params;
-    const speed = envs.CLAUDE_CODE_SPEED;
-    const settings: CodeTurnSettings = {
-      ...(envs.CLAUDE_CODE_MODEL ? { model: envs.CLAUDE_CODE_MODEL } : {}),
-      ...(envs.CLAUDE_CODE_EFFORT ? { effort: envs.CLAUDE_CODE_EFFORT } : {}),
-      ...(speed === 'fast' || speed === 'standard' ? { speed } : {}),
-    };
-    const delivery = await deliverUserTurnToCodeSession({
-      wsUrl: params.wsUrl,
-      taskId: previous.id,
-      turnId: spawnTurnId(codeSession, params.taskId),
-      text: params.text,
-      sender: 'agent',
-      settings,
-      attach: {
-        token: codeSessionTurnToken(params.taskId),
-        credential: credentialEnvDigest(params.credentialKeys, envs),
-        config: Object.fromEntries(
-          (params.configKeys ?? []).map((key) => [key, envDigest(envs[key])])
-        ),
-      },
-    });
-    const reached = delivery.status === 'delivered' || delivery.status === 'duplicate';
-    if (reached && delivery.attached === true) {
-      log.info('Spawn attached to the live code-session CLI', {
-        codeSessionId: codeSession?.id,
-        previousTaskId: previous.id,
-        taskId: params.taskId,
-        status: delivery.status,
-        ignoredConfig: (delivery.ignored_config ?? []).join(','),
-      });
-      return {
-        attached: true,
-        reason: delivery.status,
-        ...(delivery.history_events !== undefined
-          ? { historyEvents: delivery.history_events }
-          : {}),
-      };
-    }
-    reason = reached ? 'attach_unsupported' : (delivery.reason ?? delivery.status);
+  let reason: string;
+  try {
+    const live = await deliverGoalToLiveCli(sandbox, codeSession, params, turnToken);
+    if (live.attached) return live;
+    reason = live.reason;
+  } catch (error) {
+    // No turn token (BACKEND_API_KEY unset), a failed task lookup or delivery:
+    // the restart path works without any of them, as before live attach.
+    reason = `attach_error: ${error instanceof Error ? error.message : String(error)}`;
   }
   log.info('Restarting the code-session CLI on resume', {
     codeSessionId: codeSession?.id,
@@ -445,6 +405,65 @@ export async function attachLiveCodeCli(
   });
   await stopStaleWsServer(sandbox);
   return { attached: false, reason };
+}
+
+/** One attach attempt; throws on a missing token or a failed lookup (the caller restarts). */
+async function deliverGoalToLiveCli(
+  sandbox: Sandbox,
+  codeSession: CodeSessionRow | null,
+  params: Parameters<typeof attachLiveCodeCli>[2],
+  turnToken: (taskId: string) => string
+): Promise<{ attached: boolean; reason: string; historyEvents?: number }> {
+  if (codeSession === null) return { attached: false, reason: 'no_previous_task' };
+  const previous = await prisma.claudeCodeSession.findFirst({
+    where: { codeSessionId: codeSession.id, sandboxId: sandbox.sandboxId },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, codeProvider: true },
+  });
+  if (previous === null || (previous.codeProvider ?? 'claude') !== params.provider) {
+    return { attached: false, reason: 'no_previous_task' };
+  }
+  const { envs } = params;
+  const speed = envs.CLAUDE_CODE_SPEED;
+  const settings: CodeTurnSettings = {
+    ...(envs.CLAUDE_CODE_MODEL ? { model: envs.CLAUDE_CODE_MODEL } : {}),
+    ...(envs.CLAUDE_CODE_EFFORT ? { effort: envs.CLAUDE_CODE_EFFORT } : {}),
+    ...(speed === 'fast' || speed === 'standard' ? { speed } : {}),
+  };
+  const delivery = await deliverUserTurnToCodeSession({
+    wsUrl: params.wsUrl,
+    taskId: previous.id,
+    turnId: spawnTurnId(codeSession, params.taskId),
+    text: params.text,
+    sender: 'agent',
+    settings,
+    attach: {
+      token: turnToken(params.taskId),
+      credential: credentialEnvDigest(params.credentialKeys, envs),
+      config: Object.fromEntries(
+        (params.configKeys ?? []).map((key) => [key, envDigest(envs[key])])
+      ),
+    },
+  });
+  const reached = delivery.status === 'delivered' || delivery.status === 'duplicate';
+  if (!reached || delivery.attached !== true) {
+    return {
+      attached: false,
+      reason: reached ? 'attach_unsupported' : (delivery.reason ?? delivery.status),
+    };
+  }
+  log.info('Spawn attached to the live code-session CLI', {
+    codeSessionId: codeSession.id,
+    previousTaskId: previous.id,
+    taskId: params.taskId,
+    status: delivery.status,
+    ignoredConfig: (delivery.ignored_config ?? []).join(','),
+  });
+  return {
+    attached: true,
+    reason: delivery.status,
+    ...(delivery.history_events !== undefined ? { historyEvents: delivery.history_events } : {}),
+  };
 }
 
 /**
