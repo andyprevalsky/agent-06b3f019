@@ -25,6 +25,8 @@ from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from helpers.activity_heartbeat import safe_heartbeat
+from helpers.image_count_retry import collect_with_image_count_retry, stream_with_image_count_retry
+from helpers.screenshot_history import screenshot_context_text
 from helpers.agent_addressing import planned_task_name
 from helpers.attachment_context import (
     AttachmentContextLimitError,
@@ -1212,13 +1214,15 @@ def build_verifier_context_messages(
                 )
             if truncated:
                 _tool_result_budget_hits += 1
-            # Aggregate budget exhausted → empty text; skip append so later
-            # tools cannot keep growing the verifier prompt past the cap.
-            if not tool_text:
-                continue
-            _tool_result_chars_used += len(tool_text)
-
             screenshot_b64 = metadata.get("screenshot_b64")
+            # Text budgeting must not silently remove an ordinary screenshot.
+            # Only a provider image-count rejection may reduce the image list.
+            if not tool_text:
+                if screenshot_b64:
+                    tool_text = screenshot_context_text(metadata)
+                else:
+                    continue
+            _tool_result_chars_used += len(tool_text)
             if screenshot_b64:
                 # Multimodal path. The text body must NOT include the b64 blob —
                 # we already emit it as an image block. spawn_browser_agent_v3
@@ -2183,6 +2187,12 @@ def convert_context_to_messages(
                     sections.append(f"Structured Response: {json.dumps(metadata['structured_response'])}")
                 system_content = _append_llm_context_sections_preserving_reference(system_content, sections)
                 messages.append({"role": "system", "content": system_content})
+            screenshot = metadata.get("screenshot_b64")
+            if isinstance(screenshot, str) and screenshot:
+                messages.append({"role": "user", "content": [
+                    {"type": "text", "text": screenshot_context_text(metadata)},
+                    {"type": "image_url", "image_url": {"url": f"data:{metadata.get('screenshot_media_type', 'image/png')};base64,{screenshot}"}},
+                ]})
 
     # Same closing provider-invariant guard build_llm_messages runs. Both
     # converters feed the same providers, so both owe the same contract:
@@ -2374,6 +2384,14 @@ async def _render_llm_messages(
         content, metadata_texts = await resolve_message_attachments(
             msg, pre_resolved_ids, render_text=render_text, require_inline=require_inline_attachments
         )
+        screenshot = metadata.get("screenshot_b64")
+        screenshot_blocks = []
+        if isinstance(screenshot, str) and screenshot:
+            screenshot_blocks = [
+                {"type": "text", "text": screenshot_context_text(metadata)},
+                {"type": "image_url", "image_url": {"url": f"data:{metadata.get('screenshot_media_type', 'image/png')};base64,{screenshot}"}},
+            ]
+            content = list(content or []) + screenshot_blocks
         attachment_labels = []
         for att_data in attachments_data:
             fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
@@ -2532,7 +2550,7 @@ async def _render_llm_messages(
                     tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                     label = tool_name or "tool"
                     tool_content = await bounded_tool_text(f"{ts_prefix}[{label} result]: {tool_content}", attachment_labels)
-                    messages.append({"role": "user", "content": tool_content})
+                    messages.append({"role": "user", "content": ([{"type": "text", "text": tool_content}] + screenshot_blocks) if screenshot_blocks else tool_content})
                     continue
 
                 tool_content = ts_prefix + text
@@ -2560,6 +2578,8 @@ async def _render_llm_messages(
                     "name": declared_tool_calls[canonical_tool_call_id][0],
                 }
                 messages.append(tool_msg)
+                if screenshot_blocks:
+                    messages.append({"role": "user", "content": screenshot_blocks})
                 continue
 
             # Non-terminal TOOL messages are passed as context text.
@@ -3159,8 +3179,8 @@ async def call_llm_structured_streaming(
         # hit this re-streams the stored response without touching Rose/Anthropic.
         from providers.demo_cache.rose_cache import cached_complete
 
-        _stream_iter = cached_complete(
-            rose_client,
+        _stream_iter = stream_with_image_count_retry(
+            lambda **request: cached_complete(rose_client, **request),
             call_site=call_site,
             pool=pool,
             messages=messages,
@@ -4356,7 +4376,8 @@ async def call_llm(
                 demo_cache_affinity_key=compute_token_demo_cache_affinity_key,
             )
             try:
-                rose_response = await rose_client.collect(
+                rose_response = await collect_with_image_count_retry(
+                    rose_client.collect,
                     pool=pool,
                     messages=messages,
                     response_model=response_model,
@@ -4723,7 +4744,7 @@ async def _call_llm_verifier(
         f"all verifier paths must go through check_progress, which forces rose-1-ultra."
     )
 
-    require_task_completion = _browser_task_completion_required(call_site)
+    require_task_completion = _task_completion_required(call_site)
     response_model = _build_verifier_response_model(response_schema, require_task_completion=require_task_completion)
 
     accumulated_reasoning = ""
@@ -4811,8 +4832,8 @@ async def _call_llm_verifier(
 
     try:
         # Fast Mode record/replay (verifier path).
-        async for chunk in cached_complete(
-            rose_client,
+        async for chunk in stream_with_image_count_retry(
+            lambda **request: cached_complete(rose_client, **request),
             call_site=call_site,
             pool=pool,
             messages=messages,
@@ -5620,9 +5641,8 @@ def _completed_child_task_structured_response(
     return handoff[0] if handoff else None
 
 
-_BROWSER_COMPLETION_CALL_SITES = frozenset({"verifier_browser", "verifier_browser_max_steps"})
-_BROWSER_TASK_COMPLETION_DIRECTIVE = """
-# Browser task completion verdict
+_TASK_COMPLETION_DIRECTIVE = """
+# Task completion verdict
 The numeric score continues to measure how completely the required output can
 be extracted. Separately return task_completed as a boolean: true only when
 grounded evidence establishes that the user's requested work is completed.
@@ -5634,11 +5654,12 @@ Keep accurate partial or negative output even when task_completed is false.
 """.strip()
 
 
-def _browser_task_completion_required(call_site: str) -> bool:
-    return call_site in _BROWSER_COMPLETION_CALL_SITES
+def _task_completion_required(call_site: str) -> bool:
+    # Planning and field-recovery checks do not declare the user task complete.
+    return call_site not in {"verifier_plan", "semantic_output_field_recovery_judge"}
 
 
-def _admit_browser_task_completion(result: Dict[str, Any]) -> Dict[str, Any]:
+def _admit_task_completion(result: Dict[str, Any]) -> Dict[str, Any]:
     """Keep extraction data while requiring the separate completion verdict."""
     admitted = dict(result)
     extraction_score = result["score"]
@@ -5650,7 +5671,7 @@ def _admit_browser_task_completion(result: Dict[str, Any]) -> Dict[str, Any]:
         admitted["score"] = min(float(extraction_score), 0.5)
         admitted["reasoning"] = (
             str(result.get("reasoning") or "")
-            + "\n\nThe separate browser task-completion verdict is not true; extracted output alone does not complete the task."
+            + "\n\nThe separate task-completion verdict is not true; extracted output alone does not complete the task."
         ).strip()
     return admitted
 
@@ -5705,7 +5726,7 @@ def _build_verifier_response_model(
     )
     if require_task_completion:
         fields["task_completed"] = (
-            StrictBool, Field(..., description="Whether the requested browser task was completed, independently of output extraction completeness."),
+            StrictBool, Field(..., description="Whether the requested task was completed, independently of output extraction completeness."),
         )
     fields["score"] = (
         float,
@@ -6036,7 +6057,7 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
     if require_task_completion:
         properties["task_completed"] = {
             "type": "boolean",
-            "description": "Whether the requested browser task was completed, independently of output extraction completeness.",
+            "description": "Whether the requested task was completed, independently of output extraction completeness.",
         }
         required.append("task_completed")
     properties["score"] = {
@@ -6215,6 +6236,10 @@ async def check_progress(
         - ``structured_response`` (dict | None): always returned as
             ``result["output"]`` regardless of score — callers decide what
             to do with partial output (C2).
+        - ``task_completed`` / ``extraction_score``: task-completion checks
+            retain the strict verdict and original extraction score. The public
+            ``score`` cannot reach 1.0 unless ``task_completed is True``.
+            Planning and field-recovery checks keep their existing scoped contracts.
         - ``verdict_available`` / ``judge_error``: only on the error path,
             where no judge verdict was produced and ``score`` is the 0.5
             keep-running placeholder. ``verdict_available`` is ``False`` and
@@ -6225,7 +6250,7 @@ async def check_progress(
     # Fast Mode: set the cache context so the verifier's Rose call (via
     # _call_llm_verifier → cached_complete) records/replays by canonical request
     # fingerprint. Prompt/schema/message changes intentionally miss.
-    require_task_completion = _browser_task_completion_required(call_site)
+    require_task_completion = _task_completion_required(call_site)
     write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
     demo_cache_should_write = fast_mode_cache_enabled or write_through_enabled
     if fast_mode_goal and demo_cache_should_write:
@@ -6314,42 +6339,12 @@ async def check_progress(
 
         _safe_heartbeat("Checking progress with LLM judge")
 
-        if call_site == "verifier_execute" and schema_for_call:
-            completed_child_output = _completed_child_task_structured_response(context, schema_for_call)
-            if completed_child_output is not None:
-                field_names = _schema_field_names(schema_for_call)
-                reasoning = (
-                    "A completed child task returned a grounded structured response "
-                    f"covering the required fields: {', '.join(field_names)}."
-                )
-                logger.info(
-                    "Progress satisfied by completed child task structured response",
-                    fields=field_names,
-                    call_site=call_site,
-                )
-                return {
-                    "score": 1.0,
-                    "reasoning": reasoning,
-                    "message": f"{reasoning}\n\nScore: 1.0",
-                    "usage": {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0,
-                        "actual_model": "structured_response",
-                        "pool_name": "completed_child_task",
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                        "claude_token_error": None,
-                        "gpt_token_error": None,
-                    },
-                    "structured_response": completed_child_output,
-                }
-
+        # Child output is evidence for this task, not a substitute for its completion verdict.
         config = load_config()
-        require_task_completion = _browser_task_completion_required(call_site)
+        require_task_completion = _task_completion_required(call_site)
         system_prompt = verifier_system_prompt
         if require_task_completion:
-            system_prompt += "\n\n" + _BROWSER_TASK_COMPLETION_DIRECTIVE
+            system_prompt += "\n\n" + _TASK_COMPLETION_DIRECTIVE
         verifier_dump_extra = {
             **_extract_browser_recording_dump_extra(context),
             **(dump_extra or {}),
@@ -6487,7 +6482,7 @@ async def check_progress(
                     raise last_error
 
         if require_task_completion:
-            result = _admit_browser_task_completion(result)
+            result = _admit_task_completion(result)
         score = result["score"]
         # C3: score_reasoning is gone. Read only `reasoning` now.
         reasoning = result.get("reasoning", "")

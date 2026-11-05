@@ -176,12 +176,7 @@ def test_recover_from_challenge_normalizes_auth_cookies_are_preserved_flag():
 
 def test_practice_content_and_access_control_share_a_scoped_policy():
     """Task content stays actionable without allowing manual access-gate solving."""
-    scope = (
-        "Exception to the CAPTCHA recovery and no-manual-solving rules: a public static-text or plain-arithmetic "
-        "practice exercise explicitly requested by the user is ordinary page content only when it does not guard "
-        "access to another page or service. Complete that content with normal browser actions. This exception "
-        "never covers behavioral, token, or slider challenges; apply the normal recovery rules to those."
-    )
+    scope = "never solve captchas unless explicitly asked by the user"
     task = "Read the displayed text in the public practice exercise and enter it in the field."
     requested_actions = [
         "read_browser_state", "screenshot", "input_text", "press_key",
@@ -195,14 +190,15 @@ def test_practice_content_and_access_control_share_a_scoped_policy():
             )
             assert messages[1] == {"role": "user", "content": task}
             assert scope in messages[0]["content"]
-            assert "Do not drag sliders" in messages[0]["content"] or "do not drag sliders" in messages[0]["content"]
+            assert "Do not drag sliders" not in messages[0]["content"]
+            assert "do not drag sliders" not in messages[0]["content"]
             tools = {tool["name"]: tool for tool in build_browser_use_tools(requested_actions)}
             assert {"input_text", "press_key", "screenshot"} <= tools.keys()
             for name in ("screenshot", "request_user_assistance_for_authentication"):
                 assert scope in tools[name]["description"], name
             if recovery_disabled == "0":
                 assert scope in tools["recover_from_challenge"]["description"]
-                assert "otherwise try to solve the widget yourself" in tools["recover_from_challenge"]["description"]
+                assert "otherwise try to solve the widget yourself" not in tools["recover_from_challenge"]["description"]
             else:
                 assert "recover_from_challenge" not in tools
 
@@ -211,7 +207,7 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     description = BROWSER_USE_TOOLS["recover_from_challenge"]["description"]
     assert "Relatively expensive recovery to forcefully open" in description
     assert "Do not use when an alternate path can complete the goal" in description
-    assert "Do not drag sliders" in description
+    assert "never solve captchas unless explicitly asked by the user" in description
     assert "automatic CAPTCHA solver" in description
     assert "known challenge cookies" in description
     assert "parallel cookie-group reductions" in description
@@ -245,8 +241,8 @@ def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     assert "# Available Actions" not in prompt
     assert "- click:" not in prompt
     assert "- goto:" not in prompt
-    assert "Call one or more available browser action tools" in prompt
-    assert "execute in\norder, never concurrently" in prompt
+    assert "Return one or more browser action tool calls to execute sequentially." in prompt
+    assert "Stop at first failure." in prompt
     assert "observation_ref" in prompt
     assert "# Screenshot Tool" not in prompt
     assert "Use the `screenshot` action" not in prompt
@@ -380,7 +376,7 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     )
     assert "relatively expensive way to force-open a blocked page or service" in prompt
     assert "do not use it when an alternate path can complete the goal" in prompt
-    assert "Do not drag sliders" in prompt
+    assert "never solve captchas unless explicitly asked by the user" in prompt
     assert "# OTP Rules" not in prompt
     assert "Do not classify final credential failures yourself" not in prompt
 
@@ -2958,7 +2954,9 @@ def test_phone_off_matches_prephone_bytes():
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('491285864cdc66839a16c5555347e1f532550d781b68ad7e801d9a54eb92ac3b', 'c4b8fe58764e433a17c0ad9d3ff2c36aa8b6f8262756ae0de0b7ce2fd31f083f', '5cc74e692cbbd8dc9ab96391add1b4fc9815c734b4c8932ea37783110c361940'), '1': ('dc29592e3846726a1527288c98ca9303c614a931977defbd37f2688817a8258f', '29e206b941044b496b1de7dc4e4e287315585372df18bbe15cd416bb45fae404', '34117c8dc99a4baf9626fbec2ab3581fd2e4e3b1a39af74c3faff9bea4d0f13c')}
+    # 2026-11-04 user-authorized captcha rule and Skyvern-aligned batch wording;
+    # prior b757 golden hashes reproduced exactly before replacing these pins.
+    expected = {'0': ('0f91c0a93c69900b55e6f7634aba2862cd9ce9347192b6c5d95d7c2411af0450', 'e46e91fd54170ef1cc5cb00bef0ebbf4e4446447005d9287d6f0d0f4ad455b1d', '62626a38cbbc18d38081798bb33fc33ba33960d7b0fa8a30b75e55e9c62d5d9d'), '1': ('5bee4333c896a1ba508c7e200e64224945d0806c9be550756ed3d780b77b1c7f', 'f304359dd340ba5945d2430237f884708698f7add337fda59ea220453e54fa78', 'b6680960025afe45387e9a390eadff21206ff23e3d3ded2227326958ac0b2835')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):

@@ -389,6 +389,13 @@ def build_polar_trajectory(
                 action_bits.append("Recorded action parameters: " + json.dumps(params, ensure_ascii=False, sort_keys=True))
             if text and text not in (final_answer, (completion_card(metadata) or {}).get("summary")):
                 action_bits.append(text)
+            # Non-browser tools may return typed data without a display string.
+            # Retain their actual output for the same semantic judge; tool choice
+            # itself is not an acceptance requirement.
+            if tool_name != "spawn_browser_agent" and isinstance(metadata.get("structured_response"), (dict, list)):
+                action_bits.append("Recorded tool output: " + json.dumps(
+                    metadata["structured_response"], ensure_ascii=False, sort_keys=True,
+                ))
             completion_text = _displayed_completion_text(message)
             if completion_text and completion_text.strip() not in {text.strip(), final_answer.strip()}:
                 action_bits.append("Displayed final answer: " + completion_text)

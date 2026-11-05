@@ -106,8 +106,6 @@ WAKEABLE_TASK_TYPES = frozenset({"explore", "browser", "code"})
 # Finished explore/browser/code tasks that keep what a wake needs (args + previous result).
 MAX_WAKEABLE_FINISHED_TASKS = 10
 FINISHED_RECORD_KEYS = (
-    "browser_verified",
-    "browser_instruction_receipt",
     "tool_call_id",
     "agent_type",
     "address",
@@ -413,9 +411,6 @@ class BackgroundAgentsMixin:
         return True
 
     async def _start_background_spawn(self, tool_args: Dict[str, Any], tool_call_id: str) -> Dict[str, Any]:
-        from helpers.browser_budget_stop import budget_stop_pending
-        if budget_stop_pending(self):
-            return {"error": True, "message": "Browser action budget stop is finalizing; new work is not admitted"}
         task_id = tool_call_id
         args = {key: value for key, value in tool_args.items() if key != "run_in_background"}
         agent_type = str(args.get("type") or "agent")
@@ -500,9 +495,6 @@ class BackgroundAgentsMixin:
     def _launch_background_task(self, task_id: str) -> None:
         if task_id in self._background_handles:
             return
-        from helpers.browser_budget_stop import budget_stop_pending
-        if budget_stop_pending(self):
-            raise RuntimeError("Browser action budget stop is finalizing; new work is not admitted")
         # A user pause from this launch on ends the run as "paused" (workflow state,
         # never result text). Read now: a pause handled before the task's first
         # step still belongs to this run.
@@ -578,9 +570,6 @@ class BackgroundAgentsMixin:
             return
         metadata = event.metadata or {}
         data = event.data or {}
-        if metadata.get("toolName") == "spawn_browser_agent" and metadata.get("action_type") == "task_complete":
-            outcome["browser_verified"] = metadata.get("success") is True
-            outcome["browser_instruction_receipt"] = metadata.get("browser_instruction_receipt")
         outcome["status"] = event.status
         outcome["message"] = event.message or ""
         if isinstance(data.get("result"), str) and data["result"].strip():
@@ -637,9 +626,6 @@ class BackgroundAgentsMixin:
         if failed and paused and not kill_reason:
             status = PAUSED_TASK_STATUS
         record["status"] = status
-        if record.get("agent_type") == "browser":
-            record["browser_verified"] = outcome.get("browser_verified") is True
-            record["browser_instruction_receipt"] = outcome.get("browser_instruction_receipt")
         record["finished_at"] = workflow.now().isoformat()
         self._background_tasks.pop(task_id, None)
         finished = {key: record.get(key) for key in FINISHED_RECORD_KEYS}
@@ -743,9 +729,6 @@ class BackgroundAgentsMixin:
         never starts a second run). The message was already stored by the
         backend, which applies the per-sender rate and unread guards first.
         """
-        from helpers.browser_budget_stop import budget_stop_pending
-        if budget_stop_pending(self):
-            return {"woke": False, "reason": "Browser action budget stop is finalizing; resume after parking"}
         if task_id in self._background_tasks:
             return {"woke": True, "already_running": True}
         record = self._background_finished.get(task_id)

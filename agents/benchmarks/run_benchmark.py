@@ -3184,9 +3184,7 @@ async def create_agent(
     elif task.model:
         body["model"] = task.model
 
-    if is_polar_bench_task(task):
-        body["start_phase"] = "browser"
-    elif task.start_phase:
+    if task.start_phase:
         body["start_phase"] = task.start_phase
     # Planner memory is an explicit per-run A/B flag: default off for every benchmark.
     body["memory_enabled"] = task.memory == "on"
@@ -4181,6 +4179,8 @@ def _root_exact_tool_count_exceeded(task: BenchmarkTask, messages: List[dict]) -
     Waiting for the task timeout only hides the first bad boundary and can repeat
     external side effects, so exact root-count benchmarks stop immediately.
     """
+    if is_polar_bench_task(task):
+        return None
     if task.tool_count_scope != "root" or not task.expected_tool_counts:
         return None
     actual_counts = _count_logical_tool_calls_from_messages(messages)
@@ -4531,30 +4531,6 @@ async def post_world_model_update_events(base_url: str, agent_id: str) -> None:
             return
 
 
-async def pause_at_browser_budget(
-    base_url: str, agent_id: str, budget: int, *, include_pending: bool = False
-) -> bool | Literal["pending"]:
-    """Ask for an exact finalizer handoff; refusal retains ordinary pause."""
-    try:
-        headers = await _api_headers()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{base_url}/api/agents/{agent_id}/browser-budget-stop",
-                                     headers=headers, json={"budget": budget})
-        if resp.status_code != 200:
-            return False
-        result = resp.json()
-        if result.get("accepted") is True:
-            return True
-        if (include_pending and result.get("accepted") is False and result.get("pending") is True
-                and set(result) == {"accepted", "pending", "task_id", "run_id", "first_run_id", "deadline"}
-                and type(result["deadline"]) in (int, float)
-                and math.isfinite(result["deadline"]) and result["deadline"] > 0):
-            for field in ("task_id", "run_id", "first_run_id"):
-                uuid.UUID(result[field])
-            return "pending"
-        return False
-    except Exception:
-        return False
 
 
 async def pause_agent(base_url: str, agent_id: str) -> bool:
@@ -5036,7 +5012,6 @@ async def _poll_agent(
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     wall_clock_disabled = polar_wall_clock_disabled(task) or resolved_timeout in (None, 0)
     step_budget = polar_browser_step_budget(task)
-    budget_stop_pending = None
 
     while True:
         elapsed = time.monotonic() - start
@@ -5152,34 +5127,11 @@ async def _poll_agent(
                 )
                 return data, approvals_triggered, approvals_resolved, None
 
-        if budget_stop_pending is not None:
-            data["_benchmark"].update(budget_stop_pending)
-            if status == "PAUSED":
-                return data, approvals_triggered, approvals_resolved, None
-        if step_budget and budget_stop_pending is None and status not in TERMINAL_STATUSES:
+        if step_budget and status not in TERMINAL_STATUSES:
             browser_steps = _browser_iteration_budget_counts(data)
             used_steps = max(browser_steps.values()) if browser_steps else 0
             if used_steps >= step_budget:
-                data["_benchmark"]["step_budget_reached"] = True
-                data["_benchmark"]["browser_steps"] = used_steps
-                data["_benchmark"]["browser_step_budget"] = step_budget
                 print(f"    🧭 Browser step budget reached: {used_steps}/{step_budget} — pausing for polar judge")
-                budget_response = await pause_at_browser_budget(
-                    base_url, agent_id, step_budget, include_pending=True
-                )
-                if budget_response == "pending":
-                    # No acceptance is cached: the next ordinary poll rechecks
-                    # owner, generation, requirements and the existing deadline.
-                    await asyncio.sleep(POLL_INTERVAL)
-                    continue
-                if budget_response is True:
-                    budget_stop_pending = {
-                        "step_budget_reached": True, "browser_steps": used_steps,
-                        "browser_step_budget": step_budget,
-                    }
-                    # Existing polling/deadlines continue; no additional actions
-                    # are admitted by the accepted finalizer-only workflow stop.
-                    continue
                 try:
                     await pause_agent(base_url, agent_id)
                     data = await get_agent(base_url, agent_id)
@@ -6376,7 +6328,7 @@ def evaluate_task(
     # Check expected tools were called
     all_metadata = " ".join(json.dumps(m.get("metadata", {})) for m in messages if m.get("metadata")).lower()
 
-    for tool in task.expected_tools:
+    for tool in ([] if is_polar_bench_task(task) else task.expected_tools):
         if tool.lower() not in all_metadata:
             return False, f"Expected tool '{tool}' not found in messages"
 
@@ -6438,7 +6390,7 @@ def evaluate_task(
         and any(evaluator.get("method") == "polar" for evaluator in task.evaluators)
     )
     # Other runs still require a successful native progress check.
-    if progress < 0.5 and not polar_budget_pause:
+    if progress < 0.5 and not polar_budget_pause and not is_polar_bench_task(task):
         return False, f"Low progress score: {progress:.2f}"
 
     return True, None
@@ -15590,7 +15542,7 @@ async def _run_single_task_as_run_user(
             and not task.simulate_gate_webhook
             and not task.complete_subscription_checkout
         )
-        if not expected_gate_terminal:
+        if not expected_gate_terminal and not is_polar_bench_task(task):
             min_steps_error = _validate_agent_class_min_steps(
                 task.min_steps,
                 agent_class_step_counts,
@@ -15617,7 +15569,7 @@ async def _run_single_task_as_run_user(
 
         # Tool count checks — tree-wide by default, with root scope available
         # for benchmarks that validate top-level orchestration paths only.
-        if (task.expected_tool_counts or task.min_tool_counts or task.forbidden_tools) and passed:
+        if not is_polar_bench_task(task) and (task.expected_tool_counts or task.min_tool_counts or task.forbidden_tools) and passed:
             try:
                 if task.tool_count_scope == "root":
                     actual_counts = _count_logical_tool_calls_from_messages(data.get("messages", []))

@@ -1138,14 +1138,14 @@ async def test_browser_verifier_context_uses_real_capture_not_blank_placeholder(
     assert "screenshot_placeholder" not in real_state
     real = await verifier_screenshot(real_state)
     assert real["metadata"]["screenshot_b64"] == "cmVhbC1wbmc="
-    assert real["text"].startswith("Final-state screenshot attached")
+    assert real["text"].startswith("Screenshot tool result")
 
     blank_state = await browser_state(None)
-    assert blank_state["screenshot_placeholder"] is True
-    assert blank_state["screenshot"]  # the browser-use step still receives a frame
+    assert blank_state["screenshot_unavailable"] is True
+    assert not blank_state.get("screenshot")
     blank = await verifier_screenshot(blank_state)
     assert blank["metadata"]["screenshot_b64"] == ""
-    assert blank["text"].startswith("No final-state screenshot included")
+    assert blank["text"] == "No screenshot was available for this verification step."
 
 
 def test_evaluate_does_not_snapshot_dom_behind_the_model():
@@ -15832,12 +15832,12 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
         recent_events=[{"text": echoed}],
     )
     dom._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=state))
-    with patch.object(dom, "_capture_surface_screenshot", AsyncMock()) as capture:
+    with patch.object(dom, "_capture_surface_screenshot", AsyncMock(return_value="fixture-image-containing-private-values")) as capture:
         observed = await dom.get_browser_state(include_screenshot=True)
-    dom._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=False)
-    capture.assert_not_awaited()
-    assert observed["screenshot_placeholder"] is True
-    assert "screenshot" not in observed and "media_candidates" not in observed
+    dom._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=True)
+    capture.assert_awaited_once()
+    assert observed["screenshot"] == "fixture-image-containing-private-values"
+    assert "screenshot_placeholder" not in observed and "media_candidates" not in observed
     assert all(secret not in str(observed) for secret in all_values)
     assert await dom.get_page_image_urls() == []
     assert dom._session.get_browser_state_summary.await_count == 1, (
@@ -15858,7 +15858,7 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
         screenshot="fixture-private-image",
     )
     assert all(secret not in str(entry.to_dict()) for secret in all_values)
-    assert not entry.screenshot
+    assert entry.screenshot == "fixture-private-image"
     assert all(secret not in str(history.get_entries()) for secret in all_values)
     private_state = dom.secret_redaction_state()
     replacement = DOMService("ws://unused-replacement-private-observation-fixture")
@@ -15884,9 +15884,10 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
         }
     )
     assert all(secret not in str(safe) for secret in all_values)
-    assert "media_candidates" not in safe and "image_url" not in str(safe)
+    assert safe["media_candidates"] == [{"url": "https://fixture.test/private-card.png"}]
+    assert safe["messages"][0]["image_url"]["url"] == "data:image/png;base64,PRIVATE"
     assert all(secret not in str(history.get_entries()) for secret in all_values)
-    assert not history.get_entries()[0].get("screenshot")
+    assert history.get_entries()[0]["screenshot"] == "fixture-private-image"
 
     # Page-controlled JSON may use any JSON value for a field named "type".
     # It stays ordinary data while actual media and credentials are filtered.
@@ -15906,10 +15907,7 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
         assert visible["value"]["type"] == page_type
         assert visible["value"]["private"] == "{{secret:card_cvv}}"
         assert visible["value"]["nested"] == [
-            {
-                "type": "text",
-                "text": "[image withheld after private credential entry]",
-            }
+            {"type": "image", "url": "https://fixture.test/image"}
         ]
 
     # Exercise the native observation -> action builder -> private result boundary.
@@ -22457,9 +22455,10 @@ async def test_execute_screenshot_success():
                 "media_candidates": [{"url": "https://fixture.test/image"}],
             },
         )
-        assert "screenshot" not in visible and "screenshot_b64" not in visible and "media_candidates" not in visible
-        assert "screenshot" not in visible["value"]
-    assert not history.get_entries()[0].get("screenshot")
+        assert visible["screenshot"] == trusted_png and visible["screenshot_b64"] == trusted_png
+        assert visible["value"]["screenshot"] == trusted_png
+        assert visible["media_candidates"] == [{"url": "https://fixture.test/image"}]
+    assert history.get_entries()[0]["screenshot"] == trusted_png
 
 
 async def test_browser_use_screenshots_get_distinct_remote_names():
@@ -24979,7 +24978,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None, verifier_responses_override=None, extraction_results=None, expected_activity_status="completed"):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None, verifier_responses_override=None, extraction_results=None, expected_activity_status="completed", credential_propagation_override=None):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -25087,6 +25086,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     decision_order = []
 
     async def capture_actor(**kwargs):
+        await asyncio.sleep(0)
         decision_order.append("model")
         captured_turns.append(copy.deepcopy(kwargs["turn_messages"]))
         captured_system_context.append(kwargs["dynamic_system_context"])
@@ -25216,7 +25216,7 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
-            propagation_mock,
+            credential_propagation_override or propagation_mock,
         ),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
         patch(
@@ -26552,8 +26552,9 @@ async def test_initial_auth_inventory_is_delivered_by_page_state_result():
     assert len(tools) == 1
     context = json.loads(tools[0]["content"])["auth_context"]
     assert context["auth_realm"] == "admin.google.com" and context["inventory_status"] == "available"
-    assert "fixture@workspace.example" in context["auth_options"]
-    assert "18000ms" in context["credential_preparation_error"]
+    assert "fixture@workspace.example" in context["auth_options"], context
+    assert context["credential_preparation_status"] == "error"
+    assert context["credential_preparation_error"] == "Saved credential preparation failed"
     assert "cookies_injected" not in context and "encryptedPassword" not in str(context)
 
 
@@ -26688,13 +26689,15 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
     import json
 
     contexts = [json.loads(message["content"])["auth_context"] for message in tool_results]
-    assert [context["auth_realm"] for context in contexts] == ["admin.google.com", "claude.ai"]
-    assert all(
-        context["inventory_status"] == "unknown" and context["credential_preparation_error"] for context in contexts
-    )
-    assert all("auth_options" not in context for context in contexts), (
-        "failed discovery was presented as an empty known inventory"
-    )
+    assert [context["auth_realm"] for context in contexts] == ["admin.google.com", "claude.ai"], contexts
+    assert all(context["credential_preparation_status"] in {"pending", "ready", "error"} for context in contexts)
+    assert contexts[0]["inventory_status"] == "unknown" and "auth_options" not in contexts[0]
+    for context in contexts:
+        if context["credential_preparation_status"] == "error":
+            assert context["credential_preparation_error"] == "Saved credential preparation failed"
+        if "auth_options" in context:
+            assert "admin.google.com" not in context["auth_options"] if context["auth_realm"] == "claude.ai" else "claude.ai" not in context["auth_options"]
+
 
 
 async def test_native_failed_navigation_restriction_and_escape():
@@ -26714,9 +26717,40 @@ async def test_native_navigation_policy_restriction_and_escape():
     await assert_navigation_admission_at_native_dispatch()
 
 
-async def test_credential_reload_error_document_uses_pre_navigation_identity():
-    for native_case in ('error_document', 'error_document_unavailable'):
-        await test_credential_reload_failure_preserves_pending_ack_and_shared_recovery(native_case=native_case)
+async def test_pending_credentials_refuse_only_the_secret_dependent_action():
+    actor, judge = await _exercise_browser_resume_user_input(actor_responses_override=[{'action': {'action': 'input_text', 'params': {'text': '{{secret:pwd:missing}}'}}, 'usage': {}}, {'action': {'action': 'press_key', 'params': {'key': 'Escape'}}, 'usage': {}}, {'action': {'action': 'attempt_completion', 'params': {'reasoning': 'done'}}, 'usage': {}}], pending_action={'action': 'press_key', 'params': {'key': 'a'}})
+    assert actor.activity_result['status'] == 'completed' and judge.await_count == 1
+    assert actor.pending_execution.await_count == 1, actor.pending_execution.await_args_list
+    call = actor.pending_execution.await_args
+    action = call.args[2] if len(call.args) > 2 else call.kwargs['action']
+    assert action['action'] == 'press_key'
+    assert any(('Requested saved credential is not ready or unavailable' in str(turns) for turns in actor.captured_turns))
+
+
+async def test_initial_credential_hydration_and_upload_do_not_hold_browser_completion(stage='both'):
+    import asyncio
+    from unittest.mock import patch
+    from contextlib import nullcontext
+    from domains.spawn_browser_agent_v3 import handler as h
+    started = asyncio.Event()
+    upload_started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def blocked_upload(*args, **kwargs):
+        upload_started.set()
+        await blocked.wait()
+
+    async def blocked_hydration(*args, **kwargs):
+        started.set()
+        await blocked.wait()
+    with patch.object(h, 'build_realm_credential_state', blocked_hydration) if stage != 'upload' else nullcontext():
+        actor, judge = await asyncio.wait_for(_exercise_browser_resume_user_input(actor_responses_override=[{'action': {'action': 'attempt_completion', 'params': {'reasoning': 'done'}}, 'usage': {}}], credential_propagation_override=blocked_upload if stage != 'hydration' else None), timeout=5)
+    assert actor.activity_result['status'] == 'completed' and actor.await_count == 1
+    if stage != 'upload':
+        assert started.is_set() and (not blocked.is_set()), 'initial hydration did not run independently'
+    if stage != 'hydration':
+        assert upload_started.is_set(), 'credential upload did not run independently'
+        assert actor.activity_result['credential_background_status']['credential_upload'] == 'error'
 
 
 async def test_terminal_visual_persistence_error_keeps_verified_completion():
@@ -26765,285 +26799,6 @@ async def test_terminal_visual_persistence_preserves_control_exceptions():
                 assert raised is error
             else:
                 raise AssertionError('terminal evidence swallowed control exception')
-
-
-async def test_credential_reload_failure_preserves_pending_ack_and_shared_recovery(active_case=None, native_case=None):
-    """Execute the original activity's realm/reload block with only I/O faked."""
-    import ast
-    import asyncio
-    import textwrap
-    from pathlib import Path
-    from types import SimpleNamespace
-    from domains.spawn_browser_agent_v3.navigation_policy import (
-        NavigationPolicyBarrier, NavigationFailureBarrier, NativeNavigationFailure,
-        is_native_navigation_policy_denial, native_navigation_failure, web_destination,
-    )
-    source = Path(__file__).resolve().parents[2] / 'domains/spawn_browser_agent_v3/handler.py'
-    source = globals().get('RELOAD_SOURCE', source)
-    text = Path(source).read_text()
-    start = text.index('            observed_auth_realm = auth_realm_from_url(current_url)')
-    stop = text.index('\n            if current_url and (not visited_urls', start)
-    nodes = ast.parse(textwrap.dedent(text[start:stop])).body
-    # Replace only the imported event constructor with the harness dependency.
-    nodes = [node for node in nodes if not isinstance(node, ast.ImportFrom)]
-    for node in ast.walk(ast.Module(body=nodes, type_ignores=[])):
-        if isinstance(node, ast.ImportFrom):
-            node.names = []
-    block = ast.unparse(ast.Module(body=nodes, type_ignores=[]))
-    block = '\n'.join(line for line in block.splitlines() if not line.strip().startswith('from browser_use.browser.events import'))
-    prolog = '''
-async def run(mode, pending='new.example', current_url='https://new.example/login', auth_realm='new.example', binding_changed=False, preparation_error=False):
-    events = []
-    failures = 0
-    active_credential_binding = ('old',)
-    def _credential_binding():
-        return ('new',) if binding_changed else active_credential_binding
-    async def _prepare_credentials_for_url(url):
-        nonlocal auth_realm
-        events.append(('prepare', url))
-        if mode == 'preparation_failure': raise RuntimeError('credential preparation failed')
-        if mode == 'preparation_none': return None
-        if mode == 'preparation_quarantined': return {'credential_preparation_error':'quarantined'}
-        auth_realm = auth_realm_from_url(url)
-        return {'credential_preparation_error': 'fixture'} if preparation_error else {'auth_realm': auth_realm}
-    pending_credential_reload_realm = pending
-    navigation_policy = NavigationPolicyBarrier('fixture-task')
-    if mode.startswith('active_'):
-        navigation_policy.deny('session', {'target_id':'denied', 'url':'https://denied.example/'})
-    authority_reads = 0
-    identity_reads = 0
-    identity_faulted = False
-    error_document = False
-    def fault(stage):
-        nonlocal identity_faulted
-        if mode.startswith('active_' + stage) and not identity_faulted:
-            identity_faulted = True
-            if mode.endswith('_cancel'): raise asyncio.CancelledError()
-            if mode.endswith('_sealed'): raise WorkflowGenerationSealed()
-            raise RuntimeError('native identity unavailable:' + stage)
-    async def prepare_optional_realm_credentials(**kwargs):
-        events.append(('optional_prepare', pending_credential_reload_realm))
-        return await kwargs['prepare_credentials'](kwargs['target_url'])
-    failed_credential_prep_realms = {}
-    _prepare_credentials_for_url_unquarantined = _prepare_credentials_for_url
-    async def discard(message):
-        events.append(('discard', navigation_policy.active))
-    action_batch = SimpleNamespace(discard=discard)
-    state_prefetch = SimpleNamespace(discard=lambda: None)
-    task_id, session_id, agent_id, browser_url = 'fixture-task', 'session', 'agent', 'browser'
-    browser_turn_messages = []
-    async def record_action(**kwargs):
-        events.append(('barrier', navigation_policy.checkpoint()))
-    action_history = SimpleNamespace(record_action=record_action)
-    def _activate_realm_credentials(*args): pass
-    def _append_browser_turn_messages(*args, **kwargs): pass
-    async def _save_browser_action_message(**kwargs): pass
-    MessageStatus = SimpleNamespace(FINISHED='FINISHED')
-    def _policy_authority():
-        nonlocal authority_reads
-        authority_reads += 1
-        if authority_reads == 1: fault('before_prepare')
-        if authority_reads == 2: fault('after_prepare')
-        if authority_reads == 4: fault('after_reload')
-        if mode in ('identity_unavailable', 'denial_identity_unavailable'):
-            raise RuntimeError('native identity unavailable')
-        if mode == 'error_document_unavailable' and authority_reads == 1:
-            raise RuntimeError('native identity unavailable')
-        return ('session', 'fixture-task', 'target', current_url, active_credential_binding, 0, 0)
-    async def _recover_browser_step(reason, *, reload_page):
-        nonlocal error_document
-        error_document = False
-        if mode.startswith('active_'):
-            assert not mode.endswith(('_cancel', '_sealed')), 'control signal entered recovery'
-            assert navigation_policy.active and pending_credential_reload_realm == 'new.example'
-        events.append(('recover', pending_credential_reload_realm, reason, reload_page))
-        events.append(('barrier_during_recovery', navigation_policy.active))
-        return not mode.endswith('exhausted')
-    class Event:
-        def __await__(self):
-            async def ready():
-                if mode == 'cancel': raise asyncio.CancelledError()
-                if mode == 'sealed': raise WorkflowGenerationSealed()
-            return ready().__await__()
-        async def event_result(self, **kwargs):
-            nonlocal failures, error_document
-            events.append(('event_ack', pending_credential_reload_realm))
-            if mode.startswith('error_document') and failures == 0:
-                failures += 1
-                error_document = True
-                raise RuntimeError('Navigation failed: net::ERR_EMPTY_RESPONSE')
-            if mode == 'denial_identity_unavailable' and failures == 0:
-                failures += 1
-                raise RuntimeError({'code': -32000, 'message': 'navigation to a non-public address is blocked'})
-            if mode in ('event_failure', 'exhausted') and failures == 0:
-                failures += 1
-                raise RuntimeError('Page.navigate() timed out after 300.0s (60001ms)')
-    def dispatch(event):
-        events.append(('dispatch', event.url, pending_credential_reload_realm))
-        return Event()
-    def parked_identity():
-        nonlocal identity_reads
-        identity_reads += 1
-        if identity_reads == 2: fault('acknowledge')
-        return {'url': 'chrome-error://chromewebdata/' if error_document else current_url, 'target_id': 'target'}
-    dom_service = SimpleNamespace(session=SimpleNamespace(event_bus=SimpleNamespace(dispatch=dispatch)), get_parked_page_identity=parked_identity)
-    async def wait_for_navigation_ready(*args, **kwargs):
-        nonlocal failures
-        events.append(('ready_ack', pending_credential_reload_realm))
-        if mode == 'readiness_failure' and failures == 0:
-            failures += 1
-            raise RuntimeError('readiness failed')
-    for tick in range(5):
-'''
-    code = prolog + textwrap.indent(block, '        ') + '''
-        events.append(('model', pending_credential_reload_realm))
-        break
-    return events
-'''
-    env = {'NavigationPolicyBarrier': NavigationPolicyBarrier, 'NavigationFailureBarrier': NavigationFailureBarrier,
-           'NativeNavigationFailure': NativeNavigationFailure, 'native_navigation_failure': native_navigation_failure,
-           'is_native_navigation_policy_denial': is_native_navigation_policy_denial, 'web_destination': web_destination, 'asyncio': asyncio, 'SimpleNamespace': SimpleNamespace,
-           'auth_realm_from_url': lambda u: u.split('/')[2] if '://' in u else '',
-           'auth_realm_matches_url': lambda realm,u: bool(realm) and realm == (u.split('/')[2] if '://' in u else ''),
-           'NavigateToUrlEvent': lambda **kw: SimpleNamespace(**kw),
-           'logger': SimpleNamespace(info=lambda *a, **k: None),
-           'uuid_module': __import__('uuid'),
-           'unknown_realm_credential_state': lambda realm: {},
-           'WorkflowGenerationSealed': type('WorkflowGenerationSealed', (RuntimeError,), {})}
-    exec(compile(code, str(source), 'exec'), env)
-    run = env['run']
-    if native_case is not None:
-        events = await run(native_case)
-        barriers = [x[1] for x in events if x[0] == 'barrier']
-        if native_case == 'error_document':
-            import hashlib
-            assert len(barriers) == 1, events
-            assert barriers[0]['url_sha256'] == hashlib.sha256(b'https://new.example/login').hexdigest()
-            assert events[-1] == ('model', 'new.example'), events
-        else:
-            assert not barriers and len([x for x in events if x[0] == 'recover']) == 1, events
-            assert events[-1] == ('model', None), events
-        return
-    for stage in ((active_case,) if active_case else ('before_prepare', 'after_prepare', 'after_reload', 'acknowledge')):
-        mode = 'active_' + stage
-        events = await run(mode)
-        assert events[-1] == ('model', None), events
-        recoveries = [x for x in events if x[0] == 'recover']
-        assert len(recoveries) == 1 and recoveries[0][1] == 'new.example' and recoveries[0][3] is True, events
-        assert ('barrier_during_recovery', True) in events, events
-        assert events[-2] == ('discard', False), events
-        assert len([x for x in events if x[0] == 'dispatch']) == (2 if stage in ('after_reload', 'acknowledge') else 1), events
-        for suffix, error_type in (('_exhausted', RuntimeError), ('_cancel', asyncio.CancelledError), ('_sealed', env['WorkflowGenerationSealed'])):
-            try:
-                await run(mode + suffix)
-            except error_type as error:
-                if suffix == '_exhausted': assert str(error) == 'native identity unavailable:' + stage
-            else:
-                raise AssertionError('active barrier swallowed ' + mode + suffix)
-    if active_case:
-        return
-    for mode in ('event_failure', 'readiness_failure', 'success', 'identity_unavailable', 'denial_identity_unavailable'):
-        events = await run(mode)
-        assert events[-1] == ('model', None), events
-        recoveries = [x for x in events if x[0] == 'recover']
-        expected_recoveries = mode not in ('success', 'identity_unavailable')
-        assert len(recoveries) == expected_recoveries, events
-        assert all(x[1] == 'new.example' and x[3] is True for x in recoveries), events
-        assert all(x[1] == 'new.example' for x in events if x[0] in ('event_ack','ready_ack')), events
-        assert len([x for x in events if x[0] == 'dispatch']) == (2 if expected_recoveries else 1), events
-    try:
-        await run('exhausted')
-    except RuntimeError as exc:
-        assert '60001ms' in str(exc)
-    else:
-        raise AssertionError('exhausted shared recovery swallowed the original failure')
-    try:
-        await run('cancel')
-    except asyncio.CancelledError:
-        pass
-    else:
-        raise AssertionError('reload swallowed cancellation')
-    for kwargs in ({'pending':'old.example'}, {'pending':None}, {'pending':None,'current_url':'about:blank','auth_realm':''}, {'pending':None,'binding_changed':True,'preparation_error':True}):
-        events = await run('success', **kwargs)
-        assert not any(x[0] == 'dispatch' for x in events), events
-
-    events = await run('success', pending=None, auth_realm='old.example')
-    assert events.index(('prepare', 'https://new.example/login')) < next(i for i,x in enumerate(events) if x[0] == 'dispatch')
-    events = await run('success', pending=None, binding_changed=True)
-    assert events[0] == ('prepare', 'https://new.example/login')
-    assert not any(x[0] == 'dispatch' for x in events)
-    try:
-        await run('preparation_failure', pending=None, auth_realm='old.example')
-    except RuntimeError as exc:
-        assert str(exc) == 'credential preparation failed'
-    else:
-        raise AssertionError('credential preparation error entered reload recovery')
-
-    try:
-        await run('sealed')
-    except env['WorkflowGenerationSealed']:
-        pass
-    else:
-        raise AssertionError('reload swallowed sealed generation')
-    tree = ast.parse(text)
-    durable_values = [v for node in ast.walk(tree) if isinstance(node, ast.Dict) for k,v in zip(node.keys,node.values) if isinstance(k,ast.Constant) and k.value == 'credential_reload_pending']
-    assert len(durable_values) == 1
-    value_code = compile(ast.Expression(body=durable_values[0]), str(source), 'eval')
-    for pending, expected in ((None,False), ('new.example',True)):
-        value = eval(value_code, {'pending_credential_reload_realm':pending})
-        assert value is expected
-        assert 'new.example' not in str({'credential_reload_pending':value})
-    restore_nodes = [n for n in ast.walk(tree) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='pending_credential_reload_realm' for t in n.targets) and isinstance(n.value,ast.IfExp)]
-    assert len(restore_nodes)==1
-    restore_code=compile(ast.Expression(body=restore_nodes[0].value), str(source), 'eval')
-    for flag in (True,False,None,'true'):
-        restored=eval(restore_code, {'auth_realm':'current.example','durable_browser_runtime':{'credential_reload_pending':flag}})
-        assert restored == ('current.example' if flag is True else None)
-
-    import json
-    continuity = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_browser_resume_continuity_state')
-    continuity_env = {'_browser_turn_messages_for_resume':lambda x:list(x or []), 'is_inter_agent_message':lambda x:False}
-    exec(compile('from __future__ import annotations\n'+ast.unparse(continuity), str(source), 'exec'), continuity_env)
-    state=continuity_env['_browser_resume_continuity_state'](action_history=SimpleNamespace(get_entries=lambda:[]),visited_urls=[],verifier_checkpoints=[],durable_runtime_state={'credential_reload_pending':True})
-    roundtrip=json.loads(json.dumps(state))
-    assert eval(restore_code,{'auth_realm':'resumed.example','durable_browser_runtime':roundtrip['durable_browser_runtime']})=='resumed.example'
-
-    events = await run('success', pending='new.example', binding_changed=True)
-    assert events[-1] == ('model', None), events
-    assert events.index(('prepare', 'https://new.example/login')) < next(i for i,x in enumerate(events) if x[0] == 'dispatch')
-    assert any(x[0] == 'ready_ack' for x in events), events
-    for kwargs in (
-        {'pending':'new.example','binding_changed':True,'preparation_error':True},
-        {'pending':'old.example','auth_realm':'old.example','preparation_error':True},
-    ):
-        events = await run('success', **kwargs)
-        assert events[-1] == ('model', None), events
-        assert events[0][0] == 'prepare', events
-        assert not any(x[0] in ('dispatch','recover') for x in events), events
-
-    for mode in ('preparation_none','preparation_quarantined'):
-        events = await run(mode, pending='new.example', binding_changed=True)
-        assert events[-1] == ('model', None), events
-        assert not any(x[0] in ('dispatch','ready_ack','recover') for x in events), events
-    helper = next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='prepare_optional_realm_credentials')
-    helper_env = dict(env, extract_error_message=str)
-    helper_env['logger'] = SimpleNamespace(warning=lambda *a,**k:None)
-    exec(compile('from __future__ import annotations\n'+ast.unparse(helper), str(source), 'exec'), helper_env)
-    calls=[]
-    async def prepare(url):
-        calls.append(url)
-        return {'auth_realm':'new.example'}
-    fn=helper_env['prepare_optional_realm_credentials']
-    assert await fn(target_url='https://new.example/login',current_auth_realm='new.example',failed_realms={},prepare_credentials=prepare) is None
-    assert not calls
-    assert (await fn(target_url='https://new.example/login',current_auth_realm='',failed_realms={},prepare_credentials=prepare))['auth_realm']=='new.example'
-    calls.clear()
-    quarantined=await fn(target_url='https://new.example/login',current_auth_realm='',failed_realms={'new.example':'prior failure'},prepare_credentials=prepare)
-    assert quarantined['credential_preparation_error']=='prior failure' and not calls
-    async def failed(url): raise RuntimeError('fixture preparation failure')
-    failures={}
-    rejected=await fn(target_url='https://new.example/login',current_auth_realm='',failed_realms=failures,prepare_credentials=failed)
-    assert rejected['credential_preparation_error'] and 'new.example' in failures
 
 
 async def _run_realm_transition_action_fixture(
@@ -36032,18 +35787,8 @@ async def test_kernel_replay_is_stopped_before_the_browser_session_is_closed():
     assert recordings, "the Kernel replay recording message must still be saved"
 
 
-def test_browser_budget_finalizer_guards():
-    from browser_budget_guard_cases import test_ticket_ack_exact, test_stop_requires_current_acknowledged_finalizer
-    for fault in ("none", "task", "activity", "attempt", "nonce", "generation", "steps", "bool", "deadline", "too-late", "revision", "paused", "kill", "orphan"):
-        test_ticket_ack_exact(fault)
-    for fault in ("none", "early", "wrong-budget", "bool", "first-run", "multiple", "expired", "feedback", "paused", "kill"):
-        test_stop_requires_current_acknowledged_finalizer(fault)
 
 
-async def test_browser_budget_finalizer_handoff():
-    from browser_budget_stop_cases import exercise_finalizer_handoff
-    for mode in ("budget", "user", "kill", "feedback", "noack"):
-        await exercise_finalizer_handoff(globals(), Path(__file__), mode)
 
 
 
@@ -36749,8 +36494,6 @@ async def run_all_tests():
     await r.record_async("playwright_focus_fallback_diagnostics", test_playwright_focus_fallback_diagnostics)
     r.record("playwright_focus_diagnostics_private_and_bounded", test_playwright_focus_diagnostics_private_and_bounded)
     await r.record_async("playwright_focus_diagnostics_preserve_failure_and_cancellation", test_playwright_focus_diagnostics_preserve_failure_and_cancellation)
-    await r.record_async("browser_budget_finalizer_handoff", test_browser_budget_finalizer_handoff)
-    r.record("browser_budget_finalizer_guards", test_browser_budget_finalizer_guards)
     await r.record_async("cdp_probe_does_not_wait_for_playwright_abort_ack", test_cdp_probe_does_not_wait_for_playwright_abort_ack)
     await r.record_async("owned_cdp_probe_expiry_identity_and_late_reply", test_owned_cdp_probe_expiry_identity_and_late_reply)
     await r.record_async("native_probe_rejects_changed_binding_and_preserves_foreign_requests", test_native_probe_rejects_changed_binding_and_preserves_foreign_requests)
@@ -39285,10 +39028,10 @@ async def run_all_tests():
     )
     await r.record_async("native_navigation_policy_restriction_and_escape", test_native_navigation_policy_restriction_and_escape)
     await r.record_async("native_failed_navigation_restriction_and_escape", test_native_failed_navigation_restriction_and_escape)
-    await r.record_async("credential_reload_error_document_uses_pre_navigation_identity", test_credential_reload_error_document_uses_pre_navigation_identity)
     await r.record_async("terminal_visual_persistence_preserves_control_exceptions", test_terminal_visual_persistence_preserves_control_exceptions)
+    await r.record_async("pending_credentials_refuse_only_the_secret_dependent_action", test_pending_credentials_refuse_only_the_secret_dependent_action)
+    await r.record_async("initial_credential_hydration_and_upload_do_not_hold_browser_completion", test_initial_credential_hydration_and_upload_do_not_hold_browser_completion)
     await r.record_async("terminal_visual_persistence_error_keeps_verified_completion", test_terminal_visual_persistence_error_keeps_verified_completion)
-    await r.record_async("credential_reload_failure_preserves_pending_ack_and_shared_recovery", test_credential_reload_failure_preserves_pending_ack_and_shared_recovery)
     await r.record_async(
         "activity_redirected_goto_reloads_prepared_realm_once",
         test_activity_redirected_goto_reloads_prepared_realm_once,

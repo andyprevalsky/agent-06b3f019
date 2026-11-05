@@ -26340,35 +26340,6 @@ def test_fly_log_subprocesses_close_their_transports_before_loop_shutdown():
         assert not marker.exists(), "a timed-out flyctl snapshot child outlived the runner"
 
 
-async def _exercise_budget_stop_poller(accepted):
- import httpx
- from benchmarks import run_benchmark as b
- t=copy.deepcopy(b.get_task_by_name('polar-bu-088'));posts=[];reads=[]
- async def get(*args):
-  reads.append(args)
-  return {'agent':{'id':'root','status':'ACTIVE' if len(reads)==1 else 'PAUSED','progress':0},'messages':[{'role':'TOOL','metadata':{'toolName':'spawn_browser_agent','task_id':'browser','steps_taken':step}} for step in range(1,101)]}
- async def request(req):
-  posts.append(req.url.path)
-  if req.url.path.endswith('/browser-budget-stop'):
-   assert req.read()==b'{"budget":100}'
-   return httpx.Response(200,json={'accepted':accepted})
-  assert req.url.path.endswith('/pause')
-  return httpx.Response(200,json={'success':True})
- real=httpx.AsyncClient
- with patch.object(b,'get_agent',get),patch.object(b,'_api_headers',AsyncMock(return_value={})),patch.object(b.httpx,'AsyncClient',side_effect=lambda **kw:real(transport=httpx.MockTransport(request),**kw)):
-  result=await b._poll_agent('http://offline.test','root',t)
- assert result[0]['agent']['status']=='PAUSED'
- assert result[0]['_benchmark']['step_budget_reached'] is True
- assert posts==(['/api/agents/root/browser-budget-stop'] if accepted else ['/api/agents/root/browser-budget-stop','/api/agents/root/pause'])
- assert len(reads)==2
- print('POLLER',accepted,'PASS',posts)
-
-async def test_browser_budget_stop_poller_keeps_pause_fallback():
-    await _exercise_budget_stop_poller(True)
-    await _exercise_budget_stop_poller(False)
-
-
-
 def test_browser_iteration_budget_preserves_trajectory_counting():
     from benchmarks import run_benchmark as b
 
@@ -26422,8 +26393,7 @@ async def test_browser_budget_poller_waits_for_native_iteration_limit():
     async def request(req):
         posts.append(req.url.path)
         assert len(reads) == 2
-        assert req.url.path.endswith("/browser-budget-stop")
-        assert req.read() == b'{"budget":100}'
+        assert req.url.path.endswith("/pause")
         return httpx.Response(200, json={"accepted": True})
 
     real_client = httpx.AsyncClient
@@ -26434,87 +26404,16 @@ async def test_browser_budget_poller_waits_for_native_iteration_limit():
     ):
         result = await b._poll_agent("http://offline.test", "root", task)
     assert len(reads) == 3
-    assert posts == ["/api/agents/root/browser-budget-stop"]
+    assert posts == ["/api/agents/root/pause"]
     assert result[0]["_benchmark"]["browser_steps"] == 100
     assert result[0]["agent"]["status"] == "PAUSED"
 
 
-
-def test_browser_budget_pending_registered_guards():
-    from browser_budget_guard_cases import test_pending_finalizer_revalidates_without_accepting
-    for fault in ("none", "budget", "first-run", "run", "workflow", "tool", "revision", "paused",
-                  "kill", "orphan", "credits", "expired", "missing-deadline", "nan-deadline",
-                  "bool-deadline", "multiple", "missing"):
-        test_pending_finalizer_revalidates_without_accepting(fault)
-
-
-async def test_browser_budget_pending_revalidates_before_acceptance():
-    import httpx
-    from datetime import datetime, timedelta, timezone
-    from types import SimpleNamespace
-    from helpers import browser_budget_stop as guard
-    from benchmarks import run_benchmark as b
-
-    ids = ["00000000-0000-4000-8000-00000000000" + str(i) for i in range(1, 5)]
-    root, run, first, task_id = ids
-    for mode in ("ready", "deadline", "revision", "cancel", "stale-run", "malformed"):
-        now = datetime.now(timezone.utc)
-        current_time = [now]
-        info = SimpleNamespace(workflow_id=root, run_id=run, first_execution_run_id=first)
-        owner = SimpleNamespace(agent_id=root, is_paused=False, _browser_execution_task_id="tool",
-                                _response_schema_revision=1, _background_tasks={"tool": {}})
-        events, reads = [], []
-        with patch.object(guard.workflow, "info", return_value=info), patch.object(guard.workflow, "now", side_effect=lambda: current_time[0]), patch.object(guard.workflow, "uuid4", return_value="nonce"):
-            ticket = guard.register_finalizer(owner, task_id=task_id, tool_id="tool", activity_id="activity", limit=100, timeout_seconds=3000)
-            expiry = now.timestamp() + 3000
-            rows = [{"role": "TOOL", "metadata": {"toolName": "spawn_browser_agent",
-                     "task_id": task_id, "steps_taken": i,
-                     "toolStatus": "IN_PROGRESS" if i == 100 else "FINISHED"}} for i in range(101)]
-
-            async def get(*args):
-                reads.append(1)
-                if len(reads) == 2 and mode != "malformed":
-                    if events != ["pending"]:
-                        return {"agent": {"id": root, "status": "PAUSED", "progress": 0}, "messages": rows}
-                    assert owner._browser_finalizers["tool"]["accepted"] is False
-                    assert owner._browser_finalizers["tool"]["pending_deadline"] == expiry
-                    if mode == "ready":
-                        assert guard.acknowledge_finalizer(owner, {"ticket": ticket, "steps": 100, "deadline": expiry})
-                    elif mode == "deadline": current_time[0] = now + timedelta(seconds=3000)
-                    elif mode == "revision": owner._response_schema_revision = 2
-                    elif mode == "cancel": owner.is_paused = True
-                    elif mode == "stale-run": ticket["run_id"] = "old"
-                return {"agent": {"id": root, "status": "ACTIVE" if len(reads) < (2 if mode == "malformed" else 3) else "PAUSED", "progress": 0}, "messages": rows}
-
-            async def request(req):
-                if req.url.path.endswith("/browser-budget-stop"):
-                    result = guard.request_budget_stop(owner, {"budget": 100, "first_run_id": first})
-                    if mode == "malformed": result = {**result, "deadline": True}
-                    events.append("pending" if result.get("pending") else "accepted" if result["accepted"] else "refused")
-                    return httpx.Response(200, json=result)
-                assert req.url.path.endswith("/pause"), req.url
-                events.append("pause")
-                return httpx.Response(200, json={"success": True})
-
-            real_client = httpx.AsyncClient
-            with patch.object(b, "get_agent", get), patch.object(b, "_api_headers", AsyncMock(return_value={})), patch.object(b, "POLL_INTERVAL", 0), patch.object(
-                b.httpx, "AsyncClient", side_effect=lambda **kw: real_client(transport=httpx.MockTransport(request), **kw)
-            ):
-                result = await b._poll_agent("http://offline.test", root, copy.deepcopy(b.get_task_by_name("polar-bu-088")))
-            assert result[0]["agent"]["status"] == "PAUSED"
-            if mode == "ready": assert events == ["pending", "accepted"]
-            elif mode == "malformed": assert events == ["pending", "pause"]
-            else: assert events == ["pending", "refused", "pause"]
-            assert owner._browser_finalizers["tool"]["pending_deadline"] == expiry
-
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
-    r.record("browser_budget_pending_registered_guards", test_browser_budget_pending_registered_guards)
-    await r.record_async("browser_budget_pending_revalidates_before_acceptance", test_browser_budget_pending_revalidates_before_acceptance)
     r.record("browser_iteration_budget_preserves_trajectory_counting", test_browser_iteration_budget_preserves_trajectory_counting)
     await r.record_async("browser_budget_poller_waits_for_native_iteration_limit", test_browser_budget_poller_waits_for_native_iteration_limit)
-    await r.record_async("browser_budget_stop_poller_keeps_pause_fallback", test_browser_budget_stop_poller_keeps_pause_fallback)
     from benchmarks.process_bench_test import run_process_controls
 
     r.record("process_bench_contract_and_adversarial_traces", run_process_controls)

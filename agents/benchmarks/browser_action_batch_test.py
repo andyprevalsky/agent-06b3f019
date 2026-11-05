@@ -145,7 +145,7 @@ def test_legacy_json_batch_preserves_all_actions():
 def test_prompt_teaches_batch_boundaries_and_ref_chain():
     p=build_browser_use_system_prompt([])
     assert 'exactly one available' not in p
-    for phrase in ['Batch ordered actions','never concurrently','observation_ref','missing or ambiguous','normal write','separate']:
+    for phrase in ['Return one or more browser action tool calls to execute sequentially.', 'Stop at first failure.', 'observation_ref', 'in the same response', "Same-document DOM changes can also invalidate ordinal refs; on 'Unknown ref' or unexpected failures, re-observe."]:
         assert phrase in p
 
 

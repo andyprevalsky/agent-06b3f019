@@ -49,10 +49,6 @@ def set_temporal_client(client: Client) -> None:
     _temporal_client = client
 
 
-def get_temporal_client() -> Optional[Client]:
-    return _temporal_client
-
-
 @activity.defn
 async def query_parent_state_activity(parent_workflow_id: str) -> Dict[str, Any]:
     """Query a parent workflow's pause/cost-limit state via the Temporal client.

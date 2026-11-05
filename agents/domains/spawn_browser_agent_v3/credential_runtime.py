@@ -193,3 +193,133 @@ async def build_realm_credential_state(
         passkey_ref_by_credential_id=passkey_ref_by_credential_id,
         auth_credential_ref=credential_ref if isinstance(credential_ref, dict) else None,
     )
+
+
+class OwnedCredentialTasks:
+    """Activity-local credential work; no task may outlive its browser owner."""
+
+    def __init__(self) -> None:
+        self.tasks: set[asyncio.Task] = set()
+        self.closed = False
+        self.control_error: Optional[BaseException] = None
+        self.status: Dict[str, str] = {}
+        self.latest: Dict[str, asyncio.Task] = {}
+
+    def check(self) -> None:
+        if self.control_error is not None:
+            raise self.control_error
+
+    def start(self, work: Callable[[], Any], *, label: Optional[str] = None) -> Optional[asyncio.Task]:
+        self.check()
+        if self.closed or len(self.tasks) >= 8:
+            if label:
+                self.status[label] = "error"
+            return None
+        task = asyncio.create_task(work())
+        self.tasks.add(task)
+        if label:
+            self.status[label] = "pending"
+            self.latest[label] = task
+        def done(finished: asyncio.Task) -> None:
+            self.tasks.discard(finished)
+            if label and self.latest.get(label) is finished:
+                self.status[label] = "error" if finished.cancelled() or finished.exception() is not None else "ready"
+            if not finished.cancelled():
+                error = finished.exception()
+                if error is not None:
+                    from helpers.workflow_generation import WorkflowGenerationSealed
+                    if isinstance(error, WorkflowGenerationSealed):
+                        self.control_error = error
+        task.add_done_callback(done)
+        return task
+
+    async def close(self) -> None:
+        self.closed = True
+        pending = tuple(self.tasks)
+        if pending:
+            # A short terminal grace period lets already-issued uploads settle;
+            # browser execution never joins them. Only this owner's tasks count.
+            try:
+                _, unfinished = await asyncio.wait(pending, timeout=1)
+            finally:
+                # Cancellation of the owner during its grace period must still
+                # cancel its own work, never somebody else's loop tasks.
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+            if unfinished:
+                await asyncio.wait(unfinished, timeout=0.1)
+
+
+class AsyncCredentialPreparation:
+    """Single current session/realm, immediate status reads, no polling waits."""
+
+    def __init__(self, owner: OwnedCredentialTasks, prepare: Callable[..., Any]) -> None:
+        self.owner, self.prepare = owner, prepare
+        self.scope: Any = None
+        self.task: Optional[asyncio.Task] = None
+        self.state: Dict[str, Any] = {}
+        self.revision = 0
+
+    def invalidate(self) -> None:
+        self.revision += 1
+        self.scope = None
+        self.state = {}
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
+        self.task = None
+
+    def request(self, url: str, scope: Any, realm: str) -> Dict[str, Any]:
+        self.owner.check()
+        if scope != self.scope:
+            self.invalidate()
+            self.scope = scope
+            self.state = {"auth_realm": realm, "credential_preparation_status": "pending"}
+            revision = self.revision
+            def current() -> bool:
+                return not self.owner.closed and revision == self.revision and scope == self.scope
+            async def run() -> None:
+                from helpers.workflow_generation import WorkflowGenerationSealed
+                try:
+                    result = await self.prepare(url, current)
+                except (asyncio.CancelledError, WorkflowGenerationSealed):
+                    raise
+                except Exception:
+                    if current():
+                        # Provider/decryption exceptions can contain secret values.
+                        self.state = {"auth_realm": realm, "credential_preparation_status": "error",
+                                      "credential_preparation_error": "Saved credential preparation failed"}
+                else:
+                    if current():
+                        self.state = {"auth_realm": realm, "credential_preparation_status": "ready"}
+                        if isinstance(result, dict):
+                            for key in ("cookies_injected", "cookie_count", "password_count", "passkey_count",
+                                        "passkeys_newly_injected"):
+                                value = result.get(key)
+                                if (key == "cookies_injected" and type(value) is bool
+                                        or key != "cookies_injected" and type(value) is int and value >= 0):
+                                    self.state[key] = value
+                            if result.get("credential_preparation_error"):
+                                self.state.update(credential_preparation_status="error",
+                                                  credential_preparation_error="Saved credential preparation failed")
+            self.task = self.owner.start(run)
+            if self.task is None:
+                self.state.update(credential_preparation_status="error",
+                                  credential_preparation_error="Saved credential preparation unavailable")
+        return dict(self.state)
+
+
+def missing_credential_reference(value: Any, available: Dict[str, str]) -> bool:
+    """Never type an unresolved private-reference placeholder into a page."""
+    import re
+    if isinstance(value, str):
+        references = re.findall(r"\{\{secret:([^{}]+)\}\}", value)
+        if (value.startswith("pwd:") and not any(char.isspace() for char in value)
+                or value in {"card_number", "card_name", "card_expiry", "card_cvv"}):
+            references.append(value)
+        return any(ref not in available for ref in references)
+    if isinstance(value, dict):
+        return any(missing_credential_reference(item, available) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(missing_credential_reference(item, available) for item in value)
+    return False

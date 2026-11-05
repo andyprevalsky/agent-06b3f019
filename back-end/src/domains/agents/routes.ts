@@ -12,7 +12,6 @@ import { createAgentSchema, searchAgentsQuerySchema, updateAgentSchema } from '.
 import * as routeGuards from './routes.guards';
 import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
-import { pauseAtBrowserBudgetForUser } from './agentBudgetStopService';
 import * as queryService from './agentQueryService';
 import messageRoutes from './routes.messages';
 import exploreEvidenceRoutes from './routes.exploreEvidence';
@@ -249,18 +248,6 @@ router.post(
     } catch (error) {
       handleRouteError(res, error, 'Failed to start agent mode', { agent_id: req.params.id });
     }
-  })
-);
-
-router.post(
-  '/:id/browser-budget-stop',
-  auth,
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    if (req.userId === undefined) {
-      res.status(401).json({ error: 'Unauthorized' });
-      return;
-    }
-    res.json(await pauseAtBrowserBudgetForUser(req.params.id, req.userId, req.body));
   })
 );
 

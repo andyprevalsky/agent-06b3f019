@@ -74,7 +74,7 @@ from helpers.wait_condition_or_handoff import (
     wait_condition_or_generation_handoff,
 )
 from helpers.workflow_generation import WorkflowGenerationSealed
-from helpers.browser_budget_stop import (announce_finalizer, register_finalizer, finish_budget_stop, forget_finalizer, finalizer_stop_requested, finalizer_result)
+from helpers.screenshot_history import redact_with_screenshots, screenshot_context_text
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.demo_cache.browser_use_cache import cached_browser_decision
@@ -140,10 +140,12 @@ from .config import (
     browser_start_to_close_timeout_minutes,
     skip_browser_network_recording,
 )
-from .credential_runtime import build_realm_credential_state, unknown_realm_credential_state
+from .credential_runtime import (
+    AsyncCredentialPreparation, OwnedCredentialTasks, build_realm_credential_state,
+    missing_credential_reference, unknown_realm_credential_state,
+)
 from .navigation_policy import (
-    NavigationPolicyBarrier, NavigationFailureBarrier, NativeNavigationFailure,
-    is_native_navigation_policy_denial, native_navigation_failure, restore_navigation_barrier, url_digest, web_destination,
+    NavigationFailureBarrier, NavigationPolicyBarrier, restore_navigation_barrier, url_digest,
 )
 from .download_persist import BrowserDownloadPersister
 from .recording import (
@@ -161,7 +163,6 @@ from .repo import (
     acknowledge_browser_user_control,
     close_browser_session,
     create_user_auth_assistance_request,
-    fetch_auth_options,
     fetch_browser_captcha_telemetry,
     fetch_browser_control_state,
     fetch_claude_token,
@@ -1226,7 +1227,7 @@ def _model_visible_browser_message(
         payload = preserve_output_protocol(original, payload, action_name, redact, arguments=tool_arguments)
         return json_dumps_compact(payload)
 
-    safe = redact(message)
+    safe = redact_with_screenshots(message, redact)
     role = message.get("role")
     if isinstance(role, str) and role in {"user", "assistant", "tool", "system", "developer", "USER", "TOOL"}:
         safe["role"] = role
@@ -1239,20 +1240,8 @@ def _model_visible_browser_message(
     if isinstance(content, list):
         blocks = []
         for block in content:
-            visible_block = redact(block)
-            if (
-                isinstance(block, dict)
-                and isinstance(block.get("type"), str)
-                and block["type"] in {"image_url", "image", "input_image"}
-                and (secret_values_used or visible_block != block)
-            ):
-                omitted = (
-                    "[image withheld after private credential entry]"
-                    if secret_values_used
-                    else "[image omitted from Temporal resume]"
-                )
-                visible_block = {"type": "text", "text": redact(omitted)}
-            elif isinstance(block, dict) and block.get("type") == "text" and isinstance(visible_block, dict):
+            visible_block = redact_with_screenshots(block, redact)
+            if isinstance(block, dict) and block.get("type") == "text" and isinstance(visible_block, dict):
                 visible_block["type"] = "text"
             blocks.append(visible_block)
         safe["content"] = blocks
@@ -1297,72 +1286,15 @@ def _model_visible_browser_turn_messages(
     secret_values_used: bool,
     action_result_redact: Any = None,
 ) -> Any:
-    """Preserve only screenshot-tool transport linked to its harness tool call."""
-    # Message keys are protocol; nested content still belongs to the page.
-    visible = (
-        [
-            _model_visible_browser_message(
-                message, redact, action_result_redact=action_result_redact, secret_values_used=secret_values_used
-            )
-            for message in messages
-        ]
-        if isinstance(messages, list)
-        else redact(messages)
-    )
-    if secret_values_used or not isinstance(messages, list) or not isinstance(visible, list):
-        return visible
-    for index in range(2, len(messages)):
-        assistant, tool, image = messages[index - 2 : index + 1]
-        if not all(isinstance(item, dict) for item in (assistant, tool, image)):
-            continue
-        if assistant.get("role") != "assistant" or tool.get("role") != "tool" or tool.get("name") != "screenshot":
-            continue
-        if not any(
-            isinstance(call, dict)
-            and call.get("id") == tool.get("tool_call_id")
-            and isinstance(call.get("function"), dict)
-            and call["function"].get("name") == "screenshot"
-            for call in assistant.get("tool_calls") or []
-        ):
-            continue
-        try:
-            result = json.loads(tool.get("content") or "")
-        except (TypeError, ValueError):
-            continue
-        content = image.get("content")
-        screenshot_label = "Screenshot captured by the screenshot tool."
-        if (
-            not isinstance(result, dict)
-            or result.get("screenshot_attached") is not True
-            or image.get("role") != "user"
-            or not isinstance(content, list)
-            or len(content) != 2
-            or content[0]
-            not in ({"type": "text", "text": screenshot_label}, {"type": "text", "text": redact(screenshot_label)})
-            or not isinstance(content[1], dict)
-            or content[1].get("type") != "image_url"
-        ):
-            continue
-        payload = content[1].get("image_url")
-        url = payload.get("url") if isinstance(payload, dict) else None
-        if not isinstance(url, str) or not url.startswith("data:image/png;base64,"):
-            continue
-        try:
-            png = base64.b64decode(url.split(",", 1)[1], validate=True)
-        except ValueError:
-            continue
-        if not png.startswith(b"\x89PNG\r\n\x1a\n"):
-            continue
-        visible_content = visible[index].get("content")
-        if isinstance(visible_content, list) and len(visible_content) == 2:
-            visible[index]["role"] = "user"
-            visible_content[0] = {"type": "text", "text": redact(content[0]["text"])}
-            visible_content[1] = {"type": "image_url", "image_url": {"url": url}}
-    return visible
+    """Keep ordinary image results and their original tool-call association."""
+    return [
+        _model_visible_browser_message(message, redact, action_result_redact=action_result_redact)
+        for message in messages
+    ] if isinstance(messages, list) else redact_with_screenshots(messages, redact)
 
 
 def _model_visible_browser_verifier_context(context: Any, dom_service: Any, browser_state: Dict[str, Any], *, action_history: Any = None, session_id: str = "", task_id: str = "") -> Any:
-    """Keep only the builder's final trusted raster intact before private entry."""
+    """Redact text while retaining screenshots supplied by ordinary tool results."""
     visible = (
         [
             _model_visible_browser_message(
@@ -1402,64 +1334,6 @@ def _model_visible_browser_verifier_context(context: Any, dom_service: Any, brow
                         },
                     },
                 }
-    # Only this task's native capture owner can reintroduce raster bytes after
-    # text redaction. A model-authored metadata dictionary cannot authorize one.
-    if not getattr(dom_service, "secret_values_used", False) and isinstance(visible, list):
-        receipts = (action_history.screenshot_evidence(session_id, task_id)
-                    if action_history is not None and callable(getattr(action_history, "screenshot_evidence", None)) else [])
-        for original, safe_message in zip(context, visible):
-            metadata = original.get("metadata") if isinstance(original, dict) else None
-            if not isinstance(metadata, dict) or not isinstance(safe_message, dict):
-                continue
-            if metadata.get("toolName") != "historical_screenshot":
-                continue
-            evidence = metadata.get("structured_response")
-            trusted = next((r for r in receipts if evidence == {k: r[k] for k in ("step", "url", "target_id", "task_id", "sha256")}
-                            and metadata.get("screenshot_b64") == r["screenshot_b64"]), None)
-            if trusted is not None:
-                safe_message["metadata"]["screenshot_b64"] = trusted["screenshot_b64"]
-            else:
-                safe_message.get("metadata", {}).pop("screenshot_b64", None)
-    screenshot = browser_state.get("screenshot")
-    if (
-        getattr(dom_service, "secret_values_used", False)
-        or browser_state.get("screenshot_placeholder")
-        or not isinstance(screenshot, str)
-        or not screenshot
-        or not isinstance(context, list)
-        or not context
-        or not isinstance(visible, list)
-    ):
-        return visible
-    # Final evidence precedes optional historical observations in admission.
-    final_index = next(
-        (
-            index
-            for index in range(len(context) - 1, -1, -1)
-            if isinstance(context[index], dict)
-            and (context[index].get("metadata") or {}).get("toolName") == "final_screenshot"
-        ),
-        -1,
-    )
-    if final_index < 0:
-        return visible
-    original = context[final_index]
-    if not isinstance(original, dict) or original.get("role") != "TOOL":
-        return visible
-    metadata = original.get("metadata")
-    if (
-        isinstance(metadata, dict)
-        and metadata.get("toolName") == "final_screenshot"
-        and metadata.get("screenshot_b64") == screenshot
-        and isinstance(visible[final_index], dict)
-    ):
-        visible[final_index]["role"] = "TOOL"
-        visible[final_index]["metadata"] = {
-            **dom_service.model_visible_value(metadata),
-            "toolName": "final_screenshot",
-            "toolStatus": "FINISHED",
-            "screenshot_b64": screenshot,
-        }
     return visible
 
 
@@ -2039,7 +1913,19 @@ async def _propagate_browser_credentials_with_progress(
     success: bool,
     message: str,
     redact: Optional[Callable[[Any], Any]] = None,
+    background_owner: Optional[OwnedCredentialTasks] = None,
 ) -> Optional[Dict[str, Any]]:
+    if background_owner is not None:
+        async def upload():
+            result = await _propagate_browser_credentials_with_progress(
+                config=config, agent_id=agent_id, task_id=task_id, browser_url=browser_url,
+                status=status, success=success, message=message, redact=redact,
+            )
+            if result is None:
+                raise RuntimeError("Saved credential upload failed")
+            return result
+        task = background_owner.start(upload, label="credential_upload")
+        return {"status": "pending" if task is not None else "error"}
     if not task_id:
         return None
     redact = redact or (lambda value: value)
@@ -2817,7 +2703,7 @@ def _fresh_connect_url_minter(config: Any, task_id: Optional[str]) -> Optional[C
         return None
 
     async def mint() -> Optional[str]:
-        info = await fetch_session_info(config, task_id)
+        info = await fetch_session_info(config, task_id, include_credentials=False)
         ws_url = info.get("ws_url") if isinstance(info, dict) else None
         return ws_url if isinstance(ws_url, str) and ws_url else None
 
@@ -3906,11 +3792,7 @@ async def _call_browser_use_with_rotation(
         task=task,
         browser_state=browser_state_for_llm,
         action_history=action_entries,
-        available_actions=[
-            action
-            for action in available_actions
-            if action != "screenshot" or getattr(dom_service, "secret_values_used", False) is not True
-        ],
+        available_actions=list(available_actions),
         dynamic_system_context=dynamic_system_context,
         turn_messages=turn_messages,
         agent_id=agent_id,
@@ -3942,7 +3824,7 @@ async def _call_browser_use_with_rotation(
             for key in ("params", "result"):
                 if key in original:
                     visible[key] = dom_service.model_visible_value(original[key])
-            if not dom_service.secret_values_used and original.get("screenshot"):
+            if original.get("screenshot"):
                 visible["screenshot"] = original["screenshot"]
         for key in ("viewport", "scroll_position", "page_stats"):
             if key in browser_state_for_llm:
@@ -3952,7 +3834,7 @@ async def _call_browser_use_with_rotation(
                 {**dom_service.model_visible_value(tab), **({"id": tab["id"]} if "id" in tab else {})}
                 for tab in browser_state_for_llm["tabs"]
             ]
-        if not dom_service.secret_values_used and browser_state_for_llm.get("screenshot"):
+        if browser_state_for_llm.get("screenshot"):
             rose_kwargs["browser_state"]["screenshot"] = browser_state_for_llm["screenshot"]
         if extra_user_messages:
             rose_kwargs["browser_state"]["_extra_user_messages"] = _model_visible_browser_turn_messages(
@@ -4150,7 +4032,7 @@ def _append_browser_turn_messages(
                 "content": [
                     {
                         "type": "text",
-                        "text": "Screenshot captured by the screenshot tool.",
+                        "text": screenshot_context_text({"screenshot_context": {**(result.get("screenshot_context") or {}), "tool_call_id": tool_call_id}}),
                     },
                     {
                         "type": "image_url",
@@ -6363,7 +6245,6 @@ async def spawn_browser_agent_activity_v3(
     agent_model: Optional[str] = None,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
-    budget_finalizer: Optional[dict] = None,
 ) -> Dict[str, Any]:
     # Browser steps run on the spawning agent's Rose pool (ultra root → ultra).
     browser_pool = browser_pool_for_agent_model(agent_model)
@@ -6428,7 +6309,6 @@ async def spawn_browser_agent_activity_v3(
         browser_pool=browser_pool,
         inbox_address=inbox_address,
         await_owner_cleanup=await_owner_cleanup,
-        budget_finalizer=budget_finalizer,
     )
 
 
@@ -8075,7 +7955,6 @@ async def _spawn_browser_agent_activity_v3_real(
     browser_pool: str = BROWSER_USE_PRICING_POOL,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
-    budget_finalizer: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Browser agent activity using browser-use BrowserSession + Rose API."""
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -8173,7 +8052,8 @@ async def _spawn_browser_agent_activity_v3_real(
 
     private_browser_runtime: Dict[str, Any] = {}
     durable_browser_runtime: Dict[str, Any] = {}
-    pending_credential_reload_realm: Optional[str] = None
+    credential_tasks = OwnedCredentialTasks()
+    credential_preparation = None
     navigation_policy = NavigationPolicyBarrier(task_id or "")
     # The latest challenge episode whose recovery did not resolve it (antibot.stuck);
     # defined before any early exit so the activity's finally can always read it.
@@ -8347,7 +8227,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 ),
             },
             durable_runtime_state={
-                "credential_reload_pending": bool(pending_credential_reload_realm),
+                "credential_preparation_status": (dict(credential_preparation.state) if credential_preparation else {}),
                 **({navigation_policy.checkpoint_key: navigation_policy.checkpoint()} if navigation_policy.active else {}),
                 # Tilion downloads are durable in attachment storage; the
                 # resumed activity (maybe on another worker) extracts them.
@@ -8394,6 +8274,10 @@ async def _spawn_browser_agent_activity_v3_real(
         *,
         operational_sources: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        if credential_tasks.status:
+            # The terminal result is serialized after finally closes this owner;
+            # keep its status map so cancelled uploads finish as error, not pending.
+            result = {**result, "credential_background_status": credential_tasks.status}
         if unread_user_instructions:
             result = {**result, "unread_user_messages": list(unread_user_instructions)}
         # Archive references and routing IDs remain exact protocol values.
@@ -8943,10 +8827,6 @@ async def _spawn_browser_agent_activity_v3_real(
 
         fingerprint_injection = None
         user_profile = {}
-        # Current backends return auth_options from the same realm-preparation
-        # boundary as cookies/passwords/passkeys. Keep the fallback below for a
-        # rolling deployment where an older backend response omits it.
-        auth_options_prefetch: Optional[asyncio.Task] = None
         logger.info(
             "Session init check",
             is_resume=is_resume,
@@ -8965,7 +8845,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     "Resuming auth-assistance browser task via existing browser session",
                     task_id=task_id,
                 )
-                session_info = await fetch_session_info(config, task_id, validate_live=True)
+                session_info = await fetch_session_info(config, task_id, validate_live=True, include_credentials=False)
                 expected_session_id = write_lock_resume_state.get("session_id") if write_lock_resume_state else None
                 current_session_id = session_info.get("session_id")
                 session_was_refreshed = (
@@ -9020,7 +8900,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     auth_assistance_resume_mode = "new_steel_session_after_unavailable"
             else:
                 logger.info("\U0001f50d Fetching session info for resumed task", task_id=task_id)
-                session_info = await fetch_session_info(config, task_id, validate_live=True)
+                session_info = await fetch_session_info(config, task_id, validate_live=True, include_credentials=False)
                 if session_info.get("same_session_available") is not True:
                     unavailable_reason = session_info.get("same_session_unavailable_reason")
                     logger.warning(
@@ -9084,7 +8964,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     config,
                     user_id,
                     agent_id,
-                    start_url,
+                    "about:blank",
                     task_id=task_id,
                 )
 
@@ -9167,25 +9047,15 @@ async def _spawn_browser_agent_activity_v3_real(
         auth_options = session_auth_options or {}
         if auth_options.get("realm"):
             auth_realm = auth_options["realm"]
-        if not auth_options and auth_options_prefetch is not None:
-            auth_options = await auth_options_prefetch
-            auth_realm = auth_options.get("realm") or auth_realm
-        elif not auth_options and auth_realm:
-            auth_options = await fetch_auth_options(config, user_id, auth_realm)
-            auth_realm = auth_options.get("realm") or auth_realm
-        elif not auth_options:
-            auth_options = {"realm": "this site"}
-
-        if auth_options_prefetch is not None:
-            if not auth_options_prefetch.done():
-                auth_options_prefetch.cancel()
-            elif not auth_options_prefetch.cancelled() and auth_options_prefetch.exception() is not None:
-                # Retrieve the unused prefetch failure so asyncio doesn't log
-                # "exception was never retrieved" (session already had auth_options).
-                logger.debug(
-                    "Unused auth_options prefetch failed",
-                    error=extract_error_message(auth_options_prefetch.exception()),
-                )
+        # Saved-state I/O and decryption are optional background work. Keep
+        # the original encrypted payload private until the live realm requests it.
+        initial_credential_payload = {
+            "auth_realm": auth_realm, "auth_options": auth_options,
+            "passwords": session_passwords, "passkeys": session_passkeys,
+            "auth_credential_ref": session_credential_ref, "worker_apply": session_worker_apply,
+        }
+        initial_credential_scope = (session_id, auth_realm)
+        session_worker_apply = None
         auth_runtime_state = AuthRuntimeState.from_auth_options(auth_options)
         minted_option = auth_options.get("minted") or {}
         minted_account_label = (
@@ -9431,17 +9301,7 @@ async def _spawn_browser_agent_activity_v3_real(
             t = time.monotonic()
             if session_passwords:
                 logger.info(f"Loaded {len(session_passwords)} passwords from session response")
-            _realm_credential_state = await build_realm_credential_state(
-                {
-                    "auth_realm": auth_options.get("realm", auth_realm),
-                    "auth_options": auth_options,
-                    "passwords": session_passwords,
-                    "passkeys": session_passkeys,
-                    "auth_credential_ref": session_credential_ref,
-                },
-                decryption_key=config.payment.decryption_key,
-                target_url=credential_target_url,
-            )
+            _realm_credential_state = unknown_realm_credential_state(auth_realm)
             _auth_options_section = _realm_credential_state.auth_options_section
             _password_origins = _realm_credential_state.password_origins
             _credential_refs_by_secret_ref = _realm_credential_state.credential_refs_by_secret_ref
@@ -9497,6 +9357,9 @@ async def _spawn_browser_agent_activity_v3_real(
             playwright_browser,
             playwright_instance,
         ) = browser_result
+        # Credential injection is concurrent with the actor, so it cannot
+        # navigate the actor's page as a side effect of passkey preparation.
+        dom_service.allow_credential_reload = False
         from browser_tools.captcha_solve_indicator import start_captcha_telemetry_indicator_for_task
 
         start_captcha_telemetry_indicator_for_task(
@@ -9702,10 +9565,10 @@ async def _spawn_browser_agent_activity_v3_real(
             _restore_browser_auth_attempts(auth_runtime_state, write_lock_resume_state.get("auth_attempts"))
         passkey_ref_by_credential_id.update(initial_realm_credential_state.passkey_ref_by_credential_id)
         if initial_realm_credential_state.decrypted_passkeys:
-            await sync_passkeys_onto_target(
+            credential_tasks.start(lambda: sync_passkeys_onto_target(
                 initial_realm_credential_state.decrypted_passkeys,
                 context="session start",
-            )
+            ))
 
         # ===== PHASE 3: POST-SETUP =====
         t_post = time.monotonic()
@@ -9878,7 +9741,7 @@ async def _spawn_browser_agent_activity_v3_real(
             # The provider can replace the pre-navigation target/session while
             # opening the first real page. Revalidate at that exact boundary so
             # a cached authenticator id cannot hide a lost WebAuthn environment.
-            await sync_passkeys_onto_target(context="after start navigation")
+            credential_tasks.start(lambda: sync_passkeys_onto_target(context="after start navigation"), label="passkey_sync")
 
             # The interaction layer (humanizer/recorder/logo) ran concurrently
             # with the navigation; both must be complete before the warm-up
@@ -10030,13 +9893,12 @@ async def _spawn_browser_agent_activity_v3_real(
                 browser_turn_messages, action_history, last4=payment_card_last4, card_refs=card_refs
             ):
                 raise RuntimeError("Approved payment card has no pending browser tool result to complete")
-        failed_credential_prep_realms: Dict[str, str] = {}
-        credential_preparation_error: Optional[str] = None
-        pending_credential_reload_realm = (
-            auth_realm if durable_browser_runtime.get("credential_reload_pending") is True else None
-        )
         action_redaction_refs: Optional[List[Dict[str, str]]] = None
         navigation_policy = restore_navigation_barrier(task_id or "", durable_browser_runtime)
+        if isinstance(navigation_policy, NavigationFailureBarrier):
+            # Legacy transport-failure credential debt is no longer an action
+            # gate. Actual native network-policy denials retain their boundary.
+            navigation_policy = NavigationPolicyBarrier(task_id or "")
         policy_decision_authority = None
         policy_decision_tab = None
 
@@ -10053,7 +9915,6 @@ async def _spawn_browser_agent_activity_v3_real(
             nonlocal auth_options_section
             nonlocal auth_runtime_state
             nonlocal credential_refs_by_secret_ref
-            nonlocal credential_preparation_error
             nonlocal minted_account_label
             nonlocal minted_account_labels
             nonlocal minted_credential_ref
@@ -10088,7 +9949,6 @@ async def _spawn_browser_agent_activity_v3_real(
             session_passwords = list(payload.get("passwords") or [])
             session_passkeys = list(payload.get("passkeys") or [])
             session_credential_ref = realm_state.auth_credential_ref
-            credential_preparation_error = payload.get("credential_preparation_error")
             active_credential_binding = _credential_binding()
 
             minted_option = auth_options.get("minted") or {}
@@ -10115,128 +9975,83 @@ async def _spawn_browser_agent_activity_v3_real(
                 else None
             )
 
-        async def _prepare_credentials_for_url_unquarantined(
-            target_url: str,
-        ) -> Optional[Dict[str, Any]]:
-            """Atomically activate every saved credential type for a new realm."""
+        async def _prepare_credentials_for_url_unquarantined(target_url: str, current) -> Optional[Dict[str, Any]]:
+            """Prepare privately in the background; activate only the current owner."""
             target_realm = auth_realm_from_url(target_url)
-            if not target_realm:
+            captured_session, captured_dom, captured_browser = session_id, dom_service, playwright_browser
+            captured_binding = _credential_binding()
+            def still_current():
+                return (current() and session_id == captured_session and dom_service is captured_dom
+                        and _credential_binding() == captured_binding)
+            if not target_realm or not captured_session or not still_current():
                 return None
-            if not session_id:
-                raise RuntimeError(f"Cannot prepare credentials for {target_realm} without a browser session")
-
-            browser_activity_checkpoint(f"Preparing saved credentials for {target_realm}")
-            try:
-                payload = await prepare_browser_auth(
-                    config,
-                    user_id=user_id,
-                    session_id=session_id,
-                    target_url=target_url,
-                )
-            except Exception as prep_error:
-                failed_credential_prep_realms[target_realm] = (
-                    f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}"
-                )
-                raise
+            if initial_credential_scope == (captured_session, target_realm) and initial_credential_payload.get("auth_options", {}).get("realm"):
+                payload = initial_credential_payload
+            else:
+                payload = await prepare_browser_auth(config, user_id=user_id, session_id=captured_session,
+                                                     target_url=target_url)
+            if not still_current():
+                return None
+            realm_state = await build_realm_credential_state(payload, decryption_key=config.payment.decryption_key)
+            if not still_current():
+                return None
+            if not auth_realm_matches_url(realm_state.auth_realm, target_url):
+                raise RuntimeError("Credential realm mismatch")
             realm_worker_apply = tilion_worker_apply_payload(payload)
             if realm_worker_apply:
-                await apply_tilion_worker_state(playwright_browser, realm_worker_apply)
-            realm_state = await build_realm_credential_state(
-                payload,
-                decryption_key=config.payment.decryption_key,
-            )
-            if realm_state.auth_realm != target_realm and not auth_realm_matches_url(
-                realm_state.auth_realm, target_url
-            ):
-                raise RuntimeError(f"Credential realm mismatch: requested {target_realm}, got {realm_state.auth_realm}")
-
-            injected_passkey_count = await sync_passkeys_onto_target(
-                realm_state.decrypted_passkeys,
-                context=f"realm transition to {target_realm}",
-            )
+                await apply_tilion_worker_state(captured_browser, realm_worker_apply)
+            if not still_current():
+                return None
+            injected_passkey_count = 0
+            if realm_state.decrypted_passkeys:
+                injected_passkey_count = await captured_dom.inject_passkeys(realm_state.decrypted_passkeys)
+            if not still_current():
+                return None
             passkey_ref_by_credential_id.update(realm_state.passkey_ref_by_credential_id)
-
+            for passkey in realm_state.decrypted_passkeys:
+                seeded_decrypted_passkeys_by_credential_id[passkey["credentialId"]] = passkey
             _activate_realm_credentials(realm_state, payload)
-
             if realm_state.auth_credential_ref and task_id:
-                await save_browser_credential_ref_message(
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    message=f"Browser session credential applied for {auth_realm}.",
-                    role="TOOL",
-                    tool_name="browser_session_auth",
-                    credential_ref=realm_state.auth_credential_ref,
+                credential_tasks.start(lambda: save_browser_credential_ref_message(
+                    agent_id=agent_id, task_id=task_id, message="Saved browser credentials are ready.",
+                    role="TOOL", tool_name="browser_session_auth", credential_ref=realm_state.auth_credential_ref,
                     browser_url=browser_url or "",
-                )
+                ), label="credential_ref_upload")
+            return {"auth_realm": target_realm, "cookies_injected": payload.get("cookies_injected"),
+                    "password_count": len(realm_state.password_secret_refs),
+                    "passkey_count": len(realm_state.decrypted_passkeys),
+                    "passkeys_newly_injected": injected_passkey_count,
+                    **({"credential_preparation_error": True} if payload.get("credential_preparation_error") else {})}
 
-            logger.info(
-                "Prepared credentials for browser realm transition",
-                previous_realm=current_url and auth_realm_from_url(current_url),
-                auth_realm=auth_realm,
-                password_count=len(realm_state.password_secret_refs),
-                passkey_count=len(realm_state.decrypted_passkeys),
-                passkeys_newly_injected=injected_passkey_count,
-                cookie_source=payload.get("auth_source"),
-                cookies_injected=payload.get("cookies_injected"),
-            )
-            summary = {
-                "auth_realm": auth_realm,
-                "cookies_injected": payload.get("cookies_injected"),
-                "password_count": len(realm_state.password_secret_refs),
-                "passkey_count": len(realm_state.decrypted_passkeys),
-                "passkeys_newly_injected": injected_passkey_count,
-            }
-            if payload.get("credential_preparation_error"):
-                summary["credential_preparation_error"] = payload["credential_preparation_error"]
-                logger.warning(
-                    "Activated realm credentials after browser-state restoration failed",
-                    auth_realm=auth_realm,
-                    error=payload["credential_preparation_error"],
-                )
-            return summary
+        credential_preparation = AsyncCredentialPreparation(credential_tasks, _prepare_credentials_for_url_unquarantined)
 
         async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
-            previous_auth_realm = auth_realm
-            if _credential_binding() != active_credential_binding:
-                # A replaced browser or selected credential invalidates both
-                # inventory reuse and the previous session's quarantine.
-                previous_auth_realm = ""
-                failed_credential_prep_realms.clear()
             target_realm = auth_realm_from_url(target_url)
-            if target_realm != previous_auth_realm and not auth_realm_matches_url(previous_auth_realm, target_url):
-                # Invalidate unrelated context before discovery, including a
-                # return to a quarantined realm. Missing inventory is unknown.
+            if not target_realm:
+                credential_preparation.invalidate()
+                _activate_realm_credentials(unknown_realm_credential_state(""), {})
+                return {"auth_realm": "", "credential_preparation_status": "not_applicable"}
+            if _credential_binding() != active_credential_binding:
+                credential_preparation.invalidate()
                 _activate_realm_credentials(unknown_realm_credential_state(target_realm), {})
-            return await prepare_optional_realm_credentials(
-                target_url=target_url,
-                current_auth_realm=previous_auth_realm,
-                failed_realms=failed_credential_prep_realms,
-                prepare_credentials=_prepare_credentials_for_url_unquarantined,
-            )
+            if not auth_realm_matches_url(auth_realm, target_url):
+                _activate_realm_credentials(unknown_realm_credential_state(target_realm), {})
+            return credential_preparation.request(target_url, (session_id, target_realm), target_realm)
 
         async def _auth_context_for_url(observed_url: str) -> Dict[str, Any]:
-            """Publish only safe inventory for an actual browser tool observation."""
-            nonlocal pending_credential_reload_realm
+            """Return status immediately; credential I/O never owns an actor turn."""
+            state = await _prepare_credentials_for_url(observed_url)
             realm = auth_realm_from_url(observed_url)
-            realm_changed = bool(realm and not auth_realm_matches_url(auth_realm, observed_url))
-            prepared = await _prepare_credentials_for_url(observed_url)
-            if realm_changed and prepared is not None and not prepared.get("credential_preparation_error"):
-                pending_credential_reload_realm = auth_realm
+            context = {**(state or {}), "auth_realm": realm,
+                       "inventory_status": "available" if auth_options_section else "unknown"}
+            if credential_tasks.status:
+                context["credential_background_status"] = dict(credential_tasks.status)
             if not realm:
-                # Non-web pages have no authentication inventory. In particular,
-                # about:blank must not inherit another tab's realm.
-                return {"auth_realm": "", "inventory_status": "not_applicable"}
-            context: Dict[str, Any] = {
-                "auth_realm": auth_realm if auth_options_section else realm,
-                "inventory_status": "available" if auth_options_section else "unknown",
-            }
+                context["inventory_status"] = "not_applicable"
             if navigation_policy.active:
-                return {"auth_realm": realm, "inventory_status": "unknown", navigation_policy.context_flag: True}
-            if auth_options_section:
+                context[navigation_policy.context_flag] = True
+            elif auth_options_section:
                 context["auth_options"] = auth_options_section
-            error = credential_preparation_error or failed_credential_prep_realms.get(realm)
-            if error:
-                context["credential_preparation_error"] = error
             return context
 
         def _policy_authority() -> tuple:
@@ -10308,6 +10123,10 @@ async def _spawn_browser_agent_activity_v3_real(
                 return {"success": False, "error": "Batch target or authority changed before action dispatch"}
             if action.get("action") == "phone" and not (kwargs.get("phone_snapshot") or {}).get("enabled"):
                 return {"success": False, "error": "Phone unavailable for this decision"}
+            if missing_credential_reference(action.get("params") or {}, secret_refs):
+                state = await _auth_context_for_url(kwargs.get("current_url") or current_url)
+                return {"success": False, "error": "Requested saved credential is not ready or unavailable",
+                        "auth_context": state}
             redaction_refs = [dict(secret_refs)]
             action_redaction_refs = redaction_refs
             kwargs["auth_context_for_url"] = _auth_context_for_url
@@ -10327,7 +10146,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     credential_signin_realms.add(signed_in_realm)
                 if MINTED_NEW_PASSWORD_REF in successful_secret_refs and credential_url:
                     try:
-                        await save_minted_account_password(config, user_id, credential_url)
+                        credential_tasks.start(lambda url=credential_url: save_minted_account_password(config, user_id, url), label="password_upload")
                     except Exception as save_error:
                         logger.warning(
                             "Failed to save minted account password",
@@ -10674,166 +10493,14 @@ async def _spawn_browser_agent_activity_v3_real(
             step_timer.mark("passkey_usage")
             auth_runtime_state.observe_page_text(observe_page_state.get("title") or "")
 
-            # Clicks, form submissions, and server redirects can cross an auth
-            # realm without a goto tool call. Prepare that realm before the
-            # model observes or interacts with it, then reload once so newly
-            # injected cookies and origin state participate in the first page
-            # request the agent acts on.
-            observed_auth_realm = auth_realm_from_url(current_url)
-            observed_realm_changed = observed_auth_realm != auth_realm and not auth_realm_matches_url(
-                auth_realm, current_url
-            )
-            reload_prepared_realm = bool(
-                pending_credential_reload_realm and auth_realm_matches_url(pending_credential_reload_realm, current_url)
-            )
-            if pending_credential_reload_realm and not reload_prepared_realm and not navigation_policy.active:
-                pending_credential_reload_realm = None
-            if _credential_binding() != active_credential_binding or observed_realm_changed:
-                prepared_realm = await _prepare_credentials_for_url(current_url)
-                preparation_succeeded = bool(
-                    prepared_realm is not None
-                    and not prepared_realm.get("credential_preparation_error")
-                )
-                reload_prepared_realm = bool(
-                    (reload_prepared_realm or observed_realm_changed) and preparation_succeeded
-                )
-                if not preparation_succeeded and not navigation_policy.active:
-                    pending_credential_reload_realm = None
-            if navigation_policy.active:
-                reload_prepared_realm = False
-                if navigation_policy.permits_destination(current_url):
-                    try:
-                        preparation_authority = _policy_authority()
-                    except (asyncio.CancelledError, WorkflowGenerationSealed):
-                        raise
-                    except RuntimeError as identity_error:
-                        recovered = await _recover_browser_step(
-                            f"credential_preparation_identity_error:{type(identity_error).__name__}",
-                            reload_page=True,
-                        )
-                        if recovered:
-                            continue
-                        raise
-                    prepared_realm = await prepare_optional_realm_credentials(
-                        target_url=current_url, current_auth_realm="",
-                        failed_realms=failed_credential_prep_realms,
-                        prepare_credentials=_prepare_credentials_for_url_unquarantined,
-                    )
-                    try:
-                        current_authority = _policy_authority()
-                    except (asyncio.CancelledError, WorkflowGenerationSealed):
-                        raise
-                    except RuntimeError as identity_error:
-                        recovered = await _recover_browser_step(
-                            f"credential_preparation_identity_error:{type(identity_error).__name__}",
-                            reload_page=True,
-                        )
-                        if recovered:
-                            continue
-                        raise
-                    if (preparation_authority[:4] != current_authority[:4]
-                            or preparation_authority[5:] != current_authority[5:]):
-                        continue
-                    reload_prepared_realm = bool(prepared_realm is not None and not prepared_realm.get("credential_preparation_error"))
-            if reload_prepared_realm:
-                from browser_use.browser.events import NavigateToUrlEvent
-
-                pending_credential_reload_realm = observed_auth_realm
-                reload_authority = None
-                reload_identity = None
-                try:
-                    try:
-                        reload_authority = _policy_authority()
-                        reload_identity = dom_service.get_parked_page_identity()
-                    except (asyncio.CancelledError, WorkflowGenerationSealed):
-                        raise
-                    except RuntimeError:
-                        if navigation_policy.active:
-                            raise
-                    reload_event = dom_service.session.event_bus.dispatch(
-                        NavigateToUrlEvent(url=current_url, wait_until="commit")
-                    )
-                    await reload_event
-                    try:
-                        await reload_event.event_result(raise_if_any=True, raise_if_none=False)
-                    except RuntimeError as native_error:
-                        failure = native_navigation_failure(native_error)
-                        if failure is not None:
-                            raise failure from native_error
-                        raise
-                    await wait_for_navigation_ready(dom_service, url=current_url)
-                except (asyncio.CancelledError, WorkflowGenerationSealed):
-                    raise
-                except Exception as reload_error:
-                    if is_native_navigation_policy_denial(reload_error) or isinstance(reload_error, NativeNavigationFailure):
-                        try:
-                            current_authority = _policy_authority()
-                            if reload_identity is None:
-                                reload_identity = dom_service.get_parked_page_identity()
-                            if not web_destination(reload_identity.get("url")):
-                                raise RuntimeError("Native reload failure has no web document identity")
-                        except (asyncio.CancelledError, WorkflowGenerationSealed):
-                            raise
-                        except RuntimeError:
-                            # Without native identity, the existing recovery owner
-                            # must handle the failure instead of binding a barrier.
-                            pass
-                        else:
-                            if reload_authority is not None and (
-                                reload_authority[:3] != current_authority[:3] or reload_authority[4:] != current_authority[4:]
-                            ):
-                                continue
-                            barrier_type = (NavigationFailureBarrier if isinstance(reload_error, NativeNavigationFailure)
-                                            else NavigationPolicyBarrier)
-                            navigation_policy = barrier_type(task_id or "", navigation_policy.checkpoint())
-                            navigation_policy.deny(session_id, reload_identity)
-                            _activate_realm_credentials(unknown_realm_credential_state(observed_auth_realm), {})
-                            await action_batch.discard(navigation_policy.discard_message)
-                            state_prefetch.discard()
-                            policy_result = {"success": False, "error": navigation_policy.feedback,
-                                             "code": navigation_policy.result_code}
-                            await action_history.record_action(dom_service=dom_service, action="credential_reload",
-                                                              thinking="", result=policy_result)
-                            _append_browser_turn_messages(browser_turn_messages,
-                                unified_action={"action": "credential_reload", "params": {}},
-                                result=policy_result, tool_call_id=str(uuid_module.uuid4()))
-                            await _save_browser_action_message(agent_id=agent_id, task_id=task_id,
-                                title=navigation_policy.title, message=navigation_policy.feedback,
-                                status=MessageStatus.FINISHED, browser_url=browser_url,
-                                action_type="credential_reload", tool_call_id=str(uuid_module.uuid4()))
-                            continue
-                    recovered = await _recover_browser_step(
-                        f"credential_reload_error:{type(reload_error).__name__}",
-                        reload_page=True,
-                    )
-                    if recovered:
-                        continue
-                    raise
-                if navigation_policy.active:
-                    try:
-                        if reload_authority is not None and reload_authority != _policy_authority():
-                            continue
-                        acknowledgement_identity = dom_service.get_parked_page_identity()
-                    except (asyncio.CancelledError, WorkflowGenerationSealed):
-                        raise
-                    except RuntimeError as identity_error:
-                        recovered = await _recover_browser_step(
-                            f"credential_reload_identity_error:{type(identity_error).__name__}",
-                            reload_page=True,
-                        )
-                        if recovered:
-                            continue
-                        raise
-                    navigation_policy.acknowledge_other_document(acknowledgement_identity)
-                    await action_batch.discard("Replan after new-document credential acknowledgement.")
-                    state_prefetch.discard()
-                pending_credential_reload_realm = None
-                logger.info(
-                    "Reloaded page after redirected realm credential preparation",
-                    auth_realm=auth_realm,
-                    current_url=current_url,
-                )
-                continue
+            # Observations schedule realm work, but never wait for credentials
+            # or force a reload before the actor can use an otherwise usable page.
+            credential_tasks.check()
+            await _prepare_credentials_for_url(current_url)
+            if navigation_policy.active and navigation_policy.permits_destination(current_url):
+                identity = dom_service.get_parked_page_identity()
+                if navigation_policy.permits_destination(identity.get("url")):
+                    navigation_policy.acknowledge_other_document(identity)
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
@@ -11556,6 +11223,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     **_tilion_usage_kwargs(),
                 )
                 await _propagate_browser_credentials_with_progress(
+                    background_owner=credential_tasks,
                     redact=_redact_activity_value,
                     config=config,
                     agent_id=agent_id,
@@ -11973,7 +11641,7 @@ async def _spawn_browser_agent_activity_v3_real(
                         # authenticator. Re-seed the passkeys we already hold so
                         # passkey auth survives the reset exactly like the cookies
                         # and localStorage restored just above.
-                        await sync_passkeys_onto_target(context="after proxy rotation")
+                        credential_tasks.start(lambda: sync_passkeys_onto_target(context="after proxy rotation"), label="passkey_sync")
 
                         if browser_recorder is not None:
                             with contextlib.suppress(Exception):
@@ -12479,6 +12147,7 @@ async def _spawn_browser_agent_activity_v3_real(
                             **_tilion_usage_kwargs(),
                         )
                         await _propagate_browser_credentials_with_progress(
+                    background_owner=credential_tasks,
                             redact=_redact_activity_value,
                             config=config,
                             agent_id=agent_id,
@@ -12941,6 +12610,9 @@ Based on this feedback, I need to continue working on the task and address the i
                 from browser_tools.result_projection import BrowserModelResult
                 result = BrowserModelResult(result)
                 result.model_preview = observation_result_source.model_preview
+            if unified_action.get("action") == "screenshot":
+                action_history.describe_screenshot_call(result.get("action_step"), tool_call_id_action)
+                result.setdefault("screenshot_context", {})["tool_call_id"] = tool_call_id_action
             _append_browser_turn_messages(
                 browser_turn_messages,
                 unified_action=unified_action,
@@ -13420,9 +13092,6 @@ Based on this feedback, I need to continue working on the task and address the i
         terminal_reason = loop_abort_reason or f"Max iterations ({MAX_ITERATIONS}) reached"
         logger.warning(terminal_reason if loop_abort_reason else f"Max iterations reached: {MAX_ITERATIONS}")
 
-        if not navigation_policy.active and not loop_abort_reason and iteration >= MAX_ITERATIONS:
-            await announce_finalizer(budget_finalizer, steps=MAX_ITERATIONS)
-
         # Final synthesis pass — mirror run_agent's max-iterations handling
         # (loop/run_agent.py:1889). A browser sub-agent that exhausts its step
         # budget without ever calling attempt_completion would otherwise hand
@@ -13586,6 +13255,7 @@ Based on this feedback, I need to continue working on the task and address the i
             **_tilion_usage_kwargs(),
         )
         await _propagate_browser_credentials_with_progress(
+                    background_owner=credential_tasks,
             redact=_redact_activity_value,
             config=config,
             agent_id=agent_id,
@@ -13784,6 +13454,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
             try:
                 await _propagate_browser_credentials_with_progress(
+                    background_owner=credential_tasks,
                     redact=_redact_activity_value,
                     config=config,
                     agent_id=agent_id,
@@ -13835,14 +13506,16 @@ Based on this feedback, I need to continue working on the task and address the i
         raise safe_error from None
 
     finally:
+        await credential_tasks.close()
         await action_batch.discard("Batch remainder skipped when the activity ended.")
         jev_session.close()
         try:
-            generation_sealed = generation_sealed or isinstance(sys.exception(), WorkflowGenerationSealed)
+            generation_sealed = (generation_sealed or isinstance(sys.exception(), WorkflowGenerationSealed)
+                                 or credential_tasks.control_error is not None)
             if generation_sealed and otp_poll_task is not None:
                 otp_poll_task.cancel()
             stop_browser_activity_heartbeat(_heartbeat_token)
-            otp_generation_error = None
+            otp_generation_error = credential_tasks.control_error
             try:
                 await _drain_otp_poll(otp_poll_task)
             except WorkflowGenerationSealed as error:
@@ -14102,7 +13775,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         """Spawn browser agent with browser-use + Rose API."""
-        budget_ticket = None
         start_url = tool_call.get("start_url", "")
         goal = tool_call.get("goal", "")
         output_schema = tool_call.get("output_schema")
@@ -14316,21 +13988,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             goal=goal,
                             workflow_instance=workflow_instance,
                         )
-                        activity_identity = None
-                        if (getattr(workflow_instance, "_browser_execution_task_id", None) == tool_call_id
-                                and write_lock_resume_state is None):
-                            activity_identity = str(workflow.uuid4())
-                            budget_ticket = register_finalizer(
-                                workflow_instance, task_id=known_task_id, tool_id=tool_call_id,
-                                activity_id=activity_identity, limit=MAX_ITERATIONS,
-                                timeout_seconds=browser_timeout_minutes * 60,
-                            )
-                        if budget_ticket is not None:
-                            activity_args.append(budget_ticket)
                         activity_handle = workflow.start_activity(
                             spawn_browser_agent_activity_v3,
                             args=activity_args,
-                            **({"activity_id": activity_identity} if activity_identity else {}),
                             start_to_close_timeout=timedelta(minutes=browser_timeout_minutes),
                             heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
                             cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
@@ -14347,18 +14007,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             await workflow.wait_condition(
                                 lambda handle=activity_handle: (
                                     handle.done() or tool_stop_requested(workflow_instance, tool_call_id)
-                                    or finalizer_stop_requested(workflow_instance, budget_ticket)
                                 )
                             )
                         except asyncio.CancelledError:
                             await cancel_and_join_browser_activity(activity_handle)
                             raise
                         # Pause, or a kill_agent of this agent (helpers/tool_interrupts.py).
-                        if (tool_stop_requested(workflow_instance, tool_call_id)
-                                or finalizer_stop_requested(workflow_instance, budget_ticket)) and not activity_handle.done():
-                            if (finalizer_stop_requested(workflow_instance, budget_ticket)
-                                    and not tool_stop_requested(workflow_instance, tool_call_id)):
-                                await workflow_instance.pause("budget")
+                        if tool_stop_requested(workflow_instance, tool_call_id) and not activity_handle.done():
                             logger.info("\U0001f534 Cancelling browser agent due to pause")
                             user_pause_requested = bool(getattr(workflow_instance, "_user_pause_active", False))
                             activity_handle.cancel()
@@ -15305,7 +14960,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 break
 
-            result = finalizer_result(workflow_instance, budget_ticket, result)
             tool_usage: Dict[str, list] = browser_usage_items_to_tool_usage(result.get("usage_items"))
 
             output_files = result.get("output_files", [])
@@ -15384,8 +15038,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         file_pointer=fp,
                     )
 
-            await finish_budget_stop(workflow_instance, budget_ticket, result)
-
         except _BrowserPaymentResumeAbandoned:
             for terminal_event in _browser_abandoned_resume_events(
                 workflow_instance,
@@ -15436,9 +15088,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 status=MessageStatus.ERROR,
                 metadata=_browser_task_terminal_metadata(result, activity_task_id),
             )
-
-        finally:
-            forget_finalizer(workflow_instance, budget_ticket)
 
 
 # ========================================

@@ -653,7 +653,7 @@ class ActionHistory:
                     safe_entry[key]["formatted_state"] = self._dom_service.model_visible_value(value["formatted_state"])
                 else:
                     safe_entry[key] = self._dom_service.model_visible_value(value)
-        if not self._dom_service.secret_values_used and entry.get("screenshot"):
+        if entry.get("screenshot"):
             safe_entry["screenshot"] = entry["screenshot"]
         # These are harness-owned mechanics, rather than page echoes. A CVV
         # equal to a step/index must not change the chosen target or make a
@@ -769,61 +769,45 @@ class ActionHistory:
         return entry
 
     def capture_screenshot_evidence(self, dom_service: "DOMService", session_id: str, screenshot: str, before: Any = None, after: Any = None) -> None:
-        """Retain only a just-recorded native screenshot, outside model-authored history.
+        """Attach the actual capture to its existing screenshot tool result.
 
-        Twenty explicit captures, four MiB and sixteen million pixels bound this
-        task-local sidecar. One MiB/four million pixels bound an individual image.
-        These are admission ceilings, not increased task or model budgets.
+        Identity and URL describe the capture; they are not an admission rule.
+        No other session files are read and no screenshot bytes are generated.
         """
-        import base64
-        import hashlib
-        from io import BytesIO
-        from PIL import Image
-
-        if (not self._visual_task_id or dom_service is not self._dom_service or dom_service.secret_values_used
-                or not self._entries or not isinstance(session_id, str) or not session_id):
+        if not self._entries or not isinstance(screenshot, str) or not screenshot:
             return
         entry = self._entries[-1]
-        if entry.action != "screenshot" or entry.result.get("success") is not True:
-            return
-        if (not isinstance(before, dict) or before != after
-                or not isinstance(before.get("target_id"), str) or not before["target_id"]):
-            return
-        url = before.get("url")
-        if not isinstance(url, str) or not url.startswith(("https://", "http://")):
-            return
-        try:
-            if not isinstance(screenshot, str) or len(screenshot) > 1_398_104:
-                return
-            raw = base64.b64decode(screenshot, validate=True)
-            if len(raw) > 1_048_576:
-                return
-            with Image.open(BytesIO(raw)) as image:
-                if image.format != "PNG" or image.width * image.height > 4_000_000:
-                    return
-                pixels = image.width * image.height
-                image.verify()
-        except (ValueError, OSError, SyntaxError, Image.DecompressionBombError):
-            return
-        receipt = {"step": entry.step, "url": url, "session_id": session_id, "task_id": self._visual_task_id, "target_id": before["target_id"],
-                   "screenshot_b64": screenshot, "sha256": hashlib.sha256(raw).hexdigest(),
-                   "bytes": len(raw), "pixels": pixels}
-        # Replace only identical pixels from the same URL. Distinct viewports
-        # on one page and identical-looking pages retain their own provenance.
-        self._screenshot_evidence = [r for r in self._screenshot_evidence
-                                    if (r["url"], r["sha256"]) != (url, receipt["sha256"])]
-        self._screenshot_evidence.append(receipt)
-        while (len(self._screenshot_evidence) > 20
-               or sum(r["bytes"] for r in self._screenshot_evidence) > 4_194_304
-               or sum(r["pixels"] for r in self._screenshot_evidence) > 16_000_000):
-            self._screenshot_evidence.pop(0)
+        identity = before if isinstance(before, dict) else after if isinstance(after, dict) else {}
+        context = dict(entry.result.get("screenshot_context") or {})
+        context.setdefault("captured_at", time.time())
+        context.setdefault("url", identity.get("url") or getattr(dom_service, "_runtime_current_url", ""))
+        context.setdefault("target_id", identity.get("target_id"))
+        context.setdefault("step", entry.step)
+        context.setdefault("session_id", session_id)
+        entry.screenshot = screenshot
+        entry.result["screenshot_context"] = self.model_visible_value(context)
 
-    def screenshot_evidence(self, session_id: str, task_id: str) -> List[Dict[str, Any]]:
-        """Return same-session public native receipts; never hydrate paths or URLs."""
-        if not task_id or task_id != self._visual_task_id or self._dom_service is None or self._dom_service.secret_values_used:
-            return []
-        return [{**r, "url": self._dom_service.model_visible_value(r["url"])}
-                for r in self._screenshot_evidence if r["session_id"] == session_id]
+    def screenshot_evidence(self, session_id: str = "", task_id: str = "") -> List[Dict[str, Any]]:
+        """Return captured tool results already in this history, without task-proof gating."""
+        rows = []
+        for entry in self.get_entries():
+            screenshot = entry.get("screenshot")
+            if not isinstance(screenshot, str) or not screenshot:
+                continue
+            context = dict(entry.get("result", {}).get("screenshot_context") or {})
+            rows.append({**context, "step": entry["step"], "screenshot_b64": screenshot,
+                         "task_id": self._visual_task_id, "session_id": context.get("session_id", session_id)})
+        return rows
+
+    def describe_screenshot_call(self, step: int, tool_call_id: str) -> None:
+        """Add the original call ID to an already recorded capture's description."""
+        for entry in reversed(self._entries):
+            if entry.step == step:
+                context = entry.result.get("screenshot_context")
+                if isinstance(context, dict):
+                    context["tool_call_id"] = tool_call_id
+                    entry.result["tool_call_id"] = tool_call_id
+                return
 
     def last_action_step(self) -> Optional[int]:
         """Return the latest recorded receipt ID without copying DOM history."""
@@ -871,7 +855,7 @@ class ActionHistory:
         that happened before the pause instead of treating the resumed page as
         a brand-new session.
         """
-        self._screenshot_evidence = []  # Preserve existing no-image durable-resume policy.
+        self._screenshot_evidence = []  # Captures are restored with their ordinary action entries.
         restored: List[ActionHistoryEntry] = []
         allowed_fields = {entry_field.name for entry_field in fields(ActionHistoryEntry)}
         for raw_entry in entries or []:
@@ -1033,34 +1017,9 @@ class DOMService:
             self.mark_secret_used()
 
     def model_visible_value(self, value: Any) -> Any:
-        """Redact registered values and omit media after private entry.
-
-        Raster pixels, canvas output and arbitrary remote images cannot be
-        validated with string redaction. Once a secret has been entered, use
-        redacted DOM observations for this session, including durable resumes.
-        """
-        def omit_media(item: Any) -> Any:
-            if isinstance(item, dict):
-                if isinstance(item.get("type"), str) and item["type"] in {"image_url", "image", "input_image"}:
-                    return {"type": "text", "text": "[image withheld after private credential entry]"}
-                return {
-                    key: omit_media(nested)
-                    for key, nested in item.items()
-                    if key not in {
-                        "screenshot", "screenshot_b64", "media_candidates", "frame", "website_frame",
-                        "image_url", "media",
-                    }
-                }
-            if isinstance(item, list):
-                return [omit_media(nested) for nested in item]
-            if isinstance(item, tuple):
-                return tuple(omit_media(nested) for nested in item)
-            if isinstance(item, str) and item.lstrip().startswith("data:image/"):
-                return "[image withheld after private credential entry]"
-            return item
-
-        safe_value = omit_media(value) if self.secret_values_used else value
-        return mask_secret_values(safe_value, self._secret_redaction_refs)
+        """Redact registered textual secrets while preserving original image transport."""
+        from helpers.screenshot_history import redact_with_screenshots
+        return redact_with_screenshots(value, lambda item: mask_secret_values(item, self._secret_redaction_refs))
 
     def model_visible_action_result(self, action_name: str, result: Any) -> Any:
         """Redact page payloads while preserving trusted action bookkeeping."""
@@ -1088,7 +1047,7 @@ class DOMService:
                         url = original.get("image_url")
                         if isinstance(url, str) and url.startswith(("https://", "http://")):
                             visible["image_url"] = self.model_visible_value(url)
-        if action_name in {"screenshot", "read_browser_state"} and not self.secret_values_used:
+        if action_name in {"screenshot", "read_browser_state"}:
             # Only these action outputs contain trusted raster transport.
             # A coincidental CVV in PNG base64 is not a page-text readback.
             for key in ("screenshot", "screenshot_b64"):
@@ -2193,7 +2152,8 @@ class DOMService:
         # re-probes (agent c1ebd389: disabled "Sign in with a passkey" burned
         # the write_lock budget on password → WAF CAPTCHA).
         if (
-            target_id in self._passkey_pending_auth_reload_targets
+            getattr(self, "allow_credential_reload", True)
+            and target_id in self._passkey_pending_auth_reload_targets
             and self._held_passkeys_by_credential_id
             and (rebuilt_environment or seeded)
         ):
@@ -2427,26 +2387,8 @@ class DOMService:
             return state.screenshot
 
     @staticmethod
-    def _blank_screenshot(viewport_width: int, viewport_height: int) -> Optional[str]:
-        try:
-            import base64
-            from io import BytesIO
-
-            from PIL import Image
-
-            blank_image = Image.new("RGB", (viewport_width, viewport_height), color="white")
-            buffer = BytesIO()
-            blank_image.save(buffer, format="PNG")
-            return base64.b64encode(buffer.getvalue()).decode("utf-8")
-        except Exception as error:
-            logger.warning(f"📸 Failed to generate blank screenshot: {error}")
-            return None
-
-    @staticmethod
     def _analyze_screenshot(screenshot: str, viewport_width: int, viewport_height: int) -> None:
         import base64
-        import os
-        import time as time_module
         from io import BytesIO
 
         try:
@@ -2469,13 +2411,6 @@ class DOMService:
             except ImportError:
                 logger.warning("📸 PIL not available for dimension check")
 
-            if os.getenv("ENVIRONMENT") != "production":
-                debug_dir = "/tmp/browser_screenshots"
-                os.makedirs(debug_dir, exist_ok=True)
-                filename = f"{debug_dir}/screenshot_{int(time_module.time() * 1000)}.png"
-                with open(filename, "wb") as screenshot_file:
-                    screenshot_file.write(screenshot_bytes)
-                logger.info(f"📸 [DEBUG] Saved to {filename}")
         except Exception as error:
             logger.error(f"📸 Failed to analyze screenshot: {error}")
 
@@ -2557,7 +2492,8 @@ class DOMService:
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        capture_screenshot = include_screenshot and not self.secret_values_used
+        capture_screenshot = include_screenshot
+        capture_started_at = time.time() if capture_screenshot else None
         state = await self._session.get_browser_state_summary(include_screenshot=capture_screenshot)
         self._runtime_current_url = str(state.url or "")
         if state.dom_state and state.dom_state.selector_map:
@@ -2598,23 +2534,14 @@ class DOMService:
         if getattr(state, "closed_popup_messages", None):
             result["closed_popups"] = state.closed_popup_messages
         screenshot_to_use = await self._capture_surface_screenshot(state) if capture_screenshot else None
-        if self.secret_values_used:
-            capture_screenshot = False
-            screenshot_to_use = None
-        if include_screenshot and self.secret_values_used:
-            result["screenshot_placeholder"] = True
-            result["screenshot_suppressed_reason"] = "Private credentials were entered; use redacted DOM observations."
         if capture_screenshot and not screenshot_to_use:
-            logger.info(f"📸 No screenshot available, generating blank for {result.get('url', 'unknown')}")
-            screenshot_to_use = self._blank_screenshot(viewport_width, viewport_height)
-            # A synthetic white frame is not page evidence; evidence consumers
-            # (the browser verifier) must not present it as the rendered page.
-            result["screenshot_placeholder"] = True
+            result["screenshot_unavailable"] = True
         if include_screenshot and screenshot_to_use:
             result["screenshot"] = screenshot_to_use
+            result["screenshot_context"] = {"captured_at": capture_started_at, "url": result["url"]}
             self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)
         safe_result = self.model_visible_value(result)
-        if not self.secret_values_used and screenshot_to_use:
+        if screenshot_to_use:
             # PNG base64 is binary transport, not page text. A short CVV can
             # coincidentally occur in it; textual substitution corrupts pixels.
             safe_result["screenshot"] = screenshot_to_use

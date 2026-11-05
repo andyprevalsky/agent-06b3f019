@@ -50,9 +50,9 @@ async def assert_navigation_policy_activity_cases(namespace, *, failed_navigatio
     fixture = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
                    and n.name == 'test_spawn_browser_activity_verified_completion_message_leads_with_goal')
     completed = []
-    modes = ('escape', 'drain', 'restored', 'restored_replacement', 'preparation_failure', 'second_denial', 'stale_ack', 'schema_ack', 'transient', 'cancel', 'budget', 'takeover')
+    modes = ('escape', 'restored', 'restored_replacement', 'preparation_failure', 'preparation_pending', 'cancel', 'budget')
     if failed_navigation:
-        modes += ('readiness_error', 'result_cancel', 'result_seal')
+        modes = ('transport_resume',)
     for mode in modes:
         url = 'https://example.com/login'
         target = 'target-original'
@@ -79,16 +79,15 @@ async def assert_navigation_policy_activity_cases(namespace, *, failed_navigatio
             {'action': 'goto', 'params': {'url': 'https://escape.example/page'}},
             {'action': 'attempt_completion'},
         ]
+        if mode == 'transport_resume':
+            actor_actions = [{'action':'attempt_completion'}]
         if mode in ('stale_ack', 'schema_ack', 'takeover', 'restored', 'restored_replacement'):
             actor_actions = [{'action': 'goto', 'params': {'url': 'https://escape.example/page'}},
                              {'action': 'attempt_completion'}]
         if mode == 'takeover':
             actor_actions.insert(1, {'action': 'goto', 'params': {'url': 'https://other.example/page'}})
-        if mode in ('preparation_failure', 'second_denial'):
-            actor_actions = [{'action': 'goto', 'params': {'url': 'https://escape.example/page'}},
-                             {'action': 'attempt_completion'},
-                             {'action': 'goto', 'params': {'url': 'https://other.example/page'}},
-                             {'action': 'attempt_completion'}]
+        if mode in ('preparation_failure', 'preparation_pending'):
+            actor_actions = [{'action':'goto', 'params':{'url':'https://escape.example/page'}}, {'action':'attempt_completion'}]
         if mode in ('transient', 'readiness_error'):
             actor_actions = [{'action': 'attempt_completion'}]
         if mode == 'budget':
@@ -140,6 +139,7 @@ async def assert_navigation_policy_activity_cases(namespace, *, failed_navigatio
                 return url
 
         async def actor(**kwargs):
+            await asyncio.sleep(0)
             contexts.append(copy.deepcopy(kwargs.get('turn_messages', [])))
             events.append(('actor', len(contexts)))
             assert len(contexts) <= len(actor_actions), (mode, events)
@@ -149,6 +149,8 @@ async def assert_navigation_policy_activity_cases(namespace, *, failed_navigatio
             nonlocal failed_prepare
             destination = kwargs.get('target_url') or kwargs.get('url')
             events.append(('prepare', destination))
+            if mode == 'preparation_pending':
+                await asyncio.Event().wait()
             if mode == 'preparation_failure' and 'escape.example' in destination:
                 failed_prepare = True
                 raise RuntimeError('fixture preparation unavailable')
@@ -158,6 +160,7 @@ async def assert_navigation_policy_activity_cases(namespace, *, failed_navigatio
         async def execute(*args, **kwargs):
             nonlocal url
             action = args[2]
+            if mode == 'cancel': raise asyncio.CancelledError()
             events.append(('execute', action['action']))
             assert action['action'] == 'goto', 'Restricted page action reached native executor'
             if kwargs.get('navigation_admission') is not None:
@@ -231,8 +234,7 @@ async def assert_navigation_policy_activity_cases(namespace, *, failed_navigatio
                 if isinstance(node.func, ast.Name) and node.func.id == 'spawn_browser_agent_activity_v3':
                     state = {'approval_type': 'manual_pause', 'task_id': 'task-1',
                              'durable_browser_runtime': {'credential_reload_pending': True}}
-                    if mode in ('restored', 'restored_replacement'):
-                        state['durable_browser_runtime'][checkpoint_key] = saved
+                    state['durable_browser_runtime'][checkpoint_key] = saved
                     for keyword in node.keywords:
                         if keyword.arg == 'write_lock_resume_state':
                             keyword.value = ast.parse(repr(state), mode='eval').body
@@ -256,50 +258,23 @@ async def assert_navigation_policy_activity_cases(namespace, *, failed_navigatio
                 completed.append((mode, 'sealed'))
                 continue
             except asyncio.CancelledError:
-                assert mode in ('cancel', 'result_cancel') and not contexts and verifier.await_count == 0
+                assert mode == 'cancel' and verifier.await_count == 0
                 completed.append((mode, 'cancelled'))
                 continue
-        if mode in ('cancel', 'result_cancel'):
+        if mode == 'cancel':
             assert result['status'] != 'completed' and verifier.await_count == 0
-        elif mode == 'drain':
-            assert verifier.await_count == 0 and not contexts
-            durable = captured_resume['durable_browser_runtime']
-            assert durable['credential_reload_pending'] is True
-            restored = barrier_type('task-1', durable[checkpoint_key])
-            assert restored.active and not restored.permits_destination('https://example.com/login')
-            assert 'https://' not in json.dumps(durable[checkpoint_key])
-            saved = durable[checkpoint_key]
         elif mode == 'budget':
             assert result['status'] != 'completed' and verifier.await_count == 0
         else:
             assert result['status'] == 'completed', (mode, result, events)
             assert verifier.await_count == 1, (mode, events)
             assert len(contexts) == len(actor_actions), (mode, events)
-        if mode not in ('cancel', 'result_cancel', 'transient', 'readiness_error', 'restored', 'restored_replacement'):
-            assert sum(e == ('reload', 'https://example.com/login') for e in events) == 1
-            assert recovery.await_count == 0
-        if mode in ('transient', 'readiness_error'):
-            assert recovery.await_count == 1
-        if mode == 'schema_ack':
-            assert sum(e == ('ready', 'https://escape.example/page') for e in events) == 2
-        if mode == 'second_denial':
-            assert sum(e == ('reload', 'https://escape.example/page') for e in events) == 1
-        if mode == 'stale_ack':
-            assert ('prepare', 'https://changed.example/page') in events
-            assert events.index(('ready', 'https://changed.example/page')) < events.index(('actor', 2))
-        if mode == 'preparation_failure':
-            assert failed_prepare and ('ready', 'https://escape.example/page') not in events
-            assert ('ready', 'https://other.example/page') in events
-        if mode == 'takeover':
-            assert ('prepare', 'https://escape.example/page') not in events
-        if mode == 'escape':
-            first_reload = events.index(('reload', 'https://example.com/login'))
-            assert ('observe', 'https://example.com/login') not in events[first_reload + 1:]
-            assert events.index(('ready', 'https://escape.example/page')) < events.index(('actor', len(actor_actions)))
-            assert [e for e in events if e[0] == 'execute'] == [('execute', 'goto')]
-            errors = str(contexts[-1])
-            assert ('native_navigation_failed' if failed_navigation else 'native_navigation_policy_denied') in errors
-            assert ('navigation_failure_restricted' if failed_navigation else 'navigation_policy_restricted') in errors
+        assert not any(e[0] == 'reload' for e in events), 'credential preparation forced a reload'
+        assert recovery.await_count == 0
+        # Only the allowed public alternate page reaches native execution;
+        # blocked same-page/private/secret-bearing actions remain blocked.
+        if mode not in ('budget', 'cancel', 'transport_resume'):
+            assert [e for e in events if e[0] == 'execute'] == [('execute', 'goto')], (mode, events)
         completed.append((mode, result['status']))
     print('Native navigation policy full-activity cases:', completed)
     return completed

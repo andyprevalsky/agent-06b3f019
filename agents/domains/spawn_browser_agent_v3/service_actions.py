@@ -4397,12 +4397,6 @@ async def _execute_screenshot(
     config: Any,
 ) -> Dict[str, Any]:
     """Execute a screenshot action using the active provider's browser-window capture."""
-    if getattr(dom_service, "secret_values_used", False) is True:
-        return {
-            "success": False,
-            "error": "Screenshot withheld because this browser contains private credentials. Use read_browser_state or evaluate for redacted page details.",
-        }
-
     from domains.spawn_browser_agent_v3.repo import (
         take_browser_computer_screenshot,
         upload_file_to_session,
@@ -4411,11 +4405,12 @@ async def _execute_screenshot(
     if not session_id:
         raise RuntimeError("Browser session id is required for screenshot capture")
 
+    capture_started_at = time_module.time()
     capture_identity = None
     try:
         capture_identity = dom_service.get_parked_page_identity()
     except RuntimeError:
-        pass  # Capture behavior stays unchanged; incoherent evidence is not retained.
+        pass  # Identity is descriptive; an unavailable identity does not block capture.
 
     single_cdp_client = getattr(dom_service, "single_cdp_client", False) is True
     if single_cdp_client:
@@ -4456,7 +4451,10 @@ async def _execute_screenshot(
         action="screenshot",
         thinking=thinking,
         params={},
-        result={"success": True, "file_path": saved_path or "screenshot.png"},
+        result={"success": True, "file_path": saved_path or "screenshot.png",
+                "screenshot_context": {"captured_at": capture_started_at,
+                    "url": (capture_identity or {}).get("url") or getattr(dom_service, "_runtime_current_url", ""),
+                    "target_id": (capture_identity or {}).get("target_id")}},
     )
     capture_evidence = getattr(action_history, "capture_screenshot_evidence", None)
     if callable(capture_evidence):
@@ -4471,6 +4469,9 @@ async def _execute_screenshot(
         "success": True,
         "message": f"Screenshot captured from browser viewport ({len(screenshot_bytes)} bytes)",
         "screenshot": screenshot_b64,
+        "screenshot_context": {"captured_at": capture_started_at,
+            "url": (capture_identity or {}).get("url") or getattr(dom_service, "_runtime_current_url", ""),
+            "target_id": (capture_identity or {}).get("target_id")},
         "file_path": saved_path or "screenshot.png",
     }
 

@@ -376,6 +376,7 @@ async def build_browser_verifier_context(
     assembly plus one ``list_session_files`` read \u2014 no LLM call, no side
     effects on the caller.
     """
+    from helpers.screenshot_history import screenshot_message, screenshot_context_text
     all_action_entries = action_history.get_entries()
     window, older = all_action_entries[-30:], all_action_entries[:-30]
 
@@ -603,6 +604,8 @@ async def build_browser_verifier_context(
         # Validated last-four digits from the trusted card-issuance boundary are
         # the only non-browser evidence allowed through; PAN/expiry/CVC excluded.
         *([payment_card_evidence] if payment_card_evidence else []),
+    ] + [message for entry in all_action_entries
+         if (message := screenshot_message(entry)) is not None] + [
         # Final-state screenshot \u2014 emitted as a multimodal
         # image block by build_verifier_context_messages when
         # screenshot_b64 is set in metadata. Body text stays
@@ -610,35 +613,17 @@ async def build_browser_verifier_context(
         {
             "role": "TOOL",
             "text": (
-                "Final-state screenshot attached (b64-encoded PNG of "
-                "the visible viewport). Treat the DOM tree above as "
-                "ground truth; the screenshot is supplementary."
+                screenshot_context_text({"screenshot_context": browser_state.get("screenshot_context") or {"url": current_url}})
                 if final_screenshot_b64
-                else "No final-state screenshot included; DOM tree is the verifier ground truth."
+                else "No screenshot was available for this verification step."
             ),
             "metadata": {
                 "toolName": "final_screenshot",
                 "toolStatus": "FINISHED",
                 "screenshot_b64": final_screenshot_b64 or "",
+                "screenshot_context": browser_state.get("screenshot_context") or {"url": current_url},
             },
         },
-    ] + [
-        {
-            "role": "TOOL",
-            "text": "Bounded historical native viewport capture; other captures may be unavailable. Not current state or completion authority.",
-            "metadata": {
-                "toolName": "historical_screenshot", "toolStatus": "FINISHED",
-                "browser_action_step": receipt["step"],
-                "screenshot_b64": receipt["screenshot_b64"],
-                "structured_response": {key: receipt[key] for key in ("step", "url", "target_id", "task_id", "sha256")},
-                "title": "Historical native screenshot; not current state or completion authority",
-            },
-        }
-        for receipt in (
-            action_history.screenshot_evidence(session_id, task_id)
-            if callable(getattr(action_history, "screenshot_evidence", None)) else []
-        )
-        if receipt["screenshot_b64"] != final_screenshot_b64
     ] + observation_evidence[:1] + sorted(
         # Keep the latest independent native observation first. Admit remaining
         # step-owned receipts newest first across both kinds, so old native

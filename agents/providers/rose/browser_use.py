@@ -236,7 +236,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "complete it without navigating. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
             "unusual-traffic pages - those are not authentication blockers. Use recover_from_challenge for "
-            "those instead of trying to solve them yourself. "
+            "those when appropriate. "
             f"{CHALLENGE_RECOVERY_SCOPE}"
         ),
         "params": {},
@@ -246,8 +246,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             f"{CHALLENGE_RECOVERY_SCOPE} "
             "Relatively expensive recovery to forcefully open a page or service blocked by a CAPTCHA, bot "
             "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Do not use when "
-            "an alternate path can complete the goal without clearing this blocker. Do not drag sliders, "
-            "click verify buttons, or otherwise try to solve the widget yourself. Never use for bad "
+            "an alternate path can complete the goal without clearing this blocker. Never use for bad "
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool waits for Kernel or Steel's native automatic CAPTCHA solver, then tests isolated "
             "copies of browser state: known challenge cookies, all target-site cookies, then parallel "
@@ -493,8 +492,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             f"{CHALLENGE_RECOVERY_SCOPE} "
             "For CAPTCHA / bot-challenge / 'Bot or Not' pages, the DOM is often a misleading shell "
             "(#app-captcha-pwa with only div/a/span indexes) while the real widget is visual-only. "
-            "Use a screenshot only if you need to confirm the challenge type. Do not drag sliders, click "
-            "verify buttons, or otherwise try to solve the widget yourself."
+            "Use a screenshot only if you need to confirm the challenge type."
         ),
         "params": {},
     },
@@ -751,7 +749,7 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
                 "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
                 "access-denied interstitials, or unusual-traffic pages - those are not "
                 "authentication blockers. Wait briefly or try an alternate URL/path instead "
-                "of trying to solve them yourself. "
+                "of using challenge recovery. "
                 f"{CHALLENGE_RECOVERY_SCOPE}"
             )
         input_schema = _collapse_nullable_schema(generated_tool["input_schema"])
@@ -842,25 +840,10 @@ Use `screenshot` when you need a viewport image. Re-read state after navigation,
 
 # Output Format
 
-Call one or more available browser action tools. Batch ordered actions whose
-arguments are already known from the current page, such as filling several
-visible form fields and then clicking their submit control. Calls execute in
-order, never concurrently. Do not write a JSON action envelope in text.
-
-For an exact same-page observe-then-click dependency, use named observation
-bindings: read_browser_state(observation_id="checkout", targets=[{{"key":"pay",
-"role":"button","name":"Pay"}}]) then click(observation_ref={{"observation_id":
-"checkout","target":"pay"}}) in the same response. The runtime binds only one
-exact visible role/name match in that read result and rechecks its current node;
-missing or ambiguous matches stop the remainder. This never approves payment.
-For other dependencies requiring interpretation of a result, finish this turn
-and inspect that result first; do not guess indexes or future values. Use
-only indexes from the current observed document. Navigation, tab changes,
-scrolling, an error, user intervention, or a changed document stops the remaining
-calls; inspect fresh state before continuing. Put arbitrary JavaScript last: its unknown page effects end the batch. Keep
-completion, authentication assistance, payment and recovery actions in separate
-turns. Do not batch autocomplete choices whose suggestions are not yet observed. Never batch past a submit/commit control: it still needs the normal write
-approval, and later calls cannot assume approval or success.
+Return one or more browser action tool calls to execute sequentially.
+Stop at first failure.
+Use observation_ref only for targets bound by read_browser_state in the same response.
+Same-document DOM changes can also invalidate ordinal refs; on 'Unknown ref' or unexpected failures, re-observe.
 
 {VERIFICATION_RULES.strip()}
 

@@ -12,12 +12,7 @@ AUTH_ASSISTANCE_HANDOFF_RULE = (
 )
 
 
-CHALLENGE_RECOVERY_SCOPE = (
-    "Exception to the CAPTCHA recovery and no-manual-solving rules: a public static-text or plain-arithmetic "
-    "practice exercise explicitly requested by the user is ordinary page content only when it does not guard "
-    "access to another page or service. Complete that content with normal browser actions. This exception "
-    "never covers behavioral, token, or slider challenges; apply the normal recovery rules to those."
-)
+CHALLENGE_RECOVERY_SCOPE = "never solve captchas unless explicitly asked by the user"
 
 
 def build_authentication_contract(*, recover_enabled: bool) -> str:
@@ -27,8 +22,7 @@ def build_authentication_contract(*, recover_enabled: bool) -> str:
             "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
             "are not authentication. recover_from_challenge is a relatively expensive way to "
             "force-open a blocked page or service - do not use it when an alternate path can "
-            "complete the goal. Do not drag sliders, click verify buttons, or otherwise try "
-            "to solve challenge widgets yourself. Never call "
+            "complete the goal. Never call "
             "request_user_assistance_for_authentication while a challenge interstitial is "
             "still visible."
         )
@@ -37,8 +31,7 @@ def build_authentication_contract(*, recover_enabled: bool) -> str:
             "- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials "
             "are not authentication. No challenge-recovery tool is available - wait briefly "
             "for the provider auto-solver, try an alternate URL or path to complete the "
-            "goal, and do not drag sliders, click verify buttons, or otherwise try to solve "
-            "challenge widgets yourself. Never call "
+            "goal. Never call "
             "request_user_assistance_for_authentication while a challenge interstitial is "
             "still visible."
         )

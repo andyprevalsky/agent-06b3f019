@@ -92,7 +92,7 @@ async function main(): Promise<void> {
     };
     const wake = loadService('agentWakeService.ts', dependencies);
     assert.equal((await wake.wakeFinishedAgent('root', 'followup', 'updated goal')).woke, true);
-    assert.equal(starts[0].startPhase, mode === 'browser' ? 'browser' : 'execute');
+    assert.equal(starts[0].startPhase, 'execute');
     assert.equal(starts[0].goal, 'updated goal');
     const restart = loadService('agentRestartService.ts', dependencies);
     const resumeState = {
@@ -106,12 +106,12 @@ async function main(): Promise<void> {
       claim: { plannedWorkflowId: 'replacement', resumeState },
     });
     assert.equal(result.success, true);
-    assert.equal(starts[1].startPhase, mode === 'browser' ? 'browser' : 'resume');
+    assert.equal(starts[1].startPhase, 'resume');
     assert.equal(starts[1].resumeState, resumeState);
     assert.equal(starts[1].goal, 'raw task');
   }
   process.stdout.write(
-    'PASS: browser wake/restart preserve mode; ordinary modes preserve existing behavior\n'
+    'PASS: wake/restart use generic execution for ordinary modes and retired browser state\n'
   );
 }
 main().catch((error) => {

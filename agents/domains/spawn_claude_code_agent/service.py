@@ -2465,23 +2465,6 @@ async def _run_verifier(
 
         final_output = terminal.get_display()
         normalized_events = code_events or []
-        if evidence_structured and schema_complete and (exit_code is None or exit_code == 0):
-            v_reasoning = (
-                "The code agent completed successfully and the requested file outputs were extracted "
-                "from /home/user/output using normalized SDK event context."
-            )
-            await save_claude_code_message(
-                agent_id=agent_id,
-                title="⚖️ Progress: 100%",
-                task_id=task_id,
-                message=v_reasoning,
-                status=MessageStatus.FINISHED,
-                action_type="system",
-                tool_call_id=verifier_call_id,
-                code_provider=code_provider,
-            )
-            return 1.0, v_reasoning, evidence_structured, input_tokens, output_tokens
-
         event_context = _build_code_event_context(
             code_events=normalized_events,
             output_files=extracted_output_files,

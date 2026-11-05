@@ -1534,6 +1534,50 @@ async def test_handle_reconnect_exhausted_health_none():
 # ── _run_verifier ────────────────────────────────────────────────────
 
 
+async def test_enabled_verifier_requires_task_verdict_with_complete_artifacts():
+    """File coverage reaches the shared judge; it never supplies its own verdict."""
+    from domains.spawn_claude_code_agent import service
+    from helpers import llm
+    from utils.terminal_filter import TerminalFilter
+
+    terminal = TerminalFilter(cols=100, rows=20)
+    terminal.feed("Saved /home/user/output/report.txt: requested action remains undone")
+    schema = {"fields": [{"name": "report", "type": "file_pointer", "required": True}]}
+    files = [{"original_filename": "report.txt", "mime_type": "text/plain", "size_bytes": 42}]
+    assert service._structured_response_satisfies_declared_schema(
+        schema, service._structured_response_from_code_evidence(schema, files, [], terminal.get_display())
+    )
+    for completed in (False, True):
+        observed = []
+        async def fake_judge(messages, model, config, response_schema, **kwargs):
+            observed.append((messages, kwargs['call_site']))
+            return ({"score": 1.0, "task_completed": completed,
+                     "reasoning": "The requested action is complete" if completed else "The report exists but the requested action is undone",
+                     "output": {"report": {"path": "/home/user/output/report.txt"}}},
+                    {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16})
+        async def execute(fn, *, args, **kwargs):
+            return await fn(*args)
+        with (patch.dict(os.environ, {"ROSE_ENABLE_CODE_AGENT_VERIFIER": "1"}),
+              patch.object(service, 'save_claude_code_message', AsyncMock()),
+              patch('loop.activity_helper.call_temporal_activity_from_activity', execute),
+              patch.object(llm, '_call_llm_verifier', fake_judge),
+              patch.object(llm, '_resolve_verifier_file_evidence', AsyncMock(return_value={})),
+              patch.object(llm, 'resolve_pointers_in_messages', AsyncMock(side_effect=lambda messages, **kwargs: messages)),
+              patch('temporalio.activity.heartbeat')):
+            score, reasoning, structured, tokens_in, tokens_out = await service._run_verifier(
+                agent_id='enabled-artifact', task_id='enabled-task', goal='Perform the requested action and write its report',
+                model='rose-labs/rose-1-flash', terminal=terminal, action_summary=['Saved the report'],
+                output_schema=schema, claude_token=None, code_provider='codex', exit_code=0,
+                output_files=files, code_events=[{"version": 1, "type": "command", "output": terminal.get_display()}],
+            )
+        assert len(observed) == 1, 'artifact completeness bypassed the enabled completion verifier'
+        assert observed[0][1] == 'verifier_claude_code'
+        assert '/home/user/output/report.txt' in str(observed[0][0]), 'actual output evidence was dropped'
+        assert score == (1.0 if completed else 0.5), (score, reasoning)
+        assert structured == {"report": {"path": "/home/user/output/report.txt"}}
+        assert (tokens_in, tokens_out) == (12, 4)
+
+
 async def test_run_verifier_happy_path():
     """Verifier returns progress score, reasoning, tokens, and structured_response."""
     from domains.spawn_claude_code_agent import service
@@ -1959,7 +2003,8 @@ async def test_run_verifier_partial_verdict_missing_required_field_reaches_paren
     ``description`` was not grounded. Every recorded call was rejected with
     ``output.description: Field required`` until the activity reported
     ``Progress check failed``. The real ``check_progress`` parser runs here;
-    only the Rose stream is replayed from the recorded verifier output.
+    the recorded output is retained and adapted with the explicit false
+    completion verdict required by the current contract.
     """
     from domains.spawn_claude_code_agent import service
     from providers.rose.schema import build_openai_response_format
@@ -1983,7 +2028,10 @@ async def test_run_verifier_partial_verdict_missing_required_field_reaches_paren
                 kind="metadata",
                 data={"actual_model": response["actual_model"], "pool_name": response["pool_name"]},
             )
-            yield StreamChunk(kind="content", data={"text": response["content"]})
+            # Keep the historical fixture unchanged; supply the new required
+            # verdict explicitly for this current-contract partial-output test.
+            current_verdict = {**json.loads(response["content"]), "task_completed": False}
+            yield StreamChunk(kind="content", data={"text": json.dumps(current_verdict)})
             yield StreamChunk(
                 kind="usage",
                 data={"prompt_tokens": 5841, "completion_tokens": 571, "total_tokens": 6412},
@@ -2012,7 +2060,9 @@ async def test_run_verifier_partial_verdict_missing_required_field_reaches_paren
         teardown_mock()
 
     assert not reasoning.startswith("Progress check failed"), reasoning
-    assert reasoning == first_verdict["reasoning"]
+    assert reasoning == first_verdict["reasoning"] + (
+        "\n\nThe separate task-completion verdict is not true; extracted output alone does not complete the task."
+    )
     assert score == 0.5
     assert struct == {
         "game_file": {"path": "/home/user/output/neon-orbit-run.html"},
@@ -2020,10 +2070,11 @@ async def test_run_verifier_partial_verdict_missing_required_field_reaches_paren
     }
     # A well-formed verdict is consumed once; it is not regenerated as malformed.
     assert len(verifier_requests) == 1
-    # The provider-facing contract is unchanged: completion still requires
+    # Output field requirements are unchanged: completion still requires
     # both required fields, and the optional view keeps strict mode off.
     request_format = build_openai_response_format(verifier_requests[0]["response_model"])["json_schema"]
     assert request_format["strict"] is False
+    assert "task_completed" in request_format["schema"]["required"]
     assert request_format["schema"]["properties"]["output"]["required"] == ["game_file", "description"]
 
 
@@ -4103,6 +4154,7 @@ async def _run_all_tests():
     await r.record_async("handle_reconnect_dead", test_handle_reconnect_exhausted_dead_sandbox)
     await r.record_async("handle_reconnect_health_none", test_handle_reconnect_exhausted_health_none)
     # _run_verifier
+    await r.record_async("enabled_verifier_requires_task_verdict_with_complete_artifacts", test_enabled_verifier_requires_task_verdict_with_complete_artifacts)
     await r.record_async("run_verifier_happy", _with_verifier_opt_in(test_run_verifier_happy_path))
     await r.record_async("run_verifier_off_by_default", test_run_verifier_off_by_default)
     r.record("handoff_json_schema_fixed_by_output_schema", test_handoff_json_schema_is_fixed_by_output_schema)

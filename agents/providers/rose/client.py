@@ -2255,8 +2255,10 @@ class RoseClient:
         )
         # Bind failed dumps to the same request that the client attempts.
         request_id = request_id or uuid.uuid4().hex[:12]
+        from helpers.image_count_retry import collect_with_image_count_retry
         try:
-            response = await self.collect(
+            response = await collect_with_image_count_retry(
+                self.collect,
                 pool=pool,
                 messages=messages,
                 tools=tools,
