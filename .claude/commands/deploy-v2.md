@@ -70,6 +70,7 @@ Stop and ask the user only for:
 3. A request for an explicit gate override.
 4. A destructive or irreversible action that needs approval.
 5. A failure that cannot be fixed without the user.
+6. `scripts/deploy gates` reports `CAPACITY`: this box lacks the memory or disk the selected gates need. Show its `NEED` lines and largest processes, and ask the user to free that much before rerunning.
 
 Stop immediately when the user says stop. Review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
 

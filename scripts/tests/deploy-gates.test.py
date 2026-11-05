@@ -97,7 +97,9 @@ class Fixture(unittest.TestCase):
         self.system_pg = True
         for name, fake in (('run_logged', self.fake_run),
                            ('backend_recipe', lambda root, env, timeout: {'sentinel': timeout}),
-                           ('standard_template', standard)):
+                           ('standard_template', standard),
+                           ('check_capacity', lambda root, workers, proc=None: {
+                               'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0, 'free_disk_mb': 0})):
             patcher = patch.object(g, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -600,6 +602,67 @@ class Retire(Fixture):
             child.terminate()
             child.wait()
         self.assertNotIn(child.pid, g.live_processes(path))
+
+
+class Capacity(unittest.TestCase):
+    """Fail before provisioning when the box cannot hold the selected gates."""
+    ALL = [{'gate': g, 'mode': 'create'} for g in g.GATE_PEAK_PSS_MB] + [{'gate': 'smoke', 'mode': 'cloud'}]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.proc = Path(self.tmp.name) / 'proc'
+        (self.proc / '4242').mkdir(parents=True)
+        (self.proc / '4242/stat').write_text('4242 (node) S 1 0 0')
+        (self.proc / '4242/statm').write_text('0 262144 0')  # 1 GiB at 4 KiB pages
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def meminfo(self, available_mb):
+        (self.proc / 'meminfo').write_text(f'MemTotal: {16 * 1024 * 1024} kB\nMemAvailable: {available_mb * 1024} kB\n')
+
+    def check(self, workers, available_mb, free_gb):
+        self.meminfo(available_mb)
+        out = io.StringIO()
+        usage = SimpleNamespace(total=0, used=0, free=free_gb * 2**30)
+        with patch.object(g.shutil, 'disk_usage', return_value=usage), \
+             patch.object(g, 'worker_base', return_value=Path(self.tmp.name)), \
+             patch.object(g.os, 'sysconf', return_value=4096), redirect_stdout(out):
+            try:
+                return g.check_capacity(Path(self.tmp.name), workers, self.proc), out.getvalue()
+            except g.Blocked as error:
+                return error, out.getvalue()
+
+    def test_full_measured_selection_needs_its_measured_peak_plus_margin_and_floor(self):
+        need = g.capacity_requirements(self.ALL)
+        self.assertEqual(round(g.MEASURED_CONCURRENT_MB * g.MEMORY_MARGIN) + 1024, need['gates_mb'])
+        self.assertEqual(need['gates_mb'] + g.WATCHDOG_FLOOR_MB, need['memory_mb'])
+        self.assertEqual(12, need['new_workers'])
+        self.assertEqual(12 * g.WORKER_DISK_MB + g.DISK_MARGIN_MB, need['disk_mb'])
+
+    def test_subsets_scale_by_measured_peaks_and_unknown_gates_are_charged(self):
+        small = g.capacity_requirements([{'gate': 'seed-cache-decision', 'mode': 'reuse'}])
+        self.assertLess(small['gates_mb'], 100)
+        self.assertEqual(0, small['disk_mb'])
+        unknown = g.capacity_requirements([{'gate': 'new-gate', 'mode': 'create'}])
+        self.assertEqual(g.DEFAULT_GATE_MB, unknown['gates_mb'])
+
+    def test_an_idle_box_passes(self):
+        report, out = self.check(self.ALL, available_mb=14_700, free_gb=80)
+        self.assertNotIsInstance(report, g.Blocked)
+        self.assertEqual('', out)
+
+    def test_a_busy_box_fails_early_listing_needs_and_largest_processes(self):
+        error, out = self.check(self.ALL, available_mb=9_000, free_gb=30)
+        self.assertIsInstance(error, g.Blocked)
+        self.assertEqual(('capacity', g.CAPACITY_EXIT), (error.stage, error.code))
+        need = g.capacity_requirements(self.ALL)
+        self.assertIn(f"NEED memory: need {need['memory_mb']} MB available", out)
+        self.assertIn(f"available now 9000 MB; free {need['memory_mb'] - 9000} MB", out)
+        self.assertIn('NEED disk: need 66.5 GB free (12 new workers x 5.4 GB + 2 GB); free now 30.0 GB', out)
+        self.assertIn('pid 4242 1024 MB node', out)
+        self.assertIn('scripts/deploy gates retire', out)
+        self.assertIn('nothing was provisioned', out)
 
 
 class Cli(Fixture):

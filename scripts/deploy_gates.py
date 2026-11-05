@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -224,6 +225,77 @@ def provision(root: Path, gate: str, path: Path, head: str, mode: str, logs: Pat
         else:  # the script locks the shared port registry itself
             run_logged(argv, root, log, PREPARE_TIMEOUT_SECONDS)
     return local_slot(root, gate, path, parse_env_file(path / '.context/deploy-worktree.env'))
+
+
+# Measured 2026-11-05: all 12 local gates at once with the structural/semantic cuts
+# (/var/tmp/rose-deploy-measure-evidence). Per-gate peak PSS weights the selected subset;
+# MemAvailable fell by MEASURED_CONCURRENT_MB from gate start to its minimum. Re-measure with
+# --sample-memory after a gate's footprint changes.
+GATE_PEAK_PSS_MB = {'backend-coverage-blackbox': 4334, 'semantic-stack': 3685, 'deploy-command-structural': 2947,
+                    'frontend-coverage-blackbox': 2054, 'agentcard-lifecycle': 1500, 'agents-coverage-blackbox': 844,
+                    'e2b-smoke': 838, 'live-probes': 796, 'cloudbench-controller': 788, 'seed-memory-ratchet': 293,
+                    'canonical-seed-whatsapp-content': 172, 'seed-cache-decision': 79}
+MEASURED_CONCURRENT_MB = 10_882
+MEMORY_MARGIN = 1.10
+UNMEASURED_GATE_MB = {CLOUD_GATE: 1_024}  # the cloud smoke controller runs on this box (declared, not measured)
+DEFAULT_GATE_MB = 1_536                   # any other gate with no measurement yet
+WATCHDOG_FLOOR_MB = 1_024                 # the boxes memory watchdog acts once MemAvailable falls below this
+WORKER_DISK_MB = 5_500                    # measured 5.3 GB per prepared worker: checkout, npm install, database
+DISK_MARGIN_MB = 2_048
+CAPACITY_EXIT = 3
+
+
+def capacity_requirements(workers: list[dict]) -> dict:
+    """Memory and disk the selected gates need before any worker is provisioned."""
+    measured = [w['gate'] for w in workers if w['gate'] in GATE_PEAK_PSS_MB]
+    share = sum(GATE_PEAK_PSS_MB[g] for g in measured) / sum(GATE_PEAK_PSS_MB.values())
+    extra = sum(UNMEASURED_GATE_MB.get(w['gate'], DEFAULT_GATE_MB) for w in workers if w['gate'] not in measured)
+    gates_mb = round(MEASURED_CONCURRENT_MB * share * MEMORY_MARGIN + extra)
+    new = sum(w['mode'] == 'create' for w in workers)
+    return {'gates_mb': gates_mb, 'memory_mb': gates_mb + WATCHDOG_FLOOR_MB, 'new_workers': new,
+            'disk_mb': new * WORKER_DISK_MB + DISK_MARGIN_MB if new else 0}
+
+
+def capacity_shortfalls(need: dict, available_mb: float, free_disk_mb: float) -> list[str]:
+    short = []
+    if available_mb < need['memory_mb']:
+        short.append(f"memory: need {need['memory_mb']} MB available ({need['gates_mb']} MB for the gates + "
+                     f"{WATCHDOG_FLOOR_MB} MB watchdog floor); available now {available_mb:.0f} MB; "
+                     f"free {need['memory_mb'] - available_mb:.0f} MB")
+    if free_disk_mb < need['disk_mb']:
+        short.append(f"disk: need {need['disk_mb'] / 1024:.1f} GB free ({need['new_workers']} new workers x "
+                     f"{WORKER_DISK_MB / 1024:.1f} GB + {DISK_MARGIN_MB / 1024:.0f} GB); free now "
+                     f"{free_disk_mb / 1024:.1f} GB; free {(need['disk_mb'] - free_disk_mb) / 1024:.1f} GB")
+    return short
+
+
+def largest_processes(proc: Path, limit: int = 8) -> list[str]:
+    table = process_table(proc)
+    ranked = sorted(table.items(), key=lambda item: -item[1]['rss_kb'])[:limit]
+    return [f"pid {pid} {info['rss_kb'] / 1024:.0f} MB {info['comm']} cwd={info['cwd'] or '?'}" for pid, info in ranked]
+
+
+def check_capacity(root: Path, workers: list[dict], proc: Path = Path('/proc')) -> dict:
+    """Fail before provisioning when this box cannot hold the selected gates; never frees anything itself."""
+    need = capacity_requirements(workers)
+    available = meminfo(proc)['mem_available_mb']
+    disk = worker_base(root)
+    while not disk.exists():
+        disk = disk.parent
+    free_disk = shutil.disk_usage(disk).free / 2**20
+    report = {**need, 'available_mb': available, 'free_disk_mb': round(free_disk), 'disk_path': str(disk)}
+    short = capacity_shortfalls(need, available, free_disk)
+    if short:
+        print(f'DEPLOY_GATES CAPACITY: this box lacks room for {len(workers)} selected gates; nothing was provisioned.')
+        for line in short:
+            print('  NEED ' + line)
+        print('  Largest processes now (stop only ones you own):')
+        for line in largest_processes(proc):
+            print('    ' + line)
+        print('  Free space: `scripts/deploy gates retire` removes clean idle deploy workers; '
+              'finish or stop other workloads on this box, then rerun.')
+        raise Blocked('capacity', '; '.join(short), CAPACITY_EXIT)
+    return report
 
 
 def layout(root: Path, head: str, needs_worker: list[str]) -> list[dict]:
@@ -586,6 +658,11 @@ def run(args, root: Path) -> int:
                 sampler.begin()
             selection = list_selected(root, args.base, args.skip_agentcard, candidate_template)
         workers = layout(root, head, selection['needs_worker'])
+        capacity = check_capacity(root, workers)
+        if not args.dry_run:
+            print(f"DEPLOY_GATES CAPACITY ok: need {capacity['memory_mb']} MB available (have "
+                  f"{capacity['available_mb']:.0f}), {capacity['disk_mb'] / 1024:.1f} GB disk (have "
+                  f"{capacity['free_disk_mb'] / 1024:.1f})")
         if sampler is not None:
             sampler.set_roots({w['gate']: Path(w['path']) for w in workers if w['mode'] in ('create', 'reuse')})
         py = sys.executable
@@ -605,7 +682,7 @@ def run(args, root: Path) -> int:
                               'timing_run': {'current': str(timing), 'active': timing.is_file()},
                               'template': {'path': str(template_path), 'structural_workers': args.structural_workers,
                                            'semantic_worker_processes': args.semantic_worker_processes},
-                              'inventory': str(inventory_path), 'workers': workers,
+                              'inventory': str(inventory_path), 'workers': workers, 'capacity': capacity,
                               'then': [planner, [*cycle, 'init', *bound], [*cycle, 'run', *bound, *launcher], verify]},
                              indent=2))
             refused = [w['reason'] for w in workers if w['mode'] == 'refuse']
