@@ -1005,7 +1005,14 @@ def isolated_admissions(state: dict, gate: str, *, _with_sources=False):
     if invalid or any(e.get('validation_source') != state.get('source') for e in entries):
         from deploy_test_round16_isolation import inherited_sources
         from deploy_test_round19_isolation import TOKEN as round19_token, inherited_sources as round19_sources
-        covered = (round19_sources if any(e.get('token') == round19_token for e in entries) else inherited_sources)(state, entries)
+        generic = any(e.get('kind') == 'native-cloud-cleanup-v1'
+                      and e['proof'].get('compatibility') is None
+                      and e['proof'].get('layout') == 'campaign-v1' for e in entries)
+        if generic:
+            from deploy_test_native_cleanup import inherited_native_sources
+            covered = inherited_native_sources(state, entries)
+        else:
+            covered = (round19_sources if any(e.get('token') == round19_token for e in entries) else inherited_sources)(state, entries)
     if invalid - covered.keys():
         raise ValueError(f'{gate}: original isolated-validation obligation changed; refuse launch/completion')
     return (entries, covered) if _with_sources else entries

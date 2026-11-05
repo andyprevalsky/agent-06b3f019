@@ -2473,6 +2473,32 @@ class Cycle(unittest.TestCase):
         bad=copy.deepcopy(proof);bad['files'].pop(str(seal_path))
         with self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],bad)
 
+    def test_failed_canary_transport_header_requires_complete_sealed_child_source(self):
+        import deploy_test_native_cleanup as n
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        # Locate the actual synthetic provenance supplied by the native fixture.
+        fleet = next(hub.parent.parent.glob('*/execution-provenance.json')).parent
+        provenance = c.read(fleet/'execution-provenance.json')
+        provenance.update(base_sha='b'*40, workspace_patch_sha256='c'*64)
+        c.write(fleet/'execution-provenance.json',provenance)
+        receipt={'source':{'head':'a'*40}};life={'controller_exit_code':1}
+        link={'ref':'b'*40};binding=('b'*40,'c'*64,{})
+        bound=lambda p:Path(p).read_bytes()
+        n.failed_canary_source_binding(fleet,life,self.root,receipt,link,bound,[{'allocated':True}],binding)
+        for field,value in [('base_sha','d'*40),('workspace_patch_sha256','none'),('workspace_patch_sha256','d'*64)]:
+            wrong={**provenance,field:value};c.write(fleet/'execution-provenance.json',wrong)
+            with self.subTest(field=field,value=value),self.assertRaises(ValueError):
+                n.failed_canary_source_binding(fleet,life,self.root,receipt,link,bound,[{'allocated':True}],binding)
+        c.write(fleet/'execution-provenance.json',provenance)
+        for name in ('execution-provenance.json','execution-task-matrix.json'):
+            p=fleet/name;raw=p.read_bytes();p.unlink()
+            with self.subTest(missing=name),self.assertRaises(OSError):
+                n.failed_canary_source_binding(fleet,life,self.root,receipt,link,bound,[{'allocated':True}],binding)
+            p.write_bytes(raw)
+        for ref,patch in [('d'*40,'c'*64),('b'*40,'none')]:
+            with self.subTest(ref=ref,patch=patch),self.assertRaises(ValueError):
+                n.failed_canary_source_binding(fleet,life,self.root,receipt,{'ref':ref},bound,[{}],('b'*40,patch,{}))
+
     def test_native_cloud_cleanup_overlay_preserves_failed_execution_and_retained_hub(self):
         state, occurrence, paths, proof, hub = self.native_recon_state()
         before = copy.deepcopy(state['attempts'])
@@ -5201,5 +5227,66 @@ class Round19InheritedAdmission(unittest.TestCase):
             with self.subTest(field=field),self.assertRaises((ValueError,KeyError)):c.isolated_admissions(bad,'smoke')
         with patch.object(self.n,'still_bound',return_value=False),self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
 
+
+class GenericNativeInheritedAdmission(unittest.TestCase):
+    clean_successor_fixture=Round16InheritedAdmission.clean_successor_fixture
+    def setUp(self):
+        Round19InheritedAdmission.setUp(self)
+        for entry,receipt in zip(self.entries,self.receipts):
+            receipt['cleanup_owner']['worker_root']=str(self.root)
+            if 'original_request' not in entry['proof']:
+                file=Path(entry['proof']['owner']['native_cleanup_reference']['result']).parent/'request.json'
+                doc=c.read(file);doc['token']=entry['token'];c.write(file,doc)
+                receipt['worker_result']=str(file.parent/'result.json')
+        token='generic-native';source={'head':'original-generic','digest':'original'}
+        receipt={'token':token,'gate':'smoke','source':source,'started_at':80,'finished_at':81,
+                 'cleanup_owner':{'worker_root':str(self.root)}}
+        links=[dict(original_receipt_sha256=e['proof']['receipt_sha256'],original_request_token=e['token'],
+            new_request_token=token,source=source,new_native_root=str(self.root/'.context/deploy-cloud'/
+            __import__('hashlib').sha256(token.encode()).hexdigest()),excluded_resources=e['excluded_resources'],credit_granted=False)
+            for e in self.entries]
+        folder=self.root/'generic';request=folder/'request.json'
+        c.write(request,{'token':token,'source':source,'checks':['one'],'skips':{},'isolated_validation':links})
+        receipt['worker_result']=str(folder/'result.json')
+        entry=dict(kind=self.n.KIND,token=token,gate='smoke',purpose='isolated-validation',
+            cleanup_complete=False,credit_granted=False,obligations_preserved=True,excluded_resources={},
+            validation_source=self.src,proof={'layout':'campaign-v1','receipt_sha256':'generic-hash',
+            'files':{str(request):c.sha_file(request)},'owner':{'native_cleanup_reference':{'result':str(folder/'result.json')}}})
+        self.entries.append(entry);self.receipts.append(receipt)
+        self.state['reconciled_owners']['generic-hash']=entry;self.baseline=copy.deepcopy(self.entries)
+    def test_seven_original_debts_and_clean_PASS_FAIL_successors(self):
+        for status in ('PASS','FAIL'):
+            self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),7)
+            gate,request,successor,folder=self.clean_successor_fixture(status)
+            successor['started_at']=91;successor['finished_at']=92;c.write(folder/'receipt.json',successor)
+            original=copy.deepcopy(self.state)
+            self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),7)
+            self.assertEqual(len(c.isolated_request(self.state,gate,{**request,'token':'next'},self.root,{})),7)
+            self.assertEqual(successor['status'],status);self.assertEqual(self.state,original)
+            self.assertTrue(all(not e['credit_granted'] and not e['cleanup_complete'] for e in self.entries))
+            self.state['attempts'].pop()
+    def test_missing_ancestor_and_changed_debt_or_latest_proof_reject(self):
+        for key in self.state['reconciled_owners']:
+            bad=copy.deepcopy(self.state);del bad['reconciled_owners'][key]
+            with self.subTest(key=key),self.assertRaises((ValueError,KeyError)):c.isolated_admissions(bad,'smoke')
+        for key,value in [('proof',{}),('validation_source',{}),('credit_granted',True),('cleanup_complete',True)]:
+            bad=copy.deepcopy(self.state);bad['reconciled_owners']['generic-hash'][key]=value
+            with self.subTest(key=key),self.assertRaises((ValueError,KeyError)):c.isolated_admissions(bad,'smoke')
+    def test_incomplete_owned_cancelled_or_tampered_native_successor_reject(self):
+        gate,request,successor,folder=self.clean_successor_fixture();successor['started_at']=91;successor['finished_at']=92
+        original=copy.deepcopy(successor)
+        for key,value in [('complete',False),('cleanup_owner',{'live':True}),('cancelled',True),('timed_out',True),
+                          ('source',{}),('isolated_validation',successor['isolated_validation'][:-1])]:
+            successor.clear();successor.update(copy.deepcopy(original));successor[key]=value;c.write(folder/'receipt.json',successor)
+            with self.subTest(key=key),self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
+        successor.clear();successor.update(original);c.write(folder/'receipt.json',successor)
+        (folder/'native-task.json').write_text('tampered')
+        with self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
+    def test_changed_shared_partition_blocks_before_launch(self):
+        previous=self.n.still_bound
+        def changed(entry,*args):
+            return False if entry['token']==self.entries[-2]['token'] else previous(entry,*args)
+        with patch.object(self.n,'still_bound',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'shared partition changed'):c.isolated_admissions(self.state,'smoke')
 
 if __name__ == '__main__': unittest.main()

@@ -238,10 +238,27 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
     return {r['machine_id']: r['volume_id'] for r in rows}
 
 
-def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree):
+def failed_canary_source_binding(fleet, life, root, receipt, link, bound, rows, source_binding):
+    if link['ref'] != receipt['source']['head']:
+        # A transport header needs the verified seal plus original child source
+        # authority. Missing allocated-child provenance is never reconstructed.
+        from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
+        base, patch, adapter = source_binding
+        need(patch != 'none' and link['ref'] == base, 'failed canary source/owner linkage')
+        provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
+        if not rows and not provenance_path.exists() and not matrix_path.exists():
+            provenance, matrix = preallocation_binding(fleet, receipt, life['fleet_owner_token'], root,
+                lambda p: json.loads(bound(p)), bound, life['controller_exit_code'], adapter)
+        else:
+            provenance, matrix = json.loads(bound(provenance_path)), json.loads(bound(matrix_path))
+        need(not validate_provenance(provenance) and not validate_task_matrix_binding(provenance, matrix)
+             and provenance['base_sha'] == base and provenance['workspace_patch_sha256'] == patch,
+             'failed canary sealed source binding')
+
+
+def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree, source_binding):
     """A linked infra-probe may fail before producing execution provenance, never task credit."""
-    need(link and link['ref'] == receipt['source']['head']
-         and link['owner'] == life['fleet_owner_token'], 'failed canary source/owner linkage')
+    need(link and link['owner'] == life['fleet_owner_token'], 'failed canary source/owner linkage')
     owner = life['fleet_owner_token']
     local, canonical = fleet / 'teardown-ownership', root / '.git/cloudbench-fleet-audits' / owner
     seal = tree(local)
@@ -263,6 +280,7 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     need(all(r.get('fleet_owner_token') == owner and r.get('run_id') == fleet.name
              and r.get('app') == meta['app'] and r.get('source') == 'fresh-clone'
              and r.get('disposition') == 'destroyed-provider-retained' for r in rows), 'canary resource not retired')
+    failed_canary_source_binding(fleet, life, root, receipt, link, bound, rows, source_binding)
     for name in ('pool', 'pool-handoffs', 'volume-migrations'):
         path = canonical / name
         need(not path.exists() or path.is_dir() and not path.is_symlink() and not any(path.iterdir()), 'canary resource class')
@@ -655,7 +673,7 @@ def validate(receipt, owner, proof):
         if failed_canary:
             link = canary_links.get(fleet)
             need(link and link['parent'] in parents, 'failed canary parent link')
-            zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
+            zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree, (source_base, source_patch, adapter))
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
         if failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
             pass  # Positive linked infra-probe + sealed zero-resource release above; absence alone proves nothing.
@@ -922,3 +940,85 @@ def still_bound(entry, receipt, owner):
         return actual == {k: v for k, v in entry.items() if k != 'occurrence'}
     except (OSError, ValueError, KeyError, TypeError):
         return False
+
+
+def inherited_native_sources(state, entries):
+    """Compose original debt proofs with a fully verified generic native successor.
+
+    This supplies future source admission only. It never edits an old proof or
+    credits its cleanup. Before a clean full successor, a pinned current shared
+    partition remains mandatory as well as the new operation's native custody.
+    """
+    from deploy_test_cycle import latest_receipts, receipt_owner, bounded_read, sha_file
+    import deploy_test_round12_isolation as r12
+    import deploy_test_round14_isolation as r14
+    import deploy_test_round16_isolation as r16
+    import deploy_test_round19_isolation as r19
+    need(entries and len({e['token'] for e in entries}) == len(entries), 'unique native debt set')
+    by_token = {e['token']: e for e in entries}
+    receipts = {}
+    for token, entry in by_token.items():
+        rows = [r for a in state['attempts'] for r in a.get('results', [])
+                if r.get('gate') == entry['gate'] and r.get('token') == token]
+        need(len(rows) == 1 and entry.get('cleanup_complete') is False
+             and entry.get('credit_granted') is False and entry.get('obligations_preserved') is True,
+             'original native debt identity')
+        receipts[token] = rows[0]
+    # Ordinary generic debts without this existing pinned ancestry keep their
+    # established retained-owner/source-refresh behavior; no coverage is granted.
+    if not any(e['proof'].get('compatibility') in {r16.MODE, r19.MODE} for e in entries):
+        return {}
+    generic = [e for e in entries if e.get('kind') == KIND
+               and e['proof'].get('compatibility') is None and e['proof'].get('layout') == 'campaign-v1']
+    need(generic, 'generic native successor missing')
+    candidate = max(generic, key=lambda e: receipts[e['token']]['finished_at'])
+    latest = latest_receipts(state).get(candidate['gate'])
+    need(latest is not None and candidate['validation_source'] == state['source'] == state['plan']['source'],
+         'native successor current source')
+    clean = latest['token'] != candidate['token']
+    if clean:
+        need(latest['source'] == state['source'] and len(latest.get('isolated_validation', [])) == len(entries),
+             'clean successor complete debt set')
+        for token, entry in by_token.items():
+            clean_isolated_successor(state, entry, receipts[token], latest)
+    else:
+        need(still_bound(candidate, latest, receipt_owner(candidate['gate'], latest)), 'current native successor changed')
+    known = {m.MODE: m for m in (r12, r14, r16, r19)}
+    anchors = [e for e in entries if e['proof'].get('compatibility') in {r16.MODE, r19.MODE}]
+    need(anchors, 'current shared partition authority missing')
+    if not clean:
+        anchor = max(anchors, key=lambda e: receipts[e['token']]['finished_at'])
+        need(still_bound(anchor, receipts[anchor['token']], receipt_owner(anchor['gate'], receipts[anchor['token']])),
+             'current shared partition changed; native maintenance authority required')
+    for token, entry in by_token.items():
+        proof, receipt = entry['proof'], receipts[token]
+        mode = proof.get('compatibility')
+        if mode in known:
+            actual = r12.validate_execution(receipt, receipt_owner(entry['gate'], receipt), proof,
+                                           known[mode].operation_spec(), _covered_guest=True)
+            need(actual == {k:v for k,v in entry.items() if k != 'occurrence'}, 'historical native proof changed')
+            request_path = Path(proof['original_request'])
+        else:
+            need(still_bound(entry, receipt, receipt_owner(entry['gate'], receipt)), 'original native proof changed')
+            request_path = Path(receipt['worker_result']).parent / 'request.json'
+        request = bounded_read(request_path, 'original native request')
+        # The native validator already binds this exact original request. Keep
+        # its original graph and source labels, rather than inventing a renewal.
+        need(request.get('token') == token, 'native ancestor request identity')
+        links = request.get('isolated_validation', [])
+        if mode in known:
+            need(links == proof['inherited_admissions'], 'original native ancestry changed')
+        need(len({a['original_request_token'] for a in links}) == len(links), 'duplicate native ancestry')
+        for link in links:
+            prior = by_token.get(link['original_request_token'])
+            need(prior is not None and prior['token'] != token, 'missing native ancestor')
+            old = receipts[prior['token']]
+            owner = receipt_owner(entry['gate'], receipt)
+            native_root = Path(owner['worker_root'])/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()
+            need(link == dict(original_receipt_sha256=prior['proof']['receipt_sha256'],
+                 original_request_token=prior['token'],new_request_token=token,source=receipt['source'],
+                 new_native_root=str(native_root),excluded_resources=prior['excluded_resources'],credit_granted=False)
+                 and old['finished_at'] <= receipt['started_at'], 'original native ancestry edge changed')
+        if entry is candidate:
+            need({a['original_request_token'] for a in links} == set(by_token)-{token}, 'complete native ancestor set')
+    return dict.fromkeys(by_token, candidate['validation_source'])
