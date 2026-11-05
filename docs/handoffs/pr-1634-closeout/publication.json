@@ -1,20 +1,14 @@
 {
   "format": "PR1634-CLOSEOUT-PUBLICATION-V1",
-  "status": "VERIFIED_PRESERVATION_AWAITING_THIS_RECORDS_PR_PUBLICATION",
+  "status": "COMPLETE",
   "deployed_source": "172328eb96b9bf2a6b1ff6b0e81d1076d55253da",
   "deployed_pr": "https://github.com/Rose-Ai-Labs/rose/pull/1634",
   "records_pr": "https://github.com/Rose-Ai-Labs/rose/pull/1689",
   "records_commit_binding": "The Git commit containing this publication record and its listed files. The deployed PR links the final merged commit and manifest.",
-  "completion_conditions": [
-    "This records PR is merged into main",
-    "The deployed PR links the merged records commit and closeout manifest",
-    "No intended source or required record remains only on the old devbox"
-  ],
   "private_preservation_verified": true,
-  "deletion_ready_after_completion_conditions": true,
   "files_sha256": {
     "parent-validation.json": "9f44b23263285ff9eb48f42a6f25057075ea818aee8de5018f853e974df8362c",
-    "closeout-manifest.json": "c251b671d2fc7cb4378e9b533e29d4a63a6a5c2bac44378a72dfde06f7df7fdc",
+    "closeout-manifest.json": "91f6de675e058e5c07fe1f82a52d6afcc254d822a3fb08ed81bc527888f10e6c",
     "RECOVERY.md": "492df75f5c531156fe9ed6e443ab0cee23f93a30b7d50661ce95962a6b0eaef0",
     "README.md": "37671271c58b8abdc5921378b7a24b9ed05c0061b037cb32798f108c754ff37b",
     "recovery-validation.json": "5d80e3c8c002783523cab174d0e29bc939ae353f17f5b7c38988dae901b31ebe",
@@ -25,5 +19,14 @@
   },
   "resources": "Local preview hubs, tail readers, local databases and managed browser were classified with preserved records. They may end with devbox deletion; remote protected resources and Freedom were not changed.",
   "limits": "Finite file/database cutoffs; historical missing data, original benchmark failure and qualified skips remain disclosed in closeout-manifest.json. No atomic process-memory snapshot or bucket access-policy audit is claimed.",
-  "deletion_performed": false
+  "deletion_performed": false,
+  "deletion_ready": true,
+  "records_pr_merge_commit": "e0d1a838913ac47e4d359a59bdd29bfd665928e0",
+  "deployed_pr_link_verified": true,
+  "verified_at": "2026-11-05T08:47:34.541428+00:00",
+  "completion_conditions_satisfied": [
+    "This records PR is merged into main",
+    "The deployed PR links the merged records commit and closeout manifest",
+    "No intended source or required record remains only on the old devbox"
+  ]
 }

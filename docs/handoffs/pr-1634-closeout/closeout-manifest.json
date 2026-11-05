@@ -1,9 +1,9 @@
 {
   "format": "PR1634-DELETION-READINESS-MANIFEST-V1",
   "generated_at": "2026-11-05T08:42:17.041611+00:00",
-  "status": "PRIVATE_PRESERVATION_VERIFIED_PARENT_PUBLICATION_REMAINS",
-  "deletion_ready": false,
-  "parent_final_publication_required": true,
+  "status": "PRESERVATION_AND_PUBLICATION_VERIFIED",
+  "deletion_ready": true,
+  "parent_final_publication_required": false,
   "deployment_pr": 1634,
   "preservation_followup_pr": 1689,
   "deployed_source": "172328eb96b9bf2a6b1ff6b0e81d1076d55253da",
@@ -4567,7 +4567,8 @@
     "both_source_inventories_terminal": true,
     "home_top_level_entries": 37,
     "desktop_uploads_qualified": 108,
-    "independent_namespace_terminal": true
+    "independent_namespace_terminal": true,
+    "home_producer_selected_paths": 2736
   },
   "current_native_backlog": {
     "observed_at": "2026-11-05T08:10:30.799725+00:00",
@@ -4628,14 +4629,53 @@
     "final_private_control_closure": "PASS",
     "private_preservation_ready": true
   },
-  "recovery_document": "RECOVERY.md; reviewed adapter and pinned legacy helper from published source",
+  "recovery_document": "RECOVERY.md",
+  "aggregate_archive_statistics": {
+    "unique_objects": 284,
+    "member_instances": 778742,
+    "original_member_bytes": 263121305320,
+    "ciphertext_bytes": 168576533917
+  },
+  "parent_pushed_source_before_final_records": "49dba66a958a7ddf7faff117e449f3f079e426f8",
   "private_proof_index": {
     "path": "private-proof-index.json",
-    "sha256": "a881fa6a95947d1b6fe31c5fc555181089b97c91732bf0e1f480598003231f4b"
+    "sha256": "a881fa6a95947d1b6fe31c5fc555181089b97c91732bf0e1f480598003231f4b",
+    "authenticated_proof_bindings": 55
   },
-  "private_verification": {
-    "path": "private-preservation-verification.json",
-    "sha256": "16f536575e927db2f48c8ce365449bac78f5b843d6aa60fc8f8b7627cecf587d"
+  "private_verification_file": "private-preservation-verification.json",
+  "control_binding_verification_file": "control-bindings-verification.json",
+  "path_mode_results": {
+    "original_logical_and_resolved_paths": 1510318,
+    "path_mode_entries": 1877853,
+    "missing_needed_mode_paths": 0,
+    "raw_invalid_journal_records_retained": 2,
+    "exact_qualified_raw_overrides": 2,
+    "unreconciled_raw_records": 0,
+    "inventory_error_rows_explicitly_qualified": 4277,
+    "unique_error_paths_explicitly_qualified": 4112,
+    "unresolved_error_paths": 0,
+    "directory_alias_pairs": 1415,
+    "unresolved_alias_visitation": 0,
+    "independent_selected_gap_sources_with_modes": 80,
+    "independent_namespace_sources_with_modes": 49,
+    "home_source_paths_with_source_or_snapshot_mode": 4212
   },
-  "publication_record": "publication.json"
+  "closed_control_results": {
+    "control_records": 27413,
+    "authenticated_control_content_bindings": 21597,
+    "deferred_paths_missing_later_inventory": 0,
+    "full_control_producers_closed": 3,
+    "home_top_level_entries_reconciled": 37,
+    "filesystem_boundary_entries_reconciled": 492,
+    "tmp_top_level_entries_reconciled": 8331
+  },
+  "actual_producer_selected_paths_total": 599153,
+  "final_publication_note": "PR1689 merged at e0d1a838913ac47e4d359a59bdd29bfd665928e0 and its exact record/manifest link was verified in deployed PR1634. This final metadata reconciliation is preserved by its containing Git commit and linked from the same deployed PR.",
+  "publication_record": "publication.json",
+  "publication": {
+    "records_pr": 1689,
+    "records_pr_merge_commit": "e0d1a838913ac47e4d359a59bdd29bfd665928e0",
+    "deployed_pr_link_verified": true,
+    "final_metadata_commit": "The Git commit containing this file; linked from PR1634 after push."
+  }
 }
