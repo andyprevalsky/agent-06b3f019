@@ -136,6 +136,38 @@ if resume is None and os.environ.get("STUB_MODE") == "mentions_auth_text":
     emit({"type": "user", "tool_use_result": {"stdout": mentions, "stderr": ""},
           "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_g", "content": mentions}]}})
     emit({"type": "assistant", "message": {"content": [{"type": "text", "text": f"Found: {mentions}"}]}})
+if resume is None and os.environ.get("STUB_MODE") == "loop":
+    # A Bash tool running a loop that appends 1..STUB_LOOP_LINES to counter.txt.
+    # A turn written meanwhile is merged into this turn (one result), as Claude
+    # Code does; the result names the turn it answered.
+    import select
+    lines = int(os.environ.get("STUB_LOOP_LINES", "60"))
+    loop = subprocess.Popen(["sh", "-c", f'i=0; while [ $i -lt {lines} ]; do i=$((i+1)); echo $i >> "$1"; sleep 0.04; done',
+                             "sh", str(home / "counter.txt")])
+    emit({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "toolu_loop", "name": "Bash", "input": {"command": "counter loop"}}]}})
+    if os.environ.get("STUB_LOOP_RATE_LIMIT"):
+        # The subscription's limit hits while the tool runs (the parent pauses on it).
+        emit({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour",
+              "resetsAt": 1790988600, "utilization": 1.0}})
+    loop.wait()
+    emit({"type": "user", "tool_use_result": {"stdout": "loop done", "stderr": ""},
+          "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_loop", "content": "loop done"}]}})
+    queued, pending = [], b""
+    while select.select([sys.stdin.fileno()], [], [], 0.2)[0]:
+        chunk = os.read(sys.stdin.fileno(), 65536)
+        if not chunk:
+            break
+        pending += chunk
+    for line in pending.decode().splitlines():
+        queued.append("".join(p.get("text", "") for p in json.loads(line)["message"]["content"]))
+    (gate / "merged_turns.json").write_text(json.dumps(queued))
+    count = len((home / "counter.txt").read_text().split())
+    emit({"type": "result", "subtype": "success", "result": f"answer is {count} lines", "usage": {},
+          "queued_turn_count": 0})
+    while os.read(sys.stdin.fileno(), 65536):
+        pass
+    sys.exit(0)
 if resume is None and os.environ.get("STUB_MODE") not in (
     "finish", "rate_limit", "billing", "login_unusable", "auth_expired", "mentions_auth_text"
 ):
@@ -239,7 +271,20 @@ class _SessionHome:
                     self.process.wait(timeout=5)
         self.process = None
 
+    def freeze(self) -> None:
+        """E2B pause: memory and processes are kept, nothing runs."""
+        assert self.process is not None and self.process.poll() is None, "freeze needs a live ws-server"
+        os.killpg(self.process.pid, signal.SIGSTOP)
+
+    def thaw(self) -> None:
+        """E2B resume of the paused sandbox: the frozen tree continues."""
+        assert self.process is not None
+        os.killpg(self.process.pid, signal.SIGCONT)
+
     def cleanup(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.process.pid, signal.SIGCONT)
         self.pause()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -1968,6 +2013,170 @@ async def test_rotation_f_duplicate_concurrent_retry_starts_one_agent():
         session_home.cleanup()
 
 
+class _LiveResumeBackend(_Backend):
+    """Backend whose pause freezes the sandbox and whose resume attaches to the live CLI (T8).
+
+    Mirrors back-end attachLiveCodeCli: the resumed sandbox's ws-server keeps
+    running, the new spawn's goal is delivered as an agent turn with the new
+    task's token (``attach``) and the create response names the same ws_url.
+    """
+
+    def __init__(self, session_home: _SessionHome) -> None:
+        super().__init__(session_home)
+        self.attach_acks: list[dict] = []
+
+    async def create_session(self, **kwargs):
+        if not self.created:
+            return await super().create_session(**kwargs)
+        self.created.append(kwargs)
+        import aiohttp
+
+        from helpers.code_session_turns import _send_once, code_session_turn_token
+
+        self.session_home.thaw()
+        task_id = f"task-{len(self.created)}"
+        payload = {
+            "type": "user_turn",
+            "id": "spawn-attach-1",
+            "token": code_session_turn_token("task-1"),
+            "text": f"Task:\n{kwargs['goal']}",
+            "sender": "agent",
+            "attach": {
+                "token": code_session_turn_token(task_id),
+                # Same credential env as the live CLI (ANTHROPIC_API_KEY=stub-key, nothing else).
+                "credential": _credential_digest(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+                                                 {"ANTHROPIC_API_KEY": "stub-key"}),
+            },
+        }
+        relay = {
+            "type": "user_turn",
+            "id": "relay-1",
+            "token": code_session_turn_token(task_id),
+            "text": "ping from the parent",
+            "sender": "agent",
+        }
+        async with aiohttp.ClientSession() as http:
+            ack = await _send_once(http, self.session_home.ws_url, payload, "user_turn_ack", 10.0)
+            # The new task id now addresses the live CLI (agent relays, direct chat).
+            relayed = await _send_once(http, self.session_home.ws_url, relay, "user_turn_ack", 10.0)
+        self.attach_acks.extend([ack, relayed])
+        assert ack.get("status") == "delivered" and ack.get("attached") is True, ack
+        return {
+            "task_id": task_id,
+            "sandbox_id": "sb-persistent",
+            "ws_url": self.session_home.ws_url,
+            "uploaded_files": [],
+            "code_session_id": kwargs.get("code_session_id"),
+            "resumed_from": "live_cli",
+            "history_events": ack.get("history_events", 0),
+            "branch": "rose/write-answer-0a1b2c3d",
+            "base_branch": None,
+            "merge_target": None,
+        }
+
+    async def close_session(self, **kwargs):
+        self.closed.append(kwargs)
+        if len(self.closed) == 1:
+            self.session_home.freeze()  # E2B pause: memory and processes kept
+        else:
+            self.session_home.pause()
+        return {"output_files": [], "usage": None}
+
+
+def _credential_digest(keys: list[str], env: dict[str, str]) -> dict:
+    import hashlib
+
+    names = sorted(set(keys))
+    digest = hashlib.sha256(
+        json.dumps([[key, env.get(key)] for key in names], separators=(",", ":")).encode()
+    ).hexdigest()
+    return {"keys": names, "digest": digest}
+
+
+def _counter(session_home: _SessionHome) -> list[int]:
+    path = session_home.home / "counter.txt"
+    return [int(line) for line in path.read_text().split()] if path.exists() else []
+
+
+async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(*, rate_limited: bool = False):
+    """T8: a resumed spawn attaches to the CLI still running in the paused sandbox.
+
+    Spawn 1 runs a Bash loop writing counter.txt; the user pauses (activity
+    cancel → close reason ``cancel`` → the sandbox freezes, processes kept).
+    Spawn 2 resumes the session: its goal reaches the same CLI as a turn, the
+    activity attaches to the same ws-server, sees the in-flight tool finish and
+    completes with every loop line written once — no restart, no ``--resume``.
+    ``rate_limited``: spawn 1 pauses on a usage limit instead; spawn 2 resumes on
+    the same (reset) credential and must not act on spawn 1's limit event.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+    from helpers.code_session_turns import code_session_turn_token
+
+    os.environ.setdefault("BACKEND_API_KEY", "code-sessions-live-resume-key")
+    lines = 60
+    session_home = _SessionHome(
+        extra_env={
+            "STUB_MODE": "loop",
+            "STUB_LOOP_LINES": str(lines),
+            **({"STUB_LOOP_RATE_LIMIT": "1"} if rate_limited else {}),
+            # Spawn 1's ws-server addresses task-1 (backend e2b.ts sets this per task).
+            "CODE_SESSION_TURN_TOKEN": code_session_turn_token("task-1"),
+        }
+    )
+    backend = _LiveResumeBackend(session_home)
+    try:
+        with backend.patched():
+            env = ActivityEnvironment()
+            first = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_activity_args()))
+            if not rate_limited:  # a usage limit pauses spawn 1 by itself
+                await _wait_until(lambda: len(_counter(session_home)) >= 5, "the loop to start writing")
+                env.cancel()  # the user pauses the root
+            paused = await asyncio.wait_for(first, timeout=15)
+        expected_close = "usage_limit" if rate_limited else "cancel"
+        assert [call.get("reason") for call in backend.closed] == [expected_close], backend.closed
+        assert len(backend.usage_reports) == (1 if rate_limited else 0), backend.usage_reports
+        frozen = len(_counter(session_home))
+        await asyncio.sleep(0.4)
+        assert len(_counter(session_home)) == frozen, "a paused sandbox runs nothing"
+        assert frozen < lines, f"the loop must still be in flight at the pause: {frozen}"
+
+        with backend.patched():
+            resumed = await asyncio.wait_for(
+                ActivityEnvironment().run(
+                    service.spawn_claude_code_activity,
+                    *_activity_args(
+                        code_session_request={"code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de"},
+                        tool_call_id="tc-code-resume",
+                    ),
+                ),
+                timeout=40,
+            )
+        assert resumed["status"] == "completed" and resumed["success"] is True, resumed
+        assert _counter(session_home) == list(range(1, lines + 1)), "the loop ran once, start to finish"
+        assert len(session_home.runs()) == 1, f"one CLI process, never restarted: {session_home.runs()}"
+        merged = json.loads((session_home.tmp / "merged_turns.json").read_text())
+        assert [ack.get("status") for ack in backend.attach_acks] == ["delivered", "delivered"], backend.attach_acks
+        assert len(merged) == 2 and merged[0].startswith("Task:\nWrite answer.txt with the answer"), merged
+        assert merged[1] == "ping from the parent", merged
+        results = [e.get("text") or e.get("result") for e in backend.verified_events[-1] if e.get("type") == "result"]
+        assert any(f"answer is {lines} lines" in str(text) for text in results) or any(
+            f"answer is {lines} lines" in json.dumps(e) for e in backend.verified_events[-1]
+        ), backend.verified_events[-1]
+        assert paused["status"] == ("usage_limit" if rate_limited else "cancelled"), paused
+        assert len(backend.usage_reports) == (1 if rate_limited else 0), (
+            f"spawn 1's limit is history to spawn 2: {backend.usage_reports}"
+        )
+    finally:
+        session_home.cleanup()
+
+
+async def test_usage_limit_pause_then_resume_attach_ignores_the_old_limit():
+    """T8 + T2: spawn 1 pauses on a usage limit; spawn 2 attaches on the reset credential and completes."""
+    await test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(rate_limited=True)
+
+
 async def _run_all_tests():
     print("code-sessions blackbox tests:")
     r = BlackboxResult()
@@ -1981,6 +2190,14 @@ async def _run_all_tests():
         test_cancelled_spawner_unblocks_a_child_waiting_for_its_answer,
     )
     await r.record_async("failed_attempt_retry_keeps_state", test_failed_attempt_retry_keeps_state_and_code_session_id)
+    await r.record_async(
+        "user_pause_resume_keeps_live_cli_and_loop",
+        test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop,
+    )
+    await r.record_async(
+        "usage_limit_pause_resume_attach_ignores_old_limit",
+        test_usage_limit_pause_then_resume_attach_ignores_the_old_limit,
+    )
     await r.record_async(
         "resize_request_moves_session_and_reattaches",
         test_resize_request_moves_session_and_next_attempt_reattaches,

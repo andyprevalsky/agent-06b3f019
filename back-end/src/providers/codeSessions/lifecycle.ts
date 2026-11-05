@@ -41,7 +41,8 @@ const log = createLogger('CodeSessionLifecycle');
 /** How far back a resume walks when newer checkpoints fail verification. */
 const RESTORE_LOOKBACK = 5;
 
-export type ResumedFrom = 'paused_sandbox' | 'local_home' | 'checkpoint' | 'new';
+/** `live_cli`: the spawn attached to the CLI still running in the resumed sandbox. */
+export type ResumedFrom = 'live_cli' | 'paused_sandbox' | 'local_home' | 'checkpoint' | 'new';
 
 export interface RepoFacts {
   path: string;

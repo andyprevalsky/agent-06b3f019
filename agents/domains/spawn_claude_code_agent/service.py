@@ -682,6 +682,8 @@ _CODE_SESSION_FIELDS = (
     "transcript_events",
     # vCPUs / memory of the sandbox (C16); the code_agent block reports it.
     "sandbox_size",
+    # Attached to a live CLI: its events before this spawn's goal turn are history.
+    "history_events",
 )
 
 
@@ -893,6 +895,9 @@ async def _run_agentic_loop(
     # monitor if the CLI never exits after declaring completion.
     sdk_result_at: float | None = None
     logged_events = int((code_session or {}).get("logged_events") or 0)
+    # Attached to a live CLI (resumed_from=live_cli): the ws-server's events
+    # before this spawn's goal turn belong to earlier spawns.
+    history_events = int((code_session or {}).get("history_events") or 0)
     # Direct chat: while the user holds the session (ws-server `direct_chat`
     # held → released), the user's turns drive the CLI. The monitor must not
     # end the session on post-result grace / SDK idle, and never writes to
@@ -981,13 +986,16 @@ async def _run_agentic_loop(
         nonlocal direct_chat_active, user_turns_seen, sdk_results_seen, native_codex_terminal
         last_output_time = safe_time()
         code_events.append(event)
-        usage_limit = usage_limit_from_event(event)
+        event_index = len(code_events) - 1
+        # Events before this spawn's goal turn (attached to a live CLI) are the
+        # earlier turns' history: their usage limit or login failure is not this run's.
+        history = event_index < history_events
+        usage_limit = None if history else usage_limit_from_event(event)
         if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
             loop_outcome["usage_limit"] = usage_limit
-        login_unusable = login_unusable_from_event(event)
+        login_unusable = None if history else login_unusable_from_event(event)
         if login_unusable is not None and loop_outcome is not None and "login_unusable" not in loop_outcome:
             loop_outcome["login_unusable"] = login_unusable
-        event_index = len(code_events) - 1
         for record in transcript.feed(event, event_index):
             if event_index >= transcript_flushed:
                 transcript_pending[record["id"]] = record
@@ -3448,6 +3456,8 @@ async def spawn_claude_code_activity(
                 else f"Created E2B sandbox: {sandbox_id}"
             )
 
+        # A spawn attached to a live CLI starts its logs and transcript at its own goal turn.
+        history_events = int((attached if attached is not None else session_data).get("history_events") or 0)
         session_record = {
             "task_id": task_id,
             "sandbox_id": sandbox_id,
@@ -3456,12 +3466,13 @@ async def spawn_claude_code_activity(
             "github_repo_url": actual_github_repo_url,
             "started_at": start_time,
             "loop_started_at": loop_started_at,
-            "logged_events": int((attached or {}).get("logged_events") or 0),
+            "logged_events": max(int((attached or {}).get("logged_events") or 0), history_events),
+            "history_events": history_events,
             "code_session_id": code_session_id,
             "branch": (code_session_facts or {}).get("branch") or (attached or {}).get("branch"),
             "merge_target": (code_session_facts or {}).get("merge_target")
             or (attached or {}).get("merge_target"),
-            "transcript_events": int((attached or {}).get("transcript_events") or 0),
+            "transcript_events": max(int((attached or {}).get("transcript_events") or 0), history_events),
             "preview_url": code_agent_meta.get("preview_url"),
             "sandbox_size": code_agent_meta.get("sandbox_size"),
         }

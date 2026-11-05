@@ -44,6 +44,12 @@ export interface TurnDelivery {
   effective_settings?: CodeTurnSettings;
   delivery_mode?: 'steer' | 'start';
   turn_id?: string;
+  /** The ws-server confirmed a resumed spawn's `attach` (see deliverUserTurnToCodeSession). */
+  attached?: boolean;
+  /** Start-time env keys of the spawn the running CLI kept its own values for. */
+  ignored_config?: string[];
+  /** Events the ws-server held before this turn (earlier turns' history). */
+  history_events?: number;
 }
 
 /** Per-session write token; must match `code_session_turn_token` in agents. */
@@ -122,6 +128,16 @@ export async function deliverUserTurnToCodeSession(params: {
   sender?: 'user' | 'agent';
   attachments?: CodeTurnAttachment[];
   settings?: CodeTurnSettings;
+  /**
+   * A resumed spawn attaching to this live CLI (e2bCodeSessionSandbox
+   * attachLiveCodeCli): the ws-server refuses the turn (`credential_changed`)
+   * unless it holds this credential, and on delivery adopts `token`.
+   */
+  attach?: {
+    token: string;
+    credential: { keys: string[]; digest: string };
+    config?: Record<string, string>;
+  };
   timeoutMs?: number;
   attempts?: number;
 }): Promise<TurnDelivery> {
@@ -135,6 +151,7 @@ export async function deliverUserTurnToCodeSession(params: {
     sender: params.sender ?? 'user',
     attachments: params.attachments,
     settings: params.settings,
+    ...(params.attach !== undefined ? { attach: params.attach } : {}),
   };
   let lastError = '';
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -160,6 +177,9 @@ export async function deliverUserTurnToCodeSession(params: {
         ...(ack.effective_settings ? { effective_settings: ack.effective_settings } : {}),
         ...(ack.delivery_mode ? { delivery_mode: ack.delivery_mode } : {}),
         ...(ack.turn_id ? { turn_id: ack.turn_id } : {}),
+        ...(ack.attached === true ? { attached: true } : {}),
+        ...(Array.isArray(ack.ignored_config) ? { ignored_config: ack.ignored_config } : {}),
+        ...(Number.isInteger(ack.history_events) ? { history_events: ack.history_events } : {}),
       };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
