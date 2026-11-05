@@ -62,8 +62,12 @@ def apply_owned_wmh_recording(
     fixture_database: str,
 ) -> bool:
     """Admit explicitly selected recording only into its retained owned cache."""
+    if isolated and (env.get("WMH_OWNED_RECORDING_CACHE_MANIFEST") or env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL")):
+        current, legacy = env.get("DEMO_CACHE_RECORD_DEMO"), env.get("FAST_MODE_CACHE_RECORD_DEMO")
+        if current is not None and legacy is not None and current != legacy:
+            raise ValueError("Conflicting DEMO recording aliases")
     recording = env.get("FAST_MODE_CACHE_RECORD_DEMO", env.get("DEMO_CACHE_RECORD_DEMO", "")).strip().lower()
-    if not (isolated and simulate and recording in {"1", "true", "yes", "on"}):
+    if not (isolated and recording in {"1", "true", "yes", "on"}):
         return False
     if not tasks or not all(getattr(task, "demo_cache", None) == "on" for task in tasks):
         return False
@@ -73,30 +77,17 @@ def apply_owned_wmh_recording(
         return False
     if not manifest_path:
         raise ValueError("Selected isolated WMH recording requires a retained owned cache manifest")
-    manifest_file = Path(manifest_path)
-    if manifest_file.is_symlink() or not manifest_file.is_file():
-        raise ValueError("Owned recording manifest must be a regular private file")
-    manifest = json.loads(manifest_file.read_text())
-    url = env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL", "")
-    parsed = urlsplit(url)
-    database = parsed.path.removeprefix("/")
-    owned = (
-        parsed.scheme in {"postgres", "postgresql"}
-        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
-        and database.startswith("victoria_wmh_recording_")
-        and database != fixture_database
-        and manifest.get("checkout") == str(REPO_ROOT.resolve())
-        and manifest.get("owner_workspace") == workspace
-        and manifest.get("database") == database
-        and manifest.get("host") == parsed.hostname
-        and manifest.get("url_sha256") == hashlib.sha256(url.encode()).hexdigest()
-        and manifest.get("retained_across_iterations") is True
-    )
-    if not owned:
-        raise ValueError("WMH recording cache must be a retained loopback owner separate from the fixture")
-    env["FAST_MODE_CACHE_DATABASE_URL"] = url
+    from providers.demo_cache.context import validate_owned_recording
+
+    validate_owned_recording(env, checkout=str(REPO_ROOT.resolve()), workspace=workspace, fixture_database=fixture_database)
+    mode = "simulate" if simulate else "real"
+    if env.get("BENCHMARK_WORLD_MODEL_MODE", mode) != mode:
+        raise ValueError("Owned recording world mode conflicts with the selected run mode")
+    env["BENCHMARK_WORLD_MODEL_MODE"] = mode
+    for prefix in ("DEMO_CACHE_", "FAST_MODE_CACHE_"):
+        env[prefix + "DATABASE_URL"] = retained_url
+        env[prefix + "DISABLE_WRITE_THROUGH"] = "0"
     _pop_demo_cache_env(env, "USE_LOCAL")
-    env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "0"
     return True
 
 
