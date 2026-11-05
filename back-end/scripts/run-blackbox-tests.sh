@@ -504,7 +504,9 @@ cleanup() {
   if [[ "$cleaned" == 1 && -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
     rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
   fi
-  if [[ "$USE_EXISTING_BACKEND" != "1" ]]; then
+  # Only a backend this runner launched can have created stack-tagged sandboxes.
+  # Self-contained under set -u: the trap must not depend on later setup.
+  if [[ -n "$BACKEND_PID" && -n "${SANDBOX_STACK_ID:-}" ]]; then
     (cd "$BACKEND_DIR" && ROSE_SANDBOX_STACK_ID="$SANDBOX_STACK_ID" timeout 60 npx tsx scripts/kill-stack-sandboxes.ts) || true
   fi
   exit "$result"
@@ -585,7 +587,7 @@ EOF
 
   PORT="$PORT" \
   DISABLE_GMAIL_SYNC=1 \
-  ROSE_SANDBOX_STACK_ID="$SANDBOX_STACK_ID" \
+  ROSE_SANDBOX_STACK_ID="${SANDBOX_STACK_ID:-}" \
   npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!
   trap 'exit 130' INT
