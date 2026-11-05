@@ -24,7 +24,8 @@ class ForeignListener(unittest.TestCase):
         # Python executes a disposable script named tunnel with the real native
         # argv shape. Its only effect is a loopback socket, closed on stdin EOF.
         (self.foreign/'tunnel').write_text("import socket,json,sys\nfrom pathlib import Path\ns=socket.socket();s.bind(('127.0.0.1',0));s.listen();Path('ready.json').write_text(json.dumps({'port':s.getsockname()[1]}));sys.stdin.read();s.close()\n")
-        self.child=subprocess.Popen(['cloudflared','tunnel','--no-autoupdate','--url','http://127.0.0.1:3802'],executable=sys.executable,cwd=self.foreign,stdin=subprocess.PIPE,stdout=self.log,stderr=self.log)
+        # Fake argv[0] hides the relocated interpreter path; bind its real stdlib.
+        self.child=subprocess.Popen(['cloudflared','tunnel','--no-autoupdate','--url','http://127.0.0.1:3802'],executable=sys.executable,env={**os.environ,'PYTHONHOME':sys.base_prefix},cwd=self.foreign,stdin=subprocess.PIPE,stdout=self.log,stderr=self.log)
         end=time.monotonic()+5
         while not(self.foreign/'ready.json').exists() and time.monotonic()<end:time.sleep(.01)
         self.port=json.loads((self.foreign/'ready.json').read_text())['port'];parent=f.process(os.getpid())
