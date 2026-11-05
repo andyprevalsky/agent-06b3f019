@@ -4869,6 +4869,12 @@ def benchmark_wall_clock_backstop_seconds() -> int:
     return int(value)
 
 
+def _validated_preparation_price(seconds: int | None, price: int | None) -> int | None:
+    if price is not None and (seconds is None or type(price) is not int or not 1 <= price <= 1000):
+        raise ValueError("Preparation price requires explicit preparation mode and an integer 1..1000 cents")
+    return price
+
+
 def _execution_timeout_seconds(task: BenchmarkTask):
     preparation = getattr(task, "_owned_preparation_seconds", None)
     if preparation is not None:
@@ -15027,12 +15033,18 @@ async def run_single_task(
     on_task_evaluated: Optional[Callable[[TaskResult], None | Awaitable[None]]] = None,
     other_task_roots: Callable[[], set[str]] | None = None,
     preparation_seconds: int | None = None,
+    preparation_price_limit_cents: int | None = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
     # Repeated catalog selections share a template. Keep native lifecycle
     # ownership on this execution while preserving caller configuration/provenance.
+    preparation_price = _validated_preparation_price(preparation_seconds, preparation_price_limit_cents)
+    if preparation_price is not None:
+        _claim_preparation_price_admission(base_url, task, preparation_seconds, preparation_price)
     task = copy.copy(task)
+    if preparation_price is not None:
+        task.price_limit_cents = preparation_price
     if preparation_seconds is not None:
         task._owned_preparation_seconds = preparation_seconds
         _execution_timeout_seconds(task)
@@ -17431,11 +17443,15 @@ def _recording_cache_row_count(url: str) -> int:
     return int(result.stdout.strip())
 
 
-def _admit_owned_preparation(base_url: str, tasks: list, seconds: int, out: Path) -> dict:
+def _admit_owned_preparation(
+    base_url: str, tasks: list, seconds: int, out: Path, *, price_limit_cents: int | None = None,
+) -> dict:
     from providers.demo_cache.context import owned_recording_namespace, cache_writes_disabled
+    preparation_price = _validated_preparation_price(seconds, price_limit_cents)
     if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 3600:
         raise ValueError("Preparation budget must be 1..3600 seconds")
-    if not _is_local_base_url(base_url) or cloud_batch_cleanup.contract() is None:
+    owner = cloud_batch_cleanup.contract()
+    if not _is_local_base_url(base_url) or owner is None:
         raise ValueError("Preparation requires local native owned cleanup")
     if len(tasks) != 1 or tasks[0].demo_cache != "on" or tasks[0].runner != "agent":
         raise ValueError("Preparation requires one existing demo-cache agent task")
@@ -17453,7 +17469,11 @@ def _admit_owned_preparation(base_url: str, tasks: list, seconds: int, out: Path
     receipt = {"mode": "UNSCORED_RECORDING_PREPARATION", "qualification": "NOT_VALIDATION",
                "state": "ADMITTED", "cache_rows_before": count, "owner_namespace": namespace,
                "task": tasks[0].name, "budget_seconds": seconds,
-               "price_limit_cents": tasks[0].effective_price_limit_cents(),
+               "backend_url": base_url.rstrip("/"),
+               "native_owner": {"context": str(context_dir), "status_file": str(owner[0].resolve()), "token": owner[1]},
+               "price_limit_cents": preparation_price if preparation_price is not None else tasks[0].effective_price_limit_cents(),
+               "original_catalog_price_limit_cents": tasks[0].effective_price_limit_cents(),
+               "effective_preparation_price_limit_cents": preparation_price if preparation_price is not None else tasks[0].effective_price_limit_cents(),
                "task_definition_sha256": hashlib.sha256(json.dumps(asdict(tasks[0]), sort_keys=True, default=str).encode()).hexdigest(),
                "manifest_sha256": hashlib.sha256(Path(os.environ["WMH_OWNED_RECORDING_CACHE_MANIFEST"]).read_bytes()).hexdigest()}
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -17468,9 +17488,70 @@ def _admit_owned_preparation(base_url: str, tasks: list, seconds: int, out: Path
     return receipt
 
 
+def _claim_preparation_price_admission(base_url: str, task: BenchmarkTask, seconds: int, price: int) -> None:
+    """Consume the existing native admission before raising a copied task's price."""
+    from providers.demo_cache.context import owned_recording_namespace, cache_writes_disabled
+    try:
+        owner = cloud_batch_cleanup.contract()
+        if not _is_local_base_url(base_url) or owner is None or os.environ.get("BENCHMARK_WORLD_MODEL_MODE") != "real":
+            raise ValueError
+        namespace = owned_recording_namespace()
+        if not namespace or cache_writes_disabled():
+            raise ValueError
+        context = Path(os.environ["BENCHMARK_CONTEXT_DIR"]).resolve()
+        manifest = Path(os.environ["WMH_OWNED_RECORDING_CACHE_MANIFEST"])
+        admission_path = Path(str(manifest) + ".preparation-admission.json")
+        if admission_path.is_symlink() or admission_path.stat().st_size > 16384:
+            raise ValueError
+        admission = json.loads(admission_path.read_text())
+        expected = {
+            "mode": "UNSCORED_RECORDING_PREPARATION", "qualification": "NOT_VALIDATION", "state": "ADMITTED",
+            "backend_url": base_url.rstrip("/"), "owner_namespace": namespace, "task": task.name,
+            "budget_seconds": seconds, "original_catalog_price_limit_cents": task.effective_price_limit_cents(),
+            "effective_preparation_price_limit_cents": price, "price_limit_cents": price,
+            "native_owner": {"context": str(context), "status_file": str(owner[0].resolve()), "token": owner[1]},
+            "task_definition_sha256": hashlib.sha256(json.dumps(asdict(task), sort_keys=True, default=str).encode()).hexdigest(),
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        }
+        if any(admission.get(key) != value for key, value in expected.items()):
+            raise ValueError
+        if type(admission.get("cache_rows_before")) is not int or admission["cache_rows_before"] != 0:
+            raise ValueError
+        # A terminal owner is stale even if an abandoned output still says ADMITTED.
+        status = dict(line.split("=", 1) for line in owner[0].read_text().splitlines() if "=" in line)
+        if status.get("state") != "pending" or status.get("token") != owner[1]:
+            raise ValueError
+        out = Path(admission["output"])
+        if out.parent.resolve() != context or out.is_symlink() or out.stat().st_size > 16384:
+            raise ValueError
+        # Existing output is the mutable execution receipt; the admission remains immutable.
+        # Lock + ADMITTED transition prevents concurrent or later reuse of one admission.
+        with out.open("r+") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            active = json.load(stream)
+            if active != {key: value for key, value in admission.items() if key != "output"}:
+                raise ValueError
+            active["state"] = "EXECUTING"
+            stream.seek(0)
+            json.dump(active, stream, indent=2)
+            stream.truncate()
+            stream.flush()
+            os.fsync(stream.fileno())
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError("Preparation price requires a matching current native owned admission") from None
+
+
 async def _run_owned_preparation(base_url: str, task: BenchmarkTask, args) -> None:
     out = Path(args.owned_recording_preparation_out)
     receipt = json.loads(out.read_text())
+    preparation_price = _validated_preparation_price(
+        args.owned_recording_preparation_seconds,
+        getattr(args, "owned_recording_preparation_price_limit_cents", None),
+    )
+    effective_price = preparation_price if preparation_price is not None else task.effective_price_limit_cents()
+    if (receipt.get("original_catalog_price_limit_cents") != task.effective_price_limit_cents()
+            or receipt.get("effective_preparation_price_limit_cents") != effective_price):
+        raise ValueError("Preparation price differs from its admission receipt")
     live_ids: dict[str, list[str]] = {}
     results = []
     original_error = None
@@ -17485,6 +17566,7 @@ async def _run_owned_preparation(base_url: str, task: BenchmarkTask, args) -> No
         result = await run_single_task(
             base_url, task, keep_failed_agents=True, on_agent_created=remember,
             preparation_seconds=args.owned_recording_preparation_seconds,
+            preparation_price_limit_cents=preparation_price,
         )
         # Exceptions returned as native error outcomes retain their actual status/error.
         # None of these outcomes can be a benchmark pass or enter result history.
@@ -17571,6 +17653,9 @@ async def main_async(args):
         print("No tasks matched. Use --list to see available tasks.")
         sys.exit(1)
     preparation = getattr(args, "owned_recording_preparation_seconds", None)
+    preparation_price = _validated_preparation_price(
+        preparation, getattr(args, "owned_recording_preparation_price_limit_cents", None),
+    )
     if preparation is not None:
         forbidden = (args.prod or args.parallel or args.timeout_seconds is not None
                      or args.checkpoint_source_index is not None or args.row_start is not None
@@ -17578,7 +17663,8 @@ async def main_async(args):
                      or args.wmh_initial_state_file or args.harness or args.anon)
         if forbidden or not getattr(args, "owned_recording_preparation_out", None):
             raise ValueError("Preparation cannot alter task/route or use checkpoint/validation options")
-        _admit_owned_preparation(base_url, tasks, preparation, Path(args.owned_recording_preparation_out))
+        _admit_owned_preparation(base_url, tasks, preparation, Path(args.owned_recording_preparation_out),
+                                price_limit_cents=preparation_price)
     if args.wmh_initial_state_file:
         if len(tasks) != 1 or len(task_names_from_args(args)) != 1:
             raise ValueError("--wmh-initial-state-file requires exactly one explicit --task")
@@ -18208,6 +18294,8 @@ def main():
     parser.add_argument("--owned-recording-preparation-seconds", type=int, default=None,
                         help="Local owned REAL recording only; UNSCORED, bounded 1..3600s")
     parser.add_argument("--owned-recording-preparation-out", default=None)
+    parser.add_argument("--owned-recording-preparation-price-limit-cents", type=int, default=None,
+                        help="Optional owned-preparation user-charge threshold, 1..1000 cents; never validation")
     parser.add_argument("--list", action="store_true", help="List all benchmark tasks")
     parser.add_argument(
         "--task",

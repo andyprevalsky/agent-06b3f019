@@ -2692,7 +2692,13 @@ def run_benchmark_invocation(
     timeout_seconds: int | None = None,
     owner: LocalBenchmarkOwner | None = None,
     preparation_seconds: int | None = None,
+    preparation_price_limit_cents: int | None = None,
 ) -> Path:
+    if preparation_price_limit_cents is not None and (
+        preparation_seconds is None or type(preparation_price_limit_cents) is not int
+        or not 1 <= preparation_price_limit_cents <= 1000
+    ):
+        raise ValueError("Preparation price requires explicit preparation mode and an integer 1..1000 cents")
     started = time.time()
     command = build_benchmark_args(
         invocation.tasks,
@@ -2713,6 +2719,8 @@ def run_benchmark_invocation(
         preparation_out = owner.stack.context_dir / "recording-preparation.json"
         command.extend(["--owned-recording-preparation-seconds", str(preparation_seconds),
                         "--owned-recording-preparation-out", str(preparation_out)])
+        if preparation_price_limit_cents is not None:
+            command.extend(["--owned-recording-preparation-price-limit-cents", str(preparation_price_limit_cents)])
         owner.preparation_deadline = time.monotonic() + preparation_seconds
     print(f"\n== Running {invocation.label}: {', '.join(invocation.tasks)}")
     print("$ " + " ".join(command))
@@ -2790,6 +2798,9 @@ def run_benchmark_invocation(
 
 def validate_owned_preparation_options(args, selected_tasks: Sequence[str]) -> None:
     seconds = getattr(args, "owned_recording_preparation_seconds", None)
+    price = getattr(args, "owned_recording_preparation_price_limit_cents", None)
+    if price is not None and (seconds is None or type(price) is not int or not 1 <= price <= 1000):
+        raise ValueError("Preparation price requires explicit preparation mode and an integer 1..1000 cents")
     if seconds is None:
         return
     if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 3600:
@@ -3062,6 +3073,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--owned-recording-preparation-seconds", type=int, default=None,
                         help="UNSCORED local REAL recording preparation, 1..3600s; never validation")
+    parser.add_argument("--owned-recording-preparation-price-limit-cents", type=int, default=None,
+                        help="Optional owned-preparation user-charge threshold, 1..1000 cents; never validation")
     parser.add_argument("--checkpoint-timeout-seconds", type=int, default=900, help="Checkpoint poll timeout")
     parser.add_argument(
         "--checkpoint-price-limit-cents",
@@ -3369,6 +3382,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     timeout_seconds=getattr(args, "timeout_seconds", None),
                     owner=benchmark_owner,
                     preparation_seconds=args.owned_recording_preparation_seconds,
+                    preparation_price_limit_cents=args.owned_recording_preparation_price_limit_cents,
                 )
             finally:
                 benchmark_owner.starting = False

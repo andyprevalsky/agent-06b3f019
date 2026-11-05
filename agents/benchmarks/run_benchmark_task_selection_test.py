@@ -496,7 +496,8 @@ def test_owned_preparation_explicit_bounds_and_normal_deadline(monkeypatch):
             local_runner.validate_owned_preparation_options(bad, [task.name])
 
 
-def test_owned_preparation_admission_checks_empty_real_cache(monkeypatch, tmp_path):
+@pytest.mark.parametrize('price, effective', [(None, 200), (1, 1), (1000, 1000)])
+def test_owned_preparation_admission_checks_empty_real_cache(monkeypatch, tmp_path, price, effective):
     import hashlib
     import json
     from providers.demo_cache import context
@@ -518,7 +519,14 @@ def test_owned_preparation_admission_checks_empty_real_cache(monkeypatch, tmp_pa
     reads = []
     monkeypatch.setattr(rb, '_recording_cache_row_count', lambda value: reads.append(value) or 0)
     task = rb.get_task_by_name('test-mass-agent-run-0')
-    assert rb._admit_owned_preparation('http://localhost:3100', [task], 100, tmp_path/'prep.json')['cache_rows_before'] == 0
+    from dataclasses import asdict
+    original_hash = hashlib.sha256(json.dumps(asdict(task), sort_keys=True, default=str).encode()).hexdigest()
+    admitted = rb._admit_owned_preparation('http://localhost:3100', [task], 100, tmp_path/'prep.json', price_limit_cents=price)
+    assert admitted['cache_rows_before'] == 0
+    assert admitted['original_catalog_price_limit_cents'] == 200
+    assert admitted['effective_preparation_price_limit_cents'] == effective
+    assert admitted['task_definition_sha256'] == original_hash
+    assert task.price_limit_cents == 200
     assert reads == [url]
     assert context.DemoCacheContext(True, task.prompt).read_enabled is False
     assert context.DemoCacheContext(True, task.prompt).soft_complete_allowed is False
@@ -528,23 +536,25 @@ def test_owned_preparation_admission_checks_empty_real_cache(monkeypatch, tmp_pa
         old = env.get(key)
         env[key] = value
         with pytest.raises(ValueError):
-            rb._admit_owned_preparation('http://localhost:3100', [task], 100, tmp_path/(key+'.json'))
+            rb._admit_owned_preparation('http://localhost:3100', [task], 100, tmp_path/(key+'.json'), price_limit_cents=price)
         if old is None: env.pop(key)
         else: env[key] = old
     monkeypatch.setattr(rb, '_recording_cache_row_count', lambda value: 1938)
     with pytest.raises(ValueError, match='empty'):
-        rb._admit_owned_preparation('http://localhost:3100', [task], 100, tmp_path/'occupied.json')
+        rb._admit_owned_preparation('http://localhost:3100', [task], 100, tmp_path/'occupied.json', price_limit_cents=price)
     with pytest.raises(ValueError):
         rb._admit_owned_preparation('https://api.roselabs.ai', [task], 100, tmp_path/'remote.json')
 
 
-def test_owned_preparation_never_saves_benchmark_pass(monkeypatch, tmp_path):
+@pytest.mark.parametrize('price, effective', [(None, 200), (1000, 1000)])
+def test_owned_preparation_never_saves_benchmark_pass(monkeypatch, tmp_path, price, effective):
     import json
     from types import SimpleNamespace
     from benchmarks.results import TaskResult
     events = []
     async def run(base, task, **kwargs):
         assert kwargs['preparation_seconds'] == 100
+        assert kwargs['preparation_price_limit_cents'] == price
         assert kwargs['keep_failed_agents'] is True
         kwargs['on_agent_created'](task.name, 'root')
         events.append('run')
@@ -562,12 +572,16 @@ def test_owned_preparation_never_saves_benchmark_pass(monkeypatch, tmp_path):
     monkeypatch.setattr(rb.BenchmarkRun, 'save', lambda *a: pytest.fail('preparation entered benchmark history'))
     monkeypatch.setattr(rb, 'evaluate_task', lambda *a: pytest.fail('preparation scored'))
     out = tmp_path/'prep.json'
-    out.write_text('{}')
-    args = SimpleNamespace(owned_recording_preparation_seconds=100, owned_recording_preparation_out=str(out))
+    out.write_text(json.dumps({'original_catalog_price_limit_cents': 200,
+                                    'effective_preparation_price_limit_cents': effective}))
+    args = SimpleNamespace(owned_recording_preparation_seconds=100, owned_recording_preparation_out=str(out),
+                           owned_recording_preparation_price_limit_cents=price)
     asyncio.run(rb._run_owned_preparation('http://localhost:3100', rb.get_task_by_name('test-mass-agent-run-0'), args))
     value = json.loads(out.read_text())
     assert value['qualification'] == 'NOT_VALIDATION'
     assert value['mode'] == 'UNSCORED_RECORDING_PREPARATION'
+    assert value['original_catalog_price_limit_cents'] == 200
+    assert value['effective_preparation_price_limit_cents'] == effective
     assert value['result']['passed'] is False
     assert value['result']['benchmark_status'] == 'UNSCORED'
     assert events == ['run', 'cleanup', 'clean']
@@ -587,7 +601,8 @@ def test_owned_preparation_abort_retains_original_error_and_custody(monkeypatch,
     monkeypatch.setattr(rb, '_finalize_owned_cloud_batch', cleanup)
     monkeypatch.setattr(rb, '_begin_interrupt_cleanup', lambda: None)
     monkeypatch.setattr(rb, '_complete_interrupt_cleanup', lambda: None)
-    out = tmp_path/'prep.json'; out.write_text('{}')
+    out = tmp_path/'prep.json'; out.write_text(json.dumps({'original_catalog_price_limit_cents': 200,
+                                    'effective_preparation_price_limit_cents': 200}))
     args = SimpleNamespace(owned_recording_preparation_seconds=100, owned_recording_preparation_out=str(out))
     with pytest.raises(asyncio.CancelledError, match='original abort'):
         asyncio.run(rb._run_owned_preparation('http://localhost:3100', rb.get_task_by_name('test-mass-agent-run-0'), args))
@@ -799,7 +814,8 @@ def test_owned_preparation_abort_cleanup_failure_keeps_primary(monkeypatch, tmp_
     monkeypatch.setattr(rb, '_finalize_owned_cloud_batch', cleanup)
     monkeypatch.setattr(rb, '_begin_interrupt_cleanup', lambda: None)
     monkeypatch.setattr(rb, '_complete_interrupt_cleanup', lambda: pytest.fail('must not mark clean'))
-    out = tmp_path/'prep.json'; out.write_text('{}')
+    out = tmp_path/'prep.json'; out.write_text(json.dumps({'original_catalog_price_limit_cents': 200,
+                                    'effective_preparation_price_limit_cents': 200}))
     args = SimpleNamespace(owned_recording_preparation_seconds=100, owned_recording_preparation_out=str(out))
     with pytest.raises(asyncio.CancelledError, match='primary cancellation') as caught:
         asyncio.run(rb._run_owned_preparation('http://localhost:3100', rb.get_task_by_name('test-mass-agent-run-0'), args))
@@ -808,7 +824,8 @@ def test_owned_preparation_abort_cleanup_failure_keeps_primary(monkeypatch, tmp_
     assert receipt['state'] == 'INCOMPLETE' and 'unverified cleanup' in receipt['cleanup_error']
 
 
-def test_owned_preparation_local_dispatch_binds_native_owner_without_timeout_override(monkeypatch, tmp_path):
+@pytest.mark.parametrize('price', [None, 1000])
+def test_owned_preparation_local_dispatch_binds_native_owner_without_timeout_override(monkeypatch, tmp_path, price):
     import json
     from types import SimpleNamespace
     calls = []
@@ -830,6 +847,9 @@ def test_owned_preparation_local_dispatch_binds_native_owner_without_timeout_ove
         return True
     def spawn(command, **kwargs):
         assert '--owned-recording-preparation-seconds' in command
+        assert ('--owned-recording-preparation-price-limit-cents' in command) == (price is not None)
+        if price is not None:
+            assert command[command.index('--owned-recording-preparation-price-limit-cents') + 1] == str(price)
         assert '--timeout-seconds' not in command and '--checkpoint' not in command
         assert kwargs['env']['BENCHMARK_WORLD_MODEL_MODE'] == 'real'
         assert kwargs['start_new_session'] is True
@@ -839,7 +859,7 @@ def test_owned_preparation_local_dispatch_binds_native_owner_without_timeout_ove
     monkeypatch.setattr(local_runner.subprocess, 'Popen', spawn)
     result = local_runner.run_benchmark_invocation(
         local_runner.BenchmarkInvocation('preparation', ['test-mass-agent-run-0'], is_load=False),
-        port=3100, bootstrap=True, anon=False, max_concurrency=1, owner=owner, preparation_seconds=100)
+        port=3100, bootstrap=True, anon=False, max_concurrency=1, owner=owner, preparation_seconds=100, preparation_price_limit_cents=price)
     assert result == receipt
     assert [event[0] for event in calls] == ['recording', 'owner', 'bound']
     assert owner.preparation_deadline > 0
@@ -875,3 +895,163 @@ def test_owned_preparation_missing_cost_is_not_zero():
         assert evidence['cents'] is None and evidence['coverage'] == 'unknown'
     assert rb._preparation_cost_evidence({'agent': {'tree_cost_cents': 0}}) == {
         'cents': 0, 'source': 'agent.tree_cost_cents', 'coverage': 'reported_snapshot'}
+
+
+@pytest.mark.parametrize('price', [0, -1, 1001, True, False, 1.5, '1000'])
+def test_preparation_price_rejects_invalid_bounds_before_launch(price):
+    args = Namespace(owned_recording_preparation_seconds=3600,
+                     owned_recording_preparation_price_limit_cents=price)
+    with pytest.raises(ValueError):
+        local_runner.validate_owned_preparation_options(args, ['test-mass-agent-run-0'])
+
+
+def test_preparation_price_cli_requires_preparation_mode():
+    args = local_runner.parse_args(['test-mass-agent-run-0',
+        '--owned-recording-preparation-seconds', '3600',
+        '--owned-recording-preparation-price-limit-cents', '1000'])
+    local_runner.validate_owned_preparation_options(args, args.tasks)
+    assert args.owned_recording_preparation_price_limit_cents == 1000
+    args.owned_recording_preparation_seconds = None
+    with pytest.raises(ValueError):
+        local_runner.validate_owned_preparation_options(args, args.tasks)
+
+
+@pytest.mark.parametrize('price, effective', [(None, 200), (1, 1), (1000, 1000)])
+def test_preparation_price_reaches_actual_create_helper_without_mutating_task(monkeypatch, admitted_preparation_price, price, effective):
+    import copy
+    import json
+    import httpx
+    from benchmarks.results import TaskResult
+    task = copy.copy(rb.get_task_by_name('test-mass-agent-run-0'))
+    original = copy.deepcopy(vars(task))
+    requests = []
+    client = httpx.AsyncClient
+    def response(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(201, json={'agent_id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'})
+    transport = httpx.MockTransport(response)
+    monkeypatch.setattr(rb.httpx, 'AsyncClient', lambda **kwargs: client(transport=transport, **kwargs))
+    async def headers(): return {'Authorization': 'offline-fixture'}
+    monkeypatch.setattr(rb, '_api_headers', headers)
+    monkeypatch.setattr(rb, '_local_benchmark_task_queue', lambda base: 'owned-queue')
+    monkeypatch.setattr(rb, '_resolve_write_lock_enabled', lambda task: None)
+    monkeypatch.setattr(rb, '_benchmark_agent_source_override', lambda: None)
+    async def execute(base, copied, *args):
+        assert copied is not task
+        aid = await rb.create_agent(base, copied)
+        return TaskResult(name=copied.name, passed=False, agent_id=aid, status='COMPLETED',
+            progress_score=1, duration_seconds=0, cost_cents=0, message_count=1, benchmark_status='UNSCORED')
+    monkeypatch.setattr(rb, '_run_single_task_as_run_user', execute)
+    scope = admitted_preparation_price(task, price=price) if price is not None else None
+    asyncio.run(rb.run_single_task('http://localhost:3100', task,
+        preparation_seconds=3600, preparation_price_limit_cents=price))
+    if scope is not None:
+        assert json.loads(scope.out.read_text())['state'] == 'EXECUTING'
+        assert json.loads(scope.admission.read_text())['state'] == 'ADMITTED'
+        with pytest.raises(ValueError, match='matching current native owned admission'):
+            asyncio.run(rb.run_single_task('http://localhost:3100', task,
+                preparation_seconds=3600, preparation_price_limit_cents=price))
+    assert requests[0]['price_limit_cents'] == effective
+    assert requests[0]['goal'] == task.prompt
+    assert requests[0]['verifier'] == {'type': 'FLOAT_LLM_JUDGE'}
+    assert 'start_phase' not in requests[0]
+    assert vars(task) == original
+    assert task.price_limit_cents == 200
+
+
+
+def test_preparation_price_rejects_native_nonpreparation_and_changed_admission(monkeypatch, tmp_path):
+    import json
+    from types import SimpleNamespace
+    task = rb.get_task_by_name('test-mass-agent-run-0')
+    with pytest.raises(ValueError, match='explicit preparation mode'):
+        asyncio.run(rb.run_single_task('http://localhost:3100', task, preparation_price_limit_cents=1000))
+    out = tmp_path/'prep.json'
+    out.write_text(json.dumps({'original_catalog_price_limit_cents': 200,
+                              'effective_preparation_price_limit_cents': 1000}))
+    args = SimpleNamespace(owned_recording_preparation_seconds=3600,
+                           owned_recording_preparation_price_limit_cents=500,
+                           owned_recording_preparation_out=str(out))
+    async def unexpected(*args, **kwargs): pytest.fail('admission change reached task creation')
+    monkeypatch.setattr(rb, 'run_single_task', unexpected)
+    with pytest.raises(ValueError, match='differs from its admission receipt'):
+        asyncio.run(rb._run_owned_preparation('http://localhost:3100', task, args))
+    assert json.loads(out.read_text())['effective_preparation_price_limit_cents'] == 1000
+
+
+@pytest.fixture
+def admitted_preparation_price(monkeypatch, tmp_path):
+    """Real manifest/receipt/native cleanup contract with only the DB read faked."""
+    import hashlib
+    import json
+    from types import SimpleNamespace
+    def admit(task, price=1000, seconds=3600):
+        url = 'postgresql://test@localhost/victoria_wmh_recording_scope'
+        manifest = tmp_path/'owner.json'
+        manifest.write_text(json.dumps({'checkout': str(Path(__file__).resolve().parents[2]),
+            'owner_workspace': 'isolated', 'database': 'victoria_wmh_recording_scope', 'host': 'localhost',
+            'url_sha256': hashlib.sha256(url.encode()).hexdigest(), 'retained_across_iterations': True}))
+        env = {'WMH_OWNED_RECORDING_CACHE_MANIFEST': str(manifest),
+            'WMH_OWNED_RECORDING_CACHE_DATABASE_URL': url, 'DEMO_CACHE_DATABASE_URL': url,
+            'FAST_MODE_CACHE_DATABASE_URL': url, 'DEMO_CACHE_RECORD_DEMO': '1',
+            'FAST_MODE_CACHE_RECORD_DEMO': '1', 'DEMO_CACHE_DISABLE_WRITE_THROUGH': '0',
+            'FAST_MODE_CACHE_DISABLE_WRITE_THROUGH': '0', 'BENCHMARK_ISOLATED_RUN': 'true',
+            'BENCHMARK_WORLD_MODEL_MODE': 'real', 'CONDUCTOR_WORKSPACE_NAME': 'isolated',
+            'DATABASE_URL': 'postgresql://test@localhost/victoria_fixture',
+            'BENCHMARK_CLOUD_BATCH_CLEANUP': 'true', 'BENCHMARK_CONTEXT_DIR': str(tmp_path),
+            'BENCHMARK_INTERRUPT_CLEANUP_TOKEN': 'native-owner-token',
+            'BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE': str(tmp_path/'owner.status')}
+        monkeypatch.setattr(os, 'environ', env)
+        monkeypatch.setattr(rb, '_recording_cache_row_count', lambda url: 0)
+        out = tmp_path/'recording-preparation.json'
+        receipt = rb._admit_owned_preparation('http://localhost:3100', [task], seconds, out, price_limit_cents=price)
+        monkeypatch.setattr(rb, '_INTERRUPT_CLEANUP_STARTED', 0)
+        monkeypatch.setattr(rb, '_INTERRUPT_CLEANUP_COMPLETED', 0)
+        rb._begin_interrupt_cleanup()
+        # Point-of-use verification must not rerun one-use admission or a DB query.
+        monkeypatch.setattr(rb, '_recording_cache_row_count', lambda url: pytest.fail('admission DB read repeated'))
+        return SimpleNamespace(env=env, out=out, manifest=manifest,
+            admission=Path(str(manifest)+'.preparation-admission.json'), receipt=receipt)
+    return admit
+
+
+@pytest.mark.parametrize('fault', ['unadmitted', 'remote', 'readonly', 'owner_token',
+    'task', 'time', 'price', 'manifest', 'completed', 'missing_receipt',
+    'owner_context', 'namespace', 'owner_finished', 'nonowned'])
+def test_preparation_price_direct_entry_requires_matching_admission(monkeypatch, admitted_preparation_price, fault):
+    import copy
+    import json
+    task = copy.copy(rb.get_task_by_name('test-mass-agent-run-0'))
+    base = 'http://localhost:3100'
+    if fault != 'unadmitted':
+        scope = admitted_preparation_price(task)
+        if fault == 'remote': base = 'https://api.roselabs.ai'
+        elif fault == 'readonly': scope.env['BENCHMARK_DEMO_CACHE_READ_ONLY'] = '1'
+        elif fault == 'owner_token': scope.env['BENCHMARK_INTERRUPT_CLEANUP_TOKEN'] = 'different-owner'
+        elif fault == 'owner_context':
+            scope.env['BENCHMARK_CONTEXT_DIR'] = str(scope.out.parent/'other-context')
+            scope.env['BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE'] = str(scope.out.parent/'other-context'/'owner.status')
+        elif fault == 'namespace':
+            new_url = 'postgresql://test@localhost/victoria_wmh_recording_other'
+            for key in ('WMH_OWNED_RECORDING_CACHE_DATABASE_URL', 'DEMO_CACHE_DATABASE_URL', 'FAST_MODE_CACHE_DATABASE_URL'):
+                scope.env[key] = new_url
+        elif fault == 'owner_finished':
+            Path(scope.env['BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE']).write_text('version=1\ntoken=native-owner-token\nstate=clean\n')
+        elif fault == 'nonowned': scope.env['BENCHMARK_CLOUD_BATCH_CLEANUP'] = 'false'
+        elif fault == 'task': task.prompt += ' changed goal'
+        elif fault == 'manifest': scope.manifest.write_text(scope.manifest.read_text()+'\n')
+        elif fault == 'missing_receipt': scope.admission.unlink()
+        elif fault == 'completed':
+            saved=json.loads(scope.out.read_text()); saved['state']='FINISHED_UNQUALIFIED'; scope.out.write_text(json.dumps(saved))
+        else:
+            saved=json.loads(scope.admission.read_text())
+            saved['budget_seconds' if fault == 'time' else 'effective_preparation_price_limit_cents'] = 100
+            scope.admission.write_text(json.dumps(saved))
+    else:
+        monkeypatch.setattr(os, 'environ', {})
+    async def execute(*args, **kwargs):
+        pytest.fail('unadmitted direct entry reached the create-agent execution path')
+    monkeypatch.setattr(rb, '_run_single_task_as_run_user', execute)
+    with pytest.raises(ValueError):
+        asyncio.run(rb.run_single_task(base, task, preparation_seconds=3600,
+                                     preparation_price_limit_cents=1000))
