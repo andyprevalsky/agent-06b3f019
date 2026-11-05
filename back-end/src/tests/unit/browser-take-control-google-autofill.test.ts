@@ -8,8 +8,11 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { chromium } from '@playwright/test';
-import { attachCdp } from '../../domains/compute-grants/cdp';
-import { startTakeControlAutofill } from '../../domains/browser-session/googleAutofillWatch';
+import { attachCdp, type CdpClient } from '../../domains/compute-grants/cdp';
+import {
+  startTakeControlAutofill,
+  userHoldsControl,
+} from '../../domains/browser-session/googleAutofillWatch';
 
 const PWD_PAGE = `<!doctype html><body>
 <div data-profile-identifier>andy@example.com</div>
@@ -25,7 +28,66 @@ async function freePort(): Promise<number> {
   return port;
 }
 
+/** The lease rule matches getBrowserControlState: an expired USER lease is the agent's. */
+function leaseExpiryEndsControl(): void {
+  const now = Date.parse('2026-11-05T00:00:00Z');
+  const user = (lease: Date | null) => ({
+    status: 'ACTIVE',
+    controlState: 'USER',
+    controlLeaseExpiresAt: lease,
+  });
+  assert.equal(userHoldsControl(user(new Date(now + 60_000)), now), true);
+  assert.equal(userHoldsControl(user(null), now), true);
+  assert.equal(
+    userHoldsControl(user(new Date(now - 1)), now),
+    false,
+    'expired lease still autofilled'
+  );
+  assert.equal(userHoldsControl({ ...user(null), controlState: 'AGENT' }, now), false);
+  assert.equal(userHoldsControl({ ...user(null), status: 'CLOSED' }, now), false);
+  assert.equal(userHoldsControl(null, now), false);
+}
+
+/**
+ * Only CONSECUTIVE failures stop the watcher: four failures, one healthy tick,
+ * four more must not add up to the five-failure give-up.
+ */
+async function intermittentFailuresDoNotAccumulate(): Promise<void> {
+  const outcomes = ['fail', 'fail', 'fail', 'fail', 'ok', 'fail', 'fail', 'fail', 'fail', 'ok'];
+  let ticks = 0;
+  let controlling = true;
+  let closed = 0;
+  const done = new Promise<void>((resolve) => {
+    startTakeControlAutofill('task-intermittent', 'user-1', 'ws://unused', {
+      isUserControlling: async () => {
+        ticks += 1;
+        if (ticks > outcomes.length) {
+          controlling = false;
+          resolve();
+        }
+        return controlling;
+      },
+      attach: async () =>
+        ({
+          evaluateAnyTarget: async () => {
+            if (outcomes[ticks - 1] === 'fail') throw new Error('cdp read failed');
+            return '';
+          },
+          close: () => {
+            closed += 1;
+          },
+        }) as unknown as CdpClient,
+      pollMs: 10,
+    });
+  });
+  await done;
+  assert.equal(ticks, outcomes.length + 1, 'watcher gave up on non-consecutive failures');
+  assert.ok(closed >= 8, 'each failed tick drops its socket');
+}
+
 async function main(): Promise<void> {
+  leaseExpiryEndsControl();
+  await intermittentFailuresDoNotAccumulate();
   const port = await freePort();
   const browser = await chromium.launch({ args: [`--remote-debugging-port=${port}`] });
   try {

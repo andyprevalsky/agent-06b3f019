@@ -15,11 +15,15 @@ interface ElectronExternalApi {
   onOAuthComplete?: (callback: (data: { success: boolean }) => void) => () => void;
 }
 
-/** Changes whenever the callback lands: both callback paths stamp the sync time. */
+/**
+ * Changes whenever the callback lands: both callback paths stamp the sync time.
+ * '' while there is no callback evidence -- no row, or only the unstamped row
+ * the OAuth start pre-creates.
+ */
 function gmailFingerprint(integrations: ConnectedIntegration[], provider: string): string {
   const row = integrations.find((i) => i.name === provider);
-  if (row === undefined) return '';
-  return `${row.lastSuccessfulSyncAt ?? ''}|${(row.config?.connectedEmails ?? []).join(',')}`;
+  if (row?.lastSuccessfulSyncAt === undefined || row.lastSuccessfulSyncAt === '') return '';
+  return `${row.lastSuccessfulSyncAt}|${(row.config?.connectedEmails ?? []).join(',')}`;
 }
 
 function electronExternalApi(): ElectronExternalApi | null {
@@ -44,7 +48,10 @@ async function pollOnce(
 ): Promise<void> {
   try {
     const integrations = await fetchIntegrationsApi();
-    if (!isStale() && gmailFingerprint(integrations, provider) !== before) settle();
+    const now = gmailFingerprint(integrations, provider);
+    // Only a NEW callback stamp settles: a failed fetch (which yields []) or the
+    // pre-consent row both read '' and must keep polling.
+    if (!isStale() && now !== '' && now !== before) settle();
   } catch {
     /* retry on the next tick */
   }

@@ -81,14 +81,21 @@ export function googlePasswordFillScript(email: string, password: string): strin
 })()`;
 }
 
-/** Enabled Google passwords for this account, newest-used first, decrypted + deduped. */
-export type GooglePasswordLookup = (userId: string, email: string) => Promise<string[]>;
+/**
+ * Enabled Google passwords for this account, newest-used first, decrypted +
+ * deduped. `[]` means none are stored; `null` means the lookup itself failed
+ * and should be retried on a later tick.
+ */
+export type GooglePasswordLookup = (userId: string, email: string) => Promise<string[] | null>;
 
 export const lookupStoredGooglePasswords: GooglePasswordLookup = async (userId, email) => {
   try {
     return await findGooglePasswordCandidates(userId, email);
-  } catch {
-    return []; // none stored or undecryptable: leave it to the human.
+  } catch (error) {
+    log.warn('connect.google_password_lookup_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
   }
 };
 
@@ -104,7 +111,11 @@ export async function autofillGooglePassword(
   const progressByEmail = (entry.googlePassword ??= new Map<string, GooglePasswordProgress>());
   let progress = progressByEmail.get(email);
   if (progress === undefined) {
-    progress = { candidates: await lookup(entry.userId, email), tried: 0 };
+    const candidates = await lookup(entry.userId, email);
+    // A failed lookup is not "nothing stored": leave it uncached so the next
+    // tick asks again instead of disabling autofill for the whole session.
+    if (candidates === null) return false;
+    progress = { candidates, tried: 0 };
     progressByEmail.set(email, progress);
   }
   if (progress.tried >= progress.candidates.length) {

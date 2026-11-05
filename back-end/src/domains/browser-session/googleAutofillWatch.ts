@@ -41,11 +41,28 @@ export interface GoogleAutofillWatchDeps {
   pollMs?: number;
 }
 
+/**
+ * The human still holds the session: ACTIVE, USER, and the control lease not
+ * yet lapsed (the same expiry rule getBrowserControlState applies; the row
+ * itself is reset to AGENT only lazily).
+ */
+export function userHoldsControl(
+  session: {
+    status: string;
+    controlState: string;
+    controlLeaseExpiresAt: Date | null;
+  } | null,
+  now: number = Date.now()
+): boolean {
+  if (session === null || session.status !== 'ACTIVE' || session.controlState !== 'USER') {
+    return false;
+  }
+  return session.controlLeaseExpiresAt === null || session.controlLeaseExpiresAt.getTime() > now;
+}
+
 const defaultDeps: GoogleAutofillWatchDeps = {
-  isUserControlling: async (taskId) => {
-    const session = await repo.findBrowserControlRecord(taskId);
-    return session !== null && session.status === 'ACTIVE' && session.controlState === 'USER';
-  },
+  isUserControlling: async (taskId) =>
+    userHoldsControl(await repo.findBrowserControlRecord(taskId)),
   attach: attachCdp,
 };
 
@@ -92,9 +109,10 @@ export function startTakeControlAutofill(
         }
         target.cdp ??= await deps.attach(wsUrl);
         await autofillGooglePassword(target, deps.lookup);
+        attachFailures = 0; // only consecutive failures mean the browser is gone
       } catch (error) {
         // A dead socket is dropped so the next tick re-attaches; give up after a
-        // few failures, when the browser is simply gone.
+        // few consecutive failures, when the browser is simply gone.
         target.cdp?.close();
         target.cdp = null;
         attachFailures += 1;

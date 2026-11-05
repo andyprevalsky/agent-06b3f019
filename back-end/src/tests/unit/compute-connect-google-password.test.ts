@@ -82,7 +82,18 @@ async function main(): Promise<void> {
     assert.equal(await autofillGooglePassword(entry, lookup), false);
     assert.equal(await page.evaluate("document.querySelector('[name=Passwd]').value"), '');
 
+    // A failed lookup (null) is not "nothing stored": the next tick retries.
+    await page.goto('https://accounts.google.com/v3/signin/challenge/pwd');
+    let flaky = 0;
+    const flakyLookup = async () => (++flaky === 1 ? null : ['after-retry']);
+    const retryEntry = entryFor(page);
+    assert.equal(await autofillGooglePassword(retryEntry, flakyLookup), false);
+    assert.equal(await page.evaluate("document.querySelector('[name=Passwd]').value"), '');
+    assert.equal(await autofillGooglePassword(retryEntry, flakyLookup), true);
+    assert.equal(await page.evaluate('window.__submitted'), 'after-retry');
+
     // A different account with no saved password is also left alone.
+    await page.goto('https://accounts.google.com/v3/signin/challenge/pwd');
     await page.evaluate(
       "document.querySelector('[data-profile-identifier]').textContent = 'other@example.com'"
     );

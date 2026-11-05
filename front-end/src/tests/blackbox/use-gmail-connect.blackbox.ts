@@ -74,6 +74,60 @@ describe('useGmailConnect', () => {
     expect(result.current.connectingProvider).toBeNull();
   });
 
+  it('first desktop connect: the unstamped pre-consent row and a failed fetch never settle', async () => {
+    const fetchIntegrations = vi.fn().mockResolvedValue(undefined);
+    // Nothing connected before consent.
+    vi.mocked(fetchIntegrationsApi).mockResolvedValue([]);
+    const { result } = renderHook(() => useGmailConnect(fetchIntegrations));
+    await act(async () => result.current.handleEmailConnect('gmail'));
+
+    // The OAuth start's unstamped row appears: still no callback evidence.
+    vi.mocked(fetchIntegrationsApi).mockResolvedValue([
+      { id: 'i1', name: 'gmail', status: 'SYNCING', isActive: false },
+    ]);
+    await act(async () => vi.advanceTimersByTimeAsync(6_000));
+    // A failed poll (fetchIntegrationsApi yields []) also reads as no evidence.
+    vi.mocked(fetchIntegrationsApi).mockResolvedValue([]);
+    await act(async () => vi.advanceTimersByTimeAsync(6_000));
+    expect(fetchIntegrations).not.toHaveBeenCalled();
+    expect(result.current.connectingProvider).toBe('gmail');
+
+    // The callback stamps the row: now it settles.
+    vi.mocked(fetchIntegrationsApi).mockResolvedValue([
+      {
+        id: 'i1',
+        name: 'gmail',
+        status: 'CONNECTED',
+        isActive: true,
+        lastSuccessfulSyncAt: '2026-11-05T01:00:00.000Z',
+        config: { connectedEmails: ['a@example.com'] },
+      },
+    ]);
+    await act(async () => vi.advanceTimersByTimeAsync(2_500));
+    expect(fetchIntegrations).toHaveBeenCalledTimes(1);
+    expect(result.current.connectingProvider).toBeNull();
+  });
+
+  it('reconnect: a failed poll after an existing stamp does not settle', async () => {
+    const stamped = {
+      id: 'i1',
+      name: 'gmail',
+      status: 'CONNECTED' as const,
+      isActive: true,
+      lastSuccessfulSyncAt: '2026-11-01T00:00:00.000Z',
+      config: { connectedEmails: ['a@example.com'] },
+    };
+    vi.mocked(fetchIntegrationsApi).mockResolvedValue([stamped]);
+    const fetchIntegrations = vi.fn().mockResolvedValue(undefined);
+    const { result } = renderHook(() => useGmailConnect(fetchIntegrations));
+    await act(async () => result.current.handleEmailConnect('gmail'));
+
+    vi.mocked(fetchIntegrationsApi).mockResolvedValue([]);
+    await act(async () => vi.advanceTimersByTimeAsync(6_000));
+    expect(fetchIntegrations).not.toHaveBeenCalled();
+    expect(result.current.connectingProvider).toBe('gmail');
+  });
+
   it('desktop poll waits for the callback to land, not for the pre-created row', async () => {
     const row = (stamp?: string) => ({
       id: 'i1',
