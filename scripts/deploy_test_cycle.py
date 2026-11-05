@@ -1329,13 +1329,15 @@ def bound_isolated_owner_roots(state: dict, gate: dict) -> tuple[list[tuple[str,
                if e.get('gate') == gate['name'] and e.get('purpose') == 'isolated-validation']
     if not entries or len({e['token'] for e in entries}) != len(entries):
         raise ValueError('unqualified native owner set is missing or ambiguous')
-    roots, bindings = [], []
+    roots, bindings, ancestry = [], [], {}
+    by_token = {e['token']: e for e in entries}
     for entry in entries:
         proof, owner = entry['proof'], entry['owner']
         rows = [r for a in state.get('attempts', []) for r in a.get('results', [])
                 if r.get('gate') == gate['name'] and r.get('token') == entry['token']]
         if (len(rows) != 1 or entry.get('kind') != 'native-cloud-cleanup-v1'
                 or proof.get('kind') != entry['kind'] or proof.get('purpose') != 'isolated-validation'
+                or proof.get('layout') not in {'campaign-v1', 'campaign-startup-isolated-v1'}
                 or entry.get('cleanup_complete') is not False or entry.get('credit_granted') is not False
                 or entry.get('obligations_preserved') is not True):
             raise ValueError('unqualified native original debt identity changed')
@@ -1368,6 +1370,27 @@ def bound_isolated_owner_roots(state: dict, gate: dict) -> tuple[list[tuple[str,
         if (files.get(str(request_path)) != sha_file(request_path)
                 or any(request.get(k) != receipt.get(k) for k in ('token','source','gate'))):
             raise ValueError('unqualified native original request identity changed')
+        links = request.get('isolated_validation', [])
+        if not isinstance(links, list):
+            raise ValueError('unqualified native ancestry is unknown')
+        if proof.get('compatibility') in {'round12-interrupted-isolation-v1','round14-warm-stop-isolation-v1',
+                                          'round16-checkout-isolation-v1','round19-canary-source-isolation-v1'}:
+            if proof.get('inherited_admissions') != links:
+                raise ValueError('unqualified native compatibility ancestry changed')
+        ancestors = set()
+        for link in links:
+            prior = by_token.get(link.get('original_request_token'))
+            if prior is None or prior['token'] == entry['token'] or prior['token'] in ancestors:
+                raise ValueError('unqualified native ancestor owner missing or ambiguous')
+            expected = dict(original_receipt_sha256=prior['proof']['receipt_sha256'],
+                            original_request_token=prior['token'],new_request_token=entry['token'],
+                            source=receipt['source'],new_native_root=str(location/'.context/deploy-cloud'/
+                            hashlib.sha256(entry['token'].encode()).hexdigest()),
+                            excluded_resources=prior['excluded_resources'],credit_granted=False)
+            if link != expected:
+                raise ValueError('unqualified native ancestor binding changed')
+            ancestors.add(prior['token'])
+        ancestry[entry['token']] = ancestors
         if receipt.get('worker_result'):
             adapter_path = Path(receipt['worker_result'])
             adapter = bounded_read(adapter_path, 'original held adapter')
@@ -1381,6 +1404,13 @@ def bound_isolated_owner_roots(state: dict, gate: dict) -> tuple[list[tuple[str,
     latest = latest_receipts(state).get(gate['name'])
     if latest is None or latest.get('token') not in {e['token'] for e in entries}:
         raise ValueError('latest unqualified native owner is not bound')
+    reachable, todo = set(), [latest['token']]
+    while todo:
+        token = todo.pop()
+        if token not in reachable:
+            reachable.add(token); todo.extend(ancestry[token])
+    if reachable != set(by_token):
+        raise ValueError('unqualified native original ancestry is incomplete')
     return roots, bindings
 
 
@@ -1400,6 +1430,20 @@ def independent_owner_holds(plan: dict, state: dict) -> tuple[set, list, list]:
             blockers.append({'gate':gate['name'],'reason':str(error),'ownership_scope_bound':True,
                              'owner_bindings':bindings,'cleanup_complete':False,'credit_granted':False})
     return held, roots, blockers
+
+
+def independent_local_worker(gate: dict, root: Path) -> bool:
+    """Scope-only fallback cannot authorize a remote/legacy/unknown executor."""
+    if (gate.get('worker_transport') != 'local-isolated'
+            or gate.get('worker_host') not in (None, 'local')
+            or not isinstance(gate.get('cwd'), str) or not gate['cwd']):
+        return False
+    try:
+        location = local_admission_root(gate, root)
+        return (location.is_dir() and not (root / gate['cwd']).is_symlink()
+                and os.access(location, os.R_OK | os.X_OK))
+    except (OSError, ValueError):
+        return False
 
 
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
@@ -1434,7 +1478,7 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
         def conflicts(gate):
             locations = observation_worker_roots(gate, root)
             return (gate['name'] in retained or gate.get('worker') in held_workers
-                    or bool(admission_blockers) and gate.get('native_cloud') is True
+                    or bool(admission_blockers) and not independent_local_worker(gate, root)
                     or any(candidate_host == host and roots_overlap(location, path)
                            for candidate_host, location in locations for host, path in held_roots))
         pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state.get('pending', [])}

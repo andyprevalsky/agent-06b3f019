@@ -383,15 +383,111 @@ class Cycle(unittest.TestCase):
             self.assertEqual(saved,path.read_bytes(),'overlap cannot launch or invent an attempt')
         missing['cwd']=original_missing;before.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
         c.write(plan_path,plan)
-        for fault in ('missing-owner','changed-owner','missing-proof-file','unknown-owner-root'):
+        for fault in ('missing-owner','changed-owner','missing-proof-file','unknown-owner-root','unknown-layout','missing-ancestor'):
             state=copy.deepcopy(before);entry=state['reconciled_owners']['native-bound']
             if fault=='missing-owner':entry.pop('owner')
             elif fault=='changed-owner':entry['owner']['worker_root']=str(self.root)
             elif fault=='unknown-owner-root':entry['owner']['worker_root']='relative-unbound-root'
+            elif fault=='unknown-layout':entry['proof']['layout']='unrecognized-native-layout'
+            elif fault=='missing-ancestor':
+                request=Path(c.latest_receipts(state)['api']['log']).parent/'request.json'
+                value=c.read(request);value['isolated_validation']=[{'original_request_token':'unbound-old-owner'}]
+                c.write(request,value);entry['proof']['files'][str(request)]=c.sha_file(request)
             else:entry['proof']['files'][str(self.root/'unavailable-native-artifact')]='0'*64
             c.write(path,state);saved=path.read_bytes()
             with self.subTest(fault=fault),patch.object(c,'isolated_admissions',side_effect=admissions):self.assertEqual(2,call())
             self.assertEqual(saved,path.read_bytes(),'unknown ownership must block every launch atomically')
+
+    def test_scope_only_fallback_holds_valid_remote_legacy_and_unknown_transports(self):
+        state,plan,_,_,_,admissions=self.blocked_native_independent_fixture()
+        candidate=next(g for g in plan['gates'] if g['name']=='missing')
+        original=copy.deepcopy(candidate);remote='/prepared/foreign-worker'
+        env={'CONDUCTOR_WORKSPACE_NAME':'foreign','CONDUCTOR_PORT':'37000',
+             'DEPLOY_RUN_ROOT':remote+'/.context/deploy-runs','DEPLOY_CYCLE_FRESH':'1'}
+        recipe={'cases':{'missing':{'command':['true'],'env':dict(env),'timeout_seconds':2}},
+                'setup':{'command':['true'],'env':dict(env)},'cleanup':{'command':['true'],'env':dict(env)},'services':True}
+        valid_remote=dict(worker_transport='boxes-thread',worker_host='foreign-host',worker_thread='foreign-thread',
+            coordinator_thread='parent',worker_root=remote,remote_python=remote+'/agents/venv/bin/python',env=env,
+            case_protocol=True,result_transport='file',worker_recipe=recipe,
+            command=[sys.executable,str(self.root/'scripts/deploy_test_boxes.py'),'--thread','foreign-thread',
+                     '--host','foreign-host','--worker-root',remote,'--python',remote+'/agents/venv/bin/python',
+                     '--coordinator-thread','parent','--deadline-seconds','2'])
+        for changes in (valid_remote,{'worker_transport':'benchmark-cloud-cli',
+                        'command':['bash',str(self.root/'scripts/run-predeploy-cloud')]},
+                        {'worker_transport':'local-isolated','worker_host':'foreign-host'}):
+            candidate.clear();candidate.update(copy.deepcopy(original));candidate.update(changes)
+            c.validate_plan(plan,self.root)  # Exact remote counterexample is VALID, not a schema refusal.
+            state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+            before=copy.deepcopy(state)
+            with self.subTest(transport=changes['worker_transport']), \
+                 patch.object(c,'isolated_admissions',side_effect=admissions),patch.object(c,'execute') as execute:
+                c.run_phase(plan,state,self.directory,self.root,independent=True,
+                            excluded_roots=[str(Path(self.workers.name)/'leased')])
+                execute.assert_not_called()
+                self.assertEqual(state,before)
+        for changes in ({'worker_host':'foreign-host'}, {'cwd':str(self.root/'missing-physical-root')},
+                        {'worker_transport':'explicit'}, {'worker_transport':'unrecognized-transport'}):
+            gate={**original,**changes}
+            self.assertFalse(c.independent_local_worker(gate,self.root))
+
+    def test_scope_binding_requires_all_seven_original_shapes_and_ancestor_edges(self):
+        # Synthetic original files with the actual seven layout/compatibility
+        # shapes; no canonical state, provider observation or worker is used.
+        shapes=[('campaign-startup-isolated-v1',None),('campaign-v1','f87-reserve-abort-isolation-v1'),
+                ('campaign-v1','round12-interrupted-isolation-v1'),('campaign-v1','round14-warm-stop-isolation-v1'),
+                ('campaign-v1','round16-checkout-isolation-v1'),('campaign-v1','round19-canary-source-isolation-v1'),
+                ('campaign-v1',None)]
+        state={'attempts':[],'reconciled_owners':{}};prior=[]
+        gate={'name':'smoke','native_cloud':True}
+        for index,(layout,mode) in enumerate(shapes):
+            token=f'{index+1:032x}';source={'head':f'original-{index}','digest':f'digest-{index}'}
+            folder=self.directory/'sealed-owners'/str(index);folder.mkdir(parents=True)
+            reference=None;adapter=None
+            if index!=2:  # Original interrupted round12 has no fabricated adapter.
+                adapter=folder/'result.json';c.write(adapter,{'gate':'smoke','token':token,'source':source})
+                reference={'result':str(adapter),'result_sha256':c.sha_file(adapter)}
+            owner={'request_token':token,'worker_root':str(self.root),'native_cleanup_reference':reference}
+            receipt={'gate':'smoke','token':token,'source':source,'log':str(folder/'output.log'),
+                     'cleanup_owner':owner,'complete':False,'worker_result':str(adapter) if adapter else None}
+            links=[dict(original_receipt_sha256=e['proof']['receipt_sha256'],original_request_token=e['token'],
+                        new_request_token=token,source=source,new_native_root=str(self.root/'.context/deploy-cloud'/
+                        __import__('hashlib').sha256(token.encode()).hexdigest()),excluded_resources={},credit_granted=False)
+                   for e in prior]
+            request=folder/'request.json';c.write(request,{'gate':'smoke','token':token,'source':source,'isolated_validation':links})
+            recorded=folder/'receipt.json';c.write(recorded,receipt)
+            proof={'kind':'native-cloud-cleanup-v1','layout':layout,'purpose':'isolated-validation',
+                   'request_token':token,'source':source,'owner':owner,'receipt_sha256':c.sha_file(recorded),
+                   'files':{str(request):c.sha_file(request)}}
+            if mode:proof['compatibility']=mode
+            if mode and mode.startswith('round'):
+                proof.update(original_request=str(request),inherited_admissions=copy.deepcopy(links))
+            if adapter:proof['worker_result_sha256']=c.sha_file(adapter)
+            entry={'kind':'native-cloud-cleanup-v1','purpose':'isolated-validation','gate':'smoke','token':token,
+                   'owner':owner,'proof':proof,'excluded_resources':{},'cleanup_complete':False,
+                   'credit_granted':False,'obligations_preserved':True}
+            state['attempts'].append({'results':[receipt]});state['reconciled_owners'][proof['receipt_sha256']]=entry;prior.append(entry)
+        self.assertEqual(7,len(c.bound_isolated_owner_roots(state,gate)[1]))
+        for key,entry in list(state['reconciled_owners'].items())[:-1]:
+            bad=copy.deepcopy(state);del bad['reconciled_owners'][key]
+            with self.subTest(omitted=entry['proof'].get('compatibility')),self.assertRaises(ValueError):
+                c.bound_isolated_owner_roots(bad,gate)
+        bad=copy.deepcopy(state);bad['reconciled_owners']['duplicate']=copy.deepcopy(prior[0])
+        with self.assertRaises(ValueError):c.bound_isolated_owner_roots(bad,gate)
+        for index in range(2,6):
+            bad=copy.deepcopy(state);key=prior[index]['proof']['receipt_sha256']
+            bad['reconciled_owners'][key]['proof']['inherited_admissions']=[]
+            with self.subTest(changed_contract=index),self.assertRaises(ValueError):c.bound_isolated_owner_roots(bad,gate)
+        latest=prior[-1];path=Path(state['attempts'][-1]['results'][0]['log']).parent/'request.json'
+        original=c.read(path)
+        for fault in ('unknown','duplicate','substituted'):
+            doc=copy.deepcopy(original)
+            if fault=='unknown':doc['isolated_validation'][0]['original_request_token']='unknown-ancestor'
+            elif fault=='duplicate':doc['isolated_validation'].append(copy.deepcopy(doc['isolated_validation'][0]))
+            else:doc['isolated_validation'][0]['original_receipt_sha256']='substituted-receipt'
+            c.write(path,doc);bad=copy.deepcopy(state)
+            bad['reconciled_owners'][latest['proof']['receipt_sha256']]['proof']['files'][str(path)]=c.sha_file(path)
+            with self.subTest(fault=fault),self.assertRaises(ValueError):c.bound_isolated_owner_roots(bad,gate)
+        c.write(path,original)
 
     def test_diagnosed_independent_full_keeps_blocking_debt_and_excludes_retained(self):
         before, plan, path, _, call = self.diagnosed_independent_fixture()
