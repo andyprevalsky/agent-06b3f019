@@ -3438,6 +3438,9 @@ def test_boot_launch_compresses_complete_payload_under_provider_ceiling(tmp_path
     Use deterministic incompressible bytes of that size so this assertion
     cannot pass merely by double-compressing an already compressed patch.
     """
+    rejection = tmp_path / "local-rejection"
+    rejection.mkdir()
+    _assert_local_payload_rejection_records_exact_unapplied_config(rejection)
     cloud = CLOUD_SCRIPT.read_text()
     block = cloud[cloud.index("    _boot_file_args=(") : cloud.index("    boot_config_payload_guard() {")]
     guard = _extract_fleet_function(cloud, "boot_config_payload_guard() {")
@@ -36949,7 +36952,7 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost_readiness_regr
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_local_payload_rejection_records_exact_unapplied_config(tmp_path: Path) -> None:
+def _assert_local_payload_rejection_records_exact_unapplied_config(tmp_path: Path) -> None:
     cloud = CLOUD_SCRIPT.read_text()
     guard = _extract_fleet_function(cloud, "boot_config_payload_guard() {")
     guarded = '    if ! boot_config_payload_guard "${_boot_file_args[@]}"; then'
