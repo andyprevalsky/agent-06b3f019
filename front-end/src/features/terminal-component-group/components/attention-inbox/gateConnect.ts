@@ -20,6 +20,7 @@
 
 import { startSubscriptionCheckoutApi } from '@/features/billing/api';
 import { startGmailOAuthApi } from '@/features/integrations/api';
+import { DESKTOP_OAUTH_RETURN_URL } from '@/features/integrations/config';
 import { getMacAppBridge } from './macAppBridge';
 import type { GateMetadata } from './types';
 
@@ -94,7 +95,7 @@ export async function runGateConnectAction(
     const source = gateSourceKey(gate);
     if (source !== null && GMAIL_OAUTH_SOURCES.has(source)) {
       try {
-        const returnUrl = getMacAppBridge() ? undefined : window.location.href;
+        const returnUrl = getMacAppBridge() ? DESKTOP_OAUTH_RETURN_URL : window.location.href;
         const { authUrl } = await startGmailOAuthApi(returnUrl);
         openConnectUrl(authUrl);
       } catch {

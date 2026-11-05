@@ -32,6 +32,15 @@ function getAuthToken(): string {
   return token;
 }
 
+/** Like fetchIntegrationsApi, but a failed request is null, never an empty list. */
+export async function fetchIntegrationsOrNullApi(): Promise<ConnectedIntegration[] | null> {
+  const headers = getAuthHeaders();
+  const response = await fetch(`${API_BASE_WITH_PATH}/integrations`, { headers });
+  if (!response.ok) return null;
+  const data: { integrations?: ConnectedIntegration[] } = await response.json();
+  return data.integrations ?? [];
+}
+
 export async function fetchIntegrationsApi(): Promise<ConnectedIntegration[]> {
   const headers = getAuthHeaders();
   const response = await fetch(`${API_BASE_WITH_PATH}/integrations`, { headers });
