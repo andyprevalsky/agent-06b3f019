@@ -10,6 +10,10 @@ first_bad_boundary: isolated_canary_release requires the failed canary ref to eq
 symptoms:
   - failed canary source/owner linkage
   - parent patch present but allocated canary patch none
+tags:
+  - cloudbench
+  - source-isolation
+  - ownership
 sources:
   - commit e23dcd094d6fbafa6dcc120a4f79c3acc6e57408
 repro: python3 scripts/tests/deploy-test-cycle.test.py Round19ExactIsolation Round19InheritedAdmission
@@ -61,3 +65,9 @@ before admission; the saved observation is not future execution authority.
 
 Preserve actual source divergence as failed history while proving current
 execution exclusion separately; do not rename that history to gain cleanup.
+
+## Human feedback
+
+Preserve genuine failures and every unpaid or unverified obligation. A
+qualified isolated retry must not be reported as historical cleanup or a
+passed deployment gate.
