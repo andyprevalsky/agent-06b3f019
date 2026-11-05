@@ -21,8 +21,9 @@ tags:
 sources:
   - agent c4eaace9 (parent live repro on 28a7bfc99; task d0dade88)
   - commit 34631aa2ab
-repro: back-end/src/tests/blackbox/code-sessions-lifecycle.cases.ts (stop-command case only; reuse not implemented)
-status: open
+  - agent c7fc277e (parent live repro on integration 81402aef0: resumed with 23/32 lines)
+repro: back-end/src/tests/blackbox/code-sessions-live-resume.cases.ts (bash scripts/run-blackbox-tests.sh code-sessions); agents/tests/blackbox/code_sessions.blackbox.py::test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop
+status: fixed
 ---
 
 ## Problem
@@ -53,18 +54,99 @@ The pkill also killed its own shell; that sub-bug is fixed in
 
 ## Solution
 
-Not fixed: open. Making the contract true means a resume must reattach to a
-healthy live ws-server and CLI, delivering the new spawn's goal as a direct-chat
-user turn, instead of starting a new ws-server with `--resume`. That touches the
-ws-server startup and direct-chat path, the agents attach path and the
-LLM-visible delivery of the goal. It crosses cluster boundaries and is
-approval-gated, so it was not built in T3's budget.
+Fixed for Claude Code (T8, branch `fix/code-agent-resume-keeps-live-cli`);
+Codex stays on the restart path (open, below). First bad boundary:
+`acquireCodeSessionSandbox` decided "restart" for every paused-sandbox resume
+before anyone asked whether the paused CLI could take the new goal.
 
-Interim: the config.py comment now states the real contract. Files, commits and
-the conversation (`--resume`) carry over; background shells and pending waits of
-the paused CLI do not.
+- `acquireCodeSessionSandbox` no longer stops the ws-server on a same-size
+  resume (a resize still stops it before its checkpoint: the session moves to
+  a new sandbox, so a restart there is correct). The Codex create path stops
+  it itself (the previous behaviour).
+- New `attachLiveCodeCli` (e2bCodeSessionSandbox.ts), called by the Claude
+  Code create path in e2b.ts on `paused_sandbox`: the spawn's goal
+  (`Task:\n<goal>`, the first prompt's framing) goes to the live ws-server as
+  an agent `user_turn` signed with the session's previous task token, with the
+  spawn's model/effort/speed as `settings`, and `attach: {token: <new task
+  token>, credential: {keys, digest}, config: {key: digest}}`. The decision is
+  the ws-server's structured ack:
+  - `delivered` / `duplicate` with `attached: true` → attach. No project
+    restore, no ws-server start; the new task row names the same sandbox and
+    wsUrl (`resumed_from: live_cli`, `history_events`). The in-flight turn,
+    tools and background processes continue; the goal is merged into the
+    running turn (Claude Code queues it, claude-code-src query.ts) or starts
+    the next one.
+  - anything else → `stopStaleWsServer` and the existing
+    restart-with-`--resume` path: `session_ended` (stdin closed after an
+    autonomous turn, CLI exited), `credential_changed`, `unsupported_settings`,
+    `relay_paused` (the user holds the CLI in direct chat), `unreachable`, an
+    ack without `attached` (a ws-server started before this deploy, which
+    would skip the credential check and token adoption), or no previous Claude
+    task on the sandbox.
+- ws-server.mjs (Claude Code) `handleUserTurn`: validates `attach`; the
+  credential env digest must equal the spawn's or nothing is written. After
+  delivery it adopts the new task's token (direct chat and agent relays to the
+  new task id reach the live CLI) and answers `attached: true`,
+  `ignored_config` (start-time env the running CLI keeps: system prompt,
+  branch envs, repo URL; logged by the backend, as Codex logs the overrides a
+  running thread ignores) and `history_events` (events before the write).
+- agents service.py: events before `history_events` are the earlier spawns'
+  history. Their usage-limit / login-unusable events are not this run's, and
+  logging and the transcript start at the goal turn; tools in flight and turn
+  accounting still come from the whole replay.
+- Turn id `spawn-<sha256(key)>`: the key is a tool-scoped lease owner
+  (`tool:<agent>:<tool_call_id>`, the same on every retry of that call, so a
+  retried create gets `duplicate`), else the new task id (`agent:<id>` is
+  shared by every spawn of the agent).
 
-Golden reference: not applicable yet (no approval-gated hunk built).
+When a restart is still required (and correct):
+- the spawn's credential differs from the one the live CLI holds (T2 re-lease
+  with a fresh token, pool rotation, refreshed OAuth access token, API key ↔
+  OAuth, Fast Mode proxy base URLs that embed the task id): a running CLI
+  cannot adopt a new env and the old lease may be released or revoked;
+- the CLI already finished its autonomous turn (stdin closed);
+- provider switch (C15): `switchCodeSessionProvider` kills the old sandbox;
+- resize (C16): new sandbox restored from a checkpoint;
+- `fresh_conversation`;
+- target=local (Mac, C14) and the same-host local fallback: no E2B pause; the
+  close ends the CLI, so `prepareLocalCodeSessionHome` + `--resume` is the
+  only path (unchanged);
+- Codex (open): its handoff `outputSchema` is bound to the first turn
+  (`codex-code/ws-server.mjs` handoffTurnId), so an attached goal would get
+  no or the wrong result schema. Needs a per-turn output schema first.
+
+User tools (`sessionRunner.ts`) also acquire the sandbox and now leave a live
+CLI running instead of killing it. T3's 23h runtime cycle
+(`maintainCodeSession`, raw pause + connect) is unchanged.
+
+Regressions (deploy path; these files select the `backend-blackbox` and
+`agents-blackbox` lanes in full):
+- `back-end/src/tests/blackbox/code-sessions-live-resume.cases.ts` (domain
+  `code-sessions`): production ws-server, scripted CLI whose Bash tool loops
+  over counter.txt, E2B pause = SIGSTOP of the tree. Resume → acquire →
+  `attachLiveCodeCli`: the ws-server survives, the loop writes 1..120 once,
+  goal and new-task relay reach the same CLI pid, a retried create is
+  `duplicate`; two spawns without a tool lease owner each deliver; CLI
+  finished → `session_ended`, changed credential → `credential_changed`, each
+  stopping the stale ws-server with nothing delivered. Pre-fix: `resuming the
+  sandbox must not stop the live ws-server` (actual false).
+- `agents/tests/blackbox/code_sessions.blackbox.py`:
+  `user_pause_resume_keeps_live_cli_and_loop` (real activity; user pause
+  freezes the tree, the resumed spawn completes with 60/60 lines and one CLI
+  run; pre-fix ws-server: relay to the new task id `unauthorized`) and
+  `usage_limit_pause_resume_attach_ignores_old_limit` (without the history
+  boundary the resumed spawn re-reports spawn 1's limit).
+- Live E2B (one-off, 83 sandbox-seconds, sandbox killed): real pause 20 s +
+  connect kept the ws-server pid, the loop was frozen while paused, the
+  attach and the new-token relay were delivered over the public wss and the
+  loop finished 1..120 in one CLI process.
+
+10k agents: one indexed `findFirst` (ClaudeCodeSession.codeSessionId) and one
+control-socket round trip per resumed spawn, scoped to that one session; the
+adopted-token set holds one entry per resumed spawn of that sandbox; no shared
+channel, lock or polling.
+
+Golden reference: approval T8-LIVE-ATTACH, recorded in the T8 handoff.
 
 ## Human feedback
 
@@ -72,4 +154,4 @@ None recorded.
 
 ## Reusable lesson
 
-Before restarting a process tree on resume, check whether the paused tree is still healthy; a platform that preserves processes is useless if our own resume path kills them.
+Before restarting a process tree on resume, ask the live tree itself (a structured ack, not a heuristic) whether it can take the new work; a platform that preserves processes is useless if our own resume path kills them.

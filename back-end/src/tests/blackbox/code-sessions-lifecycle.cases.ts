@@ -9,7 +9,7 @@
  *   resume    ──► only a missing sandbox falls back to a new one (transient errors throw)
  *   repo key  ──► `.git` / trailing slash variants name the same session
  *   TTL       ──► an expired session is only ever RETIRED by the retire path (sandbox killed)
- *   resume    ──► the stale ws-server stop command does not kill its own shell
+ *   resume    ──► a spawn that cannot attach stops the stale ws-server; the stop command does not kill its own shell
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -33,7 +33,11 @@ import {
   checkpointCodeSession,
   sweepExpiredCodeSessions,
 } from '../../providers/codeSessions/lifecycle';
-import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
+import {
+  acquireCodeSessionSandbox,
+  attachLiveCodeCli,
+  CLAUDE_CREDENTIAL_ENV_KEYS,
+} from '../../providers/e2bCodeSessionSandbox';
 import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
 import { stopSandboxCli } from '../../providers/codeSessions/sandboxResize';
@@ -363,7 +367,7 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
     }
   });
 
-  test('resuming a paused sandbox stops its stale ws-server without killing the stop command itself', async () => {
+  test('a spawn that cannot attach stops the resumed sandbox ws-server without killing the stop command itself', async () => {
     const { codeSession, home, fake } = await liveTask(ctx, 'stale-ws');
     await markPaused(codeSession.id);
     const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSession.id } });
@@ -385,6 +389,21 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
         throw new Error('a paused sandbox is resumed, never replaced');
       });
       assert.equal(acquired.resumedFrom, 'paused_sandbox');
+      assert.equal(
+        await Promise.race([staleExit, sleep(300).then(() => false)]),
+        false,
+        'resuming alone keeps the paused CLI (the spawn decides: attach or restart)'
+      );
+      // No ws-server answers this sandbox's task: the spawn restarts the CLI.
+      const live = await attachLiveCodeCli(acquired.sandbox, row, {
+        provider: 'claude',
+        wsUrl: 'ws://127.0.0.1:9',
+        taskId: randomUUID(),
+        text: 'Task:\ncontinue',
+        envs: {},
+        credentialKeys: CLAUDE_CREDENTIAL_ENV_KEYS,
+      });
+      assert.equal(live.attached, false);
       assert.equal(
         await Promise.race([staleExit, sleep(5_000).then(() => false)]),
         true,

@@ -137,6 +137,7 @@ export async function createWithCodeSession<
     resumedFrom?: string;
     cliSessionId?: string | null;
     sandboxSize?: SandboxSize | null;
+    historyEvents?: number;
   },
 >(
   params: ResolveSpawnParams,
@@ -222,6 +223,7 @@ export async function createWithCodeSession<
         session.sandboxSize !== undefined && session.sandboxSize !== null
           ? sizeView(session.sandboxSize)
           : null,
+      history_events: session.historyEvents ?? 0,
     },
   };
 }
@@ -247,6 +249,11 @@ export interface CodeSessionSpawnFields {
   provider_handoff: boolean;
   /** vCPUs / memory of the E2B sandbox (C16); null for a local session. */
   sandbox_size: SizeView | null;
+  /**
+   * resumed_from=live_cli: the ws-server's events before this spawn's goal turn
+   * (the earlier turns of the live CLI); the monitor treats them as history.
+   */
+  history_events: number;
 }
 
 export interface CodeSessionView {
