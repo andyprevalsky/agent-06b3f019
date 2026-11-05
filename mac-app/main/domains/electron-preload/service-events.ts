@@ -111,6 +111,7 @@ export function buildUnsubscribableEventBridge(
   | 'onGptSetupStatus'
   | 'onWhatsAppQRCode'
   | 'onPasskeysImportComplete'
+  | 'onOAuthComplete'
 > {
   let pendingOpenAgentId: string | null = null;
   const openAgentCallbacks = new Set<(agentId: string) => void>();
@@ -155,6 +156,14 @@ export function buildUnsubscribableEventBridge(
       ipcRenderer.on('whatsapp:qrCode', handler);
       return () => {
         ipcRenderer.removeListener('whatsapp:qrCode', handler);
+      };
+    },
+    onOAuthComplete: (callback: (data: { success: boolean }) => void) => {
+      const handler = (_event: IpcRendererEvent, data: unknown) =>
+        callback(data as { success: boolean });
+      ipcRenderer.on('oauth-complete', handler);
+      return () => {
+        ipcRenderer.removeListener('oauth-complete', handler);
       };
     },
     onPasskeysImportComplete: (callback: (result: PasskeyImportResult) => void) => {
