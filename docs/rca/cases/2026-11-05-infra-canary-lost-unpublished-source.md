@@ -11,6 +11,10 @@ symptoms:
   - cloud guest Kernel proxy custody preload is missing or unsafe
   - nested canary provenance records workspace_patch_sha256 none
   - parent sealed patch includes the required custody guard
+tags:
+  - cloudbench
+  - source-transport
+  - canary
 sources:
   - commit e23dcd094d6fbafa6dcc120a4f79c3acc6e57408
 repro: bash scripts/tests/fleet-infra-canary.test.sh
@@ -66,3 +70,9 @@ cleanup remain retained. No provider transition, payment action or retry occurs.
 
 Pass intended source identity across nested controllers; a fetchable base alone
 is not the intended workspace when the parent carries unpublished commits.
+
+## Human feedback
+
+Preserve the zero-allocation guard and original failed-run evidence. Prove
+the focused repair before repeating the full failed gate; do not restart
+unaffected passing gates merely because the source was synchronized.
