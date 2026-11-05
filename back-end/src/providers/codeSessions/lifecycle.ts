@@ -279,20 +279,28 @@ export async function prepareLocalCodeSessionHome(session: CodeSessionRow): Prom
   return { home, resumedFrom: 'new', cliSessionId: null };
 }
 
+/**
+ * Delete one checkpoint, manifest last. The manifest is the only index of the
+ * artifact keys, so a failed read or artifact delete throws and keeps it: the
+ * caller retries (pruning logs and moves on; retire stops before markRetired, so
+ * the next TTL sweep tries again). Only an unparseable manifest is dropped.
+ */
 async function deleteCheckpoint(userId: string, codeSessionId: string, seq: number): Promise<void> {
   const manifestKey = checkpointKey(userId, codeSessionId, seq, MANIFEST_NAME);
-  const raw = await getCheckpointObject(manifestKey).catch(() => null);
+  const raw = await getCheckpointObject(manifestKey);
   if (raw !== null) {
+    let names: string[] = [];
     try {
       const manifest = JSON.parse(raw.toString('utf8')) as CheckpointManifest;
-      for (const name of Object.keys(manifest.artifacts ?? {})) {
-        await deleteCheckpointObject(checkpointKey(userId, codeSessionId, seq, name));
-      }
+      names = Object.keys(manifest.artifacts ?? {});
     } catch {
-      // an unreadable manifest still gets deleted below
+      // an unparseable manifest names no artifacts; it still gets deleted below
+    }
+    for (const name of names) {
+      await deleteCheckpointObject(checkpointKey(userId, codeSessionId, seq, name));
     }
   }
-  await deleteCheckpointObject(manifestKey).catch(() => undefined);
+  await deleteCheckpointObject(manifestKey);
 }
 
 async function deleteCheckpoints(session: CodeSessionRow): Promise<void> {
@@ -328,7 +336,16 @@ export async function retireCodeSession(session: CodeSessionRow): Promise<void> 
 export function sweepExpiredCodeSessions(userId: string): Promise<void> {
   return findExpiredCodeSessions(userId)
     .then(async (expired) => {
-      for (const session of expired) await retireCodeSession(session);
+      // A session whose checkpoints cannot be deleted yet stays unretired for the
+      // next sweep; it must not stop this sweep from retiring the others.
+      for (const session of expired) {
+        await retireCodeSession(session).catch((error: unknown) => {
+          log.warn('Retiring an expired code session failed; retried next sweep', {
+            codeSessionId: session.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
     })
     .catch((error: unknown) => {
       log.warn('Code session TTL sweep failed', {
