@@ -1018,7 +1018,13 @@ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: di
     need(not new_root.exists() and not new_root.is_symlink(), 'new request root already exists')
     bindings = []
     for entry in entries:
-        old = bounded_read(Path(entry['proof']['owner']['native_cleanup_reference']['result']).parent / 'request.json', 'old request')
+        if entry['proof'].get('compatibility') == 'round12-interrupted-isolation-v1':
+            need({a['original_request_token'] for a in entry['proof']['inherited_admissions']}
+                 <= {e['token'] for e in entries}, 'inherited isolated debt missing')
+        if entry['proof'].get('compatibility') == 'round12-interrupted-isolation-v1':
+            old = bounded_read(Path(entry['proof']['original_request']), 'old request')
+        else:
+            old = bounded_read(Path(entry['proof']['owner']['native_cleanup_reference']['result']).parent / 'request.json', 'old request')
         need(entry['validation_source'] == request['source'] and request['token'] != entry['token']
              and set(old['checks']) | set(old.get('skips', {})) == set(gate['checks']), 'next source/inventory binding')
         bindings.append({'original_receipt_sha256': entry['proof']['receipt_sha256'],

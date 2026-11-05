@@ -458,6 +458,9 @@ def execution_source_binding(adapter, request, root, runs, document, bound):
 
 def validate(receipt, owner, proof):
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
+    if proof.get('compatibility') == 'round12-interrupted-isolation-v1':
+        from deploy_test_round12_isolation import validate as round12_validate
+        return round12_validate(receipt, owner, proof)
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
     need(set(owner) == {'request_token', 'worker_root', 'native_cleanup_reference'}, 'unsupported owner shape')
     token, root = receipt['token'], Path(owner['worker_root'])
@@ -859,6 +862,12 @@ def reconcile(state, occurrence_id, proof):
         else:
             need(receipt == interrupted and receipt.get('token') == proof.get('request_token'), 'interrupted token mismatch')
         entry = validate(receipt, receipt_owner(gate, receipt), proof)
+        if proof.get('compatibility') == 'round12-interrupted-isolation-v1':
+            for inherited in proof['inherited_admissions']:
+                prior = state.get('reconciled_owners', {}).get(inherited['original_receipt_sha256'])
+                need(prior is not None and prior.get('token') == inherited['original_request_token']
+                     and prior.get('credit_granted') is False and prior.get('obligations_preserved') is True,
+                     'inherited isolated debt missing')
         entry['occurrence'] = occurrence_id
         key = proof['receipt_sha256']
         need(not any(e.get('token') == entry['token'] and k != key for k, e in state.get('reconciled_owners', {}).items()), 'token already reconciled elsewhere')

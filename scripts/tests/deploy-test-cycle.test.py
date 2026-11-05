@@ -4546,4 +4546,118 @@ class F87IsolatedCompatibility(unittest.TestCase):
         fleet=next(iter(self.participants));(fleet/'teardown-ownership/fresh').mkdir();(fleet/'teardown-ownership/fresh/claim').write_text('owned')
         with self.assertRaises(ValueError):self.verify()
 
+
+class Round12InterruptedIsolation(unittest.TestCase):
+    def setUp(self):
+        import deploy_test_round12_isolation as m
+        self.m=m;self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);self.debts=[]
+        for i in range(6):
+            p=self.root/(str(i)+'.owner');p.write_text('pid='+str(3912856 if i==0 else 500+i)+'\nstatus='+('live-transfer-required' if i==0 else 'starting')+'\npid_start=birth\nargv_sha256=argv\n');self.debts.append(p)
+        self.owner={'request_token':m.TOKEN,'worker_root':str(m.ROOT),'native_cleanup_reference':None}
+        self.r={'gate':'smoke','source':{'head':m.SOURCE,'digest':'digest'},'token':m.TOKEN,'cleanup_owner':self.owner,
+                'worker_result':None,'native_cleanup_reference':None,'cancelled':True,'complete':False,'native_exit':-9,
+                'cases':{'one':'UNVERIFIED'},'finished_at':1}
+        self.inherited=[{'original_request_token':'ce'},{'original_request_token':'e92'}]
+        self.req={'isolated_validation':self.inherited};self.parts=[self.root/'fleet-42']
+        self.obs={'boot_id':'boot','uid':1,'pids':[42,3912856],'scopes':[str(self.root),'relay'],
+                  'matched':[3912856],'unreadable':[],'observed_at':2}
+        self.guest={'observed_at':2,'id':'machine','instance_id':'instance','config_sha256':'config','guest':{'uid':0,'observed_at':2,'refresh_scope_pids':[],'unreadable':[],'token_path_metadata':{'path':'/tmp/cloudbench-warm-fetch-token.3934342','exists':False},'processes':[{'pid':1,'exe':'/fly/init'},{'pid':632,'exe':'/.fly/hallpass'},{'pid':633,'exe':'/usr/bin/sleep'}],'sockets':[]}}
+        self.pins={str(m.RECEIPT):'hash',**{str(p):str(i) for i,p in enumerate(self.debts)}}
+        self.p={'kind':'native-cloud-cleanup-v1','compatibility':m.MODE,'purpose':'isolated-validation','layout':'campaign-v1',
+                'source':self.r['source'],'request_token':m.TOKEN,'owner':self.owner,'files':self.pins,
+                'original_request':str(m.RECEIPT.parent/'request.json'),'inherited_admissions':self.inherited,
+                'receipt_sha256':'hash','validation_source':{'head':'next','digest':'new'},'local_observation':self.obs,'guest_observation':self.guest,'confirmed_at':3}
+        for target,value in [('PINS',self.pins),('snapshot',(self.r,self.req,self.root,self.parts,self.debts,'relay')),
+                             ('hub_identity',('birth','argv')),('observe',self.obs),('guest_observe',self.guest)]:
+            patcher=patch.object(m,target,return_value=value) if target in ['snapshot','hub_identity','observe','guest_observe'] else patch.object(m,target,value)
+            obj=patcher.start();self.addCleanup(patcher.stop)
+            if target=='observe':self.observer=obj
+            if target=='hub_identity':self.identity=obj
+            if target=='guest_observe':self.guest_observer=obj
+
+    def verify(self):return self.m.validate(self.r,self.owner,self.p)
+
+    def test_accepts_only_isolation_and_retains_six_debts_without_credit(self):
+        r=self.verify();self.assertEqual(len(r['retained_services']),6)
+        self.assertFalse(r['cleanup_complete']);self.assertFalse(r['credit_granted']);self.assertTrue(r['obligations_preserved'])
+        self.assertIsNone(r['worker_result_sha256']);self.assertEqual(r['proof']['inherited_admissions'],self.inherited)
+
+    def test_wrong_purpose_source_token_owner_and_original_failure_rejected(self):
+        for key,val in [('purpose',None),('compatibility','other'),('source',{}),('request_token','other'),('owner',{})]:
+            with self.subTest(key=key):
+                old=self.p[key];self.p[key]=val
+                with self.assertRaises(ValueError):self.verify()
+                self.p[key]=old
+        for key,val in [('cancelled',False),('complete',True),('native_exit',0),('worker_result','invented'),('native_cleanup_reference',{})]:
+            with self.subTest(key=key):
+                old=self.r[key];self.r[key]=val
+                with self.assertRaises(ValueError):self.verify()
+                self.r[key]=old
+
+    def test_inherited_debt_or_request_substitution_rejected(self):
+        self.p['inherited_admissions']=self.inherited[:1]
+        with self.assertRaises(ValueError):self.verify()
+        self.p['inherited_admissions']=self.inherited;self.p['original_request']='other'
+        with self.assertRaises(ValueError):self.verify()
+
+    def test_stale_scope_unreadable_process_or_incarnation_rejected(self):
+        self.p['local_observation']={**self.obs,'observed_at':0}
+        with self.assertRaises(ValueError):self.verify()
+        self.p['local_observation']={**self.obs,'scopes':['other']}
+        with self.assertRaises(ValueError):self.verify()
+        self.p['local_observation']=self.obs
+        for obs in [{**self.obs,'matched':[3912856,77]},{**self.obs,'unreadable':[{'pid':77}]}]:
+            self.observer.return_value=obs
+            with self.assertRaises(ValueError):self.verify()
+        self.observer.return_value=self.obs;self.identity.return_value=('reused','argv')
+        with self.assertRaises(ValueError):self.verify()
+
+    def test_live_guest_stale_changed_active_or_unavailable_rejected(self):
+        old=copy.deepcopy(self.guest)
+        self.p['guest_observation']={**old,'observed_at':-100}
+        with self.assertRaises(ValueError):self.verify()
+        self.p['guest_observation']=old
+        for changed in [{**old,'instance_id':'changed'},{**old,'config_sha256':'changed'},
+                        {**old,'guest':{**old['guest'],'refresh_scope_pids':[777]}},
+                        {**old,'guest':{**old['guest'],'unreadable':[777]}},
+                        {**old,'guest':{**old['guest'],'token_path_metadata':{'exists':True}}}]:
+            self.guest_observer.return_value=changed
+            with self.assertRaises(ValueError):self.verify()
+        self.guest_observer.side_effect=OSError('native exec unavailable')
+        with self.assertRaises(OSError):self.verify()
+
+    def test_successor_requires_fresh_root_token_inventory_and_inherited_debts(self):
+        source={'head':'new','digest':'digest'}
+        old=self.root/'request.json';c.write(old,{'checks':['one'],'skips':{}})
+        inherited=[{'original_request_token':'ce'},{'original_request_token':'e92'}]
+        entries=[{'token':'ce','validation_source':source,'excluded_resources':{},'proof':{'receipt_sha256':'ce','owner':{'native_cleanup_reference':{'result':str(self.root/'result.json')}}}},
+                 {'token':'e92','validation_source':source,'excluded_resources':{},'proof':{'receipt_sha256':'e92','owner':{'native_cleanup_reference':{'result':str(self.root/'result.json')}}}},
+                 {'token':self.m.TOKEN,'validation_source':source,'excluded_resources':{},'proof':{'receipt_sha256':'round12','compatibility':self.m.MODE,'original_request':str(old),'inherited_admissions':inherited}}]
+        gate={'name':'smoke','native_cloud':True,'checks':['one'],'command':['python3',str(self.root/'scripts/deploy_test_cloud.py')]}
+        request={'token':'fresh','source':source,'checks':['one'],'skips':{}}
+        with patch.object(c,'isolated_admissions',return_value=entries):
+            self.assertEqual(len(c.isolated_request({},gate,request,self.root,{})),3)
+            request['token']=self.m.TOKEN
+            with self.assertRaises(ValueError):c.isolated_request({},gate,request,self.root,{})
+            request['token']='fresh';request['checks']=['other']
+            with self.assertRaises(ValueError):c.isolated_request({},gate,request,self.root,{})
+            request['checks']=['one']
+            import hashlib
+            new=self.root/'.context/deploy-cloud'/hashlib.sha256(b'fresh').hexdigest();new.mkdir(parents=True)
+            with self.assertRaises(ValueError):c.isolated_request({},gate,request,self.root,{})
+            new.rmdir()
+        with patch.object(c,'isolated_admissions',return_value=entries[1:]):
+            with self.assertRaisesRegex(ValueError,'inherited isolated debt'):c.isolated_request({},gate,request,self.root,{})
+
+    def test_actual_snapshot_rejects_each_omitted_or_substituted_pin(self):
+        original = self.m.snapshot
+        # Reload obtains the real snapshot implementation without reading native data.
+        import runpy
+        snap = runpy.run_path(str(Path(self.m.__file__)))['snapshot']
+        for key in self.pins:
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                snap({'files':{k:v for k,v in self.pins.items() if k!=key}})
+        with self.assertRaises(ValueError):snap({'files':{'replacement':'hash'}})
+
 if __name__ == '__main__': unittest.main()
