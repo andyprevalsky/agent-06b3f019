@@ -464,6 +464,9 @@ def validate(receipt, owner, proof):
     if proof.get('compatibility') == 'round14-warm-stop-isolation-v1':
         from deploy_test_round14_isolation import validate as round14_validate
         return round14_validate(receipt, owner, proof)
+    if proof.get('compatibility') == 'round19-canary-source-isolation-v1':
+        from deploy_test_round19_isolation import validate as round19_validate
+        return round19_validate(receipt, owner, proof)
     if proof.get('compatibility') == 'round16-checkout-isolation-v1':
         from deploy_test_round16_isolation import validate as round16_validate
         return round16_validate(receipt, owner, proof)
@@ -821,7 +824,7 @@ def round14_isolation_covers_prior(state, prior, latest):
         return False
     candidates = [e for e in state.get('reconciled_owners', {}).values()
                   if e.get('token') == latest.get('token')
-                  and e.get('proof', {}).get('compatibility') in {'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1'}]
+                  and e.get('proof', {}).get('compatibility') in {'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1', 'round19-canary-source-isolation-v1'}]
     if len(candidates) != 1:
         return False
     candidate = candidates[0]
@@ -851,7 +854,7 @@ def renew_isolated_validation(state, request_token, proof):
                            if f.get('id') == prior.get('occurrence') and f.get('gate') == prior['gate']
                            and f.get('native_result') == 'UNVERIFIED' and f.get('complete') is False
                            and receipt.get('cases', {}).get(f.get('check', '').split('/', 1)[-1]) == 'UNVERIFIED']
-        need(prior['proof'].get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1'}
+        need(prior['proof'].get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1', 'round19-canary-source-isolation-v1'}
              and len(linked_failures) == 1, 'original failure obligation missing or changed')
     latest = latest_receipts(state).get(prior['gate'])
     if latest != receipt:
@@ -859,7 +862,7 @@ def renew_isolated_validation(state, request_token, proof):
             clean_isolated_successor(state, prior, receipt, latest)
     need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
     owner = receipt_owner(prior['gate'], receipt)
-    if prior['proof'].get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1'}:
+    if prior['proof'].get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1', 'round19-canary-source-isolation-v1'}:
         from deploy_test_round12_isolation import validate_renewal
         validate_renewal(prior['proof'], proof)
         # Full validate below rechecks every pinned original byte and fresh
@@ -899,7 +902,7 @@ def reconcile(state, occurrence_id, proof):
         else:
             need(receipt == interrupted and receipt.get('token') == proof.get('request_token'), 'interrupted token mismatch')
         entry = validate(receipt, receipt_owner(gate, receipt), proof)
-        if proof.get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1'}:
+        if proof.get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1', 'round19-canary-source-isolation-v1'}:
             for inherited in proof['inherited_admissions']:
                 prior = state.get('reconciled_owners', {}).get(inherited['original_receipt_sha256'])
                 need(prior is not None and prior.get('token') == inherited['original_request_token']

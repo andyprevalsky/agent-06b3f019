@@ -110,8 +110,7 @@ def snapshot(proof):
     return receipt,request,root,participants,debts,relay
 
 
-def hub_socket(proc=Path('/proc')):
-    pid, port = 1793380, 18767
+def hub_socket(proc=Path('/proc'), *, pid=1793380, port=18767):
     owned = {os.readlink(p)[8:-1] for p in (proc/str(pid)/'fd').iterdir()
              if os.readlink(p).startswith('socket:[')}
     listening = set()
@@ -123,7 +122,8 @@ def hub_socket(proc=Path('/proc')):
     return {'pid':pid,'port':port,'inodes':sorted(listening)}
 
 
-def observe_partition():
+def observe_partition(*, resources=None, live_pid=1793380, port=18767):
+    expected_resources = RESOURCES if resources is None else resources
     token=shared.fly_token();prefix='https://api.machines.dev/v1/apps/navi-whisper-lux-bench/'
     def get(path):
         try:
@@ -139,21 +139,22 @@ def observe_partition():
               and hashlib.sha256(json.dumps(m['config'],sort_keys=True).encode()).hexdigest()==expected['config_sha256'],
               'round16 warm identity/state changed')
     match(before);resources={}
-    for mid,vid in RESOURCES.items():
+    for mid,vid in expected_resources.items():
         machine=get('machines/'+mid);volume=get('volumes/'+vid)
         check(machine is None or machine.get('id')==mid and machine.get('state')=='destroyed','round16 old machine remains')
         check(volume is None or volume.get('id')==vid and volume.get('state') in {'pending_destroy','destroyed'}
               and volume.get('attached_machine_id') is None,'round16 old volume active')
         resources[mid]={'machine_absent_or_destroyed':True,'volume_absent_or_detached_terminal':True,'volume':vid}
     after=get('machines/'+expected['id']);match(after)
-    return {'observed_at':time.time(),'warm':{k:expected[k] for k in ('id','instance_id','name','state','config_sha256')},'resources':resources,'hub_socket':hub_socket()}
+    return {'observed_at':time.time(),'warm':{k:expected[k] for k in ('id','instance_id','name','state','config_sha256')},'resources':resources,'hub_socket':hub_socket(pid=live_pid, port=port)}
 
 
-def partition_facts(value):
-    check(value.get('warm',{}).get('state')=='stopped' and set(value.get('resources',{}))==set(RESOURCES),'round16 positive partition required')
+def partition_facts(value, *, resources=None, live_pid=1793380, port=18767):
+    resources = RESOURCES if resources is None else resources
+    check(value.get('warm',{}).get('state')=='stopped' and set(value.get('resources',{}))==set(resources),'round16 positive partition required')
     socket=value.get('hub_socket',{})
-    check(socket.get('pid')==1793380 and socket.get('port')==18767 and socket.get('inodes'), 'round16 Hub socket proof')
-    for mid,vid in RESOURCES.items():
+    check(socket.get('pid')==live_pid and socket.get('port')==port and socket.get('inodes'), 'round16 Hub socket proof')
+    for mid,vid in resources.items():
         check(value['resources'][mid]=={'machine_absent_or_destroyed':True,'volume_absent_or_detached_terminal':True,'volume':vid},'round16 resource observation')
     return {k:v for k,v in value.items() if k!='observed_at'}
 
@@ -176,6 +177,10 @@ def build(source):
 
 
 def inherited_sources(state, entries):
+    return inherited_operation_sources(state, entries, __import__(__name__))
+
+
+def inherited_operation_sources(state, entries, operation):
     """Current round16 partition can cover only its exact pinned ancestor graph.
 
     No entry is renewed or replaced. Original guest snapshots remain historical;
@@ -186,24 +191,24 @@ def inherited_sources(state, entries):
     from deploy_test_cycle import receipt_owner, latest_receipts
     from deploy_test_native_cleanup import still_bound, clean_isolated_successor
     import deploy_test_round14_isolation as round14
-    candidates = [e for e in entries if e.get('token') == TOKEN]
+    candidates = [e for e in entries if e.get('token') == operation.TOKEN]
     if not candidates:
         return {}
     check(len(candidates) == 1, 'ambiguous latest partition')
     candidate = candidates[0]
     latest = latest_receipts(state).get(candidate['gate'])
-    check(latest is not None and candidate['proof'].get('compatibility') == MODE
+    check(latest is not None and candidate['proof'].get('compatibility') == operation.MODE
           and candidate['validation_source'] == state['source'] == state['plan']['source'],
           'latest full partition/source changed')
-    successor = latest.get('token') != TOKEN
+    successor = latest.get('token') != operation.TOKEN
     if not successor:
         check(still_bound(candidate, latest, receipt_owner(candidate['gate'], latest)),
               'latest full partition/source changed')
     by_token = {e['token']: e for e in entries}
     links = candidate['proof']['inherited_admissions']
-    check(len(by_token) == len(entries) == 5
-          and len(links) == 4
-          and {a['original_request_token'] for a in links} == set(by_token) - {TOKEN},
+    check(len(by_token) == len(entries) == operation.operation_spec()['inherited_count'] + 1
+          and len(links) == operation.operation_spec()['inherited_count']
+          and {a['original_request_token'] for a in links} == set(by_token) - {operation.TOKEN},
           'complete exact ancestor set required')
     receipts = {}
     for token, entry in by_token.items():
@@ -229,7 +234,7 @@ def inherited_sources(state, entries):
     # foreign, omitted, duplicate, cyclic, source-swapped and substituted debts.
     for token, entry in by_token.items():
         mode = entry['proof'].get('compatibility')
-        if mode not in {shared.MODE, round14.MODE, MODE}:
+        if mode not in {shared.MODE, round14.MODE, MODE, operation.MODE}:
             check(still_bound(entry, receipts[token], receipt_owner(entry['gate'], receipts[token])),
                   'original legacy debt changed')
             continue
@@ -244,15 +249,17 @@ def inherited_sources(state, entries):
                   and link == dict(original_receipt_sha256=prior['proof']['receipt_sha256'],
                       original_request_token=prior['token'], new_request_token=token,
                       source=receipts[token]['source'],
-                      new_native_root=str(ROOT/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()),
+                      new_native_root=str(operation.ROOT/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()),
                       excluded_resources=prior['excluded_resources'], credit_granted=False)
                   and receipts[prior['token']]['finished_at'] <= receipts[token]['started_at'],
                   'ancestor edge changed')
     covered = {}
     operations = [(shared.TOKEN, shared.MODE, shared.operation_spec),
                   (round14.TOKEN, round14.MODE, round14.operation_spec)]
-    if successor:
+    if operation.TOKEN != TOKEN:
         operations.append((TOKEN, MODE, operation_spec))
+    if successor:
+        operations.append((operation.TOKEN, operation.MODE, operation.operation_spec))
     for token, mode, specification in operations:
         entry = by_token.get(token)
         check(entry is not None and entry['proof'].get('compatibility') == mode, 'exact covered ancestor required')

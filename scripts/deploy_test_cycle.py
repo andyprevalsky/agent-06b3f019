@@ -1004,7 +1004,8 @@ def isolated_admissions(state: dict, gate: str, *, _with_sources=False):
     covered = {}
     if invalid or any(e.get('validation_source') != state.get('source') for e in entries):
         from deploy_test_round16_isolation import inherited_sources
-        covered = inherited_sources(state, entries)
+        from deploy_test_round19_isolation import TOKEN as round19_token, inherited_sources as round19_sources
+        covered = (round19_sources if any(e.get('token') == round19_token for e in entries) else inherited_sources)(state, entries)
     if invalid - covered.keys():
         raise ValueError(f'{gate}: original isolated-validation obligation changed; refuse launch/completion')
     return (entries, covered) if _with_sources else entries
@@ -1026,10 +1027,10 @@ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: di
     need(not new_root.exists() and not new_root.is_symlink(), 'new request root already exists')
     bindings = []
     for entry in entries:
-        if entry['proof'].get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1'}:
+        if entry['proof'].get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1', 'round19-canary-source-isolation-v1'}:
             need({a['original_request_token'] for a in entry['proof']['inherited_admissions']}
                  <= {e['token'] for e in entries}, 'inherited isolated debt missing')
-        if entry['proof'].get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1'}:
+        if entry['proof'].get('compatibility') in {'round12-interrupted-isolation-v1', 'round14-warm-stop-isolation-v1', 'round16-checkout-isolation-v1', 'round19-canary-source-isolation-v1'}:
             old = bounded_read(Path(entry['proof']['original_request']), 'old request')
         else:
             old = bounded_read(Path(entry['proof']['owner']['native_cleanup_reference']['result']).parent / 'request.json', 'old request')

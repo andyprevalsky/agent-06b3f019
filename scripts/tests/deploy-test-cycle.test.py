@@ -5117,4 +5117,89 @@ class CloudSealedCanaryTransport(unittest.TestCase):
             link=Path(d)/'link';link.symlink_to(p);binding['patch']=str(link)
             with self.assertRaises(ValueError):cloud.source_transport_environment(binding)
 
+
+class Round19ExactIsolation(unittest.TestCase):
+    def test_pins_and_each_original_Hub_are_mandatory(self):
+        import deploy_test_round19_isolation as m
+        self.assertEqual(len([p for p in m.PINS if '/runs/_hub/' in p and p.endswith('.owner')]),7)
+        for path in m.PINS:
+            if '/runs/_hub/' in path or path.endswith('/lifecycle.json'):
+                with self.subTest(path=path),self.assertRaises(ValueError):m.pinned_files({'files':{k:v for k,v in m.PINS.items() if k!=path}})
+        with self.assertRaises(ValueError):m.pinned_files({'files':{}})
+    def test_fresh_partition_reads_all_resources_and_rejects_active_or_changed_identity(self):
+        import io,hashlib
+        import deploy_test_round19_isolation as m
+        prior=m.prior;config={'fixture':True};digest=hashlib.sha256(json.dumps(config,sort_keys=True).encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as d:
+            f=Path(d)/'warm.json';expected={'id':'warm','name':'warm','state':'stopped','instance_id':'one','config_sha256':digest};c.write(f,expected)
+            calls=[];fault=[None]
+            def response(request,**kw):
+                self.assertEqual(request.get_method(),'GET');calls.append(request.full_url)
+                ident=request.full_url.rsplit('/',1)[-1]
+                if ident=='warm':value={**expected,'config':config}
+                elif '/machines/' in request.full_url:
+                    if fault[0]=='active':value={'id':ident,'state':'started'}
+                    else:raise prior.urllib.error.HTTPError(request.full_url,404,'absent',{},None)
+                else:value={'id':ident,'state':'pending_destroy','attached_machine_id':None}
+                if fault[0]=='identity' and ident=='warm':value['instance_id']='other'
+                if fault[0]=='volume' and '/volumes/' in request.full_url:value['attached_machine_id']='active'
+                out=io.BytesIO(json.dumps(value).encode());out.status=200;return out
+            socket={'pid':374522,'port':18768,'inodes':['12']}
+            with patch.object(prior,'WARM',f),patch.object(prior.shared,'fly_token',return_value='fixture'),patch.object(prior.urllib.request,'urlopen',side_effect=response),patch.object(prior,'hub_socket',return_value=socket):
+                value=m.observe_partition();self.assertEqual(len(calls),10);m.partition_facts(value)
+                for case in ('active','identity','volume'):
+                    fault[0]=case
+                    with self.subTest(case=case),self.assertRaises(ValueError):m.observe_partition()
+                fault[0]=None;value['hub_socket']['pid']=123
+                with self.assertRaises(ValueError):m.partition_facts(value)
+    def test_wrong_source_token_and_purpose_refused_without_native_reads(self):
+        import deploy_test_round19_isolation as m
+        receipt={'source':{'head':m.SOURCE},'token':m.TOKEN,'cleanup_owner':{}}
+        for proof in ({'kind':'wrong'}, {'kind':'native-cloud-cleanup-v1','compatibility':m.MODE,'purpose':'isolated-validation','layout':'campaign-v1','source':{},'request_token':'wrong'}):
+            with patch.object(m,'observe_partition',side_effect=AssertionError('must not query')),self.assertRaises(ValueError):m.validate(receipt,receipt['cleanup_owner'],proof)
+
+class Round19InheritedAdmission(unittest.TestCase):
+    clean_successor_fixture=Round16InheritedAdmission.clean_successor_fixture
+    def setUp(self):
+        Round16InheritedAdmission.setUp(self)
+        import deploy_test_round19_isolation as m
+        self.m=m;token=m.TOKEN;self.tokens.append(token)
+        receipt={'token':token,'gate':'smoke','source':{'head':'5','digest':'5'},'started_at':50,'finished_at':51,'cleanup_owner':{'token':token}}
+        links=[dict(original_receipt_sha256=p['proof']['receipt_sha256'],original_request_token=p['token'],new_request_token=token,source=receipt['source'],new_native_root=str(self.root/'.context/deploy-cloud'/__import__('hashlib').sha256(token.encode()).hexdigest()),excluded_resources={},credit_granted=False) for p in self.entries]
+        f=self.root/'5.json';c.write(f,{'token':token,'isolated_validation':links,'checks':['one'],'skips':{}})
+        entry={'token':token,'gate':'smoke','purpose':'isolated-validation','proof':{'receipt_sha256':token+'-hash','compatibility':m.MODE,'inherited_admissions':links,'original_request':str(f)},'cleanup_complete':False,'credit_granted':False,'obligations_preserved':True,'excluded_resources':{},'validation_source':self.src}
+        self.entries.append(entry);self.receipts.append(receipt);self.state['reconciled_owners'][token+'-hash']=entry
+        self.baseline=copy.deepcopy(self.entries)
+        p=patch.object(m,'ROOT',self.root);p.start();self.addCleanup(p.stop)
+    def test_six_debts_before_and_after_real_clean_successor(self):
+        self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),6)
+        gate,request,successor,folder=self.clean_successor_fixture()
+        successor['started_at']=61;successor['finished_at']=62;c.write(folder/'receipt.json',successor)
+        for phase in ('focused','final'):
+            self.state['attempts'][-1]['phase']=phase;before=copy.deepcopy(self.state)
+            self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),6)
+            self.assertEqual(c.retained_owners(self.state,['smoke']),[])
+            self.assertEqual(len(c.isolated_request(self.state,gate,{**request,'token':'next'},self.root,{})),6)
+            self.assertEqual(self.state,before)
+        self.assertTrue(all(e['credit_granted'] is False and e['cleanup_complete'] is False for e in self.entries))
+    def test_complete_FAIL_remains_FAIL_and_incomplete_or_tampered_successor_rejects(self):
+        gate,request,successor,folder=self.clean_successor_fixture('FAIL');successor['started_at']=61;successor['finished_at']=62;c.write(folder/'receipt.json',successor)
+        self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),6);self.assertEqual(successor['status'],'FAIL')
+        original=copy.deepcopy(successor)
+        for key,value in [('complete',False),('cleanup_owner',{'owner':'live'}),('cancelled',True),('timed_out',True),('source',{}),('isolated_validation',successor['isolated_validation'][:-1])]:
+            successor.clear();successor.update(copy.deepcopy(original));successor[key]=value;c.write(folder/'receipt.json',successor)
+            with self.subTest(key=key),self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
+        successor.clear();successor.update(original);c.write(folder/'receipt.json',successor)
+        (folder/'native-task.json').write_text('tampered')
+        with self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
+    def test_omitted_changed_foreign_or_credited_debt_fails_closed(self):
+        for key in list(self.state['reconciled_owners']):
+            bad=copy.deepcopy(self.state);del bad['reconciled_owners'][key]
+            with self.subTest(missing=key),self.assertRaises(ValueError):c.isolated_admissions(bad,'smoke')
+        for field,value in [('credit_granted',True),('proof',{}),('validation_source',{}),('gate','foreign')]:
+            bad=copy.deepcopy(self.state);bad['reconciled_owners'][self.m.TOKEN+'-hash'][field]=value
+            with self.subTest(field=field),self.assertRaises((ValueError,KeyError)):c.isolated_admissions(bad,'smoke')
+        with patch.object(self.n,'still_bound',return_value=False),self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
+
+
 if __name__ == '__main__': unittest.main()
