@@ -3973,9 +3973,27 @@ async def test_held_gateway_starts_hold_at_transport_retirement():
                         await first.close()
 
 
+async def test_scroll_observation_contract():
+    from browser_scroll_observation_cases import test_scroll_result_observation_contract
+    await test_scroll_result_observation_contract()
+
+
+async def test_scroll_observation_validation():
+    from browser_scroll_observation_cases import test_document_scroll_measurement_validation
+    await test_document_scroll_measurement_validation()
+
+
+async def test_scroll_observation_native():
+    from browser_scroll_observation_cases import test_document_scroll_native
+    await test_document_scroll_native(_tilion_worker_stack)
+
+
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("scroll_observation_contract", test_scroll_observation_contract),
+        ("scroll_observation_validation", test_scroll_observation_validation),
+        ("scroll_observation_native", test_scroll_observation_native),
         ("fake_gateway_transport_slot_retirement", test_gateway_slot_tracks_closed_transport_while_bridge_retires),
         ("held_gateway_transport_slot_retirement", test_held_gateway_starts_hold_at_transport_retirement),
         ("chromium_native_port_discovery", test_chromium_native_discovery_waits_for_valid_port_file),

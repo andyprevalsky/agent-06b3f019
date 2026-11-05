@@ -1113,6 +1113,21 @@ async def _execute_read_network_requests_action(context: _ActionContext) -> Dict
     return {"success": True, "message": message, "requests": requests}
 
 
+async def _observe_document_scroll(dom_service: Any) -> Optional[Dict[str, Any]]:
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+
+    observer = getattr(dom_service, "observe_document_scroll", None)
+    if not callable(observer):
+        return None
+    try:
+        return await asyncio.wait_for(observer(), timeout=0.5)
+    except (WorkflowGenerationSealed, TemporalCancelledError):
+        raise
+    except Exception:
+        return None
+
+
 async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]:
     from browser_use.browser.events import (
         GetDropdownOptionsEvent,
@@ -1242,6 +1257,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         direction = context.params.get("direction", "down")
         amount = context.params.get("amount", 300)
         delta_y = amount if direction == "down" else -amount
+        before = await _observe_document_scroll(context.dom_service)
         if context.humanizer:
             at_coords = None
             if context.index is not None:
@@ -1263,15 +1279,29 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             )
             await event
             await event.event_result(raise_if_any=True, raise_if_none=False)
+        after = await _observe_document_scroll(context.dom_service)
+        observation: Dict[str, Any] = {
+            "scope": "document", "status": "unknown", "before": before, "after": after,
+        }
+        if before is not None and after is not None:
+            if (before["target_id"], before["time_origin_ms"]) == (after["target_id"], after["time_origin_ms"]):
+                observation.update(
+                    status="observed",
+                    delta_x=after["scroll_x"] - before["scroll_x"],
+                    delta_y=after["scroll_y"] - before["scroll_y"],
+                )
+            else:
+                observation["status"] = "incomparable"
+        result = {"success": True, "message": "", "document_scroll": observation}
         await context.action_history.record_action(
             dom_service=context.dom_service,
             action="scroll",
             thinking=context.thinking,
             index=context.index,
             params={"direction": direction, "amount": amount},
-            result={"success": True},
+            result=result,
         )
-        return {"success": True, "message": ""}
+        return result
     if context.action_name == "dropdown_options":
         if not context.element:
             return {"success": False, "error": "Dropdown requires an element index"}
@@ -1887,6 +1917,9 @@ async def _execute_resolved_action(
         Result dict with success, message, and any additional data.
         May return {"status": "needs_write_approval", ...} if write lock triggered.
     """
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+
     session = dom_service.session
     if not session:
         return {"success": False, "error": "Browser not connected"}
@@ -1960,10 +1993,12 @@ async def _execute_resolved_action(
         else:
             return {"success": False, "error": f"Unknown action: {action_name}"}
 
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, WorkflowGenerationSealed, TemporalCancelledError):
         # Propagate so the browser supervisor can classify CDP stall and
         # hard-recover a frozen renderer instead of treating this as a soft
         # action error (which leaves the page wedged).
+        # Cancellation and sealed generations likewise must stop the caller,
+        # without recording another action for a retired workflow.
         raise
     except Exception as error:
         error_text = mask_secret_values(str(error), secret_refs)

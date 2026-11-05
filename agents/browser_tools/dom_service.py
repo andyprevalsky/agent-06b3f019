@@ -2554,6 +2554,59 @@ class DOMService:
                 visible["id"] = original["id"]
         return safe_result
 
+    async def observe_document_scroll(self) -> Optional[Dict[str, Any]]:
+        """Measure only the focused document, without building DOM/state or guessing defaults."""
+        from helpers.workflow_generation import WorkflowGenerationSealed
+        from temporalio.exceptions import CancelledError as TemporalCancelledError
+
+        session = self._session
+        target_id = getattr(session, "agent_focus_target_id", None)
+        if not target_id:
+            return None
+        expression = """(async () => {
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const root = document.scrollingElement;
+            if (!root) return null;
+            return {time_origin_ms: performance.timeOrigin,
+                scroll_x: root.scrollLeft, scroll_y: root.scrollTop,
+                viewport_width: window.innerWidth, viewport_height: window.innerHeight,
+                scroll_width: root.scrollWidth, scroll_height: root.scrollHeight};
+        })()"""
+        try:
+            # One total budget for both obtaining the native session and evaluating.
+            async with asyncio.timeout(0.5):
+                cdp = await session.get_or_create_cdp_session(target_id=target_id, focus=False)
+                if cdp.target_id != target_id:
+                    return None
+                evaluated = await cdp.cdp_client.send.Runtime.evaluate(
+                    params={"expression": expression, "returnByValue": True, "awaitPromise": True},
+                    session_id=cdp.session_id,
+                )
+        except (WorkflowGenerationSealed, TemporalCancelledError):
+            raise
+        except Exception:
+            # Observation is supplementary; never log page values or overwrite the action.
+            return None
+        value = ((evaluated or {}).get("result") or {}).get("value") if isinstance(evaluated, dict) else None
+        keys = ("time_origin_ms", "scroll_x", "scroll_y", "viewport_width", "viewport_height", "scroll_width", "scroll_height")
+        if not isinstance(value, dict) or any(
+            type(value.get(key)) not in (int, float) or not math.isfinite(value[key]) for key in keys
+        ):
+            return None
+        if any(value[key] <= 0 for key in ("time_origin_ms", "viewport_width", "viewport_height")) or any(
+            value[key] < 0 for key in ("scroll_width", "scroll_height")
+        ):
+            return None
+        if self._session is not session or session.agent_focus_target_id != target_id:
+            return None
+        return {
+            "scope": "document",
+            "target_id": str(target_id),
+            **{key: value[key] for key in keys},
+            "captured_epoch_ms": time.time() * 1000,
+            "captured_monotonic_s": time.monotonic(),
+        }
+
     async def _remember_document_images(self) -> List[str]:
         """Record ``document.images`` (src, currentSrc, srcset) of the focused page.
 
