@@ -157,6 +157,25 @@ grep -Fq 'FAILED (exit=17)' "$PREFLIGHT_REPRO/output" \
 [ ! -e "$PREFLIGHT_REPRO/root/.context/fleet-infra-canary.last-pass" ] \
   || fail "failed canary must never stamp preflight success"
 
+# The parent resolved an unpublished source to a fetchable base. The nested
+# canary must keep the original request so its fleet packages the same delta.
+cat > "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$CLOUDBENCH_INFRA_CANARY_REF" > "$CLOUDBENCH_TEST_CANARY_REF"
+exit 17
+SH
+chmod +x "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary"
+set +e
+CLOUDBENCH_TEST_CANARY_REF="$PREFLIGHT_REPRO/ref" \
+  REQUESTED_BENCH_REF=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  BENCH_REF=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  bash "$PREFLIGHT_REPRO/run.sh" > "$PREFLIGHT_REPRO/ref.out" 2>&1
+PREFLIGHT_STATUS=$?
+set -e
+[ "$PREFLIGHT_STATUS" -eq 17 ] || fail "source-pinned canary must preserve its exit status"
+[ "$(cat "$PREFLIGHT_REPRO/ref")" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ] \
+  || fail "nested canary lost requested source and would omit the committed workspace patch"
+
 # Two campaign controllers may have distinct lifecycle locks, but their
 # check→canary→stamp transaction is shared. Exactly one canary may run; the
 # follower must wait, observe the fresh stamp, and return success.

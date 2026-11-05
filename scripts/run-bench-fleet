@@ -18796,8 +18796,10 @@ fleet_infra_canary_preflight() {
     # The helper holds a shared transaction lock while it rechecks the stamp,
     # runs the canary, and stamps PASS. Its lock is distinct from the nested
     # controller lifecycle lock, so nested fleet entry cannot self-deadlock.
+    # Preserve the requested source, not just its fetchable transport base:
+    # the nested fleet must package the same committed workspace delta.
     if CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="${POOL_COLD_BOOTSTRAP:-0}" \
-        CLOUDBENCH_INFRA_CANARY_REF="${BENCH_REF:-}" \
+        CLOUDBENCH_INFRA_CANARY_REF="${REQUESTED_BENCH_REF:-${BENCH_REF:-}}" \
         python3 -S "$INFRA_CANARY_PREFLIGHT_SCRIPT" \
         --stamp "$stamp" \
         --lock "$lock" \
