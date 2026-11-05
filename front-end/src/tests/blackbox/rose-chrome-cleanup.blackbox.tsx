@@ -388,8 +388,10 @@ describe('Popular Goals (#15, #24, #55)', () => {
     await renderTerminal(true);
     expect(screen.queryByTestId('popular-goals-row')).not.toBeInTheDocument();
     const layer = screen.getByTestId('query-input-layer');
-    expect(layer.parentElement).toBe(document.body);
-    expect(layer).toHaveClass('z-[100]');
+    const frame = screen.getByTestId('query-input-frame');
+    expect(frame.parentElement).toBe(document.body);
+    expect(frame).toContainElement(layer);
+    expect(frame).toHaveClass('z-[100]');
     expect(within(layer).getByTestId('query-input-host')).toHaveClass('max-w-4xl', 'mx-auto');
     expect(within(layer).getByTestId('query-toolbar-nub')).toBeInTheDocument();
   });
