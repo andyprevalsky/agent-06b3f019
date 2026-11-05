@@ -1151,12 +1151,13 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
 
 
 def interrupted_receipt(state: dict, request_token: str) -> dict:
-    """Identify a terminal interrupted operation, without inventing an RCA occurrence."""
-    if (state.get('phase') != 'interrupted' or not state.get('attempts')
-            or state['attempts'][-1].get('interrupted') is not True
+    """Identify a terminal interrupted/stale operation without inventing an RCA occurrence."""
+    phase = state.get('phase')
+    if (phase not in {'interrupted', 'stale'} or not state.get('attempts')
+            or state['attempts'][-1].get(phase) is not True
             or state.get('running') or 'live_failures' in state
             or not isinstance(request_token, str) or not request_token):
-        raise ValueError('a quiescent interrupted operation token is required')
+        raise ValueError('a quiescent interrupted or stale operation token is required')
     rows = [r for r in state['attempts'][-1]['results'] if r.get('token') == request_token]
     if (len(rows) != 1 or latest_receipts(state).get(rows[0]['gate']) != rows[0]
             or rows[0].get('source') != state['source'] or rows[0].get('complete') is not False

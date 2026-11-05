@@ -136,12 +136,27 @@ echo "STACK_START $(date -u +%FT%TZ) epoch=$(date +%s)"
 # records and BENCHMARK_RUN_ID (scripts/tests/kill-services.test.sh).
 bash scripts/kill-services.sh || exit 2
 stack_pid=''
+ready=0
+semantic_report_lane() {
+    if [ -n "${DEPLOY_SEMANTIC_ARTIFACT_DIR:-}" ]; then
+        export SEMANTIC_NATIVE_REPORT_PREFIX="$DEPLOY_SEMANTIC_ARTIFACT_DIR/$1"
+    fi
+}
 cleanup() {
     if [ -n "$stack_pid" ] && kill -0 "$stack_pid" 2>/dev/null; then
         kill -TERM "$stack_pid" 2>/dev/null || true
         wait "$stack_pid" || true
     fi
-    bash scripts/kill-services.sh
+    local cleanup_status=0
+    bash scripts/kill-services.sh || cleanup_status=$?
+    if [ -n "${DEPLOY_SEMANTIC_ARTIFACT_DIR:-}" ]; then
+        jq -n --arg token "$DEPLOY_SEMANTIC_TOKEN" --argjson source "$DEPLOY_SEMANTIC_SOURCE" \
+            --argjson ready "$ready" --argjson cleanup "$cleanup_status" \
+            --argjson ui "${r1:-null}" --argjson latency "${r2:-null}" \
+            '{token:$token,source:$source,ready:($ready==1),cleanup_complete:($cleanup==0),cleanup_exit:$cleanup,ui:$ui,latency:$latency}' \
+            > "$DEPLOY_SEMANTIC_ARTIFACT_DIR/stack.json.tmp" && \
+            mv "$DEPLOY_SEMANTIC_ARTIFACT_DIR/stack.json.tmp" "$DEPLOY_SEMANTIC_ARTIFACT_DIR/stack.json"
+    fi
     echo "STACK_TEARDOWN_DONE $(date -u +%FT%TZ)"
 }
 trap cleanup EXIT
@@ -173,9 +188,11 @@ CP=$(jq -er '.ports.backend' .context/services.json) || exit 2
 DBP=$(jq -er '.database.runtime_port' .context/services.json) || exit 2
 # Step 6b: UI specs on four workers with the latency ratchet excluded, then
 # the ratchet alone on one worker (the chat-lifecycle-ratchet.yml split).
+semantic_report_lane ui
 SEMANTIC_GREP_INVERT="chat full-lifecycle latency" SEMANTIC_WORKERS=4 LOCAL_DB_PORT=$DBP BACKEND_PORT=$CP FRONTEND_PORT=$((CP + 1)) \
     bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh
 r1=$?
+semantic_report_lane latency
 SEMANTIC_WORKERS=1 LOCAL_DB_PORT=$DBP BACKEND_PORT=$CP FRONTEND_PORT=$((CP + 1)) \
     bash scripts/run-deploy-stage semantic-latency -- bash front-end/scripts/run-semantic-tests.sh chat-lifecycle-latency
 r2=$?

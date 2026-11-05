@@ -278,6 +278,7 @@ GATES = (
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py")),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py")),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
+    Gate("deploy-test-semantic", ("python3", "scripts/tests/deploy-test-semantic.test.py")),
     Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(

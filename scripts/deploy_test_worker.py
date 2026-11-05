@@ -98,6 +98,13 @@ def execute(request: dict, root: Path) -> dict:
             raise ValueError('invalid worker timeout')
     if recipe.get('services') and not recipe.get('cleanup'):
         raise ValueError('service recipes require explicit owned cleanup')
+    # This one known native aggregate has its own case-aware reporter. Keep its
+    # original command/recipe and expose constituent verdicts in evidence only.
+    if (request['gate'] == 'semantic-stack' and set(cases) == {'semantic-stack'}
+            and cases['semantic-stack'].get('command') == ['bash', 'scripts/run-deploy-semantic-stack.sh']
+            and cases['semantic-stack'].get('aggregate') is True):
+        from deploy_test_semantic import execute as execute_semantic
+        return execute_semantic(request, root)
     folder = root / '.context' / 'deploy-worker' / hashlib.sha256(request['token'].encode()).hexdigest()
     folder.mkdir(parents=True, exist_ok=False)
     rows = {}

@@ -2211,6 +2211,34 @@ class Cycle(unittest.TestCase):
         self.assertEqual([],entry['participants'])
         self.assertEqual([],c.retained_owners(state,[occurrence['gate']]))
 
+    def test_native_prelaunch_reconciliation_accepts_quiescent_stale_attempt_token(self):
+        state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()
+        state.update(phase='stale',failures=[])
+        state.pop('pending',None)
+        state['attempts'][-1].update(stale=True)
+        state['attempts'][-1].pop('interrupted',None)
+        receipt=state['attempts'][-1]['results'][0]
+        state['source']=receipt['source']
+        before=copy.deepcopy(state['attempts'])
+        c.reconcile(state,receipt['token'],proof)
+        self.assertEqual(before,state['attempts'])
+        self.assertEqual([],state['failures'])
+        self.assertFalse(next(iter(state['reconciled_owners'].values()))['credit_granted'])
+        self.assertEqual([],c.retained_owners(state,[occurrence['gate']]))
+
+        for mutation in ('not-stale', 'running', 'live-failures', 'wrong-token'):
+            with self.subTest(mutation=mutation):
+                bad=copy.deepcopy(state)
+                bad.pop('reconciled_owners',None)
+                token=receipt['token']
+                if mutation=='not-stale':bad['attempts'][-1]['stale']=False
+                if mutation=='running':bad['running']={'gate':occurrence['gate']}
+                if mutation=='live-failures':bad['live_failures']=[]
+                if mutation=='wrong-token':token='unrelated-token'
+                snapshot=copy.deepcopy(bad)
+                with self.assertRaises(ValueError):c.reconcile(bad,token,proof)
+                self.assertEqual(snapshot,bad)
+
     def test_native_prelaunch_proof_rejects_started_job_or_missing_positive_failure(self):
         state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()
         for mutation in ('started','no-failure','not-stopped','relay-created','live-publisher','changed-source','admitted-controller'):
