@@ -329,6 +329,70 @@ class Cycle(unittest.TestCase):
         c.write(path, state)
         return state, plan, path, plan_path, call
 
+    def blocked_native_independent_fixture(self):
+        state, plan, path, plan_path, call = self.diagnosed_independent_fixture()
+        gate = next(g for g in plan['gates'] if g['name'] == 'api')
+        gate.update(native_cloud=True,worker_transport='benchmark-cloud-cli',case_protocol=True,
+                    worker_root=gate['cwd'],command=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')])
+        receipt = c.latest_receipts(state)['api']; folder=Path(receipt['log']).parent
+        adapter=folder/'native-result.json'
+        c.write(adapter,{'token':receipt['token'],'gate':'api','source':receipt['source'],'complete':False})
+        reference={'result':str(adapter),'result_sha256':c.sha_file(adapter)}
+        owner={'request_token':receipt['token'],'worker_root':gate['cwd'],'native_cleanup_reference':reference}
+        receipt.update(cleanup_owner=owner,native_cleanup_reference=reference,worker_result=str(adapter))
+        c.write(folder/'receipt.json',receipt)
+        proof={'kind':'native-cloud-cleanup-v1','purpose':'isolated-validation','layout':'campaign-v1',
+               'request_token':receipt['token'],'source':receipt['source'],'owner':owner,
+               'receipt_sha256':c.sha_file(folder/'receipt.json'),'worker_result_sha256':c.sha_file(adapter),
+               'files':{str(folder/'request.json'):c.sha_file(folder/'request.json')},'validation_source':state['source']}
+        entry={'kind':'native-cloud-cleanup-v1','gate':'api','token':receipt['token'],'owner':owner,'proof':proof,
+               'purpose':'isolated-validation','validation_source':state['source'],'cleanup_complete':False,
+               'credit_granted':False,'obligations_preserved':True,'excluded_resources':{}}
+        state['reconciled_owners']['native-bound']=entry
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        c.write(path,state);c.write(plan_path,plan)
+        original=c.isolated_admissions
+        def admissions(state,name,**kwargs):
+            if name=='api':raise ValueError('current shared partition changed; native maintenance authority required: native maintenance: unique successful original maintenance producer required')
+            return original(state,name,**kwargs)
+        return state,plan,path,plan_path,call,admissions
+
+    def test_independent_native_partition_failure_holds_cloud_and_admits_disjoint_worker(self):
+        before,plan,path,_,call,admissions=self.blocked_native_independent_fixture()
+        with patch.object(c,'isolated_admissions',side_effect=admissions):self.assertEqual(0,call())
+        after=c.read(path)
+        self.assertEqual(['missing'],[r['gate'] for r in after['attempts'][-1]['results']])
+        for field in ('failures','repair_gates','reconciled_owners','source','plan_digest'):
+            self.assertEqual(before[field],after[field])
+        self.assertFalse(after['ready']);self.assertEqual('needs-focused-plan',after['phase'])
+        blocker=after['attempts'][-1]['admission_blockers'][0]
+        self.assertEqual('api',blocker['gate']);self.assertIn('native maintenance',blocker['reason'])
+        self.assertTrue(blocker['ownership_scope_bound']);self.assertFalse(blocker['cleanup_complete'])
+        self.assertFalse(any((self.directory/'attempts').glob('*/needs-focused-plan/api/request.json')))
+
+    def test_independent_blocked_native_scope_overlap_and_unknown_owner_stay_closed(self):
+        before,plan,path,plan_path,call,admissions=self.blocked_native_independent_fixture()
+        missing=next(g for g in plan['gates'] if g['name']=='missing')
+        original_missing=missing['cwd']
+        native=next(g for g in plan['gates'] if g['name']=='api')
+        for location in (native['cwd'],str(Path(native['cwd'])/'child')):
+            missing['cwd']=location
+            state=copy.deepcopy(before);state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+            c.write(path,state);c.write(plan_path,plan);saved=path.read_bytes()
+            with patch.object(c,'isolated_admissions',side_effect=admissions):self.assertEqual(0,call())
+            self.assertEqual(saved,path.read_bytes(),'overlap cannot launch or invent an attempt')
+        missing['cwd']=original_missing;before.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        c.write(plan_path,plan)
+        for fault in ('missing-owner','changed-owner','missing-proof-file','unknown-owner-root'):
+            state=copy.deepcopy(before);entry=state['reconciled_owners']['native-bound']
+            if fault=='missing-owner':entry.pop('owner')
+            elif fault=='changed-owner':entry['owner']['worker_root']=str(self.root)
+            elif fault=='unknown-owner-root':entry['owner']['worker_root']='relative-unbound-root'
+            else:entry['proof']['files'][str(self.root/'unavailable-native-artifact')]='0'*64
+            c.write(path,state);saved=path.read_bytes()
+            with self.subTest(fault=fault),patch.object(c,'isolated_admissions',side_effect=admissions):self.assertEqual(2,call())
+            self.assertEqual(saved,path.read_bytes(),'unknown ownership must block every launch atomically')
+
     def test_diagnosed_independent_full_keeps_blocking_debt_and_excludes_retained(self):
         before, plan, path, _, call = self.diagnosed_independent_fixture()
         self.assertEqual(0, call())

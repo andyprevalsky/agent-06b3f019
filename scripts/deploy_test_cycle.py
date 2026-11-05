@@ -1316,6 +1316,92 @@ def launch_rca(path: Path, launcher: list[str]) -> None:
         write(receipt, value)
 
 
+def bound_isolated_owner_roots(state: dict, gate: dict) -> tuple[list[tuple[str, Path]], list[dict]]:
+    """Bound a CLOSED native gate's scope, never validate its cleanup/admission.
+
+    Independent local observations may coexist with a failed guest proof only
+    when immutable original receipts still positively identify every old owner
+    root. Unknown ownership remains a global refusal, not a guessed scope.
+    """
+    if gate.get('native_cloud') is not True:
+        raise ValueError('unqualified owner scope is not a native cloud contract')
+    entries = [e for e in state.get('reconciled_owners', {}).values()
+               if e.get('gate') == gate['name'] and e.get('purpose') == 'isolated-validation']
+    if not entries or len({e['token'] for e in entries}) != len(entries):
+        raise ValueError('unqualified native owner set is missing or ambiguous')
+    roots, bindings = [], []
+    for entry in entries:
+        proof, owner = entry['proof'], entry['owner']
+        rows = [r for a in state.get('attempts', []) for r in a.get('results', [])
+                if r.get('gate') == gate['name'] and r.get('token') == entry['token']]
+        if (len(rows) != 1 or entry.get('kind') != 'native-cloud-cleanup-v1'
+                or proof.get('kind') != entry['kind'] or proof.get('purpose') != 'isolated-validation'
+                or entry.get('cleanup_complete') is not False or entry.get('credit_granted') is not False
+                or entry.get('obligations_preserved') is not True):
+            raise ValueError('unqualified native original debt identity changed')
+        receipt = rows[0]
+        if (set(owner) != {'request_token','worker_root','native_cleanup_reference'}
+                or receipt_owner(gate['name'], receipt) != owner or proof.get('owner') != owner
+                or owner['request_token'] != receipt['token'] or proof.get('request_token') != receipt['token']
+                or proof.get('source') != receipt['source']):
+            raise ValueError('unqualified native original owner is unknown or changed')
+        location = Path(owner['worker_root'])
+        if (not location.is_absolute() or location.resolve() != location or not location.is_dir()
+                or not os.access(location, os.R_OK | os.X_OK)):
+            raise ValueError('unqualified native owner root is unknown or unreadable')
+        folder = Path(receipt['log']).parent
+        recorded = folder / 'receipt.json'
+        if (recorded.resolve() != recorded or recorded.is_symlink()
+                or bounded_read(recorded, 'original held receipt') != receipt
+                or sha_file(recorded) != proof.get('receipt_sha256')):
+            raise ValueError('unqualified native original receipt binding changed')
+        files = proof.get('files')
+        if not isinstance(files, dict) or not files:
+            raise ValueError('unqualified native original file seals missing')
+        for name, expected in files.items():
+            path = Path(name)
+            if (not path.is_absolute() or path.resolve() != path or path.is_symlink()
+                    or not path.is_file() or path.stat().st_size > MAX_RECEIPT_BYTES or sha_file(path) != expected):
+                raise ValueError('unqualified native original evidence missing or changed: ' + name)
+        request_path = folder / 'request.json'
+        request = bounded_read(request_path, 'original held request')
+        if (files.get(str(request_path)) != sha_file(request_path)
+                or any(request.get(k) != receipt.get(k) for k in ('token','source','gate'))):
+            raise ValueError('unqualified native original request identity changed')
+        if receipt.get('worker_result'):
+            adapter_path = Path(receipt['worker_result'])
+            adapter = bounded_read(adapter_path, 'original held adapter')
+            if (adapter_path.resolve() != adapter_path or adapter_path.is_symlink()
+                    or any(adapter.get(k) != receipt.get(k) for k in ('token','source','gate'))
+                    or sha_file(adapter_path) != proof.get('worker_result_sha256')):
+                raise ValueError('unqualified native original adapter identity changed')
+        roots.append(('local', location))
+        bindings.append({'token':receipt['token'],'receipt_sha256':proof['receipt_sha256'],
+                         'proof_sha256':digest(proof),'worker_root':str(location)})
+    latest = latest_receipts(state).get(gate['name'])
+    if latest is None or latest.get('token') not in {e['token'] for e in entries}:
+        raise ValueError('latest unqualified native owner is not bound')
+    return roots, bindings
+
+
+def independent_owner_holds(plan: dict, state: dict) -> tuple[set, list, list]:
+    held, roots, blockers = set(), [], []
+    for gate in plan['gates']:
+        try:
+            held.update(retained_owners(state, [gate['name']]))
+        except ValueError as error:
+            # The failed gate stays CLOSED. Only independently sealed scope
+            # can let disjoint local siblings proceed; no cleanup is forgiven.
+            try:
+                locations, bindings = bound_isolated_owner_roots(state, gate)
+            except (OSError, ValueError, KeyError, TypeError) as binding_error:
+                raise ValueError('independent owner scope unproven; refuse all launch: ' + str(binding_error)) from error
+            held.add(gate['name']); roots.extend(locations)
+            blockers.append({'gate':gate['name'],'reason':str(error),'ownership_scope_bound':True,
+                             'owner_bindings':bindings,'cleanup_complete':False,'credit_granted':False})
+    return held, roots, blockers
+
+
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
               launcher: list[str] | None = None, *, independent: bool = False,
               excluded_roots=()) -> None:
@@ -1335,10 +1421,10 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             raise ValueError('independent FULL observation requires quiescent triage or diagnosed repair')
         validate_plan(plan, root)
         excluded = {Path(p).resolve() for p in excluded_roots}
-        retained = set(retained_owners(state, [g['name'] for g in plan['gates']]))
+        retained, bound_roots, admission_blockers = independent_owner_holds(plan, state)
         held = [g for g in plan['gates'] if g['name'] in retained]
         held_workers = {g.get('worker') for g in held if g.get('worker')}
-        held_roots = [location for g in held for location in observation_worker_roots(g, root)]
+        held_roots = [location for g in held for location in observation_worker_roots(g, root)] + bound_roots
         for name in retained:
             owner = receipt_owner(name, latest_receipts(state)[name])
             if owner.get('worker_root'):
@@ -1348,6 +1434,7 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
         def conflicts(gate):
             locations = observation_worker_roots(gate, root)
             return (gate['name'] in retained or gate.get('worker') in held_workers
+                    or bool(admission_blockers) and gate.get('native_cloud') is True
                     or any(candidate_host == host and roots_overlap(location, path)
                            for candidate_host, location in locations for host, path in held_roots))
         pending_gates = {f['gate'] for f in state['failures'] if f['id'] in state.get('pending', [])}
@@ -1414,6 +1501,7 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                        or input_fingerprints(plan, root) != state['input_fingerprints'])
             state['attempts'].append({'phase': observation_phase, 'source': state['source'], 'results': results,
                                      'independent_full': True, 'excluded_roots': sorted(str(p) for p in excluded),
+                                     'admission_blockers': admission_blockers,
                                      'interrupted': CANCEL.is_set(), 'stale': changed})
             for result in results:
                 state.get('carried_passes', {}).pop(result['gate'], None)
