@@ -1,5 +1,6 @@
 /** Parse agent-specific grep selectors. */
 import { InvalidGrepParamError } from './errors';
+import { stripTrailingSlashes } from './format.snippets';
 import { agentTaskPathParam, parseGrepPath } from './path';
 import type {
   AgentNetworkGrepFilters,
@@ -48,7 +49,8 @@ export function parseAgentPaging(
     order: params.order ?? 'newest_first',
     pageAfterMessageId:
       pageAfter?.source === 'agent_trajectories' ? pageAfter.messageId : undefined,
-    pageAfterPath: params.page_after?.trim().replace(/\/+$/, ''),
+    pageAfterPath:
+      params.page_after === undefined ? undefined : stripTrailingSlashes(params.page_after.trim()),
   };
 }
 
