@@ -1436,6 +1436,10 @@ def independent_local_worker(gate: dict, root: Path) -> bool:
     """Scope-only fallback cannot authorize a remote/legacy/unknown executor."""
     if (gate.get('worker_transport') != 'local-isolated'
             or gate.get('worker_host') not in (None, 'local')
+            or any(gate.get(flag) is not None and gate.get(flag) is not False
+                   for flag in ('native_cloud', 'native_backend'))
+            or gate.get('category') == 'agentcard-lifecycle'
+            or gate.get('worker_thread') or gate.get('remote_python')
             or not isinstance(gate.get('cwd'), str) or not gate['cwd']):
         return False
     try:

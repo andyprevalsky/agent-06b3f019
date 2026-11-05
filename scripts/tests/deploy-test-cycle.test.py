@@ -430,6 +430,24 @@ class Cycle(unittest.TestCase):
             gate={**original,**changes}
             self.assertFalse(c.independent_local_worker(gate,self.root))
 
+    def test_scope_only_fallback_holds_hybrid_native_or_remote_local_workers(self):
+        state,plan,_,_,_,admissions=self.blocked_native_independent_fixture()
+        candidate=next(g for g in plan['gates'] if g['name']=='missing')
+        original=copy.deepcopy(candidate)
+        for changes in ({'native_cloud':True},{'native_backend':True},{'native_cloud':'unknown-flag'},
+                        {'category':'agentcard-lifecycle'},{'worker_thread':'foreign-thread'},
+                        {'remote_python':'/foreign/agents/venv/bin/python'}):
+            candidate.clear();candidate.update(copy.deepcopy(original));candidate.update(changes)
+            self.assertEqual('local-isolated',candidate['worker_transport'])
+            c.validate_plan(plan,self.root)  # Valid local binding; native/remote hybrid must still stay held.
+            state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+            before=copy.deepcopy(state)
+            with self.subTest(changes=changes),patch.object(c,'isolated_admissions',side_effect=admissions), \
+                 patch.object(c,'execute',side_effect=AssertionError('hybrid reached execute')) as execute:
+                c.run_phase(plan,state,self.directory,self.root,independent=True,
+                            excluded_roots=[str(Path(self.workers.name)/'leased')])
+                execute.assert_not_called();self.assertEqual(state,before)
+
     def test_scope_binding_requires_all_seven_original_shapes_and_ancestor_edges(self):
         # Synthetic original files with the actual seven layout/compatibility
         # shapes; no canonical state, provider observation or worker is used.
