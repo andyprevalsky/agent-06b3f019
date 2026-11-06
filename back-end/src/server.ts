@@ -25,6 +25,10 @@ import sendSmsRouter from './domains/send-sms/routes';
 import vapiRouter from './domains/vapi/routes';
 import { attachHoldStreamServer } from './domains/vapi/holdListenerService';
 import { HOLD_STREAM_PATH } from './domains/vapi/config';
+import {
+  BLACKBOX_FAKE_PHONE_UPSTREAM_PATH,
+  createBlackboxFakePhoneUpstreamRouter,
+} from './domains/vapi/routesBlackboxFakeUpstream';
 import localDevicesRouter from './domains/local-devices/routes';
 import { attachLocalDeviceServer } from './domains/local-devices/service';
 import voicesRouter from './domains/voices/routes';
@@ -262,6 +266,8 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 
   app.use('/api/test/sms-supervisor-fixture', createSupervisorFixtureTestRouter());
   app.use('/api/test/proactive-sms', createProactiveSmsTestRouter());
+  // Runners point Vapi/Twilio REST here so blackbox calls never dial a real number.
+  app.use(BLACKBOX_FAKE_PHONE_UPSTREAM_PATH, createBlackboxFakePhoneUpstreamRouter());
 
   // Signals the in-memory blackbox Temporal fake recorded for one workflow, so
   // HTTP route contracts can assert which signal (if any) a route delivered.
