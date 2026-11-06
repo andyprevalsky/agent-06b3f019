@@ -3494,10 +3494,10 @@ async def spawn_claude_code_activity(
                     "folder": code_agent_meta.get("folder"),
                 }
             )
-        # An attempt's first heartbeat goes out at once and later ones only every
-        # throttle interval, so nothing may heartbeat before the session rides
-        # along, and the session must ride along before anything else can fail:
-        # a crash in either window would hide the sandbox from the retry.
+        # The session must ride along before anything else can fail. The create
+        # heartbeats while it waits, so this beat can sit out one throttle
+        # interval; a retry after a crash in that window creates again and the
+        # backend hands back this same running task (createWithCodeSession).
         session_heartbeats.enter_context(
             heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}, retry_state)
         )

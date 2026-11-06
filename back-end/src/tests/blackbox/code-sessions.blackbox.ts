@@ -54,6 +54,7 @@ import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
 import { testResumableCloseListsPaused } from './code-sessions-list.cases';
 import { registerFailedStartPauseCases } from './code-sessions-failed-start.cases';
+import { registerSpawnReplayCases } from './code-sessions-spawn-replay.cases';
 import { registerCodeSessionLifecycleCases } from './code-sessions-lifecycle.cases';
 import { registerCodeSessionLiveResumeCases } from './code-sessions-live-resume.cases';
 import { registerSandboxAttributionCases } from './code-sessions-sandbox-attribution.cases';
@@ -600,6 +601,7 @@ test('keepalive extends an attached sandbox and its lease; retire deletes checkp
 });
 
 registerFailedStartPauseCases(userA, rootAgentId);
+registerSpawnReplayCases(userA);
 registerCodeSessionLifecycleCases({
   userA,
   fixtureDir,

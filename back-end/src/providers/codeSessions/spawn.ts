@@ -1,12 +1,28 @@
 /**
  * Glue between the code-session HTTP surface (claude-code / codex-code
  * domains) and the persistent CodeSession lifecycle.
+ *
+ * One spawn tool call starts one task. The agents activity is at-least-once
+ * and retries a create that outlives its read (a fresh repo sandbox restores
+ * its project for minutes) while the first request keeps running here, all
+ * under the call's lease owner `tool:<agent>:<call>`:
+ *
+ *   create(tool:…) ─▶ per-lease-owner lock ─┬─ stored task still ACTIVE ─▶ that task (replay)
+ *                                           └─ otherwise ─▶ resolve + lease ─▶ create() ─▶ store
+ *
+ * A replay never reaches create(), so it never restarts the CLI the first
+ * request started (RCA 2026-11-06-code-spawn-create-retry-duplicated-sessions).
+ * Resize and usage-limit switches close the task before they create again
+ * under the same owner, so they create. Owners other than `tool:` (agent-level
+ * spawns) name distinct spawns and are never replayed.
  */
+import type { Prisma } from '@prisma/client';
 import { Sandbox } from 'e2b';
 import { rootPreviewPath } from '../codePreview/rootPath';
 import { prisma } from '../database';
 import { E2BSandboxCapacityError } from '../e2bSandboxCreate';
 import { createLogger } from '../logger';
+import { getEphemeral, putEphemeral, withSerializedLock } from '../sharedState';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
@@ -128,18 +144,93 @@ export async function resolveSpawnCodeSession(
   return session;
 }
 
+type SpawnCreateResult = {
+  taskId: string;
+  resumedFrom?: string;
+  cliSessionId?: string | null;
+  sandboxSize?: SandboxSize | null;
+  historyEvents?: number;
+};
+
+const SPAWN_CREATE_NAMESPACE = 'code-spawn-create';
+/**
+ * How long a retried create waits for its spawn's first request: that one may
+ * wait for the shared E2B create slot (up to 15 minutes, e2bCreateSlot.ts) and
+ * then start the sandbox.
+ */
+const SPAWN_CREATE_WAIT_MS = 30 * 60_000;
+/** Replay window: activity retries of one spawn arrive within it. One row per spawn. */
+const SPAWN_CREATE_RECORD_TTL_MS = 6 * 60 * 60_000;
+
+/** The replay key: only a spawn tool call's lease owner identifies one spawn. */
+function spawnCreateKey(leaseOwner: string | undefined): string | null {
+  return leaseOwner !== undefined && leaseOwner.startsWith('tool:') ? leaseOwner : null;
+}
+
+/** The spawn's stored create when its task is still running on the requested provider. */
+async function replayedSpawnCreate<T extends SpawnCreateResult>(
+  key: string,
+  codeProvider: string
+): Promise<{ session: T; fields: CodeSessionSpawnFields } | null> {
+  const stored = await getEphemeral<{ session: T; fields: CodeSessionSpawnFields }>(
+    SPAWN_CREATE_NAMESPACE,
+    key
+  );
+  if (stored === undefined || stored.fields.code_provider !== codeProvider) return null;
+  const task = await prisma.claudeCodeSession.findUnique({
+    where: { id: stored.session.taskId },
+    select: { status: true },
+  });
+  if (task?.status !== 'ACTIVE') return null;
+  log.info('Replaying a retried spawn create: its task is still running', {
+    taskId: stored.session.taskId,
+    codeSessionId: stored.fields.code_session_id ?? undefined,
+    leaseOwner: key,
+  });
+  return stored;
+}
+
+/**
+ * Resolve the spawn's code session and run the sandbox create once per spawn:
+ * a retried create of the same tool call gets the task its first request
+ * started (see the header).
+ */
+export async function createWithCodeSession<T extends SpawnCreateResult>(
+  params: ResolveSpawnParams,
+  create: (codeSession: SpawnCodeSession | null, handoff: string | null) => Promise<T>
+): Promise<{ session: T; fields: CodeSessionSpawnFields }> {
+  const key = spawnCreateKey(params.leaseOwner);
+  if (key === null) return createSpawnTask(params, create);
+  return withSerializedLock(
+    `${SPAWN_CREATE_NAMESPACE}:${key}`,
+    async () => {
+      const replayed = await replayedSpawnCreate<T>(key, params.codeProvider);
+      if (replayed !== null) return replayed;
+      const created = await createSpawnTask(params, create);
+      await putEphemeral(
+        SPAWN_CREATE_NAMESPACE,
+        key,
+        created as unknown as Prisma.InputJsonValue,
+        SPAWN_CREATE_RECORD_TTL_MS
+      ).catch((error: unknown) => {
+        // The task exists and this response carries it; only a later retry loses its replay.
+        log.error('Storing the spawn create for retries failed', {
+          taskId: created.session.taskId,
+          leaseOwner: key,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+      return created;
+    },
+    { waitMs: SPAWN_CREATE_WAIT_MS }
+  );
+}
+
 /**
  * Resolve the spawn's code session, run the sandbox create, and release the
  * lease when the create fails so a retry (or the next spawn) can resume.
  */
-export async function createWithCodeSession<
-  T extends {
-    resumedFrom?: string;
-    cliSessionId?: string | null;
-    sandboxSize?: SandboxSize | null;
-    historyEvents?: number;
-  },
->(
+async function createSpawnTask<T extends SpawnCreateResult>(
   params: ResolveSpawnParams,
   create: (codeSession: SpawnCodeSession | null, handoff: string | null) => Promise<T>
 ): Promise<{ session: T; fields: CodeSessionSpawnFields }> {

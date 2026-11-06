@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from _test_utils import BlackboxResult
@@ -750,6 +751,111 @@ async def test_foreground_paths_never_background():
         wf._background_spawns_enabled = True
         wf.fast_mode_cache_enabled = True
         assert wf._spawn_runs_in_background("spawn_agent", dict(EXPLORE_ARGS)) is False
+
+
+FOREGROUND_SCHEMA = {"fields": [{"name": "summary", "type": "str", "description": "d", "required": True}]}
+FOREGROUND_SPAWNS = {
+    "explore": {"type": "explore", "task_name": "find_repo", "goal": "Find the team's main GitHub repo."},
+    "browser": {
+        "type": "browser",
+        "task_name": "inspect_repo",
+        "goal": "Read the repo's open pull requests.",
+        "start_url": "https://github.com/Rose-Ai-Labs/rose",
+        "output_schema": FOREGROUND_SCHEMA,
+    },
+    "code": {
+        "type": "code",
+        "task_name": "rose_repo_status",
+        "goal": "Read-only. Report the latest commit on main.",
+        "output_schema": FOREGROUND_SCHEMA,
+        "github_repo_link": "https://github.com/Rose-Ai-Labs/rose",
+    },
+}
+
+
+async def test_foreground_spawns_are_addressable_and_answer_truthfully_once_finished():
+    """A foreground explore/browser/code spawn has the address its schema promises.
+
+    RCA 2026-11-06-code-spawn-create-retry-duplicated-sessions (C3): root
+    1a3d495c spawned a foreground code agent with task_name rose_repo_status, then
+    send_message_to_agent("/root/rose_repo_status") failed with "No agent or
+    background task at /root/rose_repo_status": foreground spawns registered no
+    address. While one runs, its path resolves (tree state, own inbox) and its
+    rows stay the model's result; once it finished, a send names its state.
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from domains.agent_messaging.handler import resolve_message_target, send_message_to_agent
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    for agent_type, args in FOREGROUND_SPAWNS.items():
+        harness = _Harness()
+        persisted = []
+        activities = []
+
+        async def fake_execute_activity(fn, args=None, **_kwargs):
+            name = getattr(fn, "__name__", "")
+            activities.append(name)
+            if name == "update_agent_tree_state":
+                persisted.append(args[3].get("backgroundTasks"))
+            if name == "send_agent_message_to_address_activity":
+                return {"error": f"No agent or background task at {args[1]}"}
+            return None
+
+        tool_call_id = f"toolu_fg_{agent_type}"
+        path = f"/root/{args['task_name']}"
+        seen_while_running = {}
+
+        async def executor(wf, tool_call, call_id):
+            seen_while_running["tree"] = wf._background_tree_snapshot()
+            seen_while_running["target"] = resolve_message_target(wf, path)
+            await wf._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Finished",
+                    message=f"{agent_type} result",
+                    status=MessageStatus.FINISHED,
+                    data={"result": f"{agent_type} result"},
+                ),
+                call_id,
+                "spawn_agent",
+            )
+            return MessageStatus.FINISHED, f"{agent_type} result"
+
+        with (
+            _workflow_env(harness),
+            patch.object(temporal_workflow, "execute_activity", fake_execute_activity),
+            patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+            patch.object(temporal_workflow, "info", lambda: SimpleNamespace(workflow_id="agent-parent")),
+        ):
+            wf = _workflow(harness)
+            wf.current_phase = "EXECUTE"
+            result = await wf._execute_tool("spawn_agent", {**args, "run_in_background": False}, tool_call_id)
+            assert result.get("success") is True, (agent_type, result)
+
+            running = [entry for entry in seen_while_running["tree"] if entry["path"] == path]
+            assert running and running[0]["status"] == "running", (agent_type, seen_while_running["tree"])
+            assert running[0]["address"] == tool_call_id and running[0]["type"] == agent_type
+            # Own inbox for the task (code: the backend turns a send to a running code task into a CLI turn).
+            assert seen_while_running["target"] == ("agent-parent", tool_call_id, None), agent_type
+            rows = [row for row in harness.rows if row["metadata"].get("toolCallId") == tool_call_id]
+            assert rows and all("excludeFromModel" not in row["metadata"] for row in rows), (
+                "a foreground spawn's rows stay the model's result",
+                rows,
+            )
+            assert not _notifications(harness), "a foreground result is never re-sent as a notification"
+            assert any(e["path"] == path and e["status"] == "completed" for e in persisted[-1]), persisted[-1]
+            assert wf._pending_background_ids() == []
+
+            status, text = await send_message_to_agent(
+                wf, {"to": path, "message": "Print your findings in your final reply."}, f"toolu_send_{agent_type}"
+            )
+            assert status == MessageStatus.ERROR, (agent_type, text)
+            assert "No agent or background task" not in text, text
+            assert path in text and "foreground" in text and "completed" in text, text
+            assert ("code_session_id" in text) is (agent_type == "code"), text
+            assert "send_agent_message_activity" not in activities, "nothing is stored or woken"
+            assert not wf._background_tasks, "a finished foreground spawn never starts another run"
 
 
 def test_tool_schemas_and_prompts_register_agent_messaging():
@@ -2426,6 +2532,10 @@ async def run_all_tests():
         "agent_rows_feedback_only_from_ancestors", test_agent_rows_are_user_feedback_only_from_ancestors
     )
     await r.record_async("foreground_paths_never_background", test_foreground_paths_never_background)
+    await r.record_async(
+        "foreground_spawns_addressable_and_truthful_once_finished",
+        test_foreground_spawns_are_addressable_and_answer_truthfully_once_finished,
+    )
     await r.record_async(
         "dag_planned_spawn_background_dependent_sees_result",
         test_dag_planned_spawn_runs_in_background_and_dependent_sees_child_result,
