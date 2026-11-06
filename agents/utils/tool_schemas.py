@@ -1563,7 +1563,7 @@ class KillAgentTool(BaseModel):
 class ReportBugTool(BaseModel):
     """Report a bug in Rose itself, the same as the user's Report Bug button: a separate engineering agent investigates your run and fixes it.
 
-    Use it when Rose's own tools, sub-agents or harness malfunction: a tool errors, returns a result that contradicts its inputs, a sub-agent crashes or loops, or a capability you were given does not work. Do not use it for problems outside Rose, such as a website being down, a person not replying or missing information from the user. A run files at most one report, so describe every problem you saw in it, then continue your task."""
+    Use it only after you have confirmed that Rose's own tools, sub-agents or harness malfunction: a tool keeps failing on valid arguments, returns a result that contradicts its inputs, a sub-agent crashes or loops, or a capability you were given does not work. First rule out your own arguments and transient errors that a retry clears. Do not use it for problems outside Rose, such as a website being down, a person not replying or missing information from the user. A run files at most one report, so file it once you have evidence and describe every problem you saw, then continue your task."""
 
     tool: Literal["report_bug"]
     description: str = Field(
