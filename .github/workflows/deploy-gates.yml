@@ -86,7 +86,7 @@ jobs:
             back-end/node_modules
             front-end/node_modules
             agents/node_modules
-          key: deploy-gate-node-${{ env.NODE_VERSION }}-${{ hashFiles('package.json', 'back-end/package-lock.json', 'front-end/package-lock.json') }}
+          key: deploy-gate-node-${{ env.NODE_VERSION }}-${{ hashFiles('package.json', 'back-end/package.json', 'front-end/package.json', 'back-end/package-lock.json', 'front-end/package-lock.json') }}
 
       - name: Restore agents venv
         id: venv-cache
