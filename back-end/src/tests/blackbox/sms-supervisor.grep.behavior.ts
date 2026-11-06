@@ -7,6 +7,7 @@ import type { PrismaClient } from '@prisma/client';
 
 import { executeGatelessGrepTool as domainGrepTool } from '../../domains/data/grepTool';
 import { GREP_TOOL_STRICT_PARAMETERS } from '../../providers/grepTool';
+import { SmsSupervisorToolCallSchema } from '../../providers/smsSupervisor/schema';
 import { executeGrepTool } from '../../providers/smsSupervisor/supervisorTools.grep';
 import { registerUserDataGrepTool } from '../../providers/userDataSearch';
 import {
@@ -158,6 +159,19 @@ export async function testGrep_smsRunsTheSharedGrepTool(prisma: PrismaClient) {
     ) {
       throw new Error(
         `a strict-form default grep must search the defaults: ${JSON.stringify(strict)}`
+      );
+    }
+    // The supervisor dispatches the Zod-parsed call, where those nulls become undefined.
+    const parsedCall = SmsSupervisorToolCallSchema.parse({ tool: 'grep', arguments: strictCall });
+    const parsed = parse(
+      await executeGrepTool(parsedCall.arguments as Record<string, unknown>, userId)
+    );
+    if (
+      parsed.sources.join(',') !== 'messages,network,agent_network' ||
+      parsed.matches.length !== 1
+    ) {
+      throw new Error(
+        `a parsed strict-form grep must search the defaults: ${JSON.stringify(parsed)}`
       );
     }
     // No Plaid link: a named unconnected source is skipped with a notice, not searched silently.
