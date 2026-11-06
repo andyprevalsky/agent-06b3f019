@@ -13,7 +13,6 @@ import { withSteelLifecycleClaim } from './steel/lifecycleClaim';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
-import { closeClaudeCodeSession } from './e2bCloseSession';
 
 const log = createLogger('Cleanup');
 
