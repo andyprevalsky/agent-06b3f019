@@ -349,7 +349,18 @@ class QualificationTests(LedgerCase):
         self.assertIn("did not pass", out)  # the 6th-latest is the failed iteration
         code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=7")
         self.assertEqual(code, 1, out)
-        self.assertIn("6 branch attempt(s), qualification needs 7", out)
+        self.assertIn("6 deploy-eligible branch attempt(s), qualification needs 7", out)
+
+    def test_a_later_predeploy_attempt_does_not_displace_the_streak(self):
+        self.streak()
+        deploy_run = {**self.qualified(self.TASK, True, "2026-10-21T16:05:00+00:00", "deploy-1", counts=False),
+                      "suite": "predeploy"}
+        self.write("task_attempts.jsonl", [deploy_run], append=True)
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=5")
+        self.assertEqual(code, 0, out)
+        kept = [r["agent_id"] for r in self.read("task_attempts.jsonl")[2:] if r["task"] == self.TASK]
+        self.assertEqual(kept, ["q-1", "q-2", "q-3", "q-4", "q-5", "deploy-1"])
+        self.assertEqual(self.run_tool("--check", "--qualify", f"{self.TASK}=5")[0], 0)
 
     def test_qualify_rejects_a_malformed_or_duplicate_task_spec(self):
         for spec in ("code-agent-rose-repo", "code-agent-rose-repo=0", "=3", "code-agent-rose-repo=x"):

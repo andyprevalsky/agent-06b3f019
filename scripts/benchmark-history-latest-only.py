@@ -18,10 +18,11 @@ that actually merges. Rows already on the base ref are never touched.
       # (.context/deploy-ledger-park, see run-predeploy-local) into the
       # tracked ledgers, then keep only each task's most recent run
   python3 scripts/benchmark-history-latest-only.py --write --qualify TASK=5
-      # a qualification streak: keep TASK's 5 most recent branch attempts
-      # (not just the latest run) and exit 1, touching nothing, unless all 5
-      # exist, passed and count for deploy eligibility. Other tasks, and TASK's
-      # runs before those 5, are filtered exactly as without the flag.
+      # a qualification streak: keep TASK's 5 most recent deploy-eligible
+      # branch attempts (not just the latest run) and exit 1, touching nothing,
+      # unless all 5 exist and passed. A later predeploy attempt (eligibility
+      # false) stays the task's ordinary latest run. Other tasks, and TASK's
+      # attempts before those 5, are filtered exactly as without the flag.
 
 A deploy's local smoke lane records its rows under .context/deploy-ledger-park
 (BENCHMARK_HISTORY_PARK_DIR) so the tracked ledgers stay unchanged while the
@@ -127,17 +128,24 @@ def _window(row: dict) -> tuple[datetime, datetime] | None:
 
 
 def qualified_attempts(ledger: Ledger, qualify: dict[str, int]) -> tuple[set[int], list[str]]:
-    """Line indexes of each qualified task's latest N branch attempts, and unmet qualifications.
+    """Line indexes of each qualified task's latest N eligible branch attempts, and unmet qualifications.
 
-    A qualification is met when the task has at least N branch attempts and each
-    of its latest N passed and counts for deploy eligibility (the history gate
-    in select_predeploy_benches.py reads exactly those rows).
+    Only attempts that count for deploy eligibility are streak candidates (the history
+    gate in select_predeploy_benches.py reads exactly those rows); a later predeploy
+    attempt (eligibility false) is the task's ordinary latest run and never displaces
+    the streak. A qualification is met when at least N eligible attempts exist and the
+    latest N all passed.
     """
     by_task: dict[str, list[tuple[datetime, int, dict]]] = collections.defaultdict(list)
     for index, line in enumerate(ledger.lines):
         row = _row(line) if ledger.branch[index] else None
         window = _window(row) if row else None
-        if row is not None and window is not None and row.get("task") in qualify:
+        if (
+            row is not None
+            and window is not None
+            and row.get("task") in qualify
+            and row.get("counts_for_deploy_eligibility") is True
+        ):
             by_task[str(row["task"])].append((window[1], index, row))
     protected: set[int] = set()
     problems: list[str] = []
@@ -145,18 +153,11 @@ def qualified_attempts(ledger: Ledger, qualify: dict[str, int]) -> tuple[set[int
         latest = sorted(by_task.get(task, []), key=lambda a: (a[0], a[1]))[-need:]
         protected.update(index for _, index, _ in latest)
         if len(latest) < need:
-            problems.append(f"{task}: {len(latest)} branch attempt(s), qualification needs {need}")
+            problems.append(f"{task}: {len(latest)} deploy-eligible branch attempt(s), qualification needs {need}")
             continue
-        unmet = [
-            str(row.get("agent_id") or index)
-            for _, index, row in latest
-            if row.get("passed") is not True or row.get("counts_for_deploy_eligibility") is not True
-        ]
+        unmet = [str(row.get("agent_id") or index) for _, index, row in latest if row.get("passed") is not True]
         if unmet:
-            problems.append(
-                f"{task}: {len(unmet)} of its latest {need} attempts did not pass or do not count for "
-                f"deploy eligibility ({', '.join(unmet)})"
-            )
+            problems.append(f"{task}: {len(unmet)} of its latest {need} eligible attempts did not pass ({', '.join(unmet)})")
     return protected, problems
 
 
@@ -373,8 +374,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--qualify", action="append", default=[], metavar="TASK=N",
-        help="keep TASK's N most recent branch attempts as a qualification streak; exit 1 unless all N "
-             "exist, passed and count for deploy eligibility (repeatable)",
+        help="keep TASK's N most recent deploy-eligible branch attempts as a qualification streak; exit 1 "
+             "unless all N exist and passed (repeatable)",
     )
     args = parser.parse_args(argv)
     qualify: dict[str, int] = {}
