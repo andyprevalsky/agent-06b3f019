@@ -14013,7 +14013,14 @@ async def test_execute_action_scroll_with_humanizer_down():
         {"action": "scroll", "params": {"direction": "down", "amount": 400}},
         humanizer=hu,
     )
-    assert out == {"success": True, "message": ""}
+    assert out == {
+        "success": True,
+        "message": "",
+        "document_scroll": {"scope": "document", "status": "unknown", "before": None, "after": None},
+    }
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["result"] == out
+    assert ah.record_action.await_args.kwargs["action"] == "scroll"
     hu.scroll.assert_awaited_once_with(400, at_coords=None)
 
 
@@ -14054,7 +14061,14 @@ async def test_execute_action_scroll_with_humanizer_uses_element_coords():
         {"action": "scroll", "index": 34, "params": {"direction": "up", "amount": 500}},
         humanizer=hu,
     )
-    assert out == {"success": True, "message": ""}
+    assert out == {
+        "success": True,
+        "message": "",
+        "document_scroll": {"scope": "document", "status": "unknown", "before": None, "after": None},
+    }
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["result"] == out
+    assert ah.record_action.await_args.kwargs["action"] == "scroll"
     dom.get_element_coordinates.assert_awaited_once_with(34)
     hu.scroll.assert_awaited_once_with(-500, at_coords=(120, 340))
 
@@ -14076,7 +14090,14 @@ async def test_execute_action_scroll_index_zero_scrolls_viewport():
         {"action": "scroll", "index": 0, "params": {"direction": "up", "amount": 3000}},
         humanizer=hu,
     )
-    assert out == {"success": True, "message": ""}
+    assert out == {
+        "success": True,
+        "message": "",
+        "document_scroll": {"scope": "document", "status": "unknown", "before": None, "after": None},
+    }
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["result"] == out
+    assert ah.record_action.await_args.kwargs["action"] == "scroll"
     dom.get_element_coordinates.assert_not_awaited()
     hu.scroll.assert_awaited_once_with(-3000, at_coords=None)
 
@@ -14297,7 +14318,14 @@ async def test_execute_action_scroll_no_humanizer_up():
         {"action": "scroll", "params": {"direction": "up", "amount": 200}},
         humanizer=None,
     )
-    assert out == {"success": True, "message": ""}
+    assert out == {
+        "success": True,
+        "message": "",
+        "document_scroll": {"scope": "document", "status": "unknown", "before": None, "after": None},
+    }
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["result"] == out
+    assert ah.record_action.await_args.kwargs["action"] == "scroll"
 
 
 async def test_execute_action_navback():
