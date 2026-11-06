@@ -41,7 +41,7 @@ export async function createLogicalBrowserInTransaction(
     create: { userId },
   });
   const configured = storedBrowserProvider(
-    process.env.BROWSER_PROVIDER ?? DEFAULT_BROWSER_PROVIDER
+    (process.env.BROWSER_PROVIDER ?? DEFAULT_BROWSER_PROVIDER).trim().toLowerCase()
   );
   const disabled =
     (configured === 'browser-use' && !browserUseEnabled()) ||

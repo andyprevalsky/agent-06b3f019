@@ -94,6 +94,12 @@ async function main() {
       'tilion',
       'unmaterialized logical browsers must use the same Tilion default'
     );
+    process.env.BROWSER_PROVIDER = ' TILION ';
+    const normalized = await createLogicalBrowserInTransaction(tx, 'user', 'fresh-normalized');
+    assert.equal(normalized.provider, 'tilion', 'logical selection normalizes the provider');
+    process.env.BROWSER_AGENT_TILION_ENABLED = 'false';
+    const disabled = await createLogicalBrowserInTransaction(tx, 'user', 'fresh-disabled');
+    assert.equal(disabled.provider, 'kernel', 'normalized Tilion honors its kill switch');
     console.log(
       'PASS: fresh Tilion selection and placeholders; existing Steel/Kernel bindings retained'
     );
