@@ -1,0 +1,78 @@
+{
+ "source": {
+  "head": "4b79be50e644aab2aceb399c1f106b97708f5a2e",
+  "digest": "8186aeab3ffb2ab6609024dcfc7f97007845d2057134912221a78129b712bb58"
+ },
+ "gates": {
+  "cloudbench-controller": {
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/cloudbench/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/cloudbench",
+    "--stdio"
+   ],
+   "checks": [
+    "cloudbench-controller"
+   ],
+   "worker_recipe": {
+    "cases": {
+     "cloudbench-controller": {
+      "command": [
+       "/usr/bin/python3",
+       "scripts/run-cloudbench-controller-local.py"
+      ],
+      "cwd": ".",
+      "env": {
+       "CONDUCTOR_WORKSPACE_NAME": "dw-cloudbench",
+       "CONDUCTOR_PORT": "16590",
+       "CONDUCTOR_ROOT_PATH": "/var/tmp/deploy-workers/cloudbench",
+       "ROSE_USE_SYSTEM_PG": "true",
+       "LOCAL_DB_PORT": "5432",
+       "TMPDIR": "/var/tmp",
+       "NO_PROXY": "localhost,127.0.0.1,::1",
+       "no_proxy": "localhost,127.0.0.1,::1"
+      },
+      "aggregate": true
+     }
+    }
+   }
+  },
+  "deploy-command-structural": {
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "checks": [
+    "deploy-command-structural"
+   ],
+   "worker_recipe": {
+    "cases": {
+     "deploy-command-structural": {
+      "command": [
+       "python3",
+       "scripts/run-deploy-structural-gates.py",
+       "--max-workers",
+       "5"
+      ],
+      "cwd": ".",
+      "env": {
+       "CONDUCTOR_WORKSPACE_NAME": "dw-structural",
+       "CONDUCTOR_PORT": "12000",
+       "CONDUCTOR_ROOT_PATH": "/var/tmp/deploy-workers/structural",
+       "ROSE_USE_SYSTEM_PG": "true",
+       "LOCAL_DB_PORT": "5432",
+       "TMPDIR": "/var/tmp",
+       "NO_PROXY": "localhost,127.0.0.1,::1",
+       "no_proxy": "localhost,127.0.0.1,::1"
+      },
+      "aggregate": true
+     }
+    }
+   }
+  }
+ }
+}

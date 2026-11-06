@@ -1,0 +1,64 @@
+{
+ "source": {
+  "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+  "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+ },
+ "gates": {
+  "deploy-command-structural": {
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "checks": [
+    "deploy-command-structural"
+   ],
+   "worker_recipe": {
+    "cases": {
+     "deploy-command-structural": {
+      "command": [
+       "python3",
+       "scripts/run-deploy-structural-gates.py",
+       "--max-workers",
+       "2"
+      ],
+      "cwd": ".",
+      "env": {
+       "CONDUCTOR_WORKSPACE_NAME": "dw-structural",
+       "CONDUCTOR_PORT": "12000",
+       "CONDUCTOR_ROOT_PATH": "/var/tmp/deploy-workers/structural",
+       "ROSE_USE_SYSTEM_PG": "true",
+       "LOCAL_DB_PORT": "5432",
+       "TMPDIR": "/var/tmp",
+       "NO_PROXY": "localhost,127.0.0.1,::1",
+       "no_proxy": "localhost,127.0.0.1,::1"
+      },
+      "aggregate": true
+     }
+    }
+   }
+  },
+  "smoke": {
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "checks": [
+    "test-mass-agent-run-0",
+    "chat-mode",
+    "spawn-sub-agents",
+    "parallel-tool-calls",
+    "background-agent-message-smoke",
+    "claude-code-agent",
+    "browser-smoke",
+    "browser-biometrics-webdecoy",
+    "agent-payment-new-user-journey",
+    "browser-auth-saved-password-retry",
+    "browser-auth-account-locked",
+    "browser-auth-email-otp"
+   ]
+  }
+ }
+}

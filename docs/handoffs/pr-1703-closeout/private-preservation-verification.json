@@ -1,0 +1,77 @@
+{
+ "format": "PR1703-PRIVATE-PRESERVATION-VERIFICATION-V1",
+ "bucket": "trace-archive",
+ "archives": {
+  "core": {
+   "key": "devbox-closeout-private/pr1703-fa676edc/20261106T144014Z-core.tar.gz.aesgcm",
+   "receipt_sidecar_key": "devbox-closeout-private/pr1703-fa676edc/20261106T144014Z-core.tar.gz.aesgcm.receipt.aesgcm",
+   "ciphertext_sha256": "c18911ebb6344e4e322c1b014de47acfcf62701ab68e574ccbf9e83dd162e2bc",
+   "manifest_sha256": "1c162466bf8bd7ec9586f7c88038141d06adcb2afabd7932f9ac403c4ce5e47b",
+   "stored_bytes": 55197324,
+   "files": 1933,
+   "original_bytes": 197944797,
+   "frames": 7,
+   "full_readback_verified": true,
+   "encryption_key_id": "trace-archive-prod-2026-07-03"
+  },
+  "workers": {
+   "key": "devbox-closeout-private/pr1703-fa676edc/20261106T144014Z-workers.tar.gz.aesgcm",
+   "receipt_sidecar_key": "devbox-closeout-private/pr1703-fa676edc/20261106T144014Z-workers.tar.gz.aesgcm.receipt.aesgcm",
+   "ciphertext_sha256": "ba7fb8ae41e656652636bbd2db95aa5ef6b697d2706d5198a256369798b69639",
+   "manifest_sha256": "d8816635efd3923c6d9d1d5b9ffcaee9d51efcb7d74c0f28d45b9b953f70d916",
+   "stored_bytes": 717285564,
+   "files": 45997,
+   "original_bytes": 2323944000,
+   "frames": 86,
+   "full_readback_verified": true,
+   "encryption_key_id": "trace-archive-prod-2026-07-03"
+  },
+  "cloud": {
+   "key": "devbox-closeout-private/pr1703-fa676edc/20261106T144014Z-cloud.tar.gz.aesgcm",
+   "receipt_sidecar_key": "devbox-closeout-private/pr1703-fa676edc/20261106T144014Z-cloud.tar.gz.aesgcm.receipt.aesgcm",
+   "ciphertext_sha256": "1a628c68dcc3c8a08aba9c25740a8aa8701962abd1cccf29e817495e7c83bc3a",
+   "manifest_sha256": "3e1b3eeb7b0010dc1194675bca9da640d2392217fc5e1ddb5d78692828b5d83b",
+   "stored_bytes": 2079943998,
+   "files": 7769,
+   "original_bytes": 7219302963,
+   "frames": 248,
+   "full_readback_verified": true,
+   "encryption_key_id": "trace-archive-prod-2026-07-03"
+  },
+  "control": {
+   "key": "devbox-closeout-private/pr1703-fa676edc/20261106T144014Z-control.tar.gz.aesgcm",
+   "receipt_sidecar_key": "devbox-closeout-private/pr1703-fa676edc/20261106T144014Z-control.tar.gz.aesgcm.receipt.aesgcm",
+   "ciphertext_sha256": "6df7b2a3ee538fd9d086501f61e684d56381f94ee401f38f23b7801ac01f64bc",
+   "manifest_sha256": "2daff924cff2bfaf6177834d858169a43beb09a2355a21300064e71187609e49",
+   "stored_bytes": 5110480,
+   "files": 44,
+   "original_bytes": 33933251,
+   "frames": 1,
+   "full_readback_verified": true,
+   "encryption_key_id": "trace-archive-prod-2026-07-03"
+  }
+ },
+ "verification": {
+  "at": "about 2026-11-06T14:50-14:56Z",
+  "method": "docs/handoffs/pr-1691-closeout/recover_closeout.py with the escrowed key (fingerprint e351c7cc...)",
+  "core": {
+   "fetch_receipt": "authenticated",
+   "restore": "full restore into an empty directory: 1933 files + MIGRATION_MANIFEST.json"
+  },
+  "workers": {
+   "fetch_receipt": "authenticated",
+   "verify": "authenticated_original_files 45997"
+  },
+  "cloud": {
+   "fetch_receipt": "authenticated",
+   "verify": "authenticated_original_files 7769"
+  },
+  "control": {
+   "fetch_receipt": "authenticated",
+   "verify": "authenticated_original_files 44",
+   "restore": "44 files; restored inventory.jsonl sha256 fb355fa21622a696e1fd0c92f284559383fbe9bcc199d7ffdf39a4ef3fcdced7 equals the capture-time file"
+  },
+  "upload_readback": "every archive was fully read back and authenticated by the uploader (full_readback_verified true)",
+  "note": "outputs were observed in-session from the commands named; separate command logs were not retained. The R2 objects, stored bytes, receipts and inventory hash were re-checked independently by the fact-check."
+ }
+}

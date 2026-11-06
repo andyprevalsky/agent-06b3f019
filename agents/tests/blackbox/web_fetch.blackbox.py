@@ -314,6 +314,111 @@ async def test_retryable_provider_failure_remains_retryable():
     assert error.retryable is True
 
 
+async def test_hung_providers_fail_within_the_scrape_budget_and_are_not_retried():
+    """Two hung providers fail as one typed, non-retryable error inside the scrape budget.
+
+    Regression for parallel-tool-calls (agent f6899445): a page both providers hang on
+    ran Firecrawl 120s + Parallel Extract 120s, so the 180s activity timed out and
+    Temporal retried it, holding one explore agent (and the root) for 393s.
+    """
+    os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
+    os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
+
+    async def hang(_url: str):
+        await asyncio.sleep(30)
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("domains.web_fetch.config.FIRECRAWL_SCRAPE_TIMEOUT_SECONDS", 0.4, create=True),
+        patch("domains.web_fetch.config.PARALLEL_EXTRACT_TIMEOUT_SECONDS", 0.2, create=True),
+        patch("domains.web_fetch.config.WEB_FETCH_SCRAPE_BUDGET_SECONDS", 0.6, create=True),
+        patch("domains.web_fetch.service.fetch_firecrawl_scrape", hang),
+        patch("domains.web_fetch.service.fetch_parallel_extract", hang),
+    ):
+        from domains.web_fetch.service import WebFetchProvidersFailed, scrape_url
+
+        started = asyncio.get_running_loop().time()
+        try:
+            await asyncio.wait_for(scrape_url("https://example.com/hung"), timeout=3.0)
+            error = None
+        except WebFetchProvidersFailed as e:
+            error = e
+        except asyncio.TimeoutError:
+            error = None
+        elapsed = asyncio.get_running_loop().time() - started
+
+    assert error is not None, "scrape_url never returned a typed error for hung providers"
+    assert elapsed < 1.5, f"hung providers held the scrape for {elapsed:.2f}s (budget 0.6s)"
+    assert "Firecrawl" in str(error) and "Parallel Extract" in str(error)
+    assert error.retryable is False, "a page both providers hang on must not be retried"
+
+
+async def test_scrape_provider_timeouts_fit_inside_the_activity_timeout():
+    """The Firecrawl + Parallel Extract chain must finish before the scrape activity times out."""
+    from domains.web_fetch import config as wf_config
+    from domains.web_fetch.handler import WebFetchManager
+
+    chain = wf_config.FIRECRAWL_SCRAPE_TIMEOUT_SECONDS + wf_config.PARALLEL_EXTRACT_TIMEOUT_SECONDS
+    assert wf_config.WEB_FETCH_SCRAPE_BUDGET_SECONDS >= chain
+    assert chain < wf_config.WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS, (
+        f"provider chain {chain}s must fit the {wf_config.WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS}s activity"
+    )
+
+    calls = []
+
+    async def fake_execute_activity(fn, args=None, **kwargs):
+        calls.append((getattr(fn, "__name__", ""), kwargs))
+        if getattr(fn, "__name__", "") == "web_fetch_activity":
+            raise RuntimeError("stop after scheduling the scrape")
+        return None
+
+    try:
+        await WebFetchManager().execute_tool(
+            execute_activity=fake_execute_activity,
+            tool_call={"url": "https://example.com/a", "objective": "x"},
+            tool_call_id="tc-budget",
+            agent_id="a-1",
+            user_id="u-1",
+        )
+    except Exception:
+        pass
+    scrape = next(kw for name, kw in calls if name == "web_fetch_activity")
+    assert scrape["start_to_close_timeout"] == timedelta(seconds=wf_config.WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS)
+
+
+async def test_hung_file_downloads_return_inside_the_download_budget():
+    """Sequential slow file downloads are bounded by one budget below the activity timeout.
+
+    The download activity downloads Haiku-picked files one at a time; with a 180s activity
+    timeout and a retry on timeout, a handful of hung hosts cost 2x180s of one tool call.
+    """
+    from domains.web_fetch import config as wf_config
+
+    class HungClient:
+        async def get(self, url, **kwargs):
+            await asyncio.sleep(30)
+
+    urls = [f"https://example.com/file-{i}.pdf" for i in range(5)]
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("domains.web_fetch.config.WEB_FETCH_DOWNLOAD_BUDGET_SECONDS", 0.5, create=True),
+        patch("domains.web_fetch.repo.get_http_client", return_value=HungClient()),
+    ):
+        from domains.web_fetch.repo import download_files_batch
+
+        started = asyncio.get_running_loop().time()
+        try:
+            results = await asyncio.wait_for(download_files_batch(urls), timeout=3.0)
+        except asyncio.TimeoutError:
+            results = None
+        elapsed = asyncio.get_running_loop().time() - started
+
+    assert results is not None, "download_files_batch held the activity past the budget"
+    assert elapsed < 1.5, f"hung downloads took {elapsed:.2f}s (budget 0.5s)"
+    assert results == {url: None for url in urls}
+    assert wf_config.WEB_FETCH_DOWNLOAD_BUDGET_SECONDS < wf_config.WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS
+
+
 async def test_web_fetch_activity_marks_deterministic_provider_failures_non_retryable():
     """The activity converts deterministic two-provider failures into a non-retryable Temporal error."""
     from temporalio.exceptions import ApplicationError
@@ -884,6 +989,7 @@ async def test_handler_execute_tool_happy_path():
     # Keep the page facts bound to page_metadata, not session_id.
     import inspect
     from helpers.summarize import summarize_and_filter_links
+
     bound = inspect.signature(summarize_and_filter_links).bind(*summary_call["args"], "task-1")
     assert bound.arguments["page_metadata"] == {}
     assert bound.arguments["session_id"] == "task-1"
@@ -1391,6 +1497,18 @@ async def run_all_tests() -> bool:
         "handler_reports_parallel_provider", test_handler_reports_parallel_provider_when_fallback_succeeds
     )
     await r.record_async("handler_demo_cache_scrape_no_cost", test_handler_demo_cache_scrape_hit_has_no_service_cost)
+    await r.record_async(
+        "hung_providers_fail_within_scrape_budget_and_are_not_retried",
+        test_hung_providers_fail_within_the_scrape_budget_and_are_not_retried,
+    )
+    await r.record_async(
+        "hung_file_downloads_return_inside_the_download_budget",
+        test_hung_file_downloads_return_inside_the_download_budget,
+    )
+    await r.record_async(
+        "scrape_provider_timeouts_fit_inside_activity_timeout",
+        test_scrape_provider_timeouts_fit_inside_the_activity_timeout,
+    )
     await r.record_async(
         "activity_demo_cache_ignores_unavailable",
         test_web_fetch_activity_ignores_unavailable_demo_cache_when_fallback_enabled,
