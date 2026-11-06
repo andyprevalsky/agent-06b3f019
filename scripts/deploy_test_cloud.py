@@ -186,8 +186,11 @@ def shared_canary_env(root, environ=os.environ):
     deploy worktree's empty .context as "never proven". On 2026-11-06 that re-ran the
     2-machine canary for 11.3 min before any smoke Machine was requested. Explicit overrides win.
     """
-    common = Path(subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], cwd=root,
-                                          text=True).strip())
+    try:
+        common = Path(subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], cwd=root,
+                                              text=True, stderr=subprocess.DEVNULL).strip())
+    except (OSError, subprocess.CalledProcessError):
+        return {}  # Not a Git checkout: the fleet keeps its own per-checkout stamp and lock.
     directory = (common if common.is_absolute() else Path(root) / common).resolve() / 'cloudbench-infra-canary'
     directory.mkdir(mode=0o700, exist_ok=True)
     return {key: environ.get(key) or str(directory / leaf)

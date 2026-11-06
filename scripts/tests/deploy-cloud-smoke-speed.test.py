@@ -45,6 +45,10 @@ class SharedCanaryStamp(unittest.TestCase):
             self.assertEqual(env['FLEET_INFRA_CANARY_STAMP'], '/x/stamp')
             self.assertTrue(env['FLEET_INFRA_CANARY_LOCK'].endswith('cloudbench-infra-canary/transaction.lock'))
 
+    def test_a_root_outside_git_keeps_the_fleet_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(cloud.shared_canary_env(Path(tmp), {}), {})
+
     def test_the_smoke_launch_passes_the_shared_stamp_to_the_fleet(self):
         source = (Path(cloud.__file__)).read_text()
         self.assertIn("'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root)}", source)
