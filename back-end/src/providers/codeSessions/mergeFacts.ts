@@ -15,6 +15,7 @@
  * already-confirmed merge of the same head is reused without calling GitHub.
  */
 import { parseGithubUrl } from '../github';
+import { githubFetch } from '../githubTokenPool';
 import { createLogger } from '../logger';
 import type { RepoFacts } from './lifecycle';
 
@@ -49,7 +50,10 @@ function githubApiBase(): string {
   return (process.env.GITHUB_API_BASE_URL || 'https://api.github.com').replace(/\/+$/, '');
 }
 
-/** One GitHub REST call (GET by default) with the backend's GITHUB_TOKEN; shared with publish. */
+/**
+ * One GitHub REST call (GET by default); shared with publish. Reads use the
+ * token pool; a POST (opening a PR) keeps the primary GITHUB_TOKEN identity.
+ */
 export async function githubJson(
   fetchImpl: FetchLike,
   path: string,
@@ -59,14 +63,18 @@ export async function githubJson(
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
   };
-  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   if (init.body !== undefined) headers['Content-Type'] = 'application/json';
-  const response = await fetchImpl(`${githubApiBase()}${path}`, {
-    method: init.method ?? 'GET',
-    headers,
-    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
-    signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
-  });
+  const method = init.method ?? 'GET';
+  const response = await githubFetch(
+    `${githubApiBase()}${path}`,
+    {
+      method,
+      headers,
+      ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
+    },
+    { fetchImpl, identity: method === 'GET' ? 'pool' : 'primary' }
+  );
   const body: unknown = response.status === 204 ? null : await response.json().catch(() => null);
   return { status: response.status, body };
 }

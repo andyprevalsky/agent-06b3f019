@@ -1,4 +1,5 @@
 import { mapWithConcurrency } from '../../providers/concurrency';
+import { recordGithubResponse } from '../../providers/githubTokenPool';
 import { createLogger } from '../../providers/logger';
 import { GITHUB_REPO, githubApiTokenCandidates } from './config';
 
@@ -54,6 +55,7 @@ async function fetchGithubCommitPage(
       'X-GitHub-Api-Version': '2022-11-28',
     },
   });
+  recordGithubResponse(token, response.status, response.headers);
   if (!response.ok) throw new Error(`GitHub ${response.status}`);
   const commits = (await response.json()) as Array<{
     commit: { committer?: { date?: string | null }; author?: { date?: string | null } };

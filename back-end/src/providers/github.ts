@@ -1,4 +1,5 @@
 import { prisma } from './database';
+import { githubFetch } from './githubTokenPool';
 import { createLogger } from './logger';
 
 const log = createLogger('GitHub');
@@ -40,32 +41,19 @@ export function parseGithubUrl(url: string): { owner: string; repo: string } | n
   return { owner: match[1], repo: match[2] };
 }
 
-function githubApiAuthHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    Accept: 'application/vnd.github+json',
-  };
-  const token = [process.env.GITHUB_TOKEN ?? '', process.env.GITHUB_DISPATCH_TOKEN ?? '']
-    .map((value) => value.trim())
-    .find((value) => value !== '');
-  if (token !== undefined) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  return headers;
-}
-
 type GithubRepoVisibility = 'public' | 'private' | 'missing' | 'unknown';
 
 /**
  * Resolve whether a GitHub repo exists and is publicly cloneable.
- * Unauthenticated requests work for public repos; a configured token improves rate limits.
+ * Unauthenticated requests work for public repos; a pool token (githubTokenPool) improves rate limits.
  */
 export async function fetchGithubRepoVisibility(
   owner: string,
   repo: string
 ): Promise<GithubRepoVisibility> {
   try {
-    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-      headers: githubApiAuthHeaders(),
+    const response = await githubFetch(`https://api.github.com/repos/${owner}/${repo}`, {
+      headers: { Accept: 'application/vnd.github+json' },
     });
     if (response.status === 404) return 'missing';
     if (!response.ok) {
@@ -99,10 +87,10 @@ export async function fetchGithubBranchHeadSha(
   branch: string
 ): Promise<string | null> {
   try {
-    const response = await fetch(
+    const response = await githubFetch(
       `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
       {
-        headers: { ...githubApiAuthHeaders(), Accept: 'application/vnd.github.sha' },
+        headers: { Accept: 'application/vnd.github.sha' },
         signal: AbortSignal.timeout(10_000),
       }
     );
