@@ -188,6 +188,30 @@ describe('optimistic send to a running agent', () => {
     expect(confirm).not.toHaveBeenCalled();
     expect(result.current.messageInput).toBe('helllo');
   });
+  it('a failed POST keeps the failed text ahead of a draft typed while it was pending', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => (release = resolve));
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/messages`, async () => {
+        await pending;
+        return HttpResponse.json({ error: 'boom' }, { status: 500 });
+      }),
+    );
+    const { props, drop } = args();
+    const { result } = renderHook(() => useMessageSending(props));
+    act(() => result.current.setMessageInput('helllo'));
+    let send!: Promise<void>;
+    act(() => {
+      send = result.current.handleSendMessage();
+    });
+    act(() => result.current.setMessageInput('next thought'));
+    await act(async () => {
+      release();
+      await send;
+    });
+    expect(drop).toHaveBeenCalledTimes(1);
+    expect(result.current.messageInput).toBe('helllo\nnext thought');
+  });
 });
 
 describe('optimistic USER row lifecycle', () => {

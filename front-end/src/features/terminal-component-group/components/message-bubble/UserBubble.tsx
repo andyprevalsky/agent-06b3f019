@@ -74,7 +74,7 @@ function MetaLine({ timestamp, sending }: { timestamp: string; sending: boolean 
           Sending
           <span
             aria-hidden
-            className="h-3 w-3 animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
+            className="h-3 w-3 motion-safe:animate-spin rounded-full border-[1.5px] border-current border-t-transparent"
           />
         </span>
       )}

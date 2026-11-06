@@ -6,7 +6,8 @@ import type { ClientSource } from '@/lib/clientSource';
  *    |                                  |  (input cleared at once; the bubble
  *    |                                  |   reads "Sending" until the agent's
  *    |                                  |   next step, optimisticUserMessages.ts)
- *    |                                  +--fail--> bubble dropped, draft restored
+ *    |                                  +--fail--> bubble dropped, text restored
+ *    |                                       (ahead of any draft typed meanwhile)
  *    |
  *    +-- new goal --> [STAGED AGENT + USER BUBBLE] --> [CREATING]
  *                              |                         |
@@ -356,8 +357,9 @@ export function useMessageSending({
       } catch (error: unknown) {
         if (staged !== null) {
           staged.drop();
+          // Keep the failed text even if a new draft was started meanwhile.
           const unsent = messageInput;
-          setMessageInput((current) => (current === '' ? unsent : current));
+          setMessageInput((current) => (current === '' ? unsent : `${unsent}\n${current}`));
         }
         const msg = error instanceof Error ? error.message : '';
         if (msg === 'Not authenticated' || msg.includes('401') || msg.includes('Unauthorized')) {
