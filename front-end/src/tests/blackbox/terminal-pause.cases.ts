@@ -366,4 +366,52 @@ export function terminalPauseCases({ ctxState, setCurrentView, resetAnimationSta
     expect(view.result.current.agents[0].status).toBe('PAUSED');
     view.unmount();
   });
+
+  it('keeps a revisionless accepted pause across an old credit state until PAUSED is observed', async () => {
+    const agent = makeAgent({ status: 'OUT_OF_CREDITS' });
+    ctxState.agent = agent;
+    ctxState.selectedAgentId = agent.agent_id;
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/pause`, () => HttpResponse.json({ success: true })),
+      http.get(`${API_BASE}/agents/:agentId`, () =>
+        HttpResponse.json({ error: 'unavailable' }, { status: 503 }),
+      ),
+    );
+    const view = renderHook(() => useTerminalAgents('agents', setCurrentView, resetAnimationState));
+    await act(async () => view.result.current.handlePauseAgent());
+    ctxState.agent = { ...agent, status: 'ACTIVE' };
+    view.rerender();
+    expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+    ctxState.agent = { ...agent, status: 'PAUSED' };
+    view.rerender();
+    ctxState.agent = { ...agent, status: 'ACTIVE' };
+    view.rerender();
+    expect(view.result.current.agentDetail?.status).toBe('ACTIVE');
+    view.unmount();
+  });
+
+  it('keeps canonical control ordering when a legacy cached list omits its revision', async () => {
+    const agent = makeAgent({ status: 'PAUSED', user_control_revision: 3 });
+    ctxState.agent = agent;
+    ctxState.selectedAgentId = agent.agent_id;
+    server.use(
+      http.get(`${API_BASE}/agents`, () =>
+        HttpResponse.json({
+          agents: [
+            {
+              ...agent,
+              status: 'ACTIVE',
+              user_control_revision: undefined,
+              updated_at: '2099-01-01T00:00:00Z',
+            },
+          ],
+        }),
+      ),
+    );
+    const view = renderHook(() => useTerminalAgents('agents', setCurrentView, resetAnimationState));
+    await act(async () => view.result.current.loadAgents());
+    expect(view.result.current.agentDetail?.user_control_revision).toBe(3);
+    expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+    view.unmount();
+  });
 }

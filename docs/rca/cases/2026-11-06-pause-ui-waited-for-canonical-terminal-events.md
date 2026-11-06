@@ -145,3 +145,5 @@ before and pass after its correction. Invalid timestamps preserve detail
 status, and the selected-agent ref updates only for a committed selection.
 The additive default-zero column requires the normal production migration;
 this record does not claim that migration or deployment has completed.
+
+Late review compatibility cases now preserve revisionless acceptance across stale credit status and retain known canonical control ordering when a cached legacy list omits its revision. Both regressions fail before the guard changes and pass afterward; the combined terminal/context owning suites pass 69 tests. Production verification remains pending.

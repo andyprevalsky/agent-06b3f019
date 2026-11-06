@@ -17,6 +17,27 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
 
 class Cycle(unittest.TestCase):
+    def test_native_cloud_rejects_unsupported_host_before_coordinator_admission(self):
+        plan = copy.deepcopy(self.plan)
+        plan['gates'][1].update(native_cloud=True, case_protocol=True,
+                                command=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')],
+                                worker_transport='benchmark-cloud-cli')
+        with patch.object(sys, 'platform', 'darwin'):
+            with self.assertRaisesRegex(ValueError, 'native cloud.*Linux'):
+                c.validate_plan(plan, self.root)
+
+    def test_environment_fingerprint_ignores_codex_call_identity_but_binds_launch_inputs(self):
+        with patch.dict(os.environ, {'CODEX_TOOL_CALL_ID': 'call-one', 'PATH': '/fixture/bin',
+                                     'SNAPSHOT_LOOP_TOKEN': 'original'}, clear=True):
+            original = c.environment_digest()
+            os.environ['CODEX_TOOL_CALL_ID'] = 'call-two'
+            self.assertEqual(original, c.environment_digest())
+            os.environ['PATH'] = '/changed/bin'
+            self.assertNotEqual(original, c.environment_digest())
+            os.environ['PATH'] = '/fixture/bin'
+            os.environ['SNAPSHOT_LOOP_TOKEN'] = 'inherited'
+            self.assertNotEqual(original, c.environment_digest())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -4113,6 +4134,43 @@ class RelayStartupEvidence(unittest.TestCase):
         result=subprocess.run([sys.executable,str(ROOT/'scripts/tests/fixtures/native_campaign_hub_join.py'),
                                str(self.target/'run-bench-campaign.py')],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    def test_native_hub_join_attempts_later_owners_after_each_failure(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        runs=self.base/'.context/deploy-cloud'/('a'*64)/'runs'
+        hub=runs/'_hub';hub.mkdir(parents=True)
+        for index,content in enumerate(['missing=port\n','port=2\n','port=3\n']):
+            (hub/f'agent-link-server.{index}.owner').write_text(content)
+        calls=[]
+        def terminate(command,**_kwargs):
+            calls.append(command[-4])
+            if command[-4]=='2':raise subprocess.CalledProcessError(1,command)
+        with patch.dict(os.environ,{'DEPLOY_NATIVE_HUB_JOIN':'1','CLOUDBENCH_RUNS_ROOT':str(runs)}), \
+             patch.object(subprocess,'run',side_effect=terminate):
+            with self.assertRaisesRegex(ValueError,'native Hub join incomplete'):
+                module['join_native_hubs'](self.base,runs.parent/'campaigns'/('deploy-'+runs.parent.name))
+        self.assertEqual(calls,['2','3'])
+
+    def test_campaign_persists_fixed_commands_before_any_controller_admission(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        namespace=module['main'].__globals__
+        tasks=['fixture-'+str(i)for i in range(600)]
+        arguments=['campaign','--root',str(self.base),'--runs','1','--concurrency','600','--retry-infra','0',
+                   '--forward-arg=--ref','--forward-arg='+'a'*40,*['--task='+name for name in tasks]]
+        def refuse_inventory(*_args,**_kwargs):raise RuntimeError('fixture refuses before controller admission')
+        replacements=dict(campaign_workspace=lambda root,_forward:(root,None),provider_capacity_refusal=lambda _n:None,
+                          scorecard_hooks=lambda:None,start_shared_inventory=refuse_inventory,
+                          publish_campaign_group=lambda *_a,**_kw:True)
+        with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),             patch.dict(os.environ,{'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'command-proof'}):
+            self.assertEqual(module['main'](),1)
+        summary=json.loads((self.base/'campaigns/command-proof/summary.json').read_text())
+        self.assertEqual(summary['peak_concurrency'],0)
+        self.assertEqual(len(summary['jobs']),600)
+        for job in summary['jobs']:
+            self.assertEqual(job.get('controller_command'),['bash',str(self.base/'scripts/run-bench'),job['task'],'--ref','a'*40,'--foreground'])
+            self.assertIsNone(job.get('controller_pid'))
 
     def preallocation_fixture(self):
         import hashlib,shutil,time

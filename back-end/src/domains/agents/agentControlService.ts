@@ -2,7 +2,7 @@
  * Agent control service — pause, resume, restart, update status, update config, signals.
  */
 
-import type { AgentStatus } from '@prisma/client';
+import type { AgentStatus } from './types';
 
 import {
   getTemporalClient,

@@ -125,7 +125,8 @@ def source_mode(path: Path) -> int:
 
 
 def environment_digest() -> str:
-    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID"}
+    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
+                 "CODEX_TOOL_CALL_ID"}
     return digest({k: v for k, v in os.environ.items() if k not in transient})
 
 
@@ -179,6 +180,9 @@ def validate_plan(plan: dict, root: Path = ROOT) -> None:
         if not isinstance(name, str) or not NAME.fullmatch(name) or name in names:
             raise ValueError("gate names must be unique safe identifiers")
         names.add(name)
+        if (gate.get('native_cloud') is True
+                and gate.get('worker_transport') == 'benchmark-cloud-cli' and sys.platform != 'linux'):
+            raise ValueError(f'{name}: native cloud supervision requires Linux before adapter admission')
         command(gate.get("command"))
         if any("--reuse-passed" in arg for arg in gate["command"]):
             raise ValueError("staged runs require fresh execution, not pass-cache reuse")

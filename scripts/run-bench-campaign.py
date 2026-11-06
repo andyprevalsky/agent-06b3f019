@@ -41,16 +41,22 @@ def join_native_hubs(root, campaign):
     hub = runs/'_hub'
     if hub.is_symlink():
         raise ValueError('native Hub root is a symlink')
+    failures = []
     for owner in sorted(hub.glob('agent-link-server.*.owner')):
-        if owner.is_symlink() or owner.resolve().parent != hub:
-            raise ValueError('native Hub owner path changed')
-        rows = [line.split('=', 1) for line in owner.read_text().splitlines()]
-        fields = dict(rows)
-        if len(rows) != len(fields):
-            raise ValueError('duplicate native Hub owner fields')
-        subprocess.run(['bash', '-c', 'source "$1"; cloudbench_terminate_central_hub_owner "$2" "$3" "$4" "$5" 10',
-                        'native-hub-join', str(root/'scripts/lib/cloudbench-env.sh'), fields['port'],
-                        str(runs), str(root), str(owner)], check=True)
+        try:
+            if owner.is_symlink() or owner.resolve().parent != hub:
+                raise ValueError('native Hub owner path changed')
+            rows = [line.split('=', 1) for line in owner.read_text().splitlines()]
+            fields = dict(rows)
+            if len(rows) != len(fields):
+                raise ValueError('duplicate native Hub owner fields')
+            subprocess.run(['bash', '-c', 'source "$1"; cloudbench_terminate_central_hub_owner "$2" "$3" "$4" "$5" 10',
+                            'native-hub-join', str(root/'scripts/lib/cloudbench-env.sh'), fields['port'],
+                            str(runs), str(root), str(owner)], check=True)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            failures.append(f'{owner.name}: {type(error).__name__}')
+    if failures:
+        raise ValueError('native Hub join incomplete: ' + '; '.join(failures))
     return True
 
 
@@ -1446,6 +1452,13 @@ def main() -> int:
                 "log": str(campaign_dir / f"{job_id}.log"),
                 "attempt": 1,
                 "attempts": [],
+                "controller_command": [
+                    "bash",
+                    str(root / "scripts" / "run-bench"),
+                    str(scheduled["task"]),
+                    *args.forward_arg,
+                    "--foreground",
+                ],
             }
         )
 
@@ -2293,15 +2306,7 @@ def main() -> int:
                     environment["RUN_BENCH_CLEANUP_COHORT_ID"] = str(job["_cohort"]["cohort_id"])
                     environment["RUN_BENCH_CLEANUP_JOB"] = str(job["job_id"])
                     environment["RUN_BENCH_CLEANUP_GENERATION"] = str(job.get("attempt", 1))
-                command = [
-                    "bash",
-                    str(root / "scripts" / "run-bench"),
-                    str(job["task"]),
-                    *args.forward_arg,
-                    "--foreground",
-                ]
-                job['controller_command'] = command
-                write_json_atomic(summary_path, state)
+                command = job["controller_command"]
                 log_handle = open(str(job["log"]), "w", encoding="utf-8")
                 process = subprocess.Popen(
                     controller_prefix + command,

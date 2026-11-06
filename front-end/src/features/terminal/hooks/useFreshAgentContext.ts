@@ -12,8 +12,8 @@ function fresherSelectedAgent(detail: AgentDetail | null, listed: Agent | undefi
   }
   if (
     detail.user_control_revision !== undefined &&
-    listed.user_control_revision !== undefined &&
-    listed.user_control_revision < detail.user_control_revision
+    (listed.user_control_revision === undefined ||
+      listed.user_control_revision < detail.user_control_revision)
   )
     return detail;
   return {

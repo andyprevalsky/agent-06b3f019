@@ -246,3 +246,5 @@ Hub reproduces the old orphan flag and passes after this change with no supervis
 TERM, unknown child or orphan. The existing 164-test owning cycle suite and eleven
 targeted native cases pass in the integrated candidate. Raw setup/intermediate
 failures, original sidecars and retained service custody remain preserved.
+
+Review stabilization records immutable controller commands in the initial campaign manifest, avoiding a full manifest rewrite for every launch. Native cloud host validation now rejects unsupported platforms before coordinator admission, and Hub cleanup attempts every independent owner before reporting aggregate failures. Separate causal regressions preserve the old failures. A further causal check proves the deploy environment fingerprint must omit the per-tool CODEX_TOOL_CALL_ID while still binding PATH and inherited SNAPSHOT_LOOP_TOKEN. Historical pre-agent publisher identity remains unresolved; no cleanup credit is inferred from the shape of an inventory health token.

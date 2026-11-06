@@ -52,7 +52,9 @@ export function useAgentPauseRequests(agent: AgentDetail | null) {
     const settled =
       status !== 'ACTIVE' &&
       status !== 'STARTING_UP' &&
-      (acknowledged === undefined || (hasRevision && revision >= acknowledged));
+      (acknowledged === undefined
+        ? status === 'PAUSED' || status === 'COMPLETED' || status === 'FAILED'
+        : hasRevision && revision >= acknowledged);
     if (settled || resumed) {
       clear(agentId, request.token);
     }
