@@ -12,6 +12,7 @@ import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claud
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
 import { closeClaudeCodeSession } from './e2bCloseSession';
+import { sweepAllExpiredCodeSessions } from './codeSessions/lifecycle';
 
 const log = createLogger('Cleanup');
 
@@ -66,6 +67,10 @@ interface TerminalBrowserReleaseLeaseDependencies {
   reconcile: typeof reconcileTerminalAgentBrowserSessions;
   /** Owned-only Tilion orphan release (tilionReaper.ts); never throws into the lease. */
   reapTilion: () => Promise<unknown>;
+  /** Code tasks of agents that finished without their terminal hook releasing them. */
+  reconcileCodeSessions: typeof reconcileTerminalAgentCodeSessions;
+  /** Retire code sessions idle past the TTL for every user, not just the next spawner. */
+  sweepExpiredCodeSessions: () => Promise<unknown>;
 }
 
 export const TERMINAL_BROWSER_RELEASE_LEASE_KEY = 'scheduled-job:terminal-browser-release';
@@ -274,6 +279,8 @@ function terminalBrowserReleaseLeaseDependencies(): TerminalBrowserReleaseLeaseD
     releaseLease: releaseTerminalBrowserReleaseLease,
     reconcile: reconcileTerminalAgentBrowserSessions,
     reapTilion: reconcileOrphanedTilionSessions,
+    reconcileCodeSessions: reconcileTerminalAgentCodeSessions,
+    sweepExpiredCodeSessions: () => sweepAllExpiredCodeSessions(),
   };
 }
 
@@ -292,6 +299,17 @@ export async function runTerminalAgentBrowserReleaseReconcileWithLease(
     // whose row is CLOSED/ERROR yet still live remotely is reaped here.
     await dependencies.reapTilion().catch((error: unknown) => {
       log.error('Tilion orphan reaper failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    // Same lease, same cadence: code sandboxes follow the browser's release rules.
+    await dependencies.reconcileCodeSessions({}, options).catch((error: unknown) => {
+      log.error('Terminal code-session reconcile failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    await dependencies.sweepExpiredCodeSessions().catch((error: unknown) => {
+      log.error('Code session TTL sweep failed', {
         error: error instanceof Error ? error.message : String(error),
       });
     });
@@ -458,6 +476,69 @@ export async function releaseAgentCodeSessions(
     }
   }
   return released;
+}
+
+export interface TerminalCodeReleaseDependencies {
+  findTerminalAgentIds: (batchSize: number) => Promise<string[]>;
+  releaseCodeSessions: (agentId: string) => Promise<number>;
+}
+
+function terminalCodeReleaseDependencies(): TerminalCodeReleaseDependencies {
+  return {
+    // One indexed-by-status scan of ACTIVE tasks, bounded by the batch: cost grows with
+    // leaked tasks, never with live agents.
+    findTerminalAgentIds: async (batchSize) => {
+      const agents = await prisma.$queryRaw<Array<{ agentId: string }>>(Prisma.sql`
+        SELECT DISTINCT task."agentId" AS "agentId"
+        FROM "ClaudeCodeSession" AS task
+        INNER JOIN "Agent" AS agent ON agent.id = task."agentId"
+        WHERE task.status::text = 'ACTIVE'
+          AND (agent.status::text IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
+               OR agent."deletedAt" IS NOT NULL)
+        ORDER BY task."agentId" ASC
+        LIMIT ${batchSize}
+      `);
+      return agents.map((agent) => agent.agentId);
+    },
+    releaseCodeSessions: (agentId) => releaseAgentCodeSessions(agentId),
+  };
+}
+
+/**
+ * Durable retry for code tasks of agents that are already terminal or archived.
+ * The terminal-status hook releases them once; a worker death, a backend error
+ * or an agent that finished before the hook existed must not leave a sandbox
+ * rented until E2B's own timeout pauses it forever. Failures are isolated per
+ * agent; the batch and deadline bound the run.
+ */
+export async function reconcileTerminalAgentCodeSessions(
+  overrides: Partial<TerminalCodeReleaseDependencies> = {},
+  options: TerminalBrowserReleaseOptions = {}
+): Promise<TerminalBrowserReleaseSummary> {
+  const dependencies = { ...terminalCodeReleaseDependencies(), ...overrides };
+  const deadlineAtMs = Math.min(
+    options.deadlineAtMs ?? Date.now() + TERMINAL_BROWSER_RELEASE_MAX_RUN_MS,
+    Date.now() + TERMINAL_BROWSER_RELEASE_MAX_RUN_MS
+  );
+  const batchSize = Math.min(
+    TERMINAL_BROWSER_RELEASE_MAX_BATCH_SIZE,
+    Math.max(1, Math.floor(options.batchSize ?? 100))
+  );
+  const agentIds = await dependencies.findTerminalAgentIds(batchSize);
+  let released = 0;
+  let failed = 0;
+  for (const agentId of agentIds) {
+    if (Date.now() >= deadlineAtMs) break;
+    try {
+      released += await dependencies.releaseCodeSessions(agentId);
+    } catch (error) {
+      failed += 1;
+      log.warn(`Failed to retry code release for terminal agent ${agentId}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { discovered: agentIds.length, released, failed };
 }
 
 /**

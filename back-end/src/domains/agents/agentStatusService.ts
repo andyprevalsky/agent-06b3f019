@@ -1,4 +1,7 @@
-import { releaseAgentBrowserSessions } from '../../providers/agentCleanup';
+import {
+  releaseAgentBrowserSessions,
+  releaseAgentCodeSessions,
+} from '../../providers/agentCleanup';
 import { broadcastAgentUpdate } from '../../providers/chat';
 import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
 import { createLogger } from '../../providers/logger';
@@ -15,6 +18,7 @@ const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 interface UpdateAgentStatusDependencies {
   cleanupPurchaseCards?: (agentId: string) => Promise<void>;
   releaseBrowserSessions?: typeof releaseAgentBrowserSessions;
+  releaseCodeSessions?: typeof releaseAgentCodeSessions;
 }
 
 async function releaseTerminalBrowserSessions(
@@ -35,6 +39,26 @@ async function releaseTerminalBrowserSessions(
     );
   } catch (error) {
     log.warn('Terminal browser-session release unavailable', {
+      agent_id: agentId,
+      status,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function releaseTerminalCodeSessions(
+  agentId: string,
+  status: string,
+  dependencies: UpdateAgentStatusDependencies
+): Promise<void> {
+  // A finished agent's code tasks stay ACTIVE otherwise, and their sandbox runs
+  // until E2B's idle timeout pauses it forever. Persistent sessions are
+  // checkpointed and paused (resumable); one-shot sandboxes are killed. A failed
+  // release leaves the task ACTIVE for the reconciler (agentCleanup.ts).
+  try {
+    await (dependencies.releaseCodeSessions ?? releaseAgentCodeSessions)(agentId);
+  } catch (error) {
+    log.warn('Terminal code-session release unavailable; reconciler will retry', {
       agent_id: agentId,
       status,
       error: error instanceof Error ? error.message : String(error),
@@ -197,6 +221,7 @@ export async function updateAgentStatus(
   if (firstTerminal) {
     const isRoot = before.parentAgentId === null;
     await releaseTerminalBrowserSessions(agentId, body.status, isRoot, dependencies);
+    await releaseTerminalCodeSessions(agentId, body.status, dependencies);
     if (isRoot) {
       await runRootTerminalCleanup(agentId, body.status, dependencies);
       reportAutoRcaOutcome(agentId);

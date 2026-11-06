@@ -317,15 +317,18 @@ export async function markRetired(codeSessionId: string, now = new Date()): Prom
   });
 }
 
-/** Bounded per-user sweep of sessions idle past the TTL. */
+/**
+ * Bounded sweep of sessions idle past the TTL: one user's (the opportunistic
+ * sweep a spawn starts) or, with no user, everyone's (the scheduled sweep).
+ */
 export async function findExpiredCodeSessions(
-  userId: string,
+  userId: string | null,
   limit = 5,
   now = new Date()
 ): Promise<CodeSessionRow[]> {
   return prisma.codeSession.findMany({
     where: {
-      userId,
+      ...(userId === null ? {} : { userId }),
       state: { in: [CODE_SESSION_STATES.PAUSED, CODE_SESSION_STATES.ACTIVE] },
       lastActiveAt: { lt: new Date(now.getTime() - codeSessionTtlMs()) },
     },
