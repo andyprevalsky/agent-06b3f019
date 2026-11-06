@@ -2,6 +2,7 @@ import zlib from 'zlib';
 import { promisify } from 'util';
 import { config } from '../../base/config';
 import { Crypto } from '../../base/crypto';
+import { jsonToBufferSliced } from '../../base/timeSlice';
 import { ENDPOINTS } from './config';
 
 const gzip = promisify(zlib.gzip);
@@ -16,8 +17,9 @@ async function postEncryptedPayload(
   accessToken: string,
   options: { compress: boolean }
 ): Promise<void> {
-  const jsonData = JSON.stringify(payload);
-  let body: Buffer = Buffer.from(jsonData, 'utf8');
+  // Payloads reach tens of MB (IndexedDB); one JSON.stringify froze the main
+  // process (and every window) for seconds, so serialize in time slices.
+  let body: Buffer = await jsonToBufferSliced(payload);
   if (options.compress) {
     body = await gzip(body);
   }

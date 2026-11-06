@@ -38,6 +38,7 @@ import {
   type ExternalObject,
 } from './idb-coding';
 import { serializeKey, serializeValue } from './serialize';
+import { SliceClock } from '../../../base/timeSlice';
 import type { IndexedDBDatabase, IndexedDBObjectStore, IndexedDBRecord } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -91,12 +92,32 @@ class NativeIndexedDb {
   private readonly dbMeta = new Map<string, LdbRecord>();
   private readonly blobLookup = new Map<string, ExternalObject>();
 
-  constructor(dir: string, blobDir: string | null) {
+  constructor(records: LdbRecord[], blobDir: string | null) {
     this.blobDir = blobDir;
-    this.records = [...new RawLevelDb(dir).iterateRecords()];
+    this.records = records;
     this.dbIds = this.readGlobalMetadata();
     this.readDatabaseMetadata();
     this.readObjectStoreMetadata();
+  }
+
+  /** Read every raw record in one synchronous pass (tests / fidelity tooling). */
+  static open(dir: string, blobDir: string | null): NativeIndexedDb {
+    return new NativeIndexedDb([...new RawLevelDb(dir).iterateRecords()], blobDir);
+  }
+
+  /** Read the raw records in time slices so the main event loop keeps running. */
+  static async openSliced(
+    dir: string,
+    blobDir: string | null,
+    clock: SliceClock
+  ): Promise<NativeIndexedDb> {
+    const records: LdbRecord[] = [];
+    for (const record of new RawLevelDb(dir).iterateRecords()) {
+      records.push(record);
+      if (clock.shouldYield()) await clock.yieldToEventLoop();
+    }
+    await clock.checkpoint();
+    return new NativeIndexedDb(records, blobDir);
   }
 
   /** Global metadata → the set of databases. Mirrors `_get_raw_global_metadata` + `GlobalMetadata`. */
@@ -307,7 +328,7 @@ export function readDecodedDatabases(
   name: string;
   stores: { name: string; records: { key: IdbKey['value']; value: unknown }[] }[];
 }[] {
-  const idb = new NativeIndexedDb(dir, blobDir ?? null);
+  const idb = NativeIndexedDb.open(dir, blobDir ?? null);
   return idb.databases.map((db) => ({
     name: db.name,
     stores: idb.objectStores(db.dbidNo).map((store) => {
@@ -320,10 +341,12 @@ export function readDecodedDatabases(
   }));
 }
 
-export function readIndexedDbDatabases(dir: string, blobDir?: string): IndexedDBDatabase[] {
-  const idb = new NativeIndexedDb(dir, blobDir ?? null);
+/**
+ * Decode every database → object store → record, yielding once per record so
+ * a driver can decide whether to hand the event loop back. Returns the result.
+ */
+function* decodeDatabases(idb: NativeIndexedDb): Generator<void, IndexedDBDatabase[]> {
   const databases: IndexedDBDatabase[] = [];
-
   for (const db of idb.databases) {
     const objectStores: IndexedDBObjectStore[] = [];
     for (const store of idb.objectStores(db.dbidNo)) {
@@ -335,18 +358,42 @@ export function readIndexedDbDatabases(dir: string, blobDir?: string): IndexedDB
           } catch (err) {
             records.push({ key: '', value: null, error: getErrorMessage(err) });
           }
+          yield;
         }
       } catch (err) {
-        records.push({
-          key: '',
-          value: null,
-          error: `Failed to iterate records: ${getErrorMessage(err)}`,
-        });
+        const error = `Failed to iterate records: ${getErrorMessage(err)}`;
+        records.push({ key: '', value: null, error });
       }
       objectStores.push({ name: store.name, records });
     }
     databases.push({ name: db.name, objectStores });
   }
-
   return databases;
+}
+
+/** Synchronous decode: holds the calling thread for the whole folder (tests / tooling only). */
+export function readIndexedDbDatabases(dir: string, blobDir?: string): IndexedDBDatabase[] {
+  const decoding = decodeDatabases(NativeIndexedDb.open(dir, blobDir ?? null));
+  for (;;) {
+    const step = decoding.next();
+    if (step.done === true) return step.value;
+  }
+}
+
+/**
+ * Same output as {@link readIndexedDbDatabases}, decoded in time slices of
+ * `clock`'s budget so the Electron main process keeps serving input, IPC and
+ * window events while a large IndexedDB folder is scanned.
+ */
+export async function readIndexedDbDatabasesSliced(
+  dir: string,
+  blobDir: string | undefined,
+  clock: SliceClock = new SliceClock()
+): Promise<IndexedDBDatabase[]> {
+  const decoding = decodeDatabases(await NativeIndexedDb.openSliced(dir, blobDir ?? null, clock));
+  for (;;) {
+    const step = decoding.next();
+    if (step.done === true) return step.value;
+    if (clock.shouldYield()) await clock.yieldToEventLoop();
+  }
 }
