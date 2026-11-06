@@ -1498,3 +1498,74 @@ def test_seed_bootstrap_fixture_does_not_enumerate_ambient_worker_processes():
         assert not observed.exists(), "seed fixture consulted ambient process discovery"
         assert not (folder / "database.state").exists(), "owned fixture database leaked"
         local.stop_services(None, stack=stack)
+
+
+def test_kept_stack_does_not_arm_owner_watch():
+    """A stack the controller is asked to keep must outlive the controller.
+
+    run.sh shuts its stack down once RUN_SH_OWNER_PID is gone. Arming that watch
+    for --keep-services (or a paused checkpoint whose FE link must stay valid)
+    killed the kept stack the moment local.py exited (backend.log: "SIGTERM
+    received" right after "All requested benchmarks passed").
+    """
+    from unittest.mock import patch
+
+    local = load_local()
+    artifact_root = REPO / ".context/test-runs"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    folder = Path(tempfile.mkdtemp(prefix="local-keep-", dir=artifact_root))
+    stack = local.ServiceStack(
+        "fixture",
+        folder,
+        folder / "services.json",
+        folder / "services.log",
+        True,
+        workspace_name="fixture",
+        base_port=22011,
+    )
+
+    class LaunchCaptured(Exception):
+        pass
+
+    launched_envs = []
+    real_popen = subprocess.Popen
+
+    def launch(command, **kwargs):
+        if command != ["bash", "scripts/run.sh", "--benchmark"]:
+            return real_popen(command, **kwargs)
+        launched_envs.append(dict(kwargs["env"]))
+        raise LaunchCaptured()
+
+    def args_for(*, keep_services, checkpoint=None, checkpoint_no_start=False):
+        return SimpleNamespace(
+            keep_services=keep_services,
+            use_existing=False,
+            checkpoint=checkpoint,
+            checkpoint_start_agent_id=None,
+            checkpoint_no_start=checkpoint_no_start,
+        )
+
+    cases = [
+        (args_for(keep_services=False), True),
+        (args_for(keep_services=True), False),
+        (args_for(keep_services=False, checkpoint="iter-3", checkpoint_no_start=True), False),
+    ]
+    with (
+        patch.object(local.subprocess, "Popen", launch),
+        patch.dict(os.environ, {"BENCHMARK_SEED_DUMP": str(folder / "fixture.dump")}),
+    ):
+        for args, _expect_watch in cases:
+            try:
+                local.start_services(
+                    stack,
+                    clean_first=False,
+                    outlive_controller=local.stack_outlives_controller(args),
+                )
+            except LaunchCaptured:
+                pass
+            else:
+                raise AssertionError("fixture launch did not run")
+    assert len(launched_envs) == len(cases), launched_envs
+    for (args, expect_watch), env in zip(cases, launched_envs):
+        assert ("RUN_SH_OWNER_PID" in env) is expect_watch, (vars(args), sorted(k for k in env if k.startswith("RUN_SH")))
+        assert ("RUN_SH_OWNER_START" in env) is expect_watch, vars(args)

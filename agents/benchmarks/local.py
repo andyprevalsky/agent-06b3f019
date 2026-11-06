@@ -1860,6 +1860,7 @@ def start_services(
     tasks: Sequence[str] = (),
     on_process: Callable[[subprocess.Popen], None] | None = None,
     on_owner_ready: Callable[[], None] | None = None,
+    outlive_controller: bool = False,
 ) -> tuple[subprocess.Popen, dict]:
     stack.context_dir.mkdir(parents=True, exist_ok=True)
     if clean_first and not stack.isolated:
@@ -2004,11 +2005,12 @@ def start_services(
         # pinned off here for the non-isolated path).
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
 
-    if stack.isolated:
+    if stack.isolated and not outlive_controller:
         # The stack runs in its own session, so no signal to this controller's
         # group reaches it. A wrapper's grace-period SIGKILL of this process
         # would otherwise orphan it; run.sh shuts down once this exact process
-        # (pid + start time) is gone.
+        # (pid + start time) is gone. A stack the caller asked to keep
+        # (stack_outlives_controller) must not arm that watch.
         env["RUN_SH_OWNER_PID"] = str(os.getpid())
         env["RUN_SH_OWNER_START"] = _own_process_start_ticks()
 
@@ -2261,6 +2263,11 @@ def resolve_repo_path(value: str) -> Path:
 
 def checkpoint_requested(args: argparse.Namespace) -> bool:
     return args.checkpoint is not None or bool(args.checkpoint_start_agent_id)
+
+
+def stack_outlives_controller(args: argparse.Namespace) -> bool:
+    """Whether the started stack is kept running after this controller exits."""
+    return bool(args.keep_services) or (checkpoint_requested(args) and bool(args.checkpoint_no_start))
 
 
 def checkpoint_source_path(task_name: str, args: argparse.Namespace) -> Path:
@@ -3291,6 +3298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     tasks=cohort_tasks,
                     on_process=remember_stack_process,
                     on_owner_ready=stack_owner_ready,
+                    outlive_controller=stack_outlives_controller(args),
                 )
             finally:
                 benchmark_owner.starting = False
@@ -3434,10 +3442,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stop_frontend_tunnel(frontend_tunnel)
                 if dashboard is not None:
                     dashboard.stop()
-                keep_paused_checkpoint_stack = checkpoint_requested(args) and args.checkpoint_no_start
-                if keep_paused_checkpoint_stack and not args.keep_services and not args.use_existing:
-                    print("Keeping benchmark services running so the paused checkpoint FE link remains valid.")
-                if not args.keep_services and not args.use_existing and not keep_paused_checkpoint_stack:
+                if stack_outlives_controller(args) and not args.use_existing:
+                    print(f"Keeping benchmark services running: {stack.context_dir}")
+                elif not args.use_existing:
                     stop_services(process, stack=stack)
         finally:
             signal.signal(signal.SIGTERM, previous_sigterm)

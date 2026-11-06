@@ -5,6 +5,7 @@ import {
   syncConnectionAfterIntegrationAuthFailure,
 } from './integrationConnectionSync';
 import { claudeEnvelopeExpiredAt, parseClaudeEnvelope } from './claudeOauthEnvelope';
+import type { StoredLogin } from './codeLoginRejection';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -146,26 +147,28 @@ export async function fetchClaudeCodeCredentialsWithMeta(
 
   try {
     const now = new Date();
-    const userIntegration = await prisma.integration.findFirst({
+    // Every connected login of the user, first servable wins (an expired first
+    // row must not hide a live sibling account; availability uses the same rule).
+    const userIntegrations = await prisma.integration.findMany({
       where: {
         userId,
         name: 'claude_code',
         status: 'CONNECTED',
         OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
       },
+      orderBy: [{ createdAt: 'asc' }],
     });
 
-    if (userIntegration) {
+    for (const userIntegration of userIntegrations) {
       const decrypted = decryptIntegrationCredentials(userIntegration, decryptionKey);
-      if (decrypted) {
-        const result = buildClaudeCodeCredentialResult(decrypted, 'user', userId);
-        if (result) {
-          log.info(`Serving user Claude Code credentials for ${userId}`);
-          return { ...result, integrationId: userIntegration.id };
-        }
-        log.warn(`User Claude Code integration for ${userId} has no usable OAuth token`);
+      const result = decrypted ? buildClaudeCodeCredentialResult(decrypted, 'user', userId) : null;
+      if (result) {
+        log.info(`Serving user Claude Code credentials for ${userId}`);
+        return { ...result, integrationId: userIntegration.id };
       }
-    } else {
+      log.warn(`User Claude Code integration ${userIntegration.id} has no usable OAuth token`);
+    }
+    if (userIntegrations.length === 0) {
       log.info(
         `No active claude_code integration for user ${userId} (none synced or rate-limited)`
       );
@@ -279,6 +282,41 @@ export async function fetchPoolCredentials(
     });
     return null;
   }
+}
+
+/**
+ * The stored access token of a `claude_code` login and its expiry, for comparing
+ * with the token a sandbox held when the provider rejected it (codeLoginRejection.ts).
+ * Null when the row has no readable credential; undefined when this server has no decryption key.
+ */
+export async function storedClaudeLogin(
+  integrationId: string
+): Promise<StoredLogin | null | undefined> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) return undefined;
+  const integration = await prisma.integration.findUnique({
+    where: { id: integrationId },
+    select: { id: true, config: true },
+  });
+  const decrypted = integration ? decryptIntegrationCredentials(integration, decryptionKey) : null;
+  const envelope = decrypted ? parseClaudeEnvelope(decrypted) : null;
+  return envelope ? { accessToken: envelope.accessToken, expiresAt: envelope.expiresAt } : null;
+}
+
+/**
+ * Whether this `claude_code` row's stored access token is provably too close to
+ * expiry for serving (buildClaudeCodeCredentialResult skips it). Credential
+ * availability (codeSessions/usageLimit.ts) excludes such rows, so a plan never
+ * promises a subscription that serving then skips for the funded key.
+ */
+export function hasExpiredClaudeCodeToken(row: { id: string; config: unknown }): boolean {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  const decrypted = decryptionKey ? decryptIntegrationCredentials(row, decryptionKey) : null;
+  const envelope = decrypted ? parseClaudeEnvelope(decrypted) : null;
+  return (
+    envelope !== null &&
+    claudeEnvelopeExpiredAt(envelope, Date.now() + SANDBOX_MIN_ACCESS_TOKEN_LIFETIME_MS) !== null
+  );
 }
 
 /** A sandbox must start with at least this much access-token lifetime left. */
@@ -462,21 +500,14 @@ export async function markUserTokenRateLimited(
       ...(options?.integrationId ? { id: options.integrationId } : {}),
       ...(options?.accountId ? { accountId: options.accountId } : {}),
     };
-    // S33: an auth failure must name the credential that failed. Without an
-    // integration or account id it cannot tell a user's accounts apart, so it
-    // never expires more than one row (one bad token expired every healthy
-    // sibling subscription).
+    // S33/T7: an auth failure must name the credential that failed. Without an
+    // integration or account id it cannot tell the failed login from the user's
+    // other rows, so it expires none (prod: updated:3 with integrationId:null).
     if (!options?.integrationId && !options?.accountId) {
-      const candidates = await prisma.integration.count({
-        where: { ...scopedWhere, status: 'CONNECTED' },
+      log.warn(`User token auth failure for ${userId} names no credential; not expiring`, {
+        failureReason: options?.failureReason,
       });
-      if (candidates > 1) {
-        log.warn(`User token auth failure for ${userId} names no credential; not expiring`, {
-          candidates,
-          failureReason: options?.failureReason,
-        });
-        return;
-      }
+      return;
     }
     const updated = await prisma.integration.updateMany({
       where: scopedWhere,

@@ -1,0 +1,40 @@
+{
+  "format": "PR1691-PARENT-CLOSEOUT-VALIDATION-V1",
+  "observed_at": "2026-11-06T02:17:02.603843+00:00",
+  "deployed_source": "05826f6dd4f260fdc3602ab3e63095d13d2ddc81",
+  "records_branch_base": "beb1ceecfd44045a6b4b3a25665c07d2575a5119",
+  "documentation_contract_tests": {
+    "command": "python3 scripts/tests/run-deploy-structural-gates.test.py StructuralGateDocumentationTests",
+    "passed": 8,
+    "failed": 0
+  },
+  "archive_index_check": {
+    "unique_objects": 6,
+    "member_instances": 105113,
+    "original_member_bytes": 26060061408,
+    "ciphertext_bytes": 6367022555,
+    "all_four_verification_flags": true,
+    "unsigned_get_denied_for_all_objects_and_sidecars": true,
+    "all_sidecars_authenticated_by_committed_adapter_in_separate_process": true
+  },
+  "content_coverage": {
+    "inventory_records": 105790,
+    "archive_rows": 105023,
+    "bound_archive_rows": 105023,
+    "unbound": 0,
+    "symlinks_resolved": 443,
+    "symlinks_unresolved": 0,
+    "dedup_verified": 44,
+    "error_rows": 0,
+    "post_capture_changed_vanished_new": [
+      0,
+      0,
+      0
+    ]
+  },
+  "private_proof_index_check": {
+    "pointers": 27,
+    "verified_against_separately_restored_control_archive": 27
+  },
+  "scope": "Records-only closeout. Does not relabel original failures, claim recovery of previously lost data, or perform devbox deletion."
+}

@@ -17,7 +17,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { AsciiLoader } from '@/features/terminal-component-group';
 import { MessageList } from '@/features/terminal-component-group';
 
-import { useOpeningAnimation } from '../hooks/useOpeningAnimation';
+import { useOpeningAnimationState, type OpeningAnimationStore } from '../hooks/useOpeningAnimation';
 import type { AgentSlice, DripSlice, DripStyles } from '../types';
 
 import { OpeningMessageDisplay } from './OpeningMessageDisplay';
@@ -25,7 +25,7 @@ import { OpeningMessageDisplay } from './OpeningMessageDisplay';
 interface ChatScrollAreaProps {
   agents: AgentSlice;
   drip: DripSlice;
-  opening: ReturnType<typeof useOpeningAnimation>;
+  opening: OpeningAnimationStore;
   messagesEndRef: React.RefObject<HTMLDivElement>;
 }
 
@@ -91,11 +91,7 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
                 showNetworkDots ? (
                   <p className="text-muted-foreground">Loading AI Network{a.loadingDots}</p>
                 ) : (
-                  <OpeningMessageDisplay
-                    currentMessageIndex={opening.currentMessageIndex}
-                    animationPhase={opening.animationPhase}
-                    revealProgress={opening.revealProgress}
-                  />
+                  <OpeningCaption opening={opening} />
                 )
               ) : null}
             </div>
@@ -117,6 +113,19 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
         <div ref={messagesEndRef} />
       </div>
     </ScrollArea>
+  );
+}
+
+/** The only subscriber to the opening cycle: its 20ms reveal ticks re-render
+ * this caption alone, not the chat column and composer around it. */
+function OpeningCaption({ opening }: { opening: OpeningAnimationStore }) {
+  const { currentMessageIndex, animationPhase, revealProgress } = useOpeningAnimationState(opening);
+  return (
+    <OpeningMessageDisplay
+      currentMessageIndex={currentMessageIndex}
+      animationPhase={animationPhase}
+      revealProgress={revealProgress}
+    />
   );
 }
 

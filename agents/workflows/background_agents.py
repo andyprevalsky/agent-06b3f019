@@ -582,6 +582,9 @@ class BackgroundAgentsMixin:
         session_id = metadata.get("session_id")
         if isinstance(session_id, str) and session_id:
             outcome["session_id"] = session_id
+        # A code run that ended with its session saved and paused (user pause,
+        # idle C11, usage limit C15): the executor's structured outcome.
+        outcome["session_paused"] = metadata.get("session_paused") is True
 
     # ----------------------------------------------------------- completion
 
@@ -623,7 +626,13 @@ class BackgroundAgentsMixin:
         # A user pause / cost limit cancels activity-backed work exactly like a
         # foreground spawn (helpers/tool_interrupts.py): it reports failed.
         status = "failed" if failed else "completed"
-        if failed and paused and not kill_reason:
+        # Paused = resumable: a user pause ended the run (browser: cancelled as
+        # failed), or the executor reported its session paused (code).
+        if (
+            not kill_reason
+            and record.get("agent_type") in RESUMABLE_TASK_TYPES
+            and ((failed and paused) or outcome.get("session_paused") is True)
+        ):
             status = PAUSED_TASK_STATUS
         record["status"] = status
         record["finished_at"] = workflow.now().isoformat()
@@ -652,6 +661,8 @@ class BackgroundAgentsMixin:
                 structured_response=structured_response,
                 file_pointers=outcome.get("file_pointers"),
                 session_id=outcome.get("session_id"),
+                # FINAL_ANSWER / FAILED follow the run's outcome; "paused" is the task state.
+                failed=bool(failed),
             )
             try:
                 await self._post_message(
@@ -665,6 +676,7 @@ class BackgroundAgentsMixin:
                         idempotency_key=key,
                         run=run,
                         session_id=outcome.get("session_id"),
+                        failed=bool(failed),
                     ),
                 )
             except Exception as exc:

@@ -7435,6 +7435,83 @@ async def test_user_auth_error_report_names_the_leased_integration():
         body = posted[0]
         assert body["source"] == "user" and body["failureReason"] == "auth_error", body
         assert body["integrationId"] == "integration-s33", f"{token_type}: {body}"
+        # T7: and the held token's fingerprint, so an expired or re-synced
+        # login is never disabled for a rejection of an older token.
+        from helpers.llm import credential_fingerprint
+
+        assert body["credential"] == credential_fingerprint("token"), f"{token_type}: {body}"
+
+
+async def test_rotated_attempt_failures_are_reported_with_their_own_login():
+    """T7 / CodeRabbit 4475152998: each failed attempt in one Rose call reports
+    its own login. Lease A is rate-limited, the rotated lease B is rejected;
+    A must never be reported with B's auth_error (a healthy login disabled by a
+    misattributed failure). Uses the real lease closures and backend payloads.
+    """
+    import providers.rose.gpt_auth as gpt_auth_module
+    from helpers.llm import _build_compute_auth_context, credential_fingerprint
+
+    posted = []
+
+    def handler(req):
+        url = str(req.url)
+        if "credentials/token" in url:
+            return httpx.Response(
+                200,
+                json={
+                    "type": "gpt",
+                    "accessToken": "gpt-token-b",
+                    "accountId": "acct-b",
+                    "source": "user",
+                    "integrationId": "integration-b",
+                    "lineageKey": "lineage-t7",
+                },
+            )
+        if "token/rate-limited" in url:
+            posted.append(json.loads(req.content))
+            return httpx.Response(200, json={"ok": True})
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            if "gpt-token-a" in req.headers.get("authorization", ""):
+                return httpx.Response(429, json={"error": {"type": "usage_limit_reached"}})
+            return httpx.Response(401, json={"error": {"message": "revoked"}})
+        return httpx.Response(500, text="fallback unavailable in this fixture")
+
+    set_mock_handler(handler)
+    original_backoff = gpt_auth_module._backoff_for_429
+    gpt_auth_module._backoff_for_429 = lambda response, attempt: 0.0
+    try:
+        auth = _build_compute_auth_context(
+            {
+                "type": "gpt",
+                "accessToken": "gpt-token-a",
+                "accountId": "acct-a",
+                "source": "user",
+                "integrationId": "integration-a",
+                "lineageKey": "lineage-t7",
+            },
+            "user-t7",
+        )
+        assert isinstance(auth, GptAuthContext)
+        client = RoseClient(openrouter_key="ork-x")
+        try:
+            async for _chunk in client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=auth,
+                call_site="test-rotated-attempt-attribution",
+            ):
+                pass
+        except Exception:
+            pass  # only the failure reports matter here
+    finally:
+        gpt_auth_module._backoff_for_429 = original_backoff
+
+    reports = [(body.get("integrationId"), body.get("failureReason"), body.get("credential")) for body in posted]
+    assert ("integration-a", "rate_limit", credential_fingerprint("gpt-token-a")) in reports, reports
+    assert ("integration-b", "auth_error", credential_fingerprint("gpt-token-b")) in reports, reports
+    assert all(
+        not (integration == "integration-a" and reason == "auth_error") for integration, reason, _ in reports
+    ), reports
 
 
 async def test_client_foundry_server_error_falls_through_to_openrouter():
@@ -13189,6 +13266,10 @@ async def run_all_tests():
     await r.record_async(
         "user_auth_error_report_names_the_leased_integration",
         test_user_auth_error_report_names_the_leased_integration,
+    )
+    await r.record_async(
+        "rotated_attempt_failures_are_reported_with_their_own_login",
+        test_rotated_attempt_failures_are_reported_with_their_own_login,
     )
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",

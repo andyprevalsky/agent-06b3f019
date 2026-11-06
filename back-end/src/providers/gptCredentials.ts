@@ -3,6 +3,7 @@ import {
   markConnectionNeedsReconnectFromIntegrationFailure,
   syncConnectionAfterIntegrationAuthFailure,
 } from './integrationConnectionSync';
+import type { StoredLogin } from './codeLoginRejection';
 import { prisma } from './database';
 import { decryptCredentialEnvelope } from './claudeCredentials';
 import { createLogger } from './logger';
@@ -195,7 +196,9 @@ export async function fetchGptCodeCredentialsWithMeta(
   if (!decryptionKey) return null;
 
   const now = new Date();
-  const userIntegration = await prisma.integration.findFirst({
+  // First servable login wins: an expired least-recently-used row must not hide
+  // a live sibling account (availability uses the same rule).
+  const userIntegrations = await prisma.integration.findMany({
     where: {
       userId,
       name: 'gpt_code',
@@ -205,7 +208,7 @@ export async function fetchGptCodeCredentialsWithMeta(
     orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }, { createdAt: 'asc' }],
   });
 
-  if (userIntegration) {
+  for (const userIntegration of userIntegrations) {
     const decrypted = decryptIntegrationCredentials(userIntegration, decryptionKey);
     const parsed = decrypted ? parseGptCodeEnvelope(decrypted) : null;
     const sandboxAuthJson = decrypted ? toSandboxCodexAuthJson(decrypted) : null;
@@ -434,19 +437,14 @@ export async function markGptUserTokenRateLimited(
       ...(options?.integrationId ? { id: options.integrationId } : {}),
       ...(options?.accountId ? { accountId: options.accountId } : {}),
     };
-    // S33: an auth failure must name the credential that failed. Without an
-    // integration or account id it cannot tell a user's accounts apart, so it
-    // never expires more than one row (one bad token expired every healthy
-    // sibling subscription).
+    // S33/T7: an auth failure must name the credential that failed. Without an
+    // integration or account id it cannot tell the failed login from the user's
+    // other rows, so it expires none (prod: updated:3 with integrationId:null).
     if (!options?.integrationId && !options?.accountId) {
-      const candidates = await prisma.integration.count({ where: scopedWhere });
-      if (candidates > 1) {
-        log.warn(`GPT user token auth failure for ${userId} names no credential; not expiring`, {
-          candidates,
-          failureReason: options?.failureReason,
-        });
-        return;
-      }
+      log.warn(`GPT user token auth failure for ${userId} names no credential; not expiring`, {
+        failureReason: options?.failureReason,
+      });
+      return;
     }
     const updated = await prisma.integration.updateMany({
       where: scopedWhere,
@@ -536,6 +534,44 @@ export async function markGptUserTokenRateLimited(
     return;
   }
   log.info(`GPT user token for ${userId} rate-limited until ${until.toISOString()}`);
+}
+
+/**
+ * The stored access token of a `gpt_code` login and its JWT expiry, for comparing
+ * with the token a sandbox held when Codex reported it unusable
+ * (codeLoginRejection.ts). A malformed `exp` reads as expired, as when serving.
+ */
+export async function storedCodexLogin(
+  integrationId: string
+): Promise<StoredLogin | null | undefined> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) return undefined;
+  const integration = await prisma.integration.findUnique({
+    where: { id: integrationId },
+    select: { id: true, config: true },
+  });
+  const decrypted = integration ? decryptIntegrationCredentials(integration, decryptionKey) : null;
+  const parsed = decrypted ? parseGptCodeEnvelope(decrypted) : null;
+  if (!parsed) return null;
+  const expiresAt = codexAccessTokenExpiry(parsed.accessToken);
+  return { accessToken: parsed.accessToken, expiresAt: expiresAt === 'malformed' ? 0 : expiresAt };
+}
+
+/**
+ * Whether this `gpt_code` row's stored access token is provably inside Codex's
+ * refresh window (or malformed), so serving skips it (toSandboxCodexAuthJson).
+ * Credential availability (codeSessions/usageLimit.ts) excludes such rows.
+ */
+export function hasExpiredCodexToken(row: { id: string; config: unknown }): boolean {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  const decrypted = decryptionKey ? decryptIntegrationCredentials(row, decryptionKey) : null;
+  const parsed = decrypted ? parseGptCodeEnvelope(decrypted) : null;
+  if (!parsed) return false;
+  const expiresAt = codexAccessTokenExpiry(parsed.accessToken);
+  return (
+    expiresAt === 'malformed' ||
+    (expiresAt !== null && expiresAt <= Date.now() + CODEX_ACCESS_TOKEN_REFRESH_WINDOW_MS)
+  );
 }
 
 export async function fetchGptCodeAccessToken(

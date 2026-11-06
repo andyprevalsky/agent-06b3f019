@@ -1,0 +1,113 @@
+{
+ "schema_version": 1,
+ "pr": 1695,
+ "title": "iOS PWA fills the screen; stale builds auto-reload; cut mobile render cost; heavy-account poll churn; agent-message folds",
+ "merge_commit": "02537cb2620356f3b8bb8c0e754a7b0c59ae0cfb",
+ "gated_source": "3fc0006b7b9d8c955a57ad97703ef14f08ebe2ef",
+ "production": {
+  "vercel": "www.roselabs.ai /version.json buildId 774a32f2acc5-mw4hr7pb; 774a32f2 contains merge 02537cb2 (later commits docs/data only); prod CSS carries the standalone html min-height rule; /assets immutable, /version.json no-store \u2014 observed 2026-11-06T04:50Z",
+  "render": "not required (no back-end change in merged diff)",
+  "fly": "not required (no agent runtime change)",
+  "semantic": "chat-lifecycle-ratchet run 42165411310 passed, source_sha=02537cb2 (2026-11-06T05:02Z)",
+  "agentcard": "not selected (no payment surface change)",
+  "mac_local_acceptance": "SKIPPED \u2014 no Mac available: owner-scoped GET /api/local-devices returned HTTP 200 devices=[] at 2026-11-06T05:03:21Z",
+  "device_confirmation": "pending: Amplitude 'iOS Viewport Geometry' standalone events should report visual_height = screen_height (956 on the reporting iPhone) once the installed PWA loads the new build"
+ },
+ "branch_commits": [
+  "2ad2f882b8 fix(front-end): inbound agent messages fold into the work batch like a tool call",
+  "5436ce3d12 fix(front-end): self-contained vite.config build-version plugin; reload guard survives blocked storage",
+  "c5ceba14cd refactor(front-end): build-version plugin lives in src/lib, fixture change reverted",
+  "0e2a50593b fix(front-end): an open, visible page also picks up later deploys",
+  "2995780100 perf(front-end): idle agent/attention polls stop re-rendering the app",
+  "e8bf005f18 test(back-end): Rose-in-Rose preview fixture copies vite-build-version.ts",
+  "06d234984f fix(front-end): review fixes \u2014 keep drafts on chunk errors, all text inputs count, ticker follows layer swap",
+  "a95e83a294 fix(front-end): iOS PWA fills the screen; stale builds auto-reload; cut landing render cost"
+ ],
+ "staged_cycle": {
+  "final": "ready on 3fc0006b7 (evidence/final-cycle-3fc0006b.json.gz, evidence/final-plan-3fc0006b.json.gz)",
+  "rca_reports": [
+   "evidence/rca-report-5436ce3d.json",
+   "evidence/rca-report-cycle11.json"
+  ],
+  "notes": "Earlier cycles on a95e83a2/06d23498/c5ceba14/5436ce3d/13e33a87 failed on worker setup, a vite.config local-import fixture regression (fixed), main's Blacksmith CI break (fixed on main), Fly capacity denials and load-dependent deploy-tooling flakes; their state dirs were retained locally until devbox retirement, summarised here."
+ },
+ "repair_handoffs": [
+  {
+   "test": "scripts/tests/run-deploy-pipeline.test.py::check_observation_validity",
+   "thread": "https://boxes.dev/thread/ph74cbynqsekb8nevh8ns0yh7d8hpw6r",
+   "devbox": "3896fbe6-74aa-4fe7-87d2-4b36121a9f6d",
+   "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1)",
+   "requested": "claude-opus-5-5, reasoning high, speed standard (effective settings not exposed by the platform listing)"
+  }
+ ],
+ "followups": [
+  "browser-biometrics-webdecoy FCaptcha ratchet miss (0.164>0.163): existing owner PR #1703",
+  "test-mass-agent-run-0 judge Codex token unavailable (SKIPPED by standing policy): existing owner PR #1702",
+  "live Tilion flakes (backend browser-provider parity 'fetch failed'; agents browser-tilion multiplexer_arms_webauthn_popups NotSupportedError): tracked by memory browser-provider-live-tilion-flake; not reproduced as product defects",
+  "deploy-test-worker native-CLI timeout and e2b direct-chat event timeout under concurrent load: passed solo",
+  "15 cloudbench-* Machines started 2026-10-30..11-03 in navi-whisper-lux-bench (60 shared units) look leaked; not owned by this deploy, untouched, flagged to the user",
+  "wait-for-code-review latches onto unrelated skipped check runs (polled the CodeRabbit check directly instead)",
+  "polling still downloads ~570 KB/min for a 174-agent account (needs backend conditional requests to cut further)"
+ ],
+ "inventory": [
+  {
+   "path": "PR #1695 source",
+   "disposition": "committed",
+   "detail": "all branch commits merged in 02537cb2"
+  },
+  {
+   "path": "/home/boxes/perf-heavy (worktree, branch perf/heavy-account-mobile)",
+   "disposition": "reproducible-unneeded",
+   "detail": "only commit 9645eecef is patch-equivalent to merged 299578010 (git cherry '-')"
+  },
+  {
+   "path": "/home/boxes/fold-agent-msgs (worktree, branch fix/fold-agent-messages)",
+   "disposition": "reproducible-unneeded",
+   "detail": "2ad2f882b is an ancestor of main"
+  },
+  {
+   "path": "/home/boxes/deploy-workers/{backend,frontend,agentscov,structural,semantic}",
+   "disposition": "reproducible-unneeded",
+   "detail": "clones of committed source + test-run caches; regenerate with scripts/deploy_test_worker.py --prepare-checkout"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-pipeline (cycle states, receipts, logs)",
+   "disposition": "committed-summary",
+   "detail": "final plan/cycle + RCA reports committed here; superseded cycle dirs are diagnostic only"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-env.json",
+   "disposition": "destroyed",
+   "detail": "frozen process environment (may hold credentials); never committed; deleted at retirement"
+  },
+  {
+   "path": "/tmp/perf (profiling builds, screenshots of the user's account, logs)",
+   "disposition": "reproducible-unneeded",
+   "detail": "harness scripts committed under perf-tools/; account screenshots are private and not committed; minted session files shredded"
+  },
+  {
+   "path": "/tmp/amp/geom.json (Amplitude export)",
+   "disposition": "destroyed",
+   "detail": "user analytics data; summary recorded in the RCA case"
+  },
+  {
+   "path": "repo-local secrets (agents/.env, back-end/.env, front-end/.env)",
+   "disposition": "unchanged",
+   "detail": "managed project env; nothing new minted or rotated"
+  }
+ ],
+ "files": {
+  "perf-tools/trace.cjs": "11eca19f846709840d47d14e6a3b78eb90c0efc5f3087924f99261d047ae96e0",
+  "perf-tools/inspect.cjs": "2c935bd1b2df84d02d3254d0b91249558fa8b8992501c2c90db930479f7c4042",
+  "perf-tools/heavy.cjs": "f7de49345b4c9e04dd10cdec85218edb6e6cc2822a88c5b2822767d7f39f00cc",
+  "perf-tools/profile.cjs": "84c86f44aa2d039fe1ea5a6755a6d7d8458dc8bb4d38dc6638be4e0ab75a0221",
+  "perf-tools/stress_obs.sh": "487d90e7b19783a329c496542fee192d480fee4d4f46323beaa971934c3fd95e",
+  "perf-tools/attrib.cjs": "8b2677d8460564356a56ff10df511feaae863fc2c709c0e59c4abcef6ead08ae",
+  "perf-tools/webkit-motion.cjs": "c6897d1ae3fc73d8d60821820858c3a66a85f971b1de495d00fe5e26e420e8fc",
+  "perf-tools/webkit-clip.cjs": "9ab7217e3034f3293c16a562bc5e5bd5e9cab697312840e0ab44b659369a8c1e",
+  "evidence/rca-report-cycle11.json": "84da1db7f53a3f16c2918414ead1f0a61ce686c1fca0208168ba162f9facd089",
+  "evidence/final-cycle-3fc0006b.json.gz": "9cc9b755f4fe5bd513edfb602442ce500ad58da3d2dae577e8101777cf8145a2",
+  "evidence/final-plan-3fc0006b.json.gz": "66f301f2f1b465e94dad50651755fef7d4c6d3e2377f8e95d779d989dd20190c",
+  "evidence/rca-report-5436ce3d.json": "01d718eda5f1df62834efe41a8f2a0de0b33a974241cc2ff4c20f8ecb4895bab"
+ }
+}

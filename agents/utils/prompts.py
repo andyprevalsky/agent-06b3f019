@@ -100,6 +100,10 @@ PLANNER_TASK_IDX_DESCRIPTION = (
     "The 0-based array index of this task, encoded as a string. "
     "This must equal the task's position in tasks and is included only to make dependency lookups easy."
 )
+PLANNER_TASK_TITLE_DESCRIPTION = (
+    'Short task title shown to the user, at most 8 words (for example "Find Blue Bottle store hours"). '
+    "The full task description belongs in goal."
+)
 PLANNER_TASK_GOAL_DESCRIPTION = "Self-contained task brief for the spawned agent. " + SELF_CONTAINED_GOAL_RULE.strip()
 PLANNER_TASK_TOOL_NAME_DESCRIPTION = (
     "The tool to execute for this task. When using spawn_agent for a task, alias it with "
@@ -144,6 +148,7 @@ PLANNER_OUTPUT_ARG_DESCRIPTIONS = f"""
 - title: {PLANNER_RESPONSE_TITLE_DESCRIPTION}
 - tasks: {PLANNER_RESPONSE_TASKS_DESCRIPTION}
 - tasks[].task_idx: {PLANNER_TASK_IDX_DESCRIPTION}
+- tasks[].title: {PLANNER_TASK_TITLE_DESCRIPTION}
 - tasks[].goal: {PLANNER_TASK_GOAL_DESCRIPTION}
 - tasks[].tool_name: {PLANNER_TASK_TOOL_NAME_DESCRIPTION}
 - tasks[].depends_on: {PLANNER_TASK_DEPENDS_ON_DESCRIPTION}
@@ -614,7 +619,6 @@ MANDATORY DECOMPOSITION INVARIANTS:
 - Target: 3-8 tasks per plan. Instead of creating more than 8 tasks, bundle complexity into a single general-purpose agent to meet the 8 sub-tasks cap.
 - Avoid creating a task for spawn_general_purpose_agent with > 50% complexity of the original user task. This can create infinite recursive decompositions and break the entire system. If complexity is meaningfully reduced at each step the issue does not arise.
 - spawn_general_purpose_agent_for_each should be used when applying the same template task to many objects or entities from a list-adjacent piece of information.
-- spawn_code_agent has a 10 min lifetime. Because of that, keep work as tight as you can, while still being self-sustaining and not inconsequential to the goal. Like checkpoints.
 
 ## Example Structures
 

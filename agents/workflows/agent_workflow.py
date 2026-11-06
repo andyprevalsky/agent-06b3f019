@@ -72,7 +72,6 @@ with workflow.unsafe.imports_passed_through():
     from helpers.llm import (
         call_llm_activity,
         fetch_compute_token_activity,
-        mark_compute_token_rate_limited_activity,
         persist_response_schema_activity,
         release_compute_token_lineage_activity,
         set_response_schema_activity,
@@ -1005,6 +1004,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id: Optional[str] = None
         self.gpt_code_token_source: Optional[str] = None
         self.gpt_code_token_pool_id: Optional[str] = None
+        # The exact Integration row the active compute token was leased from;
+        # failure reports name it so they never reach the user's other logins.
+        self.compute_token_integration_id: Optional[str] = None
         self.compute_token_lineage_key: Optional[str] = None
         self.compute_token_demo_cache_affinity_key: Optional[str] = None
         self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
@@ -3973,6 +3975,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id = None
         self.gpt_code_token_source = None
         self.gpt_code_token_pool_id = None
+        self.compute_token_integration_id = None
         self.compute_token_fetched_at = None
         self.claude_max_token_fetched_at = None
 
@@ -3982,6 +3985,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         now = workflow.now()
         self._clear_compute_token()
         self.compute_token_provider = token.get("type")
+        self.compute_token_integration_id = token.get("integrationId")
         if token.get("lineageKey"):
             self.compute_token_lineage_key = token.get("lineageKey")
         if self.compute_token_provider == "claude":
@@ -4084,6 +4088,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "userId": self.user_id,
                 "source": self.claude_max_token_source,
                 "poolTokenId": self.claude_max_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -4097,6 +4102,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "accountId": self.gpt_code_account_id,
                 "source": self.gpt_code_token_source,
                 "poolTokenId": self.gpt_code_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -5429,30 +5435,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if claude_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
-                        f"marking {self.claude_max_token_source} token rate-limited and rotating"
+                        f"re-leasing after the {self.claude_max_token_source} token failed"
                     )
-                    # Mark the offending token rate-limited in DB so the next fetch rotates:
-                    #   source='user' → next fetch falls back to pool
-                    #   source='pool' → fetchPoolToken skips this ID and returns a different pool token
-                    # The cooldown is time-windowed (5 min); token auto-heals after rateLimitedUntil.
-                    if self.claude_max_token_source and self.user_id:
-                        try:
-                            await workflow.execute_activity(
-                                mark_compute_token_rate_limited_activity,
-                                args=[
-                                    "claude",
-                                    self.claude_max_token_source,
-                                    self.user_id,
-                                    self.claude_max_token_pool_id,
-                                    5 * 60,
-                                    None,
-                                    claude_token_error,
-                                ],
-                                start_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=2),
-                            )
-                        except Exception as mark_error:
-                            workflow.logger.warning(f"Failed to mark Claude token rate-limited: {mark_error}")
+                    # RoseClient already reported each failed attempt with that
+                    # attempt's own login (provider cool-down / stall mark). This
+                    # usage names only the last error, and after an in-call
+                    # rotation the cached lease is not the failed one, so the
+                    # workflow never reports it: it only re-leases (T7).
                     if self.user_id:
                         try:
                             await self._rotate_compute_token(self.user_id)
@@ -5488,26 +5477,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if gpt_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ GPT token {gpt_token_error}: actual_model={actual_model}, "
-                        f"marking {self.gpt_code_token_source} token rate-limited and rotating"
+                        f"re-leasing after the {self.gpt_code_token_source} token failed"
                     )
-                    if self.gpt_code_token_source and self.user_id:
-                        try:
-                            await workflow.execute_activity(
-                                mark_compute_token_rate_limited_activity,
-                                args=[
-                                    "gpt",
-                                    self.gpt_code_token_source,
-                                    self.user_id,
-                                    self.gpt_code_token_pool_id,
-                                    5 * 60,
-                                    None,
-                                    gpt_token_error,
-                                ],
-                                start_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=2),
-                            )
-                        except Exception as mark_error:
-                            workflow.logger.warning(f"Failed to mark GPT token rate-limited: {mark_error}")
+                    # RoseClient already reported each failed attempt with that
+                    # attempt's own login (provider cool-down / stall mark). This
+                    # usage names only the last error, and after an in-call
+                    # rotation the cached lease is not the failed one, so the
+                    # workflow never reports it: it only re-leases (T7).
                     if self.user_id:
                         try:
                             await self._rotate_compute_token(self.user_id)

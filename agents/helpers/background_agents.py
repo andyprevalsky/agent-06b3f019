@@ -136,14 +136,17 @@ def build_agent_notification_text(
     structured_response: Any = None,
     file_pointers: Optional[List[Dict[str, Any]]] = None,
     session_id: Optional[str] = None,
+    failed: Optional[bool] = None,
 ) -> str:
     """One completion notification (Codex completion message shape).
 
     completed → FINAL_ANSWER with the uncapped result; failed → FAILED with
-    the error text capped Codex-style (head + tail). A browser ending names its
-    provider ``session_id`` (paused, kept for continuation) on every outcome.
+    the error text capped Codex-style (head + tail). ``failed`` (when given)
+    picks the type for a "paused" task: a pause is FAILED only when the run
+    failed. A browser ending names its provider ``session_id`` (paused, kept
+    for continuation) on every outcome.
     """
-    message_type = NOTIFICATION_MESSAGE_TYPES.get(status, "FAILED")
+    message_type = _notification_message_type(status, failed)
     result = summary.strip() or f"Background {agent_type} agent {status}."
     if message_type != "FINAL_ANSWER":
         result = truncate_middle_tokens(result, ERROR_PAYLOAD_MAX_TOKENS)
@@ -179,6 +182,12 @@ def build_pending_background_status_text(records: List[Dict[str, Any]]) -> Optio
     return "Background agents still running when completion was attempted:\n" + "\n".join(lines)
 
 
+def _notification_message_type(status: str, failed: Optional[bool]) -> str:
+    if failed is not None:
+        return "FAILED" if failed else "FINAL_ANSWER"
+    return NOTIFICATION_MESSAGE_TYPES.get(status, "FAILED")
+
+
 def agent_notification_metadata(
     *,
     address: str,
@@ -188,6 +197,7 @@ def agent_notification_metadata(
     idempotency_key: str,
     run: int = 1,
     session_id: Optional[str] = None,
+    failed: Optional[bool] = None,
 ) -> Dict[str, Any]:
     metadata = {
         "agentNotification": True,
@@ -195,7 +205,7 @@ def agent_notification_metadata(
         "fromAgentAddress": address,
         "agentType": agent_type,
         "status": status,
-        "messageType": NOTIFICATION_MESSAGE_TYPES.get(status, "FAILED"),
+        "messageType": _notification_message_type(status, failed),
         "backgroundTaskId": background_task_id,
         "idempotencyKey": idempotency_key,
     }

@@ -12,8 +12,15 @@ from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
 import structlog
+from yarl import URL
 
 logger = structlog.get_logger()
+
+# Sandboxes built before bounded replay frames send a session's whole history in
+# one frame. Refusing it (aiohttp's default limit is 4 MiB) closed the socket
+# with 1009 before the exit queued behind it could be read, on every reattach.
+# The frame is history the sandbox already holds, so the client accepts it.
+WS_MAX_MSG_SIZE = 0
 
 
 class ClaudeCodeWsClient:
@@ -76,6 +83,8 @@ class ClaudeCodeWsClient:
         self._reconnect_count = 0
         self._exited = False  # Process has exited, don't reconnect
         self._reconnects_exhausted = False  # All reconnect attempts failed
+        self._replay_pending: list[dict[str, Any]] = []  # chunks of an unfinished replay
+        self._events_seen = 0  # events delivered so far (replays resend the whole history)
         self._stdin_ack_event: Optional[asyncio.Event] = None
         self._stdin_ack_result: Optional[bool] = None
 
@@ -92,14 +101,16 @@ class ClaudeCodeWsClient:
 
             self._ws = await asyncio.wait_for(
                 self._session.ws_connect(
-                    self.ws_url,
+                    # Bounded replay frames from sandboxes that support them.
+                    str(URL(self.ws_url).update_query(replay_chunks="1")),
                     heartbeat=30.0,
                     receive_timeout=60.0,
+                    max_msg_size=WS_MAX_MSG_SIZE,
                 ),
                 timeout=30.0,  # Don't hang if sandbox is dead
             )
             self._running = True
-            self._reconnect_count = 0  # Reset on successful connect
+            self._replay_pending = []
             logger.info("[ClaudeCodeWs] Connected", url=self.ws_url[:60])
 
             # Notify connection state change
@@ -242,6 +253,8 @@ class ClaudeCodeWsClient:
 
             elif msg_type == "code_agent_event":
                 event = msg.get("data")
+                self._events_seen += 1
+                self._made_progress()
                 if isinstance(event, dict) and self.on_event:
                     await self.on_event(event)
 
@@ -249,14 +262,30 @@ class ClaudeCodeWsClient:
                 events = msg.get("data")
                 if isinstance(events, list):
                     replayed = [event for event in events if isinstance(event, dict)]
-                    if self.on_events_replay:
-                        await self.on_events_replay(replayed)
-                    elif self.on_event:
-                        for event in replayed:
-                            await self.on_event(event)
+                    # A chunked replay (chunk 0 starts it, `last` ends it) is
+                    # applied as one history: acting on half of it could end a
+                    # session on a turn the next chunk shows still running.
+                    chunk = msg.get("chunk")
+                    if isinstance(chunk, int) and chunk > 0:
+                        self._replay_pending.extend(replayed)
+                    else:
+                        self._replay_pending = replayed
+                    if msg.get("last") is not False:
+                        replayed, self._replay_pending = self._replay_pending, []
+                        if self.on_events_replay:
+                            await self.on_events_replay(replayed)
+                        elif self.on_event:
+                            for event in replayed:
+                                await self.on_event(event)
+                        # The history is append-only: only a replay longer
+                        # than what was already delivered is progress.
+                        if len(replayed) > self._events_seen:
+                            self._made_progress()
+                        self._events_seen = len(replayed)
 
             elif msg_type == "exit":
                 # Process exited - don't reconnect after this
+                self._made_progress()
                 exit_code = msg.get("code", 0)
                 logger.info("[ClaudeCodeWs] Process exited", exit_code=exit_code)
                 self._exited = True
@@ -293,6 +322,12 @@ class ClaudeCodeWsClient:
             # Raw data, treat as stdout
             logger.debug("[ClaudeCodeWs] Received raw data", bytes=len(data))
             await self.on_output(data, False)
+
+    def _made_progress(self) -> None:
+        # The reconnect budget counts consecutive connections that delivered
+        # nothing new. A handshake alone is not progress: a sandbox whose
+        # replay always fails would otherwise be retried forever.
+        self._reconnect_count = 0
 
     async def _reconnect(self) -> bool:
         """
