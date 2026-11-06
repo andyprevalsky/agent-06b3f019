@@ -42,7 +42,9 @@ def check(evidence: dict, config: dict) -> tuple[bool, str]:
 
     problems = []
     for failure in failed:
-        sized = f" ({_mib(failure['worktree_bytes'])} against a {_mib(failure['cap_bytes'])} cap)" if failure.get("worktree_bytes") and failure.get("cap_bytes") else ""
+        sized = ""
+        if failure.get("worktree_bytes") and failure.get("cap_bytes"):
+            sized = f" ({_mib(failure['worktree_bytes'])} against a {_mib(failure['cap_bytes'])} cap)"
         problems.append(
             f"close checkpoint for session {str(failure.get('codeSessionId'))[:8]} failed{sized}: "
             f"{str(failure.get('error') or '')[:160]}"

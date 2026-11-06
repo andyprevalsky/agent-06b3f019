@@ -249,4 +249,40 @@ export function registerCheckpointSizeCases(ctx: CheckpointSizeContext): void {
       assert.equal(readFileSync(join(restored, 'we"ird.txt'), 'utf8'), 'quoted by git ls-files\n');
     });
   });
+
+  test('a repo that is HOME itself omits and rebuilds its unchanged tracked files too', async () => {
+    await withSession(async (session) => {
+      const origin = join(ctx.fixtureDir, `origin-size-${randomUUID()}.git`);
+      execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+      const home = join(ctx.fixtureDir, `home-size-root-${randomUUID()}`);
+      mkdirSync(home, { recursive: true });
+      execFileSync('git', ['clone', '-q', origin, home], { stdio: 'ignore' });
+      git(home, 'config', 'user.name', 'Test');
+      git(home, 'config', 'user.email', 'test@example.com');
+      git(home, 'checkout', '-q', '-b', 'main');
+      writeFileSync(join(home, 'data.bin'), randomBytes(2 * MIB));
+      writeFileSync(join(home, 'keep.txt'), 'tracked\n');
+      git(home, 'add', '-A');
+      git(home, 'commit', '-q', '-m', 'initial');
+      git(home, 'push', '-q', 'origin', 'main');
+      const bigSha = sha(join(home, 'data.bin'));
+      writeFileSync(join(home, 'keep.txt'), 'edited\n');
+      const stored = await withCap(1 * MIB, () =>
+        checkpointCodeSession({
+          session,
+          fs: localSandboxFs(home),
+          reason: 'close',
+          agentId: session.rootAgentId,
+        })
+      );
+      assert.ok(stored, 'a HOME-level repo checkpoints under the cap too');
+      const restoredHome = join(ctx.fixtureDir, `home-size-root-restored-${randomUUID()}`);
+      mkdirSync(restoredHome, { recursive: true });
+      const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: session.id } });
+      assert.ok(await restoreLatestCheckpoint(row, localSandboxFs(restoredHome)));
+      assert.equal(sha(join(restoredHome, 'data.bin')), bigSha);
+      assert.equal(readFileSync(join(restoredHome, 'keep.txt'), 'utf8'), 'edited\n');
+      assert.deepEqual(porcelain(restoredHome), [' M keep.txt']);
+    });
+  });
 }
