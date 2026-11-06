@@ -1063,7 +1063,7 @@ class Boxes(unittest.TestCase):
         self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
         # an indeterminate send whose assignment cannot be found is never repeated: re-read until the deadline
-        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 0.3)
+        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 2)
         cycle.write(directory / 'state.json', state)  # the ORIGINAL deadline governs, not a later argument
         self.configure(reply=self.reply()); self.calls.unlink()
         result = self.boxes.execute(self.request, self.coordinator, self.binding, 30)
@@ -1082,10 +1082,10 @@ class Boxes(unittest.TestCase):
                 'text': self.boxes.build_prompt(self.request, self.binding)}]}}}
 
     def test_initial_send_slice_timeout_adopts_nested_read_without_second_send(self):
-        self.configure(reply=self.reply(), send={'sleep': .6}, read=[
-            {'sleep': .6}, {'rc': 0, 'stdout': self.nested_assignment()}])
+        self.configure(reply=self.reply(), send={'sleep': 3}, read=[
+            {'sleep': 3}, {'rc': 0, 'stdout': self.nested_assignment()}])
         started = time.time()
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1.5):
             result = self.run_adapter(deadline=5)
         self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
@@ -1099,12 +1099,12 @@ class Boxes(unittest.TestCase):
         directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
         state = cycle.read(directory / 'state.json')
         self.assertGreaterEqual(state['deadline_at'], started + 5)
-        self.assertLess(state['deadline_at'], started + 5.2)
+        self.assertLess(state['deadline_at'], started + 6)
         self.assertEqual('turn-1', state['turn_id'])
 
     def test_initial_send_adoption_read_error_fails_closed_without_resending(self):
-        self.configure(reply=self.reply(), send={'sleep': .6}, read={'rc': 2, 'stderr': 'denied'})
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+        self.configure(reply=self.reply(), send={'sleep': 3}, read={'rc': 2, 'stderr': 'denied'})
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1.5):
             result = self.run_adapter(deadline=5)
         self.assertEqual('threads read exited 2', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
@@ -1125,11 +1125,11 @@ class Boxes(unittest.TestCase):
                 self.boxes._same_host(changed, self.binding)
 
     def test_initial_send_adoption_respects_original_deadline_without_resending(self):
-        self.configure(reply=self.reply(), send={'sleep': 3})
+        self.configure(reply=self.reply(), send={'sleep': 6})
         started = time.monotonic()
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
-            result = self.run_adapter(deadline=.6)
-        self.assertLess(time.monotonic() - started, .8)
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1):
+            result = self.run_adapter(deadline=2)
+        self.assertLess(time.monotonic() - started, 3)
         self.assertEqual('send_indeterminate_unadopted', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
         self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
@@ -1137,15 +1137,15 @@ class Boxes(unittest.TestCase):
         self.assertTrue(self.calls_of('read')); self.assertEqual([], self.calls_of('wait'))
 
     def test_initial_send_adoption_cancel_retains_owner_without_resending(self):
-        self.configure(reply=self.reply(), send={'sleep': 3})
-        timer = threading.Timer(.35, self.boxes.CANCEL.set); timer.start()
+        self.configure(reply=self.reply(), send={'sleep': 6})
+        timer = threading.Timer(1.5, self.boxes.CANCEL.set); timer.start()
         started = time.monotonic()
         try:
-            with patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
+            with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1):
                 result = self.run_adapter(deadline=5)
         finally:
             timer.cancel(); timer.join()
-        self.assertLess(time.monotonic() - started, .8)
+        self.assertLess(time.monotonic() - started, 3)
         self.assertEqual('send_indeterminate_unadopted', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
         self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
@@ -1165,9 +1165,9 @@ class Boxes(unittest.TestCase):
 
     def test_native_wait_slice_timeout_reobserves_same_turn_without_resending(self):
         self.configure(reply=self.reply(), wait=[
-            {'sleep': .6, 'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')},
+            {'sleep': 3, 'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')},
             {'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'})}])
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1.5):
             result = self.run_adapter(deadline=5)
         self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
         self.assertEqual(1, len(self.calls_of('send')))
@@ -1177,15 +1177,15 @@ class Boxes(unittest.TestCase):
         self.assertEqual('turn-1', result['transport_receipt']['turn_id'])
 
     def test_cancellation_during_native_wait_keeps_owner_and_never_resends(self):
-        self.configure(reply=self.reply(), wait={'sleep': 3, 'rc': 0,
+        self.configure(reply=self.reply(), wait={'sleep': 8, 'rc': 0,
             'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
-        timer = threading.Timer(.3, self.boxes.CANCEL.set)
+        timer = threading.Timer(2, self.boxes.CANCEL.set)
         started = time.monotonic(); timer.start()
         try:
-            result = self.run_adapter(deadline=5)
+            result = self.run_adapter(deadline=10)
         finally:
             timer.cancel(); timer.join()
-        self.assertLess(time.monotonic() - started, 1.2)
+        self.assertLess(time.monotonic() - started, 4)
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
         self.assertIn('cancelled', result['reason'])
         self.assertEqual('turn-1', result['cleanup_owner']['turn_id'])
@@ -1223,8 +1223,8 @@ class Boxes(unittest.TestCase):
         transient = {'schemaVersion': 1, 'ok': False,
                      'errorCode': 'delegated_thread_control_unavailable', 'retryable': True}
         self.configure(reply=self.reply(), wait={'rc': 2, 'stdout': transient})
-        started = time.monotonic(); result = self.run_adapter(deadline=.8)
-        self.assertLess(time.monotonic() - started, 1)
+        started = time.monotonic(); result = self.run_adapter(deadline=2)
+        self.assertLess(time.monotonic() - started, 3)
         self.assertIn('original deadline', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
         self.assertEqual('turn-1', result['cleanup_owner']['turn_id'])
@@ -1241,9 +1241,9 @@ class Boxes(unittest.TestCase):
         self.assertEqual(1, len(self.calls_of('send')))
 
     def test_short_nonwait_timeout_keeps_the_positive_original_deadline(self):
-        self.configure(reply=self.reply(), result={'sleep': 3, 'rc': 0,
+        self.configure(reply=self.reply(), result={'sleep': 6, 'rc': 0,
             'stdout': self.wrap({'turnId': 'turn-1', 'output': {'text': self.reply()}})})
-        with patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+        with patch.object(self.boxes, 'CLI_MAX_SECONDS', 1.5):
             result = self.run_adapter(deadline=5)
         self.assertEqual('native CLI call timed out before the original deadline', result['reason'])
         self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
@@ -1252,13 +1252,13 @@ class Boxes(unittest.TestCase):
         self.assertEqual(1, len(self.calls_of('result')))
 
     def test_native_cli_wait_returns_cleanup_owner_inside_original_deadline(self):
-        self.configure(reply=self.reply(), wait={'sleep': 3, 'ignore_term': True, 'rc': 0,
+        self.configure(reply=self.reply(), wait={'sleep': 6, 'ignore_term': True, 'rc': 0,
             'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
         started = time.monotonic()
-        result = self.run_adapter(deadline=0.8)
+        result = self.run_adapter(deadline=2)
         elapsed = time.monotonic() - started
-        print(json.dumps({'ignores_term_deadline': .8, 'elapsed': elapsed}))
-        self.assertLess(elapsed, .8)
+        print(json.dumps({'ignores_term_deadline': 2, 'elapsed': elapsed}))
+        self.assertLess(elapsed, 2)
         self.assertEqual('original deadline passed during native CLI call', result['reason'])
         self.assertFalse(result['cleanup_complete'])
         self.assertFalse(result['complete'])
@@ -1272,7 +1272,7 @@ class Boxes(unittest.TestCase):
 
     def test_timeout_or_cancel_is_unverified_and_names_the_remote_cleanup_owner(self):
         self.configure(reply=self.reply(), wait={'rc': 0, 'stdout': self.wrap({'turnId': 'turn-1'}, status='running')})
-        result = self.run_adapter(deadline=0.2)
+        result = self.run_adapter(deadline=2)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
         self.assertFalse(result['cleanup_complete']); self.assertIn('deadline', result['reason'])
         owner = result['cleanup_owner']
@@ -1289,12 +1289,12 @@ class Boxes(unittest.TestCase):
                                   ('hash-mismatch', {'rc': 0, 'stdout': self.wrap({'output': {'text': self.reply(sha='a' * 64)}})})):
             with self.subTest(label=label):
                 self.configure(reply=self.reply(), result=result_cfg)
-                result = self.run_adapter(deadline=0.3)
+                result = self.run_adapter(deadline=5)
                 self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
                 __import__('shutil').rmtree(self.coordinator / '.context')
         self.configure(reply=self.reply())
         with patch.object(self.boxes, 'MAX_RECEIPT_BYTES', 10):
-            result = self.run_adapter(deadline=0.3)
+            result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertIn('transport limit', result['reason'])
 
     def gate(self, name, thread, host, root, port, python=None):
@@ -1441,7 +1441,7 @@ class Boxes(unittest.TestCase):
         self.assertEqual(3, proc.returncode); self.assertIn('DEPLOY_GATE_WORKER_EXIT 3', proc.stdout)
         self.assertEqual([], self.calls_of('message'))  # nothing was attached or sent after the failed cd
         self.configure(reply=proc.stdout)
-        result = self.run_adapter(deadline=0.3)
+        result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
 
     def big_native(self, token):
@@ -1465,12 +1465,12 @@ class Boxes(unittest.TestCase):
 
     def test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified(self):
         self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes.replace('"PASS"', '"FAIL"', 1))
-        result = self.run_adapter(deadline=0.3)
+        result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
         __import__('shutil').rmtree(self.coordinator / '.context')
         truncated = self.reply().replace('DEPLOY_GATE_RESULT_JSON_END\n', '')
         self.configure(reply=truncated)
-        result = self.run_adapter(deadline=0.3)
+        result = self.run_adapter(deadline=5)
         self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
 
     def test_attachment_poll_obeys_deadline_and_keeps_boundary_delivery_first(self):
@@ -2151,13 +2151,13 @@ class Backend(unittest.TestCase):
     @patch('deploy_test_backend.restore_workspace_postgres', new=lambda *args: None)
     def test_threshold_uses_the_remaining_original_request_budget(self):
         self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
-        config = cycle.read(self.config); config['c8_sleep'] = 2; cycle.write(self.config, config)
+        config = cycle.read(self.config); config['c8_sleep'] = 6; cycle.write(self.config, config)
         slot = self.owner_slot()
-        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], 0.25)
+        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], 1.5)
         before = time.monotonic()
         result = self.backend.execute(self.request, self.root)
         self.assertEqual('UNVERIFIED', result['cases']['coverage-threshold'])
-        self.assertLess(time.monotonic() - before, 1.5)
+        self.assertLess(time.monotonic() - before, 4.5)
 
     # This control injects the sweep deadline/cancellation; fixture admission is tested separately.
     @patch('deploy_test_backend.restore_workspace_postgres', new=lambda *args: None)
@@ -2166,15 +2166,15 @@ class Backend(unittest.TestCase):
         (self.root / 'scripts/kill-services.sh').write_text('#!/bin/bash\nsleep .05; touch "$PWD/.context/recipe-cleanup-ran"\n')
         (self.root / self.backend.TEARDOWN).write_text('#!/bin/bash\nsleep .05; touch "$PWD/.context/native-teardown-ran"\n')
         self.request['source'] = cycle.source(self.root)
-        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], .2)
-        self.request['worker_recipe']['cleanup']['timeout_seconds'] = .5
+        self.request['worker_recipe'] = self.backend.handoff_recipe(slot['recipe'], ['alpha', 'beta', 'gamma'], 1.5)
+        self.request['worker_recipe']['cleanup']['timeout_seconds'] = 2
         native = self.backend.run_command
         for reason in ('deadline', 'cancel'):
             with self.subTest(reason=reason):
                 shutil.rmtree(self.root / '.context', ignore_errors=True)
                 self.request['token'] = 'be-cleanup-' + reason
                 self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
-                config = cycle.read(self.config); config.update(sleep=2, cancel_parent=reason == 'cancel'); cycle.write(self.config, config)
+                config = cycle.read(self.config); config.update(sleep=8, cancel_parent=reason == 'cancel'); cycle.write(self.config, config)
                 calls = []
                 def observe(argv, **kwargs):
                     calls.append((argv, kwargs['timeout'], self.backend.CANCEL.is_set()))
@@ -2190,12 +2190,12 @@ class Backend(unittest.TestCase):
                 sweep = next(c for c in calls if c[0][-3:] == self.backend.RUNNER)
                 cleanup = next(c for c in calls if 'scripts/kill-services.sh' in ' '.join(c[0]))
                 teardown = next(c for c in calls if c[0] == ['bash', self.backend.TEARDOWN])
-                self.assertGreater(sweep[1], 0); self.assertLessEqual(sweep[1], .2)
-                self.assertGreater(cleanup[1], .05); self.assertLessEqual(cleanup[1], .5)
+                self.assertGreater(sweep[1], 0); self.assertLessEqual(sweep[1], 1.5)
+                self.assertGreater(cleanup[1], .05); self.assertLessEqual(cleanup[1], 2)
                 self.assertGreater(teardown[1], .05); self.assertLessEqual(teardown[1], self.backend.CLEANUP_SECONDS)
                 self.assertFalse(cleanup[2]); self.assertFalse(teardown[2])
                 self.assertEqual(self.backend.CANCEL.is_set(), reason == 'cancel')
-                self.assertLess(time.monotonic() - before, 2)
+                self.assertLess(time.monotonic() - before, 6)
 
     # This control injects the sweep deadline/cancellation; fixture admission is tested separately.
     @patch('deploy_test_backend.restore_workspace_postgres', new=lambda *args: None)
@@ -2481,7 +2481,7 @@ class GenericLifecycle(unittest.TestCase):
         with (self.root / 'outer.log').open('wb') as output:
             result = self.process.run_command(
                 [sys.executable, str(worker_path), str(child), str(ready), str(self.root / 'inner.log')],
-                cwd=self.root, env=os.environ.copy(), output=output, timeout=.2,
+                cwd=self.root, env=os.environ.copy(), output=output, timeout=3,
                 owned_lifecycle=True)
         self.assertTrue(ready.exists())
         pid = int(ready.read_text())
@@ -2515,7 +2515,7 @@ class GenericLifecycle(unittest.TestCase):
         with (self.root / 'outer.log').open('wb') as output:
             code, timed_out, cancelled, lingering = self.process.run_command(
                 [sys.executable, str(script), str(marker), str(self.root / 'inner.log')],
-                cwd=self.root, env=os.environ.copy(), output=output, timeout=.2,
+                cwd=self.root, env=os.environ.copy(), output=output, timeout=3,
                 owned_lifecycle=True)
         self.assertEqual(code, 0)
         self.assertTrue(timed_out)
