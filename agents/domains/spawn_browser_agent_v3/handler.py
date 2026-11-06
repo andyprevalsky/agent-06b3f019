@@ -8276,6 +8276,11 @@ async def _spawn_browser_agent_activity_v3_real(
                     for field in protocol_keys:
                         if field in original:
                             visible_auth[key][field] = original[field]
+                    # The backend mints the Tilion live-view token for this
+                    # handoff and re-mints it for display; like browser_url,
+                    # the persisted copy carries it redacted.
+                    if "liveViewUrl" in original:
+                        visible_auth[key]["liveViewUrl"] = redact_url_secrets(original["liveViewUrl"])
         return result
 
     browser_url = None

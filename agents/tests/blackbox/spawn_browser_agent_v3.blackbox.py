@@ -25527,6 +25527,115 @@ async def test_failed_realm_discovery_invalidates_previous_auth_context():
 
 
 @_in_browser_activity_context
+async def test_auth_assistance_result_redacts_backend_minted_tilion_live_view_token():
+    """I-05: the backend mints the Tilion live-view token for the auth handoff.
+    The activity result (Temporal history, then the requestUserAuthentication
+    message metadata, realtime broadcast, run records and Hub uploads) must
+    carry it redacted, exactly as browser_url is; the backend re-mints it for
+    display. Other providers' live views are displayed from the persisted URL
+    and stay unchanged."""
+    from contextlib import ExitStack
+    from domains.spawn_browser_agent_v3.cdp_urls import redact_url_secrets
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    minted_token = "tilion-view-token-0123456789abcdefghijklmnopqrstuvwxyz"
+    tilion_view = (
+        "https://east.back.tilion.dev/v1/session/sess_fixture/live-view"
+        f"?token={minted_token}&interactive=true&showControls=true"
+    )
+    kernel_view = "https://live.onkernel.com/browser/abc?interactive=true&showControls=true"
+    for minted, expected in ((tilion_view, redact_url_secrets(tilion_view)), (kernel_view, kernel_view)):
+        fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+        fake_playwright = _FakePlaywright(fake_browser)
+        session_info = {
+            "session_id": "session-1",
+            "debug_url": "https://kernel.example/debug",
+            "ws_url": "ws://old",
+            "passwords": [],
+            "auth_options": {"realm": "example.com"},
+            "browser_session_metadata": {"provider": "kernel"},
+            "same_session_available": True,
+        }
+        create_auth = AsyncMock(
+            return_value={
+                "request": {"id": "request-1", "steelSessionId": "session-1", "mode": "live_view"},
+                "handoff": {"type": "live_view", "steelSessionId": "session-1", "liveViewUrl": minted},
+            }
+        )
+
+        async def model_step(**_kwargs):
+            return {
+                "action": {
+                    "action": "request_user_assistance_for_authentication",
+                    "thinking": "Sign-in needs the user",
+                    "params": {},
+                },
+                "usage": {},
+                "mode": "waterfall",
+            }
+
+        handler = "domains.spawn_browser_agent_v3.handler."
+        targets = [
+            patch(handler + "load_config", return_value=_fake_config()),
+            patch(handler + "activity.heartbeat"),
+            patch(handler + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
+            patch(handler + "fetch_session_info", AsyncMock(return_value=session_info)),
+            patch(handler + "fetch_recent_otps", AsyncMock(return_value=[])),
+            patch(
+                handler + "get_model_pricing_with_fallback",
+                AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+            ),
+            patch(handler + "_call_browser_use_with_rotation", model_step),
+            patch("domains.spawn_browser_agent_v3.streaming.stream_assistant_chunk", AsyncMock()),
+            patch("domains.spawn_browser_agent_v3.streaming.stream_tool_event", AsyncMock()),
+            patch(handler + "_wait_for_browser_user_control", AsyncMock(return_value=False)),
+            patch(
+                handler + "_observe_step_page",
+                AsyncMock(return_value={"url": "https://example.com/login", "title": "Sign in"}),
+            ),
+            patch(handler + "create_user_auth_assistance_request", create_auth),
+            patch(handler + "extract_session_files", AsyncMock(return_value=[])),
+            patch(handler + "disconnect_browser_after_passkey_capture", AsyncMock()),
+            patch(
+                handler + "propagate_browser_run_credentials",
+                AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+            ),
+            patch(handler + "close_browser_session", AsyncMock()),
+            patch(handler + "save_browser_action_message", AsyncMock()),
+            patch(handler + "save_browser_assistant_message", AsyncMock()),
+            patch(handler + "save_browser_credential_ref_message", AsyncMock()),
+            patch(handler + "persist_resume_context", AsyncMock(return_value={})),
+            patch("browser_tools.dom_service.DOMService", _FakeDomService),
+            patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+            patch("playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)),
+            patch(handler + "live_tab_looks_challenged", AsyncMock(return_value=False)),
+        ]
+        with ExitStack() as stack:
+            for target in targets:
+                stack.enter_context(target)
+            result = await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Sign in to example.com",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                start_url="https://example.com",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={"approval_type": "manual_pause", "task_id": "task-1"},
+            )
+        assert result["status"] == "awaiting_auth_assistance", result.get("status")
+        assert create_auth.await_count == 1
+        assert result["request_id"] == "request-1"
+        handoff = result["auth_assistance_request"]["handoff"]
+        assert handoff["liveViewUrl"] == expected, "auth handoff live view must match the persisted-URL policy"
+        assert minted_token not in json.dumps(result, default=str), (
+            "backend-minted Tilion live-view token leaked into the activity result"
+        )
+
+
+@_in_browser_activity_context
 async def test_auth_handoff_consumes_otp_received_during_decision(
     case="fresh", resume_step_count=0, expected_exhaustion=False, auth_review=None, expected_speed=None
 ):
@@ -38068,6 +38177,10 @@ async def run_all_tests():
     await r.record_async(
         "failed_realm_discovery_invalidates_previous_auth_context",
         test_failed_realm_discovery_invalidates_previous_auth_context,
+    )
+    await r.record_async(
+        "auth_assistance_result_redacts_backend_minted_tilion_live_view_token",
+        test_auth_assistance_result_redacts_backend_minted_tilion_live_view_token,
     )
     await r.record_async(
         "activity_failed_steel_auth_recovers_same_run",
