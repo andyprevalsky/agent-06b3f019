@@ -67,7 +67,8 @@ def env_file(values):
 def args(**overrides):
     base = dict(base='origin/main', state_dir=None, skip_agentcard=None, dry_run=False,
                 provision_jobs=4, head=None, rca_launcher=None, structural_workers=g.STRUCTURAL_WORKERS,
-                semantic_worker_processes=g.SEMANTIC_WORKER_PROCESSES, sample_memory=None, abort_below_mb=None)
+                semantic_worker_processes=g.SEMANTIC_WORKER_PROCESSES, sample_memory=None, abort_below_mb=None,
+                executor='local')
     return SimpleNamespace(**{**base, **overrides})
 
 
@@ -710,8 +711,8 @@ class Cli(Fixture):
             parsed = run.call_args[0][0]
             self.assertEqual((2, 2, None, None), (parsed.structural_workers, parsed.semantic_worker_processes,
                                                   parsed.sample_memory, parsed.abort_below_mb))
-            g.main(['--structural-workers', '5', '--semantic-worker-processes', '8', '--sample-memory', 'm.jsonl',
-                    '--abort-below-mb', '1200'])
+            g.main(['--executor', 'local', '--structural-workers', '5', '--semantic-worker-processes', '8',
+                    '--sample-memory', 'm.jsonl', '--abort-below-mb', '1200'])
             parsed = run.call_args[0][0]
             self.assertEqual((5, 8, Path('m.jsonl'), 1200.0), (parsed.structural_workers,
                              parsed.semantic_worker_processes, parsed.sample_memory, parsed.abort_below_mb))

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Run every selected pre-merge deploy gate in parallel on isolated workers.
 
-run (default): refuse uncommitted source, write this host's gate template
-(deploy_test_plan.standard_template() with --structural-workers concurrent
-structural suites and --semantic-worker-processes semantic-stack agent workers;
-every gate, check and assertion is kept), select gates with deploy_test_plan.py
---list-selected --template, provision one linked worktree per selected local
-gate (cloud smoke uses the benchmark CLI slot), write the worker inventory,
-plan, then init/run/resume the staged cycle and verify it on the exact HEAD.
+run (default): refuse uncommitted source, write the gate template
+(deploy_test_plan.standard_template(); every gate, check and assertion is kept),
+select gates with deploy_test_plan.py --list-selected --template, bind workers,
+write the worker inventory, plan, then init/run/resume the staged cycle and
+verify it on the exact HEAD. --executor blacksmith (default) runs every selected
+gate except cloud smoke (benchmark CLI slot) and AgentCard (local worktree) on
+its own Blacksmith GitHub Actions VM (BLACKSMITH_RUNNERS) at the standard
+template's concurrency. --executor local provisions one linked worktree per
+selected gate on this host, with --structural-workers concurrent structural
+suites and --semantic-worker-processes semantic-stack agent workers.
 --sample-memory writes MemAvailable and per-worker RSS/PSS every 5 s;
 --abort-below-mb TERMs only the cycle child after 3 consecutive low samples.
 retire: remove this repository's clean, idle worker worktrees. Never forces.
@@ -33,6 +36,7 @@ import threading
 import time
 
 from deploy_test_cycle import digest
+from deploy_test_isolation import GITHUB_TRANSPORT, GITHUB_WORKER_ROOT
 from deploy_test_plan import standard_template
 from deploy_test_process import cancellation_handlers, run_command
 
@@ -69,6 +73,30 @@ STRUCTURAL_GATE, SEMANTIC_GATE = 'deploy-command-structural', 'semantic-stack'
 STRUCTURAL_WORKERS = 2  # standard template: run-deploy-structural-gates.py --max-workers 5
 SEMANTIC_WORKER_PROCESSES = 2  # run-deploy-semantic-stack.sh default: WORKER_PROCESSES=8
 SEMANTIC_ENV = 'DEPLOY_SEMANTIC_WORKER_PROCESSES'
+# Executors (2026-11-06): Blacksmith VMs remove this host's memory/CPU queueing; local keeps the cuts above.
+EXECUTORS = ('blacksmith', 'local')
+DEFAULT_EXECUTOR = 'blacksmith'
+# Kept off Blacksmith: smoke drives the Fly fleet through the benchmark CLI; AgentCard owns a local
+# payment lifecycle and its cleanup (deploy_test_cycle accepts only local/boxes-thread AgentCard workers).
+BLACKSMITH_LOCAL_GATES = frozenset({CLOUD_GATE, 'agentcard-lifecycle'})
+# One VM per gate, sized by its CPU need (each size has 4 GB RAM per vCPU, far above the measured peaks).
+BLACKSMITH_RUNNERS = {
+    'backend-coverage-blackbox': 'blacksmith-16vcpu-ubuntu-2404',
+    'agents-coverage-blackbox': 'blacksmith-8vcpu-ubuntu-2404',
+    'deploy-command-structural': 'blacksmith-8vcpu-ubuntu-2404',
+    'semantic-stack': 'blacksmith-8vcpu-ubuntu-2404',
+    'frontend-coverage-blackbox': 'blacksmith-4vcpu-ubuntu-2404',
+    'cloudbench-controller': 'blacksmith-4vcpu-ubuntu-2404',
+    'seed-memory-ratchet': 'blacksmith-4vcpu-ubuntu-2404',
+    'seed-cache-decision': 'blacksmith-2vcpu-ubuntu-2404',
+    'canonical-seed-whatsapp-content': 'blacksmith-2vcpu-ubuntu-2404',
+    'live-probes': 'blacksmith-2vcpu-ubuntu-2404',
+    'e2b-smoke': 'blacksmith-2vcpu-ubuntu-2404',
+}
+DEFAULT_BLACKSMITH_RUNNER = 'blacksmith-4vcpu-ubuntu-2404'  # a gate added before it is sized here
+# The workflow sets the system-Postgres mode, trusted identity and checkout paths at job level; each VM is
+# private, so one fixed port serves every gate. Coordinator paths never go to the remote env.
+REMOTE_PORT = '12000'
 SAMPLE_SECONDS = 5.0
 LOW_MEMORY_SAMPLES = 3
 LOW_MEMORY_EXIT = 3
@@ -215,6 +243,17 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
     return slot
 
 
+def remote_slot(root: Path, gate: str) -> dict:
+    """A github-actions slot: nothing is provisioned here; the VM checks out the frozen commit."""
+    env = {'CONDUCTOR_WORKSPACE_NAME': f'deploy-{gate}', 'CONDUCTOR_PORT': REMOTE_PORT}
+    slot = {'id': f'{gate}-blacksmith', 'transport': GITHUB_TRANSPORT,
+            'runner': BLACKSMITH_RUNNERS.get(gate, DEFAULT_BLACKSMITH_RUNNER),
+            'worker_root': GITHUB_WORKER_ROOT, 'env': env, 'timeout_seconds': GATE_DEADLINE_SECONDS}
+    if gate == BACKEND_GATE:
+        slot['recipe'] = backend_recipe(root, env, GATE_DEADLINE_SECONDS)
+    return slot
+
+
 def provision(root: Path, gate: str, path: Path, head: str, mode: str, logs: Path, add_lock) -> dict:
     log = logs / f'{gate}.prepare.log'
     for argv in provision_commands(root, path, head, mode):
@@ -298,12 +337,17 @@ def check_capacity(root: Path, workers: list[dict], proc: Path = Path('/proc')) 
     return report
 
 
-def layout(root: Path, head: str, needs_worker: list[str]) -> list[dict]:
+def layout(root: Path, head: str, needs_worker: list[str], executor: str = 'local') -> list[dict]:
+    if executor not in EXECUTORS:
+        raise Blocked('workers', f'unknown executor {executor!r}')
     base, repo, registered = worker_base(root), repo_id(root), registered_worktrees(root)
     workers = []
     for gate in needs_worker:
         if gate == CLOUD_GATE:
             workers.append({'gate': gate, 'mode': 'cloud', 'slot': dict(CLOUD_SLOT)})
+            continue
+        if executor == 'blacksmith' and gate not in BLACKSMITH_LOCAL_GATES:
+            workers.append({'gate': gate, 'mode': 'remote', 'slot': remote_slot(root, gate)})
             continue
         path = worker_path(base, repo, head, gate)
         try:
@@ -319,7 +363,7 @@ def build_inventory(root: Path, head: str, workers: list[dict], logs: Path, jobs
     refused = [w['reason'] for w in workers if w['mode'] == 'refuse']
     if refused:  # nothing is created while any worker would be refused
         raise Blocked('workers', '; '.join(refused))
-    local = [w for w in workers if w['mode'] != 'cloud']
+    local = [w for w in workers if w['mode'] not in ('cloud', 'remote')]
     lock, results, errors = threading.Lock(), {}, []
     with cancellation_handlers(), ThreadPoolExecutor(max_workers=max(1, min(jobs, len(local) or 1))) as pool:
         futures = {w['gate']: pool.submit(provision, root, w['gate'], Path(w['path']), head, w['mode'], logs, lock)
@@ -331,7 +375,7 @@ def build_inventory(root: Path, head: str, workers: list[dict], logs: Path, jobs
                 errors.append(f'{gate}: {error}')
     if errors:
         raise Blocked('workers', '; '.join(errors))
-    return {w['gate']: w['slot'] if w['mode'] == 'cloud' else results[w['gate']] for w in workers}
+    return {w['gate']: w['slot'] if w['mode'] in ('cloud', 'remote') else results[w['gate']] for w in workers}
 
 
 def footprint_conflicts(inventory: dict) -> list[str]:
@@ -349,9 +393,15 @@ def footprint_conflicts(inventory: dict) -> list[str]:
     return conflicts
 
 
-def build_template(structural_workers: int, semantic_worker_processes: int, standard=None) -> dict:
-    """The standard full-suite template with this host's concurrency; nothing else changes."""
+def build_template(structural_workers: int, semantic_worker_processes: int, standard=None,
+                   executor: str = 'local') -> dict:
+    """The standard full-suite template with this host's concurrency; nothing else changes.
+
+    Under --executor blacksmith the structural and semantic gates run on their own VMs, so they keep
+    the standard template's concurrency; the host cuts apply only to gates this host runs."""
     template, found = copy.deepcopy((standard or standard_template)()), set()
+    if executor == 'blacksmith':  # neither cut gate is in BLACKSMITH_LOCAL_GATES
+        return template
     for gate in template['gates']:
         if gate['name'] == STRUCTURAL_GATE:
             command = list(gate['command'])
@@ -652,7 +702,7 @@ def run(args, root: Path) -> int:
         if not args.dry_run and not timing.is_file():
             raise Blocked('timing', f'no active deploy timing run ({timing} is missing); start one with '
                                     'bash scripts/run-deploy-stage --start before running gates')
-        template = build_template(args.structural_workers, args.semantic_worker_processes)
+        template = build_template(args.structural_workers, args.semantic_worker_processes, executor=args.executor)
         template_path, candidate_template = state_dir / 'template.json', state_dir / 'template.candidate.json'
         if args.dry_run:  # the template goes to a scratch file; the state directory is not created
             with tempfile.TemporaryDirectory(prefix='deploy-gates-dry-run-') as scratch:
@@ -665,8 +715,8 @@ def run(args, root: Path) -> int:
                 sampler = MemorySampler(target.resolve(), {'coordinator': root}, args.abort_below_mb)
                 sampler.begin()
             selection = list_selected(root, args.base, args.skip_agentcard, candidate_template)
-        workers = layout(root, head, selection['needs_worker'])
-        capacity = check_capacity(root, workers)
+        workers = layout(root, head, selection['needs_worker'], args.executor)
+        capacity = check_capacity(root, [w for w in workers if w['mode'] != 'remote'])  # remote VMs use no host room
         if not args.dry_run:
             print(f"DEPLOY_GATES CAPACITY ok: need {capacity['memory_mb']} MB available (have "
                   f"{capacity['available_mb']:.0f}), {capacity['disk_mb'] / 1024:.1f} GB disk (have "
@@ -688,16 +738,21 @@ def run(args, root: Path) -> int:
         if args.dry_run:
             print(json.dumps({'head': head, 'selection': selection, 'state_dir': str(state_dir),
                               'timing_run': {'current': str(timing), 'active': timing.is_file()},
-                              'template': {'path': str(template_path), 'structural_workers': args.structural_workers,
-                                           'semantic_worker_processes': args.semantic_worker_processes},
+                              'executor': args.executor,
+                              'template': ({'path': str(template_path), 'concurrency': 'standard'}
+                                           if args.executor == 'blacksmith' else
+                                           {'path': str(template_path), 'structural_workers': args.structural_workers,
+                                            'semantic_worker_processes': args.semantic_worker_processes}),
                               'inventory': str(inventory_path), 'workers': workers, 'capacity': capacity,
                               'then': [planner, [*cycle, 'init', *bound], [*cycle, 'run', *bound, *launcher], verify]},
                              indent=2))
             refused = [w['reason'] for w in workers if w['mode'] == 'refuse']
             if refused:
                 raise Blocked('workers', '; '.join(refused))
+            remote = sum(w['mode'] == 'remote' for w in workers)
             print(f"DEPLOY_GATES DRY-RUN head={head[:12]} gates={len(selection['selected'])} "
-                  f"workers={sum(w['mode'] != 'cloud' for w in workers)}")
+                  f"workers={sum(w['mode'] not in ('cloud', 'remote') for w in workers)}"
+                  + (f' remote={remote}' if remote else ''))
             return 0
         inventory = build_inventory(root, head, workers, state_dir / 'workers', args.provision_jobs)
         conflicts = footprint_conflicts(inventory)
@@ -892,6 +947,9 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
                         help='explicitly skip the AgentCard lifecycle category, recording why')
     parser.add_argument('--dry-run', action='store_true',
                         help='print the selection, worker paths and commands (retire: decisions); change nothing')
+    parser.add_argument('--executor', choices=EXECUTORS, default=DEFAULT_EXECUTOR,
+                        help='run: where non-smoke gates execute; blacksmith (default) = one Blacksmith GitHub '
+                             'Actions VM per gate (AgentCard stays local), local = worktrees on this host')
     parser.add_argument('--provision-jobs', type=int, default=PROVISION_JOBS,
                         help=f'concurrent worker preparations (default: {PROVISION_JOBS}); gates still all run at once')
     parser.add_argument('--head', help='retire: only workers prepared for this commit (default: every HEAD)')
@@ -925,6 +983,10 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         parser.error('--dry-run runs no gates to sample or abort')
     if args.abort_below_mb is not None and (args.sample_memory is None or not args.abort_below_mb > 0):
         parser.error('--abort-below-mb requires --sample-memory and a positive MB value')
+    if (args.action == 'run' and args.executor == 'blacksmith'
+            and (args.structural_workers is not None or args.semantic_worker_processes is not None)):
+        parser.error('--structural-workers and --semantic-worker-processes are host cuts for --executor local; '
+                     'Blacksmith gates keep the standard template concurrency')
     if args.structural_workers is None:
         args.structural_workers = STRUCTURAL_WORKERS
     if args.semantic_worker_processes is None:
