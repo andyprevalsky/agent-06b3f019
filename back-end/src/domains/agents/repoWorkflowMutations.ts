@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import type { Prisma } from './types';
 import { runTransactionWithRetry } from '../../providers/database';
 import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
 
@@ -37,7 +37,10 @@ export async function updateAgentForWorkflow(
         WHERE id = ${agentId}
       `;
     }
-    return result.count === 1;
+    return {
+      accepted: result.count === 1,
+      agent: await tx.agent.findUnique({ where: { id: agentId } }),
+    };
   });
 }
 

@@ -19,6 +19,7 @@ export type ResumeAgentWorkflowResult = { success: true } | { error: string; sta
 interface ResumeAgentWorkflowDependencies {
   signalResume?: (workflowId: string) => Promise<void>;
   hasCredits?: (userId: string) => Promise<boolean>;
+  onResumeIntentRollback?: (agentId: string) => Promise<void>;
 }
 
 type ReadyResumeIntent = Extract<WorkflowResumeIntentResult, { outcome: 'ready' }>;
@@ -28,10 +29,12 @@ async function signalResume(workflowId: string): Promise<void> {
   await client.workflow.getHandle(workflowId).signal('resume');
 }
 
+/** Deliver resume intent and publish a restored snapshot only when rollback owns the state. */
 async function deliverResumeSignal(
   agentId: string,
   intent: ReadyResumeIntent,
-  signal: (workflowId: string) => Promise<void>
+  signal: (workflowId: string) => Promise<void>,
+  onRollback?: (agentId: string) => Promise<void>
 ): Promise<ResumeAgentWorkflowResult> {
   if (intent.replacementOwned && intent.persistedActiveIntent) return { success: true };
   if (intent.workflowId === null) return { success: true };
@@ -41,6 +44,14 @@ async function deliverResumeSignal(
     if (intent.persistedActiveIntent) {
       const rolledBack = await rollbackWorkflowResumeIntent(agentId, intent.workflowId);
       if (!rolledBack) return { success: true };
+      try {
+        await onRollback?.(agentId);
+      } catch (broadcastError) {
+        log.warn('Rolled-back resume state broadcast failed', {
+          agent_id: agentId,
+          error: broadcastError instanceof Error ? broadcastError.message : String(broadcastError),
+        });
+      }
     }
     log.warn('Resume signal failed, DB status unchanged', {
       agent_id: agentId,
@@ -54,6 +65,7 @@ async function deliverResumeSignal(
   return { success: true };
 }
 
+/** Persist a resumable intent, validate credit eligibility, and deliver the workflow signal. */
 export async function resumeAgentWorkflow(
   agentId: string,
   dependencies: ResumeAgentWorkflowDependencies = {}
@@ -79,7 +91,12 @@ export async function resumeAgentWorkflow(
       return { error: 'Cannot resume a completed workflow', status: 409 };
     }
   }
-  return deliverResumeSignal(agentId, intent, dependencies.signalResume ?? signalResume);
+  return deliverResumeSignal(
+    agentId,
+    intent,
+    dependencies.signalResume ?? signalResume,
+    dependencies.onResumeIntentRollback
+  );
 }
 
 /**

@@ -160,7 +160,8 @@ async function main(): Promise<void> {
       );
 
       const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(accountingAccepted, true);
+      assert.strictEqual(accountingAccepted.accepted, true);
+      assert.strictEqual(accountingAccepted.agent?.ownCostCents, 52);
       assert.strictEqual(stored.status, 'ACTIVE');
       assert.strictEqual(stored.progress, 0.8);
       assert.strictEqual(stored.messageCount, 12);

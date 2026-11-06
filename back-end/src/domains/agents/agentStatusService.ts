@@ -109,8 +109,7 @@ async function persistStatus(agentId: string, body: UpdateStatusBody, workflowGe
   if (workflowGeneration === undefined) {
     return { accepted: true, agent: await repo.updateAgent(agentId, update) };
   }
-  const accepted = await repo.updateAgentForWorkflow(agentId, workflowGeneration, update);
-  return { accepted, agent: await repo.findAgentById(agentId) };
+  return repo.updateAgentForWorkflow(agentId, workflowGeneration, update);
 }
 
 async function failureSurface(agentId: string, body: UpdateStatusBody) {
@@ -176,7 +175,7 @@ export async function updateAgentStatus(
   if (result.agent === null || !result.accepted) return result.agent;
   await broadcastStatus(
     agentId,
-    body,
+    { ...body, status: result.agent.status },
     result.agent.temporalWorkflowId,
     result.agent.userControlRevision
   );

@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
-import { expect, it, type Mock } from 'vitest';
-import type { AgentDetailResponse, Message } from '@/lib/api';
+import { expect, it, vi, type Mock } from 'vitest';
+import { pauseAgent as sendPause, type AgentDetailResponse, type Message } from '@/lib/api';
 import type { TerminalView } from '@/features/terminal/types';
 import { useTerminalAgents } from '@/features/terminal/hooks/useTerminalAgents';
 import { useTerminalDerivedState } from '@/features/terminal/components/terminalLayoutState';
@@ -413,5 +413,42 @@ export function terminalPauseCases({ ctxState, setCurrentView, resetAnimationSta
     expect(view.result.current.agentDetail?.user_control_revision).toBe(3);
     expect(view.result.current.agentDetail?.status).toBe('PAUSED');
     view.unmount();
+  });
+  it('accepts successful pause headers when the optional response body never ends', async () => {
+    vi.useFakeTimers();
+    let body: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        body = controller;
+        controller.enqueue(new TextEncoder().encode('{"success":'));
+      },
+    });
+    let responseSent = false;
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/pause`, () => {
+        responseSent = true;
+        return new HttpResponse(stream, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }),
+    );
+    let accepted = false;
+    const pending = sendPause('stalled-body').then(() => {
+      accepted = true;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(responseSent).toBe(true);
+      expect(accepted).toBe(true);
+    } finally {
+      try {
+        body?.close();
+      } catch {
+        /* An aborted stream may already be closed. */
+      }
+      await pending;
+      vi.useRealTimers();
+    }
   });
 }

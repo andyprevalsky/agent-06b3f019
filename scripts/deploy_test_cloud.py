@@ -180,6 +180,7 @@ def collect_campaign(request, root, runs, campaign, started, native_exit, width)
 
 
 def execute(request, root):
+    """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
     checks, skipped = request['checks'], request.get('skips', {})
     if (not checks or len(set(checks)) != len(checks) or set(checks) & set(skipped)
             or any(not isinstance(n, str) or not NAME.fullmatch(n) or n.startswith('-')

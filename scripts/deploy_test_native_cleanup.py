@@ -580,6 +580,7 @@ def startup_campaign(root, runs, campaign, request, receipt, adapter, confirmed,
 
 
 def validate(receipt, owner, proof):
+    """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
     need(set(owner) == {'request_token', 'worker_root', 'native_cleanup_reference'}, 'unsupported owner shape')
@@ -1013,6 +1014,7 @@ def renew_isolated_validation(state, request_token, proof):
 
 
 def reconcile(state, occurrence_id, proof):
+    """Record verified retirement while preserving the original native result and credit."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)

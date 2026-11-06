@@ -171,6 +171,7 @@ def command(value: object) -> list[str]:
 
 
 def validate_plan(plan: dict, root: Path = ROOT) -> None:
+    """Refuse unsupported workers before allocating ownership or admitting native work."""
     gates = plan.get("gates")
     if not isinstance(gates, list) or not gates:
         raise ValueError("plan needs gates")

@@ -1021,6 +1021,7 @@ def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
 
 def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                         inventory: Path, deadline: float | None, peer_claim: int) -> dict:
+    """Start a request-owned relay only after provider preflight succeeds."""
     ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     checked = {}
     for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
@@ -1366,6 +1367,7 @@ def record_experiment(hooks, event: str, campaign_dir: Path, root: Path, **field
 
 
 def main() -> int:
+    """Run the immutable controller plan and join its owned resources before publication exits."""
     args = parse_args()
     if args.runs < 1 or args.concurrency < 1 or not args.task:
         raise SystemExit("runs, concurrency, and at least one task are required")

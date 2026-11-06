@@ -84,7 +84,12 @@ async function broadcastUserControlState(
 
 /** Resume a single agent. Children discover parent's resumed state via pull-based queries. */
 export async function resumeAgent(agentId: string) {
-  const result = await resumeAgentWorkflow(agentId);
+  const result = await resumeAgentWorkflow(agentId, {
+    onResumeIntentRollback: async (restoredAgentId) => {
+      const current = await repo.findAgentById(restoredAgentId);
+      if (current) await broadcastUserControlState(restoredAgentId, current);
+    },
+  });
   if ('success' in result) {
     const current = await repo.findAgentById(agentId);
     if (current) await broadcastUserControlState(agentId, current);
