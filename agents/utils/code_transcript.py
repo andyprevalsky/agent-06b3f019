@@ -158,13 +158,13 @@ def _tool_title(name: str, tool_input: dict[str, Any]) -> tuple[str, Optional[st
     return name, path, None
 
 
+# Task / Agent tool results that only launch a background sub-agent.
+_BACKGROUND_LAUNCHED = ("async_launched", "remote_launched")
+
 # Usage sample fields a metrics record carries: turn totals (output / input /
 # cached input) plus the latest model call's prompt size (``context_tokens``) and
 # the model's window (``context_window``), which the code-agent view's context
 # meter reads.
-# Task / Agent tool results that only launch a background sub-agent.
-_BACKGROUND_LAUNCHED = ("async_launched", "remote_launched")
-
 _USAGE_FIELDS = ("output_tokens", "input_tokens", "cached_input_tokens", "context_tokens", "context_window")
 
 
