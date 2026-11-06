@@ -12,7 +12,7 @@ run; Blacksmith destroys the VM when the run ends. A run that cannot be confirme
 finished is returned as an explicit `cleanup_owner`.
 
 remote-extract / remote-run / remote-bundle are the runner-side steps of that
-workflow. Exit codes follow the local worker: 0 all PASS, 1 failures, 2 blocked.
+workflow. Exit codes follow the local worker: 0 all PASS, otherwise 1 with a written result.
 """
 from __future__ import annotations
 
@@ -334,9 +334,8 @@ def launch(args) -> int:
         tmp = result_path.with_name(result_path.name + '.tmp')
         tmp.write_text(json.dumps(result, indent=2))
         os.replace(tmp, result_path)
-        if not result.get('complete'):
-            return 2
-        return 0 if all(v == 'PASS' for v in result['cases'].values()) else 1
+        # Same contract as deploy_test_worker: a written result exits 0 only when every case passed.
+        return 0 if result.get('complete') and all(v == 'PASS' for v in result['cases'].values()) else 1
 
     try:
         head = request['source']['head']
@@ -367,8 +366,11 @@ def launch(args) -> int:
         run = cancel_run(gh, run['id'])
         receipt = job_receipt(gh, run)
         owner = None if run.get('status') == 'completed' else {k: receipt[k] for k in ('transport', 'run_id', 'url')}
+        if owner is None:
+            delete_tag(root, token, repo, name)
         return finish(blocked(request, f'remote run {reason}', owner=owner, receipt=receipt))
     receipt = job_receipt(gh, run)
+    delete_tag(root, token, repo, name)  # The run, its logs and artifact outlive the tag.
     if run.get('head_sha') != head:
         return finish(blocked(request, 'remote run executed a different commit', receipt=receipt))
     folder = result_path.parent / 'remote-artifact'
@@ -388,7 +390,6 @@ def launch(args) -> int:
         return finish(blocked(request, 'remote worker result identity mismatch', receipt=receipt))
     localize_logs(result, artifact)
     result['remote'] = receipt
-    delete_tag(root, token, repo, name)
     return finish(result)
 
 

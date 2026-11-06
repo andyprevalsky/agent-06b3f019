@@ -5,7 +5,9 @@ Covers deploy_test_bindings (argv generation), deploy_test_isolation (exact-argv
 acceptance and fail-closed rejection), deploy_test_plan (a plan with
 github-actions slots validates) and deploy_gates --executor blacksmith (which
 gates leave this host, their runner sizes, and the unchanged local fallback).
-The launcher itself (scripts/deploy_test_github.py) is never executed here.
+The launcher (scripts/deploy_test_github.py) is exercised offline: tag naming, the
+request envelope round trip through a real annotated tag object, runner-side
+validation, run lookup against a fake GitHub API, and receipts the cycle accepts.
 """
 from contextlib import redirect_stdout
 import copy
@@ -25,6 +27,8 @@ import deploy_test_plan as p
 from deploy_test_bindings import generate
 from deploy_test_cycle import validate_plan
 import deploy_test_isolation as iso
+import deploy_test_github as gh
+from deploy_test_result import validate as validate_result
 
 ROOT = p.ROOT
 LAUNCHER = str(ROOT / 'scripts/deploy_test_github.py')
@@ -368,6 +372,124 @@ class Executor(unittest.TestCase):
         shown = json.loads('\n'.join(body))
         self.assertEqual('blacksmith', shown['executor'])
         self.assertEqual('standard', shown['template']['concurrency'])
+
+
+def git_repo(path):
+    subprocess.run(['git', 'init', '-q', str(path)], check=True)
+    (path / 'f.txt').write_text('x')
+    env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't',
+           'GIT_COMMITTER_EMAIL': 't@t', 'GIT_AUTHOR_DATE': '1700000000 +0000', 'GIT_COMMITTER_DATE': '1700000000 +0000'}
+    subprocess.run(['git', 'add', '.'], cwd=path, check=True)
+    subprocess.run(['git', 'commit', '-qm', 'c'], cwd=path, check=True, env=env)
+    return subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=path, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def remote_request(head, root=gh.REMOTE_ROOT, gate='frontend-coverage-blackbox'):
+    return {'token': 'tok-1', 'source': {'head': head, 'digest': 'd'}, 'gate': gate, 'checks': [gate],
+            'skips': {}, 'phase': 'initial', 'worker_root': root,
+            'worker_recipe': {'cases': {gate: {'command': ['true'], 'cwd': '.', 'aggregate': True}}}}
+
+
+class Launcher(unittest.TestCase):
+    def test_tag_names_carry_the_runner_size_and_are_stable_per_request(self):
+        name = gh.tag_name('blacksmith-16vcpu-ubuntu-2404', 'backend coverage/x', 'tok')
+        self.assertTrue(name.startswith('deploy-gates/16vcpu/backend-coverage-x-'))
+        self.assertEqual(name, gh.tag_name('blacksmith-16vcpu-ubuntu-2404', 'backend coverage/x', 'tok'))
+        self.assertNotEqual(name, gh.tag_name('blacksmith-16vcpu-ubuntu-2404', 'backend coverage/x', 'tok2'))
+        with self.assertRaises(ValueError):
+            gh.tag_name('ubuntu-latest', 'g', 'tok')
+
+    def test_envelope_binds_the_runner_root_and_a_known_worker(self):
+        with self.assertRaises(ValueError):
+            gh.envelope(remote_request('a' * 40, root='/elsewhere'), 'deploy_test_worker.py', RUNNER)
+        with self.assertRaises(ValueError):
+            gh.envelope(remote_request('a' * 40), 'rm.py', RUNNER)
+
+    def test_request_round_trips_through_a_deterministic_annotated_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            head = git_repo(root)
+            message = gh.envelope(remote_request(head), 'deploy_test_worker.py', RUNNER)
+            raw = gh.tag_object(root, head, 'deploy-gates/8vcpu/x', message)
+            self.assertEqual(raw, gh.tag_object(root, head, 'deploy-gates/8vcpu/x', message))
+            fields, body = gh.parse_tag(raw)
+            self.assertEqual((fields['object'], fields['type']), (head, 'commit'))
+            self.assertEqual(json.loads(body)['request']['source']['head'], head)
+
+    def run_extract(self, root, request, runner=RUNNER, script='deploy_test_worker.py', name=None):
+        name = name or gh.tag_name(runner, request['gate'], request['token'])
+        body = (json.dumps({'version': gh.ENVELOPE_VERSION, 'worker_script': script, 'runner': runner,
+                            'request': request}) + '\n').encode()
+        head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, check=True, capture_output=True,
+                              text=True).stdout.strip()
+        sha = subprocess.run(['git', 'hash-object', '-t', 'tag', '-w', '--stdin'], cwd=root, check=True,
+                             capture_output=True, input=gh.tag_object(root, head, name, body)).stdout.decode().strip()
+        subprocess.run(['git', 'update-ref', gh.REQUEST_REF, sha], cwd=root, check=True)
+        out = root / '.out'
+        cwd = os.getcwd()
+        os.chdir(root)
+        try:
+            with redirect_stdout(io.StringIO()):
+                gh.main(['remote-extract', '--ref', f'refs/tags/{name}', '--out', str(out)])
+        finally:
+            os.chdir(cwd)
+        return out
+
+    def test_runner_extracts_only_a_request_for_this_checkout_and_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            head = git_repo(root)
+            out = self.run_extract(root, remote_request(head, root=str(root)))
+            self.assertEqual(json.loads((out / 'request.json').read_text())['gate'], 'frontend-coverage-blackbox')
+            self.assertEqual((out / 'worker_script').read_text(), 'deploy_test_worker.py')
+            for bad in (remote_request('b' * 40, root=str(root)), remote_request(head, root='/other')):
+                with self.assertRaises(SystemExit):
+                    self.run_extract(root, bad)
+            with self.assertRaises(SystemExit):
+                self.run_extract(root, remote_request(head, root=str(root)), name='deploy-gates/8vcpu/forged')
+
+    def test_blocked_receipts_validate_as_unverified_and_carry_any_retained_owner(self):
+        request = remote_request('c' * 40)
+        result = gh.blocked(request, 'never started')
+        cases, complete = validate_result(result, request, 1)
+        self.assertEqual((cases, complete), ({request['gate']: 'UNVERIFIED'}, False))
+        owned = gh.blocked(request, 'cancel unconfirmed', owner={'transport': 'github-actions', 'run_id': 7, 'url': 'u'})
+        self.assertEqual(owned['cleanup_owner']['run_id'], 7)
+        with self.assertRaises(ValueError):  # unconfirmed teardown never validates as clean
+            validate_result(owned, request, 1)
+
+    def test_evidence_logs_point_at_the_downloaded_artifact_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp)
+            local = artifact / 'files/.context/deploy-worker/h/a.log'
+            local.parent.mkdir(parents=True)
+            local.write_text('log')
+            result = {'evidence': {'c': {'log': gh.REMOTE_ROOT + '/.context/deploy-worker/h/a.log'},
+                                   'd': {'log': '/etc/passwd'}}}
+            gh.localize_logs(result, artifact)
+            self.assertEqual(result['evidence']['c']['log'], str(local))
+            self.assertEqual(result['evidence']['c']['remote_log'], gh.REMOTE_ROOT + '/.context/deploy-worker/h/a.log')
+            self.assertEqual(result['evidence']['d']['log'], '/etc/passwd')
+
+    def test_run_lookup_matches_the_tag_and_reports_a_rejected_workflow(self):
+        head, name = 'd' * 40, 'deploy-gates/4vcpu/g-1'
+
+        class Fake:
+            def __init__(self, runs):
+                self.runs = runs
+
+            def json(self, path, conditional=False):
+                return {'workflow_runs': self.runs}
+
+        mine = {'id': 9, 'path': gh.WORKFLOW_PATH, 'head_branch': name}
+        other = {'id': 8, 'path': gh.WORKFLOW_PATH, 'head_branch': 'deploy-gates/4vcpu/other'}
+        self.assertEqual(gh.find_run(Fake([other, mine]), head, name, gh.time.time() + 5, 0)['id'], 9)
+        rejected = {'id': 7, 'path': gh.WORKFLOW_PATH, 'head_branch': None, 'conclusion': 'failure',
+                    'created_at': '2030-01-01T00:00:00Z', 'html_url': 'u'}
+        clock = iter(range(0, 10_000, 10))  # every reading advances 10 s
+        with patch.object(gh.time, 'time', side_effect=lambda: next(clock)), patch.object(gh.STOP, 'wait'):
+            with self.assertRaises(gh.WorkflowRejected):
+                gh.find_run(Fake([rejected]), head, name, 100, 0)
 
 
 if __name__ == '__main__':
