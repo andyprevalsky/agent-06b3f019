@@ -425,6 +425,11 @@ def remote_run(args) -> int:
     timing = json.loads((out / 'timing.json').read_text())
     timing['setup_finished_at'] = time.time()
     script = (out / 'worker_script').read_text().strip()
+    # Gates record stage receipts into an active deploy timing run, as on the coordinator.
+    token = json.loads((out / 'request.json').read_text())['token']
+    started = subprocess.run(['bash', str(ROOT / 'scripts/run-deploy-stage'), '--start', '--run-id',
+                              'gate-' + hashlib.sha256(token.encode()).hexdigest()[:16]], cwd=ROOT)
+    timing['timing_run_started'] = started.returncode == 0
     env = {**os.environ, 'DEPLOY_GATE_REQUEST': str(out / 'request.json'), 'DEPLOY_GATE_RESULT': str(out / 'result.json')}
     code = subprocess.run([sys.executable, str(ROOT / 'scripts' / script), '--root', str(ROOT)], env=env).returncode
     timing.update(worker_finished_at=time.time(), worker_exit=code)
@@ -446,7 +451,7 @@ def remote_bundle(args) -> int:
         for row in (json.loads((out / 'result.json').read_text()).get('evidence') or {}).values():
             if isinstance(row, dict):
                 paths.update(v for k, v in row.items() if isinstance(v, str) and v.startswith(str(root) + '/'))
-    for folder in ('.context/deploy-worker',):
+    for folder in ('.context/deploy-worker', '.context/deploy-runs'):
         if (root / folder).is_dir():
             paths.update(str(p) for p in (root / folder).rglob('*') if p.is_file())
     for raw in sorted(paths):
