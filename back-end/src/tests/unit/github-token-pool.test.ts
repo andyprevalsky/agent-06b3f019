@@ -7,7 +7,7 @@
  *  - the member with the most remaining quota (from x-ratelimit-*) is used;
  *  - a rate-limited or 401 member is retried on the next and then skipped;
  *  - a machine account's 404 is re-asked with the primary (private repos);
- *  - `identity: 'primary'` writes never leave GITHUB_TOKEN/GITHUB_DISPATCH_TOKEN;
+ *  - `identity: 'primary'` writes use GITHUB_TOKEN alone;
  *  - merge-facts reads use the pool while publish POSTs stay primary;
  *  - admin-health candidates follow the pool ranking.
  */
