@@ -49,21 +49,30 @@ export function useGranola(enabled: boolean, onChange?: () => Promise<void> | vo
   const [busy, setBusy] = useState<'connect' | 'sync' | 'disconnect' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const signInPoll = useRef<ReturnType<typeof setInterval> | null>(null);
-  const latestRead = useRef(0);
+  const inFlight = useRef<Promise<GranolaStatus | null> | null>(null);
 
-  // Only the newest status read is applied: an older request that finishes
-  // last must not restore a stale status (e.g. EXPIRED after a new sign-in).
-  const refresh = useCallback(async () => {
-    const read = ++latestRead.current;
-    try {
-      const next = await fetchGranolaStatusApi();
-      if (read !== latestRead.current) return null;
-      setStatus(next);
-      return next;
-    } catch (err) {
-      if (read === latestRead.current) setError(err instanceof Error ? err.message : String(err));
-      return null;
+  // One status read at a time; concurrent callers share it, so no read can
+  // supersede another and a slow read always lands. `fresh` waits for any read
+  // already in flight and then starts a new one (after a sync or disconnect).
+  const refresh = useCallback(async (fresh = false): Promise<GranolaStatus | null> => {
+    if (inFlight.current !== null) {
+      if (!fresh) return inFlight.current;
+      await inFlight.current;
     }
+    const read = (async () => {
+      try {
+        const next = await fetchGranolaStatusApi();
+        setStatus(next);
+        return next;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        return null;
+      } finally {
+        inFlight.current = null;
+      }
+    })();
+    inFlight.current = read;
+    return read;
   }, []);
 
   useEffect(() => {
@@ -91,7 +100,7 @@ export function useGranola(enabled: boolean, onChange?: () => Promise<void> | vo
       setError(null);
       try {
         await action();
-        await refresh();
+        await refresh(true);
         await onChange?.();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -125,24 +134,22 @@ export function useGranola(enabled: boolean, onChange?: () => Promise<void> | vo
       }
       await electron.openExternal(authorizeUrl);
       const startedAt = Date.now();
-      // One read at a time: a newer poll would otherwise supersede every slow
-      // read (only the newest read applies), so sign-in could never be seen.
-      let reading = false;
+      const finish = async (signedIn: boolean) => {
+        if (signInPoll.current === null) return;
+        stopSignInPoll();
+        setBusy(null);
+        if (signedIn) await onChange?.();
+      };
       signInPoll.current = setInterval(() => {
-        if (reading) return;
-        reading = true;
-        void (async () => {
-          const next = await refresh().finally(() => {
-            reading = false;
-          });
+        // The deadline holds even while a status read is still pending.
+        if (Date.now() - startedAt > SIGN_IN_TIMEOUT_MS) {
+          void finish(false);
+          return;
+        }
+        void refresh().then(async (next) => {
           // An EXPIRED grant still reads as connected; wait for the new one.
-          const signedIn = next?.connected === true && next.status !== 'EXPIRED';
-          if (signedIn || Date.now() - startedAt > SIGN_IN_TIMEOUT_MS) {
-            stopSignInPoll();
-            setBusy(null);
-            if (signedIn) await onChange?.();
-          }
-        })();
+          if (next?.connected === true && next.status !== 'EXPIRED') await finish(true);
+        });
       }, SIGN_IN_POLL_MS);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
