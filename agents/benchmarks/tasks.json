@@ -7773,6 +7773,101 @@
     "deploy_category": "harness"
   },
   {
+    "name": "code-agent-rose-repo",
+    "title": "Code agent in the attached Rose repo",
+    "prompt": "This agent runs in the Rose project, so the Rose GitHub repository is attached to the code agents you start. Use exactly one code agent (spawn_claude_code_agent) for this task; do not use browser or explore agents and do not modify any files. Ask the code agent to report, from its checkout of the Rose repository: the current branch name, and the full SHA and subject line of the commit it has checked out (git rev-parse HEAD and git log -1 --format=%s). Then reply with those three values.",
+    "timeout_seconds": 1500,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "smoke"
+    ],
+    "price_limit_cents": 200,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "plan",
+    "project": "Rose",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "tool_count_scope": "tree",
+    "forbidden_tools": [
+      "spawn_browser_agent"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Rose-builds-Rose code agent: the root agent runs in the benchmark user's Rose project (the Rose GitHub repo attached) and spawns one Claude Code agent that starts in that repo's checkout and answers from it. Gates the code agent's startup time per phase (create = sandbox + project clone + ws-server, project startup script, CLI init) and records every phase in the span history; further code-agent checks plug in as code_agent_* static checks (benchmarks/code_agent_checks/).",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "e2b_code_sandbox"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://github.com/Rose-Ai-Labs/rose"
+      ],
+      "context_notes": "The Rose project comes from the product's own out-of-box setup for the Rose repo owner (GET /api/projects, back-end/src/domains/projects/roseProject.ts): repo https://github.com/Rose-Ai-Labs/rose, default branch main, the checked-in rose-startup.sh startup script, no template snapshot, so every run measures a fresh clone. Needs the backend GITHUB_TOKEN to reach the private repo, E2B_API_KEY and a Claude Code credential. Startup evidence: worker '[ClaudeCode] …' log lines plus the backend 'Code session startup timings' line, read from the local stack's logs."
+    },
+    "enforce_declared_evaluators": true,
+    "evaluators": [
+      {
+        "id": "completed",
+        "method": "static_check",
+        "criteria": [
+          "The root agent reaches COMPLETED"
+        ],
+        "checks": [
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "startup-time",
+        "method": "static_check",
+        "criteria": [
+          "Every code agent the tree created reached CLI ready (system.init) inside a checkout of the attached project (backend checkout source remote or snapshot)",
+          "Each code agent's startup (spawn create request to CLI ready) is within the budget; per-phase durations are reported and recorded in the span history"
+        ],
+        "checks": [
+          {
+            "type": "code_agent_startup_time",
+            "max_ready_seconds": 480,
+            "min_spawns": 1,
+            "require_project_checkout": true
+          }
+        ]
+      },
+      {
+        "id": "one-session-per-spawn",
+        "method": "static_check",
+        "criteria": [
+          "Each spawn_claude_code_agent tool call created exactly one ClaudeCodeSession row (no duplicate creates from client-timeout retries)"
+        ],
+        "checks": [
+          {
+            "type": "code_agent_one_session_per_spawn"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "user-request:andy-2026-11-06-code-agent-startup-time",
+      "plan:docs/plans/active/rose-builds-rose.md"
+    ],
+    "group": "pre-deploy",
+    "deploy_category": "claude-code"
+  },
+  {
     "name": "agent-display-revenue-chart",
     "title": "Agent Display: Revenue Chart from Orders CSV",
     "prompt": "I've attached our orders export. Show me revenue for each of the last 3 days in the data as a chart in Agent Display, with each day's total labeled on the chart. Revenue is the sum of amount_usd for completed orders only (leave out refunded and cancelled orders). Also tell me the three daily totals.",

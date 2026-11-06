@@ -59,7 +59,7 @@ import httpx
 
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from benchmarks import auth_assistance_user, auth_test_site, cloud_batch_cleanup, display_check
+from benchmarks import auth_assistance_user, auth_test_site, cloud_batch_cleanup, code_agent_checks, display_check
 from benchmarks.benchmark_tasks import (
     RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
@@ -3080,6 +3080,24 @@ async def _delete_owned_native_admission_root(base_url: str, task: BenchmarkTask
     return True
 
 
+async def _resolve_benchmark_project_id(base_url: str, name: str) -> str:
+    """Id of the benchmark user's Project named ``name`` (the product list call).
+
+    Listing is the supported path that creates the Rose repo owner's configured
+    "Rose" project out of the box (back-end domains/projects/roseProject.ts), so
+    a fresh benchmark database gets the same project production has.
+    """
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.get(f"{base_url}/api/projects", headers=await _api_headers())
+    if resp.status_code != 200:
+        raise RuntimeError(f"Project lookup failed: {resp.status_code} - {resp.text[:300]}")
+    projects = (resp.json() or {}).get("projects") or []
+    matches = [p for p in projects if isinstance(p, dict) and p.get("name") == name]
+    if len(matches) != 1 or not matches[0].get("id"):
+        raise RuntimeError(f"Expected exactly one project named {name!r}, found {len(matches)}")
+    return str(matches[0]["id"])
+
+
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
@@ -3165,6 +3183,11 @@ async def create_agent(
             "engine": os.environ.get("WMH_ENGINE", "legacy"),
         }
         print(f"    🌍 WHM initial state seeded before agent start: {session_id[:12]}...")
+
+    # A task may run its root agent inside one of the user's Projects: its code
+    # agents then start in that project's repo checkout (code-agent-rose-repo).
+    if task.project:
+        body["project_id"] = await _resolve_benchmark_project_id(base_url, task.project)
 
     # A task may narrow the user context its agent sees. Used when a real user's
     # connected data offers a route the scenario is not testing — the gate removes
@@ -14776,6 +14799,11 @@ def _run_declared_static_check(
             ):
                 return False, f"{observed_kind}: {_approval_request_detail_failure(kind_check)}"
             continue
+        if check_type in code_agent_checks.CHECK_TYPES:
+            ok, reason = code_agent_checks.run_check(data, check)
+            if not ok:
+                return False, reason
+            continue
         if check_type == "code_bench_hidden_tests":
             from benchmarks.code_bench import static_check as code_bench_static_check
 
@@ -14850,6 +14878,9 @@ async def _run_declared_evaluators(
 
     if task.name.startswith("code-bench-"):
         await _hydrate_code_bench_results(task, data)
+
+    if code_agent_checks.declares_check(task.evaluators):
+        await code_agent_checks.hydrate(data, benchmark=task.name, base_url=base_url, evaluators=task.evaluators)
 
     from benchmarks.semantic_evaluator_evidence import messages_have_code_agent_grounding
 

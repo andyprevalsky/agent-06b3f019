@@ -41,6 +41,7 @@ from benchmarks.auth_test_site import (
 from benchmarks.auth_test_site import (
     validate_outcome_check as validate_auth_test_site_outcome_check,
 )
+from benchmarks.code_agent_checks import CHECK_TYPES as CODE_AGENT_CHECK_TYPES
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
 from benchmarks.tree_feedback_routing import validate_mid_run_feedback
 
@@ -121,6 +122,8 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "sms_completion_accepted",
     "sms_lifecycle_announced",
     "sms_outbound_budget",
+    # code-agent benchmark — one module per check in benchmarks/code_agent_checks/.
+    *CODE_AGENT_CHECK_TYPES,
 }
 ENVIRONMENT_MODES = {"synthetic", "live", "hybrid"}
 # "retired" = kept for ledger/history integrity (names are cross-store primary
