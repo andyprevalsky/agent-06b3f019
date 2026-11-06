@@ -4330,6 +4330,18 @@ def test_format_code_events_transcript_reports_project_startup():
         "[Claude] Project startup (Rose): timed out after 120s",
     ]
 
+    # The Codex ws-server emits the same event stamped provider "codex".
+    codex = format_code_events_transcript(
+        [
+            {"type": "project_startup", "provider": "codex", "status": "ok", "project": "Rose", "durationMs": 2000},
+            {"type": "project_startup", "provider": "codex", "status": "failed", "project": "Rose", "exitCode": 1},
+        ]
+    )
+    assert codex.splitlines() == [
+        "[Codex] Project startup (Rose): ok in 2.0s",
+        "[Codex] Project startup (Rose): failed (exit 1)",
+    ]
+
 
 def test_format_code_events_transcript_covers_failed_and_status_only_results():
     from domains.spawn_claude_code_agent.service import format_code_events_transcript
