@@ -311,6 +311,8 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     `git branch files-only-extra $(git -c user.name=t -c user.email=t@example.com commit-tree -m extra -p HEAD 'HEAD^{tree}')`
   );
   writeFileSync(join(checkout, 'app', '.env.local'), 'APP_MODE=files-only\n');
+  // A discoverable env file that is NOT named: --files-only must not auto-discover it.
+  writeFileSync(join(checkout, 'app', '.env.discovered'), 'DISCOVERED=1\n');
   const filesOnly = await runSync(s, [
     'push',
     '--dir',
@@ -330,6 +332,12 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     `files-only leaves the stored artifacts alone: ${filesOnly.gitBundle}/${filesOnly.uncommittedPatch}`
   );
   assert(filesOnly.deleted.length === 0, 'files-only never prunes');
+  assert(
+    !filesOnly.written.includes('app/.env.discovered') &&
+      !filesOnly.unchanged.includes('app/.env.discovered'),
+    `files-only pushed an env file it was not asked for: ${filesOnly.written}`
+  );
+  rmSync(join(checkout, 'app', '.env.discovered'));
   const snapshotAfter = await prisma.projectSyncSnapshot.findUniqueOrThrow({
     where: { projectId: project.id },
   });

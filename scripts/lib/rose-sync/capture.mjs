@@ -192,7 +192,15 @@ function captureLinkedOrPlain(root, rel, kind, out) {
   });
 }
 
-function captureFiles(root, include, out) {
+function captureFiles(root, include, out, filesOnly = false) {
+  // --files-only pushes exactly the named files: no dotenv auto-discovery and no
+  // untracked-symlink sweep (a stray .env.npm or lockfile must never be uploaded).
+  if (filesOnly) {
+    for (const rel of new Set(include)) {
+      captureLinkedOrPlain(root, rel, isDotenvPath(rel) ? "env" : "config", out);
+    }
+    return;
+  }
   const untracked = listZ(
     tryGit(root, ["ls-files", "--others", "--exclude-standard", "-z"]),
   );
@@ -439,7 +447,7 @@ export function captureCheckout(dir, options = {}) {
   const headSha =
     tryGit(root, ["rev-parse", "--verify", "-q", "HEAD"])?.trim() || null;
   const out = { files: new Map(), symlinks: new Map(), warnings: [] };
-  captureFiles(root, include, out);
+  captureFiles(root, include, out, options.filesOnly === true);
   // filesOnly: no branch bundle and no uncommitted patch (neither is read).
   const bundle = options.filesOnly
     ? { bundle: null, kind: null, branches: [], unpushed: 0 }
