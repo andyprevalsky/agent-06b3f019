@@ -554,7 +554,7 @@ def test_cold_image_activation_propagates_owned_setup_failure(tmp_path):
 def test_cold_image_activation_quiesces_existing_donor_before_environment(tmp_path, initial):
     cloud = (ROOT / "scripts/run-bench-cloud").read_text()
     functions = []
-    for name in ("activate_machine_environment", "inject_secrets"):
+    for name in ("wait_for_activation_image", "activate_machine_environment", "inject_secrets"):
         start = cloud.index(name + "() {")
         end = cloud.index("\n}\n", start) + 3
         functions.append(cloud[start:end])
@@ -1254,3 +1254,66 @@ def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path
         assert first_log.read_text().rstrip().endswith("ending this attempt for the normal retry.")
     for private in output.glob("*.private.log"):
         assert private.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("settle", ["stopped", "started", "absent", "foreign", "malformed", "replacing", "wrong-image", "lost-lock"])
+def test_acknowledged_environment_update_settles_before_next_image_update(tmp_path, settle):
+    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
+    start = cloud.index("machine_state_for_activation() {")
+    last = cloud.index("activate_machine_environment() {", start)
+    functions = cloud[start:cloud.index("\n}\n", last) + 3]
+    state = tmp_path / "state"; state.write_text("stopped")
+    calls = tmp_path / "calls"; calls.write_text("")
+    polls = tmp_path / "polls"; polls.write_text("0")
+    image = tmp_path / "image"; image.write_text("old")
+    script = functions + r"""
+APP=fixture
+assert_app_environment_lock_ownership() {
+    [ "$SETTLE" != lost-lock ] || [ ! -s "$CALLS" ]
+}
+FLY() {
+    if [ "$1 $2" = 'machines list' ]; then
+        state="$(cat "$STATE")"
+        if [ "$state" = replacing ]; then
+            polls=$(( $(cat "$POLLS") + 1 )); echo "$polls" > "$POLLS"
+            if [ "$polls" -gt 1 ]; then
+                case "$SETTLE" in
+                    stopped|wrong-image|lost-lock) state=stopped ;;
+                    *) state="$SETTLE" ;;
+                esac
+                echo "$state" > "$STATE"
+            fi
+        fi
+        if [ "$state" = absent ]; then echo '[]'; return 0; fi
+        if [ "$state" = foreign ]; then echo '[{"id":"foreign","state":"stopped"}]'; return 0; fi
+        if [ "$state" = malformed ]; then echo '{}'; return 0; fi
+        printf '[{"id":"warm","state":"%s","config":{"image":"%s"}}]\n' "$state" "$(cat "$IMAGE")"
+        return 0
+    fi
+    [ "$1 $2 $3" = 'machine update warm' ] || return 91
+    printf '%s\n' "$*" >> "$CALLS"
+    case "$*" in
+        *--image*) [ "$SETTLE" = wrong-image ] || echo desired > "$IMAGE" ;;
+    esac
+    echo replacing > "$STATE"; echo 0 > "$POLLS"
+    echo 'Machine warm updated successfully!'
+}
+activate_machine_environment warm warm || exit 31
+activate_machine_environment warm warm desired || exit 32
+"""
+    result = subprocess.run([BASH, "-c", script], env={**os.environ,
+        "STATE":str(state),"CALLS":str(calls),"POLLS":str(polls),"IMAGE":str(image),"SETTLE":settle,
+        "CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS":"3","CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY":"0"},
+        capture_output=True,text=True,timeout=15)
+    updates = calls.read_text().splitlines()
+    if settle == "stopped":
+        assert result.returncode == 0, result.stderr
+        assert len(updates) == 2
+        assert state.read_text().strip() == "stopped"
+        assert image.read_text().strip() == "desired"
+    else:
+        assert result.returncode != 0, result.stdout
+        assert len(updates) == (2 if settle == "wrong-image" else 1)
+    assert all("--skip-start --yes" in call for call in updates)
+    if settle == "replacing":
+        assert polls.read_text().strip() == "3", "Existing settle budget must remain bounded"

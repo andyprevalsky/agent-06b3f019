@@ -1704,11 +1704,12 @@ wait_for_activation_image() {  # wait_for_activation_image <machine_id> <image_r
     local attempts="${CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS:-15}"
     local retry_delay="${CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY:-2}"
     while [ "$attempt" -le "$attempts" ]; do
+        assert_app_environment_lock_ownership || return 1
         state="$(machine_state_for_activation "$machine_id")"
         presence=$?
         [ "$presence" -eq 0 ] || return 1
         if [ "$state" = "stopped" ] \
-            && machine_has_activation_image "$machine_id" "$image_ref"; then
+            && { [ -z "$image_ref" ] || machine_has_activation_image "$machine_id" "$image_ref"; }; then
             return 0
         fi
         case "$state" in
@@ -1760,7 +1761,13 @@ activate_machine_environment() {  # activate_machine_environment <machine_id> [w
         output="$(FLY "${update_args[@]}" 2>&1)"
         status=$?
         printf '%s\n' "$output" | sed 's/^/      /'
-        [ "$status" -eq 0 ] && return 0
+        if [ "$status" -eq 0 ]; then
+            # CLI acknowledgement can precede completion of this skip-start
+            # update. Do not hand a replacing Machine to the next mutation.
+            wait_for_activation_image "$machine_id" "$image_ref" && return 0
+            echo "      acknowledged update did not settle on stopped machine $machine_id" >&2
+            return 1
+        fi
         if [ -n "$image_ref" ] \
             && wait_for_activation_image "$machine_id" "$image_ref"; then
             echo "      Fly CLI reported failure, but provider confirms desired image on stopped machine"
