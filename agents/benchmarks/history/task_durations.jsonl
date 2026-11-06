@@ -8343,3 +8343,5 @@
 {"task": "plaid-transactions-doordash-count", "duration_seconds": 50.9, "cost_cents": 0.0, "timestamp": "2026-10-18T10:42:42.900000+00:00", "agent_id": "029c84f6-6f39-426f-ad2f-8051322d328a", "backfill_source": "hub:direct-cloud-fleet"}
 {"task": "plaid-transactions-doordash-count", "duration_seconds": 56.3, "cost_cents": 0.0, "timestamp": "2026-10-18T10:42:49.300000+00:00", "agent_id": "1ddcf265-27bc-4eab-93ac-eaf071953a02", "backfill_source": "hub:direct-cloud-fleet"}
 {"task": "browser-agent-amazon-passkey", "duration_seconds": 100.5, "cost_cents": 0.0, "timestamp": "2026-10-18T10:43:31.500000+00:00", "agent_id": "6cda4f7c-ea14-443b-919c-fc519f22f578", "backfill_source": "hub:direct-cloud-fleet"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 167.8, "cost_cents": 26.0, "timestamp": "2026-11-06T11:15:47.344569+00:00", "agent_id": "97aa455f-1fe8-407b-9fa5-f8bad701fc71"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 133.2, "cost_cents": 41.0, "timestamp": "2026-11-06T13:17:57.200000+00:00", "agent_id": "d5672824-be5a-4873-839a-351de889f6e3", "backfill_source": "hub:cloud-fleet"}
