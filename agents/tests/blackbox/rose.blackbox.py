@@ -5604,6 +5604,58 @@ async def test_anthropic_api_key_cooldown_mark_then_on_cooldown():
     rc._reset_anthropic_api_key_cooldown_cache()
 
 
+async def test_funded_api_key_cooldown_read_is_single_flight():
+    """Concurrent callers share one in-flight cooldown read instead of skipping it.
+
+    Regression (descend I-12): the first caller started the backend read and
+    every other caller answered "not on cooldown" while it was pending, so a
+    burst of concurrent LLM calls reached an out-of-credits funded key.
+    """
+    import providers.rose.client as rc
+
+    keys = (
+        ("/anthropic-key/cooldown", rc._anthropic_api_key_on_cooldown, rc._reset_anthropic_api_key_cooldown_cache),
+        ("/gpt-key/cooldown", rc._gpt_api_key_on_cooldown, rc._reset_gpt_api_key_cooldown_cache),
+    )
+    for path, on_cooldown, reset in keys:
+        for backend_answer in ("cooldown", "error"):
+            reset()
+            release = asyncio.Event()
+            reads = {"count": 0}
+
+            async def handler(req, path=path, release=release, reads=reads, backend_answer=backend_answer):
+                if req.url.path.endswith(path):
+                    reads["count"] += 1
+                    await release.wait()
+                    if backend_answer == "error":
+                        raise httpx.ConnectError("backend unreachable", request=req)
+                    return httpx.Response(200, json={"onCooldown": True})
+                return httpx.Response(404)
+
+            set_mock_handler(handler)
+            try:
+                callers = [asyncio.create_task(on_cooldown()) for _ in range(8)]
+                for _ in range(50):
+                    await asyncio.sleep(0)
+                answered_early = [t.result() for t in callers if t.done()]
+                # The caller that started the read is cancelled; the others
+                # must still receive the shared answer.
+                callers[0].cancel()
+                release.set()
+                results = await asyncio.wait_for(asyncio.gather(*callers[1:]), timeout=5)
+                after = await on_cooldown()
+            finally:
+                release.set()
+                reset()
+            label = f"{path} backend={backend_answer}"
+            assert answered_early == [], f"{label}: {len(answered_early)} callers answered while the read was pending"
+            assert reads["count"] == 1, f"{label}: expected one shared backend read, got {reads['count']}"
+            # A failed read stays fail-open (try the key); a cooled answer is shared.
+            expected = backend_answer == "cooldown"
+            assert results == [expected] * 7, f"{label}: {results}"
+            assert after is expected, f"{label}: cached answer {after}"
+
+
 async def test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundry():
     """An in-band credit error is tried once, then Foundry serves later calls."""
     import providers.rose.client as rc
@@ -13335,6 +13387,9 @@ async def run_all_tests():
     )
     await r.record_async("anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix)
     await r.record_async("anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown)
+    await r.record_async(
+        "funded_apikey_cooldown_read_single_flight", test_funded_api_key_cooldown_read_is_single_flight
+    )
     await r.record_async(
         "gpt_apikey_credit_cooldown_to_foundry",
         test_gpt_api_key_credit_failure_cools_all_agent_requests_before_foundry,

@@ -163,52 +163,98 @@ class _FallThrough(Exception):
 # workers + workflows, no hammering. A short in-memory cache keeps the LLM hot
 # path off the backend on the common (clear) case.
 _ANTHROPIC_COOLDOWN_RECHECK_S = 15.0
-_anthropic_cooldown_skip_until = 0.0  # time.monotonic() < this ⇒ locally known cooled
-_anthropic_cooldown_last_check = 0.0
+
+
+class _FundedKeyCooldown:
+    """Per-process cache of one funded key's shared backend cooldown row.
+
+    At most one backend read runs per key. Concurrent callers await that
+    in-flight read through ``asyncio.shield`` instead of answering "not on
+    cooldown" before it lands, and one caller's cancellation never reaches the
+    shared read. A failed read is treated as "not on cooldown" so a transient
+    backend blip never disables the fallback. State per key: two clocks and at
+    most one in-flight task.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self.skip_until = 0.0  # time.monotonic() < this ⇒ locally known cooled
+        self._last_check = 0.0
+        self._inflight: Optional[asyncio.Task[bool]] = None
+
+    def reset(self) -> None:
+        self.skip_until = 0.0
+        self._last_check = 0.0
+        self._inflight = None
+
+    def mark(self) -> None:
+        self.skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+
+    async def on_cooldown(self) -> bool:
+        now = time.monotonic()
+        if now < self.skip_until:
+            return True
+        loop = asyncio.get_running_loop()
+        read = self._inflight
+        if read is None or read.done() or read.get_loop() is not loop:
+            if now - self._last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
+                return False
+            self._last_check = now
+            read = loop.create_task(self._read())
+            self._inflight = read
+
+            def _on_done(done: asyncio.Task[bool]) -> None:
+                if self._inflight is done:
+                    self._inflight = None
+                if not done.cancelled():
+                    done.exception()
+
+            read.add_done_callback(_on_done)
+        cooled = await asyncio.shield(read)
+        # A failure marked while the read was pending still counts.
+        return cooled or time.monotonic() < self.skip_until
+
+    async def _read(self) -> bool:
+        cfg = load_config()
+        base = (cfg.backend.api_url or "").rstrip("/")
+        if not base:
+            return False
+        try:
+            resp = await get_http_client().get(
+                f"{base}{self._path}",
+                timeout=5.0,
+                headers={"X-API-Key": cfg.backend.api_key or ""},
+            )
+            cooled = resp.status_code == 200 and resp.json().get("onCooldown") is True
+        except Exception:
+            return False
+        # Both windows start when the answer is known, so a read slowed past
+        # the recheck interval cannot hand later callers an expired answer.
+        answered = time.monotonic()
+        self._last_check = answered
+        if cooled:
+            self.skip_until = max(self.skip_until, answered + _ANTHROPIC_COOLDOWN_RECHECK_S)
+        return cooled
+
+
+_anthropic_api_key_cooldown = _FundedKeyCooldown("/api/integrations/compute-code/anthropic-key/cooldown")
 
 
 def _reset_anthropic_api_key_cooldown_cache() -> None:
     """Test-only: clear the in-memory cooldown cache between cases."""
-    global _anthropic_cooldown_skip_until, _anthropic_cooldown_last_check
-    _anthropic_cooldown_skip_until = 0.0
-    _anthropic_cooldown_last_check = 0.0
+    _anthropic_api_key_cooldown.reset()
 
 
 async def _anthropic_api_key_on_cooldown() -> bool:
     """Whether the shared funded key is backed off (in-memory fast path, then
-    a throttled backend read). Failures are treated as 'not on cooldown' so a
-    transient backend blip never disables the fallback."""
-    global _anthropic_cooldown_skip_until, _anthropic_cooldown_last_check
-    now = time.monotonic()
-    if now < _anthropic_cooldown_skip_until:
-        return True
-    if now - _anthropic_cooldown_last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
-        return False
-    _anthropic_cooldown_last_check = now
-    cfg = load_config()
-    base = (cfg.backend.api_url or "").rstrip("/")
-    if not base:
-        return False
-    try:
-        client = get_http_client()
-        resp = await client.get(
-            f"{base}/api/integrations/compute-code/anthropic-key/cooldown",
-            timeout=5.0,
-            headers={"X-API-Key": cfg.backend.api_key or ""},
-        )
-        if resp.status_code == 200 and resp.json().get("onCooldown") is True:
-            _anthropic_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
-            return True
-    except Exception:
-        return False
-    return False
+    one shared, throttled backend read)."""
+    return await _anthropic_api_key_cooldown.on_cooldown()
 
 
 async def _mark_anthropic_api_key_cooldown(reason: str) -> None:
     """Back the shared funded key off (in-memory + backend DB) so no other
     worker/workflow retries it until it recovers."""
-    global _anthropic_cooldown_skip_until
-    _anthropic_cooldown_skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+    _anthropic_api_key_cooldown.mark()
     cfg = load_config()
     base = (cfg.backend.api_url or "").rstrip("/")
     if not base:
@@ -227,46 +273,19 @@ async def _mark_anthropic_api_key_cooldown(reason: str) -> None:
 
 # The shared GPT_API_KEY uses the same cross-worker DB cooldown as Anthropic,
 # with its own row so one provider cannot suppress the other.
-_gpt_api_key_cooldown_skip_until = 0.0
-_gpt_api_key_cooldown_last_check = 0.0
+_gpt_api_key_cooldown = _FundedKeyCooldown("/api/integrations/compute-code/gpt-key/cooldown")
 
 
 def _reset_gpt_api_key_cooldown_cache() -> None:
-    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
-    _gpt_api_key_cooldown_skip_until = 0.0
-    _gpt_api_key_cooldown_last_check = 0.0
+    _gpt_api_key_cooldown.reset()
 
 
 async def _gpt_api_key_on_cooldown() -> bool:
-    global _gpt_api_key_cooldown_skip_until, _gpt_api_key_cooldown_last_check
-    now = time.monotonic()
-    if now < _gpt_api_key_cooldown_skip_until:
-        return True
-    if now - _gpt_api_key_cooldown_last_check < _ANTHROPIC_COOLDOWN_RECHECK_S:
-        return False
-    _gpt_api_key_cooldown_last_check = now
-    cfg = load_config()
-    base = (cfg.backend.api_url or "").rstrip("/")
-    if not base:
-        return False
-    try:
-        client = get_http_client()
-        resp = await client.get(
-            f"{base}/api/integrations/compute-code/gpt-key/cooldown",
-            timeout=5.0,
-            headers={"X-API-Key": cfg.backend.api_key or ""},
-        )
-        if resp.status_code == 200 and resp.json().get("onCooldown") is True:
-            _gpt_api_key_cooldown_skip_until = now + _ANTHROPIC_COOLDOWN_RECHECK_S
-            return True
-    except Exception:
-        return False
-    return False
+    return await _gpt_api_key_cooldown.on_cooldown()
 
 
 async def _mark_gpt_api_key_cooldown(reason: str) -> None:
-    global _gpt_api_key_cooldown_skip_until
-    _gpt_api_key_cooldown_skip_until = time.monotonic() + _ANTHROPIC_COOLDOWN_RECHECK_S
+    _gpt_api_key_cooldown.mark()
     cfg = load_config()
     base = (cfg.backend.api_url or "").rstrip("/")
     if not base:
