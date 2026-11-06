@@ -15885,6 +15885,8 @@ async def _run_single_task_as_run_user(
                     "live_output_tokens": tokens_out,
                     "tree_tokens_out": tree_tokens_out,
                 }
+        if not run_declared and code_agent_checks.declares_check(task.evaluators):
+            await code_agent_checks.record_evidence(data, benchmark=task.name, base_url=base_url)
         if run_declared:
             data.setdefault("_benchmark", {})["api_base_url"] = base_url
             evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(

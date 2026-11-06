@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from benchmarks import code_agent_checks
 from benchmarks.code_agent_checks import evidence as ev
+from benchmarks.code_agent_checks import external
 from benchmarks.code_agent_checks import one_session_per_spawn, startup_time
 from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
 from benchmarks.run_benchmark import _run_declared_static_check
@@ -197,37 +198,199 @@ def test_spawn_calls_are_distinct_tool_call_ids_of_the_spawn_tool():
     assert ev.spawn_calls_by_agent({"messages": messages}, [AGENT]) == {AGENT: ["a", "b"]}
 
 
-def test_external_lane_checks_are_called_by_name_from_their_module(monkeypatch):
+CTX = {
+    "base_url": "http://localhost:3001",
+    "user_id": "user-1",
+    "root_agent_id": AGENT,
+    "agent_ids": [AGENT, "child-1"],
+    "frontend_url": "http://localhost:3002",
+}
+
+
+def _external_data(**evidence) -> dict:
+    return {"_benchmark": {code_agent_checks.EVIDENCE_KEY: {"context": CTX, **evidence}}}
+
+
+def _fake_module(monkeypatch, name, **attrs):
     import sys
     import types
 
+    module = types.ModuleType(name)
+    for key, value in attrs.items():
+        setattr(module, key, value)
+    monkeypatch.setitem(sys.modules, name, module)
+    return module
+
+
+def test_every_lane_check_is_registered_with_its_kind():
+    kinds = {t: s.kind for t, s in external.EXTERNAL.items()}
+    assert kinds == {
+        "code_agent_single_code_agent": "python_run",
+        "code_agent_message_reached": "python_run",
+        "code_agent_thinking_rows": "python_root",
+        "code_agent_markdown": "script",
+        "code_agent_render": "playwright",
+        "code_agent_github_rate_limit": "python_github",
+    }
+    assert set(external.EXTERNAL) <= code_agent_checks.CHECK_TYPES <= RUNTIME_STATIC_CHECK_TYPES
+
+
+def test_python_run_lane_check_is_called_by_name_with_its_hydrated_run(monkeypatch):
     calls = {}
 
     def check_single_code_agent(run, expected=1):
-        calls["single"] = (run, expected)
+        calls["args"] = (run, expected)
         return {"passed": run["code_agents"] == ["one"], "detail": f"{len(run['code_agents'])} code agent(s)"}
 
-    fake = types.ModuleType("benchmarks.code_agent_run_checks")
-    fake.check_single_code_agent = check_single_code_agent
-    monkeypatch.setitem(sys.modules, "benchmarks.code_agent_run_checks", fake)
-    module = code_agent_checks.EXTERNAL_CHECKS["code_agent_single_code_agent"][0]
+    _fake_module(monkeypatch, "benchmarks.code_agent_run_checks", check_single_code_agent=check_single_code_agent)
     check = {"type": "code_agent_single_code_agent", "expected": 1}
-    data = {"_benchmark": {code_agent_checks.EVIDENCE_KEY: {"run": {module: {"code_agents": ["one"]}}}}}
+    module = external.EXTERNAL[check["type"]].module
+    data = _external_data(run={module: {"code_agents": ["one"]}})
     assert code_agent_checks.run_check(data, check) == (True, "code_agent_single_code_agent: 1 code agent(s)")
-    assert calls["single"] == ({"code_agents": ["one"]}, 1)
-    data["_benchmark"][code_agent_checks.EVIDENCE_KEY]["run"][module] = {"code_agents": ["a", "b"]}
+    assert calls["args"] == ({"code_agents": ["one"]}, 1)
+    data = _external_data(run={module: {"code_agents": ["a", "b"]}})
     assert not code_agent_checks.run_check(data, check)[0]
 
 
-def test_external_lane_checks_fail_closed_without_their_module_or_evidence(monkeypatch):
+def test_python_run_hydration_uses_the_lane_modules_own_hydrate(monkeypatch):
+    import asyncio
+
+    seen = {}
+
+    async def hydrate_code_agent_run(base_url, api_key, user_id, root_agent_id):
+        seen["args"] = (base_url, user_id, root_agent_id)
+        return {"messages": [], "code_agents": []}
+
+    _fake_module(monkeypatch, "benchmarks.code_agent_run_checks", hydrate_code_agent_run=hydrate_code_agent_run)
+    monkeypatch.setattr(external, "_api_key", lambda: "secret-key")
+    runs = asyncio.run(external.hydrate_runs({"benchmarks.code_agent_run_checks"}, CTX))
+    assert runs == {"benchmarks.code_agent_run_checks": {"messages": [], "code_agents": []}}
+    assert seen["args"] == (CTX["base_url"], "user-1", AGENT)
+
+
+def test_python_root_lane_check_gets_the_root_and_the_run_context(monkeypatch):
+    seen = {}
+
+    def check_thinking_rows(root_agent_id, *, base_url, api_key, user_id, **config):
+        seen.update(root=root_agent_id, base_url=base_url, user_id=user_id, key=api_key, config=config)
+        ok = config.get("ok", True)
+        return {"passed": ok, "report": {"tok_s": 42}, "failures": [] if ok else ["root has no generation"]}
+
+    _fake_module(monkeypatch, "benchmarks.thinking_rows_check", check_thinking_rows=check_thinking_rows)
+    monkeypatch.setattr(external, "_api_key", lambda: "k")
+    ok, reason = code_agent_checks.run_check(_external_data(), {"type": "code_agent_thinking_rows"})
+    assert ok and '"tok_s": 42' in reason
+    assert seen == {"root": AGENT, "base_url": CTX["base_url"], "user_id": "user-1", "key": "k", "config": {}}
+    ok, reason = code_agent_checks.run_check(_external_data(), {"type": "code_agent_thinking_rows", "ok": False})
+    assert not ok and "root has no generation" in reason
+
+
+def test_github_rate_limit_lane_check_builds_the_expectation_from_config(monkeypatch):
+    from types import SimpleNamespace
+
+    seen = {}
+
+    class Expectation:
+        def __init__(self, *, injected_reset_at, phase, **rest):
+            seen["expectation"] = (injected_reset_at.isoformat(), phase, rest)
+
+    async def check_github_rate_limit(base_url, headers, agent_ids, expectation):
+        seen["call"] = (base_url, headers["X-User-Id"], list(agent_ids))
+        return SimpleNamespace(passed=True, outcome="failed truthfully", failures=[])
+
+    _fake_module(
+        monkeypatch,
+        "benchmarks.github_rate_limit_check",
+        GithubRateLimitExpectation=Expectation,
+        check_github_rate_limit=check_github_rate_limit,
+    )
+    monkeypatch.setattr(external, "_api_key", lambda: "k")
+    check = {"type": "code_agent_github_rate_limit", "injected_reset_at": "2026-11-06T06:18:42Z", "phase": "startup",
+             "max_sessions": 1}
+    assert code_agent_checks.run_check(_external_data(), check) == (True, "code_agent_github_rate_limit: failed truthfully; ")
+    assert seen["expectation"] == ("2026-11-06T06:18:42+00:00", "startup", {"max_sessions": 1})
+    assert seen["call"] == (CTX["base_url"], "user-1", [AGENT, "child-1"])
+
+
+def _stub(tmp_path, body: str):
+    path = tmp_path / "stub.sh"
+    path.write_text("#!/usr/bin/env bash\n" + body)
+    return path
+
+
+def test_script_lane_check_passes_context_flags_and_maps_exit_codes(monkeypatch, tmp_path):
+    out = tmp_path / "args.txt"
+    stub = _stub(tmp_path, f'echo "$@ key=$BACKEND_API_KEY" > {out}\necho \'{{"ok":true,"checked":3,"violations":[]}}\'\nexit ${{STUB_EXIT:-0}}\n')
+    monkeypatch.setattr(external, "REPO_ROOT", tmp_path)
+    monkeypatch.setitem(external.EXTERNAL, "code_agent_markdown", external.External("script", "stub.sh"))
+    monkeypatch.setattr(external, "_api_key", lambda: "k")
+    check = {"type": "code_agent_markdown", "require_root_reply": True, "require_code_reply": True}
+    ok, reason = code_agent_checks.run_check(_external_data(), check)
+    assert ok and "checked 3" in reason
+    assert out.read_text().split() == [
+        "--backend", CTX["base_url"], "--user-id", "user-1", "--agent-id", AGENT, "--agent-id", "child-1",
+        "--require-root-reply", "--require-code-reply", "key=k"]
+    monkeypatch.setenv("STUB_EXIT", "1")
+    assert not code_agent_checks.run_check(_external_data(), check)[0]
+    monkeypatch.setenv("STUB_EXIT", "2")  # bad input is not a verdict
+    ok, reason = code_agent_checks.run_check(_external_data(), check)
+    assert not ok and "exited 2" in reason
+    assert stub.exists()
+
+
+def test_playwright_lane_check_needs_a_real_pass_and_the_root_in_its_env(monkeypatch, tmp_path):
+    out = tmp_path / "env.txt"
+    stub = _stub(tmp_path, f'echo "$CODE_AGENT_CHECK_ROOT_ID $FRONTEND_URL" > {out}\necho "${{STUB_OUT:-  1 passed (3s)}}"\nexit ${{STUB_EXIT:-0}}\n')
+    (tmp_path / "front-end/tests-e2e").mkdir(parents=True)
+    (tmp_path / "front-end/tests-e2e/code-agent-render-check.spec.ts").write_text("")
+    monkeypatch.setattr(external, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(external, "FRONT_END", tmp_path / "front-end")
+    monkeypatch.setattr(external, "PLAYWRIGHT_CMD", ("bash", str(stub)))
+    check = {"type": "code_agent_render"}
+    assert code_agent_checks.run_check(_external_data(), check) == (True, "code_agent_render: 1 passed")
+    assert out.read_text().split() == [AGENT, CTX["frontend_url"]]
+    monkeypatch.setenv("STUB_OUT", "  1 skipped")  # a skipped spec is not a pass
+    assert not code_agent_checks.run_check(_external_data(), check)[0]
+    monkeypatch.setenv("STUB_EXIT", "1")
+    monkeypatch.setenv("STUB_OUT", "  1 failed: C8 rendered below the history")
+    ok, reason = code_agent_checks.run_check(_external_data(), check)
+    assert not ok and "C8 rendered below the history" in reason
+
+
+def test_absent_lane_files_fail_closed_with_an_actionable_reason(monkeypatch, tmp_path):
     import sys
 
-    monkeypatch.setitem(sys.modules, "benchmarks.code_agent_run_checks", None)
-    module = code_agent_checks.EXTERNAL_CHECKS["code_agent_message_reached"][0]
-    check = {"type": "code_agent_message_reached"}
-    for run in ({}, {module: {"error": "HTTPStatusError: 404"}}, {module: {"messages": []}}):
-        data = {"_benchmark": {code_agent_checks.EVIDENCE_KEY: {"run": run}}}
-        assert not code_agent_checks.run_check(data, check)[0]
+    for name in ("benchmarks.code_agent_run_checks", "benchmarks.thinking_rows_check", "benchmarks.github_rate_limit_check"):
+        monkeypatch.setitem(sys.modules, name, None)
+    monkeypatch.setattr(external, "REPO_ROOT", tmp_path)
+    run = {"benchmarks.code_agent_run_checks": {"messages": []}}
+    for check in (
+        {"type": "code_agent_single_code_agent"},
+        {"type": "code_agent_thinking_rows"},
+        {"type": "code_agent_markdown"},
+        {"type": "code_agent_render"},
+        {"type": "code_agent_github_rate_limit", "injected_reset_at": "2026-11-06T06:18:42Z", "phase": "startup"},
+    ):
+        ok, reason = code_agent_checks.run_check(_external_data(run=run), check)
+        assert not ok and "is not on this branch" in reason, (check, reason)
+    ok, reason = code_agent_checks.run_check(
+        _external_data(run={"benchmarks.code_agent_run_checks": {"error": "HTTPStatusError: 404"}}),
+        {"type": "code_agent_message_reached"},
+    )
+    assert not ok and "evidence unavailable" in reason
+
+
+def test_run_context_has_no_secret_and_the_frontend_follows_the_backend_port(monkeypatch, tmp_path):
+    import json as _json
+
+    monkeypatch.delenv("BENCHMARK_CONTEXT_DIR", raising=False)
+    assert external.frontend_url("http://localhost:24420") == "http://localhost:24421"
+    (tmp_path / "services.json").write_text(_json.dumps({"urls": {"frontend": "http://localhost:9999"}}))
+    monkeypatch.setenv("BENCHMARK_CONTEXT_DIR", str(tmp_path))
+    assert external.frontend_url("http://localhost:24420") == "http://localhost:9999"
+    monkeypatch.setattr(external, "_api_key", lambda: "super-secret-key")
+    context = external.context({"agent": {"agent_id": AGENT}}, "http://localhost:24420/", [AGENT])
+    assert "super-secret-key" not in _json.dumps(context) and context["root_agent_id"] == AGENT
 
 
 def test_retried_create_keeps_the_first_create_as_the_spawn_checkout():
@@ -259,3 +422,21 @@ def test_collect_keeps_per_phase_startup_for_the_run_record(monkeypatch):
     assert phases["phases_ms"]["ready"] == 303500.0 and phases["phases_ms"]["backend.workspace"] == 139601.0
     assert phases["checkout_source"] == "remote" and phases["backend_creates"] == 1
     json.dumps(evidence)  # persisted in the run record
+
+
+def test_failed_run_still_records_code_agent_evidence_and_never_raises(monkeypatch):
+    import asyncio
+
+    async def boom(data, *, benchmark, base_url):
+        raise RuntimeError("log read failed")
+
+    async def fine(data, *, benchmark, base_url):
+        return {"startup_phases": []}
+
+    data: dict = {}
+    monkeypatch.setattr(ev, "collect", boom)
+    asyncio.run(code_agent_checks.record_evidence(data, benchmark=TASK, base_url=None))
+    assert data["_benchmark"][code_agent_checks.EVIDENCE_KEY] == {"collect_error": "RuntimeError: log read failed"}
+    monkeypatch.setattr(ev, "collect", fine)
+    asyncio.run(code_agent_checks.record_evidence(data, benchmark=TASK, base_url=None))
+    assert data["_benchmark"][code_agent_checks.EVIDENCE_KEY] == {"startup_phases": []}

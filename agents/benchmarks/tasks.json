@@ -7775,7 +7775,7 @@
   {
     "name": "code-agent-rose-repo",
     "title": "Code agent in the attached Rose repo",
-    "prompt": "This agent runs in the Rose project, so the Rose GitHub repository is attached to the code agents you start. Use exactly one code agent (spawn_claude_code_agent) for this task; do not use browser or explore agents and do not modify any files. Ask the code agent to report, from its checkout of the Rose repository: the current branch name, and the full SHA and subject line of the commit it has checked out (git rev-parse HEAD and git log -1 --format=%s). Then reply with those three values.",
+    "prompt": "This agent runs in the Rose project, so the Rose GitHub repository is attached to the code agents you start. Use exactly one code agent for this task; do not use browser or explore agents and do not modify any files. Start it with this task: from its checkout of the Rose repository, run these read-only commands one at a time, each as its own shell command, and report every output: git rev-parse --abbrev-ref HEAD, git rev-parse HEAD, git log -1 --format=%s, git count-objects -vH, and git ls-files | wc -l. Right after you start it, while it is still working, send that same code agent exactly one message with send_message_to_agent asking it to also report the output of git log -3 --format=%h. When it finishes, reply with the branch name, the SHA, the subject line and the three short hashes.",
     "timeout_seconds": 1500,
     "is_chat_mode": false,
     "expected_tools": [
@@ -7793,7 +7793,8 @@
     "start_phase": "plan",
     "project": "Rose",
     "min_tool_counts": {
-      "spawn_claude_code_agent": 1
+      "spawn_claude_code_agent": 1,
+      "send_message_to_agent": 1
     },
     "tool_count_scope": "tree",
     "forbidden_tools": [
@@ -7856,6 +7857,69 @@
         "checks": [
           {
             "type": "code_agent_one_session_per_spawn"
+          }
+        ]
+      },
+      {
+        "id": "single-code-agent",
+        "method": "static_check",
+        "criteria": [
+          "Exactly one code agent exists under the root for its single code spawn call, and no code agent exists that no spawn reported (benchmarks.code_agent_run_checks.check_single_code_agent)"
+        ],
+        "checks": [
+          {
+            "type": "code_agent_single_code_agent",
+            "expected": 1
+          }
+        ]
+      },
+      {
+        "id": "message-reached-code-agent",
+        "method": "static_check",
+        "criteria": [
+          "The root's send_message_to_agent to the code agent finished, the backend delivered it as a CLI turn, and the code agent's transcript shows it (benchmarks.code_agent_run_checks.check_message_reached_code_agent)"
+        ],
+        "checks": [
+          {
+            "type": "code_agent_message_reached"
+          }
+        ]
+      },
+      {
+        "id": "thinking-rows",
+        "method": "static_check",
+        "criteria": [
+          "Thinking is a normal row with a recorded tok/s for the root and for every code agent (benchmarks.thinking_rows_check.check_thinking_rows)"
+        ],
+        "checks": [
+          {
+            "type": "code_agent_thinking_rows"
+          }
+        ]
+      },
+      {
+        "id": "markdown-rendering",
+        "method": "static_check",
+        "criteria": [
+          "The root's replies, the code agent's replies and its command output render as markdown structure (front-end/scripts/check-agent-markdown.sh)"
+        ],
+        "checks": [
+          {
+            "type": "code_agent_markdown",
+            "require_root_reply": true,
+            "require_code_reply": true
+          }
+        ]
+      },
+      {
+        "id": "code-agent-transcript-render",
+        "method": "static_check",
+        "criteria": [
+          "The code-agent transcript renders in the existing folded work drawer: no duplicate Worked-for rows, no branch/commit status rows (front-end/tests-e2e/code-agent-render-check.spec.ts)"
+        ],
+        "checks": [
+          {
+            "type": "code_agent_render"
           }
         ]
       }
