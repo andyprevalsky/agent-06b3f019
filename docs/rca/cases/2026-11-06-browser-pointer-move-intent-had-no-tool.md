@@ -30,6 +30,7 @@ sources:
   - agent e04e7558-afdb-412a-a023-e6ccfba54e67 (local fix run on cce696e9d, PASS)
   - commit cce696e9d
   - commit 15f2ef6cf
+  - PR #1703
 repro: agents/tests/blackbox/rose_browser_use.blackbox.py::test_pointer_move_intent_has_a_hover_tool_instead_of_drag
 status: fixed
 ---
@@ -144,6 +145,11 @@ Commits cce696e9d and 15f2ef6cf:
   uses the same pointer movement as click. `drag` holds the button, is never
   for moving the pointer, and needs both ends. `evaluate` no longer routes
   hover/drag to JavaScript.
+- `humanizer.drag_between` (now on the live path) releases the button and
+  fails the drag when a CDP pointer move breaks after a CDP press. Before, it
+  continued with Playwright moves that had no matching press and reported
+  success (CodeRabbit finding on PR #1703; regression
+  `humanized_drag_fails_when_cdp_move_breaks_after_press`).
 - Rejected tool-arg decisions are now dumped (`tool_args_validation_error` in
   output) before the loop feeds the rejection back.
 - Regressions: rose_browser_use `pointer_move_intent_has_hover_tool`,

@@ -749,9 +749,13 @@ class BrowserHumanizer:
                             await self._notify_cursor_observer(int(x), int(y))
                             continue
                         await self._invalidate_cdp_session(cdp_session)
-                        logger.debug("CDP drag move failed; Playwright fallback", error=str(exc))
-                        await self._playwright_mouse("move", int(x), int(y))
-                        pressed = False
+                        # The press went through CDP and Playwright holds no matching
+                        # down, so continuing with Playwright moves would report a drag
+                        # that never happened. Release the button and fail the drag.
+                        logger.debug("CDP drag move failed after press", error=str(exc))
+                        with contextlib.suppress(Exception):
+                            await self._playwright_mouse("up")
+                        raise RuntimeError(f"drag failed: CDP pointer move after press failed: {exc}") from exc
                 else:
                     await self._playwright_mouse("move", int(x), int(y))
                 await self._notify_cursor_observer(int(x), int(y))

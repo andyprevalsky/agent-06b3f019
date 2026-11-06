@@ -12065,6 +12065,61 @@ async def test_humanized_drag_approaches_start_before_pressing():
     assert history.get_entries()[-1]["action"] == "drag"
 
 
+async def test_humanized_drag_fails_when_cdp_move_breaks_after_press():
+    """A CDP press followed by a failed CDP move must release and fail, not report success.
+
+    CodeRabbit on PR #1703: drag_between used to continue with Playwright moves
+    that have no matching Playwright press, so the drag could fail while the
+    executor recorded success.
+    """
+    from browser_tools.dom_service import ActionHistory
+    from browser_tools.humanizer import BrowserHumanizer
+    from browser_tools.tool_executor_v2 import _execute_drag
+
+    sent = []
+
+    class FakeCdp:
+        async def send(self, method, params):
+            sent.append(params)
+            if params.get("type") == "mouseMoved" and params.get("buttons") == 1:
+                raise RuntimeError("Target closed")
+            return {}
+
+    class FakeMouse:
+        def __init__(self):
+            self.ups = 0
+
+        async def move(self, *args, **kwargs):
+            return None
+
+        async def down(self, *args, **kwargs):
+            return None
+
+        async def up(self, *args, **kwargs):
+            self.ups += 1
+
+    mouse = FakeMouse()
+    cdp = FakeCdp()
+    page = SimpleNamespace(
+        mouse=mouse,
+        keyboard=SimpleNamespace(press=AsyncMock()),
+        viewport_size={"width": 1280, "height": 800},
+        context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=cdp)),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+    humanizer._cdp_mouse_transport_enabled = True
+    history = ActionHistory()
+    dom = SimpleNamespace(session=SimpleNamespace(), selector_map={}, get_element_at_coordinates=AsyncMock(return_value=None))
+    with patch("browser_tools.humanizer.asyncio.sleep", new_callable=AsyncMock):
+        out = await _execute_drag(
+            dom, history, {"start_x": 10, "start_y": 20, "end_x": 300, "end_y": 20, "steps": 4}, humanizer=humanizer,
+        )
+    assert out["success"] is False and "drag failed" in out["error"], out
+    assert any(p.get("type") == "mousePressed" for p in sent)
+    assert mouse.ups == 1
+    assert not history.get_entries()
+
+
 async def test_action_history_record_action_accepts_tuple_coordinates():
     """Drag/click executors pass (x, y); record_action used to index that as a dict.
 
@@ -35816,6 +35871,10 @@ async def run_all_tests():
     await r.record_async(
         "humanized_drag_approaches_start_before_pressing",
         test_humanized_drag_approaches_start_before_pressing,
+    )
+    await r.record_async(
+        "humanized_drag_fails_when_cdp_move_breaks_after_press",
+        test_humanized_drag_fails_when_cdp_move_breaks_after_press,
     )
     await r.record_async(
         "action_history_record_action_accepts_tuple_coordinates",
