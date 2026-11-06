@@ -75,13 +75,17 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "params": {"time_ms": {"type": "integer", "description": "Milliseconds to wait (maximum 60000)"}},
     },
     "click": {
-        "description": "Click element by index",
+        "description": (
+            "Click element by index. The mouse pointer first moves to the element along a natural, "
+            "human-like path, then presses and releases; no separate pointer movement is needed."
+        ),
         "params": {"index": {"type": "integer", "description": "Element index from browser_state", "required": True}},
     },
     "click_coordinates": {
         "description": (
             "Fallback only: click at specific coordinates when the target has no numeric DOM index. "
-            "Do not use when the current browser state lists a relevant [index]."
+            "Do not use when the current browser state lists a relevant [index]. Like click, the pointer "
+            "moves to the target along a natural, human-like path before pressing."
         ),
         "params": {
             "x": {"type": "integer", "description": "X coordinate", "required": True},
@@ -92,9 +96,11 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Drag from a start point to an end point with a real mouse press → move → release "
             "(CDP Input.dispatchMouseEvent, same path browser-use uses for Element.drag_to). "
-            "Use for sliders, CAPTCHA / 'Bot or Not' slide-to-verify widgets, scrubbers, and "
-            "drag-and-drop. Prefer source_index/target_index when those nodes are indexed; "
-            "otherwise use start_x/start_y and end_x/end_y from the screenshot viewport."
+            "The mouse button stays held for the whole movement. Use only for sliders, CAPTCHA / "
+            "'Bot or Not' slide-to-verify widgets, scrubbers, and drag-and-drop; never to move the "
+            "pointer, because click and click_coordinates already move it naturally. Both ends are "
+            "required: source_index or start_x/start_y, and target_index or end_x/end_y. Prefer "
+            "indexes when those nodes are indexed; otherwise use screenshot viewport coordinates."
         ),
         "params": {
             "source_index": {
@@ -113,6 +119,18 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                 "type": "integer",
                 "description": "Intermediate move samples while held (default 24)",
             },
+        },
+    },
+    "hover": {
+        "description": (
+            "Move the mouse pointer to an element by index, or to viewport coordinates x/y, along a "
+            "natural, human-like path without clicking. Useful for triggering hover states such as "
+            "menus and tooltips."
+        ),
+        "params": {
+            "index": {"type": "integer", "description": "Element index from browser_state"},
+            "x": {"type": "integer", "description": "Viewport X"},
+            "y": {"type": "integer", "description": "Viewport Y"},
         },
     },
     "input_text": {
@@ -1280,6 +1298,7 @@ _VALID_ACTIONS = frozenset(
         "click",
         "click_coordinates",
         "drag",
+        "hover",
         "scroll",
         "wait",
         "extract",
@@ -1404,6 +1423,19 @@ def normalize_browser_use_response(
             "index": drag_params.get("source_index"),
             "coordinates": None,
             "params": drag_params,
+        }
+
+    if normalized_action == "hover":
+        hover_params = {
+            key: params[key] for key in ("index", "x", "y") if params.get(key) is not None
+        }
+        return {
+            "action": "hover",
+            "thinking": thinking,
+            "index": hover_params.get("index"),
+            "coordinates": None,
+            "element_description": None,
+            "params": hover_params,
         }
 
     if normalized_action == "click" and index is None:

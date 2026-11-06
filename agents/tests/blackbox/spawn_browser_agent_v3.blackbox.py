@@ -11978,6 +11978,47 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     assert drag_mock.await_args.args[2]["end_y"] == 4
 
 
+async def test_execute_action_hover_moves_pointer_without_pressing():
+    """hover is the pointer-only move the webdecoy agents tried to fake with drag.
+
+    Repro: browser-biometrics-webdecoy agents 98fac0b3/1eeef95c sent
+    drag({"end_x": 480, "end_y": 408}) 147-177 times because no advertised tool
+    could move the pointer without pressing the button.
+    """
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    submit = SimpleNamespace(tag_name="button", text_content="Submit", get_all_children_text=lambda: "Submit")
+    dom = SimpleNamespace(
+        session=MagicMock(),
+        selector_map={2827: submit},
+        get_element_coordinates=AsyncMock(return_value=(481, 409)),
+        get_element_at_coordinates=AsyncMock(return_value=None),
+        ensure_browser_overlays_suppressed=AsyncMock(),
+    )
+    humanizer = MagicMock()
+    humanizer.hover = AsyncMock()
+    humanizer.click_at_coords = AsyncMock()
+    humanizer.drag_between = AsyncMock()
+    history = ActionHistory()
+
+    to_point = await execute_action(dom, history, {"action": "hover", "params": {"x": 480, "y": 408}}, humanizer=humanizer)
+    assert to_point["success"] is True, to_point
+    to_element = await execute_action(dom, history, {"action": "hover", "index": 2827, "params": {"index": 2827}}, humanizer=humanizer)
+    assert to_element["success"] is True, to_element
+
+    assert [call.args for call in humanizer.hover.await_args_list] == [(480, 408), (481, 409)]
+    humanizer.click_at_coords.assert_not_awaited()
+    humanizer.drag_between.assert_not_awaited()
+    entries = history.get_entries()
+    assert [entry["action"] for entry in entries[-2:]] == ["hover", "hover"]
+    assert entries[-2]["coordinates"] == {"x": 480, "y": 408}
+    assert entries[-1]["coordinates"] == {"x": 481, "y": 409}
+
+    missing = await execute_action(dom, history, {"action": "hover", "params": {}}, humanizer=humanizer)
+    assert missing["success"] is False and "hover requires index" in missing["error"]
+
+
 async def test_action_history_record_action_accepts_tuple_coordinates():
     """Drag/click executors pass (x, y); record_action used to index that as a dict.
 
@@ -35721,6 +35762,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_drag_dispatches_to_tool_executor",
         test_execute_action_drag_dispatches_to_tool_executor,
+    )
+    await r.record_async(
+        "execute_action_hover_moves_pointer_without_pressing",
+        test_execute_action_hover_moves_pointer_without_pressing,
     )
     await r.record_async(
         "action_history_record_action_accepts_tuple_coordinates",

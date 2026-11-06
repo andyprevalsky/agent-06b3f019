@@ -844,6 +844,7 @@ _INTERACTION_ACTIONS = {
     "select_dropdown",
     "upload_file",
     "drag",
+    "hover",
 }
 _NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
 _INSPECTION_ACTIONS = {
@@ -1237,6 +1238,8 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             context.action_history,
             context.params,
         )
+    if context.action_name == "hover":
+        return await _execute_hover(context)
     if context.action_name == "scroll":
         direction = context.params.get("direction", "down")
         amount = context.params.get("amount", 300)
@@ -3671,6 +3674,35 @@ async def _execute_click(
 
     else:
         return {"success": False, "error": "Click requires either element index or coordinates"}
+
+
+async def _execute_hover(context: _ActionContext) -> Dict[str, Any]:
+    """Move the humanized pointer to an element or viewport point without pressing."""
+    index = context.index if context.index is not None else context.params.get("index")
+    target: Any = None
+    if index is not None:
+        target = await _maybe_await(context.dom_service.get_element_coordinates(index))
+        if target is None:
+            target = await _refresh_element_coordinates(context.dom_service, index)
+        if target is None:
+            return {"success": False, "error": f"Cannot hover element index {index}: no coordinates available"}
+    elif context.params.get("x") is not None and context.params.get("y") is not None:
+        target = (int(context.params["x"]), int(context.params["y"]))
+    else:
+        return {"success": False, "error": "hover requires index or both x and y"}
+    if context.humanizer is None:
+        return {"success": False, "error": "hover is unavailable: this browser session has no pointer humanizer"}
+    x, y = int(target[0]), int(target[1])
+    await context.humanizer.hover(x, y)
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="hover",
+        thinking=context.thinking,
+        index=index,
+        coordinates={"x": x, "y": y},
+        result={"success": True},
+    )
+    return {"success": True, "message": f"Pointer moved to ({x}, {y})"}
 
 
 def _input_success_result(display_text: str, credential_ref: Optional[Dict[str, str]]) -> Dict[str, Any]:
