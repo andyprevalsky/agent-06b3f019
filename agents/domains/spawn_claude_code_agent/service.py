@@ -3443,6 +3443,10 @@ async def spawn_claude_code_activity(
             if isinstance(session_data.get("sandbox_size"), dict):
                 # vCPUs / memory of the E2B sandbox (C16).
                 code_agent_meta["sandbox_size"] = session_data["sandbox_size"]
+            if isinstance(session_data.get("startup"), dict):
+                # How long the sandbox's ws-server took to serve and its repo clone
+                # ({ws_ready_ms, clone_ms}); the code-agent benchmark reads it.
+                code_agent_meta["startup"] = session_data["startup"]
 
             logger.info(
                 "[ClaudeCode] Session created",

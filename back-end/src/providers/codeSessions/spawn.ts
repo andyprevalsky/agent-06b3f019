@@ -150,6 +150,7 @@ type SpawnCreateResult = {
   cliSessionId?: string | null;
   sandboxSize?: SandboxSize | null;
   historyEvents?: number;
+  startup?: { wsReadyMs: number; cloneMs: number | null };
 };
 
 const SPAWN_CREATE_NAMESPACE = 'code-spawn-create';
@@ -315,6 +316,10 @@ async function createSpawnTask<T extends SpawnCreateResult>(
           ? sizeView(session.sandboxSize)
           : null,
       history_events: session.historyEvents ?? 0,
+      startup:
+        session.startup !== undefined
+          ? { ws_ready_ms: session.startup.wsReadyMs, clone_ms: session.startup.cloneMs }
+          : null,
     },
   };
 }
@@ -345,6 +350,8 @@ export interface CodeSessionSpawnFields {
    * (the earlier turns of the live CLI); the monitor treats them as history.
    */
   history_events: number;
+  /** Startup phases of the ws-server this spawn started (null: it attached to a live one). */
+  startup: { ws_ready_ms: number; clone_ms: number | null } | null;
 }
 
 export interface CodeSessionView {
