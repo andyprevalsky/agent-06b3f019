@@ -139,19 +139,24 @@ A root agent can report a Rose bug itself with its `report_bug` tool. In
 production that launches a /rca like this one (its prompt quotes the
 description); everywhere else (local, devbox, benchmark) the report is only
 saved. Check for one on the agent under investigation; any agent in a tree
-resolves to its root's report:
+resolves to its root's report. Query the backend that ran the agent:
+`https://api.roselabs.ai` with the production `BACKEND_API_KEY` for a production
+agent, the local stack's URL and key otherwise.
 
 ```bash
-curl -s "$BACKEND_URL/api/agents/<agent_id>/report-bug/by-agent" \
-  -H "X-API-Key: $BACKEND_API_KEY"   # report is null when none was filed
+curl -s "<backend that ran the agent>/api/agents/<agent_id>/report-bug/by-agent" \
+  -H "X-API-Key: <that backend's BACKEND_API_KEY>"
 ```
+
+`report` is `null` when the agent filed none. An HTTP error or 404 means the
+wrong backend or a missing row, not "no report".
 
 Archived and cloud-benchmark runs lose their database: read the root
 transcript instead (`GET /api/agents/<root_id>` also serves Hub-archived runs).
 The TOOL row for `report_bug` carries the full description:
 
 ```bash
-curl -s "$BACKEND_URL/api/agents/<root_id>" -H "X-API-Key: $BACKEND_API_KEY" \
+curl -s "<backend that ran the agent>/api/agents/<root_id>" -H "X-API-Key: <its key>" \
   -H "X-User-Id: <owner_user_id>" | jq '.messages[]
   | select(.metadata.toolName == "report_bug") | .metadata.bugReportDescription'
 ```
