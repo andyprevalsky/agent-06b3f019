@@ -634,6 +634,100 @@ class NativeCacheRenewal(unittest.TestCase):
         with patch.object(m,'historical_debt_audit',return_value=[self.entry]),self.assertRaises(ValueError):self.consumer()
 
 
+class NativeCacheComposition(unittest.TestCase):
+    setUp=NativeTransition.setUp
+    run_native=NativeTransition.run_native
+    consumer=NativeTransition.consumer
+    prospective_fixture=NativeTransition.prospective_fixture
+    renewal_fixture=NativeCacheRenewal.renewal_fixture
+
+    def composition_fixture(self):
+        import datetime
+        self.renewal_fixture()
+        node='e'*64;python='c'*64;epoch=int(time.time())-100
+        self.added='rose_cloudbench_deps_'+hashlib.sha256((node+'\0'+python).encode()).hexdigest()[:32]
+        self.added_value=f'{node} {python} {epoch} added vol-owned warm navi-whisper-lux-bench'
+        for phase in ('before','after'):self.provider[phase]['config']['metadata'][self.added]=self.added_value
+        self.snapshots.append(dict(id='added',status='created',size=123,volume_id='vol-owned',
+            created_at=datetime.datetime.fromtimestamp(epoch+1,datetime.timezone.utc).isoformat()))
+        c.write(self.context/'provider.json',self.provider);c.write(self.context/'snapshots.json',self.snapshots)
+
+    def test_begin_composes_addition_with_renewals_and_preserves_old_authority(self):
+        self.composition_fixture();result=self.run_native();self.assertEqual(result.returncode,0,result.stderr)
+        state=c.read(self.context/'cycle.json');record=state['native_maintenance'][-1]
+        self.assertEqual(state['native_maintenance'][:2],self.saved_state['native_maintenance'])
+        self.assertEqual(state['reconciled_owners'],self.saved_state['reconciled_owners'])
+        intent=m.read(Path(record['directory'])/'intent.json');proof=intent['before']['cache_addition']
+        self.assertEqual(proof['added_entries'],[self.added])
+        self.assertEqual(proof['renewed_entries'],sorted([self.a,self.b]))
+        self.assertFalse(proof['dependency_reuse_credit']);self.assertTrue(record['qualified'])
+        baseline=m.native_cache_baseline(state,self.root,[self.entry])
+        self.assertNotIn(self.added,baseline['entries'],'new intent cannot enlarge historical authority')
+        with patch.object(m,'historical_debt_audit',return_value=[self.entry]):self.assertTrue(self.consumer())
+
+    def test_new_tuple_and_unrecognized_raw_fields_never_hide_other_changes(self):
+        self.composition_fixture();original=copy.deepcopy(self.provider)
+        mutations=[('unrelated metadata',lambda v:v['config']['metadata'].update(owner='foreign')),
+          ('unrelated env',lambda v:v['config']['env'].update(PRESENT='foreign')),
+          ('removed original',lambda v:v['config']['metadata'].pop(self.a)),
+          ('extra raw metadata',lambda v:v['config']['metadata'].update(extra='opaque')),
+          ('extra raw tuple field',lambda v:v['config']['metadata'].update({self.added:self.added_value+' extra'})),
+          ('malformed',lambda v:v['config']['metadata'].update({self.added:'invalid'})),
+          ('key fingerprint mismatch',lambda v:v['config']['metadata'].update({self.added:self.added_value.replace('e'*64,'f'*64)})),
+          ('foreign app',lambda v:v['config']['metadata'].update({self.added:self.added_value.replace('navi-whisper-lux-bench','foreign-app')})),
+          ('foreign Machine',lambda v:v['config']['metadata'].update({self.added:self.added_value.replace(' warm ',' foreign ')})),
+          ('foreign volume',lambda v:v['config']['metadata'].update({self.added:self.added_value.replace('vol-owned','foreign')})),
+          ('future epoch',lambda v:v['config']['metadata'].update({self.added:self.added_value.replace(self.added_value.split()[2],str(int(time.time())+1000))}))]
+        for name,mutate in mutations:
+            self.provider=copy.deepcopy(original);mutate(self.provider['before']);c.write(self.context/'provider.json',self.provider)
+            with self.subTest(case=name):
+                result=self.run_native();self.assertNotEqual(result.returncode,0,result.stderr)
+                self.assertEqual(self.phase.read_text(),'before')
+                self.assertEqual(c.read(self.context/'cycle.json'),self.saved_state)
+
+    def test_addition_requires_unique_completed_same_volume_nonfuture_snapshot(self):
+        self.composition_fixture();original=copy.deepcopy(self.snapshots)
+        cases=[('missing',None),('foreign volume',{'volume_id':'foreign'}),('pending',{'status':'pending'}),
+               ('zero size',{'size':0}),('stale',{'created_at':'2000-01-01T00:00:00+00:00'}),
+               ('future',{'created_at':'2999-01-01T00:00:00+00:00'}),('wrong identity',{'id':'other'})]
+        for name,change in cases:
+            rows=copy.deepcopy(original)
+            if change is None:rows.pop()
+            else:rows[-1].update(change)
+            c.write(self.context/'snapshots.json',rows)
+            with self.subTest(case=name):
+                result=self.run_native();self.assertNotEqual(result.returncode,0,result.stderr)
+                self.assertEqual(c.read(self.context/'cycle.json'),self.saved_state)
+        c.write(self.context/'snapshots.json',original+[copy.deepcopy(original[-1])])
+        self.assertNotEqual(self.run_native().returncode,0)
+        self.assertEqual(c.read(self.context/'cycle.json'),self.saved_state)
+
+    def test_even_completed_valid_addition_after_begin_cannot_start_guest(self):
+        import datetime
+        self.composition_fixture();node='f'*64;python='c'*64;epoch=int(time.time())-100
+        key='rose_cloudbench_deps_'+hashlib.sha256((node+'\0'+python).encode()).hexdigest()[:32]
+        self.provider['after']['config']['metadata'][key]=f'{node} {python} {epoch} later vol-owned warm navi-whisper-lux-bench'
+        self.snapshots.append(dict(id='later',status='created',size=123,volume_id='vol-owned',
+            created_at=datetime.datetime.fromtimestamp(epoch+1,datetime.timezone.utc).isoformat()))
+        c.write(self.context/'provider.json',self.provider);c.write(self.context/'snapshots.json',self.snapshots)
+        result=self.run_native();self.assertNotEqual(result.returncode,0,result.stderr)
+        self.assertIn('prestart protected config changed',result.stderr)
+        state=c.read(self.context/'cycle.json');record=state['native_maintenance'][-1]
+        self.assertFalse((Path(record['directory'])/'prestart.json').exists())
+        self.assertFalse((self.context/'start-marker').exists());self.assertFalse(record['qualified'])
+        self.assertEqual(state['native_maintenance'][:2],self.saved_state['native_maintenance'])
+        with patch.object(m,'historical_debt_audit',return_value=[self.entry]),self.assertRaises(ValueError):self.consumer()
+
+    def test_added_tuple_removed_after_begin_is_also_protected(self):
+        self.composition_fixture();self.provider['after']['config']['metadata'].pop(self.added)
+        c.write(self.context/'provider.json',self.provider)
+        result=self.run_native();self.assertNotEqual(result.returncode,0,result.stderr)
+        self.assertIn('prestart protected config changed',result.stderr)
+        record=c.read(self.context/'cycle.json')['native_maintenance'][-1]
+        self.assertFalse((Path(record['directory'])/'prestart.json').exists())
+        self.assertFalse((self.context/'start-marker').exists());self.assertFalse(record['qualified'])
+
+
 class Quiescence(unittest.TestCase):
     def test_actual_campaign_and_fleet_and_ancestor_are_not_quiescent(self):
         with tempfile.TemporaryDirectory() as td:
