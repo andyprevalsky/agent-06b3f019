@@ -4325,12 +4325,11 @@ def check_standard_plan_typescript() -> None:
         refused = run_driver("verify", "--require-staged", "--state-dir", raw, env=dict(os.environ))
     assert refused.returncode == 2 and "PIPELINE_VERIFY status=no-staged-cycle exit=2" in refused.stdout, \
         (refused.returncode, refused.stdout, refused.stderr)
-    # The fix-loop rule deploy.md states (two failed rounds refuse a blind rerun; resume with
-    # `run --after-rca`) is the driver's own flag set and default.
-    deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
-    assert "After two failed rounds the runner refuses a blind rerun" in deploy_md and "run --after-rca" in deploy_md
+    # The driver keeps the fix-loop and speculative-source flags the retired deploy.md Phase 3 pinned by
+    # wording (--follow-source, FIX_LOOP_CAP / --fix-loop-cap / --after-rca, default of two failed rounds);
+    # their behavior is asserted by check_follow_source, check_fix_loop_cap and check_env_cap.
     pipeline = load_module("run_deploy_pipeline_fix_loop_rule", DRIVER)
-    assert pipeline.DEFAULT_FIX_LOOP_CAP == 2, "deploy.md says two failed rounds"
+    assert pipeline.DEFAULT_FIX_LOOP_CAP == 2, "two failed rounds refuse a blind rerun"
     run_help = run_driver("run", "--help", env=dict(os.environ), check=True).stdout
     for flag in ("--follow-source", "--fix-loop-cap", "--after-rca"):
         assert flag in run_help, f"run_deploy_pipeline.py run must keep {flag}"
