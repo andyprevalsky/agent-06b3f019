@@ -5,6 +5,7 @@
  */
 
 import { WebSocketServer } from "ws";
+import { createServer } from "http";
 import { execFileSync, execSync, spawn } from "child_process";
 import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import {
@@ -15,6 +16,7 @@ import {
   readdirSync,
   renameSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
@@ -107,17 +109,63 @@ const clients = new Set();
 // on its E2B idle window and the result is still here when it resumes.
 // Closing the session (SIGTERM / sandbox pause or kill) exits immediately.
 
-// Create WebSocket server
-const wss = new WebSocketServer({ port: PORT });
-
-wss.on("listening", () => {
-  log("info", "Server listening", {
-    port: wss.address().port,
-    ...(process.env.ROSE_LOCAL_WS_READINESS_TOKEN
-      ? { readinessToken: process.env.ROSE_LOCAL_WS_READINESS_TOKEN }
-      : {}),
+// The port is bound first and answers plain HTTP with the startup state, so a
+// probe can tell a server that is cloning from one that serves. A bound socket
+// whose event loop is blocked answers nothing, which the backend's old
+// `netstat | grep :3000` probe called ready. WebSocket handshakes are refused
+// with 503 until the server serves, so no connection handler runs before the
+// module's state exists. "Server listening" is logged once it serves.
+//
+//   starting ─▶ cloning ─▶ starting ─▶ ready      GET / : 503 {state} … 200 {state:"ready"}
+const startup = {
+  state: "starting",
+  phase: "init",
+  startedAt: Date.now(),
+  cloneMs: null,
+  cloneChild: null,
+};
+const httpServer = createServer((req, res) => {
+  const ready = startup.state === "ready";
+  res.writeHead(ready ? 200 : 503, {
+    "content-type": "application/json",
+    ...(ready ? {} : { "retry-after": "2" }),
   });
+  res.end(
+    JSON.stringify({
+      state: startup.state,
+      phase: startup.phase,
+      elapsed_ms: Date.now() - startup.startedAt,
+      clone_ms: startup.cloneMs,
+    }),
+  );
 });
+
+// Create WebSocket server
+const wss = new WebSocketServer({ noServer: true });
+httpServer.on("upgrade", (req, socket, head) => {
+  if (startup.state !== "ready") {
+    socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+});
+httpServer.listen(PORT);
+
+function markServing() {
+  startup.state = "ready";
+  startup.phase = "serving";
+  const announce = () =>
+    log("info", "Server listening", {
+      port: httpServer.address().port,
+      startup_ms: Date.now() - startup.startedAt,
+      clone_ms: startup.cloneMs,
+      ...(process.env.ROSE_LOCAL_WS_READINESS_TOKEN
+        ? { readinessToken: process.env.ROSE_LOCAL_WS_READINESS_TOKEN }
+        : {}),
+    });
+  if (httpServer.listening) announce();
+  else httpServer.once("listening", announce);
+}
 
 // A control connection that only sends a turn (`?replay=0`) skips the history
 // replay: a long session's buffer is megabytes, and the turn ack would queue
@@ -396,12 +444,24 @@ async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   log("info", "Starting graceful shutdown", { exitCode });
+  if (startup.state !== "ready") {
+    // Signalled while cloning or configuring: the session state below does not
+    // exist yet. Stop the clone (its temp dir is removed by the next start).
+    startup.cloneChild?.kill("SIGTERM");
+    httpServer.close(() => {
+      log("info", "Shutdown complete");
+      process.exit(exitCode);
+    });
+    setTimeout(() => process.exit(exitCode), 5000);
+    return;
+  }
   endNativeTurn("interrupted");
   if (cliChild && !processExited) cliChild.kill("SIGTERM");
 
   announceExit(exitCode);
 
   // Close server
+  httpServer.close();
   wss.close(() => {
     log("info", "Shutdown complete");
     process.exit(exitCode);
@@ -476,6 +536,61 @@ writeFileSync(settingsPath, JSON.stringify(settings));
 
 log("info", "Configuration written");
 
+// A startup phase is one named, timed step of getting the session ready. It
+// is logged and kept in the event buffer, so a benchmark can read how long the
+// clone took from the sandbox log or the replayed events.
+function recordStartupPhase(name, status, startedAt) {
+  const durationMs = Date.now() - startedAt;
+  log("info", "Startup phase", { name, status, duration_ms: durationMs });
+  appendEvent({ type: "startup_phase", name, status, duration_ms: durationMs });
+  return durationMs;
+}
+
+// `git clone` runs as a child process, not on the event loop, so the server
+// keeps answering "cloning" while a large repo downloads. It clones into a
+// sibling temp dir and renames it into place: a clone that is interrupted (a
+// restart, a pause) never leaves a half-written workspace that the next start
+// would take for a resumable repo ("HEAD is not a commit"). A finished clone
+// is found by RESUMING_REPO below and never repeated.
+const CLONE_TMP_PREFIX = ".workspace-cloning-";
+async function cloneRepoAtomically(authUrl, destDir) {
+  for (const name of readdirSync(home)) {
+    // Left behind by a server that was killed mid-clone.
+    if (name.startsWith(CLONE_TMP_PREFIX))
+      rmSync(join(home, name), { recursive: true, force: true });
+  }
+  const tmpDir = join(home, `${CLONE_TMP_PREFIX}${process.pid}`);
+  const startedAt = Date.now();
+  startup.state = "cloning";
+  startup.phase = "clone";
+  let status = "completed";
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn("git", ["clone", authUrl, tmpDir], {
+        stdio: "inherit",
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      });
+      startup.cloneChild = child;
+      child.once("error", reject);
+      child.once("exit", (code, signal) =>
+        code === 0
+          ? resolve()
+          : reject(new Error(`git clone exited with ${code ?? signal}`)),
+      );
+    });
+    renameSync(tmpDir, destDir);
+  } catch (err) {
+    status = "failed";
+    rmSync(tmpDir, { recursive: true, force: true });
+    throw err;
+  } finally {
+    startup.cloneChild = null;
+    startup.state = "starting";
+    startup.phase = "configure";
+    startup.cloneMs = recordStartupPhase("clone", status, startedAt);
+  }
+}
+
 // Clone GitHub repo if specified
 let workDir = home;
 const REPO_WORKDIR = join(home, "workspace");
@@ -549,11 +664,8 @@ if (projectMode) {
     : GITHUB_REPO_URL;
 
   try {
-    // Clone repo
-    execSync(`git clone ${authUrl} ${workDir}`, {
-      stdio: "inherit",
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-    });
+    // Clone repo (off the event loop, atomically: see cloneRepoAtomically)
+    await cloneRepoAtomically(authUrl, workDir);
 
     // Configure git for commits
     execSync(`git config user.name "Rose Agent"`, { cwd: workDir });
@@ -1908,3 +2020,4 @@ async function runClaudeCli(startupReport = null) {
 }
 
 runProjectStartup().then((report) => runClaudeCli(report));
+markServing();

@@ -4369,8 +4369,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         moved this agent to that child's finish, so the next "now" it sees is
         the world's.
         Outside a WMH world no cursor exists and nothing extra runs.
+
+        A foreground explore/browser/code spawn is recorded under its task path
+        while it runs (workflows/background_agents.py), so it is addressable.
         """
-        result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        refused = await self._begin_foreground_spawn(tool_name, tool_args, tool_call_id)
+        if refused is not None:
+            return refused
+        result: Any = None
+        try:
+            result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
+        finally:
+            await self._end_foreground_spawn(tool_call_id, result)
         await self._refresh_world_time_cursor_after_tool()
         return result
 

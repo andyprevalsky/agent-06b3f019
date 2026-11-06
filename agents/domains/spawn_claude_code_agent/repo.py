@@ -12,12 +12,15 @@ from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from domains.spawn_claude_code_agent.config import (
+    CODE_SESSION_CREATE_HEARTBEAT_S,
+    CODE_SESSION_CREATE_TIMEOUT_S,
     CODE_SESSION_RESIZE_ATTEMPTS,
     CODE_SESSION_RESIZE_RETRY_BACKOFF_S,
     CODE_SESSION_RESIZE_TIMEOUT_S,
     E2B_CAPACITY_EXHAUSTED_CODE,
     LOCAL_TARGET_UNAVAILABLE_CODE,
 )
+from helpers.activity_heartbeat import safe_heartbeat
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
@@ -247,6 +250,24 @@ async def save_code_transcript_batch(
         return False
 
 
+async def _post_with_heartbeats(request: Any, message: str) -> httpx.Response:
+    """Await a long backend request, heartbeating the activity while it runs.
+
+    A session create can take minutes (CODE_SESSION_CREATE_TIMEOUT_S); without
+    beats the heartbeat timeout would start a second attempt beside this one.
+    """
+    pending = asyncio.ensure_future(request)
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=CODE_SESSION_CREATE_HEARTBEAT_S)
+            if done:
+                return pending.result()
+            safe_heartbeat(message)
+    finally:
+        if not pending.done():
+            pending.cancel()
+
+
 async def create_e2b_session(
     agent_id: str,
     goal: str,
@@ -300,14 +321,17 @@ async def create_e2b_session(
             # Keep the session's sandbox and files; start a new CLI conversation.
             create_payload["fresh_conversation"] = True
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            f"{config.backend.api_url}{_session_base_path(code_provider)}/create",
-            headers={
-                "x-api-key": config.backend.api_key or "",
-                "Content-Type": "application/json",
-            },
-            json=create_payload,
+    async with httpx.AsyncClient(timeout=httpx.Timeout(CODE_SESSION_CREATE_TIMEOUT_S, connect=10.0)) as client:
+        response = await _post_with_heartbeats(
+            client.post(
+                f"{config.backend.api_url}{_session_base_path(code_provider)}/create",
+                headers={
+                    "x-api-key": config.backend.api_key or "",
+                    "Content-Type": "application/json",
+                },
+                json=create_payload,
+            ),
+            "Starting the code-agent sandbox",
         )
 
         if response.status_code == 409 and target == "local":

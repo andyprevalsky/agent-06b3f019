@@ -107,6 +107,15 @@ DRAIN_CHECK_INTERVAL_S: Final[float] = 1.0
 # The retry after a dead worker starts once this passes without a heartbeat, so
 # the sandbox ws-servers serve their final buffer until the session is closed.
 CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S: Final[int] = 300
+# Session create: the backend may wait for its shared E2B create slot (up to
+# 15 min, back-end/src/providers/e2bCreateSlot.ts) and then start the sandbox; a
+# fresh repo sandbox restores its project for minutes (150 s on 2026-11-06,
+# when a 60 s read timed out and the retries started 3 tasks). The activity
+# heartbeats while it waits, so liveness stays the heartbeat timeout; this
+# bound only ends a backend that never answers. A retry of the same tool call
+# gets the same task back (backend createWithCodeSession).
+CODE_SESSION_CREATE_TIMEOUT_S: Final[float] = 30 * 60.0
+CODE_SESSION_CREATE_HEARTBEAT_S: Final[float] = 30.0
 # A reattaching attempt closes the previous sandbox and starts over only after
 # this many failed handshakes, so one network blip does not discard a live run.
 REATTACH_PROBE_ATTEMPTS: Final[int] = 3

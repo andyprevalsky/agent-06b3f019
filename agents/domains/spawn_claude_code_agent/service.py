@@ -3443,6 +3443,10 @@ async def spawn_claude_code_activity(
             if isinstance(session_data.get("sandbox_size"), dict):
                 # vCPUs / memory of the E2B sandbox (C16).
                 code_agent_meta["sandbox_size"] = session_data["sandbox_size"]
+            if isinstance(session_data.get("startup"), dict):
+                # How long the sandbox's ws-server took to serve and its repo clone
+                # ({ws_ready_ms, clone_ms}); the code-agent benchmark reads it.
+                code_agent_meta["startup"] = session_data["startup"]
 
             logger.info(
                 "[ClaudeCode] Session created",
@@ -3494,10 +3498,10 @@ async def spawn_claude_code_activity(
                     "folder": code_agent_meta.get("folder"),
                 }
             )
-        # An attempt's first heartbeat goes out at once and later ones only every
-        # throttle interval, so nothing may heartbeat before the session rides
-        # along, and the session must ride along before anything else can fail:
-        # a crash in either window would hide the sandbox from the retry.
+        # The session must ride along before anything else can fail. The create
+        # heartbeats while it waits, so this beat can sit out one throttle
+        # interval; a retry after a crash in that window creates again and the
+        # backend hands back this same running task (createWithCodeSession).
         session_heartbeats.enter_context(
             heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}, retry_state)
         )

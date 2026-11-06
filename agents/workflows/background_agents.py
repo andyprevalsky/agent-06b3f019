@@ -26,6 +26,16 @@
            general_purpose/for_each children (they stop as orphaned), record
            each as "failed"; late child_completed signals are ignored.
 
+Foreground explore/browser/code spawns (run_in_background=false) get the same
+record while they run, flagged ``foreground`` (``_begin_foreground_spawn``), so
+the address the schema promises, <own path>/<task_name>, resolves::
+
+    spawn_agent(run_in_background=false, id=T) ──▶ record T {foreground, running}
+        │  (tree state lists it: other agents' sends reach its inbox / CLI turn)
+        ▼  the executor's rows stay the model's result (never stamped FE-only)
+    returns ──▶ record finished (_end_foreground_spawn): no notification, no
+                wake; a send to it gets its state (background_message_refusal)
+
 Planned (DAG) spawns run in the background too (``_planned_dag_background``)::
 
     DAG task T ── spawn_agent ──▶ _start_background_spawn (same "started" row)
@@ -108,6 +118,7 @@ MAX_WAKEABLE_FINISHED_TASKS = 10
 FINISHED_RECORD_KEYS = (
     "tool_call_id",
     "agent_type",
+    "foreground",
     "address",
     "goal",
     "status",
@@ -220,11 +231,12 @@ class BackgroundAgentsMixin:
         return [self._background_tasks[key]["address"] for key in self._pending_background_ids()]
 
     def _is_background_execution_id(self, tool_call_id: Any) -> bool:
-        """T (or a for_each child's T:<n>) of an own background spawn."""
+        """T (or a for_each child's T:<n>) of an own background spawn (never a foreground one)."""
         if not isinstance(tool_call_id, str) or not tool_call_id:
             return False
         base_id = tool_call_id.split(":", 1)[0]
-        return base_id in self._background_tasks or base_id in self._background_finished
+        record = self._background_tasks.get(base_id) or self._background_finished.get(base_id)
+        return record is not None and not record.get("foreground")
 
     def _background_row_metadata(
         self, tool_call_id: Any, metadata: Optional[Dict[str, Any]]
@@ -492,6 +504,67 @@ class BackgroundAgentsMixin:
         await self._update_tree_state()
         return {"success": True, "message": text, "background_task_id": task_id, "address": address}
 
+    async def _begin_foreground_spawn(
+        self, tool_name: str, tool_args: Dict[str, Any], tool_call_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Record a foreground explore/browser/code spawn under its task path.
+
+        Returns the tool's error result when its task_name is taken, else None.
+        A background spawn (or a background run's executor, or a foreground
+        spawn resumed after a handoff) already has its record and is skipped.
+        """
+        if tool_name != "spawn_agent" or tool_args.get("type") not in WAKEABLE_TASK_TYPES:
+            return None
+        if self._spawn_runs_in_background(tool_name, tool_args):
+            return None
+        if tool_call_id in self._background_tasks or tool_call_id in self._background_finished:
+            return None
+        args = {key: value for key, value in tool_args.items() if key != "run_in_background"}
+        try:
+            validate_spawn_params({"tool": "spawn_agent", **args, "_phase": getattr(self, "current_phase", None)})
+        except ValueError:
+            return None  # the foreground path posts the validation error
+        task_name = args.get("task_name")
+        # Resolve before the uniqueness check: nothing may await between that
+        # check and the insertion (see _start_background_spawn).
+        path = child_task_path(await resolve_own_task_path(self), task_name)
+        if task_name and (
+            task_name in self._retired_task_names
+            or task_name_in_use([*self._background_tasks.values(), *self._background_finished.values()], task_name)
+        ):
+            error = (
+                f"task_name '{task_name}' is already used by another agent you spawned; choose a different task_name."
+            )
+            await self._handle_tool_event(
+                ToolEvent(type=EventType.POST_MESSAGE, title="spawn_agent failed", message=error, status=MessageStatus.ERROR),
+                tool_call_id,
+                "spawn_agent",
+            )
+            return {"error": True, "message": error}
+        self._background_tasks[tool_call_id] = {
+            "tool_call_id": tool_call_id,
+            "tool_args": args,
+            "agent_type": str(args.get("type")),
+            "foreground": True,
+            "address": path or tool_call_id,
+            "task_name": task_name,
+            "path": path,
+            "started_at": workflow.now().isoformat(),
+            "goal": str(args.get("goal") or "")[:BACKGROUND_GOAL_RECORD_LEN],
+            "status": "running",
+            "child_agent_ids": [],
+        }
+        return None
+
+    async def _end_foreground_spawn(self, tool_call_id: str, result: Any) -> None:
+        """Finish a foreground spawn's record; a parked one stays running for the next generation."""
+        record = self._background_tasks.get(tool_call_id)
+        if record is None or not record.get("foreground"):
+            return
+        if isinstance(result, dict) and result.get("pending_tool_resume"):
+            return
+        await self._finish_background_task(tool_call_id, result if isinstance(result, dict) else {"error": True})
+
     def _launch_background_task(self, task_id: str) -> None:
         if task_id in self._background_handles:
             return
@@ -552,6 +625,8 @@ class BackgroundAgentsMixin:
             record = self._background_tasks[task_id]
             if record.get("agent_type") in CHILD_WORKFLOW_AGENT_TYPES:
                 continue  # durable children report through child_completed
+            if record.get("foreground"):
+                continue  # its parked tool call re-enters in the foreground
             workflow.logger.info(f"[background] relaunching {task_id} after continuation")
             self._launch_background_task(task_id)
 
@@ -638,7 +713,7 @@ class BackgroundAgentsMixin:
         record["finished_at"] = workflow.now().isoformat()
         self._background_tasks.pop(task_id, None)
         finished = {key: record.get(key) for key in FINISHED_RECORD_KEYS}
-        if record.get("agent_type") in WAKEABLE_TASK_TYPES:
+        if record.get("agent_type") in WAKEABLE_TASK_TYPES and not record.get("foreground"):
             # What send_message_to_agent needs to wake this task for another run.
             finished["wake"] = {
                 "tool_args": dict(record.get("tool_args") or {}),
@@ -648,6 +723,11 @@ class BackgroundAgentsMixin:
         self._remember_finished_background_task(task_id, finished)
         if record.get("agent_type") not in CHILD_WORKFLOW_AGENT_TYPES:
             await self._update_tree_state()  # the persisted tree state lists it as finished
+        if record.get("foreground"):
+            # Its result is already the spawn call's result in the model's context.
+            self._background_finishing.discard(task_id)
+            self._background_settled.add(task_id)
+            return
 
         key = f"{self.agent_id}:{task_id}:notification" + (f":run{run}" if run > 1 else "")
         if key not in self._background_notified:
