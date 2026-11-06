@@ -208,9 +208,11 @@ export interface SpawnAgentMetadata extends BaseToolMetadata {
 
 /**
  * A single task in the plan.
- * Contains the goal and tool to execute.
+ * Contains the short display title, the full task description (goal) and the tool to execute.
  */
 export interface PlanTask {
+  /** Short planner-generated title shown in the plan. Absent on plans made before task titles. */
+  title?: string;
   goal: string;
   tool_name: string;
 }
@@ -224,7 +226,7 @@ export interface PlanArtifactData {
   type: 'plan_artifact';
   title: string;
   content: string;
-  /** Array of tasks - each task has goal and tool_name */
+  /** Array of tasks - each task has title, goal and tool_name */
   tasks: PlanTask[];
   /** Map of task index to list of predecessor task indices */
   dependencies: Record<string, string[]>;

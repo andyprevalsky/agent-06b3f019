@@ -8,9 +8,11 @@
  *   a background-task path narrows to its owner; an unknown path → 404 AGENT_PATH_NOT_FOUND
  *   a path is resolved only inside the caller's tree; a missing agent_id → 400
  *   agent_network rows are stored messages, so record_kind message/all reads them;
- *   order is accepted and ignored on a sole agent_network search (newest first);
+ *   order is accepted and ignored wherever agent_trajectories is not searched
+ *   (newest first, as display_order says);
  *   a model-record kind, surface, until, page_after or non-task trace_path → 400
- *   naming that parameter; order with another source → 400 order/page_after
+ *   naming that parameter; order on agent_trajectories mixed with another
+ *   source → 400 naming order
  *
  * Registered by data.blackbox.ts.
  */
@@ -310,8 +312,20 @@ async function proveAgentNetworkRecordKind(
     agent_id: tree.siblingId,
   });
   assert(
-    mixed.status === 400 && JSON.stringify(mixed.data).includes("'order/page_after'"),
-    `order with another source is rejected, got ${mixed.status} ${JSON.stringify(mixed.data)}`
+    mixed.status === 200 &&
+      (mixed.data as unknown as { display_order?: string }).display_order === 'newest_first',
+    `order without agent_trajectories is ignored, got ${mixed.status} ${JSON.stringify(mixed.data)}`
+  );
+  const mergedTrajectories = await grep(headers, {
+    pattern: tree.marker,
+    sources: ['agent_network', 'agent_trajectories'],
+    order: 'oldest_first',
+    agent_id: tree.siblingId,
+  });
+  assert(
+    mergedTrajectories.status === 400 &&
+      JSON.stringify(mergedTrajectories.data).includes("'order'"),
+    `order on a merged agent_trajectories search is rejected by name, got ${mergedTrajectories.status} ${JSON.stringify(mergedTrajectories.data)}`
   );
 }
 

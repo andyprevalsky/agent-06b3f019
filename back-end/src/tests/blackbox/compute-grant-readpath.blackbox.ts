@@ -272,9 +272,15 @@ test('a Claude envelope past its own expiresAt is never leased to an agent', asy
   assert(poolToken === null, 'pool path leased a refreshable envelope past its own expiresAt');
   const row = await prisma.integration.findUnique({ where: { id: expired.id } });
   assert(row !== null, 'skipping an expired envelope must not delete the account');
-  assert(row.status === 'EXPIRED', 'an expired envelope must be surfaced as needing reconnect');
+  // T7: an expired access token is not a revoked login. Its device's next sync
+  // replaces it, so the lease skips it and never disables it (prod 2026-11-03
+  // disabled a healthy subscription this way).
+  assert(
+    row.status === 'CONNECTED' && row.isActive && row.failureReason === null,
+    'an expired access token must be skipped, not disabled'
+  );
 
-  // Retiring the dead row must not take the user's healthy account with it.
+  // Skipping the expired row must not take the user's healthy account with it.
   await materializeGrantAsIntegration({
     userId,
     provider: 'claude',
@@ -295,7 +301,7 @@ test('a Claude envelope past its own expiresAt is never leased to an agent', asy
   const healthy = await prisma.integration.findFirst({
     where: { userId, name: 'claude_code', accountId: 'healthy-sibling' },
   });
-  assert(healthy?.status === 'CONNECTED', 'retiring an expired row disabled a healthy sibling');
+  assert(healthy?.status === 'CONNECTED', 'skipping an expired row disabled a healthy sibling');
 });
 
 test('the credential envelope has the exact shape the reader expects', async () => {

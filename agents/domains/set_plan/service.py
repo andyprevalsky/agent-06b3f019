@@ -396,7 +396,10 @@ def build_plan_data(planner_result: dict[str, Any]) -> PlanData:
     Assumes planner_result has already passed validation.
     """
     task_objects = planner_result["tasks"]
-    tasks: list[TaskObject] = [TaskObject(goal=t["goal"], tool_name=t["tool_name"]) for t in task_objects]
+    tasks: list[TaskObject] = [
+        TaskObject(title=str(t.get("title") or "").strip(), goal=t["goal"], tool_name=t["tool_name"])
+        for t in task_objects
+    ]
     deps = dependencies_from_tasks(task_objects)
     title: str = planner_result["title"]
     content: str = planner_result.get("content") or ""

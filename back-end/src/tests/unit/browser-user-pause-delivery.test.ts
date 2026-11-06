@@ -20,7 +20,9 @@ async function main() {
   let rows: TestRow[] = [];
   const broadcasts: Broadcast[] = [];
   const tx = {
-    $queryRaw: async () => [],
+    // The tool call's lifecycle-row lookup; every other raw query is a lock.
+    $queryRaw: async (query: TemplateStringsArray) =>
+      query.join('').includes('FROM "Message"') ? rows.map(({ id }) => ({ id })) : [],
     agent: { findUnique: async () => ({ temporalWorkflowId: 'generation' }) },
     message: {
       findMany: async () => rows,

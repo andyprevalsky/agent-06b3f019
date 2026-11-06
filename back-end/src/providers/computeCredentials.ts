@@ -1,16 +1,12 @@
 import { prisma } from './database';
-import {
-  decryptCredentialEnvelope,
-  markPoolTokenRateLimited,
-  markUserTokenRateLimited,
-} from './claudeCredentials';
+import { decryptCredentialEnvelope } from './claudeCredentials';
 import {
   claudeEnvelopeExpiredAt,
   isUsableClaudePoolEnvelope,
   parseClaudeEnvelope,
 } from './claudeOauthEnvelope';
-import { markGptPoolTokenRateLimited, markGptUserTokenRateLimited } from './gptCredentials';
 import { createLogger } from './logger';
+export { classifyReportedLogin, markComputeTokenUnavailable } from './computeLoginFailure';
 export {
   __clearGptApiKeyCooldownCache,
   __resetGptApiKeyCooldown,
@@ -90,24 +86,6 @@ function decryptIntegrationCredentials(integration: IntegrationRow, decryptionKe
   return decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
 }
 
-/** Retire exactly this row: EXPIRED + needs-reconnect, never its sibling accounts. */
-async function retireExpiredClaudeIntegration(
-  integration: IntegrationRow,
-  source: 'user' | 'pool',
-  expiresAt: number
-): Promise<void> {
-  log.warn('Skipping Claude credential past its own expiresAt', {
-    integrationId: integration.id,
-    userId: integration.userId,
-    source,
-    expiredAt: new Date(expiresAt).toISOString(),
-  });
-  await markUserTokenRateLimited(integration.userId, {
-    failureReason: 'auth_error',
-    integrationId: integration.id,
-  });
-}
-
 function parseGptEnvelope(credentialsJson: string) {
   try {
     const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
@@ -149,7 +127,20 @@ async function rowToCredential(
     if (!envelope) return null;
     const expired = claudeEnvelopeExpiredAt(envelope, Date.now());
     if (expired !== null) {
-      await retireExpiredClaudeIntegration(integration, source, expired);
+      // An expired access token is not a revoked login: its device's next sync
+      // replaces it (codeLoginRejection.ts), so it is skipped, never disabled.
+      // Stamping it moves it behind every live row in least-recently-used order,
+      // so each lease does not decrypt it first again.
+      await prisma.integration.update({
+        where: { id: integration.id },
+        data: { lastUsedAt: new Date() },
+      });
+      log.info('Skipping Claude credential past its own expiresAt', {
+        integrationId: integration.id,
+        userId: integration.userId,
+        source,
+        expiredAt: new Date(expired).toISOString(),
+      });
       return null;
     }
     if (source === 'pool' && !isUsableClaudePoolEnvelope(envelope)) return null;
@@ -543,56 +534,6 @@ export async function releaseComputeTokenLineage(lineageKey: string) {
     data: { releasedAt: new Date() },
   });
   return { ok: result.count > 0, updated: result.count };
-}
-
-/**
- * Back a compute token off after a failure.
- *
- * `rateLimitedUntil` is the PROVIDER's own reset time (from
- * `anthropic-ratelimit-*-reset` / `retry-after` / the error body). Pass it
- * whenever the provider supplied one: omitting it makes the cooldown fall back
- * to a synthetic 5-minute default, which is exactly how a real usage window got
- * destroyed in prod on 2026-07-28 — a header-derived `2026-07-30T22:00Z` was
- * overwritten 15s later by an uninformed `+5m` from this path. The synthetic
- * default is only correct when the provider genuinely told us nothing.
- */
-export async function markComputeTokenUnavailable(
-  token: ComputeCodeCredentialResult,
-  reason: 'auth_error' | 'rate_limit',
-  rateLimitedUntil?: string
-): Promise<void> {
-  const failureReason = reason === 'auth_error' ? 'auth_error' : undefined;
-  const options = { failureReason, rateLimitedUntil };
-
-  if (token.source === 'pool') {
-    if (!token.poolTokenId) {
-      log.warn('Cannot mark pool compute token unavailable without poolTokenId', {
-        type: token.type,
-        reason,
-        userId: token.userId,
-      });
-      return;
-    }
-    if (token.type === 'claude') {
-      await markPoolTokenRateLimited(token.poolTokenId, options);
-      return;
-    }
-    await markGptPoolTokenRateLimited(token.poolTokenId, options);
-    return;
-  }
-
-  // Pool branch returned above; remaining tokens are user-owned.
-  if (token.type === 'claude') {
-    await markUserTokenRateLimited(token.userId, {
-      ...options,
-      accountId: token.accountId,
-    });
-    return;
-  }
-  await markGptUserTokenRateLimited(token.userId, {
-    ...options,
-    accountId: token.accountId,
-  });
 }
 
 // ── Shared Anthropic API-key cooldown ──────────────────────────────────────

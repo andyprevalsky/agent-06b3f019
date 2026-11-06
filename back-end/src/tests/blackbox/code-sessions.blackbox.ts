@@ -27,7 +27,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { Sandbox } from 'e2b';
+import { Sandbox, SandboxNotFoundError } from 'e2b';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
@@ -46,7 +46,6 @@ import {
   CodeSessionBusyError,
   CodeSessionNotFoundError,
   keepAliveCodeTask,
-  markAwaitingParent,
   resolveSpawnCodeSession,
   retireOwnedCodeSession,
 } from '../../providers/codeSessions/spawn';
@@ -55,6 +54,10 @@ import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
 import { testResumableCloseListsPaused } from './code-sessions-list.cases';
 import { registerFailedStartPauseCases } from './code-sessions-failed-start.cases';
+import { registerCodeSessionLifecycleCases } from './code-sessions-lifecycle.cases';
+import { registerCodeSessionLiveResumeCases } from './code-sessions-live-resume.cases';
+import { registerSandboxAttributionCases } from './code-sessions-sandbox-attribution.cases';
+import { registerCheckpointDeletionCases } from './code-sessions-checkpoint-deletion.cases';
 
 config();
 
@@ -231,7 +234,13 @@ after(async () => {
     else process.env[key] = value;
   }
   await prisma.agentTrajectorySearch.deleteMany({ where: { userId: { in: [userA, userB] } } });
-  await prisma.claudeCodeSession.deleteMany({ where: { agentId: rootAgentId } });
+  const fixtureAgents = await prisma.agent.findMany({
+    where: { userId: { in: [userA, userB] } },
+    select: { id: true },
+  });
+  await prisma.claudeCodeSession.deleteMany({
+    where: { agentId: { in: [rootAgentId, ...fixtureAgents.map((agent) => agent.id)] } },
+  });
   await prisma.codeSessionShare.deleteMany({ where: { userId: { in: [userA, userB] } } });
   await prisma.codeSession.deleteMany({ where: { userId: { in: [userA, userB] } } });
   await prisma.agent.deleteMany({ where: { userId: { in: [userA, userB] } } });
@@ -386,8 +395,9 @@ test('close checkpoints and pauses the sandbox, never kills it; a dead sandbox f
     assert.equal(row.leaseOwner, null, 'a paused session releases its lease for the next spawn');
 
     // Resume path: the paused sandbox is gone, so a new one gets the checkpoint.
-    patchConnect(async () => {
-      throw new Error('sandbox not found');
+    patchConnect(async (id) => {
+      // What E2B's connect throws for a paused sandbox that no longer exists.
+      throw new SandboxNotFoundError(`Paused sandbox ${id} not found`);
     });
     const freshHome = join(fixtureDir, 'home-e2b-fresh');
     mkdirSync(freshHome, { recursive: true });
@@ -561,12 +571,7 @@ test('keepalive extends an attached sandbox and its lease; retire deletes checkp
     },
     NO_CODE_RESOURCES
   );
-  assert.deepEqual(alive, { alive: true, code_session_id: session.id, awaiting_parent: null });
-  // A question to the (blocked) spawning agent rides on the next keepalive.
-  await markAwaitingParent(task.id, { message_id: 'q-1', question: 'Which database?' });
-  const asked = await keepAliveCodeTask(task.id, async () => undefined, NO_CODE_RESOURCES);
-  assert.equal(asked.awaiting_parent?.question, 'Which database?');
-  assert.equal(asked.awaiting_parent?.message_id, 'q-1');
+  assert.deepEqual(alive, { alive: true, code_session_id: session.id });
   assert.deepEqual(extended, [['sb-keepalive', 30 * 60 * 1000]]);
   const leased = await prisma.codeSession.findUniqueOrThrow({ where: { id: session.id } });
   assert.ok(
@@ -595,3 +600,21 @@ test('keepalive extends an attached sandbox and its lease; retire deletes checkp
 });
 
 registerFailedStartPauseCases(userA, rootAgentId);
+registerCodeSessionLifecycleCases({
+  userA,
+  fixtureDir,
+  seedWorkspace,
+  fakeSandbox,
+  patchConnect,
+  restoreConnect: () => patchConnect(originalConnect),
+});
+registerCodeSessionLiveResumeCases({
+  userA,
+  fixtureDir,
+  seedWorkspace,
+  fakeSandbox,
+  patchConnect,
+  restoreConnect: () => patchConnect(originalConnect),
+});
+registerSandboxAttributionCases(userA);
+registerCheckpointDeletionCases({ fixtureDir, seedWorkspace });

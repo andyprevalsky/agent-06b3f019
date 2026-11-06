@@ -12,6 +12,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import {
+  compareCatalog,
+  driftProblems,
   runSchemaDriftCheck,
   SCHEMA_DRIFT_LEASE_KEY,
   SCHEMA_DRIFT_LEASE_NAMESPACE,
@@ -131,6 +133,39 @@ test('production cron registers the hourly schema drift check', () => {
     cronSource,
     /cron\.schedule\('\d+ \* \* \* \*', run\);\n {2}cronLog\.info\('Schema drift/
   );
+});
+
+test('an index left INVALID by a failed concurrent build is drift, even after IF NOT EXISTS skipped it', () => {
+  // A retried `CREATE INDEX CONCURRENTLY IF NOT EXISTS` skips an invalid index
+  // and the migration still records as applied; this check is what makes that
+  // state fail the post-deploy smoke and the hourly cron instead of passing.
+  const name = 'Message_toolCallLifecycle_idx';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'schema-drift-invalid-'));
+  try {
+    const migration = '20261104230000_message_tool_call_lifecycle_index';
+    fs.mkdirSync(path.join(dir, migration));
+    fs.copyFileSync(
+      path.resolve(__dirname, '../../../prisma/migrations', migration, 'migration.sql'),
+      path.join(dir, migration, 'migration.sql')
+    );
+    const catalog = (valid: boolean): Catalog => ({
+      ...healthy(),
+      applied: new Set([migration]),
+      indexes: new Map([
+        [name, valid],
+        ['Undeclared_leftover_idx', valid],
+      ]),
+      policies: new Map(),
+      rls: new Set(),
+    });
+    assert.deepEqual(driftProblems(compareCatalog(catalog(true), dir)), []);
+    assert.deepEqual(driftProblems(compareCatalog(catalog(false), dir)), [
+      `INVALID index: ${name}`,
+      'INVALID index: Undeclared_leftover_idx',
+    ]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test.after(() => fs.rmSync(migrations, { recursive: true, force: true }));
