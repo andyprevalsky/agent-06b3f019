@@ -5,7 +5,7 @@
  *     -> normalizeMarkdownText (unescape)
  *     -> linkifyMarkdownText (wrap bare hosts as [host](https://host))
  *     -> ReactMarkdown + remark-gfm
- *     -> <a href>  (FadeInMarkdown extractWords preserves href)
+ *     -> <a href>  (both MarkdownText paths render the same ReactMarkdown tree)
  *
  * remark-gfm autolinkLiterals cover http(s):// and www. only. This pass
  * covers the rest of the hostname class (example.com, example.de/path)
@@ -14,7 +14,8 @@
  * Filename-like final labels (js, ts, json, py, md, …) stay plain text.
  */
 
-const PROTECTED_SEGMENT = /```[\s\S]*?```|`[^`]*`|\[[^\]]*\]\([^)]+\)|<[a-zA-Z][^>]*>/g;
+// A fence closes only on a run of its own length (fenceTerminalOutput uses longer fences).
+const PROTECTED_SEGMENT = /(`{3,})[\s\S]*?\1|`[^`]*`|\[[^\]]*\]\([^)]+\)|<[a-zA-Z][^>]*>/g;
 
 const FILE_LIKE_TLDS = new Set([
   'js',

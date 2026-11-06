@@ -34,6 +34,7 @@
  */
 
 import type { Message } from '@/lib/api/types';
+import { fenceTerminalOutput } from '@/lib/fenceTerminalOutput';
 
 import {
   codeAgentLabel,
@@ -178,7 +179,7 @@ function activityMessage(entry: TranscriptEntry, id: string): Message {
   return {
     ...base,
     role: 'TOOL',
-    text: entry.tool?.output ?? '',
+    text: fenceTerminalOutput(entry.tool?.output),
     metadata: {
       toolName: entry.tool?.name ?? entry.type,
       toolStatus: running ? 'IN_PROGRESS' : 'FINISHED',
