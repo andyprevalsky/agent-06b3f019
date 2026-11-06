@@ -31,6 +31,10 @@ sources:
   - commit cce696e9d
   - commit 15f2ef6cf
   - PR #1703
+  - agent 3c057de1-d449-49b9-b76c-a5c72ca3d140 (cloud, f25d7c064, PR #1730 deploy, 3 drags, 0.164)
+  - agent c19b68c8-5306-4f81-ab50-9fee95a7760d (cloud, 2731bfe53, PR #1725 deploy, 3 drags, 0.164)
+  - agent 97aa455f-1fe8-407b-9fa5-f8bad701fc71 (local control on db5b15de9, no drag, 0.057, PASS)
+  - agent d5672824-be5a-4873-839a-351de889f6e3 (cloud on merged fa676edc7, hover, 0.0906, PASS)
 repro: agents/tests/blackbox/rose_browser_use.blackbox.py::test_pointer_move_intent_has_a_hover_tool_instead_of_drag
 status: fixed
 ---
@@ -165,6 +169,51 @@ teleported pointer. Hover-revealed menus and tooltips no longer need JavaScript
 (untrusted events). Not done (rule 25a): no harness repeat-breaker for
 identical rejected calls. 10k agents: one extra tool definition per browser
 request; hover and drag stay per-session pointer input with no shared state.
+
+## Further pre-merge observations (2026-11-06)
+
+Two more cloud smoke failures hit this case before PR #1703 merged
+(fa676edc7). Both ran on source without the fix (052ac6ce7 is an ancestor of
+fa676edc7, not of either failed source), so neither is a recurrence after the
+fix. Each reported `FCaptcha captured API risk score 0.164 exceeds ratchet
+0.163` with `vision_ai: Click injected with no pointer trajectory (3 teleport
+clicks)`, plus datacenter-IP, three-speech-voice and missing-Segoe-UI
+detections that describe the Tilion browser environment rather than pointer
+behaviour.
+
+- PR #1730 deploy on f25d7c064, agent 3c057de1, Hub run
+  20261106-103815-953003-m7cf1c7ff9d3f (source, run and error recorded in
+  `docs/handoffs/pr-1730-closeout/evidence/repair-goal-webdecoy.txt`).
+- PR #1725 deploy on 2731bfe53, agent c19b68c8, Hub run
+  20261106-095657-2926622-mc29e58eff36d (source, run and error recorded in
+  `docs/handoffs/pr-1725-closeout/evidence/repair-evidence-webdecoy-fcaptcha-owner.txt`).
+
+Neither run hit the rejected-drag loop. Each browser agent reasoned it would
+move the mouse "using drag" and made three accepted drags before the checkbox
+click (c19b68c8 split them around a scroll). Its other clicks and typing went
+through the humanized `click_at_coords` path, so the three teleport clicks are
+consistent with the three raw-CDP drag presses. The Hub exports carry no
+worker logs, so a non-humanized click fallback cannot be fully excluded.
+c19b68c8 also reported a browser-session cleanup error after completion. That
+error is unrelated to the score.
+
+A local control run (agent 97aa455f) was launched from the main checkout at
+db5b15de9 without the fix. The SHA is the checkout HEAD at launch; the run
+record does not store it. That run made no drag and scored 0.057. This is
+consistent with drag being the discriminating variable, but it is one local
+run compared with cloud failures. The fix's regressions
+`humanized_drag_approaches_start_before_pressing` and
+`execute_action_hover_moves_pointer_without_pressing` fail on db5b15de9 and
+pass on 052ac6ce7.
+
+Outcome on the merged fix: `scripts/run-bench browser-biometrics-webdecoy
+--ref fa676edc7 --wait` (cloud fleet, Tilion, run 20261106-131544-295004,
+agent d5672824, receipt base_sha fa676edc7) passed in 133 s with captured risk
+0.0906. It made no drag, called `hover` before its clicks, and had no
+`vision_ai` or teleport detection. Summary and receipt hash:
+`docs/handoffs/pr-1735-closeout/evidence/cloud-pass-fa676edc7.json`. The
+control and cloud-pass ledger rows are in
+`docs/handoffs/pr-1735-closeout/evidence/ledger-rows-pending-main.jsonl`.
 
 ## Human feedback
 
