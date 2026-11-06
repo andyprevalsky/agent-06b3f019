@@ -837,7 +837,22 @@ echo "PASS: owner lock survives wrapper termination until the transaction child 
 
 require_text "$DESCEND_COMMAND" 'bash scripts/prepare-deploy-worktree.sh' "/descend must hydrate and provision each isolated deploy worktree"
 require_text "$DEPLOY_COMMAND" 'bash scripts/prepare-deploy-worktree.sh --check' "/deploy must fail closed when isolated-worktree preparation is incomplete"
-require_text "$DEPLOY_COMMAND" 'bash scripts/tests/deploy-worktree-preflight.test.sh' "/deploy structural gates must cement deploy-worktree preparation"
+# deploy.md carries no gate list: this suite is cemented by its (single) registration
+# in the structural-gate registry that `scripts/deploy gates` runs.
+python3 -B - "$ROOT_DIR/scripts/run-deploy-structural-gates.py" <<'PY_REGISTRY' ||
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("deploy_worktree_registry", sys.argv[1])
+registry = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = registry
+spec.loader.exec_module(registry)
+name, command = "deploy-worktree-preflight", ("bash", "scripts/tests/deploy-worktree-preflight.test.sh")
+owners = [gate for gate in registry.GATES if gate.name == name or gate.command == command]
+if len(owners) != 1 or owners[0].name != name or owners[0].command != command:
+    raise SystemExit(1)
+PY_REGISTRY
+  fail "/deploy structural gates must cement deploy-worktree preparation"
 require_text "$PREFLIGHT" 'if [ ! -d node_modules ]; then' "dependency hydration must not borrow the controller's node_modules through parent resolution"
 require_text "$PREFLIGHT" 'ROSE_USE_SYSTEM_PG' "deploy-worktree prep must support system Postgres when Docker overlay mounts fail"
 require_text "$PREFLIGHT" 'system_deploy_db_name' "deploy-worktree prep must isolate system Postgres databases per worktree"
