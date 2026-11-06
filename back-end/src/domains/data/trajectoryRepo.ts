@@ -5,6 +5,7 @@ import { prisma } from '../../providers/database';
 import type { AgentTrajectoryGrepFilters } from './types';
 import { buildAgentTrajectoryPath } from './path';
 import { InvalidGrepParamError } from './errors';
+import { PAGE_AFTER_HINT } from './validate.agent';
 
 export interface AgentTrajectoryRow {
   messageId: string;
@@ -139,7 +140,7 @@ export async function searchAgentTrajectories(
         anchor.messageId
       ) !== query.pageAfterPath
     ) {
-      throw new InvalidGrepParamError('page_after');
+      throw new InvalidGrepParamError('page_after', PAGE_AFTER_HINT);
     }
     pagePredicate =
       query.order === 'oldest_first'

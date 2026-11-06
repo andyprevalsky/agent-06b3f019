@@ -614,7 +614,6 @@ MANDATORY DECOMPOSITION INVARIANTS:
 - Target: 3-8 tasks per plan. Instead of creating more than 8 tasks, bundle complexity into a single general-purpose agent to meet the 8 sub-tasks cap.
 - Avoid creating a task for spawn_general_purpose_agent with > 50% complexity of the original user task. This can create infinite recursive decompositions and break the entire system. If complexity is meaningfully reduced at each step the issue does not arise.
 - spawn_general_purpose_agent_for_each should be used when applying the same template task to many objects or entities from a list-adjacent piece of information.
-- spawn_code_agent has a 10 min lifetime. Because of that, keep work as tight as you can, while still being self-sustaining and not inconsequential to the goal. Like checkpoints.
 
 ## Example Structures
 

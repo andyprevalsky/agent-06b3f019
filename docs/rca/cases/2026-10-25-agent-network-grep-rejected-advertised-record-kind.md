@@ -12,7 +12,7 @@ symptoms:
   - "grep source=agent_network record_kind=all trace_path=/root/member_number → 400 INVALID_GREP_PARAM"
   - "grep sources=[agent_network] order=oldest_first → Unsupported grep parameter: 'agent_trajectories source'."
   - "explore spawn_agent ERROR Reached max iterations (5)"
-  - "browser-auth-assistance-declined assistance-declined-runtime: Observed tool failure: attempt_completion_with_result status=ERROR"
+  - "grep sources=[messages] order=newest_first → Unsupported grep parameter: 'agent_trajectories source'."
 tags:
   - grep
   - agent-network
@@ -25,6 +25,7 @@ sources:
   - agent 3327c447-2cf2-46e8-80de-94eb897daab8 (explore /root/auth_obstacle)
   - commit d2cfa2c90 (branch rca/GREP-explore-agent-network)
   - commit 81c465b2c (order application, superseded on branch rca/GREP2)
+  - agent 06ca141f-61e6-4a2e-b32b-f9baa9db3110 (prod recurrence 2026-11-04 query; 127 rows / 23 agents on non-agent sources)
 repro: back-end/src/tests/blackbox/data-agent-task-path.cases.ts proveAgentNetworkRecordKind (data blackbox domain)
 status: fixed
 ---
@@ -82,6 +83,31 @@ a parameter that does not apply, ignore it, and say so in the schema —
 content, ignored otherwise"), hermes `file_tools.py:1301`, openclaw
 `sessions-history-tool.ts:60`. 10k-agent behavior: pure request validation, no
 new queries or state.
+
+### Recurrence 2026-11-04 (other sources)
+
+A read-only prod query found 127 grep results (23 agents, 2026-10-07 to
+2026-11-03, 43 of them after this fix shipped) ending in `Unsupported grep
+parameter: 'agent_trajectories source'.` Callers sent `order` (and `until`)
+to messages, calendar, documents, drive and transactions, e.g.
+`sources:["messages"], order:"newest_first", filters:{since:...}` and
+`source:"calendar", order:"oldest_first", until:"2026-11-25"`. The earlier fix
+held only for the agent_network branch of `validateAgentSourceSelection`; the
+generic branch still threw for every selection without agent sources, still
+named a source the caller never used, and treated top-level `until` as
+trajectory-only although calendar, drive, documents and transactions accept
+`until`. Reproduced by `back-end/src/tests/blackbox/data-grep-contract.cases.ts`
+(data-grep domain) on 28a7bfc99. Fix on `fix/grep-param-contract`: the same
+rule now covers every source — `order` is ignored wherever
+agent_trajectories is not searched (display_order reports the real order),
+`order`/`page_after` on a merged agent_trajectories search is rejected naming
+that parameter, the remaining agent selectors are rejected by name with what
+to add, and top-level `until`/`since`/`person` apply to every selected source
+whose filters accept them, leaving the other selected sources unfiltered
+(validate.normalize.ts; see
+2026-11-04-grep-schema-documented-nested-filters-validator-accepted-only-flat).
+The `[agent_network, messages] + order` case in
+`data-agent-task-path.cases.ts` changed from 400 to 200 accordingly.
 
 ## Human feedback
 

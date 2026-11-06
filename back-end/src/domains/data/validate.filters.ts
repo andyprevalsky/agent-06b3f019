@@ -3,20 +3,34 @@
  *
  * Split out of validate.ts: each source owns a distinct filter key set
  * (DATA_SOURCE_CONFIGS in types.ts), and `filters.path` translates an emitted
- * path back into structured components for every source that emits one.
+ * path back into structured components for every source that emits one. Each
+ * parser receives that source's effective filters (validate.normalize.ts), so
+ * key placement is already settled and only values are checked here.
  */
 
 import { InvalidGrepParamError } from './errors';
 import { parseGrepPath } from './path';
-import {
-  DATA_SOURCE_CONFIGS,
-  type DocumentGrepFilters,
-  type GrepParams,
-  type MessageGrepFilters,
-  type NetworkGrepFilters,
-  type TransactionGrepFilters,
-  type ValidSource,
+import type {
+  DocumentGrepFilters,
+  MessageGrepFilters,
+  NetworkGrepFilters,
+  TransactionGrepFilters,
+  ValidSource,
 } from './types';
+
+export type FilterObject = Record<string, unknown>;
+
+const SINCE_HINT = 'Use an ISO 8601 time or a relative form like 7d, 24h or 30m.';
+const DATE_HINT = 'Use an ISO 8601 date or time, such as 2026-11-02.';
+
+/** Why a `filters.path` value was refused, and what it accepts. */
+export function printedPathHint(source: ValidSource): string {
+  const agentAddress =
+    source === 'agent_network' || source === 'agent_trajectories'
+      ? ' or an agent address in your tree such as /root/outreach'
+      : '';
+  return `It must be a path an earlier ${source} result printed (${source}/...)${agentAddress}.`;
+}
 
 export function parseFilterBoolean(
   filters: Record<string, unknown>,
@@ -25,7 +39,7 @@ export function parseFilterBoolean(
 ): boolean {
   if (!(key in filters)) return defaultValue;
   if (typeof filters[key] !== 'boolean') {
-    throw new InvalidGrepParamError(`filters.${key}`);
+    throw new InvalidGrepParamError(`filters.${key}`, 'It must be true or false.');
   }
   return filters[key];
 }
@@ -63,11 +77,11 @@ export function parseFilterDate(filters: Record<string, unknown>, key: string): 
   if (!(key in filters)) return undefined;
   const value = filters[key];
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new InvalidGrepParamError(`filters.${key}`);
+    throw new InvalidGrepParamError(`filters.${key}`, DATE_HINT);
   }
   const parsed = new Date(value.length === 10 ? `${value}T00:00:00.000Z` : value);
   if (Number.isNaN(parsed.getTime())) {
-    throw new InvalidGrepParamError(`filters.${key}`);
+    throw new InvalidGrepParamError(`filters.${key}`, DATE_HINT);
   }
   return parsed;
 }
@@ -76,11 +90,11 @@ export function parseFilterSince(filters: Record<string, unknown>, key: string):
   if (!(key in filters)) return undefined;
   const value = filters[key];
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new InvalidGrepParamError(`filters.${key}`);
+    throw new InvalidGrepParamError(`filters.${key}`, SINCE_HINT);
   }
   const parsed = parseSince(value);
   if (parsed === undefined) {
-    throw new InvalidGrepParamError(`filters.${key}`);
+    throw new InvalidGrepParamError(`filters.${key}`, SINCE_HINT);
   }
   return parsed;
 }
@@ -92,7 +106,7 @@ export function parseFilterString(
   if (!(key in filters)) return undefined;
   const value = filters[key];
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new InvalidGrepParamError(`filters.${key}`);
+    throw new InvalidGrepParamError(`filters.${key}`, 'It must be a non-empty string.');
   }
   return value.trim();
 }
@@ -104,45 +118,13 @@ export function parseFilterNumber(
   if (!(key in filters)) return undefined;
   const value = filters[key];
   if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new InvalidGrepParamError(`filters.${key}`);
+    throw new InvalidGrepParamError(`filters.${key}`, 'It must be a number.');
   }
   return value;
 }
 
-export function requireFilterObject(params: GrepParams): Record<string, unknown> {
-  if (params.filters === undefined || params.filters === null) return {};
-  if (typeof params.filters !== 'object' || Array.isArray(params.filters)) {
-    throw new InvalidGrepParamError('filters');
-  }
-  return params.filters;
-}
-
-export function rejectUnsupportedFilters(
-  source: ValidSource,
-  filters: Record<string, unknown>
-): void {
-  const allowed = new Set<string>(DATA_SOURCE_CONFIGS[source].filters);
-  for (const key of Object.keys(filters)) {
-    if (!allowed.has(key)) {
-      throw new InvalidGrepParamError(`filters.${key}`);
-    }
-  }
-}
-
-export function parseMessageFilters(
-  params: GrepParams,
-  mergeTopLevelNarrowing: boolean
-): MessageGrepFilters | undefined {
-  const raw = requireFilterObject(params);
-  const merged = mergeTopLevelNarrowing
-    ? {
-        ...raw,
-        ...(params.person !== undefined ? { person: params.person } : {}),
-        ...(params.since !== undefined ? { since: params.since } : {}),
-      }
-    : raw;
+export function parseMessageFilters(merged: FilterObject): MessageGrepFilters | undefined {
   if (Object.keys(merged).length === 0) return undefined;
-  rejectUnsupportedFilters('messages', merged);
   const rawPath = parseFilterString(merged, 'path');
   const parsedPath = rawPath === undefined ? undefined : parseGrepPath(rawPath);
   // A path grep printed for another source (or a non-path string) is a caller
@@ -151,7 +133,7 @@ export function parseMessageFilters(
     rawPath !== undefined &&
     (parsedPath === null || parsedPath === undefined || parsedPath.source !== 'messages')
   ) {
-    throw new InvalidGrepParamError('filters.path');
+    throw new InvalidGrepParamError('filters.path', printedPathHint('messages'));
   }
   return {
     person: parseFilterString(merged, 'person'),
@@ -165,33 +147,28 @@ export function parseMessageFilters(
   };
 }
 
-export function parseNetworkFilters(params: GrepParams): NetworkGrepFilters | undefined {
-  const raw = requireFilterObject(params);
-  if (Object.keys(raw).length === 0) return undefined;
-  rejectUnsupportedFilters('network', raw);
+export function parseNetworkFilters(raw: FilterObject): NetworkGrepFilters | undefined {
   const rawPath = parseFilterString(raw, 'path');
   if (rawPath === undefined) return undefined;
   const parsed = parseGrepPath(rawPath);
   if (parsed === null || parsed.source !== 'network') {
-    throw new InvalidGrepParamError('filters.path');
+    throw new InvalidGrepParamError('filters.path', printedPathHint('network'));
   }
   return { pathContact: parsed.contact };
 }
 
-export function parseTransactionFilters(params: GrepParams): TransactionGrepFilters | undefined {
-  const raw = requireFilterObject(params);
+export function parseTransactionFilters(raw: FilterObject): TransactionGrepFilters | undefined {
   if (Object.keys(raw).length === 0) {
     return { includePendingInTotals: false, status: 'all' };
   }
-  rejectUnsupportedFilters('transactions', raw);
   const rawPath = parseFilterString(raw, 'path');
   const parsedPath = rawPath === undefined ? undefined : parseGrepPath(rawPath);
   if (rawPath !== undefined && (parsedPath === null || parsedPath?.source !== 'transactions')) {
-    throw new InvalidGrepParamError('filters.path');
+    throw new InvalidGrepParamError('filters.path', printedPathHint('transactions'));
   }
   const status = 'status' in raw ? parseFilterString(raw, 'status') : 'all';
   if (status !== 'pending' && status !== 'posted' && status !== 'all') {
-    throw new InvalidGrepParamError('filters.status');
+    throw new InvalidGrepParamError('filters.status', 'Use posted, pending or all.');
   }
   return {
     ...(parsedPath?.source === 'transactions'
@@ -223,17 +200,17 @@ export function documentPathFilters(rawPath: string | undefined): {
   if (rawPath === undefined) return {};
   const parsed = parseGrepPath(rawPath);
   if (parsed === null) return { path: rawPath };
-  if (parsed.source !== 'documents') throw new InvalidGrepParamError('filters.path');
+  if (parsed.source !== 'documents') {
+    throw new InvalidGrepParamError('filters.path', printedPathHint('documents'));
+  }
   return {
     ...(parsed.documentSource !== undefined ? { pathDocumentSource: parsed.documentSource } : {}),
     ...(parsed.rest !== undefined ? { pathRest: parsed.rest } : {}),
   };
 }
 
-export function parseDocumentFilters(params: GrepParams): DocumentGrepFilters | undefined {
-  const raw = requireFilterObject(params);
+export function parseDocumentFilters(raw: FilterObject): DocumentGrepFilters | undefined {
   if (Object.keys(raw).length === 0) return undefined;
-  rejectUnsupportedFilters('documents', raw);
   return {
     documentSource: parseFilterString(raw, 'document_source')
       ?.toLowerCase()
@@ -247,9 +224,3 @@ export function parseDocumentFilters(params: GrepParams): DocumentGrepFilters | 
     tag: parseFilterString(raw, 'tag'),
   };
 }
-
-/**
- * Validate the source selection (single `source` or multi `sources`), resolve
- * the effective list, and derive which filter families apply. Also enforces the
- * legacy filter-rejection rules so single-source behavior is unchanged.
- */

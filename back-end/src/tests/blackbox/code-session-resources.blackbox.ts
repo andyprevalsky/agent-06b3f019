@@ -118,7 +118,6 @@ test('keepalive returns and broadcasts the newest sandbox sample', async () => {
   assert.deepEqual(alive, {
     alive: true,
     code_session_id: null,
-    awaiting_parent: null,
     resources: sample,
   });
   assert.deepEqual(starts, [new Date(now.getTime() - RESOURCE_SAMPLE_WINDOW_MS)]);
@@ -153,7 +152,7 @@ test('unavailable: a failed or empty metrics read sends no sample', async () => 
     metric('2026-10-26T18:02:10.000Z', { cpuCount: 0, memTotal: 0, diskTotal: 0 }),
   ]);
   for (const response of [failed, empty, unusable]) {
-    assert.deepEqual(response, { alive: true, code_session_id: null, awaiting_parent: null });
+    assert.deepEqual(response, { alive: true, code_session_id: null });
   }
   assert.deepEqual(await codeResourceEvents(), []);
 });

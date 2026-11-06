@@ -88,6 +88,9 @@ child.wait()
                     "PORT_LOCK_DIR": str(port_lock),
                     "MANIFEST_PATH": str(p / "manifest.json"),
                     "RUN_ID": "blackbox-owned-cleanup",
+                    # Process ownership only: no stack id, so the runner skips its
+                    # E2B stack-sandbox reaper (covered by the code-sessions suites).
+                    "SANDBOX_STACK_ID": "",
                     "TEST_BASE_URL": "http://localhost:0",
                     "RUNNER_LOG": str(p / "runner.log"),
                     "SCRIPT_DIR": str(root / "back-end/scripts"),

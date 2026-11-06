@@ -33,6 +33,7 @@ import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 import { markPaused } from '../../providers/codeSessions/store';
 import {
   __resetCodexFundedCooldown,
+  codeCredentialTiers,
   codeSpawnCredentialPlan,
   markCodexFundedCooldown,
   pickNextLease,
@@ -420,6 +421,69 @@ export function registerCodeSessionCredentialOrderCases(ctx: CredentialOrderCont
       await prisma.integration.deleteMany({ where: { id: { in: [codex.id, claude.id] } } });
       await prisma.agent.deleteMany({ where: { id: agentId } });
       await prisma.user.deleteMany({ where: { userId: owner } });
+    }
+  });
+
+  test('a login whose stored access token expired is not a leasable subscription (availability = serving)', async () => {
+    const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const savedKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+    process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = Buffer.from(
+      privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+    ).toString('base64');
+    const pem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const owner = `code-order-expiry-${randomUUID()}`;
+    const jwt = (expMs: number) =>
+      ['{"alg":"none"}', JSON.stringify({ exp: Math.floor(expMs / 1000) })]
+        .map((part) => Buffer.from(part).toString('base64url'))
+        .join('.') + '.sig';
+    const seal = (name: 'claude_code' | 'gpt_code', expMs: number) =>
+      prisma.integration.create({
+        data: {
+          userId: owner,
+          type: 'TOOL_SETUP',
+          name,
+          accountId: `${name}-${expMs}`,
+          status: 'CONNECTED',
+          isActive: true,
+          config: {
+            encryptedCredentials: sealEnvelope(
+              JSON.stringify(
+                name === 'claude_code'
+                  ? {
+                      claudeAiOauth: {
+                        accessToken: `sk-ant-oat01-${randomUUID()}`,
+                        expiresAt: expMs,
+                      },
+                    }
+                  : { auth_mode: 'chatgpt', tokens: { access_token: jwt(expMs), account_id: 'c1' } }
+              ),
+              pem
+            ),
+          },
+        },
+      });
+    try {
+      const hourAgo = Date.now() - 60 * 60 * 1000;
+      await seal('claude_code', hourAgo);
+      await seal('gpt_code', hourAgo);
+      // A Mac-style own-only view: only this owner's logins count (no shared pool rows).
+      const expired = await codeCredentialTiers(owner, new Date(), { ownOnly: true });
+      assert.equal(expired.claude.subscription, false, 'an expired Claude token cannot be served');
+      assert.equal(expired.codex.subscription, false, 'an expired Codex token cannot be served');
+      assert.equal(
+        (await fetchClaudeCodeCredentialsWithMeta(owner))?.source === 'user',
+        false,
+        'serving agrees: the expired login is never handed out'
+      );
+      const hourAhead = Date.now() + 60 * 60 * 1000;
+      await seal('claude_code', hourAhead);
+      await seal('gpt_code', hourAhead);
+      const live = await codeCredentialTiers(owner, new Date(), { ownOnly: true });
+      assert.equal(live.claude.subscription, true);
+      assert.equal(live.codex.subscription, true);
+    } finally {
+      process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY = savedKey;
+      await prisma.integration.deleteMany({ where: { userId: owner } });
     }
   });
 }
