@@ -1691,6 +1691,9 @@ async def test_agent_messaging_tools_decode_results_in_real_sandbox():
     @activity.defn(name="send_agent_message_activity")
     async def fake_send(*args):
         sent.append(args)
+        if "while it starts" in args[2]:
+            # The backend accepted it for a code agent whose session does not exist yet (C20).
+            return {"delivered": False, "queued": True, "task_running": True, "message_id": "msg-2"}
         return {"delivered": True, "message_id": "msg-1"}
 
     async with await WorkflowEnvironment.start_time_skipping() as env:
@@ -1709,6 +1712,7 @@ async def test_agent_messaging_tools_decode_results_in_real_sandbox():
                         "agent-root",
                         [
                             {"tool": "send_message_to_agent", "to": "parent", "message": "Draft is ready."},
+                            {"tool": "send_message_to_agent", "to": "parent", "message": "Hello while it starts."},
                         ],
                     ],
                     id="agent-messaging-sandbox-probe",
@@ -1716,9 +1720,14 @@ async def test_agent_messaging_tools_decode_results_in_real_sandbox():
                 ),
                 timeout=60,
             )
-    assert [row["status"] for row in results] == ["FINISHED"], results
+    assert [row["status"] for row in results] == ["FINISHED", "FINISHED"], results
     assert results[0]["text"] == "Message sent to parent.", results
-    assert len(sent) == 1
+    # A message the backend queued for a still-starting code agent says so, and not to resend it.
+    assert results[1]["text"] == (
+        "Message queued for parent: its code agent is still starting. It will receive this as its next "
+        "turn as soon as its CLI runs, in the order you sent it; do not send it again."
+    ), results
+    assert len(sent) == 2
 
 
 async def test_background_tasks_persist_in_tree_state_and_names_stay_unique():

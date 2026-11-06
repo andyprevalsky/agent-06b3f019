@@ -140,29 +140,73 @@ def test_healthy_run_passes_both_checks():
     assert reached["sends"][0]["delivered"] is True and reached["sends"][0]["seen"] is True
 
 
-def test_retried_sends_while_starting_are_tolerated_but_other_failures_are_not():
+QUEUED_RESULT = (
+    "Message queued for /root/rose_repo_status: its code agent is still starting. It will receive this as its next "
+    "turn as soon as its CLI runs, in the order you sent it; do not send it again."
+)
+
+
+def _queued_run():
+    """The send was made while the code agent started: queued, then delivered after its task prompt (C20)."""
+    run = _healthy_run()
+    run["messages"] = [
+        _send_result(row["metadata"]["toolCallId"], "FINISHED", QUEUED_RESULT)
+        if row["metadata"].get("toolName") == "send_message_to_agent"
+        else row
+        for row in run["messages"]
+    ]
+    return run
+
+
+def test_a_send_in_the_startup_window_passes_when_queued_and_delivered():
+    from benchmarks.code_agent_run_checks import check_message_reached_code_agent
+
+    reached = check_message_reached_code_agent(_queued_run())
+    assert reached["passed"] is True, reached
+    assert reached["sends"][0]["queued"] is True and reached["sends"][0]["delivered"] is True, reached
+    assert "1 queued while the code agent started" in reached["detail"], reached
+
+
+def test_a_queued_message_that_never_reached_the_cli_fails():
+    from benchmarks.code_agent_run_checks import check_message_reached_code_agent
+
+    # Accepted as queued but dropped: no timeline receipt, then no transcript row.
+    run = _queued_run()
+    run["messages"] = [row for row in run["messages"] if not row["metadata"].get("a2a")]
+    dropped = check_message_reached_code_agent(run)
+    assert dropped["passed"] is False and "no delivered CLI turn" in dropped["detail"], dropped
+    run = _queued_run()
+    run["messages"] = [row for row in run["messages"] if "[Agent → " not in row["text"]]
+    unseen = check_message_reached_code_agent(run)
+    assert unseen["passed"] is False and "transcript never shows the message" in unseen["detail"], unseen
+
+
+def test_a_refusal_while_starting_and_other_failures_fail():
     from benchmarks.code_agent_run_checks import check_message_reached_code_agent
 
     not_started = "Message delivery failed: Code agent session has not started yet; send again once it runs"
+    # The pre-C20 behaviour: the send was refused while the sandbox cloned its repo, then retried.
     run = _healthy_run()
-    # Two earlier sends were refused truthfully while the sandbox cloned its repo; the third was delivered.
-    early = [
-        _send("toolu_early1", "/root/rose_repo_status"),
-        _send_result("toolu_early1", "ERROR", not_started),
-        _send("toolu_early2", "/root/rose_repo_status"),
-        _send_result("toolu_early2", "ERROR", not_started),
-    ]
-    run["messages"] = run["messages"][:2] + early + run["messages"][2:]
-    ok = check_message_reached_code_agent(run)
-    assert ok["passed"] is True and "2 earlier send(s) retried while starting" in ok["detail"], ok
+    run["messages"] = (
+        run["messages"][:2]
+        + [_send("toolu_early", "/root/rose_repo_status"), _send_result("toolu_early", "ERROR", not_started)]
+        + run["messages"][2:]
+    )
+    refused = check_message_reached_code_agent(run)
+    assert refused["passed"] is False and "was refused while the code agent started" in refused["detail"], refused
+    assert "must be queued and delivered" in refused["detail"], refused
 
-    # Only pre-start refusals: nothing was ever delivered.
+    # Only a refusal: nothing was ever delivered.
     only_refused = {
         "root_agent_id": ROOT,
-        "messages": [_spawn(SPAWN, "rose_repo_status"), _code_row(SPAWN, TASK)] + early,
+        "messages": [
+            _spawn(SPAWN, "rose_repo_status"),
+            _code_row(SPAWN, TASK),
+            _send("toolu_early", "/root/rose_repo_status"),
+            _send_result("toolu_early", "ERROR", not_started),
+        ],
     }
-    refused = check_message_reached_code_agent(only_refused)
-    assert refused["passed"] is False and "no send was delivered" in refused["detail"], refused
+    assert check_message_reached_code_agent(only_refused)["passed"] is False
 
     # A different failure is never tolerated, even next to a delivered send.
     run = _healthy_run()
@@ -230,9 +274,13 @@ async def run_all_tests():
     r.record("undelivered_or_unseen_message_fails", test_undelivered_or_unseen_message_fails)
     r.record("startup_phase_is_read_from_the_start_row", test_startup_phase_is_read_from_the_start_row)
     r.record(
-        "retried_sends_while_starting_are_tolerated_but_other_failures_are_not",
-        test_retried_sends_while_starting_are_tolerated_but_other_failures_are_not,
+        "a_send_in_the_startup_window_passes_when_queued_and_delivered",
+        test_a_send_in_the_startup_window_passes_when_queued_and_delivered,
     )
+    r.record(
+        "a_queued_message_that_never_reached_the_cli_fails", test_a_queued_message_that_never_reached_the_cli_fails
+    )
+    r.record("a_refusal_while_starting_and_other_failures_fail", test_a_refusal_while_starting_and_other_failures_fail)
     return r.summary()
 
 

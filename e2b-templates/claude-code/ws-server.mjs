@@ -420,6 +420,8 @@ function announceExit(exitCode) {
   if (exitAnnounced) return;
   exitAnnounced = true;
   finalExitCode = exitCode;
+  dropStartupTurns("session_ended");
+  resolveTaskPrompt();
   appendEvent({
     type: "final",
     status: exitCode === 0 ? "completed" : "failed",
@@ -1203,6 +1205,20 @@ let directHold = false;
 let directHoldTimer = null;
 const deliveredTurnIds = new Map();
 const pendingDeliveries = new Map();
+// Startup window: from the server answering until the CLI is launched (project
+// startup runs first and can take minutes). An agent turn that arrives in it is
+// acked `queued` and, once the CLI exists, written right after the task prompt in
+// arrival order, so a message to a code agent that is still starting is not
+// refused (a user's direct turn is told `session_starting` and retries). From the
+// launch on, a turn waits for the task prompt (taskPromptReady) before it is
+// written. The queue lives and dies with this server: announceExit clears it.
+const MAX_STARTUP_TURNS = 20;
+const startupTurnQueue = [];
+const queuedTurnAcks = new Map();
+let resolveTaskPrompt = () => {};
+const taskPromptReady = new Promise((resolve) => {
+  resolveTaskPrompt = resolve;
+});
 const controlRequests = new Map();
 let controlSerial = Promise.resolve();
 let effectiveSettings = {
@@ -1583,30 +1599,86 @@ async function deliverTurnOnce(id, msg) {
       .then((ack) =>
         ack.status === "delivered" ? { ...ack, status: "duplicate" } : ack,
       );
+  if (queuedTurnAcks.has(id)) return { ...queuedTurnAcks.get(id) };
+  const invalid = invalidTurn(id, msg);
+  if (invalid) return invalid;
+  // Decided here, at arrival, not inside the serial chain: a turn that arrives
+  // as the prompt is written must queue behind the earlier queued turns.
+  if (!cliChild && !exitAnnounced) {
+    // Only agent messages wait: a user's direct turn carries settings and
+    // attachments that must be confirmed at once, so it is told to retry.
+    return msg.sender === "agent"
+      ? queueStartupTurn(id, msg)
+      : turnAck(id, "rejected", "session_starting");
+  }
+  return startSerialDelivery(id, msg);
+}
+function startSerialDelivery(id, msg) {
   const promise = controlSerial.then(() => deliverNativeTurn(msg));
   controlSerial = promise.catch(() => {});
   pendingDeliveries.set(id, promise);
-  try {
-    return await promise;
-  } finally {
-    pendingDeliveries.delete(id);
+  const done = () => pendingDeliveries.delete(id);
+  promise.then(done, done);
+  return promise;
+}
+function queueStartupTurn(id, msg) {
+  if (startupTurnQueue.length >= MAX_STARTUP_TURNS) {
+    return turnAck(id, "rejected", "startup_queue_full");
   }
+  startupTurnQueue.push({ id, msg });
+  const ack = {
+    ...turnAck(id, "queued"),
+    queue_position: startupTurnQueue.length,
+  };
+  queuedTurnAcks.set(id, ack);
+  appendEvent({
+    type: "user_turn_queued",
+    client_message_id: id,
+    sender: msg.sender === "agent" ? "agent" : "user",
+    queue_position: ack.queue_position,
+  });
+  log("info", "Queued user turn until the CLI starts", {
+    id,
+    queue_position: ack.queue_position,
+  });
+  return ack;
+}
+/**
+ * The CLI is launched: queued turns enter the delivery chain, ahead of any later
+ * arrival. Each waits for the task prompt (deliverNativeTurn), so they follow it.
+ */
+function releaseStartupTurns() {
+  for (const { id, msg } of startupTurnQueue.splice(0)) {
+    startSerialDelivery(id, msg).then((ack) => {
+      queuedTurnAcks.delete(id);
+      if (ack.status !== "delivered" && ack.status !== "duplicate") {
+        appendEvent({
+          type: "user_turn_undelivered",
+          turn_ids: [id],
+          reason: ack.reason || "rejected",
+        });
+      }
+    });
+  }
+}
+/** The session ended before the CLI took the queued turns: say which were lost. */
+function dropStartupTurns(reason) {
+  if (startupTurnQueue.length === 0) return;
+  appendEvent({
+    type: "user_turn_undelivered",
+    turn_ids: startupTurnQueue.map((turn) => turn.id),
+    reason,
+  });
+  startupTurnQueue.length = 0;
+  queuedTurnAcks.clear();
 }
 async function deliverNativeTurn(msg) {
   const id = typeof msg.id === "string" ? msg.id : "";
-  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
-  if (!id || id.length > MAX_TURN_ID_CHARS) {
-    return turnAck(id, "rejected", "invalid_id");
-  }
+  const invalid = invalidTurn(id, msg);
+  if (invalid) return invalid;
   if (deliveredTurnIds.has(id))
     return { ...deliveredTurnIds.get(id), status: "duplicate" };
   const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
-  if (
-    (!text.trim() && !msg.attachments?.length) ||
-    text.length > MAX_TURN_TEXT_CHARS
-  ) {
-    return turnAck(id, "rejected", "invalid_text");
-  }
   if (exitAnnounced || !cliStdinOpen || !cliChild) {
     return turnAck(id, "rejected", "session_ended");
   }
@@ -1616,6 +1688,7 @@ async function deliverNativeTurn(msg) {
   }
   try {
     if (nativeInitialization) await nativeInitialization;
+    await taskPromptReady;
     await applyTurnSettings(msg.settings);
   } catch (error) {
     return turnAck(id, "rejected", error.message);
@@ -1677,6 +1750,21 @@ async function deliverNativeTurn(msg) {
   return ack;
 }
 
+/** The refusal for a turn that can never be delivered, or null when it is well formed. */
+function invalidTurn(id, msg) {
+  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
+  if (!id || id.length > MAX_TURN_ID_CHARS) {
+    return turnAck(id, "rejected", "invalid_id");
+  }
+  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
+  if (
+    (!text.trim() && !msg.attachments?.length) ||
+    text.length > MAX_TURN_TEXT_CHARS
+  ) {
+    return turnAck(id, "rejected", "invalid_text");
+  }
+  return null;
+}
 function handleHandBack(msg) {
   if (!tokenMatches(msg.token)) {
     return {
@@ -1930,6 +2018,7 @@ async function runClaudeCli(startupReport = null) {
   });
   cliChild = child;
   cliStdinOpen = true;
+  releaseStartupTurns();
   // Attach output/control handlers before negotiating settings or writing a turn.
 
   let stdoutRemainder = "";
@@ -2014,6 +2103,7 @@ async function runClaudeCli(startupReport = null) {
     pendingTurns = 1;
     startNativeTurn();
     child.stdin.write(prompt);
+    resolveTaskPrompt();
   } catch (error) {
     appendEvent({ type: "error", message: error.message });
     endCliStdin("native settings unconfirmed");

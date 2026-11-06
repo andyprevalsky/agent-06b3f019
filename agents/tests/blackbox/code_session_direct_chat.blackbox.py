@@ -318,6 +318,80 @@ async def test_direct_turn_reaches_cli_once_across_delivery_retry():
         sandbox.stop()
 
 
+async def _send_turn(sandbox: LocalCodeSessionSandbox, turn_id: str, text: str, sender: str = "agent"):
+    return await deliver_user_turn_to_code_session(
+        sandbox.ws_url, task_id="t", text=text, turn_id=turn_id, sender=sender, token=TEST_TURN_TOKEN
+    )
+
+
+async def test_agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_in_order_once():
+    """C20: the ws-server is up but the CLI is not launched yet (a held project startup): an agent turn is
+    acked queued (not refused), a retry stays queued, and once the CLI starts the turns follow the task
+    prompt in arrival order, each written once."""
+    sandbox = LocalCodeSessionSandbox("claude", gate_startup=True)
+    try:
+        await sandbox.start()
+        observer = SessionObserver(sandbox.ws_url)
+        await observer.start()
+        first = await _send_turn(sandbox, "a-1", "ROSE: first")
+        retry = await _send_turn(sandbox, "a-1", "ROSE: first")
+        second = await _send_turn(sandbox, "a-2", "ROSE: second")
+        assert (first.status, retry.status, second.status) == ("queued", "queued", "queued"), (first, retry, second)
+        assert not first.reached_cli, "queued has not reached the CLI yet"
+        # A user's direct turn carries settings that must be confirmed at once: told to retry, never queued.
+        user = await _send_turn(sandbox, "u-1", "typed by the user", sender="user")
+        assert (user.status, user.reason) == ("rejected", "session_starting"), user
+        assert sandbox.cli_stdin_lines() == [], "nothing is written to a CLI that has no task yet"
+
+        sandbox.start_cli()
+        await observer.wait_for(lambda: len(sandbox.cli_stdin_lines()) >= 3)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert "Task:\n" in texts[0] and texts[1:] == ["ROSE: first", "ROSE: second"], texts
+        # After the flush a retry of a queued id is a duplicate, not a second turn.
+        late = await _send_turn(sandbox, "a-1", "ROSE: first")
+        assert late.status == "duplicate", late
+        await observer.wait_for(lambda: observer.exit_code is not None)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert texts.count("ROSE: first") == 1 and len(texts) == 3, texts
+        assert observer.count("user_turn_queued") == 2 and observer.count("user_turn") == 2, observer.events
+        assert observer.count("user_turn_undelivered") == 0
+        await observer.close()
+    finally:
+        sandbox.stop()
+
+
+async def test_startup_queue_is_bounded_and_a_session_that_ends_first_reports_the_loss():
+    """C20: the startup queue holds at most 20 turns (the 21st is refused with a reason). A session that
+    ends before its CLI is launched never delivers them: the server says which turns were lost
+    (user_turn_undelivered), and later sends are refused or unreachable, never "queued"."""
+    sandbox = LocalCodeSessionSandbox("claude", gate_startup=True)
+    try:
+        await sandbox.start()
+        observer = SessionObserver(sandbox.ws_url)
+        await observer.start()
+        for index in range(20):
+            sent = await _send_turn(sandbox, f"q-{index}", f"ROSE: waiting {index}")
+            assert sent.status == "queued", (index, sent)
+        over = await _send_turn(sandbox, "q-20", "ROSE: one too many")
+        assert (over.status, over.reason) == ("rejected", "startup_queue_full"), over
+        kept = await _send_turn(sandbox, "q-0", "ROSE: waiting 0")
+        assert kept.status == "queued", "a retry of a queued id is still accepted"
+
+        sandbox.end_session()
+        await observer.wait_for(lambda: observer.exit_code is not None)
+        lost = [event for event in observer.events if event.get("type") == "user_turn_undelivered"]
+        assert len(lost) == 1 and lost[0]["turn_ids"] == [f"q-{index}" for index in range(20)], lost
+        assert lost[0]["reason"] == "session_ended", lost
+        for turn_id in ("q-3", "q-new"):
+            # The server is gone: the sender is told so (rejected or unreachable), never "queued".
+            after = await _send_turn(sandbox, turn_id, "ROSE: after the end")
+            assert after.status in ("rejected", "unreachable"), (turn_id, after)
+        assert sandbox.cli_stdin_lines() == [], "the CLI never got a turn"
+        await observer.close()
+    finally:
+        sandbox.stop()
+
+
 async def test_direct_turn_requires_the_session_token():
     sandbox = LocalCodeSessionSandbox("claude", gate_first_turn=True)
     try:
@@ -684,6 +758,14 @@ async def run_all_tests():
     )
     await r.record_async(
         "direct_turn_reaches_cli_once_across_delivery_retry", test_direct_turn_reaches_cli_once_across_delivery_retry
+    )
+    await r.record_async(
+        "agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_in_order_once",
+        test_agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_in_order_once,
+    )
+    await r.record_async(
+        "startup_queue_is_bounded_and_a_session_that_ends_first_reports_the_loss",
+        test_startup_queue_is_bounded_and_a_session_that_ends_first_reports_the_loss,
     )
     await r.record_async("direct_turn_requires_the_session_token", test_direct_turn_requires_the_session_token)
     await r.record_async(

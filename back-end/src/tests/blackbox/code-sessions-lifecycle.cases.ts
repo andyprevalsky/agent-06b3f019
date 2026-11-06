@@ -30,6 +30,11 @@ import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources
 import { keepAliveCodeTask, resolveSpawnCodeSession } from '../../providers/codeSessions/spawn';
 import { markPaused } from '../../providers/codeSessions/store';
 import {
+  enqueueStartupTurn,
+  queuedStartupTurnCount,
+  type StartupTurn,
+} from '../../providers/codeSessions/startupTurns';
+import {
   checkpointCodeSession,
   sweepExpiredCodeSessions,
 } from '../../providers/codeSessions/lifecycle';
@@ -488,6 +493,53 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
     assert.deepEqual(connected, [], 'a superseded sandbox stays paused');
     const closed = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: task.id } });
     assert.equal(closed.status, 'CLOSED');
+  });
+
+  test("closing a code task drops its spawn's queued startup messages; a superseded task's close keeps them", async () => {
+    const turn = (key: string): StartupTurn => ({
+      key,
+      text: 'queued while the code agent started',
+      original: 'queued while the code agent started',
+      sender: { id: randomUUID(), label: '/root' },
+      toolCallId: 'toolu_startup_row',
+    });
+    const queue = (spawnKey: string, turnKey: string) =>
+      enqueueStartupTurn(spawnKey, turn(turnKey), {
+        findStarted: async () => null,
+        admit: async () => undefined,
+      });
+    const owned = await liveTask(ctx, 'startup-row');
+    const ownedKey = owned.codeSession.leaseOwner ?? '';
+    assert.equal((await queue(ownedKey, 'a2a:sender:one')).status, 'queued');
+    assert.equal(await queuedStartupTurnCount(ownedKey), 1);
+    ctx.patchConnect(async () => owned.fake.sandbox);
+    try {
+      await closeClaudeCodeSession(owned.task.id, undefined, undefined, undefined, {
+        reason: 'close',
+      });
+    } finally {
+      ctx.restoreConnect();
+    }
+    assert.equal(await queuedStartupTurnCount(ownedKey), 0, 'the closed spawn keeps no row');
+
+    // A newer spawn already owns the session's sandbox: the older task's close must not
+    // drop the messages that newer spawn is still waiting to deliver.
+    const stale = await liveTask(ctx, 'startup-row-stale');
+    const staleKey = stale.codeSession.leaseOwner ?? '';
+    await queue(staleKey, 'a2a:sender:two');
+    await prisma.codeSession.update({
+      where: { id: stale.codeSession.id },
+      data: { sandboxId: `sb-newer-${randomUUID()}` },
+    });
+    ctx.patchConnect(async () => stale.fake.sandbox);
+    try {
+      await closeClaudeCodeSession(stale.task.id, undefined, undefined, undefined, {
+        reason: 'cancel',
+      });
+    } finally {
+      ctx.restoreConnect();
+    }
+    assert.equal(await queuedStartupTurnCount(staleKey), 1, "the newer spawn's row is untouched");
   });
 
   test('periodic saves keep a bounded number of checkpoints per session', async () => {
