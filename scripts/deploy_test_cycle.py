@@ -699,6 +699,32 @@ def agentcard_release_stall_task(name: object, root: Path = ROOT) -> bool:
     return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
 
 
+def agentcard_unreleased_text(state: dict, warning: dict) -> str:
+    """The funds a standing release-stall warning leaves unreleased, for its report row.
+
+    Read from the exact native run document the warning is bound to (its sha256 is checked), from the
+    runner's own typed org-transfer record: transferredCents less releasedCents, with the provider mode
+    (livemode false is the sandbox). An amount the record does not state is UNRECORDED, never zero.
+    """
+    failure = next((f for f in state['failures'] if f['id'] == warning['id']), {})
+    evidence = failure.get('worker_evidence') if isinstance(failure.get('worker_evidence'), dict) else {}
+    try:
+        path = evidence['path']
+        if sha_file(path) != warning['receipt_sha256']:
+            raise ValueError('native run document changed')
+        name = warning['native_row']['name']
+        task = next(t for t in bounded_read(path, 'native run document')['tasks'] if t.get('name') == name)
+        transfer = task['logs']['agentcard_release_stall_lifecycle']['orgTransfer']
+        transferred, released = transfer['transferredCents'], transfer['releasedCents']
+        if any(type(v) is not int or v < 0 for v in (transferred, released)) or released > transferred:
+            raise ValueError('unreleased amount is not stated')
+    except (KeyError, StopIteration, TypeError, ValueError, OSError):
+        return 'Unreleased: UNRECORDED'
+    mode = {False: 'sandbox', True: 'live'}.get(transfer.get('livemode'), 'mode UNRECORDED')
+    return (f"Unreleased: ${(transferred - released) / 100:.2f} {mode} "
+            f"(transferredCents {transferred} / releasedCents {released})")
+
+
 def sidecar_finished_at(failure: dict):
     """Read-only fallback for occurrences recorded before finished_at existed: the coordinator
     receipt beside the worker result must match the failure exactly; otherwise there is no bound."""
@@ -1962,7 +1988,10 @@ def main(argv: list[str] | None = None) -> int:
                         proof = w["confirmation"]
                         text += (f"- {w['check']} — {proof['provider']}: {proof['receipt_reason']} [{proof['reason_code']}]"
                                  f" · Evidence: {proof['evidence']} · Confirmed at: {proof['confirmed_at']}"
-                                 f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}\n")
+                                 f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}")
+                        if proof['reason_code'] == AGENTCARD_RELEASE_STALL_CODE:
+                            text += f" · {agentcard_unreleased_text(state, w)} (followup: unreleased funds stay open)"
+                        text += "\n"
                 (directory / "report.md").write_text(text)
                 print(text, end="")
                 return 0

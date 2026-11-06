@@ -1703,6 +1703,58 @@ class Cycle(unittest.TestCase):
         self.assertEqual({}, self.state['skips'])  # no pass credit
         self.assertEqual('agentcard_release_stall', self.state['resource_warnings'][0]['confirmation']['reason_code'])
 
+    def stall_run_document(self, transfer):
+        """The runner's own run.json shape for the 2026-11-06 sandbox proof (agent 4f8c38c0)."""
+        document = {'run_id': 'flt-agent-payment-abandonment-d9a38b815c82-0', 'tasks': [
+            {'name': 'agent-payment-abandonment', 'status': 'SKIPPED', 'benchmark_status': 'SKIPPED', 'passed': False,
+             'failure_reason': self.STALL_REASON, 'logs': {'agentcard_release_stall_lifecycle': {
+                 'agentCard': {'id': 'card_f82707f47089791fef514b3c', 'status': 'CLOSED', 'balanceCents': 0},
+                 'orgTransfer': transfer}}}]}
+        path = self.root / '.context/native/agent-payment-abandonment/cloudbench-run.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document))
+        return path
+
+    def stall_report_text(self, transfer):
+        import contextlib, io
+        path = self.stall_run_document(transfer)
+        sha = c.sha_file(path)
+        failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment', sha=sha)
+        failure['worker_evidence']['path'] = str(path)
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED',
+                                             resource_skip=self.stall_confirmation(receipt_sha256=sha)))
+        plan = self.directory / 'plan.json'; c.write(plan, self.plan); c.write(self.directory / 'cycle.json', self.state)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['report', '--plan', str(plan), '--state-dir', str(self.directory),
+                                        '--root', str(self.root)]))
+        return (self.directory / 'report.md').read_text().split('RESOURCE WARNINGS', 1)[1]
+
+    def test_agentcard_release_stall_warning_row_states_the_unreleased_amount(self):
+        # transferredCents 4396 / releasedCents 0 is $43.96 left unreleased in the sandbox; the row is still
+        # a warning (native FAIL retained), never a pass, and says the funds stay a followup.
+        warning = self.stall_report_text({'id': 'owt_208688aafd52934f33699e9c', 'status': 'consumed', 'livemode': False,
+                                          'amountCents': 4396, 'transferredCents': 4396, 'releasedCents': 0})
+        self.assertIn('- api/a — agentcard-sandbox: ' + self.STALL_REASON + ' [agentcard_release_stall]', warning)
+        self.assertIn(' · Native: FAIL · Unreleased: $43.96 sandbox (transferredCents 4396 / releasedCents 0)'
+                      ' (followup: unreleased funds stay open)', warning)
+        self.assertNotIn('PASS', warning)
+
+    def test_agentcard_release_stall_warning_never_invents_an_unstated_amount(self):
+        for label, transfer, mode in (('no transferred amount', {'releasedCents': 0, 'livemode': False}, None),
+                                      ('no released amount', {'transferredCents': 4396, 'livemode': False}, None),
+                                      ('non-integer', {'transferredCents': '4396', 'releasedCents': 0}, None),
+                                      ('released above transferred', {'transferredCents': 1, 'releasedCents': 5}, None),
+                                      ('live mode', {'transferredCents': 100, 'releasedCents': 25, 'livemode': True}, 'live'),
+                                      ('mode unstated', {'transferredCents': 100, 'releasedCents': 25}, 'mode UNRECORDED')):
+            with self.subTest(label):
+                self.tearDown(); self.setUp()
+                warning = self.stall_report_text(transfer)
+                if mode is None:
+                    self.assertIn(' · Unreleased: UNRECORDED (followup: unreleased funds stay open)', warning)
+                    self.assertNotIn('$', warning.split('Native:', 1)[1])
+                else:
+                    self.assertIn(f' · Unreleased: $0.75 {mode} (transferredCents 100 / releasedCents 25)', warning)
+
     def test_agentcard_release_stall_qualification_binds_the_exact_sandbox_row(self):
         pristine = copy.deepcopy(self.state)
         for label, row in {'production task': dict(name='agent-payment-production-abandonment'),
