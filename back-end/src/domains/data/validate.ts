@@ -126,6 +126,13 @@ function requireKnownSources(params: GrepParams): void {
   }
 }
 
+/** The local defaults; agent_network needs an agent tree, so callers without one skip it. */
+function defaultSources(params: GrepParams): ValidSource[] {
+  return params.agent_id === undefined || params.agent_id === ''
+    ? DEFAULT_GREP_SOURCES.filter((source) => source !== 'agent_network')
+    : DEFAULT_GREP_SOURCES;
+}
+
 /**
  * Sources in precedence order: explicit `sources`/`source`; sources the
  * filters name (a nested block or a printed path); typed trajectory narrowing;
@@ -147,7 +154,7 @@ function resolveSourceSelection(params: GrepParams, split: SplitFilters): Resolv
           ? named
           : hasTrajectoryNarrowing(params, split)
             ? ['agent_trajectories']
-            : DEFAULT_GREP_SOURCES;
+            : defaultSources(params);
   validateAgentSourceSelection(params, resolvedSources);
   return {
     resolvedSources,

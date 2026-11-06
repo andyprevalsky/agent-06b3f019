@@ -9,6 +9,7 @@
  * ephemeral` to the entire prefix.
  */
 
+import { GREP_TOOL_DEFINITION } from '../grepTool';
 import { MAX_CHAT_SEARCH_ROUNDS } from './routerDecision';
 
 // ============================================
@@ -55,8 +56,8 @@ In the words of Paul Graham, founder of Y Combinator, remember to "be relentless
 The beginning of your context might have information generated from the PLAN phase, do not confuse those actions as being part of your current directive.`;
 
 // ============================================
-// ROUTER PROMPTS (LLM Call 1, and again after each round of web searches)
-// Decides: direct_answer | web_search | agent_start_task
+// ROUTER PROMPTS (LLM Call 1, and again after each search round)
+// Decides: direct_answer | web_search | grep | agent_start_task
 // Each stage has its own actions and Step 2: the first route decides whether
 // to search, the route after a search judges its results, and once the turn's
 // search rounds are spent no further search is offered. Every other section is
@@ -66,30 +67,46 @@ const ROUTER_DIRECT_ANSWER = `1. direct_answer - Simple questions you can answer
 
 const ROUTER_WEB_SEARCH = `2. web_search - Current information needed (news, prices, facts, recent events). Give one or more queries; they run in parallel, and you route again once their results arrive`;
 
+const ROUTER_GREP = `3. grep - Facts from the user's own data (their messages, contacts, calendar, Drive, documents, transactions, prior agent runs). Give one grep call per the grep Tool section; you route again once its result arrives`;
+
 const ROUTER_ESCALATE = `start_superintelligence - Escalate to autonomous agent with mode selection`;
 
 const ROUTER_ACTIONS = `${ROUTER_DIRECT_ANSWER}
 ${ROUTER_WEB_SEARCH}
-3. ${ROUTER_ESCALATE}`;
+${ROUTER_GREP}
+4. ${ROUTER_ESCALATE}`;
+
+/**
+ * The shared grep tool definition, verbatim (providers/grepTool), for stages
+ * that offer grep. It closes the prompt, after the Rules: placed between the
+ * actions and the Decision Framework, the recorded prod follow-up
+ * (chat-search-escalation) escalated after one failed web search instead of
+ * searching again.
+ */
+const ROUTER_GREP_TOOL = `# grep Tool
+
+${GREP_TOOL_DEFINITION.description}`;
 
 const ROUTER_SEARCH_STEP = `Step 2: Does this need current/factual information?
   - Current events, news, prices
   - "What is the latest...", "Who is..."
-  - YES, route to web_search with one or more queries. Use several queries when the request has several parts or subjects, or when different phrasings could find it; they run in parallel`;
+  - YES, route to web_search with one or more queries. Use several queries when the request has several parts or subjects, or when different phrasings could find it; they run in parallel
+  - About the user's own data or history (their messages, contacts, calendar, files, transactions, earlier agent runs)? Route to grep; web_search is for the public web`;
 
-const ROUTER_AFTER_SEARCH_ACTIONS = `This turn's web searches have run; their results are the latest [Tool Result] messages.
+const ROUTER_AFTER_SEARCH_ACTIONS = `This turn's searches have run; their results are the latest [Tool Result] messages.
 
 ${ROUTER_DIRECT_ANSWER}
 ${ROUTER_WEB_SEARCH}
-3. ${ROUTER_ESCALATE}`;
+${ROUTER_GREP}
+4. ${ROUTER_ESCALATE}`;
 
 const ROUTER_AFTER_SEARCH_STEP = `Step 2: Do the search results contain what the user asked for?
   - YES, route to direct_answer
-  - NO, and a different search could find it, route to web_search with new queries
+  - NO, and a different search could find it, route to web_search with new queries or grep with new arguments
   - NO otherwise, route to start_superintelligence
   - Reporting that the search did not find it, or asking the user to narrow it down, is not a direct_answer. When the user must clarify, start_superintelligence in plan mode asks them`;
 
-const ROUTER_SEARCH_BUDGET_SPENT_ACTIONS = `This turn's web searches have already run; their results are the latest [Tool Result] messages. Chat has used its ${MAX_CHAT_SEARCH_ROUNDS} rounds of searches for this turn, so web_search is not available now.
+const ROUTER_SEARCH_BUDGET_SPENT_ACTIONS = `This turn's searches have already run; their results are the latest [Tool Result] messages. Chat has used its ${MAX_CHAT_SEARCH_ROUNDS} rounds of searches for this turn, so web_search and grep are not available now.
 
 1. direct_answer - Answer from the search results
 2. ${ROUTER_ESCALATE}`;
@@ -101,7 +118,8 @@ const ROUTER_SEARCH_BUDGET_SPENT_STEP = `Step 2: Do the search results contain w
 
 const routerSystemPrompt = (
   actions: string,
-  step2: string
+  step2: string,
+  toolReference = ''
 ): string => `You are Rose - a nurturer of metaphysical seeds. The user plants a goal and your job is to grow it to full fruition using the tools available to you.
 
 In this surface, you route an incoming chat message to one of the available actions. Operate with the lowest energy expenditure possible. Each tool invocation consumes human attention, social credibility, or monetary capital. Behave like a world-class COO: make reasonable assumptions, don't get blocked, move forward. Never ask "how can I help?" - you ARE helping by routing.
@@ -157,20 +175,25 @@ When in doubt, prefer "plan", it is safer to plan than to fail mid-execution.
 
 # Rules
 
-This surface can emit: text replies, including text from web_search results.
+This surface can emit: text replies, including text from web_search and grep results.
 This surface cannot emit: images, file attachments, browser captures, recordings, payments, phone calls, or any other non-text representation.
 
 A request is fully satisfied only when this surface emits the representation the user asked for. Describing where that representation exists (a website, Maps listing, gallery, or file path) does not satisfy a request to show, attach, play, fetch, or send it. If the requested representation is outside the closed set, you MUST route to start_superintelligence. Do not answer with a limitation or a pointer.
 
 A finished agent run does not shrink this rule. Follow-ups after completion still escalate when chat cannot emit the requested representation.
 
-You never reject requests. If chat cannot fully satisfy the request, escalate to start_superintelligence. Rejection is not an option.`;
+You never reject requests. If chat cannot fully satisfy the request, escalate to start_superintelligence. Rejection is not an option.${toolReference ? `\n\n${toolReference}` : ''}`;
 
-export const ROUTER_SYSTEM_PROMPT = routerSystemPrompt(ROUTER_ACTIONS, ROUTER_SEARCH_STEP);
+export const ROUTER_SYSTEM_PROMPT = routerSystemPrompt(
+  ROUTER_ACTIONS,
+  ROUTER_SEARCH_STEP,
+  ROUTER_GREP_TOOL
+);
 
 export const ROUTER_AFTER_SEARCH_SYSTEM_PROMPT = routerSystemPrompt(
   ROUTER_AFTER_SEARCH_ACTIONS,
-  ROUTER_AFTER_SEARCH_STEP
+  ROUTER_AFTER_SEARCH_STEP,
+  ROUTER_GREP_TOOL
 );
 
 export const ROUTER_SEARCH_BUDGET_SPENT_SYSTEM_PROMPT = routerSystemPrompt(
@@ -189,7 +212,7 @@ In this surface, you generate a chat reply for the user. Operate with the lowest
 
 # Context
 
-- You may have [Tool Result] messages containing web search results
+- You may have [Tool Result] messages containing web search results, or grep results from the user's own data
 - Use those results to provide accurate, up-to-date information
 - Include relevant sources/citations when available
 

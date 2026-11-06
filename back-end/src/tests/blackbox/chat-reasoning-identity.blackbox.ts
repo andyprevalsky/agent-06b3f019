@@ -9,9 +9,18 @@ import { postMessage } from '../../domains/agents/agentMessageService';
 import { getAgentDetail } from '../../domains/agents/agentQueryService';
 import { __flushBroadcastQueueForTests } from '../../providers/chat/supabaseBroadcast';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
+import { registerUserDataGrepTool } from '../../providers/userDataSearch';
+import { executeGrepTool } from '../../domains/data/grepTool';
 import { replayCall, stalledResponse } from './chat-search-escalation.network.support';
 
-type Action = 'direct_answer' | 'web_search' | 'start_superintelligence';
+type Action = 'direct_answer' | 'web_search' | 'grep' | 'start_superintelligence';
+
+/** Every chat grep call, recorded on its way into the real shared executor. */
+const grepCalls: Array<{ userId: string; args: Record<string, unknown> }> = [];
+registerUserDataGrepTool(async (userId, args) => {
+  grepCalls.push({ userId, args });
+  return executeGrepTool(userId, args);
+});
 type Stream = { agentId?: string; stream_id?: string; delta?: string; sequence?: number };
 type Frame = { topic: string; event: string; record: Record<string, unknown> };
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -44,6 +53,7 @@ async function runCase(name: string, actions: Action[], followUp = false) {
   const frames: Frame[] = [];
   const requests: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
   let routed = 0;
+  grepCalls.length = 0;
   globalThis.fetch = (async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.endsWith('/realtime/v1/api/broadcast')) {
@@ -95,6 +105,9 @@ async function runCase(name: string, actions: Action[], followUp = false) {
         reasoning,
         action,
         ...(action === 'web_search' ? { queries: [`${name} query ${routed}`] } : {}),
+        ...(action === 'grep'
+          ? { grep: { pattern: `${name} pattern ${routed}`, sources: ['messages'], filters: null } }
+          : {}),
         ...(action === 'start_superintelligence'
           ? { goal: `Identity escalation ${name}`, mode: 'plan' }
           : {}),
@@ -163,6 +176,35 @@ async function runCase(name: string, actions: Action[], followUp = false) {
       'UI stream identity must not be passed to the model'
     );
     assert.equal(routed, actions.length);
+    const grepRounds = actions.filter((action) => action === 'grep').length;
+    assert.equal(grepCalls.length, grepRounds, 'each grep route runs the shared executor once');
+    for (const call of grepCalls) {
+      assert.equal(call.userId, userId, 'chat grep searches the chat owner’s data');
+      assert.equal(call.args.agent_id, agentId, 'agent_network is scoped to this chat agent');
+      assert.deepEqual(call.args.sources, ['messages']);
+      assert.equal('filters' in call.args, false, 'strict-provider nulls never reach the executor');
+    }
+    if (grepRounds > 0) {
+      const rows = await prisma.message.findMany({
+        where: { agentId },
+        orderBy: { createdAt: 'asc' },
+      });
+      const finished = rows.filter((row) => {
+        const metadata = row.metadata as { toolName?: string; toolStatus?: string } | null;
+        return metadata?.toolName === 'grep' && metadata.toolStatus === 'FINISHED';
+      });
+      assert.equal(finished.length, grepRounds, 'every grep chip reaches a FINISHED row');
+      assert(
+        requests.some((request) =>
+          request.messages.some(
+            (message) =>
+              typeof message.content === 'string' &&
+              message.content.startsWith('[Tool Result]\nGrep {"pattern":')
+          )
+        ),
+        'the route after grep reads its result'
+      );
+    }
     if (followUp) {
       const reactivated = frames.findIndex(
         (frame) =>
@@ -204,6 +246,8 @@ async function main() {
     ['search-again', ['web_search', 'web_search', 'direct_answer']],
     ['initial-escalation', ['start_superintelligence']],
     ['search-escalation', ['web_search', 'start_superintelligence']],
+    ['grep-then-answer', ['grep', 'direct_answer']],
+    ['grep-then-search', ['grep', 'web_search', 'direct_answer']],
   ];
   let failed = 0;
   for (const [name, actions, followUp] of cases) {

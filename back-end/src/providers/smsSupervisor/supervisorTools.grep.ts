@@ -1,154 +1,42 @@
 /**
- * SMS supervisor `grep` tool — symmetrical port of the explore agent's grep.
+ * SMS supervisor `grep` tool: the shared grep tool, run on the shared executor.
  *
- * The explore agent (agents/domains/grep/repo.py) POSTs the same args to
- * /api/data/grep and hands the raw JSON GrepResult to its LLM. Here the call
- * goes in-process through the userDataSearch bridge (registered from
- * server.ts) and the LLM gets the same JSON. One asymmetry: the supervisor is
- * not an agent, so the agent_network source (which requires an agent_id) is
- * unavailable. agent_trajectories needs only the authenticated user and is
- * available here; an omitted source searches messages + network instead of the
- * explore default of messages + network + agent_network.
+ *   LLM grep call (providers/grepTool definition, strict form)
+ *        └─> executeUserDataGrepTool(userId, args) ─> domains/data/grepTool ─> JSON result
+ *
+ * The explore agent and web chat call the same executor, so all three accept
+ * the same arguments and return the same result. The supervisor is not an
+ * agent: with no agent tree, the default sources leave agent_network out and
+ * an explicit agent_network search reports that it needs an agent.
  */
 
 import { createLogger } from '../logger';
-import { executeUserDataGrep, UserDataGrepParams, UserDataGrepResult } from '../userDataSearch';
+import { executeUserDataGrepTool, type UserDataGrepToolResult } from '../userDataSearch';
 import type { ToolResult } from './supervisorTools';
 
 const log = createLogger('SmsSupervisorGrep');
 
-export interface GrepArgs {
-  pattern?: string;
-  source?: string | null;
-  role?: 'USER' | 'ASSISTANT' | 'TOOL' | null;
-  record_kind?: 'message' | 'llm_output' | 'llm_context' | 'all' | null;
-  surface?: 'WEB' | 'MAC_APP' | 'SMS' | 'WHATSAPP' | null;
-  trace_path?: string | null;
-  order?: 'newest_first' | 'oldest_first' | null;
-  page_after?: string | null;
-  until?: string | null;
-  context?: number | null;
-  '-B'?: number | null;
-  '-A'?: number | null;
-  '-C'?: number | null;
-  '-n'?: boolean | null;
-  '-i'?: boolean | null;
-  head_limit?: number | null;
-  offset?: number | null;
-  multiline?: boolean | null;
-  filters?: Record<string, unknown> | null;
-  person?: string | null;
-  since?: string | null;
-}
-
-const OMITTED_SOURCE_FAN_OUT = ['messages', 'network'] as const;
-
-/** Drop null/undefined keys so the domain's strict validation sees only real args. */
-function stripNullish(obj: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(obj)) {
-    if (value !== null && value !== undefined) out[key] = value;
-  }
-  return out;
-}
-
-function toGrepParams(args: GrepArgs): UserDataGrepParams {
-  const params = stripNullish(args as unknown as Record<string, unknown>);
-  // The strict LLM schema makes every filter key required-but-nullable, so a
-  // filters object arrives fully populated with nulls; the domain rejects
-  // null-valued keys as unsupported for the source. Strip them, and drop the
-  // object entirely when nothing real remains.
-  if (params.filters !== undefined) {
-    const filters = stripNullish(params.filters as Record<string, unknown>);
-    if (Object.keys(filters).length === 0) {
-      delete params.filters;
-    } else {
-      params.filters = filters;
-    }
-  }
-  return params as unknown as UserDataGrepParams;
-}
-
-function mergeFanOutResults(results: UserDataGrepResult[], limit: number): UserDataGrepResult {
-  const matches = results
-    .flatMap((r) => r.matches)
-    .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
-    .slice(0, limit);
-  const totalMatches = results.reduce((sum, r) => sum + r.total_matches, 0);
-  const messages = results.map((r) => r.message).filter((m): m is string => m !== undefined);
-  return {
-    matches,
-    total_matches: totalMatches,
-    truncated: totalMatches > matches.length || results.some((r) => r.truncated),
-    pattern: results[0].pattern,
-    sources: results.flatMap((r) => r.sources),
-    applied_limit: limit,
-    applied_offset: results[0].applied_offset,
-    returned: matches.length,
-    has_more: totalMatches > matches.length || results.some((r) => r.has_more),
-    next_offset:
-      totalMatches > matches.length || results.some((r) => r.has_more)
-        ? results[0].applied_offset + matches.length
-        : null,
-    display_order: 'newest_first',
-    context_unit: 'mixed',
-    ...(messages.length === results.length && messages.length > 0
-      ? { message: messages.join(' ') }
-      : {}),
-  };
-}
+export type GrepArgs = Record<string, unknown>;
 
 export async function executeGrepTool(args: GrepArgs, userId: string): Promise<ToolResult> {
-  const params = toGrepParams(args);
   const startTime = Date.now();
   log.info('Executing grep', {
-    pattern: params.pattern ?? '',
-    source: params.source ?? 'all',
+    pattern: typeof args.pattern === 'string' ? args.pattern : '',
+    sources: args.sources ?? args.source ?? 'default',
     userId,
   });
 
-  if (params.source === 'agent_network') {
-    return {
-      tool: 'grep',
-      success: false,
-      result: '',
-      error:
-        "source 'agent_network' is not available in this surface. Supported sources: messages, network, agent_trajectories, transactions, documents.",
-    };
-  }
-
-  let result: UserDataGrepResult;
-  const trajectoryNarrowing =
-    params.role !== undefined ||
-    params.record_kind !== undefined ||
-    params.surface !== undefined ||
-    params.trace_path !== undefined ||
-    params.order !== undefined ||
-    params.page_after !== undefined ||
-    params.until !== undefined;
-  if (params.source === undefined && trajectoryNarrowing) {
-    result = await executeUserDataGrep(userId, { ...params, source: 'agent_trajectories' });
-  } else if (params.source === undefined) {
-    if (params.filters !== undefined) {
-      // Mirrors the domain's validateGrepInput: nested filters need an explicit source.
-      return {
-        tool: 'grep',
-        success: false,
-        result: '',
-        error:
-          'filters require an explicit source. Pick one of: messages, network, agent_trajectories, transactions, documents.',
-      };
-    }
-    const perSource = await Promise.all(
-      OMITTED_SOURCE_FAN_OUT.map((source) => executeUserDataGrep(userId, { ...params, source }))
-    );
-    result = mergeFanOutResults(perSource, perSource[0].applied_limit);
-  } else {
-    result = await executeUserDataGrep(userId, params);
+  let result: UserDataGrepToolResult;
+  try {
+    result = await executeUserDataGrepTool(userId, args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log.warn('Grep failed', { error: message, durationMs: Date.now() - startTime });
+    return { tool: 'grep', success: false, result: '', error: message };
   }
 
   log.info('Grep complete', {
-    pattern: params.pattern,
+    pattern: result.pattern,
     sources: result.sources,
     totalMatches: result.total_matches,
     returned: result.matches.length,
