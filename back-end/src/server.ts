@@ -97,7 +97,7 @@ import {
 import { isCorsOriginAllowed, resolveAllowedOrigins } from './providers/corsConfig';
 import { BAZAAR_DESCRIPTION } from './providers/bazaarDescription';
 import { grep as userDataGrep } from './domains/data/service';
-import { executeGrepTool } from './domains/data/grepTool';
+import { executeGatelessGrepTool } from './domains/data/grepTool';
 import { registerUserDataGrep, registerUserDataGrepTool } from './providers/userDataSearch';
 import { registerCronJobs } from './serverCron';
 import { cleanupBenchmarkKernelProfiles } from './providers/browser/kernel';
@@ -120,7 +120,8 @@ if (!process.env.BACKEND_API_KEY) {
 // bridge so the SMS supervisor and web chat search user data without a
 // provider→domain import.
 registerUserDataGrep(userDataGrep);
-registerUserDataGrepTool(executeGrepTool);
+// SMS and chat have no connect gate: they report unconnected sources themselves.
+registerUserDataGrepTool(executeGatelessGrepTool);
 
 const app = express();
 const PORT = process.env.PORT || 3001;

@@ -115,7 +115,7 @@ export function registerUserDataGrepTool(fn: UserDataGrepToolFn): void {
 /**
  * Run one grep tool call (arguments as the shared grep definition declares
  * them) for `userId`. `agentId` scopes `agent_network` to that agent's tree;
- * without one the default sources leave agent_network out.
+ * without one, a default search finds an empty agent tree (with a notice).
  */
 export async function executeUserDataGrepTool(
   userId: string,

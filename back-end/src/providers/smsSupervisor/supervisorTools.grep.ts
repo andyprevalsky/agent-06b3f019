@@ -6,8 +6,9 @@
  *
  * The explore agent and web chat call the same executor, so all three accept
  * the same arguments and return the same result. The supervisor is not an
- * agent: with no agent tree, the default sources leave agent_network out and
- * an explicit agent_network search reports that it needs an agent.
+ * agent: its default searches find an empty agent tree (with a notice), and an
+ * explicit agent_network search reports that it needs an agent. With no connect
+ * gate, named sources that are not connected are skipped with a notice.
  */
 
 import { createLogger } from '../logger';

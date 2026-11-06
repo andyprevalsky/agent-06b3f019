@@ -10,7 +10,7 @@ import { getAgentDetail } from '../../domains/agents/agentQueryService';
 import { __flushBroadcastQueueForTests } from '../../providers/chat/supabaseBroadcast';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 import { registerUserDataGrepTool } from '../../providers/userDataSearch';
-import { executeGrepTool } from '../../domains/data/grepTool';
+import { executeGatelessGrepTool } from '../../domains/data/grepTool';
 import { replayCall, stalledResponse } from './chat-search-escalation.network.support';
 
 type Action = 'direct_answer' | 'web_search' | 'grep' | 'start_superintelligence';
@@ -19,7 +19,7 @@ type Action = 'direct_answer' | 'web_search' | 'grep' | 'start_superintelligence
 const grepCalls: Array<{ userId: string; args: Record<string, unknown> }> = [];
 registerUserDataGrepTool(async (userId, args) => {
   grepCalls.push({ userId, args });
-  return executeGrepTool(userId, args);
+  return executeGatelessGrepTool(userId, args);
 });
 type Stream = { agentId?: string; stream_id?: string; delta?: string; sequence?: number };
 type Frame = { topic: string; event: string; record: Record<string, unknown> };

@@ -5,7 +5,7 @@
  */
 import type { PrismaClient } from '@prisma/client';
 
-import { executeGrepTool as domainGrepTool } from '../../domains/data/grepTool';
+import { executeGatelessGrepTool as domainGrepTool } from '../../domains/data/grepTool';
 import { executeGrepTool } from '../../providers/smsSupervisor/supervisorTools.grep';
 import { registerUserDataGrepTool } from '../../providers/userDataSearch';
 import {
@@ -134,6 +134,28 @@ export async function testGrep_smsRunsTheSharedGrepTool(prisma: PrismaClient) {
     if (literal.literal_fallback !== true || literal.matches.length !== 1) {
       throw new Error(
         `SMS grep did not retry a broken regex literally: ${JSON.stringify(literal)}`
+      );
+    }
+    // No Plaid link: a named unconnected source is skipped with a notice, not searched silently.
+    const mixed = parse(
+      await executeGrepTool({ pattern: 'Gate code', sources: ['messages', 'transactions'] }, userId)
+    );
+    if (
+      mixed.sources.join(',') !== 'messages' ||
+      mixed.matches.length !== 1 ||
+      !String(mixed.message).includes('not connected: transactions')
+    ) {
+      throw new Error(`SMS grep must report the unconnected source: ${JSON.stringify(mixed)}`);
+    }
+    const onlyUnconnected = parse(
+      await executeGrepTool({ pattern: 'amazon', source: 'transactions', since: '30d' }, userId)
+    );
+    if (
+      onlyUnconnected.matches.length !== 0 ||
+      !String(onlyUnconnected.message).includes('roselabs.ai/connect/plaid')
+    ) {
+      throw new Error(
+        `SMS grep on an unconnected source must say so: ${JSON.stringify(onlyUnconnected)}`
       );
     }
     const tree = await executeGrepTool({ pattern: 'x', source: 'agent_network' }, userId);
