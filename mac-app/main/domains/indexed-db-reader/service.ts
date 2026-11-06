@@ -18,34 +18,16 @@
  * discovery module; this file is orchestration plus `crypto`.
  */
 
-import crypto from 'crypto';
 import { getErrorMessage } from '../../../shared/utils/error';
-import { LOG_COMPONENT, ORIGIN_HASH_PREFIX_LENGTH } from './config';
+import { LOG_COMPONENT } from './config';
 import { resolveHomeDir } from './repo';
 import { findIndexedDbFolders } from './native/discovery';
-import { readIndexedDbDatabases } from './native/indexeddb';
+import { readIndexedDbDatabasesSliced } from './native/indexeddb';
+import { SliceClock } from '../../base/timeSlice';
+import { computeOriginHashSliced } from './service-hash';
 import type { IndexedDBData, IndexedDBOriginData } from './types';
 
-// ---------------------------------------------------------------------------
-// Per-origin change-detection hash
-// ---------------------------------------------------------------------------
-
-/**
- * Compute a stable 16-hex sha256 prefix over an origin's `databases`.
- *
- * The shape is hashed verbatim via `JSON.stringify` — callers upstream rely on
- * the fact that identical `databases` produce identical hashes across
- * invocations, and that any change (record add/remove/value tweak) flips the
- * hash. No sorting is applied: record ordering is part of the observed state.
- */
-export function computeOriginHash(data: IndexedDBOriginData): string {
-  const content = JSON.stringify(data.databases);
-  return crypto
-    .createHash('sha256')
-    .update(content)
-    .digest('hex')
-    .slice(0, ORIGIN_HASH_PREFIX_LENGTH);
-}
+export { computeOriginHash, computeOriginHashSliced } from './service-hash';
 
 // ---------------------------------------------------------------------------
 // Result helpers
@@ -90,11 +72,10 @@ export async function readIndexedDB(originFilter?: string): Promise<IndexedDBDat
   const filterSuffix = originFilter === undefined ? '' : ` for '${originFilter}'`;
   console.log(`[${LOG_COMPONENT}] Reading IndexedDB${filterSuffix}...`);
 
-  // `readIndexedDbDatabases` is synchronous CPU/IO work; keep the async
-  // signature (callers await it) but yield to the event loop first so a large
-  // scan doesn't block other startup work on the main thread.
-  await Promise.resolve();
-
+  // This runs on the Electron main process, which owns every window's event
+  // loop: decode and hash in time slices so a large IndexedDB never freezes the
+  // app (a single synchronous scan showed the spinning beachball).
+  const clock = new SliceClock();
   const folders = findIndexedDbFolders(resolveHomeDir(), originFilter);
   if (folders.length === 0) {
     console.log(`[${LOG_COMPONENT}] No IndexedDB data found${filterSuffix}`);
@@ -106,10 +87,14 @@ export async function readIndexedDB(originFilter?: string): Promise<IndexedDBDat
 
   for (const folder of folders) {
     try {
-      const databases = readIndexedDbDatabases(folder.leveldbDir, folder.blobDir ?? undefined);
+      const databases = await readIndexedDbDatabasesSliced(
+        folder.leveldbDir,
+        folder.blobDir ?? undefined,
+        clock
+      );
       const origin: IndexedDBOriginData = { origin: folder.origin, databases };
       origins.push(origin);
-      hashes[folder.origin] = computeOriginHash(origin);
+      hashes[folder.origin] = await computeOriginHashSliced(origin, clock);
     } catch (error) {
       // A single unreadable/corrupt folder must not abort the whole scan.
       console.error(
