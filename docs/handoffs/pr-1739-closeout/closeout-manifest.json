@@ -1,0 +1,138 @@
+{
+ "schema_version": 1,
+ "pr": 1739,
+ "title": "fix(agents): carry the continuation context once so large agents can hand off",
+ "assignment": "post-merge repair goal from the PR #1732 deploy: production gate Step 13ab (monitor-cooperative-cutover.ts --verify) stayed DRAINING for job 39e1d2df83d3be9b74681f789c9932eae7117319a5ae85774d8ca886ddd36839 (deploy-agents.yml run 42225762040, merged source 25b44dff334567fec68534aed3a0cccb28da23ca) because one old-bank workflow failed every handoff task with TMPRL1103; repair devbox 17dd522e-2d46-4dc9-943b-29962da8834d in Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1); originating devbox 1483da82-0d27-4ae6-a916-720b5a62db29",
+ "merge_commit": "58e2f7ef54fe0d4cf61987b353e2aeae9015e8b2",
+ "gated_source": "f3026d2e6d740d77b06a60b7656a9933b40474b3",
+ "branch_commits": [
+  "2a4d591a915f1fa1d82330b701f8250a56fef1f2 fix(agents): carry the continuation context once so large agents can hand off",
+  "f3026d2e6d740d77b06a60b7656a9933b40474b3 Merge origin/main (sync; only docs/rca/INDEX.md conflicted and was regenerated)"
+ ],
+ "assigned_test_proof": {
+  "root_cause": "AgentWorkflow._continuation_resume_state wrote runtime_state[\"context\"] (the whole conversation) while _continuation_args also passed it as argument 6. The stuck agent (76aac11b, 384 messages) had a 1,032,403-byte context and a 1,050,698-byte resume_state: 2.08 MB per continue_as_new, over Temporal Cloud 2 MiB, so the SDK refused the upload ([TMPRL1103]) and the workflow task failed forever.",
+  "causal_repro": "agents/tests/blackbox/workflow.blackbox.py test_workflow_continuation_carries_the_context_once_so_large_agents_hand_off (registered as wf_continuation_carries_context_once, domain workflow): failed on the unfixed code (runtime_state contained context), passes after. A real Temporal dev server with Cloud 2 MiB blob limit (evidence/repro/temporal-continue-as-new-2mib-repro.py, output beside it) reproduces the exact TMPRL1103 wedge for the duplicated shape and a clean handoff for the single-copy shape.",
+  "assigned_command": "cd back-end && node --import tsx scripts/monitor-cooperative-cutover.ts --job-id 39e1d2df83d3be9b74681f789c9932eae7117319a5ae85774d8ca886ddd36839 --expected-hash a85f3c9e6fbc --verify exit 0 at 2026-11-06T16:09Z: phase cooperative_drain_complete, job SUCCEEDED, pointer navi-agent-tasks-pool-31f329790ca3@a85f3c9e6fbc. (With the branch surface hash 2664fe4b8093 the same command correctly refuses: expected-source mismatch.)",
+  "fresh_deploy_proof": "The merged fix deployed as job 144933574d2842d9561c44e411145bfa3d69abcaa7f8bb3ac7072fd879aa1481 (deploy-agents.yml run 42266835623 attempt 1, conclusion success): monitor --verify exit 0 with --expected-hash 5a08a687714c, pointer navi-agent-tasks-pool-a6628b226b5b@5a08a687714c, job SUCCEEDED."
+ },
+ "live_remediation": [
+  {
+   "at": "2026-11-06T15:48:37Z",
+   "action": "archived (soft delete via DELETE /api/agents/<id>, reversible with unarchive) stale agent 76aac11b-7c50-4d3c-9741-47e2cdb912a5 (DEMO fleet concurrency probe alpha, ACTIVE since 2026-10-28, unanswered question), the only open workflow on the old bank",
+   "reason": "old-bank code duplicates the context, so the handoff cannot succeed in place; a restart or pause would move the same oversized state onto a bank that still carries the bug",
+   "then": "old queue showed 0 open workflows; the saved job 39e1d2df was resumed with worker-deployment-queue.ts run --job-id ... --if-idle -- python3 ../scripts/worker_pool_cutover.py and reached SUCCEEDED"
+  },
+  {
+   "at": "2026-11-06T18:18:13Z",
+   "action": "archived sibling probe agent 7e8dd768-7e32-46e4-9759-09813b9a9430 (429 messages, 1.09 MB) wedged by the same TMPRL1103 on the PR #1734 bank navi-agent-tasks-pool-81c57163476d@4a16262572d6 while job 144933574d28 drained",
+   "then": "that bank showed 0 open workflows and the job reached SUCCEEDED"
+  }
+ ],
+ "forbidden_actions_not_taken": "no bank force-cleared, no Machine destroyed, no pointer rolled back, no forced workflow migration, no benchmark/test/timeout change",
+ "rca_case": "docs/rca/cases/2026-11-06-continuation-carries-the-context-twice-and-wedges-cooperative-cutover.md (status fixed)",
+ "review": {
+  "cycles": "initial CodeRabbit review of 2a4d591a91: no actionable comments (clean); the sync-only HEAD f3026d2e6d was recorded with deploy_review_cycle.py inherit-sync (branch diff byte-identical, only generated docs/rca/INDEX.md changed); Graphide not requested",
+  "ledger": "evidence/review-ledger.json"
+ },
+ "staged_cycle": {
+  "plan": "evidence/final-plan-f3026d2e6d.json.gz (15 gates; frontend, AgentCard lifecycle and mac-app omitted by the planner)",
+  "cycle_1": "ready on 2a4d591a91 then superseded because main moved (PR #1734 merged; sync required). A prior failed first attempt of this cycle (live-probes and e2b-smoke UNVERIFIED because the worker roots had no active run-deploy-stage timing run, a setup defect) was archived in the core archive, not hidden.",
+  "cycle_2": "ready on f3026d2e6d: 15/15 gates PASS incl. 249/249 backend cases and cloud smoke 9/9 with a complete cleanup receipt; PIPELINE_VERIFY status=bound-staged exit=0 (evidence/final-cycle-f3026d2e6d.json.gz, final-cycle-gate-receipts-f3026d2e6d.tgz, final-cycle-output-logs-f3026d2e6d.tgz)"
+ },
+ "production": {
+  "fly": "deploy-agents.yml run 42266835623 (merged source 58e2f7ef54): success; job 144933574d28... SUCCEEDED; hash 5a08a687714c",
+  "render": "not required (no back-end change)",
+  "vercel": "not required (no front-end change)",
+  "mac_release": "not required (no mac-app change)",
+  "workflow_migration_matrix": "validate-prod-workflow-migration.ts --execute: 45/45 PASS, fixtures cleaned (evidence/prod-workflow-migration-validation-45pass.log.gz)",
+  "semantic": "chat-lifecycle-ratchet.yml run 42270315420 source_sha=58e2f7ef54: all jobs success, lane end 2026-11-06T18:35:22Z (evidence/prod-semantic-pipeline.log.gz)",
+  "agentcard": "not selected (no AgentCard/payment path changed)",
+  "mac_local_acceptance": "SKIPPED - no Mac available: owner-scoped GET https://api.roselabs.ai/api/local-devices returned HTTP 200 devices=0 at 2026-11-06T18:24:09Z (in-memory owner session, never persisted)"
+ },
+ "non_pass_items_disclosed": [
+  "Mac acceptance SKIPPED (no Mac available)",
+  "AgentCard lifecycle gates not selected by the planner",
+  "The two stale probe agents were archived (soft delete) to unblock the cutover; their messages are retained and unarchive restores them readable",
+  "First staged validation attempt had an UNVERIFIED worker-setup result, archived and rerun to PASS",
+  "The old-bank code that duplicates the context stays on retired banks only; any large-context agent on a pre-fix bank could wedge a cutover again, now observable by the 1.5 MB continuation warning"
+ ],
+ "followups": [
+  "A single context larger than ~2 MiB would still exceed the Temporal limit; compaction bounds it by tokens and the new warning shows approach. A DB-backed claim check for such contexts is a separate larger change."
+ ],
+ "preservation": {
+  "archives": {
+   "core": {
+    "key": "devbox-closeout-private/pr1739-58e2f7ef/20261106T192643Z-core.tar.gz.aesgcm",
+    "ciphertext_sha256": "9cf49c85f1b820a0f7fa36b0c8ad52b24c8a7a986d839452d4ed0243147fd609",
+    "gzip_sha256": "8657197f9af6a755e99c499a67f7fc52e5c256bc3d5b699e8ce11fd326926e9c",
+    "manifest_sha256": "b5c550e1bd9b68c5b9c79308ca6aec87fa9fee2966653a29633955b63b32eb62",
+    "stored_bytes": 5809926,
+    "files": 719,
+    "original_bytes": 28193153,
+    "frames": 1,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "full_readback_verified": true,
+    "independent_verify_authenticated_files": 719
+   },
+   "workers": {
+    "key": "devbox-closeout-private/pr1739-58e2f7ef/20261106T192643Z-workers.tar.gz.aesgcm",
+    "ciphertext_sha256": "3d93ded646eef323663b2c54b80426c6427f3d5f0afcdd563aa08970318cf3b2",
+    "gzip_sha256": "b55c26a6a068f434c1a05fcc0df455cbb40e5e185cc00ad2913d92311b414eba",
+    "manifest_sha256": "b3af80fd30aab4a82fe61bf82c2efd084879d342be091e7f7f1ef4960ceac58e",
+    "stored_bytes": 385285992,
+    "files": 23932,
+    "original_bytes": 809408611,
+    "frames": 46,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "full_readback_verified": true,
+    "independent_verify_authenticated_files": 23932
+   },
+   "cloud": {
+    "key": "devbox-closeout-private/pr1739-58e2f7ef/20261106T192643Z-cloud.tar.gz.aesgcm",
+    "ciphertext_sha256": "104ca1538d425e05d93e576e8b45122ca6e38d32f87758f0da1ce0b2f17d7e38",
+    "gzip_sha256": "b0ef09c70478411eb5026e90f7598a28b4bd3659ce909ec60941d224259f1e73",
+    "manifest_sha256": "7d015a8ae0b645bafd1293a0acb673b4b0a05db4adcce7e6c022a32019fd5e26",
+    "stored_bytes": 783259671,
+    "files": 2631,
+    "original_bytes": 2495327107,
+    "frames": 94,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "full_readback_verified": true,
+    "independent_verify_authenticated_files": 2631
+   },
+   "control": {
+    "key": "devbox-closeout-private/pr1739-58e2f7ef/20261106T192643Z-control.tar.gz.aesgcm",
+    "ciphertext_sha256": "4d3dc7f9d48545c823ee92f5eed45a69d36c2aecbc50bf67eed6ed65ee1f1de5",
+    "gzip_sha256": "d5e696474a638a90637407c9195e6e37faef4c5300fd29d46016a204f0ec1ad9",
+    "manifest_sha256": "cebf89ecb88ac43407f22d9713bc19fa186c79fa7ef815b9410dc83c947f2a34",
+    "stored_bytes": 362551,
+    "files": 12,
+    "original_bytes": 4815271,
+    "frames": 1,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "full_readback_verified": true,
+    "independent_verify_authenticated_files": 12
+   }
+  },
+  "verification": "private-preservation-verification.json",
+  "recovery": "RECOVERY.md",
+  "symlinks_and_exclusions": "99 symlinks inside the archived .context trees are recorded with their targets in list-skipped.json (control archive, with the capture file lists and the three upload receipts); caches and dependencies are reproducible and excluded; the key escrow file is never archived"
+ },
+ "files": [
+  "evidence/final-cycle-f3026d2e6d.json.gz",
+  "evidence/final-cycle-gate-receipts-f3026d2e6d.tgz",
+  "evidence/final-cycle-output-logs-f3026d2e6d.tgz",
+  "evidence/final-plan-f3026d2e6d.json.gz",
+  "evidence/prod-semantic-pipeline.log.gz",
+  "evidence/prod-workflow-migration-validation-45pass.log.gz",
+  "evidence/production-receipt.json.gz",
+  "evidence/repro/temporal-continue-as-new-2mib-repro.output.txt",
+  "evidence/repro/temporal-continue-as-new-2mib-repro.py",
+  "evidence/review-ledger.json",
+  "private-preservation-verification.json"
+ ],
+ "factory_history": {
+  "commit": "e24b8eb812034e15e8ba689ca2ef2b02c2c7e8b8",
+  "note": "data-only chore(factory-history) commit on main publishing this deploy (stage records, review, production events and the completed outcome); factory events recorded after it are not part of this deploy"
+ }
+}
