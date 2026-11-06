@@ -6,7 +6,7 @@ surface: agents
 component: spawn-browser-agent-decline-result
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: spawn_browser_agent_v3 decline result text reached the root as 'declined sign-in assistance' with no stop semantics; root execute_loop 98c810c8e0f9 then spawned a browser to sign in by email code
+first_bad_boundary: spawn_browser_agent_v3 decline result reached the root as 'declined sign-in assistance' without the realm or the decline's scope; root execute_loop 98c810c8e0f9 then spawned a browser to sign in by email code
 symptoms:
   - "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2"
   - browser-auth-assistance-declined
@@ -95,7 +95,7 @@ Use current thread without children; preserve Freedom/devboxes/refs/evidence and
 
 ## Reusable lesson
 
-Make a user-decision tool result state that the decision stands and what to do instead; a system-prompt rule does not substitute for the result's own semantics.
+Make a user-decision tool result state, as fact, exactly what the user declined and its scope; vague wording invites the parent to retry by another route.
 
 
 ### 2026-10-17 source2a native recurrence and two non-reproducing request diagnostics
@@ -145,23 +145,37 @@ Observed chain on r002 (UTC): first browser `/root/member_number` tried all thre
 
 **Semantic RED, first reproduced.** `scripts/replicate_llm_dump.py`'s `replay_generic` was run on the exact dump with unchanged messages, tools, pool `rose-1-ultra`, effort xhigh and fast mode. The dump had no direct auth, so the replay served `openai/gpt-6.1-sol` (waterfall). That is the same model family as the original `gpt-6.1-sol-foundry` leg but not the same provider deployment. Result: 7/10 replays spawned another browser to sign in by another method; 2/10 messaged the explore agent to look for other credentials; 1/10 displayed the result. The earlier decision point (dump `f8d2a373adf9`, right after the decline) chose explore 10/10, the same detour seen in both r001 and r002.
 
-**Fix and GREEN.** Claude Code's human-rejection tool result (`claude-code-src/src/utils/messages.ts:210-213`, `CANCEL_MESSAGE`/`REJECT_MESSAGE`) says the decision stands: "STOP what you are doing and wait for the user to tell you how to proceed." Its prompt rule (`claude-code-src/src/constants/prompts.ts:189`, "adjust your approach") is the same rule Rose's EXECUTE prompt mirrors. Rose's decline result carried the rule but not the result semantics. The fix is in `agents/domains/spawn_browser_agent_v3/handler.py`. The decline result is now the constant `AUTH_ASSISTANCE_DECLINED_MESSAGE`: "The user declined to sign in. The browser stopped without signing in. Do not try to sign in to this site again by any method. If the task needs this sign-in, stop and report that it is still needed, so the user can tell you how to proceed." The conditional clause keeps public or optional work possible, matching the verifier's existing refusal rubric.
+**String history.** This result string has been reviewed before. c05f6fa352 (Oct 3) told the parent "Do not look for another way in; tell the user." a74341447d (Oct 3) changed it to "No other sign-in option is left." 4b12ac96d1 (Oct 5) removed that sentence because "it steered the parent rather than reporting what happened", leaving "User declined to sign in to {auth_realm}." fc4f6d9485 (Oct 6) put the rule in the EXECUTE prompt instead (`agents/utils/prompts.py:189`, Claude Code's denied-tool rule, approved by Andy as AP-planner-refusal-2). ef1c7622d2 (Oct 27) and 4c5c0005c0 (Oct 28) replaced the realm-naming fact with "The user declined sign-in assistance. The browser task stopped without retrying authentication." That phrasing lost both the realm and the fact that the user declined *sign-in*, not just help with it. The recurrence followed.
 
-The identical replay was then run with the dump's decline text replaced by the source constant; the two places the history quoted it were replaced too. Results:
+**Fix and GREEN.** The fix is in `agents/domains/spawn_browser_agent_v3/handler.py`: `auth_assistance_declined_message(auth_realm)`. It keeps the Oct 5 review's facts-only rule: no instruction to the parent. It names the realm from the resume state and states the scope of the decline as a fact: "The user declined to sign in to {realm}. Their decline applies to every way of signing in to {realm}, including other sign-in methods. The browser stopped without signing in." The EXECUTE prompt's approved rule does the rest. The first candidate (70473c288e) added imperatives ("Do not try to sign in to this site again by any method … stop and report"). It also replayed at 0/20, but the golden review returned NOT_GROUNDED because it reversed the Oct 5 decision, so it was replaced.
 
-| Variant | Browser respawns | Other outcomes |
-| --- | --- | --- |
-| Baseline | 7/10 | — |
-| Source constant | 0/10 | 9 display, 1 text-only report |
-| Same text, pre-commit run | 0/10 | 10 display |
-| Rewording only ("The user declined to sign in. The browser stopped without signing in.") | 4/10 | 2 more explores for an alternative route |
+Each replay variant was run on the identical dump with the decline text replaced by the candidate (plus the two places the history quoted it):
 
-The rewording-only result means the stop semantics, not the wording, flip the decision. At the earlier decision point the fix moved 10/10 explore to 8 text-only reports and 2 display. The text-only reports hit the existing no-tool retry, so they need one extra turn before completion.
+| Variant | Decision dump | Browser respawns | Other outcomes |
+| --- | --- | --- | --- |
+| Baseline | 98c810c8e0f9 | 7/10 | 2 asked explore for other credentials, 1 display |
+| Rewording only ("The user declined to sign in. The browser stopped without signing in.") | 98c810c8e0f9 | 4/10 | 2 explored for an alternative route |
+| Imperative candidate (70473c288e) | 98c810c8e0f9 | 0/20 | 19 display, 1 text-only report |
+| **Fact-only, realm-scoped (chosen)** | 98c810c8e0f9 | **0/20** | 20 display |
+| Baseline | f8d2a373adf9 (right after the decline) | 0/10 | 10 explore detours |
+| **Fact-only (chosen)** | f8d2a373adf9 | 0/10 | 8 text-only reports, 2 display |
 
-**Cement.** `test_browser_empty_completion_preserves_verified_denial_for_parent` now asserts that the parent notification carries `AUTH_ASSISTANCE_DECLINED_MESSAGE` and its stop clauses. Red on the unchanged source (AttributeError, no constant, old text lacks the clauses), green after the fix, five consecutive passes. The paid replay panel is diagnostic evidence, not a deploy gate.
+Stating the scope as a fact flips the decision; rewording without the scope does not. The text-only reports hit the loop's existing no-tool retry, so they cost one extra turn before completion.
+
+**Optional-work control.** No real optional-decline dump exists locally: the catalog has no such task and no other local dump set contains a decline. As a derived control, the f8d2a373adf9 goal was extended with "Also tell me what the site's public homepage says." Every variant still continued the independent work in 10/10 replays:
+
+| Variant | Explore | Browser | Spawn goal |
+| --- | --- | --- | --- |
+| Baseline | 9 | 1 | public homepage only, sign-in excluded |
+| Fact-only | 9 | 1 | public homepage only, sign-in excluded |
+| Imperative | 8 | 2 | public homepage only, sign-in excluded |
+
+The decline text did not stop optional work. The browser counts are public-page reads, not sign-in retries.
+
+**Cement.** `test_browser_empty_completion_preserves_verified_denial_for_parent` now asserts that the parent notification carries `auth_assistance_declined_message("rose-shop-test")`, the realm, the decline's scope, and no "Do not"/"stop and report" instruction. It also checks the "the site" fallback. Red on the unchanged source (no helper; the old text lacks the realm and scope), green after the fix, five consecutive passes. The replay panel is diagnostic evidence, not a deploy gate.
 
 **Outcome proof pending.** No unchanged-task run on the fixed source exists yet. The case stays `open` until the `/descend` outcome reruns (K=3 cloud members of `browser-auth-assistance-declined`) pass on a build containing this change. The N-rate replay loop and decoded dumps are private under `/var/tmp/rca-H-16*`. They contain no credentials but were never published. The dumps are refetchable with `back-end/scripts/fetch-agent-llm-dumps.ts c8e27e60-ca4e-4ecb-b626-cc782c2bf826`.
 
-10k-agent behavior: one constant string per declined sign-in; no new state, polling, channels or queries.
+10k-agent behavior: one formatted string per declined sign-in; no new state, polling, channels or queries.
 
 The earlier lesson (correlate captured model call IDs with dispatch spans before blaming replay) still holds; `## Reusable lesson` now carries this recurrence's lesson.

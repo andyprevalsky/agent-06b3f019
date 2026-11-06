@@ -24130,6 +24130,7 @@ async def test_browser_empty_completion_preserves_verified_denial_for_parent():
         },
         resume_overrides={
             "browser_turn_messages": turns,
+            "auth_realm": "rose-shop-test",
             "rejected_action": {"tool_call_id": "denied-auth-call", "approval_type": "auth_assistance",
                                 "request_id": "denied-auth-request", "url": "https://example.com/login"},
         },
@@ -24145,11 +24146,14 @@ async def test_browser_empty_completion_preserves_verified_denial_for_parent():
     # The parent's only evidence is this result. "Declined assistance" alone read as
     # "the user won't help, try another sign-in method" and the root respawned a
     # browser for an email code (RCA 2026-10-15-auth-decline-root-continuation-unproven).
-    assert result["message"] == h.AUTH_ASSISTANCE_DECLINED_MESSAGE
-    assert h.AUTH_ASSISTANCE_DECLINED_MESSAGE in notification
-    assert "The user declined to sign in." in notification
-    assert "Do not try to sign in to this site again by any method." in notification
-    assert "stop and report that it is still needed" in notification
+    # It names the realm and states the decline's scope as fact; it never instructs
+    # the parent (review of 4b12ac96d1: steering text was removed from this result).
+    assert result["message"] == h.auth_assistance_declined_message("rose-shop-test")
+    assert result["message"] in notification
+    assert "The user declined to sign in to rose-shop-test." in notification
+    assert "applies to every way of signing in to rose-shop-test, including other sign-in methods" in notification
+    assert "Do not" not in result["message"] and "stop and report" not in result["message"]
+    assert h.auth_assistance_declined_message(None).startswith("The user declined to sign in to the site.")
 
 
 @_in_browser_activity_context
