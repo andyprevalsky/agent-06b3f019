@@ -81,63 +81,21 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
 
-      - name: Restore node_modules
-        id: node-cache
-        uses: actions/cache/restore@v4
+      # Dependencies live on a sticky disk keyed by every manifest/lockfile and toolchain version
+      # (actions/cache is ref-scoped, and every gate run is a new tag). The setup script bind-mounts
+      # its directories at the devbox paths, installs only into a fresh disk, and marks it ready.
+      - name: Mount dependency disk
+        uses: useblacksmith/stickydisk@v1
         with:
-          path: |
-            node_modules
-            back-end/node_modules
-            front-end/node_modules
-            agents/node_modules
-          key: deploy-gate-node-${{ env.NODE_VERSION }}-${{ hashFiles('package.json', 'back-end/package.json', 'front-end/package.json', 'back-end/package-lock.json', 'front-end/package-lock.json') }}
-
-      - name: Restore agents venv
-        id: venv-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: agents/venv
-          key: deploy-gate-venv-${{ env.PYTHON_VERSION }}-${{ hashFiles('agents/requirements.txt') }}
-
-      - name: Restore Playwright browsers
-        id: browser-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: deploy-gate-browsers-${{ hashFiles('back-end/package-lock.json', 'front-end/package-lock.json', 'agents/requirements.txt') }}
+          key: rose-deploy-gates-deps-node${{ env.NODE_VERSION }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('package.json', 'back-end/package.json', 'front-end/package.json', 'back-end/package-lock.json', 'front-end/package-lock.json', 'agents/requirements.txt') }}
+          path: /home/runner/rose-deps
+          commit: on-change
 
       - name: Prepare runner
         env:
           DEPLOY_GATE_ENV_BUNDLE: ${{ secrets.DEPLOY_GATE_ENV_BUNDLE }}
-          NODE_CACHE_HIT: ${{ steps.node-cache.outputs.cache-hit }}
-          VENV_CACHE_HIT: ${{ steps.venv-cache.outputs.cache-hit }}
-          BROWSER_CACHE_HIT: ${{ steps.browser-cache.outputs.cache-hit }}
+          DEPLOY_GATE_DEPS: /home/runner/rose-deps
         run: bash scripts/ci/deploy-gate-setup.sh
-
-      - name: Save node_modules
-        if: steps.node-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            node_modules
-            back-end/node_modules
-            front-end/node_modules
-            agents/node_modules
-          key: ${{ steps.node-cache.outputs.cache-primary-key }}
-
-      - name: Save agents venv
-        if: steps.venv-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: agents/venv
-          key: ${{ steps.venv-cache.outputs.cache-primary-key }}
-
-      - name: Save Playwright browsers
-        if: steps.browser-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ steps.browser-cache.outputs.cache-primary-key }}
 
       - name: Run gate
         run: python3 scripts/deploy_test_github.py remote-run --out "$RUNNER_TEMP/gate"
@@ -145,6 +103,10 @@ jobs:
       - name: Bundle evidence
         if: always()
         run: python3 scripts/deploy_test_github.py remote-bundle --out "$RUNNER_TEMP/gate"
+
+      - name: Release dependency mounts
+        if: always()
+        run: bash scripts/ci/deploy-gate-setup.sh --release
 
       - uses: actions/upload-artifact@v4
         if: always()
