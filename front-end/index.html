@@ -111,6 +111,46 @@
         );
       }
     </script>
+    <script>
+      // STATE MACHINE: entry-load recovery (before the bundle, so it survives its loss)
+      // [LOADING] --entry module script loads--> [MOUNTED] (appVersion.ts owns later reloads)
+      // [LOADING] --entry module graph fails (error event), online--> [RELOADING]
+      //           after 0.5s/1s/2s backoff, at most 3 times per entry URL
+      // [LOADING] --budget for this entry URL spent, or offline--> [STATIC] (links only)
+      // A document can outlive its deploy (edge-cached HTML across a production alias
+      // switch); its hashed entry chunks then 404 and React never mounts, leaving only
+      // the static links above. src/lib/appVersion.ts runs inside that bundle, so the
+      // recovery must live here. Reloading fetches the live build's HTML.
+      window.addEventListener(
+        'error',
+        function (event) {
+          var script = event.target;
+          if (!(script instanceof HTMLScriptElement) || script.type !== 'module' || !script.src)
+            return;
+          if (navigator.onLine === false) return;
+          var key = 'rose:entry-reload:' + script.src;
+          var attempts = 0;
+          try {
+            attempts = Number(sessionStorage.getItem(key)) || 0;
+            if (attempts >= 3) return;
+            sessionStorage.setItem(key, String(attempts + 1));
+          } catch (_) {
+            // Storage disabled: window.name survives a same-tab reload (one attempt).
+            var marker = '[' + key + ']';
+            if (window.name.indexOf(marker) !== -1) return;
+            window.name += marker;
+          }
+          console.warn('[EntryLoad] ' + script.src + ' failed to load; reloading');
+          setTimeout(
+            function () {
+              location.reload();
+            },
+            500 * Math.pow(2, attempts),
+          );
+        },
+        true,
+      );
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
