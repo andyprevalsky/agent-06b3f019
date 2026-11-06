@@ -318,6 +318,22 @@ def test_python_root_lane_check_gets_the_root_and_the_run_context(monkeypatch):
     assert not ok and "root has no generation" in reason
 
 
+def test_python_root_lane_check_reports_the_per_agent_verdict_lines_and_forwards_evidence(monkeypatch):
+    seen = {}
+
+    def check_thinking_rows(root_agent_id, *, base_url, api_key, user_id, evidence=None, **config):
+        seen["evidence"] = evidence
+        return {"passed": True, "report": {"ok": True}, "failures": [], "notes": ["no thinking recorded for code (N/A)"],
+                "detail": ["root: 4 thoughts, 230.8 tok/s", "code a1b2: no thinking recorded (N/A)"]}
+
+    _fake_module(monkeypatch, "benchmarks.thinking_rows_check", check_thinking_rows=check_thinking_rows)
+    monkeypatch.setattr(external, "_api_key", lambda: "k")
+    check = {"type": "code_agent_thinking_rows", "evidence": {AGENT: {"reasoningTokens": 120}}}
+    ok, reason = code_agent_checks.run_check(_external_data(), check)
+    assert ok and reason == "code_agent_thinking_rows: root: 4 thoughts, 230.8 tok/s | code a1b2: no thinking recorded (N/A)"
+    assert seen["evidence"] == {AGENT: {"reasoningTokens": 120}}
+
+
 def test_github_rate_limit_lane_check_builds_the_expectation_from_config(monkeypatch):
     from types import SimpleNamespace
 

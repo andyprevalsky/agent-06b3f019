@@ -160,8 +160,14 @@ def _python_root(spec: External, check: dict, ctx: dict) -> tuple[bool, str]:
         ctx["root_agent_id"], base_url=ctx["base_url"], api_key=_api_key(), user_id=ctx["user_id"], **_config(check)
     )
     failures = [str(f) for f in result.get("failures") or []]
-    detail = "; ".join(failures[:4])[:900] if failures else json.dumps(result.get("report"), default=str)[:300]
-    return bool(result.get("passed")), f"{check['type']}: {detail}"
+    verdicts = [str(line) for line in result.get("detail") or []]  # one verdict line per agent (Lane C, C21)
+    if failures:
+        text = "; ".join(failures[:4])[:900]
+    elif verdicts:
+        text = " | ".join(verdicts)[:900]
+    else:
+        text = json.dumps(result.get("report"), default=str)[:300]
+    return bool(result.get("passed")), f"{check['type']}: {text}"
 
 
 def _python_github(spec: External, check: dict, ctx: dict) -> tuple[bool, str]:
