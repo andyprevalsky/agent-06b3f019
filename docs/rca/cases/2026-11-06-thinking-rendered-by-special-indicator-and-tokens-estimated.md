@@ -131,9 +131,14 @@ FE function (`thoughtGeneration`); tok/s = recorded tokens / recorded window.
   cumulative per completed response, so a window starts at the previous response's
   end and includes time to first token; the tool-run guard suppresses most of them.
   Expect few Codex thoughts to carry a rate until checked against a live session.
-- The benchmark check verifies data (recorded, plausible generations), not
-  rendering, and is not yet wired to a benchmark task (tasks.json is owned by
-  another lane).
+- The benchmark check (C21) renders every measured row through the production
+  thought-row path and holds an agent to thinking rows only on evidence of
+  thinking; otherwise it reports "no thinking recorded for <agent> (N/A)". Root
+  rows from the chat router and DAG reasoning record no per-call usage and are
+  reported, not failed; only run-agent rows record a generation. Rose records no
+  reasoning-token field for the root today, so the root's evidence hook
+  (`evidence[agent].reasoningTokens`) is empty unless the caller hydrates one. It
+  is not yet wired to a benchmark task (tasks.json is owned by another lane).
 
 ## Human feedback
 

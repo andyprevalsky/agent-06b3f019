@@ -16,7 +16,9 @@ FIXTURE = thinking_rows_check.FRONT_END / "src/tests/blackbox/code-agent-thinkin
 ROOT = "1a3d495c-826c-4eca-afe0-382fcbf72e82"
 
 
-def _run(root_generation: dict[str, Any] | None, *, thinking: bool = True) -> list[dict[str, Any]]:
+def _run(
+    root_generation: dict[str, Any] | None, *, thinking: bool = True, root_thought: bool = True
+) -> list[dict[str, Any]]:
     fixture = json.loads(FIXTURE.read_text())
     messages: list[dict[str, Any]] = [
         {
@@ -26,14 +28,21 @@ def _run(root_generation: dict[str, Any] | None, *, thinking: bool = True) -> li
             "role": "USER",
             "metadata": None,
         },
-        {
-            "message_id": "thought-1",
-            "timestamp": "2026-11-06T04:21:13.920Z",
-            "text": "Spawning a Claude Code agent in the repo.",
-            "role": "ASSISTANT",
-            "metadata": {"generation": root_generation} if root_generation else {},
-        },
     ]
+    if root_thought:
+        # A run-agent turn: the one root producer that records a generation.
+        metadata: dict[str, Any] = {"tool_calls": [{"tool": "web_search", "tool_call_id": "call-1"}]}
+        if root_generation:
+            metadata["generation"] = root_generation
+        messages.append(
+            {
+                "message_id": "thought-1",
+                "timestamp": "2026-11-06T04:21:13.920Z",
+                "text": "Spawning a Claude Code agent in the repo.",
+                "role": "ASSISTANT",
+                "metadata": metadata,
+            }
+        )
     for carrier in fixture["carriers"]:
         events = [e for e in carrier["events"] if thinking or e.get("type") != "thinking"]
         messages.append(
@@ -72,17 +81,56 @@ def test_thinking_rows_measured_root_and_code_agent_pass():
     assert code["measured"][0]["outputTokens"] == 817
     assert code["measured"][0]["durationMs"] == 6050
     assert round(code["measured"][0]["tokensPerSecond"], 1) == 135.0
+    assert result["detail"] == [
+        "root: 1 thinking row, 1 measured (83–83 tok/s)",
+        "code agent 6f8f8f4d-c670-4bc8-b5df-e2c785c4a908: 1 thinking row, 1 measured (135–135 tok/s)",
+    ]
+    assert result["notes"] == []
 
 
 def test_thinking_rows_without_recorded_generation_fail():
+    """(a) Rows that exist are held to their recorded generation when the records prove one was recordable."""
     result = thinking_rows_check.check_thinking_rows_from_messages(_run(None), ROOT)
     assert not result["passed"]
-    assert result["failures"] == ["root: no thinking row carries a recorded generation (tok/s)"]
+    assert result["failures"] == ["root: 1 run-agent thinking row, none carries a recorded generation (tok/s)"]
     implausible = {**ROOT_GENERATION, "ended_at": "2026-11-06T04:21:06.550Z"}  # 597 tokens in 50 ms
     result = thinking_rows_check.check_thinking_rows_from_messages(_run(implausible), ROOT)
     assert not result["passed"] and "11940.0 tok/s" in result["failures"][0]
-    result = thinking_rows_check.check_thinking_rows_from_messages(_run(ROOT_GENERATION, thinking=False), ROOT)
-    assert result["failures"] == ["code agent 6f8f8f4d-c670-4bc8-b5df-e2c785c4a908: no thinking rows"]
+
+
+def test_thinking_rows_required_only_on_evidence_of_thinking():
+    """(b) An agent with evidence of thinking (recorded reasoning tokens) must show thinking rows."""
+    task = "6f8f8f4d-c670-4bc8-b5df-e2c785c4a908"
+    result = thinking_rows_check.check_thinking_rows_from_messages(
+        _run(ROOT_GENERATION, root_thought=False, thinking=False),
+        ROOT,
+        evidence={ROOT: {"reasoningTokens": 120}, task: {"reasoningTokens": 50}},
+    )
+    assert not result["passed"]
+    assert result["failures"] == [
+        "root: thinking recorded (120 reasoning tokens in recorded usage) but no thinking row is shown",
+        f"code agent {task}: thinking recorded (50 reasoning tokens in recorded usage) but no thinking row is shown",
+    ]
+    # The same evidence with the rows present holds the agents to the row checks instead.
+    result = thinking_rows_check.check_thinking_rows_from_messages(
+        _run(ROOT_GENERATION), ROOT, evidence={ROOT: {"reasoningTokens": 120}, task: {"reasoningTokens": 400}}
+    )
+    assert result["passed"], result["failures"]
+
+
+def test_thinking_rows_without_evidence_or_rows_are_an_explicit_na():
+    """(c) No evidence and no rows is a labeled N/A in the verdict detail, never a failure."""
+    task = "6f8f8f4d-c670-4bc8-b5df-e2c785c4a908"
+    result = thinking_rows_check.check_thinking_rows_from_messages(
+        _run(ROOT_GENERATION, root_thought=False, thinking=False), ROOT
+    )
+    assert result["passed"], result["failures"]
+    assert result["notes"] == [
+        "no thinking recorded for root (N/A)",
+        f"no thinking recorded for code agent {task} (N/A)",
+    ]
+    assert result["detail"] == ["root: N/A, no thinking recorded", f"code agent {task}: N/A, no thinking recorded"]
+    assert result["report"]["root"]["verdict"] == "n/a" and result["report"]["codeAgents"][0]["verdict"] == "n/a"
 
 
 def test_thinking_rows_cli_crash_is_a_failure_not_an_exception():
