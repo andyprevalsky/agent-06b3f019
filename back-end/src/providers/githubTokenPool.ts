@@ -1,10 +1,13 @@
 /**
  * GitHub token pool.
  *
- * Members: GITHUB_TOKEN (the primary identity) then GITHUB_TOKEN_2 … GITHUB_TOKEN_9
- * (machine accounts), with GITHUB_DISPATCH_TOKEN kept as the last-resort member
- * for auth fallbacks. Each GitHub user has its own 5,000/h core quota, so reads
- * spread across members instead of draining the primary account.
+ * Members: GITHUB_TOKEN (the primary identity), GITHUB_TOKEN_2 … GITHUB_TOKEN_9
+ * (machine accounts), the GitHub App installation token (GITHUB_APP_ID +
+ * GITHUB_APP_INSTALLATION_ID + GITHUB_APP_PRIVATE_KEY_B64; minted on demand,
+ * refreshed before its one-hour expiry), with GITHUB_DISPATCH_TOKEN kept as the
+ * last-resort member for auth fallbacks. Each GitHub user or installation has
+ * its own quota, so reads spread across members instead of draining the
+ * primary account.
  *
  *   caller ──githubFetch(url, init, { identity })──▶ pickGithubToken
  *                                                     │  pool: most remaining quota
@@ -19,6 +22,8 @@
  * must keep `identity: 'primary'`. State is per process and derived only from
  * GitHub's own response headers: O(members) per call, no shared lock.
  */
+import { createSign } from 'node:crypto';
+
 import { createLogger } from './logger';
 
 const log = createLogger('GitHubTokenPool');
@@ -60,10 +65,108 @@ function stateFor(token: string): MemberState {
   return state;
 }
 
+/** Refresh an installation token this long before GitHub expires it. */
+const APP_TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
+let appToken: { token: string; expiresAt: number } | null = null;
+let appTokenInFlight: Promise<string | null> | null = null;
+
+interface GithubAppConfig {
+  appId: string;
+  installationId: string;
+  privateKey: string;
+}
+
+function githubAppConfig(env: NodeJS.ProcessEnv): GithubAppConfig | null {
+  const appId = (env.GITHUB_APP_ID ?? '').trim();
+  const installationId = (env.GITHUB_APP_INSTALLATION_ID ?? '').trim();
+  const keyB64 = (env.GITHUB_APP_PRIVATE_KEY_B64 ?? '').trim();
+  if (appId === '' || installationId === '' || keyB64 === '') return null;
+  return { appId, installationId, privateKey: Buffer.from(keyB64, 'base64').toString('utf8') };
+}
+
+function base64Url(value: string): string {
+  return Buffer.from(value).toString('base64url');
+}
+
+/** A ten-minute app JWT (RS256), backdated a minute for clock skew. */
+export function githubAppJwt(appId: string, privateKey: string, nowMs = Date.now()): string {
+  const now = Math.floor(nowMs / 1000);
+  const unsigned = `${base64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))}.${base64Url(
+    JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId })
+  )}`;
+  const signature = createSign('RSA-SHA256').update(unsigned).sign(privateKey, 'base64url');
+  return `${unsigned}.${signature}`;
+}
+
+async function mintGithubAppToken(
+  config: GithubAppConfig,
+  fetchImpl: typeof fetch
+): Promise<string | null> {
+  const base = (process.env.GITHUB_API_BASE_URL || 'https://api.github.com').replace(/\/+$/, '');
+  try {
+    const response = await fetchImpl(
+      `${base}/app/installations/${config.installationId}/access_tokens`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${githubAppJwt(config.appId, config.privateKey)}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        signal: AbortSignal.timeout(10_000),
+      }
+    );
+    if (!response.ok) {
+      log.warn('GitHub App installation token mint failed', { status: response.status });
+      return appToken?.token ?? null;
+    }
+    const body = (await response.json()) as { token?: string; expires_at?: string };
+    const expiresAt = Date.parse(body.expires_at ?? '');
+    if (typeof body.token !== 'string' || body.token === '' || !Number.isFinite(expiresAt)) {
+      log.warn('GitHub App installation token response was malformed');
+      return appToken?.token ?? null;
+    }
+    if (appToken !== null) memberState.delete(appToken.token);
+    appToken = { token: body.token, expiresAt };
+    return body.token;
+  } catch (error) {
+    log.warn('GitHub App installation token mint errored', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return appToken?.token ?? null;
+  }
+}
+
+/**
+ * Make sure the GitHub App member holds an unexpired installation token.
+ * Concurrent callers share one mint; a failed mint keeps any still-valid token
+ * and never blocks the static members. Returns null when no app is configured.
+ */
+export async function ensureGithubAppToken(
+  fetchImpl: typeof fetch = fetch
+): Promise<string | null> {
+  const config = githubAppConfig(process.env);
+  if (config === null) return null;
+  if (appToken !== null && appToken.expiresAt - Date.now() > APP_TOKEN_REFRESH_MARGIN_MS) {
+    return appToken.token;
+  }
+  appTokenInFlight ??= mintGithubAppToken(config, fetchImpl).finally(() => {
+    appTokenInFlight = null;
+  });
+  return appTokenInFlight;
+}
+
+function currentAppToken(): string {
+  return appToken !== null && appToken.expiresAt > Date.now() ? appToken.token : '';
+}
+
 /** Configured members in pool order, deduplicated. Read at call time. */
 export function githubPoolTokens(env: NodeJS.ProcessEnv = process.env): string[] {
-  const tokens = POOL_KEYS.map((key) => (env[key] ?? '').trim()).filter((token) => token !== '');
-  return [...new Set(tokens)];
+  const staticTokens = POOL_KEYS.filter((key) => key !== 'GITHUB_DISPATCH_TOKEN').map((key) =>
+    (env[key] ?? '').trim()
+  );
+  const tokens = [...staticTokens, currentAppToken(), (env.GITHUB_DISPATCH_TOKEN ?? '').trim()];
+  return [...new Set(tokens.filter((token) => token !== ''))];
 }
 
 /** Members ordered best-first: unblocked by most remaining quota (unknown = full), then blocked by soonest recovery. */
@@ -188,6 +291,7 @@ export async function githubFetch(
   options: GithubFetchOptions = {}
 ): Promise<Response> {
   const fetchImpl = options.fetchImpl ?? fetch;
+  if ((options.identity ?? 'pool') === 'pool') await ensureGithubAppToken(fetchImpl);
   const candidates = githubTokenCandidates(options.identity ?? 'pool');
   if (candidates.length === 0) return fetchImpl(url, init);
   const primary = (process.env.GITHUB_TOKEN ?? '').trim();
@@ -211,4 +315,6 @@ export async function githubFetch(
 
 export function resetGithubTokenPoolForTests(): void {
   memberState.clear();
+  appToken = null;
+  appTokenInFlight = null;
 }

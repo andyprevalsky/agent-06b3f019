@@ -9,6 +9,7 @@ GITHUB_TOKEN_2..9 and GITHUB_DISPATCH_TOKEN by remaining quota from the free
 
 from __future__ import annotations
 
+import base64
 import http.server
 import importlib.util
 import json
@@ -34,7 +35,41 @@ BEHAVIOUR: dict[str, tuple[int, int, int, int, float]] = {}
 SLOW_SECONDS = 2.0
 
 
+# GitHub App installation-token mints: installation id -> response status.
+APP_MINTS: list[dict[str, str]] = []
+APP_MINT_STATUS = {"777": 201}
+APP_PUBLIC_KEY: dict[str, str] = {}
+APP_EXPIRES_IN = {"seconds": 3600}
+
+
+def _unb64url(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
 class FakeGitHub(http.server.BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        installation = self.path.removeprefix("/app/installations/").removesuffix("/access_tokens")
+        jwt = self.headers.get("Authorization", "").removeprefix("Bearer ")
+        header, payload, signature = (jwt.split(".") + ["", "", ""])[:3]
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / "pub.pem").write_text(APP_PUBLIC_KEY.get("pem", ""))
+            (Path(scratch) / "sig").write_bytes(_unb64url(signature))
+            verified = subprocess.run(
+                ["openssl", "dgst", "-sha256", "-verify", f"{scratch}/pub.pem", "-signature", f"{scratch}/sig"],
+                input=f"{header}.{payload}".encode(), capture_output=True, check=False,
+            ).returncode == 0
+        claims = json.loads(_unb64url(payload) or b"{}") if payload else {}
+        APP_MINTS.append({"installation": installation, "iss": str(claims.get("iss")), "verified": str(verified)})
+        status = APP_MINT_STATUS.get(installation, 404) if verified else 401
+        expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + APP_EXPIRES_IN["seconds"]))
+        body = json.dumps({"token": f"app-token-{len(APP_MINTS)}", "expires_at": expires}).encode()
+        BEHAVIOUR[f"app-token-{len(APP_MINTS)}"] = (200, 12000, 12000, RESET, 0.0)
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         token = self.headers.get("Authorization", "").removeprefix("Bearer ")
         status, core, graphql, reset, delay = BEHAVIOUR.get(token, (401, 0, 0, RESET, 0.0))
@@ -89,7 +124,10 @@ class GithubTokenPoolTests(unittest.TestCase):
 
     def cli(self, *args: str, environ: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         env = {"PATH": os.environ.get("PATH", ""), "GITHUB_API_BASE_URL": self.base,
-               "GITHUB_TOKEN_POOL_TIMEOUT_SECONDS": "1", **(environ or {})}
+               "GITHUB_TOKEN_POOL_TIMEOUT_SECONDS": "1",
+               # Never let a child fall back to the real ~/.cache token cache.
+               "GITHUB_APP_TOKEN_CACHE": os.environ.get("GITHUB_APP_TOKEN_CACHE", str(self.tmp / "cache.json")),
+               **(environ or {})}
         return subprocess.run([sys.executable, str(SCRIPT), *args, "--repo-root", str(self.tmp)],
                               env=env, capture_output=True, text=True, timeout=30)
 
@@ -169,6 +207,57 @@ class GithubTokenPoolTests(unittest.TestCase):
         self.assertIn("http=401", lines[2])
         picked = self.cli("pick", environ=secrets)
         self.assertEqual(picked.stdout.strip(), secrets["GITHUB_TOKEN_2"])
+
+    def app_env(self) -> dict[str, str]:
+        key_path = self.tmp / "app.pem"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+                        "-out", str(key_path)], check=True, capture_output=True)
+        APP_PUBLIC_KEY["pem"] = subprocess.run(["openssl", "pkey", "-in", str(key_path), "-pubout"], check=True,
+                                               capture_output=True, text=True).stdout
+        os.environ["GITHUB_APP_TOKEN_CACHE"] = str(self.tmp / "cache" / "app-token.json")
+        return {"GITHUB_TOKEN": "tok-primary", "GITHUB_DISPATCH_TOKEN": "tok-dispatch",
+                "GITHUB_APP_ID": "424242", "GITHUB_APP_INSTALLATION_ID": "777",
+                "GITHUB_APP_PRIVATE_KEY_B64": base64.b64encode(key_path.read_bytes()).decode()}
+
+    def test_github_app_member_is_minted_cached_and_ranked(self) -> None:
+        APP_MINTS.clear()
+        APP_MINT_STATUS["777"] = 201
+        APP_EXPIRES_IN["seconds"] = 3600
+        env = self.app_env()
+        BEHAVIOUR.update({"tok-primary": (200, 400, 400, RESET, 0), "tok-dispatch": (200, 400, 400, RESET, 0)})
+        found = pool.members(self.tmp, env, self.base)
+        self.assertEqual([member.name for member in found], ["GITHUB_TOKEN", "GITHUB_APP", "GITHUB_DISPATCH_TOKEN"])
+        self.assertEqual(APP_MINTS, [{"installation": "777", "iss": "424242", "verified": "True"}],
+                         "one mint, with a JWT signed by the configured private key")
+        cache = Path(os.environ["GITHUB_APP_TOKEN_CACHE"])
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.pick(env), "app-token-1", "the installation's own quota outranks a drained user")
+        self.assertEqual(len(APP_MINTS), 1, "an unexpired cached token is reused")
+        result = self.cli("status", environ=env)
+        self.assertNotIn("app-token-1", result.stdout + result.stderr)
+        self.assertIn("GITHUB_APP http=200 core=12000/5000", result.stdout)
+
+    def test_github_app_token_near_expiry_is_reminted(self) -> None:
+        APP_MINTS.clear()
+        APP_MINT_STATUS["777"] = 201
+        APP_EXPIRES_IN["seconds"] = 120
+        env = self.app_env()
+        pool.members(self.tmp, env, self.base)
+        pool.members(self.tmp, env, self.base)
+        self.assertEqual(len(APP_MINTS), 2, "a token inside the five-minute margin is minted again")
+
+    def test_github_app_mint_failure_keeps_static_members(self) -> None:
+        APP_MINTS.clear()
+        APP_MINT_STATUS["777"] = 500
+        env = self.app_env()
+        BEHAVIOUR.update({"tok-primary": (200, 400, 400, RESET, 0)})
+        found = pool.members(self.tmp, env, self.base)
+        self.assertEqual([member.name for member in found], ["GITHUB_TOKEN", "GITHUB_DISPATCH_TOKEN"])
+        self.assertEqual(self.pick(env), "tok-primary")
+        APP_MINT_STATUS["777"] = 201
+
+    def tearDown(self) -> None:
+        os.environ.pop("GITHUB_APP_TOKEN_CACHE", None)
 
 
 if __name__ == "__main__":

@@ -204,6 +204,96 @@ async function main(): Promise<void> {
   pool.recordGithubResponse('primary', 200, limited(0).headers);
   assert.deepStrictEqual(githubApiTokenCandidates(), ['bot2', 'bot3', 'dispatch', 'primary']);
 
+  // GitHub App member: one RS256-signed mint, cached, refreshed before expiry,
+  // ranked by its own quota; a failed mint never blocks the static members.
+  const { generateKeyPairSync, createVerify } = await import('node:crypto');
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  process.env.GITHUB_APP_ID = '424242';
+  process.env.GITHUB_APP_INSTALLATION_ID = '777';
+  process.env.GITHUB_APP_PRIVATE_KEY_B64 = Buffer.from(
+    privateKey.export({ type: 'pkcs8', format: 'pem' }) as string
+  ).toString('base64');
+  let mints = 0;
+  let mintStatus = 201;
+  let expiresInMs = 3_600_000;
+  respond = (call) => {
+    if (call.url.endsWith('/app/installations/777/access_tokens')) {
+      mints += 1;
+      const [header, payload, signature] = call.auth.replace('Bearer ', '').split('.');
+      assert.ok(
+        createVerify('RSA-SHA256')
+          .update(`${header}.${payload}`)
+          .verify(publicKey, Buffer.from(signature, 'base64url')),
+        'app JWT is signed with the configured private key'
+      );
+      assert.strictEqual(JSON.parse(Buffer.from(payload, 'base64url').toString()).iss, '424242');
+      assert.strictEqual(call.method, 'POST');
+      return mintStatus === 201
+        ? Response.json(
+            {
+              token: `app-installation-${mints}`,
+              expires_at: new Date(Date.now() + expiresInMs).toISOString(),
+            },
+            { status: 201 }
+          )
+        : new Response('{"message":"boom"}', { status: mintStatus });
+    }
+    return limited(call.auth.startsWith('Bearer app-installation') ? 14000 : 100);
+  };
+  reset();
+  pool.recordGithubResponse('primary', 200, limited(100).headers);
+  pool.recordGithubResponse('bot2', 200, limited(100).headers);
+  pool.recordGithubResponse('bot3', 200, limited(100).headers);
+  await Promise.all([
+    githubFetch('https://api.github.com/repos/o/r', {}, { fetchImpl: fakeFetch }),
+    githubFetch('https://api.github.com/repos/o/r', {}, { fetchImpl: fakeFetch }),
+  ]);
+  assert.strictEqual(mints, 1, 'concurrent callers share one mint');
+  assert.deepStrictEqual(
+    calls.filter((c) => !c.url.includes('/app/')).map((c) => c.auth),
+    ['Bearer app-installation-1', 'Bearer app-installation-1']
+  );
+  await githubFetch('https://api.github.com/repos/o/r', {}, { fetchImpl: fakeFetch });
+  assert.strictEqual(mints, 1, 'an unexpired installation token is reused');
+
+  // Near expiry: minted again, and the old token's state is dropped.
+  reset();
+  expiresInMs = 4 * 60_000;
+  await githubFetch('https://api.github.com/repos/o/r', {}, { fetchImpl: fakeFetch });
+  await githubFetch('https://api.github.com/repos/o/r', {}, { fetchImpl: fakeFetch });
+  assert.strictEqual(mints - 1, 2, 'a token inside the refresh margin is re-minted');
+
+  // A failed mint falls back to the static members.
+  reset();
+  mintStatus = 500;
+  calls.length = 0;
+  const fallback = await githubFetch(
+    'https://api.github.com/repos/o/r',
+    {},
+    { fetchImpl: fakeFetch }
+  );
+  assert.strictEqual(fallback.status, 200);
+  assert.deepStrictEqual(
+    calls.filter((c) => !c.url.includes('/app/')).map((c) => c.auth),
+    ['Bearer primary']
+  );
+
+  // Primary-identity writes never use the app.
+  reset();
+  mintStatus = 201;
+  await githubFetch(
+    'https://api.github.com/repos/o/r/pulls',
+    { method: 'POST' },
+    {
+      fetchImpl: fakeFetch,
+      identity: 'primary',
+    }
+  );
+  assert.deepStrictEqual(
+    calls.map((c) => c.auth),
+    ['Bearer primary']
+  );
+
   process.stdout.write('github-token-pool: ok\n');
 }
 

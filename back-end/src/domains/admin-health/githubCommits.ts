@@ -1,5 +1,5 @@
 import { mapWithConcurrency } from '../../providers/concurrency';
-import { recordGithubResponse } from '../../providers/githubTokenPool';
+import { ensureGithubAppToken, recordGithubResponse } from '../../providers/githubTokenPool';
 import { createLogger } from '../../providers/logger';
 import { GITHUB_REPO, githubApiTokenCandidates } from './config';
 
@@ -126,6 +126,7 @@ async function fetchGithubItemsWithToken(
 export async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
   const [owner, repoName] = GITHUB_REPO.split('/');
   if (!owner || !repoName) throw new Error(`Invalid ADMIN_HEALTH_GITHUB_REPO: ${GITHUB_REPO}`);
+  await ensureGithubAppToken();
   const candidates = githubApiTokenCandidates();
   if (candidates.length === 0) {
     throw new Error('GITHUB_TOKEN / GITHUB_DISPATCH_TOKEN is not configured.');

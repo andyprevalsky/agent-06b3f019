@@ -2,7 +2,10 @@
 """GitHub token pool for scripts: pick the member with the most remaining quota.
 
 Members, in order: GITHUB_TOKEN (the primary identity), GITHUB_TOKEN_2 ...
-GITHUB_TOKEN_9 (machine accounts, any may be absent), then
+GITHUB_TOKEN_9 (machine accounts, any may be absent), the GitHub App
+installation token (GITHUB_APP when GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID
+and GITHUB_APP_PRIVATE_KEY_B64 are set; minted with an `openssl`-signed RS256
+JWT and cached privately until five minutes before its one-hour expiry), then
 GITHUB_DISPATCH_TOKEN as a last resort. Each key is read from the process
 environment first, then agents/.env, then back-end/.env under the repo root
 (agents/.env is not shell-sourceable, so the files are parsed here). Empty
@@ -23,10 +26,14 @@ prints one line per member and never a token value.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import json
 import os
+import subprocess
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +46,9 @@ MEMBER_NAMES = (
     + tuple(f"GITHUB_TOKEN_{index}" for index in range(2, 10))
     + ("GITHUB_DISPATCH_TOKEN",)
 )
+APP_MEMBER_NAME = "GITHUB_APP"
+APP_KEYS = ("GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_B64")
+APP_REFRESH_MARGIN_SECONDS = 300
 ENV_FILES = ("agents/.env", "back-end/.env")
 DEFAULT_API_BASE = "https://api.github.com"
 DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -90,23 +100,113 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def members(repo_root: Path | None = None, environ: Mapping[str, str] | None = None) -> list[Member]:
+def _lookup(name: str, env: Mapping[str, str], files: Sequence[Mapping[str, str]]) -> str:
+    value = (env.get(name) or "").strip()
+    if value:
+        return value
+    for values in files:
+        value = (values.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def app_jwt(app_id: str, private_key_pem: str, now: int | None = None) -> str:
+    """A ten-minute RS256 app JWT, backdated a minute for clock skew, signed by openssl."""
+    issued = int(time.time()) if now is None else now
+    unsigned = ".".join(
+        _b64url(json.dumps(part, separators=(",", ":")).encode())
+        for part in ({"alg": "RS256", "typ": "JWT"}, {"iat": issued - 60, "exp": issued + 540, "iss": app_id})
+    )
+    with tempfile.TemporaryDirectory(prefix="github-app-") as private_dir:
+        key_path = Path(private_dir) / "key.pem"
+        key_path.touch(mode=0o600)
+        key_path.write_text(private_key_pem)
+        signed = subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", str(key_path)],
+            input=unsigned.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=30,
+        )
+    if signed.returncode != 0:
+        raise RuntimeError("openssl could not sign the GitHub App JWT")
+    return f"{unsigned}.{_b64url(signed.stdout)}"
+
+
+def _app_cache_path() -> Path:
+    override = os.environ.get("GITHUB_APP_TOKEN_CACHE")
+    if override:
+        return Path(override)
+    base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return base / "rose" / "github-app-token.json"
+
+
+def app_token(
+    app_id: str, installation_id: str, private_key_pem: str, base_url: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> str | None:
+    """An unexpired installation token: the private cache, else a fresh mint. None on failure."""
+    cache = _app_cache_path()
+    key = f"{app_id}:{installation_id}"
+    try:
+        cached = json.loads(cache.read_text())
+        if cached.get("key") == key and float(cached["expires_at"]) - time.time() > APP_REFRESH_MARGIN_SECONDS:
+            return str(cached["token"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    base = (base_url or os.environ.get("GITHUB_API_BASE_URL") or DEFAULT_API_BASE).rstrip("/")
+    try:
+        request = urllib.request.Request(
+            f"{base}/app/installations/{installation_id}/access_tokens", method="POST", data=b"",
+            headers={
+                "Authorization": f"Bearer {app_jwt(app_id, private_key_pem)}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "rose-github-token-pool",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = json.loads(response.read() or b"{}")
+        token = str(body["token"])
+        expires_at = dt.datetime.fromisoformat(str(body["expires_at"]).replace("Z", "+00:00")).timestamp()
+    except Exception as error:  # mint failures leave the static members usable
+        print(f"github_token_pool: GitHub App token mint failed ({type(error).__name__})", file=sys.stderr)
+        return None
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staging = cache.with_name(f".{cache.name}.{os.getpid()}")
+        staging.touch(mode=0o600)
+        staging.write_text(json.dumps({"key": key, "token": token, "expires_at": expires_at}))
+        os.replace(staging, cache)
+    except OSError:
+        pass
+    return token
+
+
+def members(
+    repo_root: Path | None = None, environ: Mapping[str, str] | None = None,
+    base_url: str | None = None, include_app: bool = True,
+) -> list[Member]:
     """Pool members in contract order; process env wins per key over the env files."""
     root = REPO_ROOT if repo_root is None else Path(repo_root)
     env = os.environ if environ is None else environ
     files = [read_env_file(root / relative) for relative in ENV_FILES]
     found: list[Member] = []
     seen: set[str] = set()
-    for name in MEMBER_NAMES:
-        value = (env.get(name) or "").strip()
-        if not value:
-            for values in files:
-                value = (values.get(name) or "").strip()
-                if value:
-                    break
+
+    def add(name: str, value: str) -> None:
         if value and value not in seen:
             seen.add(value)
             found.append(Member(name, value))
+
+    for name in MEMBER_NAMES:
+        if name == "GITHUB_DISPATCH_TOKEN" and include_app:
+            app_id, installation_id, key_b64 = (_lookup(key, env, files) for key in APP_KEYS)
+            if app_id and installation_id and key_b64:
+                pem = base64.b64decode(key_b64).decode()
+                add(APP_MEMBER_NAME, app_token(app_id, installation_id, pem, base_url) or "")
+        add(name, _lookup(name, env, files))
     return found
 
 
@@ -197,7 +297,7 @@ def pick_token(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> str | None:
     """The best usable member's token, or None when no member is usable."""
-    ranked = rank(probe(members(repo_root, environ), base_url, timeout), resource)
+    ranked = rank(probe(members(repo_root, environ, base_url), base_url, timeout), resource)
     return ranked[0].member.token if ranked else None
 
 
