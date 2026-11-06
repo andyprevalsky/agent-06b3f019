@@ -21,7 +21,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 | 3 | Start the timing run | `bash scripts/run-deploy-stage --start` |
 | 4 | Format and lint-fix, commit everything, run the approval guards | `scripts/deploy freeze -m "<message>"` |
 | 5 | Push, open the PR, start review cycle 1 | `scripts/deploy open-pr --title "<title>" --body-file <file>` |
-| 6 | Run every selected gate in parallel, in the background | `scripts/deploy gates` |
+| 6 | Run every selected gate in parallel, in the background: one Blacksmith GitHub Actions VM per gate; smoke on the Fly fleet, AgentCard locally (`--executor local` runs everything on this box) | `scripts/deploy gates` |
 | 7 | Wait for the review on the exact HEAD, in the background beside step 6 | `scripts/deploy review-wait` |
 | 8 | Close the review cycle | `scripts/deploy review-finish --result clean\|findings` |
 | 9 | Commit this deploy's benchmark history rows before the final review cycle | `scripts/deploy ledger` |
@@ -51,6 +51,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Run `gates` and `review-wait` in the background and watch both; start `/RCA` on each failure as soon as it appears, not when `gates` exits.
 - Never fire and forget: every background command has an owner that watches it until exit and cleanup.
 - Every lane owns its own setup, cleanup and teardown; never kill processes you did not start.
+- A Blacksmith gate's logs and result come back as its GitHub Actions run artifact; RCA reads them from that gate's evidence and run URL.
 - "Pre-existing", "flaky", "resource contention", "doesn't touch agent code" and "agents timing out" are never evidence for an exception or attribution.
 - Never change assertions, timeouts, concurrency, task definitions or coverage thresholds to get green.
 - Never disable a linter or type checker.

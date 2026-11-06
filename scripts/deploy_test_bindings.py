@@ -3,6 +3,9 @@ from pathlib import Path
 import shlex
 import sys
 
+from deploy_test_isolation import (GITHUB_LAUNCHER, GITHUB_RUNNER, GITHUB_TRANSPORT, GITHUB_WORKER_ROOT,
+                                   GITHUB_WORKER_SCRIPTS, github_argv)
+
 
 def generate(template, inventory, root):
     bindings = {}
@@ -26,8 +29,8 @@ def generate(template, inventory, root):
         if gate.get('native_backend'):
             from deploy_test_backend import sweep_from_recipe
             sweep_from_recipe(slot.get('recipe', {}), gate['checks'])
-        if gate.get('native_backend') and mode not in {'local-isolated', 'boxes-thread'}:
-            raise ValueError('native backend cases require a local-isolated or boxes-thread worker')
+        if gate.get('native_backend') and mode not in {'local-isolated', 'boxes-thread', GITHUB_TRANSPORT}:
+            raise ValueError('native backend cases require a local-isolated, boxes-thread or github-actions worker')
         if gate.get('native_backend') and mode == 'local-isolated':
             bindings[name] = {**slot, 'command': [sys.executable, str(root / 'scripts/deploy_test_backend.py'),
                               '--root', checkout], 'cwd': checkout, 'case_protocol': True, 'result_transport': 'file'}
@@ -54,8 +57,21 @@ def generate(template, inventory, root):
                        '--coordinator-thread', slot['coordinator_thread'], '--deadline-seconds', str(timeout)]
             if gate.get('native_backend'):
                 command += ['--worker-script', 'deploy_test_backend.py']
+        elif mode == GITHUB_TRANSPORT:
+            # One ephemeral Blacksmith VM per gate request; the launcher pushes the frozen commit, starts
+            # .github/workflows/deploy-gates.yml and returns the worker's own result.json artifact.
+            if checkout != GITHUB_WORKER_ROOT:
+                raise ValueError(f'github-actions inventory requires the runner checkout {GITHUB_WORKER_ROOT}')
+            if not isinstance(slot.get('runner'), str) or not GITHUB_RUNNER.fullmatch(slot['runner']):
+                raise ValueError('github-actions inventory requires a Blacksmith Ubuntu 24.04 runner label')
+            if timeout is None:
+                raise ValueError('github-actions inventory requires the existing gate deadline')
+            if gate.get('category', name) in ('smoke', 'agentcard-lifecycle'):
+                raise ValueError(f'{name}: smoke stays on the cloud benchmark CLI and AgentCard on a local worker')
+            script = GITHUB_WORKER_SCRIPTS[1] if gate.get('native_backend') else GITHUB_WORKER_SCRIPTS[0]
+            command = [sys.executable, str(root / GITHUB_LAUNCHER), *github_argv(slot['runner'], script, timeout)]
         elif mode != 'local-isolated':
-            raise ValueError('inventory must name an existing local-isolated, SSH or boxes-thread worker')
+            raise ValueError('inventory must name an existing local-isolated, SSH, boxes-thread or github-actions worker')
         if 'recipe' in slot:
             recipe = slot['recipe']
         else:
@@ -76,4 +92,6 @@ def generate(template, inventory, root):
         if mode == 'boxes-thread':
             bindings[name].update(result_transport='file', timeout_seconds=timeout, worker_root=checkout,
                                   python=command[command.index('--python') + 1])
+        elif mode == GITHUB_TRANSPORT:
+            bindings[name].update(result_transport='file', timeout_seconds=timeout, worker_root=checkout)
     return bindings
