@@ -2619,8 +2619,15 @@ dependency_fields = (
 lock_path = root / "back-end/package-lock.json"
 if not lock_path.is_file():
     raise SystemExit(f"missing dependency manifest: {lock_path}")
+lock = json.loads(lock_path.read_text())
+# Runtime policy belongs to the service/image configuration, not the installed
+# dependency graph. npm mirrors package.json's engines field into only the root
+# package entry, so normalize it out without weakening package/version checks.
+root_package = lock.get("packages", {}).get("")
+if isinstance(root_package, dict):
+    root_package.pop("engines", None)
 digest.update(b"back-end/package-lock.json\0")
-digest.update(lock_path.read_bytes())
+digest.update(json.dumps(lock, sort_keys=True, separators=(",", ":")).encode())
 digest.update(b"\0")
 
 for relative in ("package.json", "back-end/package.json", "front-end/package.json"):

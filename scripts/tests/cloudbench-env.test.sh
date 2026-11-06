@@ -2523,6 +2523,17 @@ printf '{"scripts":{"test":"new"},"dependencies":{"tsx":"2.0.0"}}\n' > "$node_b/
 node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
 [ "$node_a_fingerprint" != "$node_b_fingerprint" ] ||
   fail "dependency field changes must invalidate baked dependencies"
+printf '{"lockfileVersion":3,"packages":{"":{"engines":{"node":"22.23.4"}}}}\n' > "$node_a/back-end/package-lock.json"
+printf '{"lockfileVersion":3,"packages":{"":{"engines":{"node":"24.22.1"}}}}\n' > "$node_b/back-end/package-lock.json"
+printf '{"scripts":{"test":"old"},"dependencies":{"tsx":"1.0.0"}}\n' > "$node_b/package.json"
+node_a_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_a")"
+node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
+[ "$node_a_fingerprint" = "$node_b_fingerprint" ] ||
+  fail "runtime-only engines changes must not invalidate baked dependencies"
+printf '{"lockfileVersion":3,"packages":{"":{"engines":{"node":"24.22.1"}},"node_modules/tsx":{"version":"2.0.0"}}}\n' > "$node_b/back-end/package-lock.json"
+node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
+[ "$node_a_fingerprint" != "$node_b_fingerprint" ] ||
+  fail "locked package changes must invalidate baked dependencies"
 
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
