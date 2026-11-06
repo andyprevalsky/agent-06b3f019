@@ -93,7 +93,7 @@ class Fixture(unittest.TestCase):
         os.environ.pop('DEPLOY_TEST_CYCLE_STATE_DIR', None)
         os.environ.pop('DEPLOY_RUN_ROOT', None)
         (self.root / '.context/deploy-runs').mkdir(parents=True)
-        (self.root / '.context/deploy-runs/current').write_text('run-1\n')  # deploy-v2 step 3
+        (self.root / '.context/deploy-runs/current').write_text('run-1\n')  # deploy.md step 3
         self.calls, self.calls_lock, self.prepare_hook = [], threading.Lock(), None
         self.events = []
         self.system_pg = True

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-line commands for each /deploy step (see .claude/commands/deploy-v2.md → Process).
+"""One-line commands for each /deploy step (see .claude/commands/deploy.md → Process).
 
 Every subcommand composes the existing deploy tools; none adds a new gate or waiver.
 """

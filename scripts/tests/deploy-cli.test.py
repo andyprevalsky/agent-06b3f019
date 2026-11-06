@@ -364,10 +364,10 @@ class Dispatch(unittest.TestCase):
             delegate.assert_called_with('deploy_prod', ['--sha', 'abc'])
 
     def test_every_documented_subcommand_exists(self):
-        doc = (Path(__file__).resolve().parents[2] / '.claude/commands/deploy-v2.md').read_text()
+        doc = (Path(__file__).resolve().parents[2] / '.claude/commands/deploy.md').read_text()
         names = set(d.COMMANDS) | {'gates', 'production'}
         for name in names:
-            self.assertTrue(f'scripts/deploy {name}' in doc, f'deploy-v2.md does not document {name}')
+            self.assertTrue(f'scripts/deploy {name}' in doc, f'deploy.md does not document {name}')
 
 
 if __name__ == '__main__':
