@@ -85,6 +85,12 @@ require_text "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
   'GIT_TERMINAL_PROMPT=0 git -C "$workspace_root" credential fill' \
   "credential discovery must never prompt an unattended controller"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true' \
+  "private-repo token validation must disable terminal and askpass prompts"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'git -c credential.helper= ls-remote --exit-code' \
+  "private-repo token validation must ignore ambient credential helpers"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'export CLOUDBENCH_GITHUB_TOKEN_B64=\$(cat' \
   "warm git-sync must load its request-scoped controller token"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \

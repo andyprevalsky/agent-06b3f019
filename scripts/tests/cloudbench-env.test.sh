@@ -3415,8 +3415,11 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'github_token_can_fetch_repo()' \
   "cloudbench must validate GitHub tokens against the private rose repo"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  "git ls-remote --exit-code" \
+  "git -c credential.helper= ls-remote --exit-code" \
   "token validation must require private Git contents access without consuming REST quota"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true' \
+  "token validation must fail without terminal or askpass prompts"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'resolve_durable_github_token' \
   "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
