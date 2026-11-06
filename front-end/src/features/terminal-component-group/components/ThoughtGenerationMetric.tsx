@@ -7,7 +7,7 @@ export function ThoughtGenerationMetric({ generation }: { generation: ThoughtGen
     <StreamingMetric
       durationMs={generation.durationMs}
       tokenCount={generation.outputTokens}
-      tokensPerSecond={generation.tokensPerSecond}
+      tokensPerSecond={generation.tokensPerSecond ?? undefined}
       className="text-xs"
       iconClassName="h-3 w-3"
     />

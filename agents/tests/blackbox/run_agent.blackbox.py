@@ -608,9 +608,18 @@ async def test_assistant_thought_records_measured_generation():
     }
     assert assistant["metadata"]["tool_calls"][0]["tool_call_id"] == "tc-web-search-1"
     estimated = {"prompt_tokens": 10, "completion_tokens": 596, "total_tokens": 606}
-    burst = {**_MEASURED_USAGE, "generation_ended_at_ms": 1_793_939_000_050}  # one 50 ms flush
-    for usage in (estimated, {**_MEASURED_USAGE, "from_fast_cache": True}, burst):
+    no_window = {**_MEASURED_USAGE, "generation_ended_at_ms": _MEASURED_USAGE["generation_started_at_ms"]}
+    for usage in (estimated, {**_MEASURED_USAGE, "from_fast_cache": True}, no_window):
         assert "generation" not in ((await _posted_thought(usage))["metadata"] or {})
+    # C24: a response returned in one 50 ms flush is RECORDED (tokens and duration); the UI
+    # reader (thoughtGeneration) is the one judge that calls its implied rate a burst, so the
+    # producer carries no bound of its own.
+    burst = {**_MEASURED_USAGE, "generation_ended_at_ms": 1_793_939_000_050}
+    assert (await _posted_thought(burst))["metadata"]["generation"] == {
+        "output_tokens": 596,
+        "started_at": "2026-11-06T04:23:20.000Z",
+        "ended_at": "2026-11-06T04:23:20.050Z",
+    }
 
 
 async def test_thought_generation_metadata_is_invisible_to_every_llm_builder():
@@ -637,38 +646,46 @@ async def test_thought_generation_metadata_is_invisible_to_every_llm_builder():
         ]
 
     plain = {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-1", "query": "rose repo"}]}
-    recorded = {**plain, "generation": llm_generation_metadata(_MEASURED_USAGE)}
-    assert recorded["generation"]
-    assert await build_llm_messages(context(plain), "system") == await build_llm_messages(context(recorded), "system")
-    for include_assistant in (False, True):
-        assert convert_context_to_messages(
-            context(plain), include_assistant=include_assistant
-        ) == convert_context_to_messages(context(recorded), include_assistant=include_assistant)
-    assert build_planner_messages(context(plain)) == build_planner_messages(context(recorded))
+    # A steady recording and a burst one (C24: 596 tokens in 50 ms, which the UI reader
+    # flags as not streamed): neither may change anything a model or planner reads.
+    steady_generation = llm_generation_metadata(_MEASURED_USAGE)
+    burst_generation = llm_generation_metadata({**_MEASURED_USAGE, "generation_ended_at_ms": 1_793_939_000_050})
+    assert steady_generation and burst_generation and burst_generation["ended_at"].endswith(":20.050Z")
+    for generation in (steady_generation, burst_generation):
+        recorded = {**plain, "generation": generation}
+        assert recorded["generation"]
+        assert await build_llm_messages(context(plain), "system") == await build_llm_messages(
+            context(recorded), "system"
+        )
+        for include_assistant in (False, True):
+            assert convert_context_to_messages(
+                context(plain), include_assistant=include_assistant
+            ) == convert_context_to_messages(context(recorded), include_assistant=include_assistant)
+        assert build_planner_messages(context(plain)) == build_planner_messages(context(recorded))
 
-    # The remaining readers of an ASSISTANT row's metadata: the context compactor's
-    # summary input and size estimate, and the planner-memory transcript trim.
-    from helpers.summarize import _format_middle_for_prompt, estimate_context_tokens
-    from providers.planner_memory.transcript import trim_rows
+        # The remaining readers of an ASSISTANT row's metadata: the context compactor's
+        # summary input and size estimate, and the planner-memory transcript trim.
+        from helpers.summarize import _format_middle_for_prompt, estimate_context_tokens
+        from providers.planner_memory.transcript import trim_rows
 
-    assert _format_middle_for_prompt(context(plain), [0, 1, 2]) == _format_middle_for_prompt(
-        context(recorded), [0, 1, 2]
-    )
-    assert estimate_context_tokens(context(plain)) == estimate_context_tokens(context(recorded))
+        assert _format_middle_for_prompt(context(plain), [0, 1, 2]) == _format_middle_for_prompt(
+            context(recorded), [0, 1, 2]
+        )
+        assert estimate_context_tokens(context(plain)) == estimate_context_tokens(context(recorded))
 
-    def memory_rows(metadata):
-        return [
-            {
-                "id": f"m{index}",
-                "createdAt": row["timestamp"],
-                "role": row["role"],
-                "message": row["text"],
-                "metadata": row.get("metadata"),
-            }
-            for index, row in enumerate(context(metadata))
-        ]
+        def memory_rows(metadata):
+            return [
+                {
+                    "id": f"m{index}",
+                    "createdAt": row["timestamp"],
+                    "role": row["role"],
+                    "message": row["text"],
+                    "metadata": row.get("metadata"),
+                }
+                for index, row in enumerate(context(metadata))
+            ]
 
-    assert trim_rows(memory_rows(plain)) == trim_rows(memory_rows(recorded))
+        assert trim_rows(memory_rows(plain)) == trim_rows(memory_rows(recorded))
 
 
 async def test_rejected_completion_continues_with_stable_schema():

@@ -22,8 +22,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import { MessageListItems } from '@/features/terminal-component-group/components/MessageListItems';
+import {
+  BURST_REASON,
+  MAX_STREAMING_TOKENS_PER_SECOND,
+  thoughtGeneration,
+} from '@/features/terminal-component-group/components/thoughtGeneration';
 import { buildCodeSession } from '@/features/terminal-component-group/hooks/codeSessionTurns';
-import { checkThinkingRows } from '@/features/terminal-component-group/benchmark/thinkingRowsCheck';
 import type { Message } from '@/lib/api';
 import { makeCtx } from './browser-agent-chip.fixtures';
 import { msg } from './code-agent-steering.fixtures';
@@ -219,278 +223,6 @@ describe('code agent thinking is the same tool row', () => {
   });
 });
 
-describe('benchmark check (C21): rows are checked when they exist, required only on evidence', () => {
-  const second = (n: number) => new Date(Date.UTC(2026, 10, 6, 6, 0, 0) + n * 1000).toISOString();
-  const generation = {
-    output_tokens: 597,
-    started_at: '2026-11-06T04:21:06.500Z',
-    ended_at: '2026-11-06T04:21:13.700Z',
-  };
-  const rootRow = (id: string, metadata: Record<string, unknown>, sec = 1) =>
-    msg(metadata, {
-      message_id: id,
-      role: 'ASSISTANT',
-      text: `Reasoning ${id}.`,
-      timestamp: second(sec),
-    });
-  const runAgentRow = (id: string, withGeneration: boolean) =>
-    rootRow(id, {
-      tool_calls: [{ tool: 'web_search', tool_call_id: `${id}-call` }],
-      ...(withGeneration ? { generation } : {}),
-    });
-  const carrier = (taskId: string, records: unknown[]) =>
-    msg({
-      toolName: 'spawn_claude_code_agent',
-      task_id: taskId,
-      subAgentId: taskId,
-      action_type: 'code_transcript',
-      hidden: true,
-      code_agent_events: records,
-    });
-  const start = {
-    id: 'start',
-    seq: 0,
-    type: 'turn',
-    event: 'started',
-    turn_id: 'native-1',
-    ts: second(0),
-    turn_started_at: second(0),
-  };
-  const usage = (id: string, seq: number, sec: number, output: number, scope = 'turn') => ({
-    id,
-    seq,
-    type: 'metrics',
-    ts: second(sec),
-    output_tokens: output,
-    usage_scope: scope,
-  });
-  const thinking = (id: string, seq: number, sec: number) => ({
-    id,
-    seq,
-    type: 'thinking',
-    text: `thinking ${id}`,
-    ts: second(sec),
-  });
-  const tool = (id: string, seq: number, sec: number) => ({
-    id,
-    seq,
-    type: 'tool',
-    ts: second(sec),
-    tool: { name: 'Bash', target: 'git status', result: { status: 'ok', exit_code: 0 } },
-  });
-  // Claude Code: a model call's thinking sits between its start and end usage samples.
-  const measuredAgent = [
-    start,
-    usage('u1', 1, 1, 10),
-    thinking('th', 2, 2),
-    usage('u2', 3, 4, 410),
-  ];
-  const run = (rows: Message[], evidence?: Record<string, { reasoningTokens?: number }>) =>
-    checkThinkingRows([goal, ...rows], 'root', { evidence });
-
-  describe('(a) every thinking row that exists is verified', () => {
-    it('passes measured root and code-agent rows, each rendered as a normal tool row', () => {
-      const report = run([runAgentRow('r1', true), carrier('T', measuredAgent)]);
-      expect(report.failures).toEqual([]);
-      expect(report.ok).toBe(true);
-      expect(report.root.verdict).toBe('checked');
-      expect(report.root.measured[0].tokensPerSecond).toBeCloseTo(82.92, 2);
-      expect(report.codeAgents[0]).toMatchObject({ taskId: 'T', verdict: 'checked' });
-      expect(report.codeAgents[0].measured[0]).toMatchObject({
-        outputTokens: 400,
-        durationMs: 3000,
-      });
-      expect(report.detail).toEqual([
-        'root: 1 thinking row, 1 measured (83–83 tok/s)',
-        'code agent T: 1 thinking row, 1 measured (133–133 tok/s)',
-      ]);
-    });
-
-    it('the prod run 1a3d495c passes (817 tokens / 6.05 s on the code agent)', () => {
-      const report = run([runAgentRow('r1', true), ...prodCarriers()]);
-      expect(report.failures).toEqual([]);
-      expect(report.codeAgents[0].measured[0]).toMatchObject({
-        outputTokens: 817,
-        durationMs: 6050,
-      });
-    });
-
-    it('fails an implausible recorded rate', () => {
-      const burst = { ...generation, ended_at: '2026-11-06T04:21:06.550Z' }; // 597 tokens in 50 ms
-      const report = run([
-        rootRow('r1', { tool_calls: [], generation: burst }),
-        carrier('T', measuredAgent),
-      ]);
-      expect(report.ok).toBe(false);
-      expect(report.failures[0]).toContain('root: thought r1 runs at 11940.0 tok/s');
-    });
-
-    it('fails when the root run-agent loop wrote thinking rows and none carries a generation', () => {
-      const report = run([runAgentRow('r1', false), carrier('T', measuredAgent)]);
-      expect(report.failures).toEqual([
-        'root: 1 run-agent thinking row, none carries a recorded generation (tok/s)',
-      ]);
-      expect(report.root.verdict).toBe('failed');
-    });
-
-    it('reports, never fails, root rows whose producer records no per-call usage', () => {
-      const router = rootRow('router', { streamId: 'stream-1' });
-      const dag = rootRow('dag', { dagTaskIndex: 0, streamId: 'dag-0' });
-      const report = run([router, dag, runAgentRow('r1', true), carrier('T', measuredAgent)]);
-      expect(report.failures).toEqual([]);
-      expect(report.root.unmeasured.map((row) => row.messageId)).toEqual(['router', 'dag']);
-      expect(report.notes).toEqual([
-        'root: thought router not measurable (chat router/generator row: its producer records no per-call usage)',
-        'root: thought dag not measurable (DAG reasoning row: its producer records no per-call usage)',
-      ]);
-    });
-
-    it("never counts a sub-agent's text rows as the root's thinking", () => {
-      const browserText = rootRow('browser-text', { subAgentId: 'browser-1' });
-      const report = run([browserText, carrier('T', measuredAgent)]);
-      expect(report.root.thoughts).toBe(0);
-      expect(report.root.verdict).toBe('n/a');
-    });
-
-    it('reports, never fails, a thought no usage sample precedes (nothing can bracket it)', () => {
-      const report = run([
-        carrier('T', [
-          start,
-          thinking('th', 1, 0.5),
-          usage('u1', 2, 1, 10),
-          usage('u2', 3, 4, 410),
-        ]),
-      ]);
-      expect(report.failures).toEqual([]);
-      expect(report.notes).toEqual([
-        'no thinking recorded for root (N/A)',
-        'code agent T: thought code:T:th not measurable (no usage sample precedes it)',
-      ]);
-      expect(report.codeAgents[0].unmeasured[0]).toMatchObject({ failing: false });
-    });
-
-    it('reports, never fails, a thought cut off before its call finished (no sample follows)', () => {
-      const report = run([carrier('T', [start, usage('u1', 1, 1, 10), thinking('th', 2, 2)])]);
-      expect(report.failures).toEqual([]);
-      expect(report.notes).toEqual([
-        'no thinking recorded for root (N/A)',
-        'code agent T: thought code:T:th not measurable (no usage sample follows it (the session ended or was interrupted before the call finished))',
-      ]);
-    });
-
-    it("does not call a call's own streaming tool a tool run: a tool created inside the window is fine", () => {
-      // The tool is created (seq 3) after the window's first sample (seq 1) and finishes before the last.
-      const streaming = [
-        start,
-        usage('u1', 1, 1, 10),
-        thinking('th', 2, 2),
-        tool('run', 3, 3),
-        usage('u2', 4, 4, 410),
-      ];
-      const report = run([carrier('T', streaming)]);
-      expect(report.failures).toEqual([]);
-      expect(report.codeAgents[0].measured[0]).toMatchObject({ outputTokens: 400 });
-    });
-
-    it('reports, never fails, a window a tool created before it finished inside', () => {
-      const spanning = [
-        start,
-        tool('run', 1, 2), // created before u1, finishes inside the window
-        usage('u1', 2, 1, 10),
-        thinking('th', 3, 2.5),
-        usage('u2', 4, 4, 410),
-      ];
-      const report = run([carrier('T', spanning)]);
-      expect(report.failures).toEqual([]);
-      expect(report.notes).toEqual([
-        'no thinking recorded for root (N/A)',
-        'code agent T: thought code:T:th not measurable (a tool created before the window finished inside it)',
-      ]);
-    });
-
-    it('fails a code agent that has thinking rows and no usage samples at all', () => {
-      const report = run([carrier('T', [start, thinking('th', 1, 1)])]);
-      expect(report.failures).toEqual([
-        'code agent T: thought code:T:th carries no recorded generation (no usage samples recorded for this session)',
-      ]);
-    });
-
-    it('reports, never fails, a Codex thought whose session-scoped window spans a tool run', () => {
-      const codex = [
-        start,
-        tool('run', 1, 2), // created during the response that ends at s1, finished after it
-        usage('s1', 2, 1, 1000, 'session'),
-        thinking('th', 3, 2.5),
-        usage('s2', 4, 3, 1100, 'session'),
-      ];
-      const report = run([carrier('T', codex)]);
-      expect(report.failures).toEqual([]);
-      expect(report.codeAgents[0]).toMatchObject({ verdict: 'checked' });
-      expect(report.codeAgents[0].unmeasured).toEqual([
-        {
-          messageId: 'code:T:th',
-          reason: 'a tool created before the window finished inside it',
-          failing: false,
-        },
-      ]);
-    });
-
-    it('fails a run with no code agent', () => {
-      expect(run([runAgentRow('r1', true)]).failures).toEqual([
-        'no code-agent transcript in the run',
-      ]);
-    });
-  });
-
-  describe('(b) thinking rows are required only on evidence of thinking', () => {
-    it('fails a root whose recorded usage shows reasoning tokens but that shows no thinking row', () => {
-      const report = run([carrier('T', measuredAgent)], { root: { reasoningTokens: 120 } });
-      expect(report.failures).toEqual([
-        'root: thinking recorded (120 reasoning tokens in recorded usage) but no thinking row is shown',
-      ]);
-      expect(report.root.verdict).toBe('failed');
-    });
-
-    it('fails a code agent with reasoning-token evidence and no thinking row', () => {
-      const quiet = [start, tool('run', 1, 1)];
-      const report = run([runAgentRow('r1', true), carrier('T', quiet)], {
-        T: { reasoningTokens: 50 },
-      });
-      expect(report.failures).toEqual([
-        'code agent T: thinking recorded (50 reasoning tokens in recorded usage) but no thinking row is shown',
-      ]);
-    });
-
-    it('holds an agent that has the evidence AND the rows to the row checks, not to N/A', () => {
-      const report = run([runAgentRow('r1', true), carrier('T', measuredAgent)], {
-        root: { reasoningTokens: 120 },
-        T: { reasoningTokens: 400 },
-      });
-      expect(report.failures).toEqual([]);
-      expect(report.root.verdict).toBe('checked');
-    });
-  });
-
-  describe('(c) no evidence and no rows is an explicit N/A, never a failure', () => {
-    it('labels the root and a code agent that recorded no thinking', () => {
-      const quiet = [start, tool('run', 1, 1)];
-      const report = run([carrier('T', quiet)]);
-      expect(report.failures).toEqual([]);
-      expect(report.ok).toBe(true);
-      expect(report.root.verdict).toBe('n/a');
-      expect(report.codeAgents[0].verdict).toBe('n/a');
-      expect(report.notes).toEqual([
-        'no thinking recorded for root (N/A)',
-        'no thinking recorded for code agent T (N/A)',
-      ]);
-      expect(report.detail).toEqual([
-        'root: N/A, no thinking recorded',
-        'code agent T: N/A, no thinking recorded',
-      ]);
-    });
-  });
-});
-
 describe('Codex session-scoped counters bracket a thought only over generation', () => {
   const second = (n: number) => new Date(Date.UTC(2026, 10, 6, 4, 30, 0) + n * 1000).toISOString();
   const usage = (id: string, seq: number, sec: number, output: number) => ({
@@ -633,5 +365,40 @@ describe('an unfinalized thought never outlives its turn', () => {
 
   it('settles when the session closes with the turn still open', () => {
     expect(rows([started, streaming], 'paused')).toEqual([['FINISHED', 'Thought']]);
+  });
+});
+
+describe('thoughtGeneration: the one judge of what a recorded generation can show', () => {
+  const at = (ms: number) => new Date(Date.UTC(2026, 10, 6, 7, 0, 0) + ms).toISOString();
+  const recorded = (tokens: number, ms: number) => ({
+    generation: { output_tokens: tokens, started_at: at(0), ended_at: at(ms) },
+  });
+
+  it('exports the streaming bound once, for the row and the benchmark check alike', () => {
+    expect(MAX_STREAMING_TOKENS_PER_SECOND).toBe(5_000);
+  });
+
+  it('keeps the rate of a streamed response (an old-shape row renders unchanged)', () => {
+    expect(thoughtGeneration(recorded(817, 6050))).toEqual({
+      outputTokens: 817,
+      durationMs: 6050,
+      tokensPerSecond: 817 / 6.05,
+    });
+  });
+
+  it('a rate at the bound is measured; above it the response was not streamed', () => {
+    expect(thoughtGeneration(recorded(5_000, 1_000))?.tokensPerSecond).toBe(5_000);
+    expect(thoughtGeneration(recorded(5_001, 1_000))).toEqual({
+      outputTokens: 5_001,
+      durationMs: 1_000,
+      tokensPerSecond: null,
+      notMeasurable: BURST_REASON,
+    });
+  });
+
+  it('records no generation without a positive duration or any tokens', () => {
+    expect(thoughtGeneration(recorded(463, 0))).toBeNull();
+    expect(thoughtGeneration(recorded(0, 1_000))).toBeNull();
+    expect(thoughtGeneration({})).toBeNull();
   });
 });

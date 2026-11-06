@@ -17,9 +17,13 @@
  *     inside the call's window can finish before its message_delta; the "tool finished
  *     inside the window" guard read that as a tool run.
  */
+import { render } from '@testing-library/react';
+import { createElement } from 'react';
 import { describe, expect, it } from 'vitest';
 import { checkThinkingRows } from '@/features/terminal-component-group/benchmark/thinkingRowsCheck';
 import { buildCodeSession } from '@/features/terminal-component-group/hooks/codeSessionTurns';
+import { ToolMessage } from '@/features/terminal-component-group/components/message-bubble/ToolMessage';
+import { useToolData } from '@/features/terminal-component-group/components/message-bubble/useToolData';
 import type { Message } from '@/lib/api';
 import { msg } from './code-agent-steering.fixtures';
 import fixture from './code-agent-streaming-runs.fixture.json';
@@ -87,7 +91,7 @@ describe('replaying the integrated runs through the production projection', () =
     expect(streaming?.[1]).toMatchObject({ output_tokens: 148 }); // 561 -> 709; the Run finished 1 ms before the delta
   });
 
-  it.each(Object.keys(runs))(
+  it.each(['be1c90da', '9f709385'])(
     'the benchmark check passes run %s: every thought recorded, none merely reported',
     (run) => {
       const messages = Object.entries(runs[run].tasks).flatMap(([taskId, carriers]) =>
@@ -114,4 +118,91 @@ describe('replaying the integrated runs through the production projection', () =
       }
     },
   );
+});
+
+function runMessages(run: string): Message[] {
+  return Object.entries(runs[run].tasks).flatMap(([taskId, carriers]) =>
+    carriers.map((carrier) =>
+      msg(
+        {
+          toolName: 'spawn_claude_code_agent',
+          task_id: taskId,
+          subAgentId: taskId,
+          action_type: 'code_transcript',
+          hidden: true,
+          code_agent_events: carrier.events,
+        },
+        { message_id: carrier.message_id, timestamp: carrier.timestamp },
+      ),
+    ),
+  );
+}
+
+/** The thought row as the app draws it (useToolData -> ToolMessage). */
+function renderThought(message: Message) {
+  return render(
+    createElement(function Row() {
+      const data = useToolData({ message, isStreaming: false, isAssistant: false, isTool: true });
+      return data ? createElement(ToolMessage, { data }) : null;
+    }),
+  );
+}
+
+/**
+ * Run 4 (C24): the Claude subscription login was rate-limited, so the run was served by a
+ * gateway that returned its final response in ONE burst: 463 tokens between two usage
+ * samples 31 ms apart (after a 5.35 s wait). The projection recorded it and the row drew
+ * 14,935.5 tok/s. A response that was not streamed has no measurable rate: the row shows
+ * its duration and tokens only, and the benchmark check reports it instead of failing.
+ */
+describe('run 4: a response the gateway returned in one burst', () => {
+  const taskId = '080d3457-94fd-4b6c-87fc-50c4554135be';
+  const burstKey = Object.keys(expected.run4[taskId]).find((id) => id.endsWith('EV2dWL:0'))!;
+  const steadyKey = Object.keys(expected.run4[taskId]).find((id) => id.endsWith('t69o9d:0'))!;
+  const thoughtRow = (key: string) => {
+    const entries = buildCodeSession({
+      messages: runMessages('run4'),
+      taskId,
+      ownerAgentId: runs.run4.agent_id,
+      provider: 'claude',
+      sessionState: 'completed',
+      sessionEndedAt: null,
+      echoes: [],
+    });
+    return entries
+      .flatMap((entry) => (entry.kind === 'work' ? entry.turn.activities : []))
+      .find((message) => message.message_id === `code:${taskId}:${key}`)!;
+  };
+
+  it('still records its tokens and duration (463 tokens over 31 ms)', () => {
+    expect(project('run4', taskId)[burstKey]).toEqual(expected.run4[taskId][burstKey]);
+    expect(expected.run4[taskId][burstKey].output_tokens).toBe(463);
+  });
+
+  it('renders the burst row with its duration and tokens and NO tok/s', () => {
+    const view = renderThought(thoughtRow(burstKey));
+    expect(view.container).toHaveTextContent('463 tokens');
+    expect(view.container).toHaveTextContent('0.0s');
+    expect(view.container).not.toHaveTextContent('tok/s');
+    view.unmount();
+    const steady = renderThought(thoughtRow(steadyKey));
+    expect(steady.container).toHaveTextContent('158.6 tok/s'); // a streamed row keeps its rate
+  });
+
+  it('the benchmark check reports the burst as not measurable instead of failing the run', () => {
+    const report = checkThinkingRows(runMessages('run4'), runs.run4.agent_id);
+    expect(report.failures).toEqual([]);
+    expect(report.codeAgents[0].verdict).toBe('checked');
+    expect(report.codeAgents[0].measured).toHaveLength(3);
+    expect(report.codeAgents[0].unmeasured).toEqual([
+      {
+        messageId: `code:${taskId}:${burstKey}`,
+        reason: 'response arrived in one burst, not streamed',
+        failing: false,
+      },
+    ]);
+    expect(report.notes).toContain(
+      `code agent ${taskId}: thought code:${taskId}:${burstKey} not measurable (response arrived in one burst, not streamed)`,
+    );
+  });
 });

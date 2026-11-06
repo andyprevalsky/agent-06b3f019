@@ -93,9 +93,15 @@ def test_thinking_rows_without_recorded_generation_fail():
     result = thinking_rows_check.check_thinking_rows_from_messages(_run(None), ROOT)
     assert not result["passed"]
     assert result["failures"] == ["root: 1 run-agent thinking row, none carries a recorded generation (tok/s)"]
-    implausible = {**ROOT_GENERATION, "ended_at": "2026-11-06T04:21:06.550Z"}  # 597 tokens in 50 ms
-    result = thinking_rows_check.check_thinking_rows_from_messages(_run(implausible), ROOT)
-    assert not result["passed"] and "11940.0 tok/s" in result["failures"][0]
+    # C24: 597 tokens in 50 ms is a response returned in one burst (an unstreamed gateway route):
+    # reported as not measurable, never failed, and the row must render without a tok/s.
+    burst = {**ROOT_GENERATION, "ended_at": "2026-11-06T04:21:06.550Z"}
+    result = thinking_rows_check.check_thinking_rows_from_messages(_run(burst), ROOT)
+    assert result["passed"], result["failures"]
+    assert "root: thought thought-1 not measurable (response arrived in one burst, not streamed)" in result["notes"]
+    assert result["report"]["root"]["unmeasured"] == [
+        {"messageId": "thought-1", "reason": "response arrived in one burst, not streamed", "failing": False}
+    ]
 
 
 def test_thinking_rows_required_only_on_evidence_of_thinking():
