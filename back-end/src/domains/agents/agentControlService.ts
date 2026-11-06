@@ -2,6 +2,8 @@
  * Agent control service — pause, resume, restart, update status, update config, signals.
  */
 
+import type { AgentStatus } from '@prisma/client';
+
 import {
   getTemporalClient,
   startAgentWorkflowExecution,
@@ -61,7 +63,7 @@ export async function pauseAgent(agentId: string): Promise<number | undefined> {
 async function broadcastUserControlState(
   agentId: string,
   agent: {
-    status: import('@prisma/client').AgentStatus;
+    status: AgentStatus;
     userControlRevision: number;
     updatedAt: Date;
   }
