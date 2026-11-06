@@ -56,6 +56,7 @@ CHANNEL_POLL_SECONDS = 15.0     # R2 GETs: no GitHub quota
 LIVENESS_SECONDS = 600.0        # one REST status read per gate every 10 min
 CANCEL_SECONDS = 180.0       # cancel request -> run completed (VM destroyed)
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
+PUSH_ATTEMPTS = 4
 MAX_RESULT_BYTES = 64 * 1024 * 1024
 BUNDLE_FILE_BYTES = 64 * 1024 * 1024
 BUNDLE_TOTAL_BYTES = 400 * 1024 * 1024
@@ -266,11 +267,21 @@ def push_tag(root: Path, token: str, repo: str, name: str, raw: bytes) -> str:
     sha = git(root, 'hash-object', '-t', 'tag', '-w', '--stdin', input_bytes=raw)
     env = git_env(token)
     url = f'https://github.com/{repo}.git'
-    existing = git(root, 'ls-remote', url, f'refs/tags/{name}', env=env).split()
-    if existing and existing[0] != sha:
-        raise ValueError(f'remote tag {name} already names a different request')
-    if not existing:
-        git(root, 'push', '--quiet', '--no-verify', url, f'{sha}:refs/tags/{name}', env=env)
+    # GitHub transiently rejects some of many simultaneous ref updates ("remote rejected ... (failed)").
+    # The tag bytes are deterministic, so a retry re-checks the remote and pushes the same object.
+    for attempt in range(PUSH_ATTEMPTS):
+        existing = git(root, 'ls-remote', url, f'refs/tags/{name}', env=env).split()
+        if existing and existing[0] != sha:
+            raise ValueError(f'remote tag {name} already names a different request')
+        if existing:
+            return sha
+        try:
+            git(root, 'push', '--quiet', '--no-verify', url, f'{sha}:refs/tags/{name}', env=env)
+            return sha
+        except subprocess.CalledProcessError:
+            if attempt == PUSH_ATTEMPTS - 1:
+                raise
+            time.sleep(2 * (attempt + 1))
     return sha
 
 

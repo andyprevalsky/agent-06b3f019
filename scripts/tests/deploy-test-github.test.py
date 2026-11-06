@@ -590,5 +590,30 @@ class ResultChannel(unittest.TestCase):
                              'never-started')
 
 
+class TagPush(unittest.TestCase):
+    def test_a_transient_remote_rejection_is_retried_with_the_same_tag_object(self):
+        calls = []
+
+        def fake_git(root, *args, env=None, input_bytes=None):
+            calls.append(args[0])
+            if args[0] == 'hash-object':
+                return 'a' * 40
+            if args[0] == 'ls-remote':
+                return ''
+            if args[0] == 'push' and calls.count('push') == 1:
+                raise subprocess.CalledProcessError(1, 'git push', stderr=b'! [remote rejected] (failed)')
+            return ''
+
+        with patch.object(gh, 'git', side_effect=fake_git), patch.object(gh.time, 'sleep'):
+            self.assertEqual(gh.push_tag(ROOT, 't', 'o/r', 'deploy-gates/2vcpu/g-1', b'tag'), 'a' * 40)
+        self.assertEqual(calls.count('push'), 2)
+
+    def test_a_tag_naming_a_different_request_is_refused_not_overwritten(self):
+        with patch.object(gh, 'git', side_effect=lambda root, *a, **k: 'a' * 40 if a[0] == 'hash-object'
+                          else ('b' * 40 + '\trefs/tags/x') if a[0] == 'ls-remote' else ''):
+            with self.assertRaises(ValueError):
+                gh.push_tag(ROOT, 't', 'o/r', 'x', b'tag')
+
+
 if __name__ == '__main__':
     unittest.main()
