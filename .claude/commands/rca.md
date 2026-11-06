@@ -151,13 +151,13 @@ curl -s "<backend that ran the agent>/api/agents/<agent_id>/report-bug/by-agent"
 `report` is `null` when the agent filed none. An HTTP error or 404 means the
 wrong backend or a missing row, not "no report".
 
-Archived and cloud-benchmark runs lose their database: read the root
-transcript instead (`GET /api/agents/<root_id>` also serves Hub-archived runs).
-The TOOL row for `report_bug` carries the full description:
+Benchmark Hub runs (cloud benchmarks, finished isolated local runs) lose the
+database that ran them: read the root transcript from the Hub through
+production instead. Its TOOL row for `report_bug` carries the full description:
 
 ```bash
-curl -s "<backend that ran the agent>/api/agents/<root_id>" -H "X-API-Key: <its key>" \
-  -H "X-User-Id: <owner_user_id>" | jq '.messages[]
+curl -s "https://api.roselabs.ai/api/agents/<root_id>" -H "X-API-Key: <production key>" \
+  -H "X-User-Id: <run owner user id>" | jq '.messages[]
   | select(.metadata.toolName == "report_bug") | .metadata.bugReportDescription'
 ```
 
