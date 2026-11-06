@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "e3793b25bccf63a3a19f94501cbe9e7184d5d6c0",
+      "status": "completed",
+      "started_at": "2026-11-06T12:00:38.082461+00:00",
+      "result": "findings",
+      "finished_at": "2026-11-06T12:15:14.278748+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "cc11ccb60b7b33edc88690707342642f34361522",
+      "status": "completed",
+      "started_at": "2026-11-06T12:15:16.441883+00:00",
+      "result": "findings",
+      "finished_at": "2026-11-06T12:36:48.131633+00:00"
+    },
+    {
+      "number": 3,
+      "kind": "verification",
+      "head": "0918a0c6564992b46ff2a1dbfc3987da7152e642",
+      "status": "completed",
+      "started_at": "2026-11-06T12:36:49.963026+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-06T12:47:28.767415+00:00",
+      "disposition": "skipped",
+      "report_row": "Code Review | \u26a0\ufe0f Skipped | reviewers usage-exhausted (CodeRabbit: 'Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).', issue comment 6684359557 updated 2026-11-06T12:37:46Z naming commit 0918a0c65; check run 127896512110 neutral 'Review rate limited'; Claude fallback disabled)",
+      "skip_reason": "usage-cap",
+      "evidence": {
+        "source": "gh:Rose-Ai-Labs/rose",
+        "captured_at": "2026-11-06T12:47:28.764760+00:00",
+        "issue_comment_id": 6684359557,
+        "issue_comment_updated_at": "2026-11-06T12:37:46Z",
+        "quote": "Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).",
+        "check_run_id": 127896512110,
+        "check_conclusion": "neutral",
+        "check_title": "Review rate limited",
+        "non_substantive_review_ids": [
+          5800160586
+        ]
+      }
+    },
+    {
+      "number": 3,
+      "kind": "verification",
+      "head": "6e331faf045780a5edc481890c4b7637a6fd2b7a",
+      "status": "completed",
+      "started_at": "2026-11-06T12:59:38.655924+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-06T13:00:42.255940+00:00",
+      "disposition": "skipped",
+      "report_row": "Code Review | \u26a0\ufe0f Skipped | reviewers usage-exhausted (CodeRabbit: 'Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).', issue comment 6684359557 updated 2026-11-06T13:00:11Z naming commit 6e331faf0; check run 127906023789 neutral 'Review rate limited'; Claude fallback disabled)",
+      "skip_reason": "usage-cap",
+      "evidence": {
+        "source": "gh:Rose-Ai-Labs/rose",
+        "captured_at": "2026-11-06T13:00:42.254100+00:00",
+        "issue_comment_id": 6684359557,
+        "issue_comment_updated_at": "2026-11-06T13:00:11Z",
+        "quote": "Review limit reached \u2014 Your organization has reached its usage spending cap. Adjust your spending cap in the [billing tab](https://app.coderabbit.ai/settings/billing?tab=usage&orgId=3b69819d-2d22-496a-b20e-1e6669d35f3f).",
+        "check_run_id": 127906023789,
+        "check_conclusion": "neutral",
+        "check_title": "Review rate limited",
+        "non_substantive_review_ids": []
+      }
+    },
+    {
+      "number": 3,
+      "kind": "verification",
+      "head": "81a773c5ff5bce3df4efeca45c88b36e48dc7069",
+      "status": "completed",
+      "started_at": "2026-11-06T14:21:14.892880+00:00",
+      "note": "reopened by deploy owner: closed findings before the standing three-round deferral (sequencing error); override follows",
+      "result": "clean",
+      "finished_at": "2026-11-06T14:31:39.934634+00:00",
+      "disposition": "overridden",
+      "report_row": "Code Review | \u26a0\ufe0f Overridden | CodeRabbit review 5801481924 on 81a773c5f left finding(s) 4493445533 deferred to RCA case 2026-11-06-browser-state-fetch-failed-silently-on-dropped-cdp-socket (follow-up: report current session flags at each use site in BrowserCdpConnectionLost) (user pre-authorization: skip review after 3 rounds; rounds=3); ledger result clean",
+      "finding_ids": [
+        4493445533
+      ],
+      "deferred_to": "RCA case 2026-11-06-browser-state-fetch-failed-silently-on-dropped-cdp-socket (follow-up: report current session flags at each use site in BrowserCdpConnectionLost)",
+      "rounds": 3,
+      "prior_rounds": 0,
+      "evidence": {
+        "source": "gh:Rose-Ai-Labs/rose",
+        "captured_at": "2026-11-06T14:31:39.934163+00:00",
+        "review_id": 5801481924,
+        "review_findings": 1,
+        "check_run_id": 127944590709,
+        "check_conclusion": "success",
+        "findings": [
+          {
+            "id": 4493445533,
+            "reply_id": 4493501434
+          }
+        ]
+      }
+    },
+    {
+      "number": 6,
+      "kind": "sync-inherited",
+      "head": "466030ae3e5e7addf5752eb4fe3531b355af3e46",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "81a773c5ff5bce3df4efeca45c88b36e48dc7069",
+      "base": "23ccbefa847a3ad78b419290e00764e6a54dd89d",
+      "branch_diff_sha256": "472442a242eba4b53f9d6719c7ec4ba2737ec0d6a2e80c3a942c89e8408ff336",
+      "generated_changed": [
+        "docs/rca/INDEX.md"
+      ],
+      "started_at": "2026-11-06T15:28:39.546688+00:00",
+      "finished_at": "2026-11-06T15:28:39.546711+00:00"
+    }
+  ]
+}

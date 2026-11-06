@@ -1,0 +1,254 @@
+{
+ "failures": [
+  {
+   "id": "f4b3870c27ed47389f7a80e07469bb79",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "structural gate: two load-sensitive native test failures under full-sweep load",
+   "evidence": "Native exit 1 at 052ac6ce7 with the structural gate at --max-workers 2 (no lingering group this time: term_sent=0, #1727 orphan avoided): deploy-pipeline run-deploy-pipeline.test.py check_observation_validity (line 927; live /proc memory observation read 'unknown' not 'stale') and benchmark-live-results[2/6] test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack failed during the 11-gate sweep at load ~14-25. Both suites pass on these bytes when the box is quiet: run-deploy-pipeline.test.py alone ('all checks passed', /var/tmp/webdecoy-rca/branch-deploy-pipeline.log) and the full structural gate (91/91 PASS natively in the quiet focused runs, attempts 3-4 and the 08:06 run). The diff touches no deploy tooling.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Native exit 1 at 052ac6ce7 with the structural gate at --max-workers 2 (no lingering group this time: term_sent=0, #1727 orphan avoided): deploy-pipeline run-deploy-pipeline.test.py check_observation_validity (line 927; live /proc memory observation read 'unknown' not 'stale') and benchmark-live-results[2/6] test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack failed during the 11-gate sweep at load ~14-25. Both suites pass on these bytes when the box is quiet: run-deploy-pipeline.test.py alone ('all checks passed', /var/tmp/webdecoy-rca/branch-deploy-pipeline.log) and the full structural gate (91/91 PASS natively in the quiet focused runs, attempts 3-4 and the 08:06 run). The diff touches no deploy tooling."
+  },
+  {
+   "id": "2f26610985d0406fa737e371a6297e34",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "4b8cc887870448f28784c89c3ad4b044",
+   "check": "smoke/chat-mode",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "bd0ff95bdb184ee2ab39a973ea11b7ee",
+   "check": "smoke/spawn-sub-agents",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "e2d0947252354519841ad2a6eb427973",
+   "check": "smoke/parallel-tool-calls",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "f3ffa349317a405f9077b9d74734758c",
+   "check": "smoke/background-agent-message-smoke",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "d6da4d99a89048f7937c82d4e8a33f5e",
+   "check": "smoke/claude-code-agent",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "claude-code-agent cache ratchet failed on a gpt_auth route (0% hit)",
+   "evidence": "Smoke member claude-code-agent: task passed (COMPLETED, 80.5 s) but run_benchmark --ci exited 1 on the prompt-cache hit-rate ratchet: cache_hit_pct 0.0, prompt_cache_routes ['gpt_auth'], 2 calls, 0 cache read, 23226 uncached tokens (cloudbench-run.json in .context/deploy-cloud/848f48c2/runs/20261106-084544-262659/claude-code-agent). In the earlier round on the same code the same task routed claude_auth with 76.1% hit (.context/deploy-cloud/518fa58c/...). A model-route/provider difference in the Claude Code agent path; this diff changes only browser tool descriptions, the hover tool and drag input handling (agents/browser_tools, spawn_browser_agent_v3, providers/rose/browser_use.py), none of which the claude-code-agent task exercises.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member claude-code-agent: task passed (COMPLETED, 80.5 s) but run_benchmark --ci exited 1 on the prompt-cache hit-rate ratchet: cache_hit_pct 0.0, prompt_cache_routes ['gpt_auth'], 2 calls, 0 cache read, 23226 uncached tokens (cloudbench-run.json in .context/deploy-cloud/848f48c2/runs/20261106-084544-262659/claude-code-agent). In the earlier round on the same code the same task routed claude_auth with 76.1% hit (.context/deploy-cloud/518fa58c/...). A model-route/provider difference in the Claude Code agent path; this diff changes only browser tool descriptions, the hover tool and drag input handling (agents/browser_tools, spawn_browser_agent_v3, providers/rose/browser_use.py), none of which the claude-code-agent task exercises."
+  },
+  {
+   "id": "d166d46c0fa64facbbc4742dd1e9a6cb",
+   "check": "smoke/browser-smoke",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "c1659fb45e554c688d753c404e4beb7b",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "e92b4950326049dba3fc48874d8d7110",
+   "check": "smoke/agent-payment-new-user-journey",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "8ed5cb680ec642d3b022654958c723b5",
+   "check": "smoke/browser-auth-saved-password-retry",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "da528f86a1c940edbe686cde6cc00aa7",
+   "check": "smoke/browser-auth-account-locked",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  },
+  {
+   "id": "1e9fce9d735d4d63b77fedd857ccacd4",
+   "check": "smoke/browser-auth-email-otp",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member passed; gate incomplete only because a sibling failed",
+   "evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Smoke member passed natively (cloudbench-run.json passed=True, controller exit 0 in .context/deploy-cloud/848f48c2/cli.log). It is recorded UNVERIFIED only because the smoke gate is incomplete after sibling member claude-code-agent failed its cache ratchet; the gate reruns in full."
+  }
+ ]
+}

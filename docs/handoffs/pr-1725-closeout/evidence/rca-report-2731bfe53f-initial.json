@@ -1,0 +1,102 @@
+{
+ "failures": [
+  {
+   "id": "86a78c49697d488ca427bf2189b2a8ad",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "2731bfe53f7ace99196021906b423b2a6296766a",
+    "digest": "7342924de1a9e74d0a1c36cd26ff468d04f41a077a39ea9e01851d6dea7722b6"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "deploy-command-structural aggregate failed two timing/capacity-dependent suites while eleven other gates and a 9-task cloud fleet ran concurrently on 8 cores (load 20+): scripts/tests/run-deploy-pipeline.test.py check_observation_validity (holder observation 'unknown' instead of 'stale') and agents/benchmarks/cloudbench_campaign_inventory_test.py::test_campaign_inventory_post_canary_admission_wait_keeps_feed_and_standalone_reads[False] (assert 7 == 8).",
+   "evidence": "PR #1725 changes no file under agents/ or scripts/ (git diff --name-only origin/main...HEAD: 15 files, all front-end display/trajectory UI + tests or back-end display route + tests). Both are the documented load-dependent deploy-tooling families (memory structural-gate-load-flakes; repair handoffs for run-deploy-pipeline observation timing already exist: boxes thread ph74cbynqsekb8nevh8ns0yh7d8hpw6r and PR #1724 closeout repair-goal-run-deploy-pipeline). The bound deploy-command-structural gate passed in full on the preceding tree in this deploy, and scripts/tests/run-deploy-pipeline.test.py passed solo at 3m02s (/var/tmp/disp-bb/pipeline-solo.log). Native log: /home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/deploy-command-structural/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps the repair for this deploy: re-run the bound deploy-command-structural gate with no concurrent load on the unchanged frozen source and require it to pass; the timing-dependent tests keep their existing post-merge repair owners.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/deploy-command-structural/output.log"
+  },
+  {
+   "id": "a4dd8541d4bf4d1fb1610cbfeae28790",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/cloudctl/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/cloudctl",
+    "--stdio"
+   ],
+   "source": {
+    "head": "2731bfe53f7ace99196021906b423b2a6296766a",
+    "digest": "7342924de1a9e74d0a1c36cd26ff468d04f41a077a39ea9e01851d6dea7722b6"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloudbench-controller aggregate: step multi-workstream (scripts/tests/cloudbench-multi-workstream.test.sh) failed with 'existing-Machine capacity gap (pool-provision-1.ids): new Machine allocation withheld; authenticated measured admission is not available' while the same host ran the structural gate's fake controllers and a 9-task cloud fleet; every other GATE_STEP of the controller gate exited 0.",
+   "evidence": "PR #1725 changes no file under agents/ or scripts/ (git diff --name-only origin/main...HEAD: 15 files, all front-end display/trajectory UI + tests or back-end display route + tests). The step exercises fake-provider fleet admission and shares host-wide cleanup/admission state with the concurrently running structural gate (documented in memory structural-gate-load-flakes: run the controller gate and the structural runner one after the other). The same gate passed in full on the preceding tree in this deploy. Native log: /home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/cloudbench-controller/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps the repair for this deploy: re-run the bound cloudbench-controller gate on the unchanged frozen source and require it to pass.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/cloudbench-controller/output.log"
+  },
+  {
+   "id": "45bf50d5712b4c79a391f6bdc4320769",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "2731bfe53f7ace99196021906b423b2a6296766a",
+    "digest": "7342924de1a9e74d0a1c36cd26ff468d04f41a077a39ea9e01851d6dea7722b6"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/browser-biometrics-webdecoy FAILED its FCaptcha anti-detection ratchet: captured risk score 0.164 vs ratchet 0.163 on the third-party FCaptcha engine v1.46.2 (Tilion datacenter-IP browser). A 0.001 margin on a ratchet-only third-party score; the task ran to completion.",
+   "evidence": "PR #1725 changes no file under agents/ or scripts/ (git diff --name-only origin/main...HEAD: 15 files, all front-end display/trajectory UI + tests or back-end display route + tests). The identical gate/task passed earlier in this same deploy on the preceding tree (cycle state .context/deploy-pipeline.round5-08b8054ea: smoke PASS 9/9, backend 249/249, every other gate PASS; differs from this tree only by main's 31-file sync). No browser, agents/ or Tilion code is in this PR; the score is produced by the third-party detector from the Tilion session/IP. Known family: memory browser-biometrics-cost-cap-flake. Native result: /home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/smoke/output.log",
+   "post_merge": {
+    "test": "smoke/browser-biometrics-webdecoy",
+    "command": [
+     "/usr/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "browser-biometrics-webdecoy smoke task: FCaptcha risk-score ratchet (lower is more human, ratchet only decreases); preserve the ratchet and the anti-detection intent",
+    "error": "FCaptcha captured API risk score 0.164 exceeds ratchet 0.163 (lower = more human; this gate only ratchets down, never up) [FCaptcha engine v1.46.2; a version change here means the third-party detector was recalibrated \u2014 compare against the version on the last passing run before treating this as an anti-detection regression] [detections: vision_ai: Click injected with no pointer trajectory (3 teleport clicks); datacenter: Request from known datacenter IP range; headless: Very few speech voices available (3); bot: Windows UA but Segoe UI font not detected; browser tilion/tilion_direct_country]",
+    "source": "2731bfe53f7ace99196021906b423b2a6296766a",
+    "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/smoke/output.log"
+   }
+  },
+  {
+   "id": "40232af249fa47e9b0ecd243a4b62928",
+   "check": "smoke/agent-payment-new-user-journey",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "2731bfe53f7ace99196021906b423b2a6296766a",
+    "digest": "7342924de1a9e74d0a1c36cd26ff468d04f41a077a39ea9e01851d6dea7722b6"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-new-user-journey FAILED: the spawned test_checkout browser agent ended status=ERROR with browser_use 'ValueError: Expected at least one handler to return a non-None result' on BrowserStateRequestEvent (spawn_browser_agent_activity_v3 completed as failed); the ordered-contract evaluator observed the browser agent failure.",
+   "evidence": "PR #1725 changes no file under agents/ or scripts/ (git diff --name-only origin/main...HEAD: 15 files, all front-end display/trajectory UI + tests or back-end display route + tests). The identical gate/task passed earlier in this same deploy on the preceding tree (cycle state .context/deploy-pipeline.round5-08b8054ea: smoke PASS 9/9, backend 249/249, every other gate PASS; differs from this tree only by main's 31-file sync). The failure is inside the agents/ browser-use state-request path (DOMWatchdog/DownloadsWatchdog handlers), unrelated to the display route or trajectory UI changed here. Native result: /home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/smoke/output.log",
+   "post_merge": {
+    "test": "smoke/agent-payment-new-user-journey",
+    "command": [
+     "/usr/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "agent-payment-new-user-journey smoke task: browser agent state request / ordered new-user payment contract; preserve the evaluator and payment assertions",
+    "error": "Declared evaluator new-user-payment-ordered-contract failed: Observed browser agent failure: spawn_browser_agent toolu_012DH6aU1brAvAX8SuNRW6tV status=ERROR; child message: ValueError: Expected at least one handler to return a non-None result, but none did! ?\u25b6 BrowserStateRequestEvent#be80 \u2705 -> {browser_use DownloadsWatchdog.on_BrowserStateRequestEvent \u2705, DOMWatchdog.on_BrowserStateRequestEvent \u2705} (Session ID sess_c3d0eba6494749bfb53b8358962364df)",
+    "source": "2731bfe53f7ace99196021906b423b2a6296766a",
+    "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/smoke/output.log"
+   }
+  }
+ ]
+}

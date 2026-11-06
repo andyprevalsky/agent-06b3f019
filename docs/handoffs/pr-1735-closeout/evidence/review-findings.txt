@@ -1,0 +1,24 @@
+CodeRabbit: cycle 1 (7bfbe321d) and cycle 2 (6f0f9da4a) were both "Review skipped: Path filters excluded 1 file"
+(.coderabbit.yaml excludes !docs/** and !**/*.md). Check runs: cycle 2 = 127929745209 (skipped).
+This is not quota exhaustion. Docs-only records PRs #1731 and #1733 got the same skip.
+
+Independent adversarial fact-check (fresh read-only sub-agent), cycle 1 on 7bfbe321d: REVIEW: FINDINGS
+  1 c19b68c8 detection text was not in its Hub export: fixed; cites the committed PR1725 closeout record
+  2 drag ordering imprecise for c19b68c8: fixed ("split them around a scroll")
+  3 "every click went through humanizer" overstated: fixed (count match; fallback not excluded)
+  4 "drag is the discriminating variable" overstated: fixed ("consistent with", one local run)
+  5 SHA/Hub provenance only in private notes: fixed; cites the committed PR1730/PR1725 records
+  6 c19b68c8 cleanup error omitted: fixed (noted as unrelated to the score)
+Cycle 2 re-review on 6f0f9da4a: all six confirmed fixed; ancestry verified (052ac6ce7, cce696e9d and
+  15f2ef6cf are ancestors of fa676edc7 and not of f25d7c064, 2731bfe53 or db5b15de9). One finding:
+  the merged-fix pass was only in private files. Fixed by this closeout directory
+  (cloud-pass-fa676edc7.json, ledger-rows-pending-main.jsonl).
+
+Pre-check of a1a4d9625 (before cycle 3): REVIEW: FINDINGS
+  7 cloud-pass full_receipt_bytes was a character count: fixed (13626594 bytes)
+  8 cloud-pass ledger rows hand-built, not the canonical Hub row: fixed via hub_ledger_row
+Cycle 3 (verification) on fcd16f694: CodeRabbit path-filter skip; adversarial review REVIEW: FINDINGS
+  9 backfill_source was hub:direct-cloud-fleet, but the canonical tag is 'hub:' + run.source, and the
+    Hub record of run 20261106-131544-295004 has source 'cloud-fleet': fixed (hub:cloud-fleet).
+  A third cycle with findings exhausts the review ledger cap. That deploy attempt (timing run
+  20261106-134623-765009) was recorded blocked/review-unstable, and this fix ships through a fresh /deploy.

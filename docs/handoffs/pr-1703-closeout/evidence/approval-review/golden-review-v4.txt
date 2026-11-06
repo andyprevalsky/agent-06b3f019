@@ -1,0 +1,97 @@
+# Golden-reference adversarial review v4 — RCA-WEBDECOY-POINTER-1 @ 052ac6ce7
+
+I am a fresh reviewer, working read-only, and I did not write this change.
+
+## Bytes in scope
+
+- **Diff identity.** The `+`/`-` lines of `git diff origin/main...052ac6ce7 -- agents/providers/rose/browser_use.py agents/browser_tools/schemas.py` are identical to `llm-visible-v4.diff`. The packet's inline diff matches it.
+- **Changes since review 3.** Comparing v2 with v4 by their `+`/`-` lines, exactly one LLM-visible line changed, and it became two lines. This is in the drag description:
+  - Before: "never to move the pointer, because click and click_coordinates already move it."
+  - After: "never to move the pointer: use hover to move it without clicking (click and click_coordinates move it themselves before pressing)."
+  - `git diff 584cf4076 052ac6ce7` confirms this is the only change in browser_use.py and schemas.py.
+  - Every other difference between the two diff files is hunk-header or context noise (`-U3` vs `-U2`).
+- **Other changes since 584cf4076.** These are out of scope:
+  - main-merge files;
+  - the humanizer.py drag release/raise refactor;
+  - a new test assertion and a re-pinned tool hash.
+  - The humanizer can now raise "drag failed: CDP pointer move after press failed: …". That is a truthful result of a real tool failure, not a synthetic message, so it is not a rule-25a nudge.
+
+## A. Grounding the changed drag sentence: PASSES
+
+I opened these references in this session:
+
+1. **`claude-code-src/cli.js:1830`** (Claude Code computer use)
+   - `left_mouse_down`: "Press the left mouse button at the current cursor position and leave it held. … Use mouse_move first to position the cursor."
+   - `mouse_move`: "Move the mouse cursor without clicking. Useful for triggering hover states."
+   - `left_click_drag`: "Press, move to target, and release."
+   - `left_click`: "Left-click at the given coordinates." This is a single action, with no separate move needed.
+   - The reference routes pointer-only positioning to the dedicated no-click move tool, and does so from inside a held-button tool's description. The new sentence makes the same cross-reference from the held-button `drag` to `hover`.
+2. **`claude-code-src/cli.js:66`** (Claude in Chrome `computer`)
+   - The enum includes `left_click_drag` and `hover`.
+   - "`hover`: Move the mouse cursor to the specified coordinates or element without clicking. Useful for revealing tooltips, dropdown menus, or triggering hover states."
+   - The new sentence's "move it without clicking" matches this nearly word for word.
+3. **`hermes-agent/tools/drive_preview_tool.py:81-83`**
+   - "Input is real (pointer travels, hover menus open). Actions: … click, hover (park the pointer — opens dropdowns before clicking in)".
+   - Pointer-only parking goes to `hover`, and click carries its own travel. The new sentence says the same for both clauses.
+4. **`claude-code-src/src/utils/computerUse/executor.ts:103-120`**
+   - `moveAndSettle` moves the pointer instantly and then sleeps 50 ms before a click, scroll or drag-from.
+   - This grounds the parenthetical "click and click_coordinates move it themselves before pressing".
+5. **OpenClaw**
+   - `openclaw/extensions/browser/src/browser-tool.schema.ts:19`: `hover` is its own act kind beside `drag` (line 21) and `evaluate`.
+   - `.../routes/agent.act.normalize.ts:222-237`: hover takes an element target, and drag requires both ends.
+   - Nothing there routes pointer movement through drag or click.
+
+**Contrary practice.**
+- No reference tells the model to move the pointer with drag or with a click.
+- The superseded sentence ("because click and click_coordinates already move it") could be read as "use click to move". CodeRabbit flagged that (cr2-inline.txt:104-106), and the new text removes it, so it now matches the references more closely.
+- Hermes `computer_use` has no hover, but Hermes ships hover in its preview tool. That is an omission, not a contrary design.
+- codex, prime-agent and kimi-code have no agent pointer tool, so the packet's `Not applicable` holds.
+
+**Truth at runtime (052ac6ce7).**
+- `_execute_hover` (spawn_browser_agent_v3/service_actions.py:3680) moves the pointer and never presses.
+- Drag dispatch uses `humanizer.drag_between` (tool_executor_v2.py:310).
+- The click-travel claim is unchanged from review 3, which verified it. The occluded-element JS-click exception is stated in Downstream.
+
+**Not broader than the reference.** The change is one routing clause and adds no capability.
+
+**CLAUDE.md hard rules.**
+- 25: PASS. No change to tasks, evaluator, timeout or ratchet.
+- 25a: PASS. Static tool text only, with no injection.
+- 25b: PASS. No classifier.
+- 28: PASS. Adds about 15 tokens to one tool description, with per-session state only.
+
+**Every other in-scope hunk is byte-unchanged** from review 3's GROUNDED snapshot. That review's mapping still applies, and I re-opened its citations above:
+- HoverTool and its registry entry;
+- the hover, click and click_coordinates descriptions;
+- the evaluate narrowing;
+- `_VALID_ACTIONS` and the normalize hover branch.
+
+## B. Packet validity (packet-v4.md): PASSES, with one required correction
+
+- **Packet citations.** Every Golden reference citation exists and says what the packet claims:
+  - `cli.js:1830`, `cli.js:66`
+  - `executor.ts:103-120`
+  - `browser-tool.schema.ts:19`, `normalize.ts:228-237`
+  - `drive_preview_tool.py:81-83`, `computer_use/schema.py:117-131`
+- **Post-fix "again on 052ac6ce7" is bound to these bytes.**
+  - Run `20261106-041514-1711198-fc1dc72a` results: rose-browser-use "122 passed", spawn-browser-agent-v3 passed (2/2).
+  - browser_use.py was last modified at 04:14:28, before the run started at 04:15:14.
+  - `test_phone_off_matches_prephone_bytes` pins the tool-description hash, and 052ac6ce7 re-pinned it. That test could only pass against the new drag text with the new pin, and the new assertion "use hover to move it without clicking" is at rose_browser_use.blackbox.py:373.
+  - The tree is clean, so those working-tree bytes equal 052ac6ce7.
+- **Outcome evidence is honestly labelled.** The cloud smoke on 4b79be50e is marked "final text except the one drag sentence", and the benchmark PASS on 15f2ef6cf is marked as 584cf4076 code. The exact final sentence has blackbox proof, not a benchmark rerun. The packet does not claim otherwise.
+- **Structure is unchanged from review 3 and still valid:** Before/After first, all seven labels, one block plus Links, the Environment triple and the verbatim task prompt.
+- **Golden review line.** "pending fourth review" is appropriate for a draft.
+
+**Required correction (non-blocking).** Four Scope lines and their links are stale by +1 at 052ac6ce7, because the drag hunk grew by one line:
+- `browser_use.py:124` should be `:125` (`"hover": {`).
+- `:194` should be `:195` (`"evaluate": {`). As written, `:194` is a `},` that falls outside the evaluate hunk.
+- `:1301` should be `:1302` (`"hover",`).
+- `:1428` should be `:1429` (`if normalized_action == "hover":`).
+
+Lines 77, 84, 95, 289 and 996 are correct. The links are present and land within one line of each construct, so the packet is not invalid. Fix these numbers before recording the approval in TEST_REPORT or the PR body.
+
+## Blocking findings
+
+None.
+
+VERDICT RCA-WEBDECOY-POINTER-1: GROUNDED

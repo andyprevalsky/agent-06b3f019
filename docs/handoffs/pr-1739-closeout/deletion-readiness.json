@@ -1,0 +1,25 @@
+{
+ "schema_version": 1,
+ "pr": 1739,
+ "deployed_sha": "58e2f7ef54fe0d4cf61987b353e2aeae9015e8b2",
+ "validated_head": "f3026d2e6d740d77b06a60b7656a9933b40474b3",
+ "records_branch": "records/pr1739-closeout",
+ "records_base": "e24b8eb812034e15e8ba689ca2ef2b02c2c7e8b8",
+ "closeout_manifest": "docs/handoffs/pr-1739-closeout/closeout-manifest.json",
+ "recovery": "docs/handoffs/pr-1739-closeout/RECOVERY.md",
+ "verification": "docs/handoffs/pr-1739-closeout/private-preservation-verification.json",
+ "archives": "four AES-GCM objects under devbox-closeout-private/pr1739-58e2f7ef/ in the trace-archive bucket (core 719 files, workers 23932, cloud 2631, control 12); each uploader readback authenticated and an independent verify authenticated every frame; core restored to an empty directory and 583 files compared byte-identical to the originals",
+ "key_recovery": "project-managed .context/pr1634-archive-recovery.env (PR1634_ARCHIVE_RECOVERY_KEY_B64) and agents/.env TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (dvb-onbox env list shows both); decoded SHA256 e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730; escrow equals live key",
+ "configuration_recovery": "project-managed env files (dvb-onbox env list); no values stored in git or archives",
+ "source": "merged on main (58e2f7ef54); branch fix/continuation-context-once-cutover-wedge pushed to origin; no unpushed local commits; durable memory notes in /project/.claude/memory",
+ "resources": {
+  "fly": "no Machines or volumes owned by this deploy remain: cloud smoke gate cleanup receipt complete (cleanup_complete true, 9/9 tasks); the worker bank cutover reused existing reserved Machines and destroyed none; shared bench image and warm resources retained",
+  "local_retired": "10 deploy worker roots under /var/tmp/rdw (about 54 GB), 7 scratch coverage/stack databases plus leaked prisma_local_push_ddl_test_* and seedmem scratch databases, the 6 GB /var/tmp/swapfile-deploy (swapoff, removed, vm.swappiness restored to 60), hard-link staging and the restore-test directory; free space on / went from 24.8 GB to 85.9 GB (61.1 GB reclaimed)",
+  "local_retained": "/home/boxes/rose checkout and .context, /home/boxes/evidence/cutover (all archived in core/control), the shared victoria development database, browser-use temp directories under /var/tmp not created by a gate of this deploy",
+  "processes": "the two agent_link_server.py servers started by cloud smoke (pids 1507462 and 3659996) were stopped by exact PID; nothing owned by this deploy is running; the devbox daemon and flyctl agent are the box's own"
+ },
+ "freedom": "untouched",
+ "open_items": [],
+ "non_pass_items_disclosed": "see closeout-manifest.json non_pass_items_disclosed (Mac acceptance SKIPPED: no Mac available; AgentCard gates not selected; two stale probe agents archived by soft delete)",
+ "factory_history_commit": "e24b8eb812034e15e8ba689ca2ef2b02c2c7e8b8"
+}

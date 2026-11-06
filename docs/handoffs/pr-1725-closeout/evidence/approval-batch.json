@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "head": "2731bfe53f7ace99196021906b423b2a6296766a",
+  "base_ref": "origin/main",
+  "merge_base": "101ece413be25cf87a4bf6e03febf1ce11f332a9",
+  "frozen_at": "2026-11-06T09:48:45Z",
+  "guards": {
+    "prompt-approval": [],
+    "agent-behavior-approval": [],
+    "llm-trajectory-injection-approval": []
+  },
+  "files": {},
+  "decision": "clear"
+}

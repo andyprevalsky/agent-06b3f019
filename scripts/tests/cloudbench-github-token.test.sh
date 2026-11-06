@@ -13,7 +13,9 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"; kill "$SERVER_PID" 2>/dev/null || true' EXIT
+# Reap the mock server before exiting: a TERM without a wait let it outlive the
+# test under load, and the controller-gate supervisor then had to reap an orphan.
+trap 'kill "${SERVER_PID:-}" 2>/dev/null || true; wait "${SERVER_PID:-}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 
 LIVE_DISPATCH="${GITHUB_DISPATCH_TOKEN:-}"
 GOOD_TOKEN="gho_test_dispatch_token_good_for_repo_read"

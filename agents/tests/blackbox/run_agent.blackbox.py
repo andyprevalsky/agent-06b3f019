@@ -365,7 +365,7 @@ async def test_browser_budget_handoff_before_llm_preserves_unused_allowance():
     assert result["status"] == "generation_handoff", result
     assert not posted and not executed
     assert not wf._cost_limit_wrapup_consumed, "handoff spent an allowance without a model call"
-    state = wf._continuation_resume_state(result["context"])
+    state = wf._continuation_resume_state()
     restored = AgentWorkflow()
     restored._restore_deployment_state(state)
     with patch("loop.run_agent.activity.heartbeat"):
