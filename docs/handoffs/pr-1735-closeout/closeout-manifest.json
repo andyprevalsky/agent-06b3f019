@@ -36,7 +36,7 @@
   {
    "path": "evidence/ledger-rows-pending-main.jsonl",
    "disposition": "committed; appended to agents/benchmarks/history/task_attempts.jsonl and task_durations.jsonl on main by a post-merge data-only commit (held out of the gated tree because ledger paths widen gate selection)",
-   "provenance": "local control rows (97aa455f) written by the canonical local writer benchmarks/timeout_history.record_attempt/record_pass during the run; cloud-pass rows (d5672824) built by scripts/benchmark-history-backfill.py hub_ledger_row from the Hub record of run 20261106-131544-295004 (source hub:direct-cloud-fleet, timestamp = start + duration, counts_for_deploy_eligibility false)"
+   "provenance": "local control rows (97aa455f) written by the canonical local writer benchmarks/timeout_history.record_attempt/record_pass during the run; cloud-pass rows (d5672824) built by scripts/benchmark-history-backfill.py hub_ledger_row(run, task, 'hub:' + run.source) from the Hub record of run 20261106-131544-295004 (run.source 'cloud-fleet' -> backfill_source 'hub:cloud-fleet', timestamp = start + duration, counts_for_deploy_eligibility false)"
   },
   {
    "path": "agents/benchmarks/history/span_durations.20261106.main.jsonl (local control run spans, 767952 bytes, sha256 23824daac398b1920a155a954a5af2c1677460e3c6535a687d71a870bbdbd4d7)",
