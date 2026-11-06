@@ -4,6 +4,7 @@ import ast
 import asyncio
 import copy
 import functools
+from contextlib import contextmanager
 import inspect
 import json
 import os
@@ -868,6 +869,7 @@ def result(aid):
         benchmark_status="FAILED",
         status="PAUSED",
         failure_reason="test timeout",
+        stop_metadata=None,
     )
 
 
@@ -1069,6 +1071,7 @@ async def test_composite_result_finalizes_each_exact_root_without_changing_verdi
         return {"messages": []}
 
     async def archive(_url, aid, _task, **_kwargs):
+        assert _kwargs["unscored_preparation"] is False
         events.append(("archive", aid))
         return f"archive-{aid}", {}
 
@@ -1327,6 +1330,57 @@ def _postgres_binary(name):
     return found
 
 
+@contextmanager
+def _tree_query_postgres():
+    """Own only this real-SQL fixture's cluster and short private socket directory."""
+    import shutil
+    import socket
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    parent = root / ".context"
+    assert not parent.is_symlink(), "fixture socket parent must belong to this checkout"
+    parent.mkdir(exist_ok=True)
+    pg_ctl = _postgres_binary("pg_ctl")
+    directory = Path(tempfile.mkdtemp(prefix="tree-query-pg."))
+    sockets = None
+    attempted_start = False
+    server = [pg_ctl, "-D", str(directory / "data"), "-w", "-s"]
+    try:
+        sockets = Path(tempfile.mkdtemp(prefix="pg.", dir=parent))
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        assert len(os.fsencode(sockets / f".s.PGSQL.{port}")) <= 107, "private socket path exceeds 107 bytes"
+        subprocess.run([_postgres_binary("initdb"), "-D", str(directory / "data"), "-U", "postgres", "--auth=trust", "-E", "UTF8"],
+                       check=True, capture_output=True)
+        attempted_start = True
+        # Preserve localhost TCP semantics and the original startup deadline.
+        subprocess.run(server + ["-l", str(directory / "server.log"),
+                                 "-o", f"-p {port} -k '{sockets}' -c listen_addresses=localhost", "start"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        yield directory, sockets, port
+    finally:
+        primary = sys.exc_info()[1]
+        try:
+            if attempted_start:
+                pid_file = directory / "data/postmaster.pid"
+                lines = pid_file.read_text().splitlines()
+                assert len(lines) > 1 and Path(lines[1]).resolve() == (directory / "data").resolve(), "unknown fixture postmaster owner"
+                subprocess.run(server + ["status"], check=True, capture_output=True, timeout=60)
+                subprocess.run(server + ["-m", "immediate", "stop"], check=True, capture_output=True, timeout=60)
+                assert not pid_file.exists(), "fixture postmaster did not stop"
+            shutil.rmtree(directory)
+            if sockets is not None:
+                shutil.rmtree(sockets)
+        except BaseException as error:
+            # Retain data/socket/log evidence if exact shutdown is not confirmed.
+            if primary is None:
+                raise
+            primary.add_note(f"Fixture cleanup unconfirmed; retained {directory} and {sockets}: {error}")
+
+
 def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postgres():
     """Every agent owns a logical BrowserSession row (sessionId NULL) until a
     provider session exists. The owned-cloud finalizer must not reject such a
@@ -1340,31 +1394,22 @@ def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postg
     ).read_text()
     logical_identity_ddl = migration.split('ALTER TABLE "BrowserSiteState"', 1)[0]
     recovery = __import__("runpy").run_path(str(cleanup.REPO_ROOT / "scripts/cloudbench-guest-recovery.py"))
-    with tempfile.TemporaryDirectory() as directory:
-        data, sockets = Path(directory) / "data", Path(directory) / "sockets"
-        sockets.mkdir()
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        subprocess.run([_postgres_binary("initdb"), "-D", str(data), "-U", "postgres", "--auth=trust", "-E", "UTF8"],
-                       check=True, capture_output=True)
-        server = [_postgres_binary("pg_ctl"), "-D", str(data), "-w", "-s"]
-        # The daemon must not inherit captured pipes, or run() waits for their EOF forever.
-        subprocess.run(server + ["-l", str(Path(directory) / "server.log"),
-                                 "-o", f"-p {port} -k {sockets} -c listen_addresses=localhost", "start"],
-                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-        try:
-            def sql(statement, database="postgres"):
-                return subprocess.run(
-                    [_postgres_binary("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-h", "localhost", "-p", str(port),
-                     "-U", "postgres", "-d", database, "-c", statement],
-                    capture_output=True, text=True, timeout=30,
-                )
-            assert sql("CREATE DATABASE owned_fixture").returncode == 0
-            # The pre-migration table as main defines it, then the branch's real
-            # logical-identity migration bytes (nullable sessionId + constraints).
-            setup = sql(
-                """
+    with _tree_query_postgres() as (directory, sockets, port):
+        import stat
+        assert directory.parent == Path(tempfile.gettempdir())
+        assert sockets.parent == Path(__file__).resolve().parents[2] / ".context"
+        assert stat.S_IMODE(sockets.stat().st_mode) == 0o700
+        def sql(statement, database="postgres"):
+            return subprocess.run(
+                [_postgres_binary("psql"), "-X", "-q", "-v", "ON_ERROR_STOP=1", "-h", "localhost", "-p", str(port),
+                 "-U", "postgres", "-d", database, "-c", statement],
+                capture_output=True, text=True, timeout=30,
+            )
+        assert sql("CREATE DATABASE owned_fixture").returncode == 0
+        # The pre-migration table as main defines it, then the branch's real
+        # logical-identity migration bytes (nullable sessionId + constraints).
+        setup = sql(
+            """
                 CREATE TYPE "BrowserSessionStatus" AS ENUM ('ACTIVE', 'CLOSED', 'ERROR', 'PAUSED');
                 CREATE TABLE "Agent" (id TEXT PRIMARY KEY, "userId" TEXT NOT NULL,
                   "parentAgentId" TEXT, "deletedAt" TIMESTAMP(3));
@@ -1376,66 +1421,142 @@ def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postg
                 CREATE TABLE "PurchaseWalletFunding" ("purchaseId" TEXT, status TEXT, "providerTransferId" TEXT,
                   "reclaimProviderTransferId" TEXT);
                 """ + logical_identity_ddl,
-                "owned_fixture",
-            )
-            assert setup.returncode == 0, setup.stderr
-            # Agent creation's unmaterialized logical browsers (createLogicalBrowserInTransaction)
-            # plus one child that did materialize a Kernel session.
-            inserted = sql(
-                f"""
+            "owned_fixture",
+        )
+        assert setup.returncode == 0, setup.stderr
+        # Agent creation's unmaterialized logical browsers (createLogicalBrowserInTransaction)
+        # plus one child that did materialize a Kernel session.
+        inserted = sql(
+            f"""
                 INSERT INTO "Agent" VALUES ('{ROOT}', '{ROOT}', NULL, NULL), ('{CHILD}', '{ROOT}', '{ROOT}', NULL);
                 INSERT INTO "BrowserSession" (id, "contextId", "agentId", "sessionId", status, provider,
                   "logicalOwnerKey", "baselineCheckpointRef") VALUES
                   ('logical-root', 'context', '{ROOT}', NULL, 'PAUSED', 'kernel', 'agent:{ROOT}', 'empty-baseline'),
                   ('logical-child', 'context', '{CHILD}', NULL, 'PAUSED', 'kernel', 'agent:{CHILD}', 'empty-baseline');
                 """,
-                "owned_fixture",
-            )
-            assert inserted.returncode == 0, inserted.stderr
-            # The schema itself guarantees a NULL-session row is only an unmaterialized logical identity.
-            orphan = sql(
-                f"""INSERT INTO "BrowserSession" (id, "contextId", "agentId", "sessionId", status, provider)
+            "owned_fixture",
+        )
+        assert inserted.returncode == 0, inserted.stderr
+        # The schema itself guarantees a NULL-session row is only an unmaterialized logical identity.
+        orphan = sql(
+            f"""INSERT INTO "BrowserSession" (id, "contextId", "agentId", "sessionId", status, provider)
                 VALUES ('orphan', 'context', '{ROOT}', NULL, 'ACTIVE', 'kernel')""",
+            "owned_fixture",
+        )
+        assert orphan.returncode != 0 and "BrowserSession_unmaterialized_check" in orphan.stderr
+
+        context = Path(directory) / "context"
+        context.mkdir()
+        (context / "services.json").write_text(json.dumps({
+            "worktree": str(cleanup.REPO_ROOT), "benchmark_mode": True, "status": "running",
+            "temporal_task_queue": "owned-queue", "ports": {"backend": 31001},
+            "database": {"name": "owned_fixture", "port": port},
+        }))
+        environment = {
+            "BENCHMARK_CLOUD_BATCH_CLEANUP": "true", "BENCHMARK_ISOLATED_RUN": "true",
+            "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "owned-token",
+            "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(context / "status"),
+            "BENCHMARK_CONTEXT_DIR": str(context), "TEMPORAL_TASK_QUEUE": "owned-queue",
+            "PATH": str(Path(_postgres_binary("psql")).parent) + os.pathsep + os.environ.get("PATH", ""),
+        }
+        with patch.dict(os.environ, environment), patch.object(cleanup.runpy, "run_path", return_value=recovery):
+            # A non-browser task: only unmaterialized logical rows, so no provider session to own.
+            snapshot = cleanup.exact_root_sessions("http://localhost:31001", ROOT)
+            assert snapshot["tree_agent_ids"] == sorted([ROOT, CHILD])
+            assert snapshot["browser_sessions"] == []
+            # A materialized Kernel session is still returned and owned exactly.
+            materialized = sql(
+                f"""UPDATE "BrowserSession" SET "sessionId" = 'kernel_session_0001', status = 'ACTIVE'
+                    WHERE id = 'logical-child'""",
                 "owned_fixture",
             )
-            assert orphan.returncode != 0 and "BrowserSession_unmaterialized_check" in orphan.stderr
+            assert materialized.returncode == 0, materialized.stderr
+            assert cleanup.exact_root_sessions("http://localhost:31001", ROOT)["browser_sessions"] == [
+                {"agent_id": CHILD, "session_id": "kernel_session_0001", "provider": "kernel"}
+            ]
+            # A provider-backed row from an unknown provider is still refused.
+            assert sql("""UPDATE "BrowserSession" SET provider = 'unknown-provider' WHERE id = 'logical-child'""",
+                       "owned_fixture").returncode == 0
+            with pytest.raises(RuntimeError, match="unrecognized provider session"):
+                cleanup.exact_root_sessions("http://localhost:31001", ROOT)
 
-            context = Path(directory) / "context"
-            context.mkdir()
-            (context / "services.json").write_text(json.dumps({
-                "worktree": str(cleanup.REPO_ROOT), "benchmark_mode": True, "status": "running",
-                "temporal_task_queue": "owned-queue", "ports": {"backend": 31001},
-                "database": {"name": "owned_fixture", "port": port},
-            }))
-            environment = {
-                "BENCHMARK_CLOUD_BATCH_CLEANUP": "true", "BENCHMARK_ISOLATED_RUN": "true",
-                "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "owned-token",
-                "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(context / "status"),
-                "BENCHMARK_CONTEXT_DIR": str(context), "TEMPORAL_TASK_QUEUE": "owned-queue",
-                "PATH": str(Path(_postgres_binary("psql")).parent) + os.pathsep + os.environ.get("PATH", ""),
-            }
-            with patch.dict(os.environ, environment), patch.object(cleanup.runpy, "run_path", return_value=recovery):
-                # A non-browser task: only unmaterialized logical rows, so no provider session to own.
-                snapshot = cleanup.exact_root_sessions("http://localhost:31001", ROOT)
-                assert snapshot["tree_agent_ids"] == sorted([ROOT, CHILD])
-                assert snapshot["browser_sessions"] == []
-                # A materialized Kernel session is still returned and owned exactly.
-                materialized = sql(
-                    f"""UPDATE "BrowserSession" SET "sessionId" = 'kernel_session_0001', status = 'ACTIVE'
-                    WHERE id = 'logical-child'""",
-                    "owned_fixture",
-                )
-                assert materialized.returncode == 0, materialized.stderr
-                assert cleanup.exact_root_sessions("http://localhost:31001", ROOT)["browser_sessions"] == [
-                    {"agent_id": CHILD, "session_id": "kernel_session_0001", "provider": "kernel"}
-                ]
-                # A provider-backed row from an unknown provider is still refused.
-                assert sql("""UPDATE "BrowserSession" SET provider = 'unknown-provider' WHERE id = 'logical-child'""",
-                           "owned_fixture").returncode == 0
-                with pytest.raises(RuntimeError, match="unrecognized provider session"):
-                    cleanup.exact_root_sessions("http://localhost:31001", ROOT)
-        finally:
-            subprocess.run(server + ["-m", "immediate", "stop"], capture_output=True, timeout=60)
+
+def test_tree_query_postgres_rejects_overlong_socket_before_start(monkeypatch):
+    import shutil
+    import subprocess
+    parent = Path(__file__).resolve().parents[2] / ".context"
+    long_parent = Path(tempfile.mkdtemp(prefix="pg-bound-", dir=parent))
+    nested = long_parent / ("x" * 120)
+    nested.mkdir()
+    created = []
+    create = tempfile.mkdtemp
+    def overlong(*args, **kwargs):
+        if kwargs.get("dir") == parent:
+            kwargs["dir"] = nested
+        value = create(*args, **kwargs)
+        created.append(Path(value))
+        return value
+    try:
+        monkeypatch.setattr(tempfile, "mkdtemp", overlong)
+        with patch.object(subprocess, "run", side_effect=AssertionError("must reject before initdb")):
+            with pytest.raises(AssertionError, match="private socket path exceeds 107 bytes"):
+                with _tree_query_postgres():
+                    pytest.fail("overlong socket must not yield")
+        assert len(created) == 2 and all(not path.exists() for path in created)
+    finally:
+        shutil.rmtree(long_parent)
+
+
+def test_tree_query_postgres_start_exception_stops_exact_cluster(monkeypatch):
+    import subprocess
+    run = subprocess.run
+    paths = []
+    create = tempfile.mkdtemp
+    def record(*args, **kwargs):
+        value = create(*args, **kwargs)
+        paths.append(Path(value))
+        return value
+    def fail_after_start(command, **kwargs):
+        result = run(command, **kwargs)
+        if command[-1] == "start":
+            raise RuntimeError("injected post-start failure")
+        return result
+    monkeypatch.setattr(tempfile, "mkdtemp", record)
+    monkeypatch.setattr(subprocess, "run", fail_after_start)
+    with pytest.raises(RuntimeError, match="injected post-start failure"):
+        with _tree_query_postgres():
+            pytest.fail("failed startup must not yield")
+    assert len(paths) == 2 and all(not path.exists() for path in paths)
+
+
+def test_tree_query_postgres_stop_failure_retains_owned_evidence(monkeypatch):
+    import shutil
+    import subprocess
+    run = subprocess.run
+    owned = None
+    def fail_stop(command, **kwargs):
+        if command[-1] == "stop":
+            raise subprocess.CalledProcessError(1, command, stderr=b"injected stop failure")
+        return run(command, **kwargs)
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(subprocess, "run", fail_stop)
+            with pytest.raises(subprocess.CalledProcessError):
+                with _tree_query_postgres() as owned:
+                    pass
+        directory, sockets, _ = owned
+        assert (directory / "data/postmaster.pid").is_file()
+        assert (directory / "server.log").is_file() and sockets.is_dir()
+    finally:
+        # The expected negative control retains a real owned cluster; close it
+        # using its exact data identity after restoring the real stop command.
+        if owned is not None:
+            directory, sockets, _ = owned
+            run([_postgres_binary("pg_ctl"), "-D", str(directory / "data"), "-w", "-s", "-m", "immediate", "stop"],
+                check=True, capture_output=True, timeout=60)
+            assert not (directory / "data/postmaster.pid").exists()
+            shutil.rmtree(directory)
+            shutil.rmtree(sockets)
 
 
 def test_provider_rejection_does_not_skip_other_sessions_in_same_root():
