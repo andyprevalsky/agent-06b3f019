@@ -1,11 +1,11 @@
 {
   "format": "PR1691-DELETION-READINESS-MANIFEST-V1",
   "generated_at": "2026-11-06T02:16:43.298890+00:00",
-  "status": "PRESERVATION_VERIFIED_PUBLICATION_PENDING",
-  "deletion_ready": false,
-  "parent_final_publication_required": true,
+  "status": "PRESERVATION_AND_PUBLICATION_VERIFIED",
+  "deletion_ready": true,
+  "parent_final_publication_required": false,
   "deployment_pr": 1691,
-  "preservation_followup_pr": null,
+  "preservation_followup_pr": 1705,
   "deployed_source": "05826f6dd4f260fdc3602ab3e63095d13d2ddc81",
   "validated_source": "493df34052b766e156182b7a264babaa683dcba9",
   "factory_ledger_commit": "beb1ceecfd44045a6b4b3a25665c07d2575a5119",
@@ -601,5 +601,13 @@
   "private_verification_file": "private-preservation-verification.json",
   "control_binding_verification_file": "control-bindings-verification.json",
   "deletion_readiness_receipt": "deletion-readiness.json",
-  "publication_record": "publication.json"
+  "publication_record": "publication.json",
+  "publication": {
+    "records_pr": 1705,
+    "records_pr_merge_commit": "8defa4a649447d3bd77d0673a93b28c1e0988372",
+    "deployed_pr_link": "https://github.com/Rose-Ai-Labs/rose/pull/1691#issuecomment-6675158473",
+    "deployed_pr_link_verified": true,
+    "final_metadata_commit": "The Git commit containing this file; linked from PR1691 after push."
+  },
+  "final_publication_note": "PR1705 merged at 8defa4a649447d3bd77d0673a93b28c1e0988372 and its exact record/manifest link was verified in deployed PR1691 (https://github.com/Rose-Ai-Labs/rose/pull/1691#issuecomment-6675158473). This final metadata records publication only; archives and verification receipts are unchanged."
 }
