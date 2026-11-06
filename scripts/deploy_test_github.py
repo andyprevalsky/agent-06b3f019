@@ -56,6 +56,7 @@ BUNDLE_FILE_BYTES = 64 * 1024 * 1024
 BUNDLE_TOTAL_BYTES = 400 * 1024 * 1024
 BUNDLE_SKIP = {'seed-cache', 'tsbuildinfo', 'frontend-builds', 'experiential-venv', 'node_modules'}
 SERVICE_LOGS = ('back-end/backend-logs.log', 'agents/navi-worker-log.txt', 'front-end/frontend-logs.log')
+LOG_TREES = ('back-end/coverage', 'front-end/coverage', 'agents/coverage', 'front-end/test-results')
 STOP = threading.Event()
 
 
@@ -463,6 +464,10 @@ def remote_bundle(args) -> int:
             if path.is_file() and not path.is_symlink() and parts[0] not in BUNDLE_SKIP:
                 paths.add(str(path))
     paths.update(str(root / rel) for rel in SERVICE_LOGS if (root / rel).is_file())
+    for rel in LOG_TREES:  # per-domain/test logs the suites write outside .context
+        if (root / rel).is_dir():
+            paths.update(str(p) for p in (root / rel).rglob('*')
+                         if p.is_file() and not p.is_symlink() and p.suffix in ('.log', '.json', '.txt'))
     total, skipped = 0, []
     for raw in sorted(paths, key=lambda p: (Path(p).stat().st_size, p)):
         path = Path(raw)
