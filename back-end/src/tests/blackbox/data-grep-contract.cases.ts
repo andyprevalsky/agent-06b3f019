@@ -497,6 +497,28 @@ function cases(thread: string): ContractCase[] {
       expect: { reject: 'filters.path', says: [/earlier/] },
       maxMs: 5_000,
     },
+    // A JSON `__proto__` filter key is an own key like any other (CodeRabbit
+    // 4487727422). Assigning it onto a plain object swapped that object's
+    // prototype instead, so the key vanished and its contents leaked in.
+    {
+      label: 'JSON __proto__ filter key',
+      body: {
+        pattern: 'Ledger',
+        sources: ['messages'],
+        filters: JSON.parse('{"__proto__": {"since": "2026-01-01"}}') as Record<string, unknown>,
+      },
+      expect: { reject: 'filters.__proto__', says: [/messages accepts/] },
+    },
+    {
+      label: 'JSON __proto__ filter key carrying a path',
+      body: {
+        pattern: 'Ledger',
+        filters: JSON.parse(
+          '{"__proto__": {"path": "calendar/a@example.com/2026-11-02"}}'
+        ) as Record<string, unknown>,
+      },
+      expect: { reject: 'filters.__proto__', says: [/accepts/] },
+    },
   ];
 }
 
