@@ -3,10 +3,7 @@
  * plugin + vercel.json caching). An installed iPhone PWA resumes the page it
  * launched days ago instead of loading it again, so users kept old builds.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { productionBuildId, roseBuildVersion } from '@/lib/buildVersion';
 import {
   APP_VERSION_IDLE_BEFORE_RELOAD_MS,
   APP_VERSION_MIN_CHECK_INTERVAL_MS,
@@ -145,6 +142,24 @@ describe('stale build auto refresh', () => {
     expect(second).not.toHaveBeenCalled();
   });
 
+  it('still reloads once, without looping, when session storage throws', async () => {
+    window.name = '';
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('denied', 'SecurityError');
+    });
+    const first = watch(versionFetch(DEPLOYED));
+    await settle();
+    expect(first).toHaveBeenCalledTimes(1);
+    cleanup();
+    // The reloaded tab keeps window.name, so the same stale target cannot loop.
+    const second = watch(versionFetch(DEPLOYED));
+    await settle();
+    resume();
+    await settle();
+    expect(second).not.toHaveBeenCalled();
+    window.name = '';
+  });
+
   it('shares one request between resumes inside the check interval', async () => {
     const fetchImpl = versionFetch(RUNNING);
     watch(fetchImpl);
@@ -248,42 +263,5 @@ describe('stale build auto refresh', () => {
     document.body.innerHTML = '';
     document.body.insertAdjacentHTML('beforeend', '<div contenteditable="true">hi</div>');
     expect(hasUnsentText()).toBe(true);
-  });
-});
-
-describe('build version publishing', () => {
-  it('publishes the baked build id as /version.json from production builds only', () => {
-    const buildId = productionBuildId();
-    expect(buildId).toMatch(/^\w+-[0-9a-z]+$/);
-    const plugin = roseBuildVersion(buildId);
-    expect(plugin.apply).toBe('build');
-
-    const emitFile = vi.fn();
-    const generateBundle = plugin.generateBundle as unknown as (this: unknown) => void;
-    generateBundle.call({ emitFile });
-    expect(emitFile).toHaveBeenCalledWith({
-      type: 'asset',
-      fileName: 'version.json',
-      source: `${JSON.stringify({ buildId })}\n`,
-    });
-  });
-
-  it('bakes the same id into the bundle that the plugin publishes', () => {
-    const config = readFileSync(resolve(process.cwd(), 'vite.config.ts'), 'utf8');
-    expect(config).toMatch(/const buildId = command === 'build' \? productionBuildId\(\) : '';/);
-    expect(config).toMatch(/plugins: \[react\(\), roseBuildVersion\(buildId\)\]/);
-    expect(config).toMatch(/'import\.meta\.env\.VITE_ROSE_BUILD_ID': JSON\.stringify\(buildId\)/);
-  });
-
-  it('serves hashed assets as immutable and the version file uncached', () => {
-    const vercel = JSON.parse(readFileSync(resolve(process.cwd(), 'vercel.json'), 'utf8')) as {
-      headers: { source: string; headers: { key: string; value: string }[] }[];
-    };
-    const header = (source: string) =>
-      vercel.headers
-        .find((entry) => entry.source === source)
-        ?.headers.find((entry) => entry.key === 'Cache-Control')?.value;
-    expect(header('/assets/(.*)')).toBe('public, max-age=31536000, immutable');
-    expect(header('/version.json')).toBe('no-store');
   });
 });

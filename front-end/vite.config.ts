@@ -1,7 +1,31 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react-swc';
 import path from 'path';
-import { productionBuildId, roseBuildVersion } from './src/lib/buildVersion';
+
+// Kept in this file: Rose-in-Rose previews and the cloud image build copy
+// vite.config.ts without its neighbours, so it must not import local modules.
+
+/** One id per production build: the deployed commit plus the build time. */
+export function productionBuildId(): string {
+  const commit = process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) || 'local';
+  return `${commit}-${Date.now().toString(36)}`;
+}
+
+/** Publishes the build id as /version.json; open pages poll it to reload onto
+ * a newer deploy (src/lib/appVersion.ts). */
+export function roseBuildVersion(buildId: string): Plugin {
+  return {
+    name: 'rose-build-version',
+    apply: 'build',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'version.json',
+        source: `${JSON.stringify({ buildId })}\n`,
+      });
+    },
+  };
+}
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command }) => {

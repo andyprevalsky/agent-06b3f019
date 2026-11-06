@@ -78,14 +78,18 @@ export async function fetchDeployedBuildId(
   }
 }
 
-/** Reloads at most once per session for `target`, so a lagging CDN cannot loop the page. */
+/** Reloads at most once per session for `target`, so a lagging CDN cannot loop the page
+ * (sessionStorage, else a window.name marker when storage throws). */
 function reloadOnce(target: string, reason: string, reload: () => void): boolean {
   const key = `${RELOAD_GUARD_PREFIX}${target}`;
   try {
     if (window.sessionStorage.getItem(key)) return false;
     window.sessionStorage.setItem(key, String(Date.now()));
   } catch {
-    return false;
+    // Storage disabled or full: window.name also survives a same-tab reload.
+    const marker = `[${key}]`;
+    if (window.name.includes(marker)) return false;
+    window.name += marker;
   }
   console.warn(`[AppVersion] ${reason}; reloading`);
   reload();
