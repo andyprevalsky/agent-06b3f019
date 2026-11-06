@@ -2,6 +2,7 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { subscribeToBus } from '@/lib/realtime';
+import { noteTreeUserMessage } from '@/hooks/useAgentTree';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
 import { defaultProps, makeAgent, mockSession } from './app-sidebar.fixtures';
 import { expandBar, mockProjectsApi, signedInUser, roseBar } from './rose-sidebar.fixtures';
@@ -232,6 +233,85 @@ describe('sidebar agent hierarchy', () => {
     expect(
       [...rows].map((el) => el.dataset.testid!.replace(/^rose-(code-)?agent-row-/, '')),
     ).toEqual(['run-messaged', 'code-run', 'run-old', 'paused', 'done-messaged', 'code-done']);
+  });
+  it('reorders siblings live: a messaged sub-agent and a realtime-spawned child', async () => {
+    mockSession();
+    mockProjectsApi([]);
+    const node = (agent_id: string, parent_agent_id: string | null, created_at: string) => ({
+      agent_id,
+      parent_agent_id,
+      goal: agent_id,
+      status: 'ACTIVE',
+      temporal_workflow_id: parent_agent_id ? null : 'root-wf',
+      progress: 0,
+      tools_in_use: [],
+      message_count: 1,
+      tree_cost_cents: 0,
+      created_at,
+    });
+    server.use(
+      http.get(`${API}/agents/tree`, () =>
+        HttpResponse.json({
+          agents: [
+            { ...node('root', null, '2026-10-21T00:00:00Z'), goal: 'Launch report' },
+            node('old-run', 'root', '2026-10-21T00:01:00Z'),
+            node('new-run', 'root', '2026-10-21T00:02:00Z'),
+          ],
+        }),
+      ),
+      http.get(`${API}/agents/code-agents`, () => HttpResponse.json({ code_agents: [] })),
+    );
+    renderWithProviders(
+      <AppSidebar
+        {...defaultProps({
+          agents: [
+            makeAgent({
+              agent_id: 'root',
+              goal: 'Launch report',
+              status: 'ACTIVE',
+              temporal_workflow_id: 'root-wf',
+            }),
+          ],
+          user: signedInUser(),
+          selectedAgentId: 'root',
+        })}
+      />,
+    );
+    await screen.findByTestId('rose-agent-count-root');
+    expandBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Launch report' }));
+    const order = () =>
+      [
+        ...screen
+          .getByTestId('rose-agent-children-root')
+          .querySelectorAll<HTMLElement>('[data-testid^="rose-agent-row-"]'),
+      ].map((el) => el.dataset.testid!.replace('rose-agent-row-', ''));
+    await waitFor(() => expect(order()).toEqual(['new-run', 'old-run']));
+
+    // The person messages the older sub-agent: it moves up without a refetch.
+    act(() => noteTreeUserMessage('old-run', '2026-10-21T00:10:00Z'));
+    expect(order()).toEqual(['old-run', 'new-run']);
+
+    // A child spawned over realtime has no REST creation time; its event time
+    // makes it the newest running row, not the oldest.
+    const handlers = vi
+      .mocked(subscribeToBus)
+      .mock.calls.filter(([id]) => id === 'root')
+      .at(-1)![1];
+    act(() =>
+      handlers.onAgentStateChanged?.({
+        agentId: 'spawned',
+        parentAgentId: 'root',
+        goal: 'spawned',
+        status: 'ACTIVE',
+        progress: 0,
+        toolsInUse: [],
+        messageCount: 1,
+        costCents: 0,
+        updatedAt: '2026-10-21T00:20:00Z',
+      }),
+    );
+    expect(order()).toEqual(['spawned', 'old-run', 'new-run']);
   });
   it('minimized: shows the actual active subtree count >1 on the robot, hiding child rows', async () => {
     setup();

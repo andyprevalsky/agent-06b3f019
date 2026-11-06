@@ -3,9 +3,12 @@
 -- polled every 10s and must not cost O(agents x messages) per read.
 ALTER TABLE "Agent" ADD COLUMN "lastUserMessageAt" TIMESTAMP(3);
 
--- Backfill the live sidebar roots from their newest USER row that no agent
--- authored (the same metadata flags the write path excludes). Each lookup walks
--- the existing ("agentId", "timestamp") index backwards and stops at the first hit.
+-- Backfill the live sidebar roots (334 in prod on 2026-11-06) from their
+-- newest USER row without an agent-authored flag. Each lookup walks the
+-- ("agentId", "timestamp") index backwards and filters role/metadata per row,
+-- so it reads every newer TOOL/ASSISTANT row of that root; the run is bounded
+-- by the live roots' messages and locks only those root rows. Goal and
+-- attachment rows count (both carry their message's own time).
 UPDATE "Agent" a
 SET "lastUserMessageAt" = (
   SELECT m."timestamp"

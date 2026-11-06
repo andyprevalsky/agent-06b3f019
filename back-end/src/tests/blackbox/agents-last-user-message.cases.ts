@@ -14,10 +14,14 @@ import {
   createAnonymousSession,
   createTestAgent,
   deleteTestAgent,
+  prisma,
+  randomUUID,
   request,
   sleep,
   test,
+  trackedAgentIds,
 } from './agents-blackbox-harness';
+import { recordPersonMessage } from '../../providers/personMessageStamp';
 
 // Read-after-write budget mirrors agents-sidebar-organization.cases.ts.
 const LIST_POLL_ATTEMPTS = 40;
@@ -90,4 +94,37 @@ test('GET / and GET /tree — last_user_message_at tracks person-authored messag
   );
 
   await deleteTestAgent(agentId, userId);
+});
+
+test('recordPersonMessage — moves forward only, keeps updatedAt, never throws', async () => {
+  const session = await createAnonymousSession('stamp-semantics');
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  // Seeded directly: the HTTP create path writes a title asynchronously, which
+  // would move updatedAt on its own and blur the assertion below.
+  await prisma.agent.create({
+    data: { id: agentId, userId: session.user.id, goal: `Stamp ${RUN_ID}`, busId: agentId },
+  });
+  const read = () =>
+    prisma.agent.findUniqueOrThrow({
+      where: { id: agentId },
+      select: { updatedAt: true, lastUserMessageAt: true },
+    });
+  const before = await read();
+  const later = new Date(Date.now() + 60_000);
+
+  await recordPersonMessage({ agentId, timestamp: later });
+  const stamped = await read();
+  assert(stamped.lastUserMessageAt?.getTime() === later.getTime(), 'stamp was not written in UTC');
+  assert(
+    stamped.updatedAt.getTime() === before.updatedAt.getTime(),
+    'the stamp must not move updatedAt (liveness and old-agent collapse read it)'
+  );
+
+  await recordPersonMessage({ agentId, timestamp: new Date(later.getTime() - 30_000) });
+  await recordPersonMessage({ agentId, timestamp: new Date(Number.NaN) }); // logs, never throws
+  const after = await read();
+  assert(after.lastUserMessageAt?.getTime() === later.getTime(), 'stamp moved backwards');
+
+  await prisma.agent.delete({ where: { id: agentId } });
 });

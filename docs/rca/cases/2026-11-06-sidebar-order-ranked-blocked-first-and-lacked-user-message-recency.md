@@ -73,25 +73,33 @@ sub-agent children order" — no prior case; novel.
 ## Solution
 
 - New nullable `Agent.lastUserMessageAt` (migration
-  `20261106120000_agent_last_user_message_at`, backfilled for live roots from the
-  newest USER row without agent-authored flags). `recordPersonMessage`
-  (`providers/personMessageStamp.ts`) stamps it from the three person-authored
-  entry points only: the non-internal POST /:id/messages path,
-  `createUserMessageInTransaction` (attention answers, Browser-composer
-  messages) and SMS supervisor replies. A2A, notifications and compaction rows
-  never stamp it.
+  `20261106120000_agent_last_user_message_at`, backfilled for the 334 live prod
+  roots from the newest USER row without agent-authored flags; measured
+  read-only before deploy). `recordPersonMessage`
+  (`providers/personMessageStamp.ts`) stamps it after the message is committed
+  and delivered, with raw SQL so `Agent.updatedAt` (liveness reconciler,
+  old-agent collapse) does not move, and never throws: a failed stamp is logged
+  and cannot fail, retry or duplicate the delivery. Person-authored entry points
+  only: non-internal POST /:id/messages (incl. Browser-composer messages) unless
+  `personAuthored: false`, attention replies (after commit) and SMS supervisor
+  replies. A2A, notifications, compaction and Slack-relayed error occurrences
+  never stamp it; Slack reviewer feedback does.
 - GET /api/agents and GET /api/agents/tree expose `last_user_message_at`; the
   tree subscription preserves it across realtime updates.
 - One shared rule: `runStateRank` (active 0, needs-help 1, done 2) and
   `lastUserMessageTime` (stamp, else created_at). `sortAgents` keeps pinned on
   top, then uses both; `RoseAgentBranch` sorts sub-agents and code agents
-  together with the same rule. The terminal re-reads the list after a send so
-  the row moves immediately.
+  together with the same rule. After a send the terminal re-reads the root list
+  and patches the live tree node (`noteTreeUserMessage`), so a messaged sub-agent
+  reorders among its siblings at once; a realtime-spawned child sorts by its
+  event time instead of the root's creation.
 - Sibling failures prevented: folders, mobile list and stock sidebar inherit the
   same comparator; any new list reuses `runStateRank`/`lastUserMessageTime`.
 - 10k-agent behavior: one keyed `UPDATE "Agent"` per person message; the list and
   tree read one extra column; no per-poll Message scan, no new channel.
 - Golden reference: not applicable (no approval-gated hunk).
+- Code agents still order by creation inside their run-state tier: code-agent
+  rows carry no person-message time (follow-up).
 
 Post-fix: same FE command 41/41; same backend command 307/307 (and 5
 consecutive passing runs).
@@ -102,6 +110,14 @@ Andy (2026-11-06) specified the order: running agents first in any project,
 folder and sub-agent list, then the most recent user message on top within that
 tier. The implementation consequently moved needs-help below running (it had
 been ranked first); that choice was surfaced to him for confirmation.
+He then asked for `/rca fix` followed by `/deploy`.
+
+The Step 7 adversarial review (agent thread ph7279fqap113m1s0maxxnyt3h8hqrrk)
+rejected the first fix shape: stamping inside the delivery path (a failed
+UPDATE could drop or duplicate a user message), bumping `updatedAt` through
+Prisma `updateMany`, an unmeasured whole-root backfill, sub-agent recency that
+only REST refreshed, and Slack-relayed alerts counting as person messages. All
+were changed before deploy.
 
 ## Reusable lesson
 

@@ -464,6 +464,26 @@ function releaseSubscription(
   unsubscribe(subscription.channel);
 }
 
+/**
+ * The person just messaged `agentId`: move its sidebar recency key in every
+ * live tree that holds it. Only the REST snapshot carries the stamp and
+ * realtime updates keep it, so without this a messaged sub-agent would not
+ * reorder among its siblings until the tree resubscribed.
+ */
+export function noteTreeUserMessage(agentId: string, at: string): void {
+  for (const subscription of busSubscriptions.values()) {
+    const previous = subscription.nodes.get(agentId);
+    if (!previous) continue;
+    if (previous.lastUserMessageAt && Date.parse(previous.lastUserMessageAt) >= Date.parse(at))
+      continue;
+    const next = { ...previous, lastUserMessageAt: at };
+    const nodes = new Map(subscription.nodes);
+    nodes.set(agentId, next);
+    if (subscription.realtimeNodes.has(agentId)) subscription.realtimeNodes.set(agentId, next);
+    publishNodes(subscription, nodes);
+  }
+}
+
 export function listenToAgentTree(
   busId: string,
   listener: (nodes: Map<string, TreeNode>) => void,

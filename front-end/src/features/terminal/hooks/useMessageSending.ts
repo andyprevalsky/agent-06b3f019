@@ -26,6 +26,7 @@ import type { ClientSource } from '@/lib/clientSource';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as amplitude from '@amplitude/analytics-browser';
 
+import { noteTreeUserMessage } from '@/hooks/useAgentTree';
 import { useQueryPreference } from '@/hooks/useQueryPreference';
 import { readQueryPreferences } from '@/lib/queryPreferences';
 import { useToast } from '@/hooks/use-toast';
@@ -322,6 +323,7 @@ export function useMessageSending({
           });
           setMessageInput('');
           // The sidebar orders by the newest user message; re-read it now.
+          noteTreeUserMessage(selectedAgentId, new Date().toISOString());
           void loadAgents();
           return;
         }
@@ -329,8 +331,9 @@ export function useMessageSending({
         // The backend lifts a user pause after delivering the message, so the
         // woken workflow always has it; resuming here first would not.
         // A Browser-composer target goes straight to that browser task.
-        await postMessage(selectedAgentId, messageInput, attachments, target);
+        const posted = await postMessage(selectedAgentId, messageInput, attachments, target);
         setMessageInput('');
+        noteTreeUserMessage(selectedAgentId, posted.timestamp);
         void loadAgents();
         // Only a message to the agent itself lifts its pause.
         if (target === undefined && agentDetail?.status === 'PAUSED') {

@@ -41,7 +41,9 @@ function childAgent(root: Agent, node: TreeNode): Agent {
     status: node.status,
     temporal_workflow_id: null,
     pinned_at: null,
-    created_at: node.createdAt ?? root.created_at,
+    // A realtime-spawned child has no REST creation time yet; its event time is
+    // the closest truth (the root's creation would sort it oldest).
+    created_at: node.createdAt ?? node.updatedAt ?? root.created_at,
     last_user_message_at: node.lastUserMessageAt ?? null,
   };
 }
