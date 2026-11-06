@@ -17,7 +17,7 @@
  * Keyed off metadata (agentMessage / messageType / toolName / waitForMode),
  * never off message text.
  */
-import { isAgentMessageMetadata } from '@/lib/realtime-types';
+import { isAgentMessageMetadata, isAgentNotificationMetadata } from '@/lib/realtime-types';
 import type { Message } from '../../hooks';
 import { codexPayload } from '../../hooks/codexMessage';
 import { waitTarget } from '../waitForPhrase';
@@ -42,6 +42,15 @@ export function isAgentToolRow(message: Message): boolean {
   }
   if (message.role !== 'TOOL') return false;
   return AGENT_TOOLS.has(String(metadata.toolName ?? '')) || isAgentWait(metadata);
+}
+
+/**
+ * USER/ASSISTANT row carrying another agent's message (never a child completion).
+ * Renders as InboundAgentRow and folds into work history like a tool call.
+ */
+export function isInboundAgentMessage(message: Message): boolean {
+  if (message.role !== 'USER' && message.role !== 'ASSISTANT') return false;
+  return !isAgentNotificationMetadata(message.metadata) && isAgentMessageMetadata(message.metadata);
 }
 
 /** wait_for in agents mode (wait on other agents rather than time/condition). */
