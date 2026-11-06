@@ -2860,6 +2860,27 @@ warm_source_machine_creation_admission() {
     echo "❌ warm-source capacity gap: reuse an existing owned warm Machine; new Machine creation is withheld without measured admission" >&2
     return 78
 }
+# Bind the activated image to the manifests it was built from, so fleets can
+# prove that fresh REAL primaries (which copy deps from the image's baked /app)
+# will match their checkout. Only an image this process built from
+# IMAGE_BUILD_CONTEXT has known /app manifests; a prebuilt WARM_IMAGE_REF stays
+# unproven, and fresh fleets then restore the proven snapshot instead.
+publish_warm_image_deps_proof() {  # <warm-machine-id>
+    local machine_id="$1" node_fp py_fp
+    if [ -n "${WARM_IMAGE_REF:-}" ]; then
+        echo "   prebuilt image: no dependency proof published (fresh fleets restore the proven snapshot)"
+        return 0
+    fi
+    node_fp="$(cloudbench_node_dependency_fingerprint "$IMAGE_BUILD_CONTEXT")" || node_fp=""
+    py_fp="$(cloudbench_manifest_fingerprint "$IMAGE_BUILD_CONTEXT" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || py_fp=""
+    if [ -n "$node_fp" ] && [ -n "$py_fp" ] \
+        && cloudbench_publish_warm_image_deps "$APP" "$machine_id" "$IMAGE_REF" "$node_fp" "$py_fp"; then
+        echo "🧾 published warm image dependency proof for $IMAGE_REF (node ${node_fp:0:12}, python ${py_fp:0:12})"
+    else
+        echo "⚠️  could not publish the warm image dependency proof; fresh fleets will restore the proven snapshot" >&2
+    fi
+    return 0
+}
 if [ "$MODE" = "setup" ]; then
     echo "═══ run-bench-cloud --setup ═══"
     echo "app=$APP region=$REGION machine=$MACHINE_NAME volume=$VOLUME_NAME vm=$VM_SIZE/${VM_MEMORY}MB volume_size=${VOLUME_SIZE}GB"
@@ -2908,6 +2929,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
             exit 1
         }
         echo "✅ Persistent machine already exists: $mid (image refreshed)"
+        publish_warm_image_deps_proof "$mid"
     else
         echo "🖥️  Creating persistent machine $MACHINE_NAME ($VM_SIZE / ${VM_MEMORY}MB, volume→/data) ..."
         warm_source_machine_creation_admission || exit $?
@@ -2926,6 +2948,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
         [ -z "$mid" ] && mid="$(resolve_machine_id)"
         [ -z "$mid" ] && { echo "❌ Failed to create the persistent machine"; exit 1; }
         echo "✅ Machine: $mid"
+        publish_warm_image_deps_proof "$mid"
     fi
     write_state "$mid"
 

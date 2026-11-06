@@ -19457,6 +19457,130 @@ def test_fresh_controller_reuses_only_proven_donor_dependencies(tmp_path: Path, 
         assert "SNAP_AFTER=snap-transaction" in result.stdout
 
 
+_IMAGE_NODE, _IMAGE_PY = "1" * 64, "2" * 64
+_DONOR_IMAGE = "registry.fly.io/bench-app:cloudbench-warm-main"
+
+
+def _fresh_image_admission_harness(tmp_path: Path, *, metadata: str | None, image: str, requested: bool):
+    """Drive the controller's storage decision after warm_deps_preflight proved the snapshot."""
+    fleet = fleet_source_text()
+    helpers = _extract_fleet_function(fleet, "primary_clone_storage_mode() {")
+    if "fresh_image_deps_admission() {" in fleet:
+        helpers += _extract_fleet_function(fleet, "fresh_image_deps_admission() {")
+    config: dict = {"image": image, "mounts": [{"volume": "vol_warm"}], "metadata": {}}
+    if metadata is not None:
+        config["metadata"]["rose_cloudbench_image_deps"] = metadata
+    inventory = [{"id": "other-machine", "config": {"image": "registry.fly.io/bench-app:other"}},
+                 {"id": "warm-machine", "config": config}]
+    script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+is_sim_on() {{ return 1; }}
+{helpers}
+BENCHES=(real-task sim-task)
+CATALOG_MODES=(real simulate)
+FRESH_VOLUMES=1
+FRESH_VOLUMES_REQUESTED={1 if requested else 0}
+PRIVATE_SOURCE_FILE=""
+WARM_ID=warm-machine
+SNAP_ID=snap-proven
+CURRENT_NODE_FP={_IMAGE_NODE}
+CURRENT_PY_FP={_IMAGE_PY}
+warm_json={shlex.quote(json.dumps(inventory))}
+status=0
+if declare -F fresh_image_deps_admission >/dev/null; then fresh_image_deps_admission || status=$?; fi
+echo "ADMISSION=$status"
+echo "REAL=$(primary_clone_storage_mode real-task) SIM=$(primary_clone_storage_mode sim-task) EXPORTED=${{CLOUDBENCH_FRESH_VOLUMES:-unset}}"
+"""
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                          env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+
+
+@pytest.mark.parametrize(
+    "scenario", ["proven", "digest-resolved", "foreign-image", "unproven", "stale-image", "explicit-fresh"]
+)
+def test_fresh_real_primaries_require_an_image_dependency_proof(tmp_path: Path, scenario: str) -> None:
+    """Descend I-01 (2026-11-06): another owner activated a warm image whose baked /app
+    dependencies were built from a different branch. warm_deps_preflight proved only the
+    snapshot, the fleet admitted fresh REAL primaries, and every guest died ~8 minutes later
+    with "warm image/volume JavaScript dependencies do not match the checked-out ref"."""
+    proof = f"{_DONOR_IMAGE} {_IMAGE_NODE} {_IMAGE_PY}"
+    image = _DONOR_IMAGE
+    metadata: str | None = proof
+    if scenario == "digest-resolved":
+        image = _DONOR_IMAGE + "@sha256:" + "a" * 64
+    elif scenario in {"foreign-image", "explicit-fresh"}:
+        metadata = f"{_DONOR_IMAGE} {'3' * 64} {_IMAGE_PY}"
+    elif scenario == "unproven":
+        metadata = None
+    elif scenario == "stale-image":
+        image = "registry.fly.io/bench-app:cloudbench-warm-other-owner"
+    result = _fresh_image_admission_harness(tmp_path, metadata=metadata, image=image,
+                                            requested=scenario == "explicit-fresh")
+    out = result.stdout + result.stderr
+    if scenario in {"proven", "digest-resolved"}:
+        assert "ADMISSION=0" in out and "REAL=fresh SIM=snapshot" in out, out
+        assert "keep fresh volumes" in out
+    elif scenario == "explicit-fresh":
+        assert "ADMISSION=1" in out, out
+        assert "Refusing allocation" in out
+    else:
+        assert "ADMISSION=0" in out, out
+        assert "REAL=snapshot SIM=snapshot EXPORTED=0" in out, (
+            "fresh REAL primaries were admitted against an unproven warm image; guests FATAL in dep_sync\n" + out
+        )
+        assert "restore proven snapshot snap-proven" in out
+
+
+def test_setup_publishes_the_built_image_dependency_proof(tmp_path: Path) -> None:
+    """The proof --setup publishes is exactly what fresh admission accepts for that image."""
+    cloud = CLOUD_SCRIPT.read_text()
+    helper = _extract_fleet_function(cloud, "publish_warm_image_deps_proof() {")
+    context = tmp_path / "context"
+    for relative, body in {
+        "package.json": '{"name": "root", "workspaces": ["back-end", "front-end"]}',
+        "back-end/package.json": '{"dependencies": {"express": "4"}}',
+        "back-end/package-lock.json": '{"lockfileVersion": 3}',
+        "front-end/package.json": '{"dependencies": {"react": "19"}}',
+        "front-end/package-lock.json": '{"lockfileVersion": 3}',
+        "agents/requirements.txt": "temporalio==1.0\n",
+    }.items():
+        (context / relative).parent.mkdir(parents=True, exist_ok=True)
+        (context / relative).write_text(body)
+    calls = tmp_path / "calls"
+    script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+cloudbench_publish_warm_image_deps() {{ printf '%s\\n' "$*" >> {shlex.quote(str(calls))}; }}
+{helper}
+APP=bench-app
+IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}
+IMAGE_REF={_DONOR_IMAGE}
+WARM_IMAGE_REF="${{PREBUILT:-}}"
+publish_warm_image_deps_proof warm-machine
+node=$(cloudbench_node_dependency_fingerprint "$IMAGE_BUILD_CONTEXT")
+py=$(cloudbench_manifest_fingerprint "$IMAGE_BUILD_CONTEXT" "${{CLOUDBENCH_PYTHON_MANIFESTS[@]}}")
+echo "EXPECTED=bench-app warm-machine $IMAGE_REF $node $py"
+"""
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path)}
+    built = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, env=env)
+    assert built.returncode == 0, built.stdout + built.stderr
+    expected = next(line for line in built.stdout.splitlines() if line.startswith("EXPECTED="))
+    published = calls.read_text().splitlines()
+    assert published == [expected.removeprefix("EXPECTED=")]
+    _, machine, image, node, python = published[0].split()
+    inventory = json.dumps([{"id": machine, "config": {"image": image + "@sha256:" + "b" * 64,
+                                                       "metadata": {"rose_cloudbench_image_deps": f"{image} {node} {python}"}}}])
+    matched = subprocess.run(
+        ["bash", "-c", f"source {shlex.quote(str(ENV_HELPER_SCRIPT))}; cloudbench_warm_image_deps_match {machine} {node} {python}"],
+        input=inventory, capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert matched.returncode == 0, matched.stdout + matched.stderr
+    calls.write_text("")
+    prebuilt = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                              env={**env, "PREBUILT": "registry.fly.io/bench-app:prebuilt"})
+    assert prebuilt.returncode == 0, prebuilt.stdout + prebuilt.stderr
+    assert calls.read_text() == "", "a prebuilt image of unknown provenance must stay unproven"
+
+
 @pytest.mark.parametrize("publish_status", [0, 1])
 def test_verified_legacy_snapshot_is_shared_without_rebuild_or_run_rejection(
     tmp_path: Path, publish_status: int

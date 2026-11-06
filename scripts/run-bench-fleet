@@ -16473,7 +16473,36 @@ warm_deps_preflight() {
     echo "❌ central dep refresh failed; refusing to provision task machines" >&2
     return 1
 }
+# Fresh REAL primaries boot the donor's CURRENT image and take dependency trees
+# from its baked /app; warm_deps_preflight above proves only the snapshot. Keep
+# fresh volumes only when that exact image carries a dependency proof for this
+# checkout. Otherwise REAL primaries restore the snapshot just proven, or an
+# explicit fresh-only request is refused before allocation. Without this, every
+# guest of a fleet admitted against another owner's image FATALs in dep_sync.
+fresh_image_deps_admission() {
+    [ "${FRESH_VOLUMES:-0}" = 1 ] || return 0
+    [ -z "${PRIVATE_SOURCE_FILE:-}" ] || return 0
+    local image="unknown"
+    if [ -n "${CURRENT_NODE_FP:-}" ] && [ -n "${CURRENT_PY_FP:-}" ]; then
+        if image="$(printf '%s' "${warm_json:-[]}" \
+            | cloudbench_warm_image_deps_match "$WARM_ID" "$CURRENT_NODE_FP" "$CURRENT_PY_FP")"; then
+            echo "✅ warm image dependency proof matches the current ref; REAL primaries keep fresh volumes"
+            return 0
+        fi
+    fi
+    if [ "${FRESH_VOLUMES_REQUESTED:-0}" = 1 ] \
+        || [ "${CLOUDBENCH_FRESH_TARGET_REGION+x}" = x ] \
+        || [ "${CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE+x}" = x ]; then
+        echo "❌ fresh volumes were explicitly required, but warm image ${image:-unknown} has no dependency proof for this checkout's manifests; guests would FATAL in dep_sync. Refusing allocation." >&2
+        echo "   rebuild/activate the image from this checkout (bash scripts/run-bench-cloud --setup) or drop the fresh-only request" >&2
+        return 1
+    fi
+    FRESH_VOLUMES=0
+    export CLOUDBENCH_FRESH_VOLUMES=0
+    echo "🧊 warm image ${image:-unknown} has no dependency proof for this checkout's manifests; REAL primaries restore proven snapshot $SNAP_ID instead of fresh volumes"
+}
 warm_deps_preflight || exit 1
+fresh_image_deps_admission || exit 1
 fresh_target_region_bind_destination || exit 1
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
 

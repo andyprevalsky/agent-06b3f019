@@ -2471,15 +2471,13 @@ cloudbench_warm_deps_metadata_key() {
   python3 -c 'import hashlib,sys; print("rose_cloudbench_deps_" + hashlib.sha256((sys.argv[1] + "\0" + sys.argv[2]).encode()).hexdigest()[:32])' "$1" "$2"
 }
 
-cloudbench_publish_warm_deps_state() {
-  local key
-  key="$(cloudbench_warm_deps_metadata_key "$4" "$5")" || return 1
+cloudbench_publish_machine_metadata() {  # <app> <machine-id> <key> <value>
   # The metadata-only endpoint does not update, start, or restart a Machine.
   # Auth stays in the process environment, never in argv or output.
   python3 -c '
 import json, os, shutil, subprocess, sys, urllib.error, urllib.parse, urllib.request
 
-app, machine, volume, node, python, epoch, snapshot, key = sys.argv[1:]
+app, machine, key, value = sys.argv[1:]
 token = os.environ.get("FLY_API_TOKEN", "")
 if not token:
     raise SystemExit(1)
@@ -2523,14 +2521,61 @@ if endpoint.scheme != "https" and not (
 ):
     raise SystemExit(1)
 path = "/v1/apps/{}/machines/{}/metadata/{}".format(*(urllib.parse.quote(part, safe="") for part in (app, machine, key)))
-value = " ".join((node, python, epoch, snapshot, volume, machine, app))
 request = urllib.request.Request(host + path, data=json.dumps({"value": value}).encode(), method="POST", headers={"Authorization": scheme + " " + token, "Content-Type": "application/json"})
 try:
     with urllib.request.urlopen(request, timeout=60) as response:
         raise SystemExit(0 if response.status == 204 else 1)
 except (urllib.error.URLError, OSError, ValueError):
     raise SystemExit(1)
-' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$key"
+' "$1" "$2" "$3" "$4"
+}
+
+cloudbench_publish_warm_deps_state() {
+  local key
+  key="$(cloudbench_warm_deps_metadata_key "$4" "$5")" || return 1
+  cloudbench_publish_machine_metadata "$1" "$2" "$key" "$4 $5 $6 $7 $3 $2 $1"
+}
+
+# Fresh REAL primaries clone the donor and boot its CURRENT image, whose baked
+# /app supplies their dependency trees (cloudbench-sync-deps.sh); the proven
+# snapshot is not on that path. An image proof binds the exact activated image
+# to the manifest fingerprints of the build context it was built from. Images
+# activated without a proof (prebuilt refs, other tooling) stay unproven.
+CLOUDBENCH_WARM_IMAGE_DEPS_KEY=rose_cloudbench_image_deps
+
+cloudbench_publish_warm_image_deps() {  # <app> <machine-id> <image-ref> <node-fp> <python-fp>
+  cloudbench_publish_machine_metadata "$1" "$2" "$CLOUDBENCH_WARM_IMAGE_DEPS_KEY" "$3 $4 $5"
+}
+
+# stdin: `machines list --json`. Prints the donor's current image; exits 0 only
+# when its image proof names that exact image and these fingerprints.
+cloudbench_warm_image_deps_match() {  # <machine-id> <node-fp> <python-fp>
+  python3 -c '
+import json, re, sys
+
+machine_id, node, python, key = sys.argv[1:]
+image = ""
+try:
+    machines = [m for m in json.load(sys.stdin) if isinstance(m, dict) and m.get("id") == machine_id]
+    if len(machines) != 1:
+        raise ValueError("ambiguous donor")
+    config = machines[0].get("config") or {}
+    image = config.get("image") if isinstance(config.get("image"), str) else ""
+    print(image or "unknown")
+    fields = str((config.get("metadata") or {}).get(key, "")).split()
+    if not image or len(fields) != 3 or fields[1:] != [node, python]:
+        raise ValueError("unproven image dependencies")
+    if not all(re.fullmatch(r"[0-9a-f]{64}", fp) for fp in fields[1:]):
+        raise ValueError("invalid fingerprints")
+    proven = fields[0]
+    # Same rule as activation: a digest-pinned proof must match exactly; a tag
+    # proof matches the tag the provider resolved to a digest.
+    if image == proven or ("@" not in proven and image.split("@", 1)[0] == proven):
+        raise SystemExit(0)
+except (TypeError, ValueError, AttributeError):
+    pass
+raise SystemExit(1)
+' "$1" "$2" "$3" "$CLOUDBENCH_WARM_IMAGE_DEPS_KEY"
 }
 
 cloudbench_warm_deps_state_from_inventory() {
