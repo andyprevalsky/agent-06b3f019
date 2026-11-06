@@ -35,6 +35,8 @@ jobs:
           persist-credentials: false
 
       - name: Read gate request
+        env:
+          DEPLOY_GATE_FETCH_TOKEN: ${{ github.token }}
         run: python3 scripts/deploy_test_github.py remote-extract --ref "$GITHUB_REF" --out "$RUNNER_TEMP/gate"
 
       - uses: actions/setup-node@v4

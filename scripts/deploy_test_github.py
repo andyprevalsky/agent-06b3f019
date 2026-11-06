@@ -41,6 +41,7 @@ WORKFLOW = 'deploy-gates.yml'
 WORKFLOW_PATH = '.github/workflows/' + WORKFLOW
 TAG_PREFIX = 'deploy-gates'
 ARTIFACT = 'deploy-gate-result'
+REQUEST_REF = 'refs/deploy-gate/request'
 REMOTE_ROOT = '/home/runner/_work/rose/rose'
 RUNNER = re.compile(r'^blacksmith-(2|4|8|16|32)vcpu-ubuntu-2404$')
 WORKER_SCRIPTS = ('deploy_test_worker.py', 'deploy_test_backend.py')
@@ -399,8 +400,12 @@ def remote_extract(args) -> int:
     name = args.ref.removeprefix('refs/tags/')
     if not name.startswith(TAG_PREFIX + '/'):
         raise SystemExit('not a deploy-gates tag')
-    raw = subprocess.run(['git', 'cat-file', 'tag', f'refs/tags/{name}'], cwd=root, check=True,
-                         capture_output=True).stdout
+    # actions/checkout re-points refs/tags/<name> at the commit; fetch the annotated tag object itself.
+    import base64
+    basic = base64.b64encode(f"x-access-token:{os.environ['DEPLOY_GATE_FETCH_TOKEN']}".encode()).decode()
+    subprocess.run(['git', '-c', f'http.extraheader=AUTHORIZATION: basic {basic}', 'fetch', '--quiet', '--no-tags',
+                    'origin', f'+refs/tags/{name}:{REQUEST_REF}'], cwd=root, check=True, capture_output=True)
+    raw = subprocess.run(['git', 'cat-file', 'tag', REQUEST_REF], cwd=root, check=True, capture_output=True).stdout
     fields, message = parse_tag(raw)
     body = json.loads(message)
     request = body['request']
