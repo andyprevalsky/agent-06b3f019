@@ -1073,6 +1073,7 @@ their assertions or test counts:
 `python3 scripts/tests/deploy-cli.test.py`,
 `python3 scripts/tests/deploy-gates.test.py`,
 `python3 scripts/tests/deploy-test-github.test.py`,
+`python3 scripts/tests/deploy-cloud-smoke-speed.test.py`,
 `python3 scripts/tests/deploy-prod.test.py`,
 `python3 scripts/tests/benchmark-history-latest-only.test.py`,
 `python3 scripts/tests/cloudbench-full-selection.test.py`,
