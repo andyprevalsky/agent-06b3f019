@@ -3960,7 +3960,12 @@ class RelayStartupEvidence(unittest.TestCase):
                    'attempts':[{'results':[receipt]}],
                    'failures':[{'id':'original-failure','gate':'smoke','check':'smoke/browser-smoke',
                                 'native_result':'UNVERIFIED','complete':False}]}
-            self.native.reconcile(state,'original-failure',proof)
+            occurrence='original-failure'
+            if getattr(self,'stale_operation',False):
+                state.update(phase='stale',source=receipt['source'],failures=[])
+                state['attempts'][-1]['stale']=True
+                occurrence=receipt['token']
+            self.native.reconcile(state,occurrence,proof)
             return next(iter(state['reconciled_owners'].values()))
 
     def test_native_adapter_requests_owned_supervision(self):
@@ -4008,6 +4013,19 @@ class RelayStartupEvidence(unittest.TestCase):
             self.validate_fixture(receipt,owner,proof)
         (inventory/'stop').write_bytes(b'');producer.write_bytes(b'unsupported publisher');self.reseal()
         with self.assertRaisesRegex(ValueError,'publisher removal contract'):
+            self.validate_fixture(receipt,owner,proof)
+
+    def test_stale_full_attempt_reconciles_exact_startup_operation_without_credit(self):
+        receipt,owner,proof=self.fixture();self.stale_operation=True
+        receipt['executed']=True
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        import hashlib
+        proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(result['occurrence'],receipt['token'])
+        proof['request_token']='foreign'
+        with self.assertRaisesRegex(ValueError,'stale operation identity'):
             self.validate_fixture(receipt,owner,proof)
 
     def test_original_fly_logs_allow_only_absent_same_boot_startup_agent(self):

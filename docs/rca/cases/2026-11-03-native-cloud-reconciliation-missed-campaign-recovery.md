@@ -201,3 +201,16 @@ it returned `credit_granted=false`. The independent reviewer found no remaining
 blocking defect in the exact startup/removed-owner scope. Full smoke success and
 production verification remain separate deploy obligations; this recurrence does
 not close the older six unresolved owners or upgrade historical test results.
+
+
+The first snapshot's healthy gates all passed, but integrating current main and
+this prerequisite before their isolated workers finished correctly made the
+coordinator attempt STALE. That boundary retains native receipts without
+promoting its live failure IDs into triage. The public reconcile entrypoint
+therefore still refused the exact cleanup proof as requiring an interrupted
+token. The same startup-only verifier now also admits the unique latest exact
+operation token at quiescent STALE, requiring the original frozen source,
+executed/incomplete UNVERIFIED receipt and no running/live/cancelled work. It
+replays the full unchanged proof and grants no credit. An eighth registered
+causal test fails before and passes after; the complete owning cycle suite
+passes 161 tests. Independent review found no blocker in this bounded branch.

@@ -843,12 +843,26 @@ def renew_isolated_validation(state, request_token, proof):
 
 
 def reconcile(state, occurrence_id, proof):
-    from deploy_test_cycle import latest_receipts, receipt_owner, interrupted_receipt
+    from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
         if failure is None and state.get('phase') == 'triage' and proof.get('purpose') == 'isolated-validation':
             return renew_isolated_validation(state, occurrence_id, proof)
-        interrupted = interrupted_receipt(state, occurrence_id) if failure is None else None
+        if failure is None and state.get('phase') == 'stale':
+            # A source refresh can finish a full attempt before its failures are
+            # promoted to triage. Its retained owner still requires exact proof.
+            need(not state.get('running') and 'live_failures' not in state and not CANCEL.is_set()
+                 and state.get('attempts') and state['attempts'][-1].get('stale') is True
+                 and proof.get('layout') == 'campaign-startup-v1', 'quiescent stale startup required')
+            candidates = [r for r in latest_receipts(state).values()
+                          if r.get('token') == occurrence_id]
+            need(len(candidates) == 1, 'stale operation identity')
+            interrupted = candidates[0]
+            need(interrupted.get('source') == state.get('source') and interrupted.get('complete') is False
+                 and interrupted.get('executed') is True and 'UNVERIFIED' in interrupted.get('cases', {}).values()
+                 and proof.get('request_token') == occurrence_id, 'stale operation identity')
+        else:
+            interrupted = interrupted_receipt(state, occurrence_id) if failure is None else None
         gate = interrupted['gate'] if interrupted is not None else failure['gate']
         need(any(g['name'] == gate and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
         receipt = latest_receipts(state)[gate]
