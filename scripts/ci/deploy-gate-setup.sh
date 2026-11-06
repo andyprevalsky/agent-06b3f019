@@ -21,10 +21,20 @@ fi
 
 step "env files"
 [ -n "${DEPLOY_GATE_ENV_BUNDLE:-}" ] || { echo "DEPLOY_GATE_ENV_BUNDLE secret is missing" >&2; exit 1; }
-( umask 077 && printf %s "$DEPLOY_GATE_ENV_BUNDLE" | base64 -d | tar -xz -C "$ROOT" )
+# Unpacked outside the checkout: anything untracked inside it would change the frozen source digest.
+bundle="$(mktemp -d)"
+( umask 077 && printf %s "$DEPLOY_GATE_ENV_BUNDLE" | base64 -d | tar -xz -C "$bundle" )
+for f in agents/.env back-end/.env front-end/.env agents/.env.benchmark-temporal; do
+  [ -f "$bundle/$f" ] && install -m 0600 "$bundle/$f" "$ROOT/$f"
+done
 for f in agents/.env back-end/.env front-end/.env; do
   [ -s "$f" ] || { echo "env bundle lacks $f" >&2; exit 1; }
 done
+# The devbox's ngrok agent config (authtoken + API key) for run.sh's public tunnel.
+if [ -f "$bundle/ngrok/ngrok.yml" ]; then
+  install -D -m 0600 "$bundle/ngrok/ngrok.yml" "$HOME/.config/ngrok/ngrok.yml"
+fi
+rm -rf "$bundle"
 
 step "git identity"
 git config --global user.name "Rose Deploy Gate"
@@ -56,6 +66,17 @@ for attempt in 1 2 3; do
 done
 [ -x "$HOME/.fly/bin/flyctl" ] || command -v flyctl >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
+
+step "tunnel tools"
+# run.sh needs ngrok (configured from the bundle) and cloudflared for its account-less fallback;
+# the cloud benchmark lock needs shlock. Same installers as scripts/cloud-init.sh.
+sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null
+if ! command -v cloudflared >/dev/null; then
+  tmp="$(mktemp)"
+  curl -fsSL --retry 3 -o "$tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+  sudo install -m 0755 "$tmp" /usr/local/bin/cloudflared && rm -f "$tmp"
+fi
+command -v shlock >/dev/null || sudo install -m 0755 scripts/lib/shlock /usr/local/bin/shlock
 
 step "dependency disk"
 sudo chown "$(id -u):$(id -g)" "$DEPS"
