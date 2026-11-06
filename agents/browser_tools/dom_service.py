@@ -1225,24 +1225,6 @@ class DOMService:
         """Back-compat: map boolean solving onto chip phase."""
         await self.set_captcha_indicator_phase("solving" if solving else "idle")
 
-    async def probe_captcha_widgets_present(self) -> bool:
-        """Kernel has no in-flight solver flag — probe challenge widgets via CDP."""
-        try:
-            from browser_tools.captcha_solve_indicator import CAPTCHA_WIDGET_PRESENT_SCRIPT
-
-            target_id = self._session.agent_focus_target_id if self._session else None
-            if not target_id:
-                return False
-            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
-            result = await cdp_session.cdp_client.send.Runtime.evaluate(
-                params={"expression": CAPTCHA_WIDGET_PRESENT_SCRIPT, "returnByValue": True},
-                session_id=cdp_session.session_id,
-            )
-            value = (result or {}).get("result", {}).get("value")
-            return value is True
-        except Exception:
-            return False
-
     def start_captcha_telemetry_indicator(
         self,
         poll_phase,
