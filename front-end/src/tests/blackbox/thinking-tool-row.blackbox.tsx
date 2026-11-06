@@ -378,8 +378,8 @@ describe('benchmark check (C21): rows are checked when they exist, required only
     it('reports, never fails, a Codex thought whose session-scoped window spans a tool run', () => {
       const codex = [
         start,
-        usage('s1', 1, 1, 1000, 'session'),
-        tool('run', 2, 2),
+        tool('run', 1, 2), // created during the response that ends at s1, finished after it
+        usage('s1', 2, 1, 1000, 'session'),
         thinking('th', 3, 2.5),
         usage('s2', 4, 3, 1100, 'session'),
       ];
@@ -482,16 +482,18 @@ describe('Codex session-scoped counters bracket a thought only over generation',
       thought('before-any-sample', 1, 0.5), // no earlier sample: no baseline to bracket from
       usage('u1', 2, 1, 1000), // a resumed session: its first sample is not "tokens since 0"
       thought('clean-window', 3, 2.5),
-      usage('u2', 4, 3, 1100), // (1s, 3s]: 100 tokens in 2s, no tool finished inside
       {
+        // Created while the response that ends at u2 streamed (Codex runs a response's
+        // tools after it completes); it finishes after u2, inside the next window.
         id: 'run',
-        seq: 5,
+        seq: 4,
         type: 'tool',
         ts: second(4),
         tool: { name: 'Bash', target: 'git status', result: { status: 'ok', exit_code: 0 } },
       },
+      usage('u2', 5, 3, 1100), // (1s, 3s]: 100 tokens in 2s, no tool finished inside
       thought('window-with-a-tool', 6, 4.5),
-      usage('u3', 7, 6, 1200), // (3s, 6s] contains the finished tool run: not generation
+      usage('u3', 7, 6, 1200), // (3s, 6s]: a tool created before it finished inside: not generation
     ];
     const entries = buildCodeSession({
       messages: [
