@@ -46,9 +46,17 @@ let signalCount = 0;
 let limit = 100;
 let status = 'COST_LIMIT_REACHED';
 let workflowId: string | null = 'synthetic-workflow';
+let committedStatus: string | undefined;
+let committedWorkflowId: string | null | undefined;
+let signalWorkflow: string | undefined;
+let scopeEntries = 0;
+let queryCalls = 0;
+let ambiguousCommit = false;
 async function testBudgetCommitReportsOnlyAcknowledgedResume(): Promise<void> {
   const { commitIncreaseBudget } =
     await import('../../providers/smsSupervisor/supervisorTools.budget');
+  committedStatus = undefined;
+  committedWorkflowId = undefined;
   for (const outcome of ['failed', 'missing', 'accepted', 'active']) {
     signalFails = outcome === 'failed';
     workflowId = outcome === 'missing' ? null : 'synthetic-workflow';
@@ -69,9 +77,72 @@ async function testBudgetCommitReportsOnlyAcknowledgedResume(): Promise<void> {
   }
 }
 
+async function testCommittedStateControlsResume(
+  beforeStatus: string,
+  afterStatus: string,
+  afterWorkflow: string | null
+): Promise<void> {
+  status = beforeStatus;
+  workflowId = 'old-workflow';
+  committedStatus = afterStatus;
+  committedWorkflowId = afterWorkflow;
+  signalCount = 0;
+  signalWorkflow = undefined;
+  signalFails = false;
+  limit = 100;
+  const { commitIncreaseBudget } =
+    await import('../../providers/smsSupervisor/supervisorTools.budget');
+  const result = await commitIncreaseBudget({
+    kind: 'increase_budget',
+    agentId: 'synthetic-agent',
+    args: { agent_id_or_prefix: 'synthetic', amount_dollars: 2 },
+  });
+  assert.equal(result.success, true);
+  assert.equal(limit, 300);
+  assert.match(result.result, /\$3\.00/);
+  const shouldSignal = afterStatus === 'COST_LIMIT_REACHED' && afterWorkflow !== null;
+  assert.equal(signalCount, shouldSignal ? 1 : 0);
+  assert.equal(signalWorkflow, shouldSignal ? afterWorkflow : undefined);
+  assert.equal(result.result.includes('agent resuming'), shouldSignal);
+  if (afterStatus === 'COST_LIMIT_REACHED' && !afterWorkflow)
+    assert.match(result.result, /not resumed/);
+}
+
+async function testAmbiguousCommitDoesNotSignalOrAutomaticallyReplay(): Promise<void> {
+  status = 'COST_LIMIT_REACHED';
+  workflowId = 'synthetic-workflow';
+  committedStatus = undefined;
+  committedWorkflowId = undefined;
+  signalCount = scopeEntries = queryCalls = 0;
+  limit = 100;
+  ambiguousCommit = true;
+  const { commitIncreaseBudget } =
+    await import('../../providers/smsSupervisor/supervisorTools.budget');
+  try {
+    await assert.rejects(
+      commitIncreaseBudget({
+        kind: 'increase_budget',
+        agentId: 'synthetic-agent',
+        args: { agent_id_or_prefix: 'synthetic', amount_dollars: 2 },
+      }),
+      /synthetic ambiguous commit/
+    );
+    assert.equal(scopeEntries, 1, 'non-idempotent update must opt out of automatic query replay');
+    assert.equal(queryCalls, 1);
+    assert.equal(limit, 300);
+    assert.equal(signalCount, 0, 'uncertain update must not claim resumed');
+  } finally {
+    ambiguousCommit = false;
+  }
+}
+
 async function main(): Promise<void> {
   await mock.module('../../providers/database', {
     namedExports: {
+      withoutQueryRetry: async <T>(operation: () => Promise<T>): Promise<T> => {
+        scopeEntries++;
+        return await operation();
+      },
       prisma: {
         agent: {
           findFirst: async () => ({
@@ -84,8 +155,18 @@ async function main(): Promise<void> {
           }),
         },
         $queryRaw: async () => {
+          queryCalls++;
           limit += 200;
-          return [{ priceLimitCents: limit }];
+          if (ambiguousCommit)
+            throw Object.assign(new Error('synthetic ambiguous commit'), { code: 'P1017' });
+          return [
+            {
+              priceLimitCents: limit,
+              status: committedStatus ?? status,
+              temporalWorkflowId:
+                committedWorkflowId === undefined ? workflowId : committedWorkflowId,
+            },
+          ];
         },
       },
     },
@@ -94,12 +175,15 @@ async function main(): Promise<void> {
     namedExports: {
       getTemporalClient: async () => ({
         workflow: {
-          getHandle: () => ({
-            signal: async () => {
-              signalCount++;
-              if (signalFails) throw Error('synthetic signal outage');
-            },
-          }),
+          getHandle: (id: string) => {
+            signalWorkflow = id;
+            return {
+              signal: async () => {
+                signalCount++;
+                if (signalFails) throw Error('synthetic signal outage');
+              },
+            };
+          },
         },
       }),
     },
@@ -107,6 +191,22 @@ async function main(): Promise<void> {
 
   const cases: Array<{ name: string; fn: () => Promise<void> }> = [
     { name: 'purchase-scale budget_dollars rejected', fn: testPurchaseScaleBudgetRejected },
+    {
+      name: 'committed transition to cost limit uses current workflow',
+      fn: () => testCommittedStateControlsResume('ACTIVE', 'COST_LIMIT_REACHED', 'new-workflow'),
+    },
+    {
+      name: 'committed active status does not signal stale paused workflow',
+      fn: () => testCommittedStateControlsResume('COST_LIMIT_REACHED', 'ACTIVE', 'new-workflow'),
+    },
+    {
+      name: 'committed missing workflow truthfully reports not resumed',
+      fn: () => testCommittedStateControlsResume('ACTIVE', 'COST_LIMIT_REACHED', null),
+    },
+    {
+      name: 'ambiguous committed update opts out and never signals',
+      fn: testAmbiguousCommitDoesNotSignalOrAutomaticallyReplay,
+    },
     { name: 'agent-run budget_dollars accepted', fn: testAgentRunBudgetAccepted },
     {
       name: 'committed budget truthfully reports resume outcome',

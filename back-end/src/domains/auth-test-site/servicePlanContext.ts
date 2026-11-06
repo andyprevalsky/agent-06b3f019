@@ -32,6 +32,7 @@ export async function resolvePlanContext(
       !permitted(user) ||
       user?.phone === null ||
       user?.phone === undefined ||
+      user.phone.trim() === '' ||
       device?.enabled !== true ||
       device.providerDeviceId === ''
     )

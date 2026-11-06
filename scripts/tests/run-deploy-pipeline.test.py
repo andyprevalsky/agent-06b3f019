@@ -901,13 +901,35 @@ def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     ], schedule={"policy": "legacy"})
     probe_calls: list[int] = []
     slow_probes: list[float] = []
+    # Inject latency only into admission probes, never the periodic host sampler.
+    # Derive sites from the producer AST so line movement cannot retarget the fault.
+    producer = Path(pipeline.__file__).resolve()
+    admission_probe_lines = {
+        node.lineno for node in ast.walk(ast.parse(producer.read_text()))
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "pass_sample" for target in node.targets)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "runtime_host_resources"
+    }
+    assert len(admission_probe_lines) == 2, admission_probe_lines
 
     def once_sampler(pids: set[int]) -> dict[int, dict | None]:
         probe_calls.append(len(pids))
-        return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids} if len(probe_calls) == 1 else {}
+        return {pid: {"anon_mb": 80.0, "pss_mb": 96.0} for pid in pids} if not slow_probes else {}
 
     def delayed_host() -> dict:
-        if gate_marker.exists() and not slow_probes:
+        frame = inspect.currentframe()
+        admission_probe = False
+        try:
+            while frame is not None:
+                if Path(frame.f_code.co_filename).resolve() == producer and frame.f_lineno in admission_probe_lines:
+                    admission_probe = True
+                    break
+                frame = frame.f_back
+        finally:
+            del frame
+        if admission_probe and gate_marker.exists() and not slow_probes:
             slow_probes.append(time.monotonic())
             time.sleep(pipeline.OBSERVATION_MAX_AGE_SECONDS + 0.2)
         return {"cpus": 8, "mem_available_mb": pipeline.MEMORY_RESERVE_MB + (120 if probe_marker.exists() else 300)}

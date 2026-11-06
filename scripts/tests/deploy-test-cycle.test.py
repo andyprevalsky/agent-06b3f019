@@ -2256,6 +2256,25 @@ class Cycle(unittest.TestCase):
             c.reconcile(state,occurrence['id'],proof)
         self.assertEqual(snapshot,state)
 
+    def test_native_prelaunch_rejects_noncleanup_purpose_without_mutation(self):
+        state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()
+        for purpose in ('isolated-validation', 'unexpected-purpose', {'unexpected': True}):
+            with self.subTest(purpose=purpose):
+                candidate=copy.deepcopy(proof); candidate['purpose']=purpose
+                snapshot=copy.deepcopy(state)
+                with self.assertRaises(ValueError):
+                    c.reconcile(state,occurrence['id'],candidate)
+                self.assertEqual(snapshot,state)
+
+    def test_native_prelaunch_accepts_explicit_null_cleanup_purpose(self):
+        state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()
+        proof['purpose']=None
+        c.reconcile(state,occurrence['id'],proof)
+        entry=state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertIsNone(entry.get('purpose'))
+        self.assertFalse(entry['credit_granted'])
+        self.assertTrue(entry['prelaunch_no_allocation'])
+
     def test_native_prelaunch_proof_rejects_started_job_or_missing_positive_failure(self):
         state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()
         for mutation in ('started','no-failure','not-stopped','relay-created','live-publisher','changed-source','admitted-controller'):

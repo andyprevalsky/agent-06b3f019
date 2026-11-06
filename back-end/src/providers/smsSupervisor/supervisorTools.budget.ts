@@ -1,5 +1,5 @@
 /** Budget commit: validate amount -> atomic live-agent increment -> report committed limit. */
-import { prisma } from '../database';
+import { prisma, withoutQueryRetry } from '../database';
 import { getTemporalClient } from '../temporal';
 import { createLogger } from '../logger';
 import type { PendingOp, ToolResult } from './supervisorTools';
@@ -90,14 +90,18 @@ export async function commitIncreaseBudget(
   // the pre-read `newLimitCents` would understate the budget whenever a
   // concurrent increase commits first — and the Temporal signal below would
   // then resume the workflow on a lower limit than the row actually holds.
-  const bumpedRows = await prisma.$queryRaw<Array<{ priceLimitCents: number }>>`
+  const bumpedRows = await withoutQueryRetry(
+    () => prisma.$queryRaw<
+      Array<{ priceLimitCents: number; status: string; temporalWorkflowId: string | null }>
+    >`
     UPDATE "Agent"
     SET "priceLimitCents" = "priceLimitCents" + ${addCents}
     WHERE "id" = ${agent.id}
       AND "deletedAt" IS NULL
       AND "priceLimitCents" <= ${MAX_PRICE_LIMIT_CENTS - addCents}
-    RETURNING "priceLimitCents"
-  `;
+    RETURNING "priceLimitCents", "status", "temporalWorkflowId"
+  `
+  );
   if (bumpedRows.length === 0) {
     // Zero rows means the ceiling predicate OR the liveness predicate failed;
     // re-read to report the accurate reason instead of always blaming the cap.
@@ -117,28 +121,32 @@ export async function commitIncreaseBudget(
   }
 
   // The authoritative committed limit, not the pre-read projection.
-  const committedLimitCents = bumpedRows[0].priceLimitCents;
+  const {
+    priceLimitCents: committedLimitCents,
+    status: committedStatus,
+    temporalWorkflowId: committedWorkflowId,
+  } = bumpedRows[0];
 
   // Report the committed budget independently from the resume signal outcome.
   let resumeSignaled = false;
   // If agent was cost-limited, signal workflow to resume
-  if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId) {
+  if (committedStatus === 'COST_LIMIT_REACHED' && committedWorkflowId) {
     try {
       const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      const handle = client.workflow.getHandle(committedWorkflowId);
       await handle.signal('price_limit_increased', {
         new_limit_cents: committedLimitCents,
       });
       resumeSignaled = true;
       log.info('Signaled price_limit_increased', {
         phase: 'budget',
-        workflowId: agent.temporalWorkflowId,
+        workflowId: committedWorkflowId,
         newLimitCents: committedLimitCents,
       });
     } catch (error) {
       log.error('Failed to signal workflow', {
         phase: 'budget',
-        workflowId: agent.temporalWorkflowId,
+        workflowId: committedWorkflowId,
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -147,6 +155,6 @@ export async function commitIncreaseBudget(
   return {
     tool: 'increase_budget',
     success: true,
-    result: `Budget increased to $${(committedLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? (resumeSignaled ? ' — agent resuming' : ' — agent not resumed') : ''}`,
+    result: `Budget increased to $${(committedLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${committedStatus === 'COST_LIMIT_REACHED' ? (resumeSignaled ? ' — agent resuming' : ' — agent not resumed') : ''}`,
   };
 }

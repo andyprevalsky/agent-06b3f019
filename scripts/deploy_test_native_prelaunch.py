@@ -14,6 +14,7 @@ import subprocess
 def validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bound, document):
     from deploy_test_native_cleanup import need, fields
     from deploy_test_cloud import campaign_published
+    need(proof.get('purpose') is None, 'prelaunch proof supports cleanup only')
     campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
     need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
          and owner['native_cleanup_reference']['native_directory'] == str(campaign), 'prelaunch campaign binding')

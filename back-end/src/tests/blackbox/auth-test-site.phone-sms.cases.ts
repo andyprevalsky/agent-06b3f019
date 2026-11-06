@@ -1,7 +1,9 @@
 /** Real routes and issuer state, no outbound transport credentials or live messages. */
 import { prisma } from '../../providers/database';
+import { ALLOWED_ACCOUNT_IDS } from '../../providers/phoneAccountPolicy';
+import { resolvePlanContext } from '../../domains/auth-test-site/servicePlanContext';
 import { findSite } from '../../domains/auth-test-site/service';
-import type { AuthTestSite } from '../../domains/auth-test-site/types';
+import { AuthTestSiteError, type AuthTestSite } from '../../domains/auth-test-site/types';
 import {
   assert,
   cleanup,
@@ -355,5 +357,57 @@ test('phone SMS verification page distinguishes missing and unacknowledged sends
     else process.env.CLOUD_IPHONE_ENABLED = prior;
     await prisma.iPhoneDevice.deleteMany({ where: { userId } });
     await cleanup(userId);
+  }
+});
+
+test('phone SMS plan rejects empty registered phones even for an id-allowlisted owner', async () => {
+  const prior = process.env.CLOUD_IPHONE_ENABLED;
+  const userLookup = prisma.user.findUnique;
+  const deviceLookup = prisma.iPhoneDevice.findUnique;
+  let phone = '';
+  let reads = 0;
+  try {
+    process.env.CLOUD_IPHONE_ENABLED = '1';
+    // Only these two persisted reads belong to this boundary. No account or DB
+    // mutation is needed to exercise the real id-allowlist branch.
+    prisma.user.findUnique = (async () => {
+      reads++;
+      return { userId: ALLOWED_ACCOUNT_IDS[0], phone, isAnonymous: false };
+    }) as typeof userLookup;
+    prisma.iPhoneDevice.findUnique = (async () => {
+      reads++;
+      return { enabled: true, providerDeviceId: 'synthetic-owned-device' };
+    }) as typeof deviceLookup;
+    const resolve = () =>
+      resolvePlanContext(
+        {
+          userId: ALLOWED_ACCOUNT_IDS[0],
+          scenario: 'phone_sms_otp',
+          publicBaseUrl: 'http://127.0.0.1:1',
+        },
+        'synthetic-site',
+        'synthetic-realm',
+        null
+      );
+    for (phone of ['', '   ']) {
+      let rejected = false;
+      try {
+        await resolve();
+      } catch (error) {
+        rejected = error instanceof AuthTestSiteError && error.statusCode === 409;
+      }
+      assert(rejected, 'Id-allowlisted owner with empty registered phone must be rejected');
+    }
+    phone = '+19729777432';
+    assert(
+      (await resolve()).ownedPhone === phone,
+      'Configured same-owner phone must remain available'
+    );
+    assert(reads === 6, 'Only the two owner/device reads per context are expected');
+  } finally {
+    prisma.user.findUnique = userLookup;
+    prisma.iPhoneDevice.findUnique = deviceLookup;
+    if (prior === undefined) delete process.env.CLOUD_IPHONE_ENABLED;
+    else process.env.CLOUD_IPHONE_ENABLED = prior;
   }
 });
