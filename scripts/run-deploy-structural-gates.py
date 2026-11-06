@@ -276,6 +276,7 @@ def plan_gates(
 
 GATES = (
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py")),
+    Gate("deploy-test-election", ("python3", "scripts/tests/deploy-test-election.test.py")),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py")),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
     Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),

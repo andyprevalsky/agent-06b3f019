@@ -19,7 +19,7 @@ sources:
   - PR #1708
   - commit 429d9ac6f9520597ba4145df096e7c37fae1d879
   - task .context/rca-browser-4f77/agentcard-election-native-replay-streamed.log
-repro: scripts/tests/deploy-test-cycle.test.py AgentCardElection
+repro: scripts/tests/deploy-test-election.test.py
 status: mitigated
 ---
 
