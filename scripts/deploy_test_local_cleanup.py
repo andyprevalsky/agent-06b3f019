@@ -170,18 +170,28 @@ def quiet(root):
 def structural_cleanup(state, receipt, proof):
     """A fully reaped failed structural suite may launch again, without test credit."""
     import hashlib
-    from deploy_test_cycle import bounded_read, digest, sha_file
+    from deploy_test_cycle import ROOT, bounded_read, digest, sha_file
     gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
     root = Path(gate['worker_root']).resolve(strict=True)
     name = gate['name']
+    file_adapter = gate.get('result_transport') == 'file'
     need(gate.get('category') == name == 'deploy-command-structural'
          and gate.get('worker_transport') == 'local-isolated' and gate.get('case_protocol') is True
-         and gate.get('result_transport') == 'stdout' and str(root) == gate['worker_root'] == gate.get('cwd')
+         and gate.get('result_transport') in ('stdout', 'file') and str(root) == gate['worker_root'] == gate.get('cwd')
          and not gate.get('native_cloud') and not gate.get('native_backend'), 'owned structural binding')
     command = gate['command']
-    need(receipt.get('command') == command and len(command) == 5
-         and command[1:] == [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root), '--stdio'],
-         'native structural command')
+    if file_adapter:
+        import sys
+        need(isinstance(command, list) and len(command) == 4
+             and isinstance(command[0], str)
+             and Path(command[0]).is_absolute()
+             and Path(command[0]).resolve(strict=True) == Path(sys.executable).resolve(strict=True)
+             and command[1:] == [str(ROOT / 'scripts/deploy_test_worker.py'), '--root', str(root)]
+             and receipt.get('command') == command, 'native structural file command')
+    else:
+        need(receipt.get('command') == command and len(command) == 5
+             and command[1:] == [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root), '--stdio'],
+             'native structural command')
     binding = receipt.get('execution_binding', {})
     need(binding.get('contract_digest') == digest(gate)
          and all(isinstance(binding.get(k), str) and binding[k] for k in ('input_fingerprint', 'environment'))
@@ -215,10 +225,15 @@ def structural_cleanup(state, receipt, proof):
          and result.get('complete') is False and result.get('cleanup_complete') is True
          and result.get('reused') is False and not result.get('cleanup_owner'), 'structural result incomplete cleanup')
     recipe = request['worker_recipe']
-    need(recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
-        'bash', '-c', 'bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish']
-         and recipe['cleanup'].get('cwd', '.') == '.' and set(recipe['cases']) == {name}
-         and recipe['cases'][name].get('aggregate') is True, 'native structural cleanup recipe')
+    if file_adapter:
+        need(recipe == {'cases': {name: {
+            'command': ['python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '5'],
+            'cwd': '.', 'env': {}, 'aggregate': True}}}, 'native structural file recipe')
+    else:
+        need(recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
+            'bash', '-c', 'bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish']
+             and recipe['cleanup'].get('cwd', '.') == '.' and set(recipe['cases']) == {name}
+             and recipe['cases'][name].get('aggregate') is True, 'native structural cleanup recipe')
     case = result['evidence'][name]
     native = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest()
     log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')

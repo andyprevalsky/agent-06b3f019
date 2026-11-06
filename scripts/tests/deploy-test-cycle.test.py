@@ -4281,6 +4281,59 @@ class StructuralSupervisorCleanup(unittest.TestCase):
 
     reconcile = LocalCleanup.reconcile
 
+    def file_adapter(self):
+        name=self.gate['name']
+        command=[sys.executable,str(ROOT/'scripts/deploy_test_worker.py'),'--root',str(self.worker)]
+        self.recipe={'cases':{name:{'command':['python3','scripts/run-deploy-structural-gates.py',
+                      '--max-workers','5'],'cwd':'.','env':{},'aggregate':True}}}
+        self.gate.update(command=command,result_transport='file',worker_recipe=self.recipe)
+        self.request['worker_recipe']=self.recipe
+        self.result['recipe_digest']=c.digest(self.recipe)
+        self.result['evidence'][name]['command']=self.recipe['cases'][name]['command']
+        self.receipt.update(command=command,execution_binding={
+            'contract_digest':c.digest(self.gate),'environment':'env','input_fingerprint':'fp'})
+        self.process['reaped']=[{'pid':124,'status':256},{'pid':125,'status':15}]+[
+            {'pid':pid,'status':0} for pid in range(126,248)]
+        self.write_native()
+
+    def test_native_file_structural_cleanup_keeps_failure_and_history(self):
+        self.file_adapter()
+        self.assertEqual(124,len(self.process['reaped']))
+        self.test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts()
+
+    def test_native_file_structural_rejects_foreign_command_and_downgraded_recipe(self):
+        import copy
+        self.file_adapter()
+        base=(copy.deepcopy(self.gate),copy.deepcopy(self.request),copy.deepcopy(self.result),copy.deepcopy(self.receipt))
+        variants=[('worker-script',lambda:self.gate['command'].__setitem__(1,str(self.worker/'scripts/deploy_test_worker.py'))),
+                  ('foreign-script',lambda:self.gate['command'].__setitem__(1,str(ROOT/'scripts/other.py'))),
+                  ('foreign-interpreter',lambda:self.gate['command'].__setitem__(0,'/bin/sh')),
+                  ('foreign-root',lambda:self.gate['command'].__setitem__(3,str(self.root))),
+                  ('stdio-on-file',lambda:self.gate['command'].append('--stdio')),
+                  ('services-without-cleanup',lambda:self.recipe.update(services=True)),
+                  ('extra-setup',lambda:self.recipe.update(setup={'command':['true']})),
+                  ('partial-case',lambda:self.recipe['cases'][self.gate['name']]['command'].append('--only')),
+                  ('case-cwd',lambda:self.recipe['cases'][self.gate['name']].update(cwd='..')),
+                  ('case-env',lambda:self.recipe['cases'][self.gate['name']].update(env={'TMPDIR':'/tmp'})),
+                  ('nonaggregate',lambda:self.recipe['cases'][self.gate['name']].update(aggregate=False))]
+        for name,mutate in variants:
+            with self.subTest(name=name):
+                self.gate,self.request,self.result,self.receipt=copy.deepcopy(base)
+                self.recipe=self.gate['worker_recipe'];mutate()
+                self.request['worker_recipe']=self.recipe
+                self.result['recipe_digest']=c.digest(self.recipe)
+                self.result['evidence'][self.gate['name']]['command']=self.recipe['cases'][self.gate['name']]['command']
+                self.receipt['command']=copy.deepcopy(self.gate['command'])
+                self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+                self.state['plan']={'gates':[self.gate]};self.state['attempts']=[{'results':[self.receipt]}]
+                self.write_native();before=copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):self.reconcile()
+                self.assertEqual(before,self.state)
+
+    def test_native_file_structural_preserves_all_supervisor_and_evidence_rejections(self):
+        self.file_adapter()
+        self.test_unreaped_unknown_signalled_or_foreign_supervisor_closure_refuses_atomically()
+
     def test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts(self):
         original={n:p.read_bytes() for n,p in self.paths.items()}
         pending=copy.deepcopy(self.state['pending'])
