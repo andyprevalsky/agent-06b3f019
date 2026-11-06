@@ -457,12 +457,13 @@ class Cycle(unittest.TestCase):
         for root, (_, admission) in zip(roots, rows):
             self.assertEqual(str(root / '.context/native-worker-admission.lock'), admission['lock'])
 
-    def initial_independent_fixture(self):
+    def initial_independent_fixture(self, phase="initial"):
         import contextlib, io
         plan = copy.deepcopy(self.plan)
         state = c.initialize(plan, self.root)
         c.run_phase(plan, state, self.directory, self.root)  # native quick receipts
         self.assertEqual('initial', state['phase'])
+        state['phase'] = phase
         plan_path = self.directory/'plan.json'; c.write(plan_path, plan)
         c.write(self.directory/'cycle.json', state)
         payload = self.directory/'defer.json'
@@ -470,11 +471,192 @@ class Cycle(unittest.TestCase):
         def call():
             error = io.StringIO()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(error):
-                code = c.main(['initial-independent', '--plan', str(plan_path), '--state-dir', str(self.directory),
+                code = c.main([phase + '-independent', '--plan', str(plan_path), '--state-dir', str(self.directory),
                                '--root', str(self.root), '--input', str(payload)])
             self.last_initial_error = error.getvalue()
             return code
         return plan, state, payload, call
+
+    def test_final_independent_preserves_pending_and_reuses_exact_full_receipts(self):
+        plan,before,payload,call=self.initial_independent_fixture('final')
+        before['initial_pending']={'ui':{'status':'PENDING','reason':'original initial deferral'}}
+        c.write(self.directory/'cycle.json',before)
+        self.assertEqual(0,call())
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('final',after['phase']);self.assertFalse(after['ready'])
+        self.assertEqual(before['attempts'],after['attempts'][:-1])
+        self.assertEqual('final',after['attempts'][-1]['phase'])
+        self.assertEqual({'ui'},set(after['final_pending']))
+        self.assertEqual(before['initial_pending'],after['initial_pending'])
+        self.assertTrue(c.reusable_full_pass(after,plan['gates'][1]))
+        self.assertNotEqual(0,c.verify_saved(self.directory,self.root))
+        self.assertEqual(0,call())
+        self.assertEqual(after['attempts'],c.read(self.directory/'cycle.json')['attempts'])
+        c.write(payload,{'source':after['source'],'gates':{}})
+        self.assertEqual(0,call())
+        completed=c.read(self.directory/'cycle.json')
+        self.assertEqual(['ui'],[r['gate'] for r in completed['attempts'][-1]['results']])
+        self.assertFalse(completed['ready']);self.assertFalse(completed['final_pending'])
+        self.assertFalse(completed['initial_pending'])
+        c.run_phase(plan,completed,self.directory,self.root)
+        self.assertTrue(completed['ready'])
+        self.assertFalse(completed['attempts'][-1]['results'])
+
+    def final_cancelled_observation(self, failing):
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        if failing:
+            plan['gates'][1]['command']=['false']
+            state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        actual=c.execute
+        def stop_after_result(*args,**kwargs):
+            result=actual(*args,**kwargs);c.CANCEL.set();return result
+        try:
+            with patch.object(c,'execute',side_effect=stop_after_result):
+                c.run_phase(plan,state,self.directory,self.root,final_observation=c.read(payload))
+        finally:
+            c.CANCEL.clear()
+        return plan,state,payload,call
+
+    def assert_final_observation_resume(self, failing):
+        import contextlib,io
+        plan,state,payload,call=self.final_cancelled_observation(failing)
+        self.assertEqual('interrupted',state['phase'])
+        self.assertEqual('triage' if failing else 'final',state['resume_phase'])
+        self.assertTrue(state['resume_independent'])
+        c.write(self.directory/'plan.json',plan)
+        original=copy.deepcopy(state)
+        def resume(value):
+            c.write(self.directory/'cycle.json',value)
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()), \
+                    patch.object(c,'execute',side_effect=AssertionError('resume must not launch')):
+                code=c.main(['resume','--plan',str(self.directory/'plan.json'),
+                    '--state-dir',str(self.directory),'--root',str(self.root)])
+            return code,c.read(self.directory/'cycle.json')
+        held=copy.deepcopy(state)
+        held['attempts'][-1]['results'][0]['cleanup_owner']={'worker':'held exact owner'}
+        code,saved=resume(held);self.assertEqual(2,code);self.assertEqual(held,saved)
+        (self.root/'code').write_text('changed')
+        code,saved=resume(original);self.assertEqual(2,code);self.assertEqual(original,saved)
+        (self.root/'code').write_text('original')
+        code,saved=resume(original)
+        self.assertEqual(1,code)  # resuming observation is never validation readiness
+        self.assertEqual('triage' if failing else 'final',saved['phase'])
+        self.assertNotIn('resume_independent',saved);self.assertNotIn('resume_phase',saved)
+        for key in ('source','attempts','failures','pending','final_pending','round'):
+            self.assertEqual(original.get(key),saved.get(key),key)
+        self.assertFalse(saved['ready'])
+
+    def test_final_independent_cancel_resume_preserves_failed_rca(self):
+        self.assert_final_observation_resume(True)
+
+    def test_final_independent_cancel_resume_never_launches_deferred_work(self):
+        self.assert_final_observation_resume(False)
+
+    def test_final_independent_interrupted_refresh_invalidates_old_credit(self):
+        plan,state,_,_=self.final_cancelled_observation(False)
+        original=copy.deepcopy(state['attempts'])
+        (self.root/'code').write_text('new source')
+        new=copy.deepcopy(plan);new['source']=c.source(self.root)
+        c.refresh(state,plan,new,self.root)
+        self.assertEqual('quick',state['phase']);self.assertFalse(state['ready'])
+        self.assertNotIn('resume_independent',state);self.assertNotIn('resume_phase',state)
+        self.assertEqual(original,state['attempts'])
+        self.assertFalse(c.reusable_full_pass(state,new['gates'][1]))
+
+    def test_final_independent_refresh_preserves_unaffected_receipts(self):
+        import contextlib,io
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        plan['gates'][1]['input_paths']=['unrelated-input']
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        plan_path=self.directory/'plan.json';c.write(plan_path,plan)
+        c.write(self.directory/'cycle.json',state)
+        self.assertEqual(0,call())
+        original=c.read(self.directory/'cycle.json')
+        previous=self.directory/'previous.json';c.write(previous,plan)
+        (self.root/'code').write_text('new source')
+        new=copy.deepcopy(plan);new['source']=c.source(self.root);c.write(plan_path,new)
+        def refresh(value):
+            c.write(self.directory/'cycle.json',value)
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                result=c.main(['refresh','--input',str(previous),'--plan',str(plan_path),
+                    '--state-dir',str(self.directory),'--root',str(self.root)])
+            return result,c.read(self.directory/'cycle.json')
+        held=copy.deepcopy(original)
+        held['attempts'][-1]['results'][0]['cleanup_owner']={'worker':'held exact owner'}
+        code,saved=refresh(held);self.assertEqual(2,code);self.assertEqual(held,saved)
+        unknown=self.directory/'attempts/unknown/final/ui/request.json'
+        c.write(unknown,{'gate':'ui','source':original['source']})
+        code,saved=refresh(original);self.assertEqual(2,code);self.assertEqual(original,saved)
+        unknown.unlink()
+        code,saved=refresh(original)
+        self.assertEqual(0,code)
+        self.assertEqual('quick',saved['phase']);self.assertFalse(saved['ready'])
+        self.assertEqual(original['attempts'],saved['attempts'])
+        self.assertTrue(c.carried_pass(saved,new['gates'][1]))
+        self.assertFalse(c.reusable_full_pass(saved,new['gates'][2]))
+        c.run_phase(new,saved,self.directory,self.root)
+        self.assertEqual('final',saved['phase'])
+        before=copy.deepcopy(saved['attempts'])
+        with patch.object(c,'execute',side_effect=AssertionError('unchanged gate must reuse proof')):
+            c.run_phase(new,saved,self.directory,self.root,
+                final_observation={'source':saved['source'],'gates':{'ui':'still unready'}})
+        self.assertEqual(before,saved['attempts']);self.assertFalse(saved['ready'])
+
+    def test_final_independent_concurrent_failure_keeps_healthy_receipt(self):
+        plan,state,payload,_=self.initial_independent_fixture('final')
+        worker=Path(self.workers.name)/'pending';worker.mkdir()
+        plan['gates'].append(dict(plan['gates'][2],name='pending',worker='pending',cwd=str(worker),
+            env={'CONDUCTOR_WORKSPACE_NAME':'pending','CONDUCTOR_PORT':'37000'}))
+        plan['gates'][1].update(case_protocol=True,command=[sys.executable,'-c',
+            "import json,os;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "r.update(cases={c:'FAIL' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r));raise SystemExit(1)"])
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        actual=c.execute;barrier=threading.Barrier(2);entered=[]
+        def execute(*args,**kwargs):
+            entered.append(args[0]['name']);barrier.wait(timeout=3);return actual(*args,**kwargs)
+        with patch.object(c,'execute',side_effect=execute):
+            c.run_phase(plan,state,self.directory,self.root,
+                final_observation={'source':state['source'],'gates':{'pending':'not ready'}})
+        self.assertCountEqual(['api','ui'],entered)
+        self.assertEqual('triage',state['phase']);self.assertEqual('final',state['failure_phase'])
+        self.assertTrue(c.reusable_full_pass(state,plan['gates'][2]))
+        report={'failures':[self.report(f,'NOT_INTRODUCED',external_provider={'name':'fixture','reason':'outage'})['failures'][0]
+            for f in state['failures'] if f['id'] in state['pending']]}
+        c.adjudicate(state,report)
+        self.assertEqual('final',state['phase']);self.assertFalse(state['ready'])
+        self.assertEqual({'pending'},set(state['final_pending']))
+
+    def test_final_independent_rejects_stale_binding_and_unknown_owner(self):
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        saved=(self.directory/'cycle.json').read_bytes()
+        for changes in ({'phase':'initial'},{'running':True},{'pending':['unresolved']},
+                        {'resume_independent':True}):
+            c.write(self.directory/'cycle.json',{**state,**changes})
+            before=(self.directory/'cycle.json').read_bytes()
+            self.assertEqual(2,call());self.assertEqual(before,(self.directory/'cycle.json').read_bytes())
+        (self.directory/'cycle.json').write_bytes(saved)
+        bad=copy.deepcopy(plan);bad['gates'][1]['env']['CONDUCTOR_PORT']='9999'
+        c.write(self.directory/'plan.json',bad)
+        self.assertEqual(2,call());self.assertEqual(saved,(self.directory/'cycle.json').read_bytes())
+        c.write(self.directory/'plan.json',plan)
+        orphan=self.directory/'attempts/unknown/final/api/request.json'
+        c.write(orphan,{'gate':'api','source':state['source']})
+        self.assertEqual(2,call());self.assertEqual(saved,(self.directory/'cycle.json').read_bytes())
+
+    def test_final_independent_never_reuses_a_tampered_native_receipt(self):
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        self.assertEqual(0,call())
+        saved=c.read(self.directory/'cycle.json')
+        receipt=Path(saved['attempts'][-1]['results'][0]['log']).parent/'receipt.json'
+        value=c.read(receipt);value['execution_binding']['contract_digest']='tampered';c.write(receipt,value)
+        self.assertFalse(c.reusable_full_pass(saved,plan['gates'][1]))
+        self.assertEqual(0,call())
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual(len(saved['attempts'])+1,len(after['attempts']))
+        self.assertEqual(['api'],[r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertFalse(after['ready'])
 
     def test_initial_independent_retains_pending_and_reuses_native_pass(self):
         plan, before, payload, call = self.initial_independent_fixture()

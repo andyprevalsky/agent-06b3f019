@@ -83,6 +83,28 @@ still requires the complete selected inventory. Active/unknown ownership on a
 selected worker refuses launch; a deferred worker is left untouched. This is an
 explicit readiness selection, not a host-capacity guarantee or serial scheduler.
 
+At quiescent FINAL, the same source-bound input format is available through:
+
+```bash
+python3 scripts/deploy_test_cycle.py final-independent --plan "$PLAN" \
+  --state-dir "$STATE" --root "$SOURCE" --input final-deferrals.json
+```
+
+This observes the operator-selected ready gates concurrently while keeping every
+other selected gate PENDING. It preserves initial deferral history and records
+final deferral reasons separately. Exact full native receipts can be reused only
+when the existing source/input/contract checks accept them. It neither grants a
+capacity waiver nor adds ordering among selected workers. A partial pass remains
+FINAL/ready=false; ordinary `run` still accounts for the entire selection.
+Failures enter RCA without stopping healthy independent workers. A cancelled
+FINAL observation resumes to quiescent FINAL (or TRIAGE when failures exist),
+without automatically launching deferred gates; cleanup and source guards still
+apply before resume. The operator must explicitly choose the next observation
+or full run. A quiescent FINAL cycle can use normal `refresh` with its exact
+saved cycle and no active or unknown owner. It preserves history, revalidates
+input/contract carry, and returns to quick checks; changed inputs get no old
+execution credit.
+
 At quiescent TRIAGE, run missing independent full gates without disposing of the
 original failures:
 
