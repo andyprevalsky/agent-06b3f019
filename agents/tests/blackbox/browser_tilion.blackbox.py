@@ -518,16 +518,19 @@ async def test_state_fetch_waits_for_a_reconnect_browser_use_left_pending():
                     real_reconnect = type(session)._auto_reconnect
                     loop = asyncio.get_running_loop()
                     calls = []
+                    deferred_cycles: list = []
 
                     async def deferred_reconnect(max_attempts: int = 3) -> None:
                         calls.append(max_attempts)
                         # The cycle that was running finished without a socket; the next one is only scheduled.
-                        loop.call_later(0.4, lambda: loop.create_task(real_reconnect(session)))
+                        loop.call_later(0.4, lambda: deferred_cycles.append(loop.create_task(real_reconnect(session))))
 
                     session._auto_reconnect = deferred_reconnect
                     state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
                     assert state["url"] is not None and session.is_cdp_connected
                     assert calls == [3], calls  # only the deferred cycle can restore the socket
+                    # Let that cycle finish its events before teardown, or it restarts the stopped event bus.
+                    await asyncio.wait_for(deferred_cycles[0], 30)
                 finally:
                     await _stop_dom_service(service)
 
