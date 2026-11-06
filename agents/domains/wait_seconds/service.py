@@ -43,5 +43,8 @@ def format_duration(seconds: int) -> str:
 def validate_seconds(seconds: int) -> str | None:
     """Validate wait duration and return an error message, or ``None`` if valid."""
     if seconds < MIN_WAIT or seconds > MAX_WAIT:
-        return f"Wait duration must be between 1 and 3600 seconds (got {seconds})"
+        return (
+            f"Wait duration must be between {format_duration(MIN_WAIT)} and {format_duration(MAX_WAIT)} "
+            f"(got {seconds} seconds)"
+        )
     return None

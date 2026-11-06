@@ -21,6 +21,7 @@ import {
   verifyCredentialEnvelopeDecryptable,
 } from '../../providers/claudeCredentials';
 import {
+  classifyReportedLogin,
   fetchComputeTokenForUser,
   getCerebrasApiKeyCooldown,
   heartbeatComputeTokenLineage,
@@ -50,6 +51,7 @@ import { archiveJson } from '../../providers/traceArchive';
 import {
   clearConnectionNeedsReconnectFromIntegrationRecovery,
   resolveAccountIdForCredentialRecovery,
+  isIntegrationAuthFailureReason,
 } from '../../providers/integrationConnectionSync';
 import * as repo from './repo';
 import {
@@ -733,6 +735,35 @@ export async function getComputeCodeToken(
 
 export { heartbeatComputeTokenLineage, releaseComputeTokenLineage };
 
+/**
+ * A worker's auth-failure report disables a login only when it names that login
+ * and the stored credential is still the live token the worker held
+ * (classifyReportedLogin). Null lets the report through; otherwise the reply
+ * for a report that changes nothing.
+ */
+async function unrevokedLoginReply(
+  type: 'claude' | 'gpt',
+  source: 'user' | 'pool',
+  params: {
+    poolTokenId?: string;
+    integrationId?: string;
+    failureReason?: string;
+    credential?: string;
+  }
+) {
+  if (!isIntegrationAuthFailureReason(params.failureReason)) return null;
+  const integrationId = source === 'pool' ? params.poolTokenId : params.integrationId;
+  const rejection = await classifyReportedLogin(type, integrationId, params.credential);
+  if (rejection === 'revoked') return null;
+  log.warn(`Login rejection report not applied: ${rejection}`, {
+    type,
+    source,
+    integrationId: integrationId ?? null,
+    failureReason: params.failureReason,
+  });
+  return { ok: true, source, disabled: false, rejection };
+}
+
 export async function markTokenRateLimited(
   source: string,
   params: {
@@ -741,12 +772,15 @@ export async function markTokenRateLimited(
     rateLimitedUntil?: string;
     failureReason?: string;
     integrationId?: string;
+    credential?: string;
   }
 ) {
   if (source === 'pool') {
     if (params.poolTokenId === undefined || params.poolTokenId === '') {
       throw new Error('Missing poolTokenId for source=pool');
     }
+    const unrevoked = await unrevokedLoginReply('claude', source, params);
+    if (unrevoked !== null) return unrevoked;
     await markPoolTokenRateLimited(params.poolTokenId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
@@ -763,6 +797,8 @@ export async function markTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
+    const unrevoked = await unrevokedLoginReply('claude', source, params);
+    if (unrevoked !== null) return unrevoked;
     await markUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
@@ -788,6 +824,7 @@ export async function markComputeTokenRateLimited(
     failureReason?: string;
     credentialId?: string;
     integrationId?: string;
+    credential?: string;
     model?: string;
     region?: string;
     deployment?: string;
@@ -865,12 +902,15 @@ export async function markGptTokenRateLimited(
     rateLimitedUntil?: string;
     failureReason?: string;
     integrationId?: string;
+    credential?: string;
   }
 ) {
   if (source === 'pool') {
     if (params.poolTokenId === undefined || params.poolTokenId === '') {
       throw new Error('Missing poolTokenId for source=pool');
     }
+    const unrevoked = await unrevokedLoginReply('gpt', source, params);
+    if (unrevoked !== null) return unrevoked;
     await markGptPoolTokenRateLimited(params.poolTokenId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
@@ -887,6 +927,8 @@ export async function markGptTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
+    const unrevoked = await unrevokedLoginReply('gpt', source, params);
+    if (unrevoked !== null) return unrevoked;
     await markGptUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,

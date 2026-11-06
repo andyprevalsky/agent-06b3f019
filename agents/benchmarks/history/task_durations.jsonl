@@ -8043,3 +8043,4 @@
 {"task": "browser-smoke", "duration_seconds": 139.8, "cost_cents": 15.0, "timestamp": "2026-11-04T15:28:44.606238+00:00", "agent_id": "25daa32d-5761-4bbe-aea5-51b3672e030c"}
 {"task": "chat-mode", "duration_seconds": 13.4, "cost_cents": 0.0, "timestamp": "2026-11-04T15:28:44.606238+00:00", "agent_id": "b09f11c4-6c01-461e-9d39-3223fa0982d1"}
 {"task": "background-agent-message-smoke", "duration_seconds": 151.1, "cost_cents": 4.0, "timestamp": "2026-11-04T15:28:44.606238+00:00", "agent_id": "386d7926-8551-49b2-91e6-c8fafb81c622"}
+{"task": "claude-code-agent", "duration_seconds": 66.1, "cost_cents": 0.0, "timestamp": "2026-11-04T23:33:01.101178+00:00", "agent_id": "7210ecb9-f45e-4e8b-9ce8-e537ebb4145e"}

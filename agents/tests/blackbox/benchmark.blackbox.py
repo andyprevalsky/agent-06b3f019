@@ -14454,6 +14454,40 @@ async def test_codex_runner_harness_error_has_explicit_error_outcome():
     assert result.benchmark_status == "ERROR", result.benchmark_status
 
 
+async def test_codex_runner_poll_returns_output_after_exit():
+    """The Codex runner's ws poll returns the output and exit code once the session exits.
+
+    Its cleanup called ``client.close()``, which ClaudeCodeWsClient does not have
+    (it has ``disconnect()``), so every finished run raised AttributeError.
+    """
+    from aiohttp import web
+    import benchmarks.codex_runner as codex
+
+    async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_str(json.dumps({"type": "stdout", "data": "collatz steps: 111\n"}))
+        await ws.send_str(json.dumps({"type": "exit", "code": 0}))
+        await asyncio.sleep(5)
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", ws_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        output, exit_code = await asyncio.wait_for(
+            codex._poll_codex_ws_until_exit(f"ws://127.0.0.1:{port}/", timeout_seconds=10), 15
+        )
+    finally:
+        await runner.cleanup()
+    assert exit_code == 0, exit_code
+    assert "collatz steps: 111" in output, output
+
+
 async def test_codex_runner_creates_session_on_mounted_internal_route():
     """The runner must reach the backend's real, internal-only Codex route.
 
@@ -27014,6 +27048,7 @@ async def run_all_tests():
     await r.record_async(
         "codex_runner_mounted_internal_route", test_codex_runner_creates_session_on_mounted_internal_route
     )
+    await r.record_async("codex_runner_poll_returns_after_exit", test_codex_runner_poll_returns_output_after_exit)
     await r.record_async(
         "minted_child_harness_outcomes",
         test_minted_benchmark_preserves_child_harness_outcomes,
