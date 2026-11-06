@@ -192,7 +192,7 @@ def structural_cleanup(state, receipt, proof):
          'structural execution/admission contract changed')
     need(receipt.get('lifecycle') == 'owned' and receipt.get('executed') is True
          and receipt.get('complete') is False and receipt.get('status') == 'FAIL'
-         and type(receipt.get('native_exit')) is int and receipt['native_exit'] == 1
+         and type(receipt.get('native_exit')) is int and receipt['native_exit'] in (0, 1)
          and receipt.get('lingering_group') is True and not receipt.get('cleanup_owner')
          and receipt.get('native_cleanup_reference') is None
          and all(receipt.get(k) is False for k in ('timed_out', 'cancelled')), 'failed structural receipt required')
@@ -212,9 +212,12 @@ def structural_cleanup(state, receipt, proof):
     need(request.get('worker_root') == result.get('worker_root') == str(root)
          and request.get('worker_recipe') == gate.get('worker_recipe')
          and result.get('recipe_digest') == digest(request['worker_recipe']), 'structural root/recipe mismatch')
+    native_exit = receipt['native_exit']
+    inner_status = 'PASS' if native_exit == 0 else 'UNVERIFIED'
     need(request.get('checks') == gate['checks'] == [name] and request.get('skips') == {}
-         and receipt.get('cases') == result.get('cases') == {name: 'UNVERIFIED'}
-         and result.get('complete') is False and result.get('cleanup_complete') is True
+         and receipt.get('cases') == {name: 'UNVERIFIED'}
+         and result.get('cases') == {name: inner_status}
+         and result.get('complete') is (native_exit == 0) and result.get('cleanup_complete') is True
          and result.get('reused') is False and not result.get('cleanup_owner'), 'structural result incomplete cleanup')
     recipe = request['worker_recipe']
     service_recipe = (recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
@@ -231,7 +234,8 @@ def structural_cleanup(state, receipt, proof):
     case = result['evidence'][name]
     native = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest()
     log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
-    need(case.get('status') == 'UNVERIFIED' and type(case.get('native_exit')) is int and case['native_exit'] == 1
+    need(case.get('status') == inner_status and type(case.get('native_exit')) is int
+         and case['native_exit'] == native_exit
          and case.get('command') == recipe['cases'][name]['command'] and case.get('log') == str(log)
          and log.resolve(strict=True) == log and sha_file(log) == case.get('sha256')
          and all(case.get(k) is False for k in ('timed_out', 'cancelled', 'lingering_group'))
@@ -253,7 +257,7 @@ def structural_cleanup(state, receipt, proof):
                  and (os.WIFEXITED(row['status']) or os.WIFSIGNALED(row['status'])) for row in rows),
          'unknown structural descendant wait records')
     reaped = {row['pid']: row['status'] for row in rows}
-    need(len(reaped) == len(rows) and reaped.get(child) == 256
+    need(len(reaped) == len(rows) and reaped.get(child) == native_exit << 8
          and all(type(pid) is int and pid > 1 and pid != child and pid in reaped for pid in terms + kills)
          and len(set(terms)) == len(terms) and len(set(kills)) == len(kills)
          and set(kills) <= set(terms)

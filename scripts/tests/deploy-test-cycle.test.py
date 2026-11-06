@@ -2716,6 +2716,74 @@ class Cycle(unittest.TestCase):
                         elif p.exists(): p.unlink()
                     for p,raw in original.items(): p.write_bytes(raw)
 
+    def independently_rejected_admission_campaign_state(self):
+        import hashlib, runpy
+        state, occurrence, paths, proof, parents = self.admission_campaign_state()
+        campaign = Path(proof['campaign'])
+        summary = c.read(campaign/'summary.json')
+        for index in (0, 1):
+            job = summary['jobs'][index]
+            job['controller_exit_code'] = 1  # Keep original cancelled status.
+            log = Path(job['log'])
+            log.write_text(f'{self.root}/scripts/run-bench monitor {parents[index]}\n'
+                'cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\n'
+                '❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation\n')
+            for name in ('lifecycle.json','run.json'):
+                p=parents[index]/'_batch'/name; value=c.read(p); value['controller_exit_code']=1; c.write(p,value)
+        c.write(campaign/'summary.json',summary)
+        native=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
+        group=native['campaign_group_record'](summary)
+        c.write(campaign/'hub-group.json',group)
+        ack=c.read(campaign/'hub-group-publication-ack.private.json')
+        ack['record_sha256']=hashlib.sha256(json.dumps(group,sort_keys=True).encode()).hexdigest()
+        c.write(campaign/'hub-group-publication-ack.private.json',ack)
+        proof['files']={p:c.sha_file(Path(p)) for p in proof['files']}
+        return state, occurrence, paths, proof, parents
+
+    def test_independent_admission_rejections_preserve_cancelled_outcomes_and_custody(self):
+        state, occurrence, paths, proof, parents = self.independently_rejected_admission_campaign_state()
+        before=copy.deepcopy(state)
+        originals={p:Path(p).read_bytes() for p in proof['files']}
+        c.reconcile(state,occurrence['id'],proof)
+        entry=next(iter(state['reconciled_owners'].values()))
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual(10,len(entry['participants']))
+        self.assertTrue(entry['retained_services'])
+        self.assertEqual(before['attempts'],state['attempts'])
+        self.assertEqual(before['failures'],state['failures'])
+        self.assertEqual(originals,{p:Path(p).read_bytes() for p in proof['files']})
+
+    def test_independent_admission_rejections_require_exact_positive_boundary(self):
+        state, occurrence, paths, proof, parents = self.independently_rejected_admission_campaign_state()
+        originals={Path(p):Path(p).read_bytes() for p in proof['files']}
+        before=copy.deepcopy(state)
+        campaign=Path(proof['campaign']); summary_path=campaign/'summary.json'
+        for mutation in ('no-marker','no-refusal','prefixed-marker','duplicate-marker','duplicate-refusal','reversed-lines',
+                         'wrong-exit','boolean-exit','finished-before-primary','started-after-primary','running-status'):
+            with self.subTest(mutation=mutation):
+                candidate=copy.deepcopy(proof)
+                try:
+                    summary=c.read(summary_path);job=summary['jobs'][0];log=Path(job['log']);text=log.read_text()
+                    marker='cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers'
+                    refusal='❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation'
+                    if mutation=='no-marker':text=text.replace(marker+'\n','')
+                    if mutation=='no-refusal':text=text.replace(refusal+'\n','')
+                    if mutation=='prefixed-marker':text=text.replace(marker,'forged '+marker)
+                    if mutation=='duplicate-marker':text+=marker+'\n'
+                    if mutation=='duplicate-refusal':text+=refusal+'\n'
+                    if mutation=='reversed-lines':text=text.replace(marker+'\n'+refusal,refusal+'\n'+marker)
+                    if mutation=='wrong-exit':job['controller_exit_code']=2
+                    if mutation=='boolean-exit':job['controller_exit_code']=True
+                    if mutation=='finished-before-primary':job['finished_at']=job['started_at']
+                    if mutation=='started-after-primary':job['started_at']=job['finished_at']
+                    if mutation=='running-status':job['status']='running'
+                    log.write_text(text);c.write(summary_path,summary)
+                    candidate['files']={str(p):c.sha_file(p) for p in originals}
+                    with self.assertRaises(ValueError):c.reconcile(state,occurrence['id'],candidate)
+                    self.assertEqual(before,state)
+                finally:
+                    for p,raw in originals.items():p.write_bytes(raw)
+
     def isolated_campaign_state(self):
         import time
         state, occurrence, paths, proof, parents = self.campaign_recon_state()
@@ -4192,6 +4260,53 @@ class StructuralSupervisorCleanup(unittest.TestCase):
         finally:
             child.terminate()
             child.wait(timeout=2)
+
+    def set_native_zero_inner_pass(self):
+        self.receipt['native_exit'] = 0
+        self.result.update(cases={self.gate['name']:'PASS'}, complete=True)
+        self.result['evidence'][self.gate['name']].update(status='PASS', native_exit=0)
+        self.process['native_exit'] = 0
+        self.process['reaped'][0]['status'] = 0
+        self.write_native()
+
+    def test_native_zero_inner_pass_keeps_outer_failure_and_no_credit(self):
+        self.set_native_zero_inner_pass()
+        self.test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts()
+        self.assertEqual('FAIL', self.receipt['status'])
+        self.assertIs(self.receipt['complete'], False)
+        self.assertEqual({self.gate['name']:'UNVERIFIED'}, self.receipt['cases'])
+        self.assertEqual({self.gate['name']:'PASS'}, self.result['cases'])
+        self.assertIs(self.result['complete'], True)
+
+    def test_native_exit_pairs_refuse_crossed_outcomes_and_noninteger_exits(self):
+        baseline = tuple(copy.deepcopy(row) for row in (self.receipt,self.result,self.process))
+        for exit_code in (0, 1):
+            variants = [('result_status', 'UNVERIFIED' if exit_code == 0 else 'PASS'),
+                        ('result_complete', exit_code == 1),
+                        ('case_status', 'UNVERIFIED' if exit_code == 0 else 'PASS'),
+                        ('case_exit', 1 - exit_code), ('process_exit', 1 - exit_code),
+                        ('child_status', (1 - exit_code) << 8)]
+            for invalid in (True, False, 0.0, 1.0, -1, 2):
+                variants.extend((field,invalid) for field in ('receipt_exit','case_exit','process_exit'))
+            variants.extend([('child_status',False),('child_status',0.0),('child_status',15)])
+            for field, value in variants:
+                with self.subTest(native_exit=exit_code, field=field, value=value):
+                    for row, original in zip((self.receipt,self.result,self.process),baseline):
+                        row.clear();row.update(copy.deepcopy(original))
+                    if exit_code == 0:
+                        self.set_native_zero_inner_pass()
+                    case = self.result['evidence'][self.gate['name']]
+                    if field == 'result_status': self.result['cases'] = {self.gate['name']:value}
+                    elif field == 'result_complete': self.result['complete'] = value
+                    elif field == 'case_status': case['status'] = value
+                    elif field == 'case_exit': case['native_exit'] = value
+                    elif field == 'process_exit': self.process['native_exit'] = value
+                    elif field == 'receipt_exit': self.receipt['native_exit'] = value
+                    elif field == 'child_status': self.process['reaped'][0]['status'] = value
+                    self.write_native()
+                    before = copy.deepcopy(self.state)
+                    with self.assertRaises(ValueError): self.reconcile()
+                    self.assertEqual(before,self.state)
 
 
 class InterruptedLocalRecovery(unittest.TestCase):

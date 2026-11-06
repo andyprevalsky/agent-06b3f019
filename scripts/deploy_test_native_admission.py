@@ -49,9 +49,12 @@ def validate_campaign(receipt, proof, root, runs, parents, participants, bound, 
         need(campaign_start <= start <= finish <= campaign_finish, 'admission job clocks')
         log = Path(job['log'])
         lines = bound(log).decode().splitlines()
-        if job is failed:
+        independently_rejected = job.get('status') == 'cancelled' and job['controller_exit_code'] == 1
+        if job is failed or independently_rejected:
             need(lines.count(marker) == lines.count(refusal) == 1
                  and lines.index(marker) < lines.index(refusal), 'positive reserve admission rejection missing')
+            need(job is failed or start <= rejected_at <= finish,
+                 'independent sibling admission clocks')
         else:
             need(job.get('status') == 'cancelled' and job['controller_exit_code'] == 143
                  and datetime.fromisoformat(job['started_at']).timestamp() <= rejected_at
