@@ -138,6 +138,21 @@ def test_startup_check_fails_outside_a_project_checkout():
         assert not ok and "did not start in a project checkout" in reason
 
 
+def test_a_resumed_spawn_keeps_its_session_checkout_but_a_fresh_empty_one_fails():
+    """qual1 (be1c90da): the root's second spawn resumed the paused sandbox (checkout "existing")."""
+    fresh = ev.build_spawns(ev._worker_entries(_worker_lines()), [_backend()])
+    resumed_backend = {**_backend(checkout="existing"), "taskId": "second-task", "resumedFrom": "paused_sandbox",
+                       "requestedAt": "2026-11-06T04:30:00+00:00"}
+    resumed = [{**fresh[0], "task_id": "second-task", "backend": resumed_backend}]
+    ok, reason = startup_time.check({"spawns": fresh + resumed}, {"max_ready_seconds": 600})
+    assert ok, reason
+    ok, reason = startup_time.check({"spawns": resumed}, {"max_ready_seconds": 600})
+    assert not ok and "no spawn created a fresh sandbox" in reason
+    empty_fresh = ev.build_spawns(ev._worker_entries(_worker_lines()), [_backend(checkout="empty")])
+    ok, reason = startup_time.check({"spawns": empty_fresh + resumed}, {"max_ready_seconds": 600})
+    assert not ok and "did not start in a project checkout" in reason
+
+
 def test_startup_check_fails_closed_without_spawns_or_budget():
     assert not startup_time.check({"spawns": [], "sources": {}}, {"max_ready_seconds": 600})[0]
     assert not startup_time.check(_evidence(), {})[0]

@@ -23,6 +23,7 @@ from typing import Optional
 
 CHECK_TYPE = "code_agent_startup_time"
 PROJECT_CHECKOUT_SOURCES = {"remote", "snapshot"}
+RESUMED_FROM = {"paused_sandbox", "live_cli"}
 
 _WORKER_PHASES = (
     ("create", "create_requested_at", "session_created_at"),
@@ -83,7 +84,7 @@ def check(evidence: dict, config: dict) -> tuple[bool, str]:
             f"{CHECK_TYPE}: {len(spawns)} code-agent create(s) observed, expected >= {min_spawns}"
             f" (sources {evidence.get('sources')})"
         )
-    summaries, failures = [], []
+    summaries, failures, fresh_checkouts = [], [], 0
     for spawn in spawns:
         phases = spawn_phases(spawn)
         summaries.append(_summary(spawn, phases))
@@ -92,15 +93,23 @@ def check(evidence: dict, config: dict) -> tuple[bool, str]:
             continue
         if config.get("require_project_checkout", True):
             backend = spawn.get("backend") or {}
-            if not backend.get("projectId") or backend.get("checkoutSource") not in PROJECT_CHECKOUT_SOURCES:
+            # A spawn that resumes a paused sandbox keeps the checkout its session's first create
+            # built ("existing"); only a fresh sandbox must show the project clone or snapshot.
+            resumed = backend.get("resumedFrom") in RESUMED_FROM
+            fresh_ok = backend.get("checkoutSource") in PROJECT_CHECKOUT_SOURCES
+            if not backend.get("projectId") or not (resumed or fresh_ok):
                 failures.append(
                     f"task {str(spawn.get('task_id'))[:8]} did not start in a project checkout"
-                    f" (projectId={backend.get('projectId')}, checkout={backend.get('checkoutSource')})"
+                    f" (projectId={backend.get('projectId')}, checkout={backend.get('checkoutSource')},"
+                    f" from={backend.get('resumedFrom')})"
                 )
+            fresh_checkouts += int(not resumed and fresh_ok and bool(backend.get("projectId")))
         if phases["ready"] > budget * 1000:
             failures.append(
                 f"task {str(spawn.get('task_id'))[:8]} ready {phases['ready'] / 1000:.1f}s > budget {budget}s"
             )
+    if config.get("require_project_checkout", True) and fresh_checkouts == 0 and not failures:
+        failures.append("no spawn created a fresh sandbox in a project checkout, so the clone was never measured")
     detail = " | ".join(summaries)
     if failures:
         return False, f"{CHECK_TYPE} failed: {'; '.join(failures)} || {detail}"
