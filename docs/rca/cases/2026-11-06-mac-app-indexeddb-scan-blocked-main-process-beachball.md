@@ -5,10 +5,12 @@ title: The Mac app froze with the spinning beachball because the periodic browse
 surface: mac-app
 component: mac-app/main/domains/indexed-db-reader (called by browser-state-sync every 5 minutes and at startup)
 classification: our-bug
-problem_class: synchronous-cpu-work-on-ui-owning-event-loop
+problem_class: concurrency-inefficiency
 first_bad_boundary: mac-app/main/domains/indexed-db-reader/service.ts readIndexedDB — `await Promise.resolve()` then a fully synchronous readIndexedDbDatabases + JSON.stringify hash per origin on the main process
 symptoms:
-  - "on the mac-app, i get stutters sometimes, it feels like the CPU gets throttled, I get the little mac spinner thing with the app freezing" (Andy, 2026-11-06)
+  - "on the mac-app, i get stutters sometimes, it feels like the CPU gets throttled, I get the little mac spinner thing with the app freezing"
+  - "[IndexedDBReader] Read N origins, D databases, R records"
+  - "spinning beachball in the Rose Mac app every few minutes"
 tags:
   - mac-app
   - electron-main
@@ -16,10 +18,10 @@ tags:
   - indexeddb
   - browser-state-sync
 sources:
-  - user report 2026-11-06
-  - local repro .context/beachball-rca (headless Chromium profile, 20,000 Gmail-like IndexedDB records)
+  - commit 9966aa4036 (fix(mac-app): stop browser-state sync from freezing the main process)
+  - commit 3f3450e892 (merge of the beachball fix into main)
 repro: mac-app/tests/blackbox/indexed-db-reader.blackbox.ts › main-process responsiveness
-status: fixed (main-process stall); Mac-side confirmation pending
+status: fixed
 ---
 
 ## Problem
@@ -51,7 +53,7 @@ main-process JavaScript runs for seconds.
    `postEncryptedPayload` ran one `JSON.stringify` over the batch. For the
    20,000-record profile (38 MB JSON) that alone blocked for **1,476 ms**.
 
-## Fix
+## Solution
 
 - `main/base/timeSlice.ts` `SliceClock` (8 ms budget) hands the loop back with
   `setImmediate` once a slice is used up.
@@ -102,3 +104,19 @@ the mac-app vitest suite used by `/deploy`.
 - The renderer liquid-metal shader (`@paper-design/shaders`) pauses only when
   `document.hidden`. It is one small canvas in the update chip, which makes it
   an unlikely cause of a multi-second freeze.
+
+## Human feedback
+
+Andy, 2026-11-06: "on the mac-app, i get stutters sometimes, it feels like the CPU
+gets throttled, I get the little mac spinner thing with the app freezing". The
+Mac-side confirmation that the beachball is gone is still pending (see the open
+items above); the fix is verified on Linux Node 22 with a real Chromium profile.
+
+## Reusable lesson
+
+`await Promise.resolve()` is a microtask, not a yield: it does not let the
+Electron main process handle events. Work that decodes or serializes
+user-sized data (IndexedDB stores, multi-MB JSON payloads) on a loop that owns
+the UI must hand the loop back on a time budget (`setImmediate` slices), keep the
+output byte-identical, and carry a responsiveness test that also asserts the
+synchronous control really stalls.
