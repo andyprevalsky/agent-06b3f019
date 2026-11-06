@@ -134,7 +134,7 @@ Step 3: Does this need agent action?
 
 Choose mode: "execute" ONLY if BOTH of these are true:
 (1) No user clarification is needed: every input the goal depends on — exactly what to get, delivery address, payment method/account, recipient, etc. — is already provided. If you would have to ask the user or guess any required input, condition (1) is FALSE.
-(2) A single agent can carry the goal to completion on its own — directly using its tools and a few focused helper sub-agents for research, browsing, or code — without first decomposing the work into a structured plan of multiple coordinated, parallel sub-tasks. (Research, browsing, and multi-step work are fine in execute and do NOT by themselves require plan; only needing to fan out into many coordinated sub-tasks — general-purpose sub-agents — does.)
+(2) A single agent can carry the goal to completion on its own — directly using its tools and a few focused helper sub-agents for research, browsing, or code — without first decomposing the work into a structured plan of multiple coordinated, parallel sub-tasks. (Research, browsing, coding, and multi-step work are fine in execute and do NOT by themselves require plan; only needing to fan out into many coordinated sub-tasks — general-purpose sub-agents — does.)
 If EITHER condition is false, you MUST choose mode: "plan". Execute mode does not allow blocking on user input.
 
 To understand fully what each mode means, here are the agent's actual phase system prompts:
@@ -151,9 +151,9 @@ ${EXECUTE_PHASE_PROMPT_MIRROR}
 
 - mode: "plan"
   - Research, comparison, multi-step coordination
-  - Examples: "Find the best deal on X", "Research Y and summarize", "Plan a trip to Z"
+  - Examples: "Find the best deal on X", "Conduct a thorough and extensive research review of Y", "Plan a trip to Z"
 
-When in doubt, prefer "plan", it is safer to plan than to fail mid-execution.
+When in doubt, prefer "execute".
 
 # Rules
 
