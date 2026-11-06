@@ -125,17 +125,6 @@ class Bindings(unittest.TestCase):
             generate(template(), {'backend-coverage-blackbox': slot('backend-coverage-blackbox')}, ROOT)
 
 
-class RemoteEnv(unittest.TestCase):
-    def test_backend_vm_runs_more_coverage_shards_and_other_gates_keep_their_env(self):
-        self.assertEqual(g.BLACKSMITH_ENV, {'backend-coverage-blackbox': {'BACKEND_COVERAGE_SHARDS': '8'}})
-        self.assertTrue(set(g.BLACKSMITH_ENV) <= set(g.BLACKSMITH_RUNNERS))
-        with patch.object(g, 'backend_recipe', side_effect=lambda root, env, timeout: {'env': env}):
-            backend = g.remote_slot(ROOT, 'backend-coverage-blackbox')
-        self.assertEqual(backend['env']['BACKEND_COVERAGE_SHARDS'], '8')
-        self.assertEqual(backend['recipe']['env']['BACKEND_COVERAGE_SHARDS'], '8')
-        self.assertNotIn('BACKEND_COVERAGE_SHARDS', g.remote_slot(ROOT, 'frontend-coverage-blackbox')['env'])
-
-
 class Portable(unittest.TestCase):
     def test_remote_recipes_use_the_runner_interpreter_not_the_coordinator_path(self):
         from deploy_test_bindings import portable
@@ -308,8 +297,7 @@ class Executor(unittest.TestCase):
         self.assertEqual(g.DEFAULT_BLACKSMITH_RUNNER, workers['brand-new-gate']['slot']['runner'])
         for worker in workers.values():
             if worker['mode'] == 'remote':  # coordinator paths never leave this host
-                extra = set(g.BLACKSMITH_ENV.get(worker['slot']['id'].removesuffix('-blacksmith'), {}))
-                self.assertEqual({'CONDUCTOR_WORKSPACE_NAME', 'CONDUCTOR_PORT'} | extra, set(worker['slot']['env']))
+                self.assertEqual({'CONDUCTOR_WORKSPACE_NAME', 'CONDUCTOR_PORT'}, set(worker['slot']['env']))
         self.assertFalse(self.workers.exists())  # layout itself never creates anything
 
     def test_runner_map_names_real_gates_with_valid_labels(self):

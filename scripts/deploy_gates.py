@@ -94,10 +94,6 @@ BLACKSMITH_RUNNERS = {
     'e2b-smoke': 'blacksmith-2vcpu-ubuntu-2404',
 }
 DEFAULT_BLACKSMITH_RUNNER = 'blacksmith-4vcpu-ubuntu-2404'  # a gate added before it is sized here
-# Existing parallelism knobs a VM can afford (the 16 GB devbox cannot). Checks, assertions and coverage
-# thresholds are unchanged: backend coverage still runs every domain once and merges every shard.
-# 2026-11-06: 2 shards left a 16-vCPU VM mostly idle (~10.5 min of serial domains per shard).
-BLACKSMITH_ENV = {'backend-coverage-blackbox': {'BACKEND_COVERAGE_SHARDS': '8'}}
 # The workflow sets the system-Postgres mode, trusted identity and checkout paths at job level; each VM is
 # private, so one fixed port serves every gate. Coordinator paths never go to the remote env.
 REMOTE_PORT = '12000'
@@ -249,7 +245,7 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
 
 def remote_slot(root: Path, gate: str) -> dict:
     """A github-actions slot: nothing is provisioned here; the VM checks out the frozen commit."""
-    env = {'CONDUCTOR_WORKSPACE_NAME': f'deploy-{gate}', 'CONDUCTOR_PORT': REMOTE_PORT, **BLACKSMITH_ENV.get(gate, {})}
+    env = {'CONDUCTOR_WORKSPACE_NAME': f'deploy-{gate}', 'CONDUCTOR_PORT': REMOTE_PORT}
     slot = {'id': f'{gate}-blacksmith', 'transport': GITHUB_TRANSPORT,
             'runner': BLACKSMITH_RUNNERS.get(gate, DEFAULT_BLACKSMITH_RUNNER),
             'worker_root': GITHUB_WORKER_ROOT, 'env': env, 'timeout_seconds': GATE_DEADLINE_SECONDS}
