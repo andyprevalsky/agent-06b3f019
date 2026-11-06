@@ -527,7 +527,7 @@ async def test_state_fetch_waits_for_a_reconnect_browser_use_left_pending():
                     session._auto_reconnect = deferred_reconnect
                     state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
                     assert state["url"] is not None and session.is_cdp_connected
-                    assert calls == [3] or calls == [], calls
+                    assert calls == [3], calls  # only the deferred cycle can restore the socket
                 finally:
                     await _stop_dom_service(service)
 
