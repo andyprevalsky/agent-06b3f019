@@ -457,7 +457,8 @@ def cache_renewal_projection(stable, baseline):
         parsed=cache_addition_projections(stable,baseline['machine'])
         current={v['key']:{k:v[k] for k in CACHE_FIELDS} for v in parsed}
         # Unknown cache namespace entries cannot be excluded by a broad prefix.
-        if set(current)!=set(baseline['entries']):return None
+        if not set(baseline['entries'])<=set(current):return None
+        added=set(current)-set(baseline['entries'])
         # Legacy/unrecognized fields stay byte-for-byte in the full hash;
         # they are never reconstructed or excluded as advisory entries.
         restored=copy.deepcopy(stable)
@@ -465,6 +466,9 @@ def cache_renewal_projection(stable, baseline):
             value=current[key]
             if any(value[k]!=old[k] for k in ('node','python','volume','machine','app')):return None
             restored['metadata'][key]=' '.join(str(old[k]) for k in CACHE_FIELDS)
+        # Only strictly parsed NEW tuples can compose with sealed renewals.
+        # Every other raw field stays protected by BOTH original full hashes.
+        for key in added:del restored['metadata'][key]
         prior=digest(restored)
         del restored['metadata'][baseline['admitted_addition']]
         return dict(baseline_sha256=digest(baseline),before_stable_sha256=prior,
@@ -481,15 +485,21 @@ def qualified_cache_renewal(warm, original, baseline, app):
          and projection['original_stable_sha256']==original['stable_sha256']==baseline['original_stable_sha256'],
          'sealed native cache full-hash reconstruction')
     current=projection['entries'];old=baseline['entries'];changed=[]
-    need(set(current)==set(old),'native cache entry set changed')
-    for key,value in current.items():
+    need(set(old)<=set(current),'native cache entry set changed')
+    added=set(current)-set(old)
+    for key in added:
+        need(current[key]['app']==app and current[key]['machine']==warm['id']
+             and any(v.get('volume')==current[key]['volume'] for v in warm['mounts']),
+             'native cache addition ownership')
+    for key in old:
+        value=current[key]
         need(all(value[k]==old[key][k] for k in ('node','python','volume','machine','app')),'native cache tuple changed')
         if value!=old[key]:
             need(value['epoch']>old[key]['epoch'] and value['snapshot']!=old[key]['snapshot'], 'native cache renewal monotonicity')
             changed.append(key)
     # The original admitted addition must still have a completed live snapshot;
     # unchanged historical entries are protected by the full hash, not re-used.
-    verify=sorted(set(changed)|{baseline['admitted_addition']});inventories={};proofs={}
+    verify=sorted(set(changed)|added|{baseline['admitted_addition']});inventories={};proofs={}
     import datetime
     for key in verify:
         value=current[key];vid=value['volume']
@@ -505,9 +515,11 @@ def qualified_cache_renewal(warm, original, baseline, app):
         need(row.get('status','').lower() in {'created','complete','completed','ready'}
              and int(row.get('size') or 0)>0 and value['epoch']-60<=created<=time.time(), 'native cache snapshot completion')
         proofs[key]={**value,'created_at':row['created_at'],'status':row['status'],'size':row['size']}
-    return dict(schema='native-cache-renewal-v1',baseline_sha256=digest(baseline),
+    result=dict(schema='native-cache-renewal-v1',baseline_sha256=digest(baseline),
                 native_before=baseline['native_before'],original_stable_sha256=original['stable_sha256'],
                 renewed_entries=sorted(changed),snapshots=proofs,dependency_reuse_credit=False)
+    if added:result['added_entries']=sorted(added)
+    return result
 
 
 def owned_scope(warm, original, *, app=None, cache_baseline=None):
