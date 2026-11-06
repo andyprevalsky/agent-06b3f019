@@ -7816,15 +7816,26 @@ def _planner_goal_from_messages(messages: List[Dict[str, Any]], *, fallback: Opt
 
 
 async def _retrieve_planner_memories(
-    *, goal: str, user_id: Optional[str], agent_id: Optional[str], memory_enabled: bool
+    *,
+    goal: str,
+    user_id: Optional[str],
+    agent_id: Optional[str],
+    memory_enabled: bool,
+    llm_auth: Optional[Dict[str, Any]] = None,
 ) -> Optional["MemoryRetrieval"]:
-    """Retrieve planner memories (traced, best-effort). None when the agent has memory off."""
+    """Retrieve planner memories (traced, best-effort). None when the agent has memory off.
+
+    ``llm_auth`` is the planner activity's own leased compute token; a plan-time
+    compression reuses it instead of falling through to API-key legs.
+    """
     from providers.planner_memory import planner_memory_available, retrieve_memories
 
     if not memory_enabled or not goal or not planner_memory_available():
         return None
     async with span("planner_memory_retrieve", call_site="planner", agent_id=agent_id, goal_chars=len(goal)):
-        return await retrieve_memories(goal, user_id=user_id, exclude_root_agent_id=agent_id, agent_id=agent_id)
+        return await retrieve_memories(
+            goal, user_id=user_id, exclude_root_agent_id=agent_id, agent_id=agent_id, llm_auth=llm_auth
+        )
 
 
 # Must fit at least twice inside set_plan's PLANNER_ACTIVITY_HEARTBEAT_TIMEOUT_SECONDS.
@@ -7978,6 +7989,18 @@ async def call_planner_llm_activity(
                 user_id=planner_user_id,
                 agent_id=agent_id,
                 memory_enabled=memory_enabled,
+                llm_auth={
+                    "claude_token": claude_max_token,
+                    "claude_token_source": claude_token_source,
+                    "claude_token_pool_id": claude_token_pool_id,
+                    "claude_token_user_id": claude_token_user_id,
+                    "gpt_token": gpt_token,
+                    "gpt_account_id": gpt_account_id,
+                    "gpt_token_source": gpt_token_source,
+                    "gpt_token_pool_id": gpt_token_pool_id,
+                    "gpt_token_user_id": gpt_token_user_id,
+                    "compute_token_lineage_key": compute_token_lineage_key,
+                },
             ),
         )
         memory_fork = None

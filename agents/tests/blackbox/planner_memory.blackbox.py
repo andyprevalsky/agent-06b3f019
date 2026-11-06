@@ -847,7 +847,13 @@ def _mock_backend(candidates: list[dict[str, Any]]):
     return calls
 
 
-async def _run_activity(*, memory_enabled: bool, candidates: list[dict[str, Any]]):
+async def _run_activity(
+    *,
+    memory_enabled: bool,
+    candidates: list[dict[str, Any]],
+    lease: Optional[dict[str, Any]] = None,
+    compressor_content: str = "",
+):
     import helpers.llm as llm
     from utils.tool_schemas import PlannerResponse
 
@@ -855,7 +861,7 @@ async def _run_activity(*, memory_enabled: bool, candidates: list[dict[str, Any]
 
     async def fake_call_llm(messages, **kwargs):
         captured["llm_calls"].append({"messages": messages, **kwargs})
-        return {"content": ""}
+        return {"content": compressor_content}
 
     async def fake_structured(**kwargs):
         captured.update(kwargs)
@@ -886,7 +892,7 @@ async def _run_activity(*, memory_enabled: bool, candidates: list[dict[str, Any]
                 "tool schemas",
                 "Name: Test User",
                 None,
-                claude_token_user_id="user-a",
+                **{"claude_token_user_id": "user-a", **(lease or {})},
                 memory_enabled=memory_enabled,
             )
     finally:
@@ -1022,6 +1028,66 @@ async def test_planner_activity_compresses_uncompressed_hit_and_caches_it():
     assert [m["role"] for m in captured["messages"]] == ["system", "user", "assistant", "tool"]
 
 
+async def test_plan_time_compressor_uses_the_planner_activity_lease():
+    """The compressor reuses the planner activity's leased compute token.
+
+    Cloud job r001-j0016 (agent fdd82785): the planner call ran with claude_auth while the
+    plan-time compressor in the same activity ran with no auth, fell through the exhausted
+    API-key legs and timed out, so the memory was never injected.
+    """
+    from providers.planner_memory import build_transcript
+
+    transcript = build_transcript(
+        root_agent_id="mem-3", goal=GOAL, messages=_messages(), passed=True, root_status="COMPLETED"
+    )
+    leases = {
+        "claude": {
+            "claude_max_token": "claude-lease-token",
+            "claude_token_source": "user",
+            "claude_token_pool_id": "pool-c",
+            "compute_token_lineage_key": "lineage-1",
+        },
+        "gpt": {
+            "gpt_token": "gpt-lease-token",
+            "gpt_account_id": "acct-1",
+            "gpt_token_source": "pool",
+            "gpt_token_pool_id": "pool-g",
+            "gpt_token_user_id": "user-a",
+        },
+    }
+    expected = {
+        "claude": {
+            "claude_token": "claude-lease-token",
+            "claude_token_source": "user",
+            "claude_token_pool_id": "pool-c",
+            "claude_token_user_id": "user-a",
+            "compute_token_lineage_key": "lineage-1",
+        },
+        "gpt": {
+            "gpt_token": "gpt-lease-token",
+            "gpt_account_id": "acct-1",
+            "gpt_token_source": "pool",
+            "gpt_token_pool_id": "pool-g",
+            "gpt_token_user_id": "user-a",
+        },
+    }
+    for kind, lease in leases.items():
+        with patch("providers.planner_memory.transcript.load_bundle_transcript", return_value=transcript):
+            result, captured, _ = await _run_activity(
+                memory_enabled=True,
+                candidates=[_cand("mem-3", GOAL, sim=0.95)],
+                lease=lease,
+                compressor_content=_hit().critical_path.model_dump_json(),
+            )
+        compressor_calls = [c for c in captured["llm_calls"] if c.get("call_site") == "memory_compressor"]
+        assert len(compressor_calls) == 1, f"{kind}: one plan-time compression, got {len(compressor_calls)}"
+        sent = compressor_calls[0]
+        for key, value in expected[kind].items():
+            assert sent.get(key) == value, f"{kind}: compressor {key}={sent.get(key)!r}, planner lease {value!r}"
+        assert result["planner_memory"]["compressed"] == 1, f"{kind}: compressed memory must be injected"
+        assert [m["role"] for m in captured["messages"]] == ["system", "user", "assistant", "tool"]
+
+
 async def test_compression_timeout_injects_nothing_and_releases_the_lease():
     import providers.planner_memory.retrieval as retrieval
     from providers.planner_memory import build_transcript
@@ -1143,6 +1209,7 @@ async def run_all_tests():
     await r.record_async(
         "activity_compresses_and_caches", test_planner_activity_compresses_uncompressed_hit_and_caches_it
     )
+    await r.record_async("compressor_uses_planner_lease", test_plan_time_compressor_uses_the_planner_activity_lease)
     await r.record_async(
         "compression_timeout_releases_lease",
         test_compression_timeout_injects_nothing_and_releases_the_lease,
