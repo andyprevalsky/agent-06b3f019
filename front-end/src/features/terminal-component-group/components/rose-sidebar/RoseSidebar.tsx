@@ -9,6 +9,7 @@
  *   A right-click menu, the search box or an inline name input keeps it EXPANDED.
  *
  * LAYOUT (top → bottom, Andy 2026-10-28):
+ *   [Mac app only: a draggable title-bar strip so the row clears the traffic lights]
  *   Back (←, collapses the bar; expanded only) | Search — one row
  *   New project (folder-plus; collapsed keeps the icon in this top slot), then
  *   the created projects: each project row + its agents, divider lines between
@@ -79,7 +80,12 @@ import { DeleteProjectDialog } from './DeleteProjectDialog';
 import { groupAgentsByProject } from './groupAgentsByProject';
 import RoseAgentGroups, { HOME_GROUP } from './RoseAgentGroups';
 import RoseProjectSettingsPanel from './RoseProjectSettingsPanel';
-import { RoseAccountRow, RoseNavRow, RoseSearchRow } from './RoseSidebarChrome';
+import {
+  RoseAccountRow,
+  RoseMacTitleBarInset,
+  RoseNavRow,
+  RoseSearchRow,
+} from './RoseSidebarChrome';
 import {
   ROSE_BAR_DURATION_MS,
   ROSE_BAR_EASE,
@@ -293,6 +299,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
             transition: `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
           }}
         >
+          <RoseMacTitleBarInset />
           <RoseSearchRow
             isExpanded={isExpanded}
             value={query}
