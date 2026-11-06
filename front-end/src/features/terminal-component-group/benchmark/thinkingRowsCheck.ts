@@ -1,19 +1,28 @@
 /**
  * Benchmark check (C6): in a finished run, the root agent's and every code agent's
- * thinking are tool rows of the work description, and their tok/s comes from
- * recorded output tokens over the recorded generation window.
+ * thinking are recorded thought rows whose tok/s comes from recorded output tokens
+ * over a recorded generation window.
  *
  * Input: the root agent's messages exactly as GET /api/agents/:rootId returns them
  * (`.messages[]`: message_id, timestamp, text, role, metadata, file_pointer). Code
  * agents' transcripts are carrier rows in that same list (metadata.task_id +
- * metadata.code_agent_events). The check runs the production projections: the root
- * work groups (groupTrajectoryWork / trajectoryActivity) and the code-session
- * adapter (buildCodeSession), then reads each thought's generation the way the
- * thought row does (thoughtGeneration). Nothing is re-derived here.
+ * metadata.code_agent_events). The check runs the production projections (the work
+ * group's activity classifier, and buildCodeSession per code agent) and reads each
+ * thought's generation the way the thought row does (thoughtGeneration). Nothing is
+ * re-derived here.
+ *
+ * What it verifies: DATA. Per agent it reports how many thoughts exist and how many
+ * carry a recorded generation, and fails when an agent has no thoughts, none with a
+ * generation, or a recorded tok/s outside the plausible range. Coverage is reported
+ * (thoughts vs measured), not thresholded: a code agent's thought whose window held
+ * a tool run, or a Fast Mode replay, is correctly unmeasured.
+ * What it does not verify: rendering. That the row draws as a normal tool row (no
+ * indicator blob) is asserted by front-end/src/tests/blackbox/thinking-tool-row.blackbox.tsx.
+ * A run with no code agent fails: this check is for Rose-on-Rose code-agent runs.
  */
 import type { Message } from '@/lib/api/types';
 
-import { groupTrajectoryWork, trajectoryActivity } from '../components/trajectoryWorkGroups';
+import { trajectoryActivity } from '../components/trajectoryWorkGroups';
 import { thoughtGeneration, type ThoughtGeneration } from '../components/thoughtGeneration';
 import { buildCodeSession } from '../hooks/codeSessionTurns';
 import { transcriptProvider } from '../hooks/codeSessionTranscript';
@@ -31,7 +40,7 @@ export interface AgentThinkingReport {
 
 export interface ThinkingRowsReport {
   ok: boolean;
-  root: AgentThinkingReport & { outsideWorkDescription: string[] };
+  root: AgentThinkingReport;
   codeAgents: Array<AgentThinkingReport & { taskId: string }>;
   failures: string[];
 }
@@ -49,16 +58,9 @@ function measured(messages: Message[]): ThoughtRowReport[] {
   });
 }
 
-function rootThinking(messages: Message[]) {
-  const grouping = groupTrajectoryWork(messages, 'COMPLETED');
+function rootThinking(messages: Message[]): AgentThinkingReport {
   const thoughts = messages.filter((message) => trajectoryActivity(message)?.kind === 'thinking');
-  return {
-    thoughts: thoughts.length,
-    measured: measured(thoughts),
-    outsideWorkDescription: thoughts
-      .filter((message) => !grouping.foldedIds.has(message.message_id))
-      .map((message) => message.message_id),
-  };
+  return { thoughts: thoughts.length, measured: measured(thoughts) };
 }
 
 function codeAgentThinking(messages: Message[], rootAgentId: string, taskId: string) {
@@ -106,9 +108,7 @@ export function checkThinkingRows(
     }
   };
   const root = rootThinking(messages);
-  if (root.thoughts === 0) failures.push('root: no thinking rows in the work description');
-  if (root.outsideWorkDescription.length > 0)
-    failures.push(`root: thinking outside the work description: ${root.outsideWorkDescription}`);
+  if (root.thoughts === 0) failures.push('root: no thinking rows');
   if (root.thoughts > 0 && root.measured.length === 0)
     failures.push('root: no thinking row carries a recorded generation (tok/s)');
   implausible('root', root.measured);

@@ -58,10 +58,13 @@ per-call output tokens exist only in ToolUsage (execute_loop iteration 3:
    characters; a 400-character thought reads "Thinking100 tokens".
 2. Root tok/s: never computed. The persisted ASSISTANT row carried no recorded
    usage or timing, so any FE rate would have been an estimate.
-3. Code agent S4: `CodeSessionMessages` WorkSlot showed its `ThinkingIndicator`
-   while `!turn.activityType`. Rose's goal opens the slot (04:21:22) about three
-   minutes before the CLI turn starts (04:24:18), so sandbox boot read as
-   "Thinking 102.1s", with no tokens because no usage sample existed yet.
+3. Code agent S4 (INFERRED from code and timestamps, not reproduced):
+   `CodeSessionMessages` WorkSlot shows its `ThinkingIndicator` while
+   `!turn.activityType`. Rose's goal opens the slot (04:21:22) about three
+   minutes before the CLI turn starts (04:24:18), so sandbox boot would read as
+   "Thinking", with no tokens because no usage sample exists yet. The
+   screenshot's 102.1s is not one of this run's gaps (176 s), so the exact
+   figure is unexplained. Lane B deletes that indicator, so it cannot recur.
 4. Code agent tok/s: `SessionBuilder.metrics` divided consecutive usage
    samples. Claude Code samples usage at each model call's `message_start` and
    `message_delta`, so consecutive windows alternate between generation
@@ -81,17 +84,24 @@ One contract: a thought row carries `metadata.generation =
 {output_tokens, started_at, ended_at}`, written by its producer and read by one
 FE function (`thoughtGeneration`); tok/s = recorded tokens / recorded window.
 
-- Root producer: `call_llm_structured_streaming` records the measured request →
-  stream-end window in its usage (measured usage only). `run_agent` attaches
-  `llm_generation_metadata(usage)` to the ASSISTANT row (never for estimated
-  usage or Fast Mode replays). UI-only: a regression proves `build_llm_messages`,
-  `convert_context_to_messages` and `build_planner_messages` are byte-identical
-  with or without it.
-- Code-agent producer (`codeSessionTurns` `metrics()`): the usage samples around
-  a finished thinking record bracket the model call that produced it (a turn
-  counter starts at 0 with the turn). A window a tool finished inside is
-  rejected, so rates only cover generation windows. Prod: 817 tokens / 6.05 s =
-  135.0 tok/s.
+- Root producer: `call_llm_structured_streaming` records the measured
+  first-token → last-token window in its usage (measured usage only; excludes
+  queueing, failover legs and the final parse; a window under 100 ms is a single
+  flush and records nothing). `run_agent` attaches `llm_generation_metadata(usage)`
+  to the ASSISTANT row (never for estimated usage or Fast Mode replays).
+  UI-only: a regression proves `build_llm_messages`, `convert_context_to_messages`,
+  `build_planner_messages`, the compactor's `_format_middle_for_prompt` and
+  `estimate_context_tokens`, and the planner-memory `trim_rows` are identical
+  with or without it. A producer test drives the real streaming function with an
+  injected clock (60 s queueing + 3 s tokens + 40 s tail reads as exactly 3 s).
+- Code-agent producer (`codeSessionTurns` `attachGeneration`): the usage samples
+  around a finished thinking record bracket the model call that produced it. A
+  window a tool finished inside is rejected, so rates cover only generation. A
+  sample with no earlier sample (first sample, counter reset, new scope) records
+  nothing; there is no turn-start fallback. One backward walk over only the
+  window's rows. Prod: 817 tokens / 6.05 s = 135.0 tok/s. A thought still
+  streaming when its turn ends or its session closes settles to a finished
+  "Thought" instead of staying "Thinking".
 - Rendering: `TrajectoryWorkGroup` drops the `indicator` prop and the
   text-length estimate; thinking is a stock activity (lightbulb + label + batch
   clock), and a finished thought appends "duration · ↓ tokens · tok/s". The
@@ -99,9 +109,31 @@ FE function (`thoughtGeneration`); tok/s = recorded tokens / recorded window.
   The WorkSlot indicator and chip `ThinkingRow` are deleted by Lane B's
   code-agent view conversion (the code view renders through
   `TrajectoryWorkGroup`).
+- What the numbers mean: the tokens and tok/s on a thought row are those of the
+  whole model call that produced it (the thought text plus its tool-call
+  arguments), not of the thought text alone (prod: ↓817 tokens on a one-line
+  thought, mostly the Bash command). Root windows start at the first token;
+  Claude Code windows run message_start → message_delta, so they include time to
+  first token and read as a lower bound.
 - 10k-agent behavior: no new channels, subscriptions, queries or broadcasts.
   One small JSON object on each persisted ASSISTANT row. `metrics()` walks back
   only over activities newer than the previous sample.
+
+### Open gaps (not fixed here)
+
+- Rose Desktop root and code-agent views only. Non-desktop web, browser and
+  explore panes and sub-agent panels (`compressWork` false) still render the
+  animated `ThinkingIndicator` with a character-estimated "↓ N tokens".
+- `WorkTurnMetrics.tokensPerSecond` (consecutive samples, spans tool runs) is
+  still computed and, until Lane B's code-view conversion lands, still displayed
+  by the old WorkSlot. Delete the field once nothing reads it.
+- Codex is verified only against a synthetic transcript. Its usage samples are
+  cumulative per completed response, so a window starts at the previous response's
+  end and includes time to first token; the tool-run guard suppresses most of them.
+  Expect few Codex thoughts to carry a rate until checked against a live session.
+- The benchmark check verifies data (recorded, plausible generations), not
+  rendering, and is not yet wired to a benchmark task (tasks.json is owned by
+  another lane).
 
 ## Human feedback
 

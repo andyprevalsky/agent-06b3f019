@@ -331,3 +331,65 @@ describe('Codex session-scoped counters bracket a thought only over generation',
     });
   });
 });
+
+describe('an unfinalized thought never outlives its turn', () => {
+  const second = (n: number) => new Date(Date.UTC(2026, 10, 6, 5, 0, 0) + n * 1000).toISOString();
+  const rows = (records: unknown[], sessionState: 'running' | 'paused') =>
+    buildCodeSession({
+      messages: [
+        msg({
+          toolName: 'spawn_claude_code_agent',
+          task_id: 'task-1',
+          subAgentId: 'task-1',
+          action_type: 'code_transcript',
+          hidden: true,
+          code_agent_events: records,
+        }),
+      ],
+      taskId: 'task-1',
+      ownerAgentId: 'root',
+      provider: 'claude',
+      sessionState,
+      sessionEndedAt: sessionState === 'paused' ? Date.parse(second(9)) : null,
+      echoes: [],
+    })
+      .flatMap((entry) => (entry.kind === 'work' ? entry.turn.activities : []))
+      .filter((message) => message.metadata?.toolName === 'thought')
+      .map((message) => [message.metadata?.toolStatus, message.metadata?.title]);
+  const started = {
+    id: 'start',
+    seq: 0,
+    type: 'turn',
+    event: 'started',
+    turn_id: 'native-1',
+    ts: second(0),
+    turn_started_at: second(0),
+  };
+  const streaming = {
+    id: 'th',
+    seq: 1,
+    type: 'thinking',
+    partial: true,
+    text: 'Hmm',
+    ts: second(1),
+  };
+
+  it('is a live "Thinking" row while its turn runs, then a finished "Thought"', () => {
+    expect(rows([started, streaming], 'running')).toEqual([['IN_PROGRESS', 'Thinking']]);
+    const ended = {
+      id: 'end',
+      seq: 2,
+      type: 'turn',
+      event: 'ended',
+      turn_id: 'native-1',
+      ts: second(5),
+      turn_ended_at: second(5),
+      turn_outcome: 'interrupted',
+    };
+    expect(rows([started, streaming, ended], 'running')).toEqual([['FINISHED', 'Thought']]);
+  });
+
+  it('settles when the session closes with the turn still open', () => {
+    expect(rows([started, streaming], 'paused')).toEqual([['FINISHED', 'Thought']]);
+  });
+});

@@ -9,8 +9,8 @@
 
 The FE check (front-end/src/features/terminal-component-group/benchmark/
 thinkingRowsCheck.ts) asserts, on the same projections the UI renders:
-  * root: thinking rows sit inside the work description, and at least one carries
-    a recorded generation (the LLM call's output tokens over its measured window);
+  * root: it has thinking rows, and at least one carries a recorded generation (the
+    LLM call's output tokens over its measured first-token -> last-token window);
   * every code agent: its thinking records become thought rows, and at least one
     carries a generation bracketed by the session's own usage samples;
   * every recorded tok/s is plausible (1–5,000 tok/s).
@@ -32,10 +32,19 @@ FRONT_END = REPO_ROOT / "front-end"
 CLI = "scripts/check-thinking-rows.mjs"
 
 
+def _error(message: str) -> dict[str, Any]:
+    return {"passed": False, "report": None, "failures": [message]}
+
+
 def check_thinking_rows_from_messages(
     messages: list[dict[str, Any]], root_agent_id: str, *, timeout_s: float = 120.0
 ) -> dict[str, Any]:
-    """Run the FE check on the root agent's agent-detail messages."""
+    """Run the FE check on the root agent's agent-detail messages.
+
+    Prerequisites (an actionable failure when missing, never a silent pass): `node` on
+    PATH and the front-end dependencies installed (`front-end/node_modules` or the
+    hoisted root `node_modules`, which provide `vite`).
+    """
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump({"messages": messages}, handle)
         path = handle.name
@@ -48,16 +57,21 @@ def check_thinking_rows_from_messages(
             timeout=timeout_s,
             check=False,
         )
+    except FileNotFoundError:
+        return _error("check-thinking-rows needs `node` on PATH (and front-end dependencies installed)")
+    except subprocess.TimeoutExpired:
+        return _error(f"check-thinking-rows timed out after {timeout_s:.0f}s")
     finally:
         Path(path).unlink(missing_ok=True)
-    if completed.returncode not in (0, 1):
-        return {
-            "passed": False,
-            "report": None,
-            "failures": [f"check-thinking-rows exited {completed.returncode}: {completed.stderr.strip()[-2000:]}"],
-        }
-    report = json.loads(completed.stdout)
-    return {"passed": bool(report["ok"]), "report": report, "failures": list(report["failures"])}
+    # 0 = ok, 1 = the check found failures; anything else (2 bad input, 3 or a node crash) is not a verdict.
+    if completed.returncode in (0, 1):
+        try:
+            report = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            report = None
+        if isinstance(report, dict) and "ok" in report:
+            return {"passed": bool(report["ok"]), "report": report, "failures": list(report["failures"])}
+    return _error(f"check-thinking-rows exited {completed.returncode}: {completed.stderr.strip()[-2000:]}")
 
 
 def check_thinking_rows(

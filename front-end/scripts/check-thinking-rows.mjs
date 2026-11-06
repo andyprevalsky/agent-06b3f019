@@ -6,7 +6,8 @@
  *   node scripts/check-thinking-rows.mjs <messages.json> <root-agent-id>
  *
  * <messages.json>: the GET /api/agents/<root-agent-id> response (or its `.messages`
- * array). Prints the JSON report; exits 0 when ok, 1 on failures, 2 on bad input.
+ * array). Prints the JSON report; exits 0 when ok, 1 on check failures, 2 on bad input,
+ * 3 on an unexpected error (so a crash is never mistaken for a failed check).
  */
 import { readFileSync } from 'node:fs';
 import { createServer } from 'vite';
@@ -22,19 +23,24 @@ if (!Array.isArray(messages)) {
   console.error(`${path}: expected an agent-detail response or a messages array`);
   process.exit(2);
 }
-const server = await createServer({
-  server: { middlewareMode: true, hmr: false },
-  appType: 'custom',
-  logLevel: 'error',
-});
 let report;
 try {
-  const { checkThinkingRows } = await server.ssrLoadModule(
-    '/src/features/terminal-component-group/benchmark/thinkingRowsCheck.ts',
-  );
-  report = checkThinkingRows(messages, rootAgentId);
-} finally {
-  await server.close();
+  const server = await createServer({
+    server: { middlewareMode: true, hmr: false },
+    appType: 'custom',
+    logLevel: 'error',
+  });
+  try {
+    const { checkThinkingRows } = await server.ssrLoadModule(
+      '/src/features/terminal-component-group/benchmark/thinkingRowsCheck.ts',
+    );
+    report = checkThinkingRows(messages, rootAgentId);
+  } finally {
+    await server.close();
+  }
+} catch (error) {
+  console.error(`check-thinking-rows: unexpected error: ${error?.stack ?? error}`);
+  process.exit(3);
 }
 console.log(JSON.stringify(report, null, 2));
 process.exit(report.ok ? 0 : 1);

@@ -83,3 +83,17 @@ def test_thinking_rows_without_recorded_generation_fail():
     assert not result["passed"] and "11940.0 tok/s" in result["failures"][0]
     result = thinking_rows_check.check_thinking_rows_from_messages(_run(ROOT_GENERATION, thinking=False), ROOT)
     assert result["failures"] == ["code agent 6f8f8f4d-c670-4bc8-b5df-e2c785c4a908: no thinking rows"]
+
+
+def test_thinking_rows_cli_crash_is_a_failure_not_an_exception():
+    """A node crash (no JSON, exit 1) must read as a failed check with its stderr, never a raised error."""
+    original = thinking_rows_check.CLI
+    thinking_rows_check.CLI = "scripts/does-not-exist.mjs"
+    try:
+        result = thinking_rows_check.check_thinking_rows_from_messages(_run(ROOT_GENERATION), ROOT)
+    finally:
+        thinking_rows_check.CLI = original
+    assert result["passed"] is False and result["report"] is None
+    assert len(result["failures"]) == 1 and result["failures"][0].startswith("check-thinking-rows exited 1:")
+    assert "does-not-exist.mjs" in result["failures"][0]
+

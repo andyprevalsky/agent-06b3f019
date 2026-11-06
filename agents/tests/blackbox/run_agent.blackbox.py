@@ -582,8 +582,8 @@ _MEASURED_USAGE = {
     "prompt_tokens": 10,
     "completion_tokens": 596,
     "total_tokens": 606,
-    "request_started_at_ms": 1_793_939_000_000,
-    "response_ended_at_ms": 1_793_939_002_400,
+    "generation_started_at_ms": 1_793_939_000_000,
+    "generation_ended_at_ms": 1_793_939_002_400,
 }
 
 
@@ -608,7 +608,8 @@ async def test_assistant_thought_records_measured_generation():
     }
     assert assistant["metadata"]["tool_calls"][0]["tool_call_id"] == "tc-web-search-1"
     estimated = {"prompt_tokens": 10, "completion_tokens": 596, "total_tokens": 606}
-    for usage in (estimated, {**_MEASURED_USAGE, "from_fast_cache": True}):
+    burst = {**_MEASURED_USAGE, "generation_ended_at_ms": 1_793_939_000_050}  # one 50 ms flush
+    for usage in (estimated, {**_MEASURED_USAGE, "from_fast_cache": True}, burst):
         assert "generation" not in ((await _posted_thought(usage))["metadata"] or {})
 
 
@@ -644,6 +645,30 @@ async def test_thought_generation_metadata_is_invisible_to_every_llm_builder():
             context(plain), include_assistant=include_assistant
         ) == convert_context_to_messages(context(recorded), include_assistant=include_assistant)
     assert build_planner_messages(context(plain)) == build_planner_messages(context(recorded))
+
+    # The remaining readers of an ASSISTANT row's metadata: the context compactor's
+    # summary input and size estimate, and the planner-memory transcript trim.
+    from helpers.summarize import _format_middle_for_prompt, estimate_context_tokens
+    from providers.planner_memory.transcript import trim_rows
+
+    assert _format_middle_for_prompt(context(plain), [0, 1, 2]) == _format_middle_for_prompt(
+        context(recorded), [0, 1, 2]
+    )
+    assert estimate_context_tokens(context(plain)) == estimate_context_tokens(context(recorded))
+
+    def memory_rows(metadata):
+        return [
+            {
+                "id": f"m{index}",
+                "createdAt": row["timestamp"],
+                "role": row["role"],
+                "message": row["text"],
+                "metadata": row.get("metadata"),
+            }
+            for index, row in enumerate(context(metadata))
+        ]
+
+    assert trim_rows(memory_rows(plain)) == trim_rows(memory_rows(recorded))
 
 
 async def test_rejected_completion_continues_with_stable_schema():

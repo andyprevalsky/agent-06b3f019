@@ -297,6 +297,47 @@ interface OpenTurn {
   metricBaseline?: number;
 }
 
+interface UsageSample {
+  count: number;
+  at: number;
+}
+
+/**
+ * Records the generation that `from`→`to` brackets on the finished thoughts inside it.
+ * One backward walk over just the window's rows. A finished tool row inside the window
+ * means it spans a tool run, not generation: no rate rather than a wrong one.
+ */
+function attachGeneration(activities: Message[], from: UsageSample, to: UsageSample) {
+  if (to.at <= from.at || to.count <= from.count) return;
+  const thoughts: number[] = [];
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const message = activities[index];
+    const time = eventTimeMs(message.timestamp);
+    if (time !== null && time <= from.at) break;
+    if (time === null || time > to.at) continue;
+    const metadata = message.metadata;
+    if (metadata?.toolName === 'thought') {
+      if (metadata.toolStatus === 'FINISHED' && !metadata.generation) thoughts.push(index);
+    } else if (
+      message.role === 'TOOL' &&
+      metadata?.toolStatus === 'FINISHED' &&
+      metadata.a2a === undefined &&
+      metadata.isUserAttentionMessage !== true
+    ) {
+      return;
+    }
+  }
+  const generation = {
+    output_tokens: to.count - from.count,
+    started_at: iso(from.at),
+    ended_at: iso(to.at),
+  };
+  for (const index of thoughts) {
+    const message = activities[index];
+    activities[index] = { ...message, metadata: { ...message.metadata, generation } };
+  }
+}
+
 class SessionBuilder {
   readonly out: CodeSessionEntry[] = [];
   private open: OpenTurn | null = null;
@@ -346,6 +387,16 @@ class SessionBuilder {
     if (!open) return;
     open.turn.status = outcome;
     open.turn.endedAt = endedAt;
+    // A thought still streaming when its turn ends (interrupted, or never finalized) is
+    // over: a finished slot never keeps a live "Thinking" row.
+    open.turn.activities = open.turn.activities.map((message) =>
+      message.metadata?.toolName === 'thought' && message.metadata.toolStatus === 'IN_PROGRESS'
+        ? {
+            ...message,
+            metadata: { ...message.metadata, toolStatus: 'FINISHED', title: 'Thought' },
+          }
+        : message,
+    );
     this.open = null;
   }
 
@@ -453,44 +504,11 @@ class SessionBuilder {
     };
     open.metricSample = { count, at, scope };
     // A thought's generation: the producer samples usage at each model call's start and
-    // end, so the samples around a thinking record bracket the call that generated it
-    // (a turn-scoped counter starts at 0 with the turn). A window a tool finished inside
-    // spans a tool run, not generation: no rate rather than a wrong one.
-    const from =
-      !reset && previous
-        ? previous
-        : scope === 'turn' && open.turn.startedAt !== null
-          ? { count: 0, at: open.turn.startedAt }
-          : null;
-    if (!from || from.at === null || at === null || at <= from.at || count <= from.count) return;
-    const inside = (message: Message) => {
-      const time = eventTimeMs(message.timestamp);
-      return time !== null && time > from.at! && time <= at;
-    };
-    const activities = open.turn.activities;
-    const toolRan = activities.some(
-      (message) =>
-        message.metadata?.toolName !== 'thought' &&
-        message.metadata?.toolStatus === 'FINISHED' &&
-        message.role === 'TOOL' &&
-        message.metadata?.a2a === undefined &&
-        message.metadata?.isUserAttentionMessage !== true &&
-        inside(message),
-    );
-    if (toolRan) return;
-    const generation = {
-      output_tokens: count - from.count,
-      started_at: iso(from.at),
-      ended_at: iso(at),
-    };
-    for (let index = activities.length - 1; index >= 0; index -= 1) {
-      const message = activities[index];
-      const time = eventTimeMs(message.timestamp);
-      if (time !== null && time <= from.at) break;
-      if (message.metadata?.toolName !== 'thought' || message.metadata.generation) continue;
-      if (message.metadata.toolStatus !== 'FINISHED' || !inside(message)) continue;
-      activities[index] = { ...message, metadata: { ...message.metadata, generation } };
-    }
+    // end, so the samples around a thinking record bracket the call that generated it.
+    // Only a sample with an earlier sample to bracket from qualifies: a first sample, a
+    // counter reset or a new scope has no baseline, and nothing is invented for it.
+    if (reset || !previous || previous.at === null || at === null) return;
+    attachGeneration(open.turn.activities, previous, { count, at });
   }
 
   end(entry: TranscriptEntry) {

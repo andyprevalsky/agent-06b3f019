@@ -5,6 +5,11 @@
  * row and the running work row both read it here: tok/s = recorded output tokens
  * over the recorded window. A thought without one shows no tokens; nothing is
  * estimated from text length.
+ *
+ * The figures belong to the whole model call that produced the thought (its text
+ * plus tool-call arguments), not to the thought text alone. Root windows run first
+ * token → last token; Claude Code windows run message_start → message_delta (they
+ * include time to first token, so they read as a lower bound).
  */
 import type { Message } from '../hooks';
 import { eventTimeMs } from '../hooks/codeAgentContract';
