@@ -461,6 +461,84 @@ async def test_multiplexer_propagates_provider_close_code():
             await multiplexer.close()
 
 
+async def test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_running():
+    """A provider socket drop whose browser-use drop callback never starts a reconnect.
+
+    browser-use's handlers skip silently while the socket is down and nothing is
+    reconnecting, so the state fetch fails with "Expected at least one handler to
+    return a non-None result" (agent-payment-new-user-journey, resumed Tilion
+    checkout, 2026-11-06). The state read must restore the connection itself.
+    """
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            with _tilion_env(gateway):
+                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, label="test")
+                service = DOMService(cdp_url=local_url, cdp_multiplexer=multiplexer)
+                try:
+                    await service.connect()
+                    session = service.session
+                    assert (await service.get_browser_state(include_screenshot=False))["url"] is not None
+                    session._intentional_stop = True  # the drop callback sees a deliberate stop and starts nothing
+                    await gateway.drop_all()
+                    for _ in range(100):
+                        if not session.is_cdp_connected:
+                            break
+                        await asyncio.sleep(0.05)
+                    await asyncio.sleep(0.3)
+                    session._intentional_stop = False
+                    assert not session.is_cdp_connected and not session.is_reconnecting
+                    state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
+                    assert state["url"] is not None
+                    assert session.is_cdp_connected
+                finally:
+                    await _stop_dom_service(service)
+
+
+async def test_state_fetch_reports_provider_close_when_the_socket_cannot_be_restored():
+    """A socket that stays down fails the read with the provider's close code, not a bare ValueError."""
+    from browser_tools.dom_service import BrowserCdpConnectionLost, DOMService
+    from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            with _tilion_env(gateway):
+                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, label="test")
+                service = DOMService(cdp_url=local_url, cdp_multiplexer=multiplexer)
+                try:
+                    await service.connect()
+                    session = service.session
+                    session._intentional_stop = True
+                    await gateway.drop_all()
+                    await asyncio.sleep(0.5)
+                    session._intentional_stop = False
+                    gateway._server.close()  # the provider no longer accepts connections
+                    with contextlib.suppress(Exception):
+                        await gateway._server.wait_closed()
+                    try:
+                        await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 120)
+                    except BrowserCdpConnectionLost as error:
+                        assert "provider close=" in str(error) and "reconnecting=" in str(error), str(error)
+                    else:
+                        raise AssertionError("an unreachable provider must fail the state read")
+                finally:
+                    await _stop_dom_service(service)
+
+
+async def test_state_restore_relies_only_on_browser_use_attributes_that_exist():
+    """The restore path uses browser-use internals; a pin bump that renames one must fail here."""
+    from browser_use.browser.session import BrowserSession
+
+    for name in ("_reconnect_event", "_intentional_stop", "_reconnect_pending", "_reconnecting"):
+        assert name in BrowserSession.__private_attributes__, f"browser-use BrowserSession no longer has {name}"
+    assert callable(getattr(BrowserSession, "_auto_reconnect", None))
+    assert isinstance(BrowserSession.model_fields["RECONNECT_WAIT_TIMEOUT"].default, float)
+    assert isinstance(BrowserSession.is_cdp_connected, property)
+    assert isinstance(BrowserSession.is_reconnecting, property)
+
+
 # ----- URLs ------------------------------------------------------------------
 
 
