@@ -22,6 +22,7 @@ import { Toaster as Sonner } from '@/components/ui/sonner';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import { initAppVersionWatch } from '@/lib/appVersion';
 import { captureBenchmarkShareToken } from '@/lib/benchmarkShare';
+import { mountBlurLabIfRequested } from '@/dev/blur-lab/mountBlurLab';
 import { initThemeColorSync } from '@/lib/themeColor';
 import { startPreviewHandoff } from '@/lib/previewHandoff';
 import AppShell, {
@@ -44,6 +45,7 @@ initViewportHeight();
 initViewportScale();
 initAppVersionWatch();
 initThemeColorSync();
+mountBlurLabIfRequested();
 
 function renderApp(): void {
   // Render main app
