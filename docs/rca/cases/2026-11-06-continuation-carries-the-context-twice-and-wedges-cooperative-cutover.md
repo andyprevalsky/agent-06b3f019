@@ -85,9 +85,20 @@ larger than ~2 MiB would still fail; compaction bounds it by tokens, and the new
 warning makes approach to that bound observable. A DB-backed claim check for such
 contexts is a separate, larger change.
 
-Live job: the wedged workflow runs old-bank code that duplicates the context, so
-the fix cannot reach it in place. See the deploy record for how that straggler
-was resolved.
+Live job: the wedged workflow ran old-bank code that duplicates the context, so
+the fix could not reach it in place, and a restart or pause would only have moved
+the same oversized state onto a bank that still carried the bug (it would wedge
+the next cutover). The stale `DEMO fleet concurrency probe alpha` agent
+(76aac11b, ACTIVE since 2026-10-28, 384 messages) was archived through the
+product's soft-delete route (reversible with unarchive) at 2026-11-06T15:48:37Z;
+the old queue then showed 0 open workflows and the same saved job 39e1d2df was
+resumed with `worker-deployment-queue.ts run --job-id ... --if-idle` until it
+reached `SUCCEEDED` (`monitor-cooperative-cutover.ts --verify` exit 0). No bank was
+force-cleared, no Machine destroyed, no pointer rolled back. The same bug wedged
+the next job (144933574d28, merged fix 58e2f7ef54): a sibling probe agent
+(7e8dd768, 429 messages, 1.09 MB, parked by the PR #1734 cutover onto an older
+bank) failed its handoff with TMPRL1103; it was archived the same way at
+18:18:13Z and that job also reached `SUCCEEDED`. Evidence: docs/handoffs/pr-1739-closeout.
 
 ## Human feedback
 
