@@ -111,8 +111,10 @@ class Worker(unittest.TestCase):
         self.assertNotIn('cleanup_owner', result)
 
     def test_native_producer_and_generic_use_their_declared_cleanup_authority(self):
+        # 'agentcard' is a stale plan's retired AgentCard lane: its tasks run in cloud smoke now, so the
+        # category earns no native-producer cleanup authority and is owned like any generic gate.
         for kind in ('generic', 'cloud', 'agentcard'):
-            native = kind in {'cloud', 'agentcard'}
+            native = kind == 'cloud'
             with self.subTest(kind=kind):
                 gate = {'name': kind, 'checks': ['first'], 'command': ['fixture'],
                         'case_protocol': True, 'native_cloud': kind == 'cloud',
@@ -137,16 +139,6 @@ class Worker(unittest.TestCase):
                     self.assertTrue(result['native_cleanup_reference']['cleanup_complete'])
                 else:
                     self.assertIsNone(result['native_cleanup_reference'])
-
-    def test_unbound_agentcard_lifecycle_refuses_before_launch(self):
-        gate = {'name': 'agentcard', 'checks': ['first'], 'command': ['fixture'],
-                'category': 'agentcard-lifecycle'}
-        state = {'phase': 'initial', 'round': 0, 'skips': {},
-                 'source': {'head': 'a' * 40, 'digest': 'b' * 64}}
-        with patch.object(cycle, 'run_command') as launch:
-            with self.assertRaisesRegex(ValueError, 'validated worker binding'):
-                cycle.execute(gate, state, self.coordinator / '.context/unbound', self.coordinator)
-            launch.assert_not_called()
 
     def test_interrupted_native_producer_records_cleanup_owner_and_blocks_credit(self):
         gate = {'name': 'native', 'checks': ['first'], 'command': ['fixture'], 'native_cloud': True}

@@ -65,7 +65,7 @@ def env_file(values):
 
 
 def args(**overrides):
-    base = dict(base='origin/main', state_dir=None, skip_agentcard=None, dry_run=False,
+    base = dict(base='origin/main', state_dir=None, dry_run=False,
                 provision_jobs=4, head=None, rca_launcher=None, structural_workers=g.STRUCTURAL_WORKERS,
                 semantic_worker_processes=g.SEMANTIC_WORKER_PROCESSES, sample_memory=None, abort_below_mb=None,
                 executor='local')
@@ -348,7 +348,7 @@ class Run(Fixture):
         name = Path(argv[1]).name
         return {'deploy_test_plan.py': 'plan', 'run_deploy_pipeline.py': 'verify'}.get(name, argv[2])
 
-    def fake_list_selected(self, root, base, skip, template):
+    def fake_list_selected(self, root, base, template):
         self.selected_with.append((template, json.loads(Path(template).read_text())))
         return self.selection
 
@@ -370,14 +370,14 @@ class Run(Fixture):
         return [self.kind(argv) for argv in self.streamed]
 
     def test_clean_pass_plans_inits_runs_and_verifies_the_exact_head(self):
-        code, out = self.go(rca_launcher=['launcher', '--flag'], skip_agentcard='no card today')
+        code, out = self.go(rca_launcher=['launcher', '--flag'])
         self.assertEqual(0, code)
         self.assertEqual(f'DEPLOY_GATES PASS head={self.head[:12]} gates=3', out.strip().splitlines()[-1])
         self.assertEqual(['plan', 'init', 'run', 'verify'], self.kinds())
         planner, init, run, verify = self.streamed
         self.assertEqual(['--inventory', str(self.state / 'inventory.candidate.json'), '--base', 'origin/main',
                           '--template', str(self.state / 'template.candidate.json'),
-                          '--output', str(self.state / 'plan.candidate.json'), '--skip-agentcard', 'no card today'],
+                          '--output', str(self.state / 'plan.candidate.json')],
                          planner[2:])
         self.assertEqual(['--plan', str(self.state / 'plan.json'), '--state-dir', str(self.state)], init[3:])
         self.assertEqual(['--rca-launcher', 'launcher', '--flag'], run[-3:])
@@ -641,10 +641,23 @@ class Capacity(unittest.TestCase):
 
     def test_full_measured_selection_needs_its_measured_peak_plus_margin_and_floor(self):
         need = g.capacity_requirements(self.ALL)
-        self.assertEqual(round(g.MEASURED_CONCURRENT_MB * g.MEMORY_MARGIN) + 1024, need['gates_mb'])
+        share = sum(g.GATE_PEAK_PSS_MB.values()) / g.MEASURED_TOTAL_PSS_MB
+        self.assertEqual(round(g.MEASURED_CONCURRENT_MB * share * g.MEMORY_MARGIN) + 1024, need['gates_mb'])
         self.assertEqual(need['gates_mb'] + g.WATCHDOG_FLOOR_MB, need['memory_mb'])
-        self.assertEqual(12, need['new_workers'])
-        self.assertEqual(12 * g.WORKER_DISK_MB + g.DISK_MARGIN_MB, need['disk_mb'])
+        self.assertEqual(11, need['new_workers'])
+        self.assertEqual(11 * g.WORKER_DISK_MB + g.DISK_MARGIN_MB, need['disk_mb'])
+
+    def test_retired_agentcard_lane_keeps_every_remaining_gate_estimate_and_charges_smoke_its_controller(self):
+        # The AgentCard tasks run in cloud smoke now; the local lane and its 1,500 MB peak are gone, but the
+        # 2026-11-05 measurement it was part of still weights every remaining gate exactly as before.
+        self.assertNotIn('agentcard-lifecycle', g.GATE_PEAK_PSS_MB)
+        self.assertEqual(18_330, g.MEASURED_TOTAL_PSS_MB)
+        for gate, peak in g.GATE_PEAK_PSS_MB.items():
+            with self.subTest(gate=gate):
+                self.assertEqual(round(g.MEASURED_CONCURRENT_MB * peak / 18_330 * g.MEMORY_MARGIN),
+                                 g.capacity_requirements([{'gate': gate, 'mode': 'reuse'}])['gates_mb'])
+        smoke = g.capacity_requirements([{'gate': 'smoke', 'mode': 'cloud'}])
+        self.assertEqual((1024, 0, 0), (smoke['gates_mb'], smoke['new_workers'], smoke['disk_mb']))
 
     def test_subsets_scale_by_measured_peaks_and_unknown_gates_are_charged(self):
         small = g.capacity_requirements([{'gate': 'seed-cache-decision', 'mode': 'reuse'}])
@@ -665,7 +678,7 @@ class Capacity(unittest.TestCase):
         need = g.capacity_requirements(self.ALL)
         self.assertIn(f"NEED memory: need {need['memory_mb']} MB available", out)
         self.assertIn(f"available now 9000 MB; free {need['memory_mb'] - 9000} MB", out)
-        self.assertIn('NEED disk: need 66.5 GB free (12 new workers x 5.4 GB + 2 GB); free now 30.0 GB', out)
+        self.assertIn('NEED disk: need 61.1 GB free (11 new workers x 5.4 GB + 2 GB); free now 30.0 GB', out)
         self.assertIn('pid 4242 1024 MB node', out)
         self.assertIn('scripts/deploy gates retire', out)
         self.assertIn('nothing was provisioned', out)
@@ -680,7 +693,8 @@ class Cli(Fixture):
         with patch.object(g, 'retire', return_value=0) as retire, patch.object(g, 'ROOT', self.root):
             self.assertEqual(0, g.main(['retire', '--head', self.head]))
         self.assertEqual(self.head, retire.call_args[0][0].head)
-        for bad in (['retire', '--rca-launcher', 'x'], ['--head', 'abc'], ['--skip-agentcard', ' '],
+        # AgentCard runs inside cloud smoke: there is no AgentCard gate to elect away.
+        for bad in (['retire', '--rca-launcher', 'x'], ['--head', 'abc'], ['--skip-agentcard', 'no card today'],
                     ['--provision-jobs', '0'], ['deploy'], ['--structural-workers', '0'],
                     ['--semantic-worker-processes', '0'], ['--semantic-worker-processes', '1000'],
                     ['--abort-below-mb', '1200'], ['--sample-memory', 'm.jsonl', '--abort-below-mb', '0'],
@@ -695,14 +709,14 @@ class Cli(Fixture):
         done = subprocess.CompletedProcess([], 0, stdout=json.dumps(selection))
         template = self.root / 'template.json'
         with patch.object(g.subprocess, 'run', return_value=done) as run:
-            self.assertEqual(selection, g.list_selected(self.root, 'review-base', 'reason', template))
-        self.assertEqual(['--list-selected', '--base', 'review-base', '--template', str(template),
-                          '--skip-agentcard', 'reason'], run.call_args[0][0][2:])
+            self.assertEqual(selection, g.list_selected(self.root, 'review-base', template))
+        self.assertEqual(['--list-selected', '--base', 'review-base', '--template', str(template)],
+                         run.call_args[0][0][2:])
         for result, code in ((subprocess.CompletedProcess([], 2, stdout=''), 2),
                              (subprocess.CompletedProcess([], 0, stdout='{"selected": []}'), 2)):
             with self.subTest(code=result.returncode), patch.object(g.subprocess, 'run', return_value=result):
                 with self.assertRaises(g.Blocked) as caught:
-                    g.list_selected(self.root, 'origin/main', None, template)
+                    g.list_selected(self.root, 'origin/main', template)
                 self.assertEqual(code, caught.exception.code)
 
     def test_host_cut_flags_default_and_pass_through(self):
@@ -927,7 +941,7 @@ class RunMemory(Fixture):
                 self.events.append('finish')
 
         self.abort_on = None
-        for name, fake in (('list_selected', lambda root, base, skip, template: self.selection),
+        for name, fake in (('list_selected', lambda root, base, template: self.selection),
                            ('stream', self.fake_stream), ('MemorySampler', FakeSampler)):
             patcher = patch.object(g, name, fake)
             patcher.start()

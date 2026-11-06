@@ -74,8 +74,8 @@ def validate(plan, root):
             host = 'boxes:' + box
         elif mode == GITHUB_TRANSPORT:
             name = gate.get('name')
-            if gate.get('category', name) in ('smoke', 'agentcard-lifecycle'):
-                raise ValueError(f'{name}: smoke stays on the cloud benchmark CLI and AgentCard on a local worker')
+            if gate.get('category', name) == 'smoke':
+                raise ValueError(f'{name}: smoke stays on the cloud benchmark CLI')
             if gate.get('worker_root') != GITHUB_WORKER_ROOT:
                 raise ValueError(f'github-actions binding requires the runner checkout {GITHUB_WORKER_ROOT}')
             location = GITHUB_WORKER_ROOT

@@ -184,7 +184,7 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(admission['started']); launch.assert_not_called()
                 c.CANCEL.clear()
                 card = dict(name='card', checks=['card'], command=['must-not-launch'], case_protocol=True,
-                            category='agentcard-lifecycle', worker_transport='local-isolated', timeout_seconds=.05)
+                            category='generic', worker_transport='local-isolated', timeout_seconds=.05)
                 result = c.execute(card, self.state, self.directory, self.root)
                 self.assertEqual({'card': 'UNVERIFIED'}, result['cases'])
                 self.assertFalse(result['executed']); self.assertFalse(result['complete'])
@@ -192,7 +192,9 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(result['lingering_group']); self.assertNotIn('cleanup_owner', result)
                 launch.assert_not_called()
 
-    def test_local_slot_holds_through_native_cleanup_validation_without_cancelling_cloud(self):
+    def test_local_slot_fences_queued_locals_after_unverified_cleanup_without_cancelling_cloud(self):
+        # The only local native producer was the retired AgentCard lane (its tasks run in cloud smoke now);
+        # an ordinary owned local gate that reports unverified cleanup still fences the queued local root.
         import time
         started = self.root / '.context/first-native-started'
         forbidden = self.root / '.context/queued-native-started'
@@ -201,7 +203,7 @@ class Cycle(unittest.TestCase):
                   f"Path({str(started)!r}).touch();time.sleep(.15);"
                   "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=False,reused=False);"
                   "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
-        first = dict(name='card', category='agentcard-lifecycle', worker_transport='local-isolated',
+        first = dict(name='card', category='generic', worker_transport='local-isolated',
                      case_protocol=True, checks=['card'], timeout_seconds=2, command=[sys.executable, '-c', script])
         second = dict(name='queued', category='generic', worker_transport='local-isolated',
                       case_protocol=True, checks=['queued'], timeout_seconds=2,
@@ -215,8 +217,8 @@ class Cycle(unittest.TestCase):
             self.assertTrue(started.exists())
             two = pool.submit(c.execute, second, self.state, self.directory, self.root, local_failure=failed)
             a, b = one.result(), two.result()
-        self.assertEqual(0, a['native_exit']); self.assertTrue(a['lingering_group'])
-        self.assertIn('cleanup_owner', a); self.assertTrue(failed.is_set())
+        self.assertEqual(0, a['native_exit']); self.assertFalse(a['complete'])
+        self.assertEqual('owned', a['lifecycle']); self.assertTrue(failed.is_set())
         self.assertEqual({'queued': 'UNVERIFIED'}, b['cases'])
         self.assertFalse(b['executed']); self.assertFalse(b['complete']); self.assertFalse(forbidden.exists())
         cloud_script = ("import json,os;from pathlib import Path;"

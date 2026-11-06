@@ -58,42 +58,17 @@ class Selection(unittest.TestCase):
         plan=p.select(self.template,['new-language/source'],self.result,self.bindings)
         self.assertEqual(7,len(plan['gates']))
 
-    def test_agentcard_opt_out_records_skip_without_reducing_other_all_categories(self):
-        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
-                                      'command':['true'],'checks':['card']})
-        self.result.update(all=True,reasons=['unmapped source'])
-        plan=p.select(self.template,['new-language/source'],self.result,self.bindings,
-                      skip_agentcard='operator elected no live payment test')
-        self.assertEqual(7,len(plan['gates']))
-        self.assertNotIn('payment',{gate['name'] for gate in plan['gates']})
-        self.assertEqual([{'gate':'payment','category':'agentcard-lifecycle',
-                          'reason':'explicit AgentCard opt-out: operator elected no live payment test',
-                          'disposition':'SKIPPED','executed':False}],plan['omitted'])
-        self.assertEqual('payment',self.template['gates'][-1]['name'])
-
-    def test_agentcard_opt_out_rejects_blank_reason(self):
-        with self.assertRaisesRegex(ValueError,'nonempty reason'):
-            p.select(self.template,[],self.result,self.bindings,skip_agentcard='  ')
-
-    def test_cli_agentcard_opt_out_does_not_require_an_unused_inventory_binding(self):
-        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
-                                      'command':['true'],'checks':['card']})
-        with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder); template=root/'template.json'; inventory=root/'inventory.json'; output=root/'plan.json'
-            template.write_text(json.dumps(self.template));inventory.write_text('{}')
-            selected=SimpleNamespace(all_lanes=True,reasons=['unmapped source'],selected=self.result['lanes'])
-            def bindings(actual, *_):
-                self.assertNotIn('payment',{gate['name'] for gate in actual['gates']})
-                return self.bindings
-            with patch.object(sys,'argv',['deploy_test_plan.py','--template',str(template),
-                    '--inventory',str(inventory),'--output',str(output),'--skip-agentcard','user elected skip']), \
-                    patch.object(p,'changed_files',return_value=['new-language/source']), \
-                    patch.object(p.Selector,'select',return_value=selected), \
-                    patch.object(p,'generate_bindings',side_effect=bindings):
-                self.assertEqual(0,p.main())
-            saved=json.loads(output.read_text())
-            self.assertEqual('SKIPPED',saved['omitted'][0]['disposition'])
-            self.assertEqual(7,len(saved['gates']))
+    def test_agentcard_is_not_a_gate_category_and_cannot_be_elected_away(self):
+        # The AgentCard lifecycle tasks are ordinary smoke tasks (agents/benchmarks/tasks.json tag smoke):
+        # there is no agentcard-lifecycle gate, path rule or opt-out; production keeps its own lane.
+        self.assertNotIn('agentcard-lifecycle',p.PATHS)
+        self.assertFalse(hasattr(p,'PATH_EXCLUDES'))
+        for argv in (['--list-selected','--skip-agentcard','no card'],
+                     ['--inventory','i.json','--output','o.json','--skip-agentcard','no card']):
+            with self.subTest(argv=argv), patch('sys.stderr',io.StringIO()), \
+                    self.assertRaises(SystemExit) as caught:
+                p.main(argv)
+            self.assertEqual(2,caught.exception.code)
 
     def test_selection_only_matches_the_bound_selection_without_worker_checks(self):
         self.template['gates'].append({'name':'mac','category':'mac-app-coverage-blackbox','platform':'other-os',
@@ -111,8 +86,6 @@ class Selection(unittest.TestCase):
             p.select(self.template,['back-end/src/one.ts'],self.result,{})
 
     def test_cli_list_selected_prints_selection_without_bindings_or_output(self):
-        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
-                                      'command':['true'],'checks':['card']})
         with tempfile.TemporaryDirectory() as folder:
             template=Path(folder)/'template.json'; template.write_text(json.dumps(self.template))
             selected=SimpleNamespace(all_lanes=False,reasons=[],selected=self.result['lanes'])
@@ -121,16 +94,14 @@ class Selection(unittest.TestCase):
                     patch.object(p.Selector,'select',return_value=selected), \
                     patch.object(p,'generate_bindings',side_effect=AssertionError('no bindings in list mode')), \
                     patch('sys.stdout',out):
-                self.assertEqual(0,p.main(['--template',str(template),'--list-selected','--base','review-base',
-                                           '--skip-agentcard','no card']))
+                self.assertEqual(0,p.main(['--template',str(template),'--list-selected','--base','review-base']))
             changed.assert_called_once_with('review-base',None)
             self.assertEqual(['template.json'],[x.name for x in Path(folder).iterdir()])
         listed=json.loads(out.getvalue())
         self.assertEqual(['lint','be','smoke','format','typescript','backend-structural'],listed['selected'])
         self.assertEqual(['lint','format','typescript','backend-structural'],listed['quick'])
         self.assertEqual(['be','smoke'],listed['needs_worker'])
-        self.assertEqual(['fe','payment'],sorted(o['gate'] for o in listed['omitted']))
-        self.assertEqual('SKIPPED',next(o for o in listed['omitted'] if o['gate']=='payment')['disposition'])
+        self.assertEqual(['fe'],[o['gate'] for o in listed['omitted']])
 
     def test_cli_requires_bindings_and_output_outside_list_mode(self):
         for argv in (['--output','plan.json'],['--workers','w.json'],['--list-selected','--workers','w.json'],
@@ -185,10 +156,9 @@ class Selection(unittest.TestCase):
                     self.assertIn(p.ALWAYS['e2b-smoke'],gate['selection_evidence'])
         self.assertIn('every deploy',p.ALWAYS['e2b-smoke'])
 
-    def test_agentcard_restores_the_original_path_rule_without_history_ledgers(self):
-        # Original /deploy CHANGED_AGENTCARD_PAYMENT (deploy.md L516).
-        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
-                                      'command':['true'],'checks':['card']})
+    def test_agentcard_payment_paths_select_the_cloud_smoke_gate_that_carries_its_tasks(self):
+        # Every path the retired AgentCard lane triggered on (original /deploy CHANGED_AGENTCARD_PAYMENT,
+        # deploy.md L516) still selects the gate that now runs those four tasks: cloud smoke.
         self.result['lanes']['backend-unit']=[]
         triggers=['back-end/scripts/setup-benchmark-payment.ts',
                   'back-end/src/domains/agentcard/service.ts','back-end/src/domains/purchases/router.ts',
@@ -196,6 +166,7 @@ class Selection(unittest.TestCase):
                   'back-end/src/providers/agentcard/client.ts','back-end/src/providers/card-provider/index.ts',
                   'back-end/src/providers/purchaseCleanup.ts','back-end/src/providers/purchase-wallet-funding.ts',
                   'back-end/src/providers/purchase-wallet-funding-retry.ts','back-end/src/providers/wallet-funding.ts',
+                  'back-end/prisma/schema.prisma',
                   'agents/benchmarks/run_benchmark.py','agents/benchmarks/tasks.json',
                   'agents/domains/request_payment_card/flow.py','agents/tools/request_payment_card.py',
                   'front-end/src/features/test-payment/Page.tsx',
@@ -203,17 +174,24 @@ class Selection(unittest.TestCase):
         for path in triggers:
             with self.subTest(path=path):
                 plan=p.select(self.template,[path],self.result,None)
-                self.assertIn('payment',[g['name'] for g in plan['gates']],path)
-        for changed in (['agents/benchmarks/history/task_attempts.jsonl'],
-                        ['agents/benchmarks/history/task_durations.jsonl',
-                         'agents/benchmarks/history/span_durations.jsonl'],['docs/guide.md']):
-            with self.subTest(changed=changed):
-                plan=p.select(self.template,changed,self.result,None)
-                self.assertNotIn('payment',[g['name'] for g in plan['gates']])
-                self.assertIn('payment',[o['gate'] for o in plan['omitted']])
-        mixed=p.select(self.template,['agents/benchmarks/history/task_attempts.jsonl','agents/tools/request_payment_card.py'],
-                       self.result,None)
-        self.assertIn('payment',[g['name'] for g in mixed['gates']])
+                self.assertIn('smoke',[g['name'] for g in plan['gates']],path)
+        plan=p.select(self.template,['docs/guide.md'],self.result,None)
+        self.assertIn('smoke',[o['gate'] for o in plan['omitted']])
+
+    def test_standard_template_has_no_agentcard_lane_and_smoke_checks_are_the_selector_inventory(self):
+        smoke_tasks='agent-payment-test-shop\nagent-payment-setup-resume\nagent-payment-idempotent-abandonment\n'\
+                    'agent-payment-abandonment\nchat-mode\n'
+        with patch.object(p.subprocess,'run') as execute:
+            execute.side_effect=[SimpleNamespace(stdout=json.dumps({'lanes':[{'name':'smoke','command':['x']}]})),
+                                 SimpleNamespace(stdout=smoke_tasks)]
+            gates={g['name']:g for g in p.standard_template()['gates']}
+        planner=execute.call_args_list[0].args[0]
+        self.assertEqual('plan',planner[2])
+        self.assertNotIn('--agentcard',planner)
+        self.assertEqual(['bash','scripts/run-predeploy-cloud','--list'],execute.call_args_list[1].args[0])
+        self.assertNotIn('agentcard-lifecycle',gates)
+        self.assertEqual(smoke_tasks.split(),gates['smoke']['checks'])
+        self.assertTrue(gates['smoke']['native_cloud'])
 
     def test_mac_app_static_is_a_conditional_quick_check_never_a_platform_pass(self):
         # Original /deploy Step 4m-lint (deploy.md L1380-1388): run when mac-app/ changed.

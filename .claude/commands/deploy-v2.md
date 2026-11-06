@@ -21,7 +21,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 | 3 | Start the timing run | `bash scripts/run-deploy-stage --start` |
 | 4 | Format and lint-fix, commit everything, run the approval guards | `scripts/deploy freeze -m "<message>"` |
 | 5 | Push, open the PR, start review cycle 1 | `scripts/deploy open-pr --title "<title>" --body-file <file>` |
-| 6 | Run every selected gate in parallel, in the background: one Blacksmith GitHub Actions VM per gate; smoke on the Fly fleet, AgentCard locally (`--executor local` runs everything on this box) | `scripts/deploy gates` |
+| 6 | Run every selected gate in parallel, in the background: one Blacksmith GitHub Actions VM per gate; smoke, AgentCard tasks included, on the Fly fleet (`--executor local` runs the other gates on this box) | `scripts/deploy gates` |
 | 7 | Wait for the review on the exact HEAD, in the background beside step 6 | `scripts/deploy review-wait` |
 | 8 | Close the review cycle | `scripts/deploy review-finish --result clean\|findings` |
 | 9 | Commit this deploy's benchmark history rows before the final review cycle | `scripts/deploy ledger` |
@@ -74,8 +74,9 @@ The PR is merged, every applicable production lane is verified or has a recorded
 
 ### AgentCard
 
+- The sandbox lifecycle tasks are ordinary smoke tasks on the fleet; there is no separate AgentCard gate or election.
 - After a confirmed release stall, stop retrying: never mint another card, keep reclaiming, or ask the user again.
-- When the AgentCard lane fails, finish its payment lifecycle cleanup before tearing down its stack.
+- A failed AgentCard task finishes its payment lifecycle cleanup on its own guest before the fleet releases it.
 - If a production AgentCard run is force-killed, recover its agent's execution and browser resources before judging the financial exception.
 
 ### Production
@@ -134,7 +135,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 |------|-----------|------|
 | Any test | A third-party provider is out of credits or storage, or needs a credential or billing change only the user can make, with explicit evidence | Never top up or wait; report it at the end of the scorecard |
 | Treasury tests | Always | Never mutate treasury records to pass |
-| AgentCard lifecycle, local or production | The user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy gates` or `scripts/deploy production`), or the exact release stall: closed card, zero balance, transfer `consumed`, `releasedCents=0` | Unreleased funds stay a followup |
+| AgentCard | Production lane: the user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy production`); any lifecycle task, smoke included: the exact release stall (closed card, zero balance, transfer `consumed`, `releasedCents=0`) | The stall is a task-level SKIP, never PASS; unreleased funds stay a followup |
 | Claude Code smoke | Preflight proves no synced Claude credential and no pool token | Task failures still block |
 | Codex E2B smoke | Every Codex credential path is out of credits (the test skips itself) | Never use `BLACKBOX_TEST_SKIP_DOMAINS` |
 | Benchmark judge | Confirmed third-party compute quota | |

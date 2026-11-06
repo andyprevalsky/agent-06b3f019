@@ -82,8 +82,8 @@ def generate(template, inventory, root):
                 raise ValueError('github-actions inventory requires a Blacksmith Ubuntu 24.04 runner label')
             if timeout is None:
                 raise ValueError('github-actions inventory requires the existing gate deadline')
-            if gate.get('category', name) in ('smoke', 'agentcard-lifecycle'):
-                raise ValueError(f'{name}: smoke stays on the cloud benchmark CLI and AgentCard on a local worker')
+            if gate.get('category', name) == 'smoke':
+                raise ValueError(f'{name}: smoke stays on the cloud benchmark CLI')
             script = GITHUB_WORKER_SCRIPTS[1] if gate.get('native_backend') else GITHUB_WORKER_SCRIPTS[0]
             command = [sys.executable, str(root / GITHUB_LAUNCHER), *github_argv(slot['runner'], script, timeout)]
         elif mode != 'local-isolated':

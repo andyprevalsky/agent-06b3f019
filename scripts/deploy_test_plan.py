@@ -35,16 +35,6 @@ PATHS = {
     'semantic-stack': ['front-end/*', 'back-end/*', 'agents/*', 'scripts/*', '.github/*'],
     'live-probes': ['back-end/*', 'agents/*', 'scripts/*', '.github/*'],
     'e2b-smoke': ['agents/*', 'back-end/*', 'scripts/*', '.github/*'],
-    # Original /deploy CHANGED_AGENTCARD_PAYMENT (deploy.md L516) plus the broader providers/run*/prisma triggers.
-    'agentcard-lifecycle': ['back-end/scripts/setup-benchmark-payment.ts',
-                           'back-end/src/domains/agentcard/*', 'back-end/src/domains/purchases/*',
-                           'back-end/src/domains/test-payment/*', 'back-end/src/providers/agentcard/*',
-                           'back-end/src/providers/card-provider/*', 'back-end/src/providers/purchaseCleanup.ts',
-                           'back-end/src/providers/purchase-wallet-funding*', 'back-end/src/providers/wallet-funding.ts',
-                           'back-end/src/providers/*', 'agents/benchmarks/*', 'agents/domains/request_payment_card/*',
-                           'agents/tools/request_payment_card.py', 'front-end/src/features/test-payment/*',
-                           'scripts/run.sh', 'scripts/run-agentcard-lifecycle-task.sh', 'scripts/run*',
-                           'back-end/prisma/*'],
     'seed-cache-decision': ['back-end/*', 'agents/*', 'scripts/*'],
     'canonical-seed-whatsapp-content': ['back-end/*', 'agents/*', 'scripts/*'],
     'seed-memory-ratchet': ['back-end/*', 'agents/*', 'scripts/*'],
@@ -57,11 +47,6 @@ CONDITIONAL_QUICK = {'mac-app-static'}
 MAC_APP_STATIC = {'name': 'mac-app-static', 'category': 'mac-app-static',
                   'command': ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check'],
                   'cwd': 'mac-app', 'platform': 'darwin', 'timeout_seconds': 600, 'checks': ['mac-app-static']}
-# Changed paths that never trigger a category's PATHS rule. Append-only benchmark history ledgers are
-# data, not payment lifecycle code; a main sync carries other deploys' rows (deploy.md L514-516).
-PATH_EXCLUDES = {
-    'agentcard-lifecycle': ['agents/benchmarks/history/*'],
-}
 # Categories selected on every deploy regardless of the diff, with the reason recorded as evidence.
 ALWAYS = {
     'e2b-smoke': ('every deploy: the Claude Code E2B sandbox smoke is never diff-skipped '
@@ -69,20 +54,13 @@ ALWAYS = {
 }
 
 
-def select(template: dict, changed: list[str], result: dict, binding: dict | None, base: str = 'origin/main',
-           skip_agentcard: str | None = None) -> dict:
+def select(template: dict, changed: list[str], result: dict, binding: dict | None,
+           base: str = 'origin/main') -> dict:
     """binding=None is selection-only: the same inclusions/omissions, no worker checks or plan validation."""
-    if skip_agentcard is not None and not skip_agentcard.strip():
-        raise ValueError('AgentCard opt-out requires a nonempty reason')
     gates, omitted = [], []
     for recipe in template['gates']:
         gate = dict(recipe)
         category = gate.get('category', gate['name'])
-        if category == 'agentcard-lifecycle' and skip_agentcard is not None:
-            omitted.append({'gate': gate['name'], 'category': category,
-                            'reason': 'explicit AgentCard opt-out: ' + skip_agentcard.strip(),
-                            'disposition': 'SKIPPED', 'executed': False})
-            continue
         if category in {'eslint', 'format'} and any(
                 Path(arg).name == 'check_deploy_static.py' for arg in gate['command']):
             command = list(gate['command'])
@@ -104,10 +82,7 @@ def select(template: dict, changed: list[str], result: dict, binding: dict | Non
                 evidence.append(f"dependency graph {lane}: {len(result['lanes'][lane])} affected test units")
         if category in ALWAYS:
             evidence.append(ALWAYS[category])
-        excluded = PATH_EXCLUDES.get(category, [])
-        if any(fnmatchcase(path, pattern) for path in changed
-               if not any(fnmatchcase(path, skip) for skip in excluded)
-               for pattern in PATHS.get(category, [])):
+        if any(fnmatchcase(path, pattern) for path in changed for pattern in PATHS.get(category, [])):
             evidence.append('runtime/contract path trigger')
         # A new/unregistered category is not silently dropped.
         if category not in GRAPH_LANES and category not in PATHS and not quick:
@@ -165,7 +140,7 @@ def select(template: dict, changed: list[str], result: dict, binding: dict | Non
 def standard_template() -> dict:
     result = subprocess.run([sys.executable, str(ROOT / "scripts/run_deploy_pipeline.py"),
         "plan", "--group", "all", "--backend", "--frontend", "--agents", "--smoke", "cloud",
-        "--agentcard", "--live-probes", "--semantic-stack", "--e2b-smoke"],
+        "--live-probes", "--semantic-stack", "--e2b-smoke"],
         cwd=ROOT, check=True, capture_output=True, text=True, timeout=PLANNING_TIMEOUT_SECONDS)
     lanes = json.loads(result.stdout)["lanes"]
     gates = [{"name": lane["name"], "category": lane["name"], "command": lane["command"],
@@ -210,14 +185,10 @@ def main(argv: list[str] | None = None) -> int:
     workers.add_argument('--inventory', type=Path, help='prepared worker identities; generate full-suite bindings')
     parser.add_argument('--base', default='origin/main')
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--skip-agentcard', metavar='REASON',
-                        help='explicitly skip the optional AgentCard lifecycle category, recording why')
     parser.add_argument('--list-selected', action='store_true',
                         help='print the same selection as JSON (selected/quick/needs_worker/omitted) '
                              'without worker bindings; writes nothing')
     args = parser.parse_args(argv)
-    if args.skip_agentcard is not None and not args.skip_agentcard.strip():
-        parser.error('--skip-agentcard requires a nonempty reason')
     if args.list_selected and (args.workers or args.inventory or args.output):
         parser.error('--list-selected takes no --workers, --inventory or --output')
     if not args.list_selected and not (args.workers or args.inventory):
@@ -230,18 +201,15 @@ def main(argv: list[str] | None = None) -> int:
               'lanes': {k: sorted(v) for k, v in selected.selected.items()}}
     template = json.loads(args.template.read_text()) if args.template else standard_template()
     if args.list_selected:
-        selection = select(template, changed, result, None, base=args.base, skip_agentcard=args.skip_agentcard)
+        selection = select(template, changed, result, None, base=args.base)
         gates = selection['gates']
         print(json.dumps({'selected': [g['name'] for g in gates], 'quick': [g['name'] for g in gates if g['quick']],
                           'needs_worker': [g['name'] for g in gates if not g['quick']],
                           'omitted': selection['omitted']}))
         return 0
-    binding_template = ({**template, 'gates': [gate for gate in template['gates']
-                         if gate.get('category', gate['name']) != 'agentcard-lifecycle']}
-                        if args.skip_agentcard is not None else template)
-    bindings = (generate_bindings(binding_template, json.loads(args.inventory.read_text()), ROOT)
+    bindings = (generate_bindings(template, json.loads(args.inventory.read_text()), ROOT)
                 if args.inventory else json.loads(args.workers.read_text()))
-    plan = select(template, changed, result, bindings, base=args.base, skip_agentcard=args.skip_agentcard)
+    plan = select(template, changed, result, bindings, base=args.base)
     write(args.output, plan)
     print(json.dumps({'selected': [g['name'] for g in plan['gates']], 'omitted': plan['omitted']}))
     return 0

@@ -631,6 +631,9 @@ def select_predeploy_benches(
             deduped_dropped.append(name)
 
     cap_hit = len(selected) >= cap and len(deduped_dropped) > 0
+    # A category scan also visits tasks the smoke floor already selected; those are
+    # selected, not history-skipped.
+    skipped_history = [name for name in skipped_history if name not in selected_set]
     return Selection(
         selected=selected,
         floor=floor,

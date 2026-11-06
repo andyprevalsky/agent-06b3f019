@@ -48,8 +48,6 @@ def template():
          'checks': ['unit:a', 'blackbox:b']},
         {'name': 'smoke', 'category': 'smoke', 'command': ['bash', 'scripts/run-predeploy-cloud'],
          'checks': ['smoke']},
-        {'name': 'agentcard-lifecycle', 'category': 'agentcard-lifecycle', 'command': ['true'],
-         'checks': ['agentcard-lifecycle']},
     ]}
 
 
@@ -115,10 +113,10 @@ class Bindings(unittest.TestCase):
             with self.subTest(label), self.assertRaisesRegex(ValueError, message):
                 generate(template(), {'frontend-coverage-blackbox': value}, ROOT)
 
-    def test_smoke_and_agentcard_cannot_be_bound_to_blacksmith(self):
-        for gate in ('smoke', 'agentcard-lifecycle'):
-            with self.subTest(gate), self.assertRaisesRegex(ValueError, 'stays on the cloud benchmark CLI'):
-                generate(template(), {gate: slot(gate)}, ROOT)
+    def test_smoke_cannot_be_bound_to_blacksmith(self):
+        # Smoke (AgentCard lifecycle tasks included) runs on the Fly fleet through the benchmark CLI.
+        with self.assertRaisesRegex(ValueError, 'smoke: smoke stays on the cloud benchmark CLI'):
+            generate(template(), {'smoke': slot('smoke')}, ROOT)
 
     def test_multi_case_gate_without_its_recipe_is_refused(self):
         with self.assertRaisesRegex(ValueError, 'slot still carries the single-case aggregate recipe'):
@@ -150,12 +148,6 @@ class Isolation(unittest.TestCase):
                                                             'blacksmith-16vcpu-ubuntu-2404',
                                                             recipe=backend_recipe()),
                           'smoke': {'id': 'cloud-smoke-worker', 'transport': 'benchmark-cloud-cli'}}
-        self.workers = tempfile.TemporaryDirectory()
-        self.addCleanup(self.workers.cleanup)
-        self.inventory['agentcard-lifecycle'] = {
-            'id': 'agentcard-local', 'transport': 'local-isolated', 'timeout_seconds': 900,
-            'worker_root': str(Path(self.workers.name) / 'agentcard'),
-            'env': {'CONDUCTOR_WORKSPACE_NAME': 'agentcard', 'CONDUCTOR_PORT': '12000'}}
 
     def plan(self):
         with patch('deploy_test_backend.sweep_from_recipe'):
@@ -165,7 +157,7 @@ class Isolation(unittest.TestCase):
     def gate(self, plan, name):
         return next(gate for gate in plan['gates'] if gate['name'] == name)
 
-    def test_plan_with_github_slots_validates_beside_cloud_smoke_and_a_local_agentcard(self):
+    def test_plan_with_github_slots_validates_beside_cloud_smoke(self):
         plan = self.plan()
         validate_plan(plan, ROOT)
         frontend, backend = self.gate(plan, 'frontend-coverage-blackbox'), self.gate(plan, 'backend-coverage-blackbox')
@@ -175,7 +167,7 @@ class Isolation(unittest.TestCase):
                               gate['result_transport'], gate['timeout_seconds']))
         self.assertEqual('deploy_test_backend.py', backend['command'][backend['command'].index('--worker-script') + 1])
         self.assertEqual('benchmark-cloud-cli', self.gate(plan, 'smoke')['worker_transport'])
-        self.assertEqual('local-isolated', self.gate(plan, 'agentcard-lifecycle')['worker_transport'])
+        self.assertNotIn('agentcard-lifecycle', {gate['name'] for gate in plan['gates']})
 
     def test_every_vm_owns_its_ports_and_workspace_so_identical_identities_are_accepted(self):
         for value in self.inventory.values():
@@ -223,8 +215,8 @@ class Isolation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'argv must bind'):
             iso.validate(plan, ROOT)
 
-    def test_saved_plan_cannot_move_smoke_or_agentcard_onto_blacksmith(self):
-        for name in ('smoke', 'agentcard-lifecycle'):
+    def test_saved_plan_cannot_move_smoke_onto_blacksmith(self):
+        for name in ('smoke',):
             plan = self.plan()
             frontend = self.gate(plan, 'frontend-coverage-blackbox')
             target = self.gate(plan, name)
@@ -275,12 +267,13 @@ class Executor(unittest.TestCase):
         recipe = patch.object(g, 'backend_recipe', lambda root, env, timeout: {'sentinel': timeout, 'env': env})
         recipe.start()
         self.addCleanup(recipe.stop)
-        self.gates = ['backend-coverage-blackbox', 'smoke', 'agentcard-lifecycle', 'frontend-coverage-blackbox',
+        self.gates = ['backend-coverage-blackbox', 'smoke', 'frontend-coverage-blackbox',
                       'deploy-command-structural', 'semantic-stack', 'brand-new-gate']
 
-    def test_blacksmith_moves_every_gate_but_smoke_and_agentcard_off_this_host(self):
+    def test_blacksmith_moves_every_gate_but_smoke_off_this_host(self):
+        self.assertEqual(frozenset({'smoke'}), g.BLACKSMITH_LOCAL_GATES)
         workers = {w['gate']: w for w in g.layout(self.root, self.head, self.gates, 'blacksmith')}
-        self.assertEqual({'cloud': ['smoke'], 'create': ['agentcard-lifecycle'],
+        self.assertEqual({'cloud': ['smoke'], 'create': [],
                           'remote': ['backend-coverage-blackbox', 'frontend-coverage-blackbox',
                                      'deploy-command-structural', 'semantic-stack', 'brand-new-gate']},
                          {mode: [n for n, w in workers.items() if w['mode'] == mode]
@@ -327,7 +320,7 @@ class Executor(unittest.TestCase):
 
         with patch.object(g, 'provision', fake):
             inventory = g.build_inventory(self.root, self.head, workers, self.root / '.context/w')
-        self.assertEqual(['agentcard-lifecycle'], provisioned)
+        self.assertEqual([], provisioned)
         self.assertEqual(self.gates, list(inventory))
         self.assertEqual('github-actions', inventory['semantic-stack']['transport'])
         self.assertEqual(g.CLOUD_SLOT, inventory['smoke'])
@@ -363,9 +356,9 @@ class Executor(unittest.TestCase):
 
     def test_capacity_counts_only_gates_this_host_runs(self):
         seen = []
-        selection = {'selected': ['format', 'semantic-stack', 'agentcard-lifecycle', 'smoke'], 'quick': ['format'],
-                     'needs_worker': ['semantic-stack', 'agentcard-lifecycle', 'smoke'], 'omitted': []}
-        args = dict(base='origin/main', state_dir=None, skip_agentcard=None, dry_run=True, provision_jobs=4,
+        selection = {'selected': ['format', 'semantic-stack', 'smoke'], 'quick': ['format'],
+                     'needs_worker': ['semantic-stack', 'smoke'], 'omitted': []}
+        args = dict(base='origin/main', state_dir=None, dry_run=True, provision_jobs=4,
                     head=None, rca_launcher=None, structural_workers=g.STRUCTURAL_WORKERS,
                     semantic_worker_processes=g.SEMANTIC_WORKER_PROCESSES, sample_memory=None,
                     abort_below_mb=None, executor='blacksmith')
@@ -379,9 +372,9 @@ class Executor(unittest.TestCase):
             with redirect_stdout(output):
                 code = g.run(SimpleNamespace(**args), self.root)
         self.assertEqual(0, code)
-        self.assertEqual([['agentcard-lifecycle', 'smoke']], seen)
+        self.assertEqual([['smoke']], seen)
         *body, summary = output.getvalue().strip().splitlines()
-        self.assertEqual(f'DEPLOY_GATES DRY-RUN head={self.head[:12]} gates=4 workers=1 remote=1', summary)
+        self.assertEqual(f'DEPLOY_GATES DRY-RUN head={self.head[:12]} gates=3 workers=0 remote=1', summary)
         shown = json.loads('\n'.join(body))
         self.assertEqual('blacksmith', shown['executor'])
         self.assertEqual('standard', shown['template']['concurrency'])

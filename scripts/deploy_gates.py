@@ -6,8 +6,8 @@ run (default): refuse uncommitted source, write the gate template
 select gates with deploy_test_plan.py --list-selected --template, bind workers,
 write the worker inventory, plan, then init/run/resume the staged cycle and
 verify it on the exact HEAD. --executor blacksmith (default) runs every selected
-gate except cloud smoke (benchmark CLI slot) and AgentCard (local worktree) on
-its own Blacksmith GitHub Actions VM (BLACKSMITH_RUNNERS) at the standard
+gate except cloud smoke (benchmark CLI slot; it includes the AgentCard lifecycle
+tasks) on its own Blacksmith GitHub Actions VM (BLACKSMITH_RUNNERS) at the standard
 template's concurrency. --executor local provisions one linked worktree per
 selected gate on this host, with --structural-workers concurrent structural
 suites and --semantic-worker-processes semantic-stack agent workers.
@@ -76,9 +76,8 @@ SEMANTIC_ENV = 'DEPLOY_SEMANTIC_WORKER_PROCESSES'
 # Executors (2026-11-06): Blacksmith VMs remove this host's memory/CPU queueing; local keeps the cuts above.
 EXECUTORS = ('blacksmith', 'local')
 DEFAULT_EXECUTOR = 'blacksmith'
-# Kept off Blacksmith: smoke drives the Fly fleet through the benchmark CLI; AgentCard owns a local
-# payment lifecycle and its cleanup (deploy_test_cycle accepts only local/boxes-thread AgentCard workers).
-BLACKSMITH_LOCAL_GATES = frozenset({CLOUD_GATE, 'agentcard-lifecycle'})
+# Kept off Blacksmith: smoke drives the Fly fleet through the benchmark CLI (AgentCard tasks included).
+BLACKSMITH_LOCAL_GATES = frozenset({CLOUD_GATE})
 # One VM per gate, sized by its CPU need (each size has 4 GB RAM per vCPU, far above the measured peaks).
 BLACKSMITH_RUNNERS = {
     'backend-coverage-blackbox': 'blacksmith-16vcpu-ubuntu-2404',
@@ -271,10 +270,13 @@ def provision(root: Path, gate: str, path: Path, head: str, mode: str, logs: Pat
 # MemAvailable fell by MEASURED_CONCURRENT_MB from gate start to its minimum. Re-measure with
 # --sample-memory after a gate's footprint changes.
 GATE_PEAK_PSS_MB = {'backend-coverage-blackbox': 4334, 'semantic-stack': 3685, 'deploy-command-structural': 2947,
-                    'frontend-coverage-blackbox': 2054, 'agentcard-lifecycle': 1500, 'agents-coverage-blackbox': 844,
+                    'frontend-coverage-blackbox': 2054, 'agents-coverage-blackbox': 844,
                     'e2b-smoke': 838, 'live-probes': 796, 'cloudbench-controller': 788, 'seed-memory-ratchet': 293,
                     'canonical-seed-whatsapp-content': 172, 'seed-cache-decision': 79}
 MEASURED_CONCURRENT_MB = 10_882
+# That run also held the since-retired local AgentCard lane (1,500 MB peak PSS; its tasks now run in cloud
+# smoke). It stays in the measured total so each remaining gate keeps its measured share of the drop.
+MEASURED_TOTAL_PSS_MB = sum(GATE_PEAK_PSS_MB.values()) + 1_500
 MEMORY_MARGIN = 1.10
 UNMEASURED_GATE_MB = {CLOUD_GATE: 1_024}  # the cloud smoke controller runs on this box (declared, not measured)
 DEFAULT_GATE_MB = 1_536                   # any other gate with no measurement yet
@@ -287,7 +289,7 @@ CAPACITY_EXIT = 3
 def capacity_requirements(workers: list[dict]) -> dict:
     """Memory and disk the selected gates need before any worker is provisioned."""
     measured = [w['gate'] for w in workers if w['gate'] in GATE_PEAK_PSS_MB]
-    share = sum(GATE_PEAK_PSS_MB[g] for g in measured) / sum(GATE_PEAK_PSS_MB.values())
+    share = sum(GATE_PEAK_PSS_MB[g] for g in measured) / MEASURED_TOTAL_PSS_MB
     extra = sum(UNMEASURED_GATE_MB.get(w['gate'], DEFAULT_GATE_MB) for w in workers if w['gate'] not in measured)
     gates_mb = round(MEASURED_CONCURRENT_MB * share * MEMORY_MARGIN + extra)
     new = sum(w['mode'] == 'create' for w in workers)
@@ -429,11 +431,9 @@ def write_json(path: Path, value: dict) -> None:
     os.replace(temporary, path)
 
 
-def list_selected(root: Path, base: str, skip_agentcard: str | None, template: Path) -> dict:
+def list_selected(root: Path, base: str, template: Path) -> dict:
     argv = [sys.executable, str(root / 'scripts/deploy_test_plan.py'), '--list-selected', '--base', base,
             '--template', str(template)]
-    if skip_agentcard is not None:
-        argv += ['--skip-agentcard', skip_agentcard]
     out = subprocess.run(argv, cwd=root, stdout=subprocess.PIPE, text=True)
     if out.returncode:
         raise Blocked('select', f'deploy_test_plan.py --list-selected exited {out.returncode}', out.returncode)
@@ -707,14 +707,14 @@ def run(args, root: Path) -> int:
         if args.dry_run:  # the template goes to a scratch file; the state directory is not created
             with tempfile.TemporaryDirectory(prefix='deploy-gates-dry-run-') as scratch:
                 write_json(Path(scratch) / 'template.json', template)
-                selection = list_selected(root, args.base, args.skip_agentcard, Path(scratch) / 'template.json')
+                selection = list_selected(root, args.base, Path(scratch) / 'template.json')
         else:
             write_json(candidate_template, template)
             if args.sample_memory is not None:
                 target = args.sample_memory if args.sample_memory.is_absolute() else root / args.sample_memory
                 sampler = MemorySampler(target.resolve(), {'coordinator': root}, args.abort_below_mb)
                 sampler.begin()
-            selection = list_selected(root, args.base, args.skip_agentcard, candidate_template)
+            selection = list_selected(root, args.base, candidate_template)
         workers = layout(root, head, selection['needs_worker'], args.executor)
         capacity = check_capacity(root, [w for w in workers if w['mode'] != 'remote'])  # remote VMs use no host room
         if not args.dry_run:
@@ -728,8 +728,6 @@ def run(args, root: Path) -> int:
         candidate_plan, candidate_inventory = state_dir / 'plan.candidate.json', state_dir / 'inventory.candidate.json'
         planner = [py, str(root / 'scripts/deploy_test_plan.py'), '--inventory', str(candidate_inventory),
                    '--base', args.base, '--template', str(candidate_template), '--output', str(candidate_plan)]
-        if args.skip_agentcard is not None:
-            planner += ['--skip-agentcard', args.skip_agentcard]
         cycle = [py, str(root / 'scripts/deploy_test_cycle.py')]
         bound = ['--plan', str(plan_path), '--state-dir', str(state_dir)]
         launcher = ['--rca-launcher', *args.rca_launcher] if args.rca_launcher else []
@@ -943,13 +941,11 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     parser.add_argument('--base', default='origin/main', help='selection diff base (default: origin/main)')
     parser.add_argument('--state-dir', type=Path,
                         help='cycle state directory (default: $DEPLOY_TEST_CYCLE_STATE_DIR or .context/deploy-pipeline)')
-    parser.add_argument('--skip-agentcard', metavar='REASON',
-                        help='explicitly skip the AgentCard lifecycle category, recording why')
     parser.add_argument('--dry-run', action='store_true',
                         help='print the selection, worker paths and commands (retire: decisions); change nothing')
     parser.add_argument('--executor', choices=EXECUTORS, default=DEFAULT_EXECUTOR,
                         help='run: where non-smoke gates execute; blacksmith (default) = one Blacksmith GitHub '
-                             'Actions VM per gate (AgentCard stays local), local = worktrees on this host')
+                             'Actions VM per gate (smoke stays on the Fly fleet), local = worktrees on this host')
     parser.add_argument('--provision-jobs', type=int, default=PROVISION_JOBS,
                         help=f'concurrent worker preparations (default: {PROVISION_JOBS}); gates still all run at once')
     parser.add_argument('--head', help='retire: only workers prepared for this commit (default: every HEAD)')
@@ -967,12 +963,10 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     parser.add_argument('--rca-launcher', nargs=argparse.REMAINDER,
                         help='run: remaining argv passed to deploy_test_cycle.py --rca-launcher (must be last)')
     args = parser.parse_args(argv)
-    if args.skip_agentcard is not None and not args.skip_agentcard.strip():
-        parser.error('--skip-agentcard requires a nonempty reason')
     if args.provision_jobs < 1:
         parser.error('--provision-jobs must be at least 1')
-    if args.action == 'retire' and (args.rca_launcher or args.skip_agentcard is not None):
-        parser.error('retire takes no --rca-launcher or --skip-agentcard')
+    if args.action == 'retire' and args.rca_launcher:
+        parser.error('retire takes no --rca-launcher')
     if args.action == 'run' and args.head:
         parser.error('--head applies to retire only')
     run_only = ('structural_workers', 'semantic_worker_processes', 'sample_memory', 'abort_below_mb')

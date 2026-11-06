@@ -469,12 +469,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     started = time.time()
     timeout = gate.get("timeout_seconds", 120 if gate.get("quick") else None)  # declared wins; 120 s is the quick default
     timed_out = cancelled = lingering = False
-    if (gate.get("category") == "agentcard-lifecycle"
-            and gate.get("worker_transport") not in {"local-isolated", "boxes-thread"}):
-        raise ValueError("AgentCard native lifecycle requires its validated worker binding")
-    native_producer = (gate.get("native_cloud") is True
-                       or (gate.get("category") == "agentcard-lifecycle"
-                           and gate.get("worker_transport") in {"local-isolated", "boxes-thread"}))
+    native_producer = gate.get("native_cloud") is True
     lifecycle = "native-producer" if native_producer else "owned"
     native_cleanup_reference = None
     worker_cleanup_owner = None
