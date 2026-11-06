@@ -16,15 +16,28 @@ MAX_MARKDOWN_LENGTH = 40_000
 # Stored in cents for parity with other service-cost entries.
 FIRECRAWL_COST_CENTS = 0.083
 
-FIRECRAWL_SCRAPE_TIMEOUT_SECONDS = 120.0
+# The scrape activity's Temporal start-to-close budget. The provider chain below
+# (Firecrawl, then the Parallel Extract fallback) must finish inside it so a hung
+# page yields a typed tool error instead of an activity timeout plus a full retry.
+WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS = 180
+
+FIRECRAWL_SCRAPE_TIMEOUT_SECONDS = 90.0
 
 # ── Parallel Extract fallback ──
 
 PARALLEL_EXTRACT_API_URL = "https://api.parallel.ai/v1/extract"
-PARALLEL_EXTRACT_TIMEOUT_SECONDS = 120.0
+PARALLEL_EXTRACT_TIMEOUT_SECONDS = 60.0
+
+# Hard cap on one scrape_url call (both providers). Kept below the activity
+# timeout; asserted by the web_fetch blackbox.
+WEB_FETCH_SCRAPE_BUDGET_SECONDS = FIRECRAWL_SCRAPE_TIMEOUT_SECONDS + PARALLEL_EXTRACT_TIMEOUT_SECONDS
 
 # Parallel Extract pricing is $1 / 1k URLs. Stored in cents.
 PARALLEL_EXTRACT_COST_CENTS = 0.1
+
+# Hard cap on one download_files_batch call (all files, sequential), leaving the
+# rest of the 180s download activity for uploads.
+WEB_FETCH_DOWNLOAD_BUDGET_SECONDS = 120.0
 
 # ── MIME type mapping ──
 
