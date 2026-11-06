@@ -57,6 +57,14 @@ BACKEND_NEEDLES = (
     "Rose-in-Rose preview",
     "Session ready: ",
     "Session attached to the live CLI: ",
+    # The model route of each create (back-end/src/providers/e2b.ts credential and gateway lines).
+    "Claude Code credentials for agent",
+    "funded fallback for agent",
+    "Using Claude OAuth for agent",
+    "Routing sandbox Anthropic calls via",
+    "Fast Mode: routing sandbox Anthropic calls",
+    "Serving user Claude Code credentials",
+    "No available pool credentials",
 )
 _DEV_LINE = re.compile(r"^\[(?P<ts>[^\]]+)\] (?P<level>[A-Z]+) \[(?P<component>[^\]]+)\] (?P<rest>.*)$")
 _FIELD = re.compile(r"(\w+)=(\S+)")
@@ -144,6 +152,69 @@ def backend_creates(lines: Iterable[str], agent_ids: Iterable[str]) -> list[dict
                     current = None
             break
     return creates
+
+
+_ROUTE_SOURCE = re.compile(
+    r"^Using (?P<source>user|pool) Claude Code credentials for agent [0-9a-f-]{36}"
+    r"(?: \(integration (?P<integration>[^,]+), mode (?P<mode>[^)]+)\))?"
+)
+_ROUTE_FUNDED = re.compile(r"^Using (?P<which>dedicated Claude Code|ANTHROPIC_API_KEY) funded fallback for agent")
+_ROUTE_GATEWAY = re.compile(r"^Routing sandbox Anthropic calls via (?P<funded>funded gateway )?(?P<url>\S+)")
+_ROUTE_OAUTH_DEFAULT_HOST = re.compile(r"^Using Claude OAuth for agent [0-9a-f-]{36} — Anthropic default host")
+_ROUTE_TEE_PROXY = re.compile(r"^Fast Mode: routing sandbox Anthropic calls via the tee-proxy")
+_ROUTE_LINES = (_ROUTE_SOURCE, _ROUTE_FUNDED, _ROUTE_GATEWAY, _ROUTE_OAUTH_DEFAULT_HOST, _ROUTE_TEE_PROXY)
+
+
+def _classify_route(messages: list[str]) -> dict:
+    """The model route one create used, from the back-end lines it logged.
+
+    kind: ``user_subscription`` (the user's own or a pooled Claude login on the Anthropic default
+    host), ``funded_gateway`` (the funded key through a gateway such as OpenRouter),
+    ``funded_direct`` (the funded key on the Anthropic host), ``tee_proxy``, or ``unknown``.
+    """
+    route: dict = {"kind": "unknown", "credential_source": None, "mode": None, "integration": None, "gateway_host": None}
+    for message in messages:
+        if found := _ROUTE_SOURCE.search(message):
+            route.update(
+                credential_source=found["source"], integration=found["integration"], mode=found["mode"]
+            )
+        elif found := _ROUTE_FUNDED.search(message):
+            route["credential_source"] = "funded_" + ("dedicated" if found["which"].startswith("dedicated") else "shared")
+        elif found := _ROUTE_GATEWAY.search(message):
+            route["gateway_host"] = urlparse(found["url"]).hostname
+            route["gateway_funded"] = found["funded"] is not None
+        elif _ROUTE_TEE_PROXY.search(message):
+            route["kind"] = "tee_proxy"
+    if route["kind"] == "unknown":
+        if route["credential_source"] in {"user", "pool"}:
+            route["kind"] = "user_subscription"
+        elif route["gateway_host"]:
+            route["kind"] = "funded_gateway" if route.get("gateway_funded") else "gateway"
+        elif route["credential_source"]:
+            route["kind"] = "funded_direct"
+    route["lines"] = [m[:240] for m in messages][:8]
+    return route
+
+
+def route_of_creates(lines: Iterable[str], agent_ids: Iterable[str]) -> list[dict]:
+    """The route of each create by one of ``agent_ids``, in order (the lines between its start and its sandbox)."""
+    wanted = set(agent_ids)
+    parsed = sorted((p for line in lines if (p := parse_backend_line(line)) is not None), key=lambda p: p[0])
+    routes: list[dict] = []
+    window: Optional[list[str]] = None
+    agent = ""
+    for at, component, message, _fields in parsed:
+        if component == "E2B" and (started := re.search(r"^Creating Claude Code session for agent ([0-9a-f-]{36})", message)):
+            agent = started.group(1)
+            window = [] if agent in wanted else None
+        elif window is not None and component == "E2B" and message.startswith("Using sandbox: "):
+            routes.append({"agentId": agent, "requestedAt": at.isoformat(), **_classify_route(window)})
+            window = None
+        elif window is not None and component in {"E2B", "ClaudeCredentials"} and any(p.search(message) for p in _ROUTE_LINES):
+            window.append(message)
+        elif window is not None and component == "ClaudeCredentials":
+            window.append(message)
+    return routes
 
 
 def _finish_create(create: dict) -> dict:
@@ -310,6 +381,7 @@ async def collect(data: dict, *, benchmark: str, base_url: Optional[str]) -> dic
         worker_lines.extend(fetch_local_worker_logs(agent_id))
     backend_lines = fetch_local_backend_log_lines(BACKEND_NEEDLES)
     creates = backend_creates(backend_lines, agent_ids)
+    routes = route_of_creates(backend_lines, agent_ids)
     spawns = build_spawns(_worker_entries(worker_lines), creates)
     recorded = record_startup_spans(benchmark, spawns, environment=_environment(base_url))
     await _hydrate_claude_code_sessions(data)
@@ -323,12 +395,15 @@ async def collect(data: dict, *, benchmark: str, base_url: Optional[str]) -> dic
                 "agent_id": spawn["agent_id"],
                 "phases_ms": startup_time.spawn_phases(spawn),
                 "checkout_source": (spawn.get("backend") or {}).get("checkoutSource"),
+                "route": routes[0]["kind"] if routes else "unknown",
                 "create_attempts": spawn.get("create_attempts"),
                 "backend_creates": spawn.get("backend_creates"),
             }
             for spawn in spawns
         ],
         "backend_creates": creates,
+        "route": routes[0] if routes else {"kind": "unknown"},
+        "routes": routes,
         "spawn_calls_by_agent": spawn_calls_by_agent(data, agent_ids),
         "sessions_by_agent": sessions_by_agent(state.get("claude_code_sessions") or []),
         "sources": {

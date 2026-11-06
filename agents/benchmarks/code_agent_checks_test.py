@@ -532,3 +532,90 @@ def test_playwright_lane_check_runs_as_an_approved_user_on_a_loopback_stack_only
     redeemed.clear()
     remote = {**CTX, "base_url": "https://api.example.com"}
     assert external._approved_session(remote) == "" and redeemed == []
+
+
+def _dev(at: str, component: str, message: str) -> str:
+    return f"\x1b[36m[2026-11-06T{at}Z] INFO [{component}] {message}\x1b[0m"
+
+
+A1 = "3ada25ad-749b-44ba-a62a-361daef35fba"  # qualification run 1
+A4 = "98eab654-2493-46b8-844b-f97f19d88b19"  # qualification run 4
+# Real back-end lines of run 1 (the user's Claude login) and run 4 (the funded OpenRouter gateway).
+RUN1_ROUTE_LINES = [
+    _dev("09:57:11.063", "E2B", f"Creating Claude Code session for agent {A1}"),
+    _dev("09:57:11.074", "ClaudeCredentials", "Serving user Claude Code credentials for 1f85ff25-6e29-4c1b-8739-f917bd101a30"),
+    _dev("09:57:11.074", "E2B", f"Using Claude OAuth for agent {A1} \u2014 Anthropic default host (sandbox gateway base skipped)"),
+    _dev("09:57:11.074", "E2B", f"Using user Claude Code credentials for agent {A1} (integration user-owned, mode oauth_token)"),
+    _dev("09:57:11.599", "E2B", "Using sandbox: i6j5aow5tvqw4eoikei6n (new)"),
+]
+RUN4_ROUTE_LINES = [
+    _dev("10:57:01.959", "ClaudeCredentials", "No claude_code integration found for user 1f85ff25-6e29-4c1b-8739-f917bd101a30"),
+    _dev("10:57:02.024", "E2B", f"Creating Claude Code session for agent {A4}"),
+    _dev("10:57:02.033", "ClaudeCredentials", "No available pool credentials for Claude Code CLI"),
+    _dev("10:57:02.034", "E2B", "Routing sandbox Anthropic calls via funded gateway https://openrouter.ai/api (Fast Mode proxy skipped)"),
+    _dev("10:57:02.034", "E2B", f"Using dedicated Claude Code funded fallback for agent {A4}"),
+    _dev("10:57:02.323", "E2B", "Using sandbox: is117oy5mx9w5mv6oys37 (new)"),
+]
+
+
+def test_route_of_a_create_on_the_users_subscription():
+    (route,) = ev.route_of_creates(RUN1_ROUTE_LINES, [A1])
+    assert route["kind"] == "user_subscription" and route["credential_source"] == "user"
+    assert route["mode"] == "oauth_token" and route["integration"] == "user-owned" and route["gateway_host"] is None
+    assert any("Using user Claude Code credentials" in line for line in route["lines"])
+
+
+def test_route_of_a_create_on_the_funded_openrouter_gateway():
+    (route,) = ev.route_of_creates(RUN4_ROUTE_LINES, [A4])
+    assert route["kind"] == "funded_gateway" and route["gateway_host"] == "openrouter.ai"
+    assert route["credential_source"] == "funded_dedicated" and route["mode"] is None
+    assert "No available pool credentials for Claude Code CLI" in route["lines"]
+
+
+def test_route_ignores_other_agents_and_reports_unknown_without_route_lines():
+    assert ev.route_of_creates(RUN4_ROUTE_LINES, [A1]) == []
+    bare = [RUN1_ROUTE_LINES[0], RUN1_ROUTE_LINES[-1]]
+    (route,) = ev.route_of_creates(bare, [A1])
+    assert route["kind"] == "unknown" and route["lines"] == []
+
+
+def test_route_of_a_funded_key_on_the_anthropic_host_and_of_the_json_log_format():
+    funded = [
+        _dev("10:00:00.000", "E2B", f"Creating Claude Code session for agent {A4}"),
+        _dev("10:00:00.010", "E2B", f"Using ANTHROPIC_API_KEY funded fallback for agent {A4}"),
+        _dev("10:00:00.300", "E2B", "Using sandbox: s1 (new)"),
+    ]
+    assert ev.route_of_creates(funded, [A4])[0]["kind"] == "funded_direct"
+    prod_json = [
+        json.dumps({"timestamp": "2026-11-06T10:00:00.000Z", "level": "info", "component": component, "message": message})
+        for component, message in (
+            ("E2B", f"Creating Claude Code session for agent {A4}"),
+            ("E2B", "Routing sandbox Anthropic calls via funded gateway https://openrouter.ai/api (Fast Mode proxy skipped)"),
+            ("E2B", "Using sandbox: s1 (new)"),
+        )
+    ]
+    route = ev.route_of_creates(prod_json, [A4])[0]
+    assert route["kind"] == "funded_gateway" and route["gateway_host"] == "openrouter.ai"
+
+
+def test_collect_records_the_route_beside_the_startup_phases(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(ev, "fetch_local_worker_logs", lambda agent_id: _worker_lines())
+    monkeypatch.setattr(ev, "fetch_local_backend_log_lines", lambda needles: PROD_BACKEND_LINES + [
+        _dev("04:16:34.900", "E2B", f"Creating Claude Code session for agent {AGENT}"),
+        _dev("04:16:34.905", "E2B", "Routing sandbox Anthropic calls via funded gateway https://openrouter.ai/api (Fast Mode proxy skipped)"),
+        _dev("04:16:35.516", "E2B", "Using sandbox: it9575l3txdpk8t8mybo1 (new)"),
+    ])
+    monkeypatch.setattr(ev, "record_startup_spans", lambda *a, **k: 0)
+
+    async def no_sessions(data):
+        data.setdefault("_benchmark", {})["claude_code_sessions"] = []
+
+    import benchmarks.run_benchmark as rb
+
+    monkeypatch.setattr(rb, "_hydrate_claude_code_sessions", no_sessions)
+    evidence = asyncio.run(ev.collect({"agent": {"agent_id": AGENT}, "messages": []}, benchmark=TASK, base_url=None))
+    assert evidence["route"]["kind"] == "funded_gateway" and evidence["routes"][0]["gateway_host"] == "openrouter.ai"
+    assert evidence["startup_phases"][0]["route"] == "funded_gateway"
+    json.dumps(evidence)
