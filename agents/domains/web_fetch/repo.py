@@ -1,5 +1,6 @@
 """Web fetch domain repo — external data access (Firecrawl/Parallel scrape, downloads, storage uploads)."""
 
+import asyncio
 import re
 from typing import Any, Dict, List, Optional
 
@@ -8,6 +9,7 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from domains.web_fetch import config as web_fetch_config
 from domains.web_fetch.config import (
     FIRECRAWL_SCRAPE_TIMEOUT_SECONDS,
     MAX_DOWNLOAD_SIZE,
@@ -194,10 +196,18 @@ async def download_files_batch(urls: List[str]) -> Dict[str, Optional[bytes]]:
     """
     results: Dict[str, Optional[bytes]] = {}
     client = get_http_client()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + web_fetch_config.WEB_FETCH_DOWNLOAD_BUDGET_SECONDS
     for url in urls:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.warning("[web_fetch] Download budget exhausted; skipping file", url=url)
+            results[url] = None
+            continue
         try:
             activity.heartbeat(f"Downloading {url.rsplit('/', 1)[-1][:50]}...")
-            response = await client.get(url, timeout=30.0, follow_redirects=True)
+            # The httpx timeout is per phase; the deadline bounds the whole download.
+            response = await asyncio.wait_for(client.get(url, timeout=30.0, follow_redirects=True), timeout=remaining)
             response.raise_for_status()
 
             content = response.content
@@ -208,7 +218,7 @@ async def download_files_batch(urls: List[str]) -> Dict[str, Optional[bytes]]:
 
             results[url] = content
         except Exception as e:
-            logger.warning("[web_fetch] Failed to download file", url=url, error=str(e))
+            logger.warning("[web_fetch] Failed to download file", url=url, error=str(e) or type(e).__name__)
             results[url] = None
 
     return results
