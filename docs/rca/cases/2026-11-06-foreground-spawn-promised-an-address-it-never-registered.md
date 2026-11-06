@@ -68,6 +68,8 @@ generation). While running it is in the tree state, so other agents' sends
 reach its inbox, and for code the backend's existing running-code-task path
 makes the message a CLI turn. Its rows stay the model's result (never stamped
 FE-only), it posts no notification and never relaunches after a continuation.
+PLAN-phase foreground explores are not recorded: PLAN has no `send_message_to_agent`,
+and recording them would reserve their `task_name` against the plan's own tasks.
 Once finished, a send gets `<path> is a <status> foreground <type> agent: its
 result is the result of the spawn_agent call that ran it, and it takes no more
 messages. Spawn a new <type> agent for new work.` (code: plus "spawn a new code
