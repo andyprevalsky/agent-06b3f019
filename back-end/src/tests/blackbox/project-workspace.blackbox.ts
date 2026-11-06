@@ -392,7 +392,10 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     'unpushed commit present'
   );
   const stash = sh(repo, 'git stash list');
-  assert(/rose-sync uncommitted \(r\d+, feature\)/.test(stash), `uncommitted work stashed: ${stash}`);
+  assert(
+    /rose-sync uncommitted \(r\d+, feature\)/.test(stash),
+    `uncommitted work stashed: ${stash}`
+  );
   const stashed = sh(repo, 'git show stash@{0}:README.md');
   assert(stashed.includes('uncommitted edit'), 'tracked edit in the stash');
   // `git apply --index` stages new files, so untracked work lands in the stash tree itself.
