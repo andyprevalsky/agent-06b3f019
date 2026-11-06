@@ -12,10 +12,10 @@ import { useAuth } from '@/features/auth';
 import { readQueryPreferences } from '@/lib/queryPreferences';
 import { getClientSource } from '@/lib/clientSource';
 import { isRoseDesktopUser } from '@/lib/roseDesktop';
-import { useAgentContext } from '@/features/agent-context';
+import type { useAgentContext } from '@/features/agent-context';
 import { useToast } from '@/hooks/use-toast';
 
-import type { Agent, AgentDetail, TerminalView } from '../types';
+import type { TerminalView } from '../types';
 import { DEFAULT_MODEL, ROSE_DESKTOP_DEFAULT_MODEL } from '../config';
 
 import { useAgentList } from './useAgentList';
@@ -26,6 +26,7 @@ import { useAncestors } from './useAncestors';
 import { useTerminalAuth } from './useTerminalAuth';
 import { useTerminalModals } from './useTerminalModals';
 import { useAgentOps } from './useAgentOps';
+import { useFreshAgentContext } from './useFreshAgentContext';
 import { useQuickQuery } from './useQuickQuery';
 
 export function overlaySelectedAgentTitle(
@@ -39,32 +40,6 @@ export function overlaySelectedAgentTitle(
       ? { ...agent, title: selectedAgent.title, status: selectedAgent.status }
       : agent,
   );
-}
-
-/** Reconcile status by producer freshness before projecting local user intent. */
-function fresherSelectedAgent(detail: AgentDetail | null, listed: Agent | undefined) {
-  if (!detail || !listed || Date.parse(listed.updated_at) <= Date.parse(detail.updated_at)) {
-    return detail;
-  }
-  return {
-    ...detail,
-    status: listed.status,
-    status_message: listed.status_message,
-    updated_at: listed.updated_at,
-  };
-}
-
-/** Cache list identity once per refresh; pause clicks perform one keyed lookup. */
-function useFreshAgentContext(agents: Agent[]) {
-  const context = useAgentContext();
-  const agentsById = useMemo(
-    () => new Map(agents.map((agent) => [agent.agent_id, agent])),
-    [agents],
-  );
-  return {
-    ...context,
-    agent: fresherSelectedAgent(context.agent, agentsById.get(context.selectedAgentId ?? '')),
-  };
 }
 
 export function useSelectedAgentModel(

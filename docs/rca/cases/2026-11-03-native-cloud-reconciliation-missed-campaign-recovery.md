@@ -214,3 +214,35 @@ executed/incomplete UNVERIFIED receipt and no running/live/cancelled work. It
 replays the full unchanged proof and grants no credit. An eighth registered
 causal test fails before and passes after; the complete owning cycle suite
 passes 161 tests. Independent review found no blocker in this bounded branch.
+
+
+### November 6 followup: dispatched controllers failed before allocation
+
+The next exact native request passed relay startup and dispatched nine local
+controllers. The protected shared warm source was still starting, so all
+controllers ended before allocating guests or producing agent artifacts. Its
+native supervisor joined an intentionally retained local Hub after leader exit,
+correctly reporting orphaned children and causing the adapter to discard normal
+collection. Every original task remains UNVERIFIED/INFRA_ERROR with no credit.
+Provider readback later confirmed the warm source stopped; no remote resource
+was modified to make it ready.
+
+The reviewed campaign-preallocation-v1 proof binds the original null native
+reference, full request/command/source/token, terminal job/owner inventory,
+authenticated relay capture and retired processes, original native sidecar,
+publication acknowledgment and sealed local/canonical audits proving zero owned
+resources and no task artifacts. Historical source authority is explicitly
+reconstructed from the original exact native --ref command and four pinned
+producer source objects; no missing per-controller log ref is invented. Every
+present foreign ref refuses, including after the monitor or masked by a later
+matching ref. Future campaigns persist each actual controller command before
+dispatch and validate that source directly. The complete original 143-file proof
+validates without mocked boundaries and grants no task or source-execution PASS.
+
+Native deploy campaigns now join only their request-scoped Hub through the
+existing exact-owner termination protocol after all controllers, shared cleanup
+and publication have ended, before their supervised leader exits. A real adopted
+Hub reproduces the old orphan flag and passes after this change with no supervisor
+TERM, unknown child or orphan. The existing 164-test owning cycle suite and eleven
+targeted native cases pass in the integrated candidate. Raw setup/intermediate
+failures, original sidecars and retained service custody remain preserved.

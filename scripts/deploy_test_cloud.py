@@ -195,6 +195,7 @@ def execute(request, root):
         raise ValueError('provider capacity cannot admit one smoke task')
     campaign = directory / 'campaigns' / ('deploy-' + directory.name)
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
+           'DEPLOY_NATIVE_HUB_JOIN': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
            'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']

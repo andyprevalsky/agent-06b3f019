@@ -212,4 +212,158 @@ export function terminalPauseCases({ ctxState, setCurrentView, resetAnimationSta
     expect(view.result.current.agents[0].status).toBe('ACTIVE');
     view.unmount();
   });
+
+  it.each(['invalid', ''])(
+    'preserves detail status when list timestamp is %s',
+    async (updated_at) => {
+      const agent = makeAgent();
+      ctxState.agent = agent;
+      ctxState.selectedAgentId = agent.agent_id;
+      server.use(
+        http.get(`${API_BASE}/agents`, () =>
+          HttpResponse.json({ agents: [{ ...agent, status: 'COMPLETED', updated_at }] }),
+        ),
+      );
+      const view = renderHook(() =>
+        useTerminalAgents('agents', setCurrentView, resetAnimationState),
+      );
+      await act(async () => view.result.current.loadAgents());
+      expect(view.result.current.agentDetail?.status).toBe('ACTIVE');
+      view.unmount();
+    },
+  );
+
+  it('reconciles an external resume revision without seeing PAUSED or trusting unrelated updates', async () => {
+    const agent = makeAgent({ user_control_revision: 0 });
+    ctxState.agent = agent;
+    ctxState.selectedAgentId = agent.agent_id;
+    let pauses = 0;
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/pause`, () =>
+        HttpResponse.json({ success: true, user_control_revision: ++pauses * 2 - 1 }),
+      ),
+      http.get(`${API_BASE}/agents/:agentId`, () =>
+        HttpResponse.json({
+          agent,
+          messages: [],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+    );
+    const view = renderHook(() => useTerminalAgents('agents', setCurrentView, resetAnimationState));
+    await act(async () => view.result.current.handlePauseAgent());
+    expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+    ctxState.agent = {
+      ...agent,
+      user_control_revision: 1,
+      updated_at: '2026-01-01T00:00:04Z',
+      token_count: 500,
+    };
+    view.rerender();
+    expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+    // Resume may already be followed by ordinary worker status/token updates.
+    ctxState.agent = {
+      ...agent,
+      user_control_revision: 2,
+      updated_at: '2026-01-01T00:00:05Z',
+      status_message: 'Working',
+    };
+    view.rerender();
+    await waitFor(() => expect(view.result.current.agentDetail?.status).toBe('ACTIVE'));
+    await act(async () => view.result.current.handlePauseAgent());
+    expect(pauses).toBe(2);
+    expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+    view.unmount();
+  });
+
+  it('keeps an HTTP-accepted pause when optional acknowledgment metadata is unreadable', async () => {
+    const agent = makeAgent();
+    ctxState.agent = agent;
+    ctxState.selectedAgentId = agent.agent_id;
+    server.use(
+      http.post(
+        `${API_BASE}/agents/:agentId/pause`,
+        () => new HttpResponse('incomplete-json', { status: 200 }),
+      ),
+      http.get(`${API_BASE}/agents/:agentId`, () =>
+        HttpResponse.json({ error: 'temporarily unavailable' }, { status: 503 }),
+      ),
+    );
+    const view = renderHook(() => useTerminalAgents('agents', setCurrentView, resetAnimationState));
+    await act(async () => view.result.current.handlePauseAgent());
+    expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+    view.unmount();
+  });
+
+  it.each([true, false])(
+    'keeps ACK revision 3 across delayed PAUSED 1 and ACTIVE 2 (refresh=%s)',
+    async (refresh) => {
+      const agent = makeAgent({ user_control_revision: 0 });
+      ctxState.agent = agent;
+      ctxState.selectedAgentId = agent.agent_id;
+      ctxState.applyAgentDetail.mockImplementation((_id, data) => {
+        ctxState.agent = data.agent;
+        return true;
+      });
+      server.use(
+        http.post(`${API_BASE}/agents/:agentId/pause`, () =>
+          HttpResponse.json({ success: true, user_control_revision: 3 }),
+        ),
+        http.get(`${API_BASE}/agents/:agentId`, () =>
+          HttpResponse.json(
+            {
+              agent: { ...agent, status: 'PAUSED', user_control_revision: 1 },
+              messages: [],
+              pagination: { has_more: false, oldest_timestamp: null },
+            },
+            { status: refresh ? 200 : 503 },
+          ),
+        ),
+      );
+      const view = renderHook(() =>
+        useTerminalAgents('agents', setCurrentView, resetAnimationState),
+      );
+      try {
+        await act(async () => view.result.current.handlePauseAgent());
+        ctxState.agent = { ...agent, status: 'PAUSED', user_control_revision: 1 };
+        view.rerender();
+        ctxState.agent = { ...agent, status: 'ACTIVE', user_control_revision: 2 };
+        view.rerender();
+        expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+        ctxState.agent = { ...agent, status: 'PAUSED', user_control_revision: 3 };
+        view.rerender();
+        ctxState.agent = { ...agent, status: 'ACTIVE', user_control_revision: 4 };
+        view.rerender();
+        expect(view.result.current.agentDetail?.status).toBe('ACTIVE');
+      } finally {
+        view.unmount();
+        ctxState.applyAgentDetail.mockImplementation(() => true);
+      }
+    },
+  );
+
+  it('keeps newer canonical control revision when a stale list row has a later timestamp', async () => {
+    const agent = makeAgent({ status: 'PAUSED', user_control_revision: 3 });
+    ctxState.agent = agent;
+    ctxState.selectedAgentId = agent.agent_id;
+    server.use(
+      http.get(`${API_BASE}/agents`, () =>
+        HttpResponse.json({
+          agents: [
+            {
+              ...agent,
+              status: 'ACTIVE',
+              user_control_revision: 2,
+              updated_at: '2099-01-01T00:00:00Z',
+            },
+          ],
+        }),
+      ),
+    );
+    const view = renderHook(() => useTerminalAgents('agents', setCurrentView, resetAnimationState));
+    await act(async () => view.result.current.loadAgents());
+    expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+    expect(view.result.current.agents[0].status).toBe('PAUSED');
+    view.unmount();
+  });
 }

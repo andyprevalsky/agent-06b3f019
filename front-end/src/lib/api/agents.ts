@@ -241,7 +241,7 @@ export async function getTools(): Promise<Tool[]> {
 }
 
 // Pause agent
-export async function pauseAgent(agentId: string): Promise<void> {
+export async function pauseAgent(agentId: string): Promise<{ user_control_revision?: number }> {
   const headers = getAuthHeaders();
 
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/pause`, {
@@ -252,6 +252,18 @@ export async function pauseAgent(agentId: string): Promise<void> {
   if (!response.ok) {
     throw new Error('Failed to pause agent');
   }
+  // HTTP acceptance owns the pause even if optional metadata cannot be read.
+  const data: unknown = await response.json().catch(() => null);
+  const revision =
+    data && typeof data === 'object' && 'user_control_revision' in data
+      ? data.user_control_revision
+      : undefined;
+  return {
+    user_control_revision:
+      typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+        ? revision
+        : undefined,
+  };
 }
 
 // Resume agent

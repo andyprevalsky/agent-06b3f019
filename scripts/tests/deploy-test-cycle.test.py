@@ -3982,6 +3982,7 @@ class RelayStartupEvidence(unittest.TestCase):
         namespace['execute'](requested,self.base)
         self.assertEqual(len(calls),1)
         self.assertIs(calls[0][1].get('owned_lifecycle'),True)
+        self.assertEqual(calls[0][1]['env'].get('DEPLOY_NATIVE_HUB_JOIN'),'1')
 
     def test_startup_only_reconciliation_retains_unverified_bytes(self):
         receipt,owner,proof=self.fixture();before=json.dumps(receipt,sort_keys=True)
@@ -4038,8 +4039,8 @@ class RelayStartupEvidence(unittest.TestCase):
         (self.relay/'broker.private.log').write_text('unsupported Fly agent version\n')
         pid=capture['agent']['pid'];socket=capture['socket']
         native=self.base/'native';native.mkdir()
-        bootstrap=native/'bootstrap.log';agent=native/'agent.log'
-        bootstrap.write_text(f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {pid}, log: /private/agent-logs/123.log)\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n')
+        bootstrap=native/'bootstrap.log';(native/'agent-logs').mkdir();agent=native/'agent-logs/123.log'
+        bootstrap.write_text(f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {pid}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n')
         when=datetime.datetime.fromisoformat(json.loads((self.campaign/'summary.json').read_text())['started_at'])+datetime.timedelta(seconds=.5)
         stamp=when.strftime('%Y/%m/%d %H:%M:%S.%f')
         payload=('ok '+json.dumps({'PID':pid,'Version':'0.5.5'})+'\n').encode()
@@ -4047,10 +4048,20 @@ class RelayStartupEvidence(unittest.TestCase):
         import json as json_module
         quoted=json_module.dumps(raw)
         agent.write_text(f'{stamp} srv OK {pid}\n{stamp} #1 -> ({len(raw)}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
-        proof['fly_native_logs']={'bootstrap':str(bootstrap),'agent':str(agent)};self.reseal()
+        proof['fly_native_logs']={'bootstrap':str(bootstrap),'agent':str(agent),'timezone':'UTC'};self.reseal()
         result=self.validate_fixture(receipt,owner,proof)
         self.assertFalse(result['credit_granted']);self.assertTrue(result['startup_processes'][3]['native_log_identity'])
         self.assertNotIn('birth',result['startup_processes'][3])
+        saved_logs=dict(proof['fly_native_logs'])
+        for fields,reason in [({k:v for k,v in saved_logs.items() if k!='timezone'},'timezone required'),
+                              ({**saved_logs,'timezone':'Unknown/Original'},'timezone unavailable'),
+                              ({**saved_logs,'timezone':'America/New_York'},'log clock')]:
+            proof['fly_native_logs']=fields
+            with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        foreign=native/'foreign.log';foreign.write_bytes(agent.read_bytes())
+        proof['fly_native_logs']={**saved_logs,'agent':str(foreign)};self.reseal()
+        with self.assertRaisesRegex(ValueError,'bootstrap binding'):self.validate_fixture(receipt,owner,proof)
+        foreign.unlink();proof['fly_native_logs']=saved_logs;self.reseal()
         prior=agent.read_text()
         for mutation,reason in [(prior.replace(str(pid),str(os.getpid())),'bootstrap|PING|shutdown'),
                                 (prior.replace('srv QUIT','missing shutdown'),'shutdown chain'),
@@ -4097,6 +4108,99 @@ class RelayStartupEvidence(unittest.TestCase):
         proof['files'][str(paths[0])]='0'*64
         with self.assertRaisesRegex(ValueError,'hash mismatch'):
             self.validate_fixture(receipt,owner,proof)
+
+    def test_native_campaign_joins_exact_hub_before_supervisor_exit(self):
+        result=subprocess.run([sys.executable,str(ROOT/'scripts/tests/fixtures/native_campaign_hub_join.py'),
+                               str(self.target/'run-bench-campaign.py')],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    def preallocation_fixture(self):
+        import hashlib,shutil,time
+        receipt,owner,proof=self.fixture()
+        (self.relay/'startup-cleanup.json').unlink()
+        capture=json.loads((self.relay/'startup-agent.json').read_text())
+        authority=json.loads((self.relay/'authority.private.json').read_text())
+        ready=dict(agent=capture['agent'],authority_sha256=capture['authority_sha256'],
+                   pid=capture['broker']['pid'],birth=capture['broker']['birth'],
+                   socket='/tmp/cb-relay-abcdefgh/control.sock')
+        self.save(self.relay/'ready.json',ready)
+        self.save(self.relay/'serve.once.json',{k:ready[k]for k in ('authority_sha256','pid','birth')})
+        (self.relay/'broker.private.log').write_text('{"stopped": true}\n')
+        def retired():
+            r=subprocess.run([sys.executable,'-c',"import os;from pathlib import Path;print(str(os.getpid())+' '+Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19])"],text=True,capture_output=True,check=True)
+            pid,start=r.stdout.split();return dict(pid=int(pid),birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+start)
+        controller,hub_process=retired(),retired()
+        hub=self.runs/'_hub';hub.mkdir()
+        hub_owner=hub/('agent-link-server.8765.'+'b'*32+'.owner')
+        fields=dict(version='1',status='live-transfer-required',pid=str(hub_process['pid']),pgid=str(hub_process['pid']),
+                    pid_start=hub_process['birth'],owner_token='b'*32,argv_sha256='c'*64,
+                    root=str(self.runs),runs_root=str(self.runs),repo_root=str(self.base),context_dir=str(hub),
+                    command=str(self.base/'agents/benchmarks/agent_link_server.py'))
+        text=lambda p,v:p.write_text(''.join(k+'='+str(x)+'\n'for k,x in v.items()))
+        text(hub_owner,fields)
+        fleet=self.runs/('20261106-090000-'+str(controller['pid']));batch=fleet/'_batch';batch.mkdir(parents=True)
+        audit=fleet/'teardown-ownership';audit.mkdir()
+        token='c'*32
+        text(audit/'meta',dict(version='1',fleet_owner_token=token,run_id=fleet.name,app='fixture',workspace_root=str(self.base),
+            status='provider-teardown-verified',hub_disposition='retained-exact-owner-transfer-required',hub_owner_file=str(hub_owner),
+            hub_owner_token='b'*32,hub_pid=fields['pid'],hub_pid_start=fields['pid_start'],hub_argv_sha256=fields['argv_sha256']))
+        (audit/'provider-teardown-verified.epoch').write_text(str(time.time()-2.8))
+        for name in ['owned-clones.ids','owned-clones.names']:(audit/name).write_bytes(b'')
+        canonical=self.base/'.git/cloudbench-fleet-audits'/token;canonical.parent.mkdir(parents=True);shutil.copytree(audit,canonical)
+        seal=hashlib.sha256()
+        for path in sorted(audit.iterdir()):
+            for raw in [path.name.encode(),path.read_bytes()]:seal.update(len(raw).to_bytes(8,'big'));seal.update(raw)
+        text(audit/'source-audit',dict(path=str(canonical),sha256=seal.hexdigest()))
+        self.save(batch/'lifecycle.json',dict(version=1,fleet_owner_token=token,run_id=fleet.name,workspace_root=str(self.base),
+            status='failed',controller_exit_code=1,audit_sha256=seal.hexdigest(),hub_publication_failed=False))
+        self.save(batch/'benches.json',[dict(name='browser-smoke',mode='REAL')])
+        self.save(batch/'run.json',dict(run_id=fleet.name,controller_exit_code=1,status='failed',tasks=[dict(name='browser-smoke',
+            status='INFRA_ERROR',passed=False,failure_reason='no current run artifact produced',lifecycle_stage='released')]))
+        self.save(batch/'disposable-cleanup.json',dict(schema='disposable-cleanup-v1',owner=token,guest_cleanup_missing=False,runtime_evidence_missing=False))
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary['jobs'][0].update(status='failed',controller_pid=controller['pid'],controller_exit_code=1,
+            controller_command=['bash',str(self.base/'scripts/run-bench'),'browser-smoke','--ref',receipt['source']['head'],'--foreground'])
+        summary['peak_concurrency']=1;summary.pop('shared_inventory_failed');self.save(self.campaign/'summary.json',summary)
+        (self.campaign/'r001-j0001.log').write_text(f'{self.base}/scripts/run-bench monitor {fleet}\nowner: {token}; private controller diagnostics stay in this run directory.\n')
+        sidecar=json.loads((self.runs.parent/'cli.log.process.json').read_text())
+        sidecar.update(orphaned_children=True,term_sent=[hub_process['pid']],reaped=[*sidecar['reaped'],dict(pid=hub_process['pid'],status=15)])
+        self.save(self.runs.parent/'cli.log.process.json',sidecar)
+        adapter_path=Path(receipt['worker_result']);adapter=json.loads(adapter_path.read_text())
+        receipt['started_at']=adapter['started_at']
+        adapter.update(fleet_directory=None,reason='cloud command interrupted or source changed');self.save(adapter_path,adapter)
+        reference=receipt['native_cleanup_reference'];reference['native_directory']=None
+        reference['result_sha256']=hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+        proof['worker_result_sha256']=reference['result_sha256'];proof['layout']='campaign-preallocation-v1'
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
+        self.reseal();return receipt,owner,proof,fleet
+
+    def test_preallocation_campaign_reconciliation_keeps_original_unverified(self):
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        before=json.dumps(receipt,sort_keys=True)
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertEqual(result['participants'],[str(fleet)])
+        self.assertFalse(result['credit_granted']);self.assertEqual(before,json.dumps(receipt,sort_keys=True))
+
+    def test_preallocation_campaign_refuses_execution_live_or_changed_ownership(self):
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        original={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        mutations=[('appended-foreign-ref',lambda:(self.campaign/'r001-j0001.log').write_text((self.campaign/'r001-j0001.log').read_text()+'ref : '+'f'*40+'\n'),'foreign log ref'),
+                   ('masked-foreign-ref',lambda:(self.campaign/'r001-j0001.log').write_text('ref : '+'f'*40+'\nref : '+receipt['source']['head']+'\n'+(self.campaign/'r001-j0001.log').read_text()),'foreign log ref'),
+                   ('foreign-ref',lambda:(self.campaign/'r001-j0001.log').write_text('ref : '+'f'*40+'\n'+(self.campaign/'r001-j0001.log').read_text()),'foreign log ref'),
+                   ('missing-command',lambda:self.save(self.campaign/'summary.json',{**json.loads((self.campaign/'summary.json').read_text()),'jobs':[{k:v for k,v in json.loads((self.campaign/'summary.json').read_text())['jobs'][0].items()if k!='controller_command'}]}),'unsupported historical preallocation dispatch'),
+                   ('execution',lambda:self.save(fleet/'execution-provenance.json',{}),'execution evidence present'),
+                   ('owned-clone',lambda:(fleet/'teardown-ownership/owned-clones.ids').write_text('unknown\n'),'audit seal'),
+                   ('live-relay',lambda:self.save(self.relay/'broker-owner.json',dict(pid=os.getpid(),birth=self.live_stamp(os.getpid()),parent_pid=1,parent_start='foreign')),'relay custody'),
+                   ('unknown-drain',lambda:self.save(self.runs.parent/'cli.log.process.json',{**json.loads((self.runs.parent/'cli.log.process.json').read_text()),'term_sent':[os.getpid()]}),'unexpected supervised termination')]
+        for name,change,reason in mutations:
+            with self.subTest(name=name):
+                for p in self.base.rglob('*'):
+                    if p.is_file()and p not in original:p.unlink()
+                for p,raw in original.items():p.write_bytes(raw)
+                change();self.reseal()
+                with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+
 
 
 if __name__ == '__main__': unittest.main()

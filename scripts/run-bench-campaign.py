@@ -28,6 +28,32 @@ from pathlib import Path
 from types import ModuleType
 
 
+def join_native_hubs(root, campaign):
+    """Join only this native request's Hub through its existing exact-owner protocol."""
+    if os.environ.get('DEPLOY_NATIVE_HUB_JOIN') != '1':
+        return True
+    runs = Path(os.environ.get('CLOUDBENCH_RUNS_ROOT', ''))
+    if (not runs.is_absolute() or runs.resolve() != runs
+            or not re.fullmatch('[0-9a-f]{64}', runs.parent.name)
+            or runs != root/'.context/deploy-cloud'/runs.parent.name/'runs'
+            or campaign != runs.parent/'campaigns'/('deploy-'+runs.parent.name)):
+        raise ValueError('native Hub join root is not request-owned')
+    hub = runs/'_hub'
+    if hub.is_symlink():
+        raise ValueError('native Hub root is a symlink')
+    for owner in sorted(hub.glob('agent-link-server.*.owner')):
+        if owner.is_symlink() or owner.resolve().parent != hub:
+            raise ValueError('native Hub owner path changed')
+        rows = [line.split('=', 1) for line in owner.read_text().splitlines()]
+        fields = dict(rows)
+        if len(rows) != len(fields):
+            raise ValueError('duplicate native Hub owner fields')
+        subprocess.run(['bash', '-c', 'source "$1"; cloudbench_terminate_central_hub_owner "$2" "$3" "$4" "$5" 10',
+                        'native-hub-join', str(root/'scripts/lib/cloudbench-env.sh'), fields['port'],
+                        str(runs), str(root), str(owner)], check=True)
+    return True
+
+
 def startup_deadline_monotonic(env, e2e_started_at, e2e_timeout, *, now_epoch, now_monotonic):
     """Translate the supervisor's source-bound absolute startup fence once."""
     value = env.get("RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH")
@@ -2274,6 +2300,8 @@ def main() -> int:
                     *args.forward_arg,
                     "--foreground",
                 ]
+                job['controller_command'] = command
+                write_json_atomic(summary_path, state)
                 log_handle = open(str(job["log"]), "w", encoding="utf-8")
                 process = subprocess.Popen(
                     controller_prefix + command,
@@ -2546,6 +2574,12 @@ def main() -> int:
         result = 128 + stop_signal
     if args.retry_infra and publication_attempted and not publication_completed:
         state["status"] = "failed" if not stop_signal else "cancelled"
+        result = result or 1
+    try:
+        join_native_hubs(root, campaign_dir)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        state['shared_transport_cleanup_pending'] = True
+        state['status'] = 'failed'
         result = result or 1
     # Publication is part of the campaign lifetime, including cancellation
     # during its final handoff. Preserve the original child outcomes.

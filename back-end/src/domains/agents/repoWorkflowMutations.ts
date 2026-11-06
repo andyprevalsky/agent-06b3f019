@@ -132,7 +132,12 @@ export async function pauseAgentUnderWorkflowLock(agentId: string) {
     await lockAgentWorkflowGeneration(tx, agentId);
     const current = await tx.agent.findFirst({
       where: { id: agentId, deletedAt: null },
-      select: { status: true, temporalWorkflowId: true },
+      select: {
+        status: true,
+        temporalWorkflowId: true,
+        userControlRevision: true,
+        updatedAt: true,
+      },
     });
     if (current === null) return null;
     if (current.status === 'COMPLETED' || current.status === 'FAILED') {
@@ -140,8 +145,13 @@ export async function pauseAgentUnderWorkflowLock(agentId: string) {
     }
     const updated = await tx.agent.update({
       where: { id: agentId },
-      data: { status: 'PAUSED' },
-      select: { status: true, temporalWorkflowId: true },
+      data: { status: 'PAUSED', userControlRevision: { increment: 1 } },
+      select: {
+        status: true,
+        temporalWorkflowId: true,
+        userControlRevision: true,
+        updatedAt: true,
+      },
     });
     return { ...updated, paused: true as const };
   });

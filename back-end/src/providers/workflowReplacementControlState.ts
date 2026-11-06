@@ -41,6 +41,7 @@ export async function recordWorkflowResumeIntent(
         where: { id: agentId },
         data: {
           status: 'ACTIVE',
+          userControlRevision: { increment: 1 },
           statusMessage: 'Resume requested',
           ...(replacementState === null
             ? {}

@@ -279,12 +279,116 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     return not rows  # Missing provenance is supported only before ANY native guest allocation.
 
 
+
+def retired_local_process(value):
+    """Refuse a live exact birth; PID reuse is never signalled by reconciliation."""
+    need(type(value.get('pid')) is int and value['pid'] > 1
+         and isinstance(value.get('birth'),str)
+         and re.fullmatch(r'proc-start:[0-9a-f-]+:[0-9]+',value['birth']), 'local process identity')
+    path = Path('/proc')/str(value['pid'])/'stat'
+    try:
+        row = path.read_text().rsplit(') ',1)[1].split()
+        current = 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+row[19]
+    except (FileNotFoundError,ProcessLookupError):
+        return
+    need(current != value['birth'] or row[0] in ('Z','X'), 'exact local process remains live')
+
+
+def preallocation_processes(root,runs,campaign,request,receipt,adapter,document,bound):
+    """Bind original supervised controller/relay closure before zero-allocation replay."""
+    checks=request['checks']
+    command=adapter.get('native_command',[])
+    need(len(command)==len(checks)+10 and command[:2]==['bash','scripts/run-bench']
+         and command[2:2+len(checks)]==checks and command[-8:-5]==['--runs','1','--concurrency']
+         and command[-5].isdigit() and 1<=int(command[-5])<=len(checks)
+         and command[-4:]==['--retry-infra','0','--ref',receipt['source']['head']], 'preallocation command')
+    relay=campaign/'shared-relay'
+    authority=document(relay/'authority.private.json')
+    capture=document(relay/'startup-agent.json')
+    ready=document(relay/'ready.json');serve=document(relay/'serve.once.json')
+    bootstrap=document(relay/'bootstrap-owner.json');broker=document(relay/'broker-owner.json')
+    parent=dict(pid=authority['parent_pid'],birth=authority['parent_start'])
+    original=subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',
+                                     receipt['source']['head']+':scripts/cloudbench-shared-relay.py'])
+    need(authority['schema']=='shared-relay-authority-v1'
+         and authority['source_sha256']==hashlib.sha256(original).hexdigest()
+         and authority['inventory_directory']==str(campaign/'shared-inventory')
+         and capture['schema']=='shared-relay-startup-agent-v1'
+         and capture['authority_sha256']==ready['authority_sha256']==serve['authority_sha256']
+             ==hashlib.sha256(bound(relay/'authority.private.json')).hexdigest()
+         and capture['parent']==parent and capture['broker']==dict(pid=broker['pid'],birth=broker['birth'])
+         and ready['agent']==capture['agent'] and ready['pid']==serve['pid']==broker['pid']
+         and ready['birth']==serve['birth']==broker['birth']
+         and all(v['parent_pid']==parent['pid'] and v['parent_start']==parent['birth'] for v in (bootstrap,broker)),
+         'preallocation relay custody')
+    location=document(campaign/'shared-relay-location.json')['directory']
+    need(re.fullmatch(r'/tmp/cb-relay-[A-Za-z0-9_]{8}',location)
+         and capture['socket']==authority['agent_socket']==location+'/fly-agent.sock'
+         and ready['socket']==location+'/control.sock'
+         and bound(relay/'broker.private.log').decode().strip()=='{"stopped": true}', 'preallocation relay shutdown')
+    for name in ('fly-agent.sock','control.sock'):
+        path=Path(location)/name
+        need(not path.exists() and not path.is_symlink(), 'preallocation socket remains')
+    inventory=campaign/'shared-inventory'
+    publisher=authority['inventory_owner']
+    need(publisher['parent_pid']==str(parent['pid']) and publisher['parent_start']==parent['birth'], 'preallocation publisher')
+    owner=inventory/'owner'
+    if owner.exists() or owner.is_symlink():
+        need(fields(bound(owner))==publisher, 'preallocation publisher conflict')
+    else:
+        original=subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',
+                                         receipt['source']['head']+':scripts/cloudbench-campaign-inventory.sh'])
+        need(hashlib.sha256(original).hexdigest()=='e924d72f258bd5b2507348e5b53143aa4c2afa1c410cd63bdf495f27dfd2082d'
+             and bound(inventory/'scripts/cloudbench-campaign-inventory.sh')==original
+             and bound(inventory/'stop')==b'', 'preallocation publisher removal')
+    identities=[parent,bootstrap,broker,capture['agent'],dict(pid=int(publisher['pid']),birth=publisher['pid_start'])]
+    need(len({p['pid'] for p in identities})==len(identities), 'preallocation aliased identity')
+    for value in identities:retired_local_process(value)
+    supervisor=document(runs.parent/'cli.log.process.json')
+    need(supervisor['child_pid']==parent['pid'] and supervisor['native_exit']==adapter['native_exit']
+         and type(adapter['native_exit']) is int and 1<=adapter['native_exit']<=255
+         and supervisor['quiescent'] is True and supervisor['remaining']==supervisor['kill_sent']==[]
+         and supervisor['timed_out'] is False and supervisor['cancelled'] is False and supervisor['error'] is None
+         and not Path('/proc',str(supervisor['supervisor_pid'])).exists()
+         and len({r['pid'] for r in supervisor['reaped']})==len(supervisor['reaped'])
+         and any(r==dict(pid=parent['pid'],status=adapter['native_exit']*256)for r in supervisor['reaped']),
+         'preallocation supervisor closure')
+    return supervisor
+
+
+def preallocation_dispatch_ref(root, job, receipt, log_ref, native_command):
+    """Use a captured command, or the exact original pre-banner dispatch contract."""
+    head = receipt['source']['head']
+    need(log_ref is None or log_ref == head, 'preallocation foreign log ref')
+    command = job.get('controller_command')
+    if command is not None:
+        need(command == ['bash',str(root/'scripts/run-bench'),job['task'],'--ref',head,'--foreground'],
+             'preallocation controller command source')
+        return dict(kind='captured-controller-command-v1',ref=command[-2])
+    # This historical producer printed its ref banner only after warm readiness.
+    # Its immutable native_command carries --ref and the exact reviewed dispatcher
+    # forwards that argument unchanged to every original per-task command.
+    for name, expected in (
+        ('run-bench','d6a63399d3ae00ae83d469f06ad44870a57ad13a85c99703366137012fc1420e'),
+        ('run-bench-campaign.py','2f12eeda57532f376a490b0afb4d234b1894fe1959285f867b350adff4600982'),
+        ('run-bench-cloud','4c6c532f61bce7cdbd7b4113736df62730ee8df7e5a5a719bf82c462fbdb76fe'),
+        ('run-bench-fleet','db6ca7938e1ca359402f6cf678569cca8a5562a721ccf8dfd47a53db5f37b429')):
+        original = subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',head+':scripts/'+name])
+        need(hashlib.sha256(original).hexdigest() == expected, 'unsupported historical preallocation dispatch')
+    return dict(kind='historical-native-dispatch-v1',ref=native_command[-1])
+
+
 def logged_startup_agent(proof, root, socket_path, parent, start, finish, bound):
     """Consume positive original Fly log identity; never invent a missing birth."""
     import ast
     from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
     logs = proof.get('fly_native_logs')
-    need(isinstance(logs,dict) and set(logs) == {'bootstrap','agent'}, 'startup original Fly logs required')
+    need(isinstance(logs,dict) and set(logs) == {'bootstrap','agent','timezone'}, 'startup original Fly logs and timezone required')
+    try:
+        zone = ZoneInfo(logs['timezone'])
+    except (TypeError, ValueError, ZoneInfoNotFoundError) as error:
+        raise ValueError('native cleanup: startup original timezone unavailable') from error
     bootstrap = bound(Path(logs['bootstrap'])).decode()
     agent = bound(Path(logs['agent'])).decode()
     matches = re.findall(r'^DEBUG started agent process \(pid: ([0-9]+), log: ([^\n]+)\)$',bootstrap,re.M)
@@ -292,12 +396,18 @@ def logged_startup_agent(proof, root, socket_path, parent, start, finish, bound)
     pid = int(matches[0][0])
     need(pid > 1 and f'DEBUG determined working directory: "{root}"' in bootstrap
          and 'dial unix '+str(socket_path)+': operation was canceled' in bootstrap
-         and re.fullmatch(r'/[^\n]+/agent-logs/[0-9]+[.]log',matches[0][1]), 'startup native bootstrap binding')
+         and re.fullmatch(r'/[^\n]+/agent-logs/[0-9]+[.]log',matches[0][1])
+         and Path(logs['agent']).resolve() == Path(matches[0][1]).resolve(), 'startup native bootstrap binding')
     observed, opened, stopped, quit_at = [], [], [], []
     for line in agent.splitlines():
         match = re.fullmatch(r'([0-9/]{10} [0-9:.]+) (.*)',line)
         need(match is not None, 'startup native log framing')
-        instant = datetime.strptime(match[1],'%Y/%m/%d %H:%M:%S.%f').replace(tzinfo=timezone.utc).timestamp()
+        local = datetime.strptime(match[1],'%Y/%m/%d %H:%M:%S.%f')
+        zoned = local.replace(tzinfo=zone)
+        need(zoned.utcoffset() == local.replace(tzinfo=zone,fold=1).utcoffset()
+             and zoned.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None) == local,
+             'startup ambiguous local log clock')
+        instant = zoned.timestamp()
         need(start <= instant <= finish, 'startup native log clock')
         message = match[2]
         if message == 'srv OK '+str(pid): opened.append(instant)
@@ -461,7 +571,11 @@ def startup_campaign(root, runs, campaign, request, receipt, adapter, confirmed,
     native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
     for path in (campaign/'hub-group.json',campaign/'hub-group-publication-ack.private.json'):
         document(path)
-    need(campaign_published(summary,campaign,adapter['started_at'],native), 'startup publication closure')
+    try:
+        published = campaign_published(summary,campaign,adapter['started_at'],native)
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as error:
+        raise ValueError('native cleanup: startup publication unavailable') from error
+    need(published, 'startup publication closure')
     return identities
 
 
@@ -521,7 +635,7 @@ def validate(receipt, owner, proof):
     cli = runs.parent / 'cli.log'
     need(adapter.get('runner_log') == str(cli), 'adapter native root')
     cli_text = bound(cli).decode()
-    parents, canary_links = {}, {}
+    parents, canary_links, preallocation_links = {}, {}, {}
     layout = proof.get('layout')
     if layout == 'campaign-startup-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
@@ -535,10 +649,14 @@ def validate(receipt, owner, proof):
                 'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
                 'participants': [], 'native_audit_seals': {}, 'retained_services': [],
                 'startup_processes': identities, 'credit_granted': False}
-    if layout == 'campaign-v1':
+    preallocation = layout == 'campaign-preallocation-v1'
+    supervision = None
+    if layout in {'campaign-v1','campaign-preallocation-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
-             and reference.get('native_directory') == str(campaign)
+             and (reference.get('native_directory') == str(campaign) or preallocation
+                  and reference.get('native_directory') is None and adapter.get('fleet_directory') is None
+                  and adapter.get('reason') == 'cloud command interrupted or source changed')
              and str(campaign) in cli_text, 'campaign root binding')
         summary = document(campaign / 'summary.json')
         checks, jobs = request['checks'], summary['jobs']
@@ -575,6 +693,12 @@ def validate(receipt, owner, proof):
         need(published, 'campaign publication or publisher cleanup')
         for path in publication:
             bound(path)
+        if preallocation:
+            need(summary['status'] in {'failed','cancelled'} and not proof.get('purpose')
+                 and not proof.get('recovered_runtime') and not summary.get('workspace_binding')
+                 and receipt['cases']==dict.fromkeys(checks,'UNVERIFIED'),
+                 'preallocation outcomes')
+            supervision=preallocation_processes(root,runs,campaign,request,receipt,adapter,document,bound)
         handles = []
         for job in jobs:
             need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']), 'campaign job id')
@@ -586,6 +710,8 @@ def validate(receipt, owner, proof):
             for index, line in enumerate(lines):
                 match = re.fullmatch(r'ref\s*:\s*([0-9a-f]{40})(?:\s+.*)?', line.strip())
                 if match:
+                    if preallocation:
+                        need(match[1] == receipt['source']['head'], 'preallocation foreign log ref')
                     ref = match[1]
                 if line.strip() == 'mode: --infra-probe (strict barrier, no LLM / run_benchmark)':
                     infra = True
@@ -598,6 +724,13 @@ def validate(receipt, owner, proof):
                     match = re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory\.', owner_line)
                     canary_links[Path(args[2])] = {'parent': one[0], 'ref': ref, 'owner': match[1] if match else None}
                     infra = False
+                if preallocation:
+                    match=re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory[.]',
+                                       lines[index+1].strip() if index+1<len(lines) else '')
+                    need(match is not None, 'preallocation controller owner')
+                    source_authority=preallocation_dispatch_ref(root,job,receipt,ref,adapter['native_command'])
+                    preallocation_links[Path(args[2])]=dict(
+                        ref=source_authority['ref'],owner=match[1],source_authority=source_authority)
                 one.append(Path(args[2]))
             need(one and one[0] not in parents and type(job.get('controller_pid')) is int
                  and job['controller_pid'] > 1 and one[0].name.rsplit('-', 1)[-1] == str(job['controller_pid']),
@@ -651,12 +784,19 @@ def validate(receipt, owner, proof):
                   else life['controller_exit_code'] == 0 and life['status'] == 'verified')
              and life['status'] in {'verified', 'failed'}, 'native terminal lifecycle')
         zero_allocation = False
+        provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
+        if preallocation:
+            need(fleet in parents and life['status']=='failed'
+                 and isolated_canary_release(fleet,life,benches,run,root,receipt,proof,
+                                             preallocation_links.get(fleet),bound,tree), 'preallocation zero resources')
+            need(not provenance_path.exists() and not matrix_path.exists(), 'preallocation execution evidence present')
+            need(not Path('/proc',fleet.name.rsplit('-',1)[-1]).exists(), 'preallocation controller PID present')
         if failed_canary:
             link = canary_links.get(fleet)
             need(link and link['parent'] in parents, 'failed canary parent link')
             zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
-        if failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
+        if preallocation or failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
             pass  # Positive linked infra-probe + sealed zero-resource release above; absence alone proves nothing.
         else:
             provenance, matrix = document(provenance_path), document(matrix_path)
@@ -721,6 +861,12 @@ def validate(receipt, owner, proof):
         retained[str(hub)] = {'path': str(hub), 'sha256': bindings[str(hub)], 'owner': hub_owner,
                              'disposition': meta['hub_disposition']}
         audit_seals[str(audit)] = seal
+    if preallocation:
+        need(set(supervision['term_sent']) <= {int(r['owner']['pid'])for r in retained.values()}
+             and all(any(v==dict(pid=pid,status=15)for v in supervision['reaped'])for pid in supervision['term_sent']),
+             'preallocation unexpected supervised termination')
+        for value in retained.values():
+            retired_local_process(dict(pid=int(value['owner']['pid']),birth=value['owner']['pid_start']))
     need(isolated or set(recovered) == set(recovery), 'recovered fleet closure')
     if isolated:
         need(set(proof['execution_quiescence']) == set(excluded), 'execution observation closure')
@@ -741,6 +887,8 @@ def validate(receipt, owner, proof):
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
             'participants': sorted(map(str, participants)), 'native_audit_seals': audit_seals,
             'retained_services': [retained[k] for k in sorted(retained)], 'credit_granted': False}
+    if preallocation:
+        result['preallocation_source_authorities']={str(k):v['source_authority']for k,v in preallocation_links.items()}
     if isolated:
         need(isinstance(proof.get('validation_source'), dict) and set(proof['validation_source']) == {'head', 'digest'}, 'next source')
         result.update(purpose='isolated-validation', validation_source=proof['validation_source'], excluded_resources=excluded,

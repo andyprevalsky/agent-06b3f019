@@ -120,3 +120,28 @@ pause, followed by completed /deploy; do not stop at diagnosis.
 ## Reusable lesson
 
 Project pending lifecycle intent in the owning view immediately, scope it to its agent, and reconcile against canonical state without fabricating transcript events.
+
+
+### Review followup: durable control ordering across clients
+
+A client that missed canonical PAUSED could retain accepted pause intent after
+another client resumed. Neither an ACTIVE snapshot nor a new updated_at proves
+that resume: stale reads and unrelated token/title writes have those shapes.
+The agent now has an additive userControlRevision, advanced inside the existing
+workflow-generation lock only when a user pause/resume intent is persisted.
+POST pause returns its exact committed revision; detail, sidebar and realtime
+updates carry it. The pending frontend request keeps that acknowledgment.
+Only an equal-or-later nonactive snapshot or a strictly later control revision
+settles it. A delayed PAUSED1/ACTIVE2 cannot revoke accepted pause3; resume4 is
+visible even after later ordinary status updates. Lower-revision realtime/list
+updates cannot overwrite a newer canonical control state. HTTP acceptance also
+survives unreadable optional acknowledgment metadata.
+
+The API regression fails on the previous source (306 pass, one failure:
+missing durable revision) and passes after (307/307). Three new frontend cases
+fail on the previous source, and the owning suite passes after. Independent
+review exposed the lower-revision PAUSED race; two unchanged causal cases fail
+before and pass after its correction. Invalid timestamps preserve detail
+status, and the selected-agent ref updates only for a committed selection.
+The additive default-zero column requires the normal production migration;
+this record does not claim that migration or deployment has completed.

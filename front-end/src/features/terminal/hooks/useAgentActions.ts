@@ -4,7 +4,7 @@
  * Handles create, resume, pause, select, feedback, and detail refresh.
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
 
@@ -30,6 +30,7 @@ interface UseAgentActionsArgs {
   loadAgents: () => Promise<void>;
 }
 
+/** Scope lifecycle actions and accepted pause ownership to each selected agent. */
 export function useAgentActions({
   selectedAgentId,
   agentDetail,
@@ -51,7 +52,9 @@ export function useAgentActions({
   const isPausing = pauseRequest?.accepted === false;
   const isPauseRequested = pauseRequest !== undefined;
   const selectedAgentIdRef = useRef(selectedAgentId);
-  selectedAgentIdRef.current = selectedAgentId;
+  useEffect(() => {
+    selectedAgentIdRef.current = selectedAgentId;
+  }, [selectedAgentId]);
 
   const refreshAgentDetailAndStatus = useCallback(
     async (agentId: string) => {
@@ -117,18 +120,17 @@ export function useAgentActions({
     if (!selectedAgentId || !agentDetail) return;
     const token = beginPause(selectedAgentId);
     if (token === null) return;
+    let revision: number | undefined;
     try {
-      await pauseAgent(selectedAgentId);
+      const response = await pauseAgent(selectedAgentId);
+      revision = response.user_control_revision;
     } catch (_e: unknown) {
       clearPause(selectedAgentId, token);
       toast({ title: 'Error', description: 'Failed to pause agent', variant: 'destructive' });
       return;
     }
-    acceptPause(selectedAgentId, token);
-    const status = await refreshAgentDetailAndStatus(selectedAgentId);
-    if (status && status !== 'ACTIVE' && status !== 'STARTING_UP') {
-      clearPause(selectedAgentId, token);
-    }
+    acceptPause(selectedAgentId, token, revision);
+    await refreshAgentDetailAndStatus(selectedAgentId);
     toast({ title: 'Agent pausing', description: 'The agent will pause shortly' });
   }, [
     selectedAgentId,

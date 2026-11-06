@@ -22,6 +22,7 @@ const AGENT_LIST_SELECT = {
   progressEstimate: true,
   progressEstimateGeneration: true,
   status: true,
+  userControlRevision: true,
   statusMessage: true,
   temporalWorkflowId: true,
   tokenCount: true,

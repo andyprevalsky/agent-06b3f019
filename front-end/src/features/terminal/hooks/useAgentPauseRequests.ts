@@ -11,8 +11,10 @@ import type { AgentDetail } from '../types';
 interface PauseRequest {
   token: symbol;
   accepted: boolean;
+  revision?: number;
 }
 
+/** Track each pause until its acknowledgment is reconciled by canonical control ordering. */
 export function useAgentPauseRequests(agent: AgentDetail | null) {
   const requests = useRef(new Map<string, PauseRequest>());
   const [pending, setPending] = useState(new Map<string, PauseRequest>());
@@ -29,22 +31,31 @@ export function useAgentPauseRequests(agent: AgentDetail | null) {
     requests.current.delete(agentId);
     setPending(new Map(requests.current));
   }, []);
-  const accept = useCallback((agentId: string, token: symbol) => {
+  const accept = useCallback((agentId: string, token: symbol, revision?: number) => {
     if (requests.current.get(agentId)?.token !== token) return;
-    requests.current.set(agentId, { token, accepted: true });
+    const acknowledged =
+      revision !== undefined && Number.isSafeInteger(revision) && revision >= 0
+        ? revision
+        : undefined;
+    requests.current.set(agentId, { token, accepted: true, revision: acknowledged });
     setPending(new Map(requests.current));
   }, []);
   const agentId = agent?.agent_id;
   const status = agent?.status;
+  const revision = agent?.user_control_revision;
   useEffect(() => {
-    if (
-      agentId &&
-      pending.get(agentId)?.accepted &&
+    const request = agentId ? pending.get(agentId) : undefined;
+    if (!agentId || !request?.accepted) return;
+    const acknowledged = request.revision;
+    const hasRevision = typeof revision === 'number' && Number.isSafeInteger(revision);
+    const resumed = hasRevision && acknowledged !== undefined && revision > acknowledged;
+    const settled =
       status !== 'ACTIVE' &&
-      status !== 'STARTING_UP'
-    ) {
-      clear(agentId, pending.get(agentId)?.token);
+      status !== 'STARTING_UP' &&
+      (acknowledged === undefined || (hasRevision && revision >= acknowledged));
+    if (settled || resumed) {
+      clear(agentId, request.token);
     }
-  }, [agentId, status, pending, clear]);
+  }, [agentId, status, revision, pending, clear]);
   return { pending, begin, accept, clear };
 }
