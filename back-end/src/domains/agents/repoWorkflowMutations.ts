@@ -5,16 +5,18 @@ import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration'
 /** Update worker-owned fields only while the producing workflow is still current. */
 export async function updateAgentForWorkflow(
   agentId: string,
-  workflowGeneration: string,
+  workflowGeneration: string | undefined,
   data: Prisma.AgentUpdateManyMutationInput
 ) {
   return runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, agentId);
     const requestedIterationOffset =
       typeof data.workflowIterationOffset === 'number' ? data.workflowIterationOffset : null;
+    const requestedStatus = typeof data.status === 'string' ? data.status : data.status?.set;
     const updateData = { ...data };
     delete updateData.workflowIterationOffset;
-    const workflowMatches: Prisma.AgentWhereInput[] = [{ temporalWorkflowId: workflowGeneration }];
+    const workflowMatches: Prisma.AgentWhereInput[] =
+      workflowGeneration === undefined ? [] : [{ temporalWorkflowId: workflowGeneration }];
     // A brand-new legacy workflow uses agentId as its Workflow ID and can report
     // STARTING_UP before the creator stores that ID. Replacement generations are
     // preclaimed, so they must never use this null compatibility path.
@@ -22,10 +24,22 @@ export async function updateAgentForWorkflow(
     const result = await tx.agent.updateMany({
       where: {
         id: agentId,
-        deletedAt: null,
-        OR: workflowMatches,
+        ...(workflowGeneration === undefined ? {} : { deletedAt: null, OR: workflowMatches }),
+        ...(['ACTIVE', 'STARTING_UP', 'PAUSED'].includes(String(requestedStatus))
+          ? { status: { notIn: ['COMPLETED', 'FAILED'] } }
+          : {}),
+        // A queued worker report cannot revoke accepted user control. Explicit
+        // resume clears this intent under the same lock before reporting.
+        ...(requestedStatus === 'ACTIVE' || requestedStatus === 'STARTING_UP'
+          ? { userControlPaused: false }
+          : {}),
       },
-      data: updateData,
+      data: {
+        ...updateData,
+        ...(requestedStatus === 'COMPLETED' || requestedStatus === 'FAILED'
+          ? { userControlPaused: false }
+          : {}),
+      },
     });
     if (result.count === 1 && requestedIterationOffset !== null) {
       await tx.$executeRaw`
@@ -99,6 +113,8 @@ export async function updateAgentConfigMutation(
             ? {
                 status: 'ACTIVE',
                 statusMessage: 'Cost limit increased',
+                userControlPaused: false,
+                userControlRevision: { increment: 1 },
               }
             : {}),
         },
@@ -148,7 +164,7 @@ export async function pauseAgentUnderWorkflowLock(agentId: string) {
     }
     const updated = await tx.agent.update({
       where: { id: agentId },
-      data: { status: 'PAUSED', userControlRevision: { increment: 1 } },
+      data: { status: 'PAUSED', userControlPaused: true, userControlRevision: { increment: 1 } },
       select: {
         status: true,
         temporalWorkflowId: true,

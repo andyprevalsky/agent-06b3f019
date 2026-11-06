@@ -92,9 +92,12 @@ frontend-coverage-blackbox category. This is ordinary frontend state/UI code.
 Golden reference: not applicable (no approval-gated hunk).
 
 10k agents: a sparse map of this view's outstanding pause requests (not the
-owned-agent roster), each with one token, and a constant-size selected projection. The list index adds no per-pause roster scan. No new
-polling, subscriptions, broadcasts, DB work, per-agent timers or network requests.
-Existing panel reduction is unchanged and skipped entirely for a paused owner.
+owned-agent roster), each with one token, and a constant-size selected projection.
+The list index adds no per-pause roster scan. There is no new polling or subscription.
+The later control-ordering followup adds single-agent locked DB reads/writes and
+control broadcasts through the existing transport. Optional acknowledgment body
+reads have one bounded timer per accepted request. Existing panel reduction is
+unchanged and skipped entirely for a paused owner.
 
 Independent managed reviewer ph7e7k5yr6jwhmakprzsb8x8w58hhr57 found refresh-failure
 and concurrent-agent request ownership gaps in the first candidate. Both were
@@ -147,3 +150,38 @@ The additive default-zero column requires the normal production migration;
 this record does not claim that migration or deployment has completed.
 
 Late review compatibility cases now preserve revisionless acceptance across stale credit status and retain known canonical control ordering when a cached legacy list omits its revision. Both regressions fail before the guard changes and pass afterward; the combined terminal/context owning suites pass 69 tests. Production verification remains pending.
+
+Further review found that a successful HTTP response could leave optional JSON
+metadata streaming indefinitely. The client now bounds only that accepted-body
+read and retains the accepted pause if it expires. A real partial, never-ending
+200 response fails before the correction and passes after. A successful resume
+rollback now broadcasts the restored current row, and generation-bound status
+broadcasts use a coherent snapshot read inside the same transaction as the write.
+Seven modeled transaction/rollback cases and the existing native PostgreSQL
+generation test pass. The API domain also passes against an isolated local DB.
+
+The full frontend sweep exposed an obsolete void-return expectation and a new
+cross-feature hook import. The API test now asserts acknowledgment metadata; the
+existing terminal composition hook supplies context to the freshness helper.
+The unchanged dependency rule and the API, terminal and context suites pass
+1,018 tests after these corrections. Original failed full-sweep evidence is
+retained. These local results do not claim production deployment.
+
+A later queued worker report could still arrive after a pause and stamp ACTIVE
+with the pause's revision. Status and revision alone cannot distinguish user
+intent from an old worker PAUSED report after a legitimate resume. The backend
+therefore stores a separate default-false userControlPaused bit. Pause sets it;
+explicit resume clears it under the same lock. Both legacy and generation-bound
+status writes honor it, and terminal completion ends it. Workflow replacement
+preserves an active pause, while terminal restart clears obsolete intent. Failed
+resume rollback is bound to the revision it accepted, so an older failure cannot
+revoke a later pause/resume winner. Raising a cost limit through the existing
+resume branch also advances control ordering.
+
+The first status-only guard failed the pause1/resume2/old-worker-PAUSED2/ACTIVE2
+sequence and remains preserved as an invalid intermediate candidate. Twenty
+modeled control cases pass with the durable intent implementation, including
+Prisma status envelopes and terminal bootstrap precedence. The native PostgreSQL
+generation unit exercises actual pause/resume helpers, queued reports,
+replacement, accounting and revision-bound rollback. The additional default-false
+column ships its own migration; schema/seed and production gates remain required.

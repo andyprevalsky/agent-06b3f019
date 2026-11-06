@@ -33,6 +33,8 @@ model Agent {
   statusMessage                    String?
   /// User control ordering; unrelated row writes preserve this revision.
   userControlRevision              Int                         @default(0)
+  /// Durable user pause intent for this lifecycle; terminal reports clear it.
+  userControlPaused                Boolean                     @default(false)
   // Archive marker. Set by DELETE /api/agents/:id (soft delete); the sidebar's
   // archived view lists rows where this is non-null.
   deletedAt                        DateTime?

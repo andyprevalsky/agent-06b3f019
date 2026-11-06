@@ -42,7 +42,11 @@ async function deliverResumeSignal(
     await signal(intent.workflowId);
   } catch (error) {
     if (intent.persistedActiveIntent) {
-      const rolledBack = await rollbackWorkflowResumeIntent(agentId, intent.workflowId);
+      const rolledBack = await rollbackWorkflowResumeIntent(
+        agentId,
+        intent.workflowId,
+        intent.userControlRevision
+      );
       if (!rolledBack) return { success: true };
       try {
         await onRollback?.(agentId);

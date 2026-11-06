@@ -10,6 +10,7 @@ export type WorkflowResumeIntentResult =
       outcome: 'ready';
       workflowId: string | null;
       userId: string;
+      userControlRevision: number;
       replacementOwned: boolean;
       previousStatus: AgentStatus;
       persistedActiveIntent: boolean;
@@ -41,6 +42,7 @@ export async function recordWorkflowResumeIntent(
         where: { id: agentId },
         data: {
           status: 'ACTIVE',
+          userControlPaused: false,
           userControlRevision: { increment: 1 },
           statusMessage: 'Resume requested',
           ...(replacementState === null
@@ -59,6 +61,7 @@ export async function recordWorkflowResumeIntent(
       outcome: 'ready',
       workflowId: agent.temporalWorkflowId,
       userId: agent.userId,
+      userControlRevision: agent.userControlRevision + (resumablePause || creditsRestored ? 1 : 0),
       replacementOwned,
       previousStatus: agent.status,
       persistedActiveIntent: resumablePause || creditsRestored,
@@ -70,19 +73,22 @@ export async function recordWorkflowResumeIntent(
 
 export async function rollbackWorkflowResumeIntent(
   agentId: string,
-  workflowId: string
+  workflowId: string,
+  userControlRevision: number
 ): Promise<boolean> {
+  if (!Number.isSafeInteger(userControlRevision) || userControlRevision < 0) return false;
   return runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, agentId);
     const rolledBack = await tx.agent.updateMany({
       where: {
         id: agentId,
         temporalWorkflowId: workflowId,
+        userControlRevision,
         workflowReplacementToken: null,
         status: 'ACTIVE',
         statusMessage: 'Resume requested',
       },
-      data: { status: 'PAUSED', statusMessage: null },
+      data: { status: 'PAUSED', userControlPaused: true, statusMessage: null },
     });
     return rolledBack.count === 1;
   });

@@ -1,5 +1,4 @@
 import { useMemo } from 'react';
-import { useAgentContext } from '@/features/agent-context';
 import type { Agent, AgentDetail } from '../types';
 
 /** Reconcile status by producer freshness before projecting local user intent. */
@@ -26,8 +25,9 @@ function fresherSelectedAgent(detail: AgentDetail | null, listed: Agent | undefi
 }
 
 /** Cache list identity once per refresh; pause clicks perform one keyed lookup. */
-export function useFreshAgentContext(agents: Agent[]) {
-  const context = useAgentContext();
+export function useFreshAgentContext<
+  T extends { agent: AgentDetail | null; selectedAgentId: string | null },
+>(context: T, agents: Agent[]) {
   const agentsById = useMemo(
     () => new Map(agents.map((agent) => [agent.agent_id, agent])),
     [agents],

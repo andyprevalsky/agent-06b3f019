@@ -12,7 +12,7 @@ import { useAuth } from '@/features/auth';
 import { readQueryPreferences } from '@/lib/queryPreferences';
 import { getClientSource } from '@/lib/clientSource';
 import { isRoseDesktopUser } from '@/lib/roseDesktop';
-import type { useAgentContext } from '@/features/agent-context';
+import { useAgentContext } from '@/features/agent-context';
 import { useToast } from '@/hooks/use-toast';
 
 import type { TerminalView } from '../types';
@@ -94,7 +94,7 @@ export function useTerminalAgents(
   const canSubmitGoals = auth.isFullySignedIn;
   const clientSource = useMemo(() => getClientSource(), []);
   const agentList = useAgentList(canSubmitGoals);
-  const ctx = useFreshAgentContext(agentList.agents);
+  const ctx = useFreshAgentContext(useAgentContext(), agentList.agents);
   const modals = useTerminalModals();
   const loading = useLoadingNetwork(ctx.selectedAgentId, ctx.isLoadingAgent, ctx.agent?.status);
   const ancestors = useAncestors(

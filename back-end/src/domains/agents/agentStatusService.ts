@@ -106,9 +106,6 @@ function statusUpdate(body: UpdateStatusBody): Prisma.AgentUpdateManyMutationInp
 
 async function persistStatus(agentId: string, body: UpdateStatusBody, workflowGeneration?: string) {
   const update = statusUpdate(body);
-  if (workflowGeneration === undefined) {
-    return { accepted: true, agent: await repo.updateAgent(agentId, update) };
-  }
   return repo.updateAgentForWorkflow(agentId, workflowGeneration, update);
 }
 
