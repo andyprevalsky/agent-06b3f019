@@ -400,11 +400,7 @@ def remote_extract(args) -> int:
     name = args.ref.removeprefix('refs/tags/')
     if not name.startswith(TAG_PREFIX + '/'):
         raise SystemExit('not a deploy-gates tag')
-    # actions/checkout re-points refs/tags/<name> at the commit; fetch the annotated tag object itself.
-    import base64
-    basic = base64.b64encode(f"x-access-token:{os.environ['DEPLOY_GATE_FETCH_TOKEN']}".encode()).decode()
-    subprocess.run(['git', '-c', f'http.extraheader=AUTHORIZATION: basic {basic}', 'fetch', '--quiet', '--no-tags',
-                    'origin', f'+refs/tags/{name}:{REQUEST_REF}'], cwd=root, check=True, capture_output=True)
+    # The workflow's mirror checkout stores the annotated tag object itself at REQUEST_REF.
     raw = subprocess.run(['git', 'cat-file', 'tag', REQUEST_REF], cwd=root, check=True, capture_output=True).stdout
     fields, message = parse_tag(raw)
     body = json.loads(message)

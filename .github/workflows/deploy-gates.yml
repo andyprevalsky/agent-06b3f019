@@ -29,16 +29,41 @@ jobs:
       - name: Start clock
         run: echo "DEPLOY_GATE_T0=$(date +%s.%N)" >> "$GITHUB_ENV"
 
-      # Full history (merge-bases against origin/main) without every historical blob: older
-      # blobs are fetched on demand with the job's read-only token.
-      - uses: actions/checkout@v4
+      # A bare mirror on a Blacksmith sticky disk: each run fetches only new objects. Fresh,
+      # filtered or shallow clones of this repo make GitHub build a full pack per job and stall.
+      - name: Mount git mirror
+        uses: useblacksmith/stickydisk@v1
         with:
-          fetch-depth: 0
-          filter: blob:none
+          key: rose-deploy-gates-git-mirror
+          path: /home/runner/rose-git-mirror
+          commit: on-change
+
+      - name: Check out the frozen commit
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 -w0)"
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+          mirror=/home/runner/rose-git-mirror/rose.git
+          sudo chown "$(id -u):$(id -g)" /home/runner/rose-git-mirror
+          if [ ! -f "$mirror/HEAD" ]; then
+            rm -rf "$mirror"
+            git -c http.extraheader="$auth" clone --quiet --bare "$url" "$mirror"
+          fi
+          git -C "$mirror" -c http.extraheader="$auth" fetch --quiet --no-tags "$url" \
+            '+refs/heads/main:refs/heads/main' "+$GITHUB_REF:refs/deploy-gate/request"
+          ws="$GITHUB_WORKSPACE"
+          find "$ws" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          git clone --quiet --shared --no-checkout "$mirror" "$ws"
+          cd "$ws"
+          git remote set-url origin "$url"
+          git fetch --quiet --no-tags "$mirror" '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/deploy-gate/request:refs/deploy-gate/request'
+          git checkout --quiet --detach "$(git rev-parse 'refs/deploy-gate/request^{commit}')"
+          git log -1 --format='checked out %H %s'
 
       - name: Read gate request
-        env:
-          DEPLOY_GATE_FETCH_TOKEN: ${{ github.token }}
         run: python3 scripts/deploy_test_github.py remote-extract --ref "$GITHUB_REF" --out "$RUNNER_TEMP/gate"
 
       - uses: actions/setup-node@v4
