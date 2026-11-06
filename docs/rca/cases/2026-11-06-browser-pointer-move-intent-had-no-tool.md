@@ -27,7 +27,9 @@ sources:
   - agent 8d029581-c5ca-418a-b255-69df3f729eef (risk 0.187 after 4 pointer-faking drags)
   - agent 1eeef95c-a0ae-4516-a6b5-df03a9d1fa0d (local repro on 24b862375, FAIL)
   - agent d920016a-5ad8-47d9-879b-e1206c9aff1c (local fix run on cce696e9d, PASS)
+  - agent e04e7558-afdb-412a-a023-e6ccfba54e67 (local fix run on cce696e9d, PASS)
   - commit cce696e9d
+  - commit 15f2ef6cf
 repro: agents/tests/blackbox/rose_browser_use.blackbox.py::test_pointer_move_intent_has_a_hover_tool_instead_of_drag
 status: fixed
 ---
@@ -56,30 +58,51 @@ browser-biometrics-webdecoy`) reproduced it exactly: 177 rejected drags from
    tool ... I can use drag with small movements to simulate mouse movement"
    (98fac0b3 msg 41, 1411db97 msg 26/31, dc306296 msg 28/36, 8d029581
    msg 31/43). The task asks it to "move to" the control.
-2. The runtime already moves the pointer naturally: every click path calls
+2. The runtime already moves the pointer: every humanized click calls
    `humanizer.click_at_coords`, which synthesizes a human trajectory with
-   overshoot before pressing (`agents/browser_tools/humanizer.py`).
+   overshoot before pressing (`agents/browser_tools/humanizer.py`). The
+   browser-use fallback without a humanizer also sends `mouseMoved` first.
    `humanizer.hover()` also exists. The tool descriptions said only
    "Click element by index", and no tool exposed hover. `evaluate`'s
    description even routes "hover, drag" to JavaScript, which this task
    forbids.
-3. So pointer movement could only be expressed as `drag` (press, hold, release).
-   Press-drags add bot-like events (higher FCaptcha risk). When the model
-   wanted "move from where the pointer is to the submit button" it emitted
-   `drag(end_x, end_y)`, which no drag argument set can represent. Rejection
-   feedback cannot fix an intent the schema cannot express, so it repeated
-   the same call until the cap.
-4. Causal replay: the captured step-6 decision of 1eeef95c, replayed through
-   RoseClient with recorded tools, chose drag 7/10 (click 1, scroll 2).
-   Changing only the descriptions cut that to 3/10. Adding hover and the
-   descriptions cut it to 2/10, which is the floor for this replay because
-   its fixed history already contains the model's earlier "use drag to
-   simulate movement" reasoning. In fresh runs with the fix the model calls
-   `hover(index)` and then `click`, with zero drags.
+3. So pointer movement could only be expressed as `drag` (press, hold,
+   release). Two consequences followed.
+   - Score: the v3 dispatcher ran drag through raw CDP (`_execute_drag`). That
+     moves the pointer straight to the start point and presses there, with no
+     trajectory. FCaptcha reported `vision_ai: Click injected with no pointer
+     trajectory (1 teleport clicks)` on dc306296 (one drag, 0.164 > 0.163) and on
+     the local buggy run 1eeef95c (one valid drag at step 6). The fixed runs
+     d920016a and e04e7558 made no drag and returned `detections: []`. The
+     existing `humanizer.drag_between`, which approaches the start along a
+     trajectory, was never called. In 8d029581 (0.187) the checkbox had already
+     failed before its drags, so its drags are not the first cause there, and
+     its detections were not captured.
+   - Loop: when the model wanted to move toward the submit button it emitted
+     `drag({"end_x":480,"end_y":408,"steps":20})` with no start point. At step
+     6 of the same run it had done the same move with a start point before
+     clicking the checkbox. All 177 rejected turns have empty thinking, so the
+     "move from the current position" intent is an inference from that run.
+     The harness does not bound identical rejections: `handler.py` resets
+     `consecutive_api_failures` on every rejection, and the model repeated the
+     identical call (repetition collapse) instead of adapting. The cloud run's
+     rejected arguments were never captured (see the observability gap below);
+     the end-only shape is known from the local reproduction only.
+4. Causal replay of the captured step-6 decision of 1eeef95c (a valid
+   pointer-faking drag) through RoseClient: recorded tools chose drag 7/10
+   (click 1, scroll 2); descriptions only, 3/10 (scroll 7); descriptions plus
+   hover, 2/10 (scroll 8, hover 0). The drop came from the model deferring with
+   scroll, not from choosing hover. The fixed history of that replay already
+   contains the earlier "use drag to simulate movement" reasoning, and that
+   bias was not tested further. The outcome evidence is end-to-end. In two fresh
+   local runs on the fix the model called `hover` before its clicks
+   (d920016a: `hover(index 2774)`; e04e7558: `hover(index 2773)` and
+   `hover(index 2826)`), made no drag, and passed (142 s and 138 s, risk 0.06).
 
 Step 5a ladder: why drag? No pointer-only move (deepest owned cause). Why did
-it loop? The end-only intent is unrepresentable in drag (consequence of the
-same gap). Next rung, "the tool surface lacks some primitive the model wants",
+it loop? The end-only move intent cannot be expressed in drag, and identical
+rejections are unbounded (consequence of the same gap; the loop mechanism is
+inferred, not replayed). Next rung, "the tool surface lacks some primitive the model wants",
 is an incoherent grab-bag. Stop at a missing pointer-move capability.
 
 Step 5b (prompt/tool-text edit): the class we stopped at is "the tool surface
@@ -106,27 +129,36 @@ args.
 
 ## Solution
 
-Commit cce696e9d:
+Commits cce696e9d and 15f2ef6cf:
 - `hover` browser tool (`HoverTool`: index or x+y), dispatched in
-  `service_actions._execute_hover` to the existing `humanizer.hover()`. It
-  never presses, and it is registered in normalize, `_VALID_ACTIONS`, handler
-  tool-argument redaction fields, the awaiting-observation set and state
-  prefetch.
-- `click`/`click_coordinates` descriptions state that the pointer travels a
-  natural path first. `drag` says the button stays held, that drag is never
-  for moving the pointer, and that both ends are required.
+  `service_actions._execute_hover`. It calls `humanizer.hover()`, or without a
+  humanizer sends one CDP `mouseMoved` (the same fallback as an unhumanized
+  click). It never presses. It is registered in normalize, `_VALID_ACTIONS`,
+  the handler tool-argument redaction fields, the awaiting-observation set and
+  state prefetch.
+- Drag runs through `humanizer.drag_between` when a humanizer exists, so the
+  press follows a pointer trajectory rather than a teleport. The raw CDP path
+  remains for unhumanized sessions.
+- Descriptions say only what holds in every input mode. `click` and
+  `click_coordinates` move the pointer themselves before pressing. `hover`
+  uses the same pointer movement as click. `drag` holds the button, is never
+  for moving the pointer, and needs both ends. `evaluate` no longer routes
+  hover/drag to JavaScript.
 - Rejected tool-arg decisions are now dumped (`tool_args_validation_error` in
   output) before the loop feeds the rejection back.
-- Regressions (fail on 24b862375, pass on cce696e9d): rose_browser_use
-  `pointer_move_intent_has_hover_tool`, `pointer_tool_descriptions_match_runtime`,
-  `rejected browser tool args are still dumped`; spawn_browser_agent_v3
-  `execute_action_hover_moves_pointer_without_pressing`. The phone-off
-  byte pin was re-pinned for the tools hash only; system and message hashes
-  are unchanged.
+- Regressions: rose_browser_use `pointer_move_intent_has_hover_tool`,
+  `pointer_tool_descriptions_match_runtime`, `rejected browser tool args are
+  still dumped`; spawn_browser_agent_v3
+  `execute_action_hover_moves_pointer_without_pressing` and
+  `humanized_drag_approaches_start_before_pressing`. The first four failed on
+  24b862375 and pass on the fix. The phone-off byte pin was re-pinned for the
+  tools hash only; the system and message hashes are unchanged.
 
-Sibling failures prevented: hover-revealed menus and tooltips no longer need
-JavaScript (untrusted events). 10k agents: one extra tool definition per
-browser request; hover is a per-session pointer move with no shared state.
+Sibling failures prevented: slider and drag-and-drop drags no longer press at a
+teleported pointer. Hover-revealed menus and tooltips no longer need JavaScript
+(untrusted events). Not done (rule 25a): no harness repeat-breaker for
+identical rejected calls. 10k agents: one extra tool definition per browser
+request; hover and drag stay per-session pointer input with no shared state.
 
 ## Human feedback
 
