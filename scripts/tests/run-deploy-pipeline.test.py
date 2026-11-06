@@ -3362,7 +3362,8 @@ def check_semantic_workflow_source_sha() -> None:
     assert set(jobs) == {"semantic", "lifecycle"}, list(jobs)
     for name, job in jobs.items():
         steps = job["steps"]
-        checkouts = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/checkout")]
+        checkouts = [i for i, step in enumerate(steps)
+                     if str(step.get("uses", "")).startswith(("actions/checkout", "useblacksmith/checkout"))]
         assert len(checkouts) == 1, f"{name}: exactly one checkout, found {len(checkouts)}"
         index = checkouts[0]
         ref = steps[index]["with"]["ref"]
