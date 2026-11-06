@@ -18,6 +18,7 @@ import {
   verifyUserUiPublishToken,
 } from '../../providers/userUi/publishToken';
 import { displayResponseHeaders } from '../../providers/agentTools/displayCsp';
+import { withDisplayHeightReporter } from '../../providers/agentTools/displayHeight';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { USERCONTENT_CACHE_CONTROL, USERCONTENT_CSP } from './config';
@@ -190,7 +191,8 @@ export const usercontentRouter = Router();
  * Content posted by the `display` tool: a single page, or any file of a
  * bundle (site, model viewer, PDF viewer). Arbitrary CSS/JS runs under the
  * permissive display CSP; isolation is the opaque sandboxed origin
- * (providers/agentTools/displayCsp.ts).
+ * (providers/agentTools/displayCsp.ts). HTML responses end with the height
+ * reporter (providers/agentTools/displayHeight.ts) so the chat frame fits them.
  */
 function sendDisplay(res: Response, file: { content: Buffer; contentType: string } | null): void {
   for (const [name, value] of Object.entries(displayResponseHeaders(file?.contentType))) {
@@ -202,7 +204,7 @@ function sendDisplay(res: Response, file: { content: Buffer; contentType: string
   }
   res.setHeader('Cache-Control', USERCONTENT_CACHE_CONTROL);
   res.setHeader('Content-Type', file.contentType);
-  res.status(200).send(file.content);
+  res.status(200).send(withDisplayHeightReporter(file.content, file.contentType));
 }
 
 usercontentRouter.get(

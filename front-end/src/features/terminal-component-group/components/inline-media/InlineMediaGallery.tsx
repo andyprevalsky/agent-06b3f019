@@ -9,7 +9,10 @@
  *             [READY image] --click/tap--> DocumentPreviewDrawer
  *             [READY video] plays inline (muted, controls); bare expand icon
  *                           --click--> DocumentPreviewDrawer
- *   DRAWER  : openId === null -> [CLOSED]; openId set -> [OPEN] for that file
+ *   DRAWER  : [UNMOUNTED] until the first open (a trajectory renders many
+ *             galleries; closed sheets render nothing, so none is built up front)
+ *             --first tap--> mounted for good (keeps its close animation):
+ *             openId === null -> [CLOSED]; openId set -> [OPEN] for that file
  *
  * Layout shift: each item reserves its box from metadata width/height when
  * present, else DEFAULT_MEDIA_ASPECT until the intrinsic size loads. Images
@@ -41,6 +44,7 @@ interface InlineMediaGalleryProps {
 export function InlineMediaGallery({ files, agentId, className }: InlineMediaGalleryProps) {
   const urls = useInlineMediaUrls(files, agentId);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [previewMounted, setPreviewMounted] = useState(false);
   if (files.length === 0) return null;
   const openFile = files.find((f) => f.id === openId) ?? null;
   const layout = files.length === 1 ? 'single' : 'gallery';
@@ -62,18 +66,23 @@ export function InlineMediaGallery({ files, agentId, className }: InlineMediaGal
             file={file}
             url={urls[file.id]}
             layout={layout}
-            onOpen={() => setOpenId(file.id)}
+            onOpen={() => {
+              setPreviewMounted(true);
+              setOpenId(file.id);
+            }}
           />
         ))}
       </div>
-      <DocumentPreviewDrawer
-        file={openFile}
-        open={openFile !== null}
-        onOpenChange={(open) => {
-          if (!open) setOpenId(null);
-        }}
-        signedUrl={openFile ? (urls[openFile.id] ?? undefined) : undefined}
-      />
+      {previewMounted && (
+        <DocumentPreviewDrawer
+          file={openFile}
+          open={openFile !== null}
+          onOpenChange={(open) => {
+            if (!open) setOpenId(null);
+          }}
+          signedUrl={openFile ? (urls[openFile.id] ?? undefined) : undefined}
+        />
+      )}
     </>
   );
 }
