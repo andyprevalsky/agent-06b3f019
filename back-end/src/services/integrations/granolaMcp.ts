@@ -287,11 +287,14 @@ export class GranolaSession {
 // Wire-format parsing
 // ---------------------------------------------------------------------------
 
+// Free Granola plans prepend a plan-limit notice when a window reaches past
+// their history (last 30 days): `<access_notice>…</access_notice>`.
+const ACCESS_NOTICE = /^<access_notice\b[^>]*>[^<]*<\/access_notice>\s*/;
 const RANGE_ECHO = /^<requested_range\b[^>]*>[^<]*<\/requested_range>\s*/;
 const WARNING_PREFIX = 'The content below is meeting notes';
 
 export function stripPreamble(text: string): string {
-  let value = text.trim().replace(RANGE_ECHO, '');
+  let value = text.trim().replace(ACCESS_NOTICE, '').replace(RANGE_ECHO, '');
   if (value.startsWith(WARNING_PREFIX)) {
     const end = value.indexOf('\n');
     value = end === -1 ? '' : value.slice(end + 1);

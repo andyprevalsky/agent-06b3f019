@@ -1,0 +1,26 @@
+{
+ "failures": [
+  {
+   "id": "6fcbb2ec7f2b469f8984e16c6e69ddb6",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "3fc0006b7b9d8c955a57ad97703ef14f08ebe2ef",
+    "digest": "def52d0a8a8265e34da465f50f70e71330093d3094caa15b792d45741efc8959"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "deploy-command-structural aggregate: two load-dependent deploy-tooling tests failed while all six gates ran concurrently \u2014 run-deploy-pipeline.test.py check_observation_validity (holder observation \"unknown\" instead of \"stale\") and deploy-test-worker.test.py test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified (native CLI call timed out before the original deadline).",
+   "evidence": "PR #1695 changes only front-end/ and one docs/rca case (git diff --name-only origin/main...HEAD); no scripts/ or deploy tooling. check_observation_validity reproduced locally under CPU contention (16 busy loops / 8 cores): 7 of 8 runs fail with the identical assertion; the suite passes solo (exit 0, \"run-deploy-pipeline: all checks passed\"). Cause: the test's one-shot sampler stub only yields \"stale\" if no further sampling pass lands before the joiner decision; run_deploy_pipeline.py re-marks unobserved lanes \"unknown\" on every pass, so a stretched timeline flips the expectation. deploy-test-worker.test.py passed solo on this devbox earlier in this deploy (exit 0). Native log: /home/boxes/deploy-workers/structural/.context/deploy-worker/613f7469e15b4817dd95c032d4059c4216328ed0ed6047427a591ef106105dd8/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps the repair: re-run the bound deploy-command-structural gate solo (focused) on the unchanged frozen source; the timing-dependent tests get a post-merge repair agent.",
+   "assigned_evidence": "/home/boxes/deploy-workers/structural/.context/deploy-worker/613f7469e15b4817dd95c032d4059c4216328ed0ed6047427a591ef106105dd8/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log"
+  }
+ ]
+}
