@@ -73,9 +73,9 @@ sub-agent children order" — no prior case; novel.
 ## Solution
 
 - New nullable `Agent.lastUserMessageAt` (migration
-  `20261106120000_agent_last_user_message_at`, backfilled for the 334 live prod
-  roots from the newest USER row without agent-authored flags; measured
-  read-only before deploy). `recordPersonMessage`
+  `20261106120000_agent_last_user_message_at`, backfilled for the live prod agents
+  (333 roots + 831 children, counted read-only on 2026-11-06) from the newest USER
+  row without agent-authored flags and without a bot-relayed Slack occurrence). `recordPersonMessage`
   (`providers/personMessageStamp.ts`) stamps it after the message is committed
   and delivered, with raw SQL so `Agent.updatedAt` (liveness reconciler,
   old-agent collapse) does not move, and never throws: a failed stamp is logged
@@ -97,6 +97,9 @@ sub-agent children order" — no prior case; novel.
   fetched before a send replaced the newer stamp of a REST-only child. The fetch now
   keeps the later stamp from the published node
   (`agent-tree-snapshot-race.blackbox.ts`, failing on the old code, 5/5 after).
+  Its verification round asked the one-time backfill to cover live children and to
+  skip Slack occurrences; both are in the migration, run by
+  `agents-last-user-message.cases.ts` (fails on the old SQL, 5/5 after).
 - Sibling failures prevented: folders, mobile list and stock sidebar inherit the
   same comparator; any new list reuses `runStateRank`/`lastUserMessageTime`.
 - 10k-agent behavior: one keyed `UPDATE "Agent"` per person message; the list and

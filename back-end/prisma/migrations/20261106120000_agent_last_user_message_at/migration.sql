@@ -3,11 +3,13 @@
 -- polled every 10s and must not cost O(agents x messages) per read.
 ALTER TABLE "Agent" ADD COLUMN "lastUserMessageAt" TIMESTAMP(3);
 
--- Backfill the live sidebar roots (334 in prod on 2026-11-06) from their
--- newest USER row without an agent-authored flag. Each lookup walks the
+-- Backfill the live sidebar agents (333 roots + 831 children in prod on
+-- 2026-11-06) from their newest person-authored USER row: no agent-authored
+-- flag, and not a Slack auto-RCA error occurrence (a bot-relayed alert has no
+-- slackUserId; a person's thread feedback does). Each lookup walks the
 -- ("agentId", "timestamp") index backwards and filters role/metadata per row,
--- so it reads every newer TOOL/ASSISTANT row of that root; the run is bounded
--- by the live roots' messages and locks only those root rows. Goal and
+-- so it reads every newer TOOL/ASSISTANT row of that agent; the run is bounded
+-- by the live agents' messages and locks only those Agent rows. Goal and
 -- attachment rows count (both carry their message's own time).
 UPDATE "Agent" a
 SET "lastUserMessageAt" = (
@@ -19,8 +21,11 @@ SET "lastUserMessageAt" = (
       COALESCE(m.metadata, '{}'::jsonb)
         ?| ARRAY['agentMessage', 'agentNotification', 'environmentContext', 'compactionSummary']
     )
+    AND NOT (
+      COALESCE(m.metadata ->> 'source', '') = 'slack_auto_rca'
+      AND NOT (COALESCE(m.metadata, '{}'::jsonb) ? 'slackUserId')
+    )
   ORDER BY m."timestamp" DESC
   LIMIT 1
 )
-WHERE a."parentAgentId" IS NULL
-  AND a."deletedAt" IS NULL;
+WHERE a."deletedAt" IS NULL;
