@@ -19,13 +19,15 @@
  *    recorded generation is RENDERED through the production path (useToolData +
  *    ToolMessage) and must show the lightbulb tool row, "<n>s", "<n> tokens" and
  *    "<n> tok/s", never the animated indicator, with a plausible rate.
- *    A row without a generation is "unmeasured". It FAILS when the records prove it
- *    should have one: a code agent with turn-scoped usage samples (Claude Code), or a
- *    code agent with thinking rows and no usage samples at all; and when a root has
- *    run-agent thinking rows (the only root producer that records a generation) and none
- *    carries one. It is reported, not failed, when the producer cannot record one: a
- *    root chat-router or DAG-reasoning row (no per-call usage on the row), or a code
- *    agent with session-scoped usage (Codex: successive samples span tool runs).
+ *    A row without a generation is "unmeasured". For a code agent the run's raw records
+ *    decide (thoughtWindow): a thought whose bracketing usage samples (creation order, same
+ *    turn) leave no tool running across the window was RECORDABLE, so the missing
+ *    generation FAILS; otherwise it is "not measurable" with the reason (no sample before
+ *    or after it, a tool running across, ...) and is only reported. A session that thought
+ *    and recorded no usage samples at all fails. For the root, a run with run-agent thinking
+ *    rows (the only root producer that records a generation) none of which carries one fails;
+ *    a chat-router, DAG-reasoning or display-message row records no per-call usage and is
+ *    reported.
  *  - NO ROWS. Evidence of thinking (the CLI recorded thinking blocks, or the supplied
  *    reasoningTokens > 0) with no row is a failure. Otherwise the verdict is
  *    "no thinking recorded for <agent> (N/A)": explicitly labeled, never a failure.
@@ -42,6 +44,7 @@ import { filterMessagesForSubAgent } from '../components/useMessageFiltering';
 import { ToolMessage } from '../components/message-bubble/ToolMessage';
 import { useToolData } from '../components/message-bubble/useToolData';
 import { buildCodeSession } from '../hooks/codeSessionTurns';
+import { thoughtWindow } from './thoughtWindow';
 import { foldSessionTranscript, transcriptProvider } from '../hooks/codeSessionTranscript';
 
 export interface ThoughtRowReport extends ThoughtGeneration {
@@ -117,10 +120,13 @@ function renderProblems(message: Message, generation: ThoughtGeneration): string
   return problems;
 }
 
-type RowKind = 'run-agent turn' | 'DAG reasoning' | 'chat router/generator' | 'other';
+type RowKind =
+  'run-agent turn' | 'DAG reasoning' | 'chat router/generator' | 'display message' | 'other';
 
 function rootRowKind(message: Message): RowKind {
   const metadata = message.metadata;
+  // User-facing text posted by the display system (a code agent's report): not a model call.
+  if (metadata?.source === 'display' || metadata?.requestingAgent) return 'display message';
   if (Array.isArray(metadata?.tool_calls)) return 'run-agent turn';
   if (metadata?.dagTaskIndex !== undefined) return 'DAG reasoning';
   if (typeof metadata?.streamId === 'string') return 'chat router/generator';
@@ -216,7 +222,9 @@ function collect(
       failures.push(`${who}: thought ${row.message_id} ${problem}`);
   }
   for (const row of unmeasured) {
-    const line = `${who}: thought ${row.messageId} carries no recorded generation (${row.reason})`;
+    const line = row.failing
+      ? `${who}: thought ${row.messageId} carries no recorded generation (${row.reason})`
+      : `${who}: thought ${row.messageId} not measurable (${row.reason})`;
     (row.failing ? failures : notes).push(line);
   }
   const reasoningTokens = options.evidence?.[agentId]?.reasoningTokens ?? 0;
@@ -280,28 +288,25 @@ export function checkThinkingRows(
 
   const codeAgents = codeTaskIds(messages).map((taskId) => {
     const entries = foldSessionTranscript(messages, taskId);
-    const scopes = new Set(
-      entries.filter((entry) => entry.type === 'metrics').map((entry) => entry.usageScope),
-    );
     const samples = entries.filter(
       (entry) => entry.type === 'metrics' && entry.outputTokens != null && entry.usageScope,
     ).length;
+    const prefix = `code:${taskId}:`;
     const collected = collect(
       taskId,
       `code agent ${taskId}`,
       codeThoughts(messages, rootAgentId, taskId),
-      () => {
+      (row) => {
+        // A session that thought but recorded no usage at all has a broken usage recorder.
         if (samples === 0)
           return { reason: 'no usage samples recorded for this session', failing: true };
-        if (!scopes.has('turn'))
-          return {
-            reason: 'session-scoped usage (Codex): successive samples span tool runs',
-            failing: false,
-          };
-        return {
-          reason: 'turn-scoped usage samples exist, so the window was recordable',
-          failing: true,
-        };
+        const verdict = thoughtWindow(entries, row.message_id.slice(prefix.length));
+        return 'reason' in verdict
+          ? { reason: verdict.reason, failing: false }
+          : {
+              reason: `recordable: usage samples seq ${verdict.fromSeq} to ${verdict.toSeq} bracket it (${verdict.tokens} tokens, no tool running across)`,
+              failing: true,
+            };
       },
       entries.filter((entry) => entry.type === 'thinking').length,
       options,

@@ -303,14 +303,25 @@ interface OpenTurn {
 interface UsageSample {
   count: number;
   at: number;
+  /** The creating event's index (creation order); null when the producer sent none. */
+  seq: number | null;
 }
 
 /**
  * Records the generation that `from`→`to` brackets on the finished thoughts inside it.
  * One backward walk over just the window's rows. A finished tool row inside the window
- * means it spans a tool run, not generation: no rate rather than a wrong one.
+ * means it spans a tool run, not generation: no rate rather than a wrong one. A tool
+ * CREATED inside the window (its seq follows `from`) is the call's own: Claude Code runs
+ * a tool as soon as its tool_use block completes, so it can finish before the call's
+ * message_delta while the call is still generating. Only a tool created before the
+ * window (a run in flight across it, as with Codex's per-response samples) disqualifies it.
  */
-function attachGeneration(activities: Message[], from: UsageSample, to: UsageSample) {
+function attachGeneration(
+  activities: Message[],
+  from: UsageSample,
+  to: UsageSample,
+  createdSeq: ReadonlyMap<string, number | null>,
+) {
   if (to.at <= from.at || to.count <= from.count) return;
   const thoughts: number[] = [];
   for (let index = activities.length - 1; index >= 0; index -= 1) {
@@ -327,7 +338,9 @@ function attachGeneration(activities: Message[], from: UsageSample, to: UsageSam
       metadata.a2a === undefined &&
       metadata.isUserAttentionMessage !== true
     ) {
-      return;
+      const created = createdSeq.get(message.message_id) ?? null;
+      const createdInside = created !== null && from.seq !== null && created > from.seq;
+      if (!createdInside) return;
     }
   }
   const generation = {
@@ -348,6 +361,21 @@ class SessionBuilder {
   private readonly comms = new Set<string>();
   /** Coordination before any slot exists: joins the next slot. */
   private pendingComms: Message[] = [];
+  /**
+   * The previous usage sample of the session, whether or not a turn was open when it
+   * arrived: a call's first sample (its message_start) can arrive before its turn opens,
+   * because the CLI's lifecycle record keeps the "started" revision's low `seq` and its
+   * later "ended" revision closes the turn early. A thought is bracketed against this chain.
+   */
+  private lastSample: {
+    count: number;
+    at: number | null;
+    seq: number | null;
+    scope: string;
+    turnId: string | null;
+  } | null = null;
+  /** Creation order (seq) of each activity row, by message id. */
+  private readonly createdSeq = new Map<string, number | null>();
 
   constructor(private readonly input: CodeSessionInput) {}
 
@@ -490,6 +518,7 @@ class SessionBuilder {
         ? entry.type
         : 'control';
     const id = this.id(entry.key);
+    this.createdSeq.set(id, entry.seq);
     open.turn.isThinking = entry.type === 'thinking' && entry.partial === true;
     open.turn.streamingMessageId =
       entry.type === 'message' && entry.partial === true ? id : undefined;
@@ -500,13 +529,15 @@ class SessionBuilder {
   }
 
   metrics(entry: TranscriptEntry) {
-    const open = this.open;
-    if (!open || (entry.turnId && open.turnId && entry.turnId !== open.turnId)) return;
-    const previous = open.metricSample;
     const count = entry.outputTokens;
     const scope = entry.usageScope;
     const at = entry.at;
     if (count == null || !scope) return;
+    const before = this.lastSample;
+    this.lastSample = { count, at, seq: entry.seq, scope, turnId: entry.turnId };
+    const open = this.open;
+    if (!open || (entry.turnId && open.turnId && entry.turnId !== open.turnId)) return;
+    const previous = open.metricSample;
     const reset = !previous || previous.scope !== scope || count < previous.count;
     if (reset) open.metricBaseline = count;
     const elapsed = at != null && previous?.at != null ? (at - previous.at) / 1000 : 0;
@@ -520,10 +551,17 @@ class SessionBuilder {
     open.metricSample = { count, at, scope };
     // A thought's generation: the producer samples usage at each model call's start and
     // end, so the samples around a thinking record bracket the call that generated it.
-    // Only a sample with an earlier sample to bracket from qualifies: a first sample, a
-    // counter reset or a new scope has no baseline, and nothing is invented for it.
-    if (reset || !previous || previous.at === null || at === null) return;
-    attachGeneration(open.turn.activities, previous, { count, at });
+    // Only a sample with an earlier sample of the same native turn and scope to bracket
+    // from qualifies: a first sample, a counter reset or a new scope has no baseline, and
+    // nothing is invented for it.
+    const from = before && before.scope === scope && before.turnId === entry.turnId ? before : null;
+    if (!from || from.at === null || at === null) return;
+    attachGeneration(
+      open.turn.activities,
+      { count: from.count, at: from.at, seq: from.seq },
+      { count, at, seq: entry.seq },
+      this.createdSeq,
+    );
   }
 
   end(entry: TranscriptEntry) {
