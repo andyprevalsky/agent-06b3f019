@@ -34,7 +34,6 @@ import type { CodeSessionLifecycleContext } from './code-sessions-lifecycle.case
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 const wsServerPath = join(repoRoot, 'e2b-templates', 'claude-code', 'ws-server.mjs');
-const CLONE_SECONDS = 3;
 
 async function freePort(): Promise<number> {
   return new Promise((resolvePort, reject) => {
@@ -52,6 +51,10 @@ interface Fixture {
   binDir: string;
   origin: string;
   cloneLog: string;
+  /** The fake `git clone` waits until this file exists, so no assertion races a timer. */
+  release: string;
+  /** While this file exists the fake `git clone` fails (exit 128, like an unreachable remote). */
+  failClone: string;
 }
 
 /** A local origin, a `git` shim (slow `clone`, logged) and a stub `claude` in one directory. */
@@ -74,12 +77,15 @@ function fixture(root: string): Fixture {
   git('push', '-q', 'origin', 'main');
   const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
   const cloneLog = join(dir, 'clones.log');
+  const release = join(dir, 'release-clone');
+  const failClone = join(dir, 'fail-clone');
   writeFileSync(
     join(binDir, 'git'),
     `#!/bin/bash
 if [ "$1" = "clone" ]; then
   echo "$3" >> "${cloneLog}"
-  sleep "${CLONE_SECONDS}"
+  while [ ! -e "${release}" ]; do sleep 0.05; done
+  if [ -e "${failClone}" ]; then echo "fatal: unable to access the remote" >&2; exit 128; fi
   exec "${realGit}" clone -q "${origin}" "$3"
 fi
 exec "${realGit}" "$@"
@@ -87,7 +93,11 @@ exec "${realGit}" "$@"
     { mode: 0o755 }
   );
   writeFileSync(join(binDir, 'claude'), '#!/bin/sh\nexec cat\n', { mode: 0o755 });
-  return { home, binDir, origin, cloneLog };
+  return { home, binDir, origin, cloneLog, release, failClone };
+}
+
+function releaseClone(fx: Fixture): void {
+  writeFileSync(fx.release, '');
 }
 
 function startServer(fx: Fixture, port: number): ChildProcess {
@@ -182,11 +192,10 @@ export function registerWsStartupCases(ctx: Pick<CodeSessionLifecycleContext, 'f
     const sandbox = hostSandbox(fx.home);
     try {
       await until(
-        'the port to answer',
-        async () => (await probeWsServer(sandbox, port)).state !== 'down'
+        'the server to report cloning',
+        async () => (await probeWsServer(sandbox, port)).state === 'cloning'
       );
-      const during = await probeWsServer(sandbox, port);
-      assert.equal(during.state, 'cloning', 'the event loop answers while the repo downloads');
+      const heldSince = Date.now();
       assert.equal(
         await handshakeStatus(port),
         'http 503',
@@ -198,6 +207,10 @@ export function registerWsStartupCases(ctx: Pick<CodeSessionLifecycleContext, 'f
         'the workspace appears only once complete'
       );
 
+      // Still cloning, and still answering: the loop is free, nothing was timed out.
+      assert.equal((await probeWsServer(sandbox, port)).state, 'cloning');
+      const heldMs = Date.now() - heldSince;
+      releaseClone(fx);
       const ready = await waitForSandboxWsServer(sandbox, {
         port,
         timeoutMs: 5_000,
@@ -207,8 +220,8 @@ export function registerWsStartupCases(ctx: Pick<CodeSessionLifecycleContext, 'f
       assert.equal(ready.ready, true);
       assert.equal(ready.state, 'ready');
       assert.ok(
-        ready.cloneMs !== null && ready.cloneMs >= CLONE_SECONDS * 1000 - 500,
-        `the clone duration is reported as a startup phase (got ${ready.cloneMs})`
+        ready.cloneMs !== null && ready.cloneMs >= heldMs,
+        `the clone duration covers the time it was held open (${heldMs} ms), got ${ready.cloneMs}`
       );
       assert.ok(
         existsSync(join(fx.home, 'workspace', '.git', 'HEAD')) &&
@@ -243,6 +256,7 @@ export function registerWsStartupCases(ctx: Pick<CodeSessionLifecycleContext, 'f
       assert.equal(await exitsWithin(first, 10_000), true, 'the server stops mid-clone');
       assert.equal(existsSync(join(fx.home, 'workspace')), false, 'no half-written workspace');
 
+      releaseClone(fx); // the interrupted clone is repeated, and this one may finish
       const second = startServer(fx, port);
       try {
         const ready = await waitForSandboxWsServer(sandbox, {
@@ -270,10 +284,46 @@ export function registerWsStartupCases(ctx: Pick<CodeSessionLifecycleContext, 'f
     }
   });
 
+  test('a failed clone is reported as failed, not as a clone time, and the server still serves', async () => {
+    const fx = fixture(ctx.fixtureDir);
+    writeFileSync(fx.failClone, '');
+    releaseClone(fx);
+    const port = await freePort();
+    const child = startServer(fx, port);
+    try {
+      const ready = await waitForSandboxWsServer(hostSandbox(fx.home), {
+        port,
+        timeoutMs: 5_000,
+        pollMs: 50,
+        startupBudgetMs: 60_000,
+      });
+      // Unchanged behaviour: the session continues without the repo and the agent sees why.
+      assert.equal(ready.ready, true);
+      assert.equal(ready.cloneMs, null, 'a failed attempt is not a clone time');
+      assert.equal(existsSync(join(fx.home, 'workspace')), false, 'no half-written workspace');
+      assert.equal(
+        readdirSync(fx.home).filter((n) => n.startsWith('.workspace-cloning-')).length,
+        0
+      );
+      const failed = readFileSync('/tmp/ws-server.log', 'utf8')
+        .split('\n')
+        .filter(
+          (line) =>
+            line.includes('"Startup phase"') &&
+            line.includes('"failed"') &&
+            line.includes(`"duration_ms"`)
+        );
+      assert.ok(failed.length >= 1, 'the failure is a named startup phase with its duration');
+    } finally {
+      stopServer(child);
+    }
+  });
+
   test('a finished clone is reused on resume, and the readiness waits tell a dead server from a busy one', async () => {
     const fx = fixture(ctx.fixtureDir);
     const port = await freePort();
     const sandbox = hostSandbox(fx.home);
+    releaseClone(fx);
     const first = startServer(fx, port);
     try {
       const ready = await waitForSandboxWsServer(sandbox, {
@@ -304,6 +354,54 @@ export function registerWsStartupCases(ctx: Pick<CodeSessionLifecycleContext, 'f
     } finally {
       stopServer(second);
     }
+
+    // The Codex ws-server has no state endpoint: a plain `ws` server answers HTTP with 426, and
+    // any answer means its event loop serves.
+    const plainPort = await freePort();
+    const plain = spawn(
+      'node',
+      [
+        '-e',
+        `const { WebSocketServer } = require(${JSON.stringify(join(repoRoot, 'node_modules', 'ws'))}); new WebSocketServer({ port: ${plainPort} });`,
+      ],
+      { detached: true, stdio: 'ignore' }
+    );
+    try {
+      const plainReady = await waitForSandboxWsServer(sandbox, {
+        port: plainPort,
+        timeoutMs: 5_000,
+        pollMs: 50,
+        startupBudgetMs: 60_000,
+      });
+      assert.deepEqual(
+        [plainReady.ready, plainReady.state, plainReady.cloneMs],
+        [true, 'ready', null]
+      );
+    } finally {
+      stopServer(plain);
+    }
+
+    // A server that accepts and drops the connection (an empty reply: what a half-started or
+    // restarting ws-server produces) is starting, never a failed probe; a missing curl is loud.
+    const dropping = createServer((socket) => socket.destroy());
+    await new Promise<void>((done) => dropping.listen(0, '127.0.0.1', done));
+    try {
+      const droppedPort = (dropping.address() as { port: number }).port;
+      assert.equal((await probeWsServer(sandbox, droppedPort)).state, 'starting');
+    } finally {
+      dropping.close();
+    }
+    const noCurl = {
+      sandboxId: 'no-curl',
+      commands: {
+        run: async () => ({
+          exitCode: 0,
+          stdout: 'bash: curl: command not found\nrc=127\n',
+          stderr: '',
+        }),
+      },
+    } as unknown as Sandbox;
+    await assert.rejects(probeWsServer(noCurl, 3000), /curl rc=127/);
 
     // Nothing ever binds: the old fail-fast bound applies, typed as down.
     const deadPort = await freePort();

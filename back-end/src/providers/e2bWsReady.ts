@@ -12,7 +12,7 @@
  * One `curl` per poll, run inside the sandbox, tells four states apart:
  *
  *   curl rc 7  (refused)      ─▶ down      nothing is bound yet, or the server died
- *   curl rc 28 (no answer)    ─▶ starting  bound, event loop busy
+ *   curl rc 28 / 52 / 56      ─▶ starting  bound, event loop busy (no answer / empty reply / reset)
  *   HTTP 503 {state}          ─▶ starting | cloning   the server says what it is doing
  *   any other HTTP answer     ─▶ ready     (the Claude ws-server answers 200 {state:"ready",
  *                                           clone_ms}; the Codex one answers 426 to plain HTTP)
@@ -31,6 +31,10 @@ const PROBE_COMMAND_TIMEOUT_MS = 6000;
 const STARTING_POLL_MS = 1000;
 
 export type WsServerState = 'ready' | 'cloning' | 'starting' | 'down';
+
+// curl exits that a server in the middle of starting (or restarting) produces: no answer in
+// time, an empty reply, a reset connection. Any other failure is a broken probe, not a wait.
+const CURL_STARTING_RC = new Set([28, 52, 56]);
 
 export interface WsServerProbe {
   state: WsServerState;
@@ -77,7 +81,7 @@ export async function probeWsServer(sandbox: Sandbox, port: number): Promise<WsS
   const httpCode = Number(lines.pop() ?? '0');
   const body = lines.join('\n');
   if (rc === 7) return { state: 'down', cloneMs: null };
-  if (rc === 28) return { state: 'starting', cloneMs: null };
+  if (CURL_STARTING_RC.has(rc)) return { state: 'starting', cloneMs: null };
   if (rc !== 0) {
     // curl missing or a protocol error: a misconfigured template, never "not ready yet".
     throw new Error(`ws-server probe failed: curl rc=${rc} (${stdout.trim().slice(0, 200)})`);

@@ -100,7 +100,9 @@ const WS_READY_POLL_INTERVAL_MS = 100;
 // serves) may take this long before the create fails. Not a retry bound: the
 // agents activity heartbeats while it waits. `startup.cloneMs` of every create
 // is returned with the session and logged, so the budget is sized from
-// measurements; override per deployment with CODE_AGENT_STARTUP_BUDGET_MS.
+// measurements (Rose-Ai-Labs/rose, 1.2 GB .git, 2 vCPU sandbox: 173 s on
+// 2026-11-06, so 10 min is about 3.4x that); override per deployment with
+// CODE_AGENT_STARTUP_BUDGET_MS.
 const DEFAULT_WS_STARTUP_BUDGET_MS = 10 * 60_000;
 
 function wsStartupBudgetMs(): number {

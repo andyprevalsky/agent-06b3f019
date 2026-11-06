@@ -587,7 +587,9 @@ async function cloneRepoAtomically(authUrl, destDir) {
     startup.cloneChild = null;
     startup.state = "starting";
     startup.phase = "configure";
-    startup.cloneMs = recordStartupPhase("clone", status, startedAt);
+    const durationMs = recordStartupPhase("clone", status, startedAt);
+    // A failed clone is not a clone time: the failure is in the log and the event.
+    startup.cloneMs = status === "completed" ? durationMs : null;
   }
 }
 
