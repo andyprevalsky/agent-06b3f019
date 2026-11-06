@@ -591,6 +591,86 @@ describe('useTerminalAgents', () => {
     },
   );
 
+  it.each([500, 200])(
+    'keeps an accepted pause when detail refresh is HTTP %s with stale ACTIVE',
+    async (status) => {
+      const agent = makeAgent();
+      ctxState.agent = agent;
+      ctxState.selectedAgentId = agent.agent_id;
+      ctxState.messages = pauseTranscript.slice(0, 1) as Message[];
+      server.use(
+        http.post(`${API_BASE}/agents/:agentId/pause`, () => HttpResponse.json({ success: true })),
+        http.get(`${API_BASE}/agents/:agentId`, () =>
+          HttpResponse.json(
+            {
+              agent,
+              messages: ctxState.messages,
+              pagination: { has_more: false, oldest_timestamp: null },
+            },
+            { status },
+          ),
+        ),
+      );
+      const view = renderHook(() => {
+        const agents = useTerminalAgents('agents', setCurrentView, resetAnimationState);
+        return { agents, derived: useTerminalDerivedState(agents) };
+      });
+      await act(async () => view.result.current.agents.handlePauseAgent());
+      expect(view.result.current.agents.agentDetail?.status).toBe('PAUSED');
+      expect(view.result.current.derived.browserStatusProps).toBeNull();
+      // A later canonical pause reconciles intent; a subsequent resume is visible.
+      ctxState.agent = { ...agent, status: 'PAUSED' };
+      view.rerender();
+      ctxState.agent = agent;
+      view.rerender();
+      expect(view.result.current.agents.agentDetail?.status).toBe('ACTIVE');
+      view.unmount();
+    },
+  );
+
+  it('preserves concurrent pause ownership across A/B/A and out-of-order failure', async () => {
+    const a = makeAgent();
+    const b = makeAgent({ agent_id: 'agent-b' });
+    ctxState.agent = a;
+    ctxState.selectedAgentId = a.agent_id;
+    const releases = new Map<string, () => void>();
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/pause`, async ({ params }) => {
+        await new Promise<void>((resolve) => releases.set(String(params.agentId), resolve));
+        return HttpResponse.json({ error: 'rejected' }, { status: 500 });
+      }),
+    );
+    const view = renderHook(() => useTerminalAgents('agents', setCurrentView, resetAnimationState));
+    let first = Promise.resolve();
+    let second = Promise.resolve();
+    act(() => {
+      first = view.result.current.handlePauseAgent();
+    });
+    await waitFor(() => expect(releases.has(a.agent_id)).toBe(true));
+    ctxState.agent = b;
+    ctxState.selectedAgentId = b.agent_id;
+    view.rerender();
+    act(() => {
+      second = view.result.current.handlePauseAgent();
+    });
+    await waitFor(() => expect(releases.has(b.agent_id)).toBe(true));
+    ctxState.agent = a;
+    ctxState.selectedAgentId = a.agent_id;
+    view.rerender();
+    try {
+      expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+      releases.get(b.agent_id)?.();
+      await act(async () => second);
+      expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+    } finally {
+      releases.get(a.agent_id)?.();
+      releases.get(b.agent_id)?.();
+      await act(async () => Promise.all([first, second]));
+    }
+    expect(view.result.current.agentDetail?.status).toBe('ACTIVE');
+    view.unmount();
+  });
+
   it('returns composed state with empty defaults', () => {
     const { result, unmount } = renderHook(() =>
       useTerminalAgents('agents' as never, setCurrentView, resetAnimationState),

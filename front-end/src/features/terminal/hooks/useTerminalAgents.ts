@@ -232,7 +232,7 @@ function buildReturn(a: BuildArgs) {
   // Project user intent while the request/refresh is pending. Canonical context
   // remains untouched, so errors reveal the latest server state automatically.
   const agentDetail =
-    a.actions.isPausing &&
+    a.actions.isPauseRequested &&
     a.ctx.agent?.agent_id === a.ctx.selectedAgentId &&
     (a.ctx.agent.status === 'ACTIVE' || a.ctx.agent.status === 'STARTING_UP')
       ? { ...a.ctx.agent, status: 'PAUSED' as const }

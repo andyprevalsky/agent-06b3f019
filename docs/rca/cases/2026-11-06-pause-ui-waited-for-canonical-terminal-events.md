@@ -67,7 +67,7 @@ Reproduction command (run from front-end):
 Before the production fix, both deferred-HTTP 200/500 cases failed with
 `AssertionError: expected 'ACTIVE' to be 'PAUSED'` on 75d1b1df8f. The identical
 command/assertion passed after the fix (2/2). The complete owning blackbox file
-also passed (38/38). Original outputs: .context/pause-rca/repro-before.log,
+also passed (41/41). Original outputs: .context/pause-rca/repro-before.log,
 repro-after.log and focused.log. Tests exercise the real composed terminal hooks,
 HTTP client and panel derivation with MSW holding the POST open. Canonical
 transcript and server state remain unchanged while pending. Additional checks
@@ -77,11 +77,13 @@ cover failed-request restoration, selection changes and authoritative completion
 
 Unify the presentation around existing pending-pause intent rather than append
 synthetic terminal messages or create a second event stream. Scope that intent
-by agent id. While an ACTIVE/STARTING_UP selected owner is pausing, project its
+by agent id and request token, deduplicate concurrent clicks, and retain accepted
+intent through failed or stale refreshes until canonical PAUSED/terminal state
+or an explicit successful resume reconciles it. While an ACTIVE/STARTING_UP selected owner is pausing, project its
 view and selected sidebar status as PAUSED. A PAUSED owner hides live browser
 panels immediately, even when transcript cleanup has not arrived. Keep the intent
-through the existing detail refresh; finally release it, revealing the latest
-canonical state on success or failure. Authoritative completion outranks the
+through the existing detail refresh; release it only after authoritative reconciliation or a rejected POST,
+revealing the latest canonical state. Authoritative completion outranks the
 pending projection. Selection changes cannot inherit the old spinner/status.
 
 The new tests live in the existing frontend blackbox runner, discovered by
@@ -89,9 +91,18 @@ vitest.config.ts's blackbox glob and executed through /deploy's complete
 frontend-coverage-blackbox category. This is ordinary frontend state/UI code.
 Golden reference: not applicable (no approval-gated hunk).
 
-10k agents: one selected-agent request id and a constant-size projection. No new
+10k agents: a sparse map of this view's outstanding pause requests (not the
+owned-agent roster), each with one token, and a constant-size selected projection. No new
 polling, subscriptions, broadcasts, DB work, per-agent timers or network requests.
 Existing panel reduction is unchanged and skipped entirely for a paused owner.
+
+Independent managed reviewer ph7e7k5yr6jwhmakprzsb8x8w58hhr57 found refresh-failure
+and concurrent-agent request ownership gaps in the first candidate. Both were
+reproduced before repair (three failing cases) using
+`npx vitest run src/tests/blackbox/terminal-hooks.blackbox.ts -t 'accepted pause|concurrent pause ownership'`.
+The unchanged cases pass in the full owning suite after token-scoped reconciliation.
+Original evidence: review-repro-before.log and review-repro-after2.log. Initial
+candidate failures remain preserved, not rewritten as passes.
 
 ## Human feedback
 
