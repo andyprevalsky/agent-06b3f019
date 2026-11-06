@@ -838,7 +838,8 @@ def execute(ctx: Ctx, selected: set[str], meta: dict, lane_funcs: dict | None = 
         # The verdict lives in production-lanes.json and the final line, where the stall is never a PASS.
         if (passed or stalled) and name in FACTORY_LANES:
             ctx.factory('production-finish', name)
-        ctx.emit(name, f'\u26a0\ufe0f\u26a0\ufe0f {STALL}: {reason}' if stalled else f'{PASS if passed else FAIL}: {reason}')
+        verdict = f'\u26a0\ufe0f\u26a0\ufe0f {STALL}' if stalled else PASS if passed else FAIL
+        ctx.emit(name, f'{verdict}: {reason}')
         finish(name, status=STALL if stalled else PASS if passed else FAIL, reason=ctx.redact(reason),
                exit_code=code, finished_at=iso(ctx.io.now()))
 
@@ -996,6 +997,10 @@ def main(argv: list[str] | None = None, *, io: IO | None = None, root: Path = RO
                        if records[n]['status'] == ELECTED)
     summary += ''.join(f' stall={n}:{json.dumps(records[n]["reason"])}' for n in applicable
                        if records[n]['status'] == STALL)
+    for name in applicable:  # loud and last, where the verdict is read: satisfied, but never a PASS
+        if records[name]['status'] == STALL:
+            out(f'\u26a0\ufe0f\u26a0\ufe0f SKIPPED {name} (standing AgentCard release stall, never PASS): '
+                f'{records[name]["reason"]}')
     if passed:
         out(f'DEPLOY_PRODUCTION PASS sha={sha[:12]} lanes={summary} report={state_dir / REPORT}')
         return 0

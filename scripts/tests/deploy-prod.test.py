@@ -777,8 +777,11 @@ class AgentCardStallTest(Base):
                     'DEPLOY_PRODUCTION PASS sha=1234567890ab lanes=render:PASS,backend-probes:PASS,'
                     f'agentcard:SKIPPED-stall,semantic:PASS stall=agentcard:{json.dumps(lane["reason"])} '
                     f'report={self.state / dp.REPORT}'))
-                self.assertTrue(any('SKIPPED-stall' in line and line.startswith('[agentcard] ') and '⚠️⚠️' in line
+                self.assertTrue(any('SKIPPED-stall' in line and line.startswith('[agentcard] ') and '\u26a0\ufe0f\u26a0\ufe0f' in line
                                     for line in fake.lines), fake.lines)
+                self.assertEqual(fake.lines[-2], (  # loud, and right above the verdict line
+                    '\u26a0\ufe0f\u26a0\ufe0f SKIPPED agentcard (standing AgentCard release stall, never PASS): '
+                    f'{lane["reason"]}'))
                 self.assertFalse(any(line.startswith('[agentcard] PASS') for line in fake.lines))
 
     def test_stall_records_timing_only_factory_events_and_verifies_production(self) -> None:
