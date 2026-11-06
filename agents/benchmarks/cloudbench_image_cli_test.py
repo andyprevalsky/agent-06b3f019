@@ -1317,3 +1317,38 @@ activate_machine_environment warm warm desired || exit 32
     assert all("--skip-start --yes" in call for call in updates)
     if settle == "replacing":
         assert polls.read_text().strip() == "3", "Existing settle budget must remain bounded"
+
+
+@pytest.mark.parametrize("race", ["started-image-read", "lost-lock-after-read"])
+def test_acknowledged_image_read_and_final_owner_must_both_be_stopped_owned(tmp_path, race):
+    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
+    start = cloud.index("machine_state_for_activation() {")
+    last = cloud.index("activate_machine_environment() {", start)
+    functions = cloud[start:cloud.index("\n}\n", last) + 3]
+    (tmp_path / "reads").write_text("0");(tmp_path / "updates").write_text("")
+    script = functions + r"""
+APP=fixture
+assert_app_environment_lock_ownership() { [ ! -f "$DIR/lost-lock" ]; }
+FLY() {
+    if [ "$1 $2" = 'machines list' ]; then
+        n=$(( $(cat "$DIR/reads") + 1 )); echo "$n" > "$DIR/reads"
+        state=stopped; image=desired
+        if [ "$n" = 1 ]; then image=old; fi
+        if [ "$n" -ge 3 ]; then
+            if [ "$RACE" = started-image-read ]; then state=started
+            else touch "$DIR/lost-lock"; fi
+        fi
+        printf '[{"id":"warm","state":"%s","config":{"image":"%s"}}]\n' "$state" "$image"
+        return 0
+    fi
+    [ "$1 $2 $3" = 'machine update warm' ] || return 91
+    echo "$*" >> "$DIR/updates"; return 0
+}
+activate_machine_environment warm warm desired
+"""
+    result = subprocess.run([BASH,"-c",script],env={**os.environ,"DIR":str(tmp_path),"RACE":race,
+        "CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS":"3","CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY":"0"},
+        capture_output=True,text=True,timeout=15)
+    assert result.returncode != 0, result.stdout
+    assert len((tmp_path / "updates").read_text().splitlines()) == 1
+    assert int((tmp_path / "reads").read_text()) == 3

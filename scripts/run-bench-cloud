@@ -1686,8 +1686,8 @@ if not isinstance(machines, list) or any(not isinstance(machine, dict) for machi
     raise SystemExit(2)
 machine_id = os.environ["MACHINE_ID"]
 machine = next((item for item in machines if item.get("id") == machine_id), None)
-if machine is None:
-    raise SystemExit(1)
+if machine is None or machine.get("state") != "stopped":
+    raise SystemExit(2)
 config = machine.get("config") or {}
 actual = config.get("image") if isinstance(config, dict) else None
 expected = os.environ["IMAGE_REF"]
@@ -1700,7 +1700,7 @@ raise SystemExit(0 if actual.split("@", 1)[0] == expected else 1)
 }
 
 wait_for_activation_image() {  # wait_for_activation_image <machine_id> <image_ref>
-    local machine_id="$1" image_ref="$2" state presence attempt=1
+    local machine_id="$1" image_ref="$2" state presence image_status attempt=1
     local attempts="${CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS:-15}"
     local retry_delay="${CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY:-2}"
     while [ "$attempt" -le "$attempts" ]; do
@@ -1708,9 +1708,19 @@ wait_for_activation_image() {  # wait_for_activation_image <machine_id> <image_r
         state="$(machine_state_for_activation "$machine_id")"
         presence=$?
         [ "$presence" -eq 0 ] || return 1
-        if [ "$state" = "stopped" ] \
-            && { [ -z "$image_ref" ] || machine_has_activation_image "$machine_id" "$image_ref"; }; then
-            return 0
+        if [ "$state" = "stopped" ]; then
+            image_status=0
+            if [ -n "$image_ref" ]; then
+                # The image read must itself prove stopped state; do not combine
+                # stopped from one inventory with image from a later active one.
+                machine_has_activation_image "$machine_id" "$image_ref"
+                image_status=$?
+                [ "$image_status" -le 1 ] || return 1
+            fi
+            if [ "$image_status" -eq 0 ]; then
+                assert_app_environment_lock_ownership || return 1
+                return 0
+            fi
         fi
         case "$state" in
             stopped|created|pending|replacing|stopping) ;;
