@@ -7782,8 +7782,7 @@
       "spawn_claude_code_agent"
     ],
     "tags": [
-      "claude-code",
-      "smoke"
+      "claude-code"
     ],
     "price_limit_cents": 200,
     "requires_browser_agent": false,
@@ -7801,6 +7800,7 @@
       "spawn_browser_agent"
     ],
     "status": "ready",
+    "deploy_canary": true,
     "runner": "agent",
     "bench": "pipeline-e2e",
     "description": "Rose-builds-Rose code agent: the root agent runs in the benchmark user's Rose project (the Rose GitHub repo attached) and spawns one Claude Code agent that starts in that repo's checkout and answers from it. Gates the code agent's startup time per phase (create = sandbox + project clone + ws-server, project startup script, CLI init) and records every phase in the span history; further code-agent checks plug in as code_agent_* static checks (benchmarks/code_agent_checks/).",
