@@ -6,6 +6,7 @@ from typing import TypedDict
 class TaskObject(TypedDict):
     """A single task in the planner output."""
 
+    title: str
     goal: str
     tool_name: str
 

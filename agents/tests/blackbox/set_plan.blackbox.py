@@ -244,8 +244,13 @@ def test_build_plan_data_maps_fields():
     plan_data = build_plan_data(
         {
             "tasks": [
-                {"goal": "Research", "tool_name": "spawn_explore_agent", "depends_on": []},
-                {"goal": "Synthesize", "tool_name": "reasoning", "depends_on": ["0"]},
+                {
+                    "title": "Research",
+                    "goal": "Research the market",
+                    "tool_name": "spawn_explore_agent",
+                    "depends_on": [],
+                },
+                {"title": "Synthesize", "goal": "Synthesize findings", "tool_name": "reasoning", "depends_on": ["0"]},
             ],
             "title": "Plan A",
             "join": "all",
@@ -257,9 +262,38 @@ def test_build_plan_data_maps_fields():
     assert plan_data["status"] == "planning"
     assert plan_data["join"] == "all"
     assert len(plan_data["tasks"]) == 2
-    assert plan_data["tasks"][0]["goal"] == "Research"
+    assert plan_data["tasks"][0]["title"] == "Research"
+    assert plan_data["tasks"][0]["goal"] == "Research the market"
     assert plan_data["tasks"][0]["tool_name"] == "spawn_explore_agent"
     assert plan_data["dependencies"] == {"0": [], "1": ["0"]}
+
+
+def test_planner_task_schema_requires_title_and_description():
+    """The planner must emit a short title plus the full description (goal) per task."""
+    from utils.tool_schemas import PlannerResponse, get_planner_response_model
+
+    for model in (PlannerResponse, get_planner_response_model()):
+        task_schema = model.model_json_schema()["$defs"]
+        task_def = next(v for k, v in task_schema.items() if k.startswith("PlannerTask"))
+        assert {"title", "goal"} <= set(task_def["required"]), task_def["required"]
+        assert list(task_def["properties"]).index("title") < list(task_def["properties"]).index("goal")
+
+
+def test_planner_task_parses_legacy_untitled_plan():
+    """Plans recorded before task titles (Fast Mode replays) still parse, with an empty title."""
+    from domains.set_plan.service import build_plan_data
+    from utils.tool_schemas import PlannerResponse
+
+    legacy = PlannerResponse.model_validate(
+        {
+            "title": "Plan",
+            "tasks": [{"task_idx": "0", "goal": "Research the market", "tool_name": "reasoning"}],
+            "join": "all",
+        }
+    )
+    assert legacy.tasks[0].title == ""
+    plan_data = build_plan_data(legacy.model_dump(mode="json"))
+    assert plan_data["tasks"][0] == {"title": "", "goal": "Research the market", "tool_name": "reasoning"}
 
 
 def test_build_plan_message_join_any():
@@ -1240,6 +1274,8 @@ async def run_all_tests():
     r.record("convert_deps_skips_missing", test_convert_deps_skips_missing_task_idx)
     # build_plan_data / build_plan_message
     r.record("build_plan_data", test_build_plan_data_maps_fields)
+    r.record("planner_task_requires_title", test_planner_task_schema_requires_title_and_description)
+    r.record("planner_task_legacy_untitled", test_planner_task_parses_legacy_untitled_plan)
     r.record("build_plan_message_any", test_build_plan_message_join_any)
     r.record("build_plan_message_parallel", test_build_plan_message_parallel_no_deps)
     r.record("build_plan_message_sequential", test_build_plan_message_sequential)
