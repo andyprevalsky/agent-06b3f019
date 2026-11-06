@@ -8058,11 +8058,6 @@
 {"task": "background-agent-message-smoke", "duration_seconds": 86.8, "cost_cents": 0.0, "timestamp": "2026-11-06T02:22:00.870117+00:00", "agent_id": "2f4a08c0-fada-4025-9257-8849894d9225"}
 {"task": "chat-mode", "duration_seconds": 15.5, "cost_cents": 0.0, "timestamp": "2026-11-06T02:22:00.870117+00:00", "agent_id": "8b47c5b3-9b16-4190-8bde-e11dd544852f"}
 {"task": "claude-code-agent", "duration_seconds": 73.6, "cost_cents": 0.0, "timestamp": "2026-11-06T02:22:00.870117+00:00", "agent_id": "d54ec554-95bf-4400-9542-e3bde81655fe"}
-{"task": "code-agent-rose-repo", "duration_seconds": 662.9, "cost_cents": 1.0, "timestamp": "2026-11-06T13:58:48.714696+00:00", "agent_id": "1ace585f-80a9-43ef-b872-1287c46cdd53"}
-{"task": "code-agent-rose-repo", "duration_seconds": 708.3, "cost_cents": 1.0, "timestamp": "2026-11-06T14:11:06.901564+00:00", "agent_id": "8f8c27dc-27ba-4db1-adba-9fb522322dd3"}
-{"task": "code-agent-rose-repo", "duration_seconds": 582.3, "cost_cents": 1.0, "timestamp": "2026-11-06T14:24:25.584271+00:00", "agent_id": "5dccff5f-a5c5-4bc1-b533-4123b9947b68"}
-{"task": "code-agent-rose-repo", "duration_seconds": 571.5, "cost_cents": 1.0, "timestamp": "2026-11-06T14:35:18.385883+00:00", "agent_id": "b8eefffa-3de4-4316-a874-fdae34f77db7"}
-{"task": "code-agent-rose-repo", "duration_seconds": 612.3, "cost_cents": 1.0, "timestamp": "2026-11-06T14:46:10.946888+00:00", "agent_id": "d89077b8-f262-4c9b-a737-724320640c42"}
 {"task": "chat-mode", "duration_seconds": 44.0, "cost_cents": 0.0, "timestamp": "2026-07-28T04:25:13.128256+00:00", "agent_id": "f326def0-8360-4ade-9aa9-e38770a4c423", "backfill_source": "main-loss"}
 {"task": "browser-smoke", "duration_seconds": 96.5, "cost_cents": 10.0, "timestamp": "2026-07-28T04:25:13.128256+00:00", "agent_id": "5a5daa1a-3597-4fe4-b2af-1769a62b304e", "backfill_source": "main-loss"}
 {"task": "parallel-tool-calls", "duration_seconds": 210.9, "cost_cents": 40.0, "timestamp": "2026-07-28T04:25:13.128256+00:00", "agent_id": "b960cac7-3d87-4566-bd6b-2f4d57789b3e", "backfill_source": "main-loss"}
