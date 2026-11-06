@@ -2328,8 +2328,10 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
         selector = selector_module.Selector()
         for path in CLOUDBENCH_CONTROLLER_SOURCES:
             assert (ROOT / path).is_file(), path
-            selected = selector.select([path]).selected["cloudbench-controller"]
-            assert selected, f"a change to {path} must select the cloudbench-controller lane"
+            lanes = selector.select([path]).selected
+            assert lanes["cloudbench-controller"], f"a change to {path} must select the cloudbench-controller lane"
+            # The former Step 4cb also ran the agents `benchmark` blackbox domain for these changes.
+            assert "benchmark" in lanes["agents-blackbox"], f"a change to {path} must select the benchmark domain"
     finally:
         sys.modules.pop(spec.name, None)
     planner = (ROOT / "scripts" / "deploy_test_plan.py").read_text()
