@@ -250,3 +250,84 @@ describe('benchmark check: thinking rows with recorded tok/s (root + code agents
     ]);
   });
 });
+
+describe('Codex session-scoped counters bracket a thought only over generation', () => {
+  const second = (n: number) => new Date(Date.UTC(2026, 10, 6, 4, 30, 0) + n * 1000).toISOString();
+  const usage = (id: string, seq: number, sec: number, output: number) => ({
+    id,
+    seq,
+    type: 'metrics',
+    ts: second(sec),
+    output_tokens: output,
+    usage_scope: 'session',
+  });
+  const thought = (id: string, seq: number, sec: number) => ({
+    id,
+    seq,
+    type: 'thinking',
+    text: `thinking ${id}`,
+    ts: second(sec),
+  });
+  const generations = () => {
+    const records = [
+      {
+        id: 'start',
+        seq: 0,
+        type: 'turn',
+        event: 'started',
+        turn_id: 'native-1',
+        ts: second(0),
+        turn_started_at: second(0),
+      },
+      thought('before-any-sample', 1, 0.5), // no earlier sample: no baseline to bracket from
+      usage('u1', 2, 1, 1000), // a resumed session: its first sample is not "tokens since 0"
+      thought('clean-window', 3, 2.5),
+      usage('u2', 4, 3, 1100), // (1s, 3s]: 100 tokens in 2s, no tool finished inside
+      {
+        id: 'run',
+        seq: 5,
+        type: 'tool',
+        ts: second(4),
+        tool: { name: 'Bash', target: 'git status', result: { status: 'ok', exit_code: 0 } },
+      },
+      thought('window-with-a-tool', 6, 4.5),
+      usage('u3', 7, 6, 1200), // (3s, 6s] contains the finished tool run: not generation
+    ];
+    const entries = buildCodeSession({
+      messages: [
+        msg({
+          toolName: 'spawn_claude_code_agent',
+          task_id: 'task-1',
+          subAgentId: 'task-1',
+          action_type: 'code_transcript',
+          hidden: true,
+          code_agent_events: records,
+        }),
+      ],
+      taskId: 'task-1',
+      ownerAgentId: 'root',
+      provider: 'codex',
+      sessionState: 'completed',
+      sessionEndedAt: null,
+      echoes: [],
+    });
+    return Object.fromEntries(
+      entries
+        .flatMap((entry) => (entry.kind === 'work' ? entry.turn.activities : []))
+        .filter((message) => message.metadata?.toolName === 'thought')
+        .map((message) => [message.text.replace('thinking ', ''), message.metadata?.generation]),
+    );
+  };
+
+  it('records a window only when it holds generation, never an invented or cross-tool rate', () => {
+    expect(generations()).toEqual({
+      'before-any-sample': undefined,
+      'clean-window': {
+        output_tokens: 100,
+        started_at: second(1),
+        ended_at: second(3),
+      },
+      'window-with-a-tool': undefined,
+    });
+  });
+});
