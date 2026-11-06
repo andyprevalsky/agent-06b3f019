@@ -175,10 +175,68 @@ class SemanticReports(unittest.TestCase):
                 self.assertTrue(receipt['ready'])
                 self.assertEqual(receipt['token'], 'request-token')
 
+    def test_inventory_cli_matches_frontend_first_and_root_fallback(self):
+        import os
+        for mode in ('frontend_bin', 'frontend_package', 'root_fallback', 'competing', 'missing'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                (root / 'front-end').mkdir()
+                out = root / 'reports'; out.mkdir()
+                choices = []
+                if mode in ('frontend_bin', 'competing'): choices.append(('front-end/node_modules/.bin/playwright', 'frontend', True))
+                if mode == 'frontend_package': choices.append(('front-end/node_modules/@playwright/test/cli.cjs', 'package', False))
+                if mode in ('root_fallback', 'competing'): choices.append(('node_modules/.bin/playwright', 'root', True))
+                for relative, label, executable in choices:
+                    target = root / relative; target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text('#!/usr/bin/env node\n' +
+                        "const fs=require('node:fs'); const lane=process.argv.some(x=>x.includes('chat-lifecycle-latency.spec'))?'latency':'ui';\n" +
+                        f"fs.appendFileSync({json.dumps(str(root / 'chosen'))}, {json.dumps(label + chr(10))});\n" +
+                        "const row={id:lane,project:'chromium',file:lane+'.spec.ts',title:[lane]};\n" +
+                        "fs.writeFileSync(process.env.DEPLOY_SEMANTIC_LIFECYCLE, JSON.stringify({event:'begin',tests:[row]})+'\\n'+JSON.stringify({event:'end',status:'passed'})+'\\n');\n")
+                    target.chmod(0o700 if executable else 0o600)
+                    if mode == 'frontend_package':
+                        (target.parent / 'package.json').write_text(json.dumps({'name':'@playwright/test','bin':{'playwright':'cli.cjs'}}))
+                if mode == 'missing':
+                    with self.assertRaises(ValueError): adapter.native_inventory(root, out)
+                else:
+                    selected = adapter.native_inventory(root, out, dict(os.environ))
+                    self.assertEqual(len(adapter.checks_for(selected)), 2)
+                    preferred = 'package' if mode == 'frontend_package' else ('root' if mode == 'root_fallback' else 'frontend')
+                    self.assertEqual((root / 'chosen').read_text().splitlines(), [preferred, preferred])
+
+    def test_optional_native_output_keeps_lane_attachments(self):
+        import os
+        tail = (ROOT / 'front-end/scripts/run-semantic-tests.sh').read_text().split(
+            '# Optional native evidence output;', 1)[1]
+        tail = '# Optional native evidence output;' + tail
+        for lane in ('ui', 'latency'):
+            for native in (False, True):
+                with self.subTest(lane=lane, native=native), tempfile.TemporaryDirectory() as d:
+                    folder = Path(d)
+                    (folder / 'tests-e2e').mkdir()
+                    (folder / 'tests-e2e/chat-lifecycle-latency.spec.ts').touch()
+                    capture = "run_playwright() { python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\"; exit 0; }\n"
+                    env = {**os.environ, 'SEMANTIC_WORKERS': '4', 'REPO_DIR': str(ROOT)}
+                    env.pop('SEMANTIC_NATIVE_REPORT_PREFIX', None)
+                    prefix = folder / lane
+                    if native: env['SEMANTIC_NATIVE_REPORT_PREFIX'] = str(prefix)
+                    args = ['chat-lifecycle-latency'] if lane == 'latency' else []
+                    proc = subprocess.run(['bash', '-eu', '-c', capture + tail, 'fixture', *args],
+                                          cwd=folder, env=env, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    argv = json.loads(proc.stdout)
+                    if native:
+                        self.assertIn('--output=' + str(prefix) + '-artifacts', argv)
+                    else:
+                        self.assertFalse(any(a.startswith('--output') for a in argv))
+                    self.assertIn('--workers=4', argv)
+
     def test_real_playwright_reports_setup_failure_as_unverified(self):
         with tempfile.TemporaryDirectory() as d:
             folder = Path(d)
-            pkg = ROOT / 'node_modules/@playwright/test'
+            pkg = Path(subprocess.check_output(
+                ['node', '-p', "require.resolve('@playwright/test')"], cwd=ROOT / 'front-end', text=True
+            ).strip())
             (folder / 'fixture.spec.cjs').write_text(
                 f"const {{test,expect}} = require({json.dumps(str(pkg))});\n"
                 "test('pass',()=>expect(1).toBe(1));\n"
@@ -189,8 +247,7 @@ class SemanticReports(unittest.TestCase):
             import os
             env = {**os.environ, 'DEPLOY_SEMANTIC_LIFECYCLE': str(folder / 'events.jsonl'),
                    'PLAYWRIGHT_JSON_OUTPUT_FILE': str(folder / 'report.json')}
-            cli = ROOT / 'node_modules/@playwright/test/cli.js'
-            proc = subprocess.run(['node', str(cli), 'test', '--reporter=json,' + str(
+            proc = subprocess.run([*adapter.playwright_command(ROOT), 'test', '--reporter=json,' + str(
                 ROOT / 'scripts/deploy-semantic-reporter.cjs')], cwd=folder, env=env,
                 capture_output=True, timeout=45)
             self.assertEqual(proc.returncode, 1, proc.stderr.decode())

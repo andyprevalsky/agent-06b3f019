@@ -73,13 +73,31 @@ export const messageQueueCases: Case[] = [
   [
     'message partial-index migration preserves historical task bindings and enforces one unresolved intent',
     async () => {
-      const migration = readFileSync(
-        path.resolve(
-          __dirname,
-          '../../../prisma/migrations/20261105233000_cloud_message_unresolved_task/migration.sql'
-        ),
-        'utf8'
-      );
+      const migrations = [
+        '20261105233000_cloud_message_unresolved_task',
+        '20261105233001_cloud_message_drop_historical_unique',
+        '20261105233002_cloud_message_task_history_index',
+      ];
+      const operations = [
+        'CREATE UNIQUE INDEX CONCURRENTLY',
+        'DROP INDEX CONCURRENTLY',
+        'CREATE INDEX CONCURRENTLY',
+      ];
+      const sql = migrations.map((name, index) => {
+        const migration = readFileSync(
+          path.resolve(__dirname, `../../../prisma/migrations/${name}/migration.sql`),
+          'utf8'
+        );
+        const statements = splitStatements(migration);
+        assert.equal(statements.length, 1, 'Concurrent migration must have one statement');
+        assert.ok(statements[0]?.startsWith(operations[index]!));
+        assert.equal(
+          /\bIF (NOT )?EXISTS\b/.test(statements[0]!),
+          false,
+          'Production retry must not skip invalid indexes'
+        );
+        return migration;
+      });
       await prisma.$transaction(async (tx) => {
         await tx.$executeRawUnsafe(
           'CREATE TEMP TABLE "ImessageQueue" ("phoneBrowserTaskId" TEXT, "transport" TEXT, "sentAt" TIMESTAMPTZ, "failedAt" TIMESTAMPTZ) ON COMMIT DROP'
@@ -88,9 +106,13 @@ export const messageQueueCases: Case[] = [
           'CREATE UNIQUE INDEX "ImessageQueue_phoneBrowserTaskId_key" ON "ImessageQueue"("phoneBrowserTaskId")'
         );
         for (let pass = 0; pass < 2; pass++)
-          for (const statement of splitStatements(migration)) {
-            if (!/^(BEGIN|COMMIT)$/i.test(statement.trim())) await tx.$executeRawUnsafe(statement);
-          }
+          for (const migration of sql)
+            for (const statement of splitStatements(
+              migration
+                .replace(/(CREATE(?: UNIQUE)? INDEX) CONCURRENTLY /g, '$1 IF NOT EXISTS ')
+                .replace(/DROP INDEX CONCURRENTLY /g, 'DROP INDEX IF EXISTS ')
+            ))
+              await tx.$executeRawUnsafe(statement);
         await tx.$executeRawUnsafe(`DO $test$ BEGIN
         INSERT INTO "ImessageQueue" VALUES ('same-task','phone_harness',NULL,NULL);
         BEGIN

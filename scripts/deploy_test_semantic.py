@@ -87,13 +87,41 @@ def events_at(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+def playwright_command(root, env=None):
+    """Match run-semantic-tests.sh: frontend bin, its resolved package, root bin."""
+    frontend = root / 'front-end'
+    local_bin = frontend / 'node_modules/.bin/playwright'
+    if local_bin.is_file() and os.access(local_bin, os.X_OK):
+        return [str(local_bin)]
+    resolver = """
+const path = require('path');
+const pkgPath = require.resolve('@playwright/test/package.json');
+const bin = require(pkgPath).bin;
+const relative = typeof bin === 'string' ? bin : bin && bin.playwright;
+if (!relative) process.exit(1);
+console.log(path.join(path.dirname(pkgPath), relative));
+"""
+    try:
+        resolved = subprocess.run(['node', '-e', resolver], cwd=frontend, env=env,
+                                  capture_output=True, text=True, timeout=10)
+        cli = Path(resolved.stdout.strip())
+        if resolved.returncode == 0 and cli.is_file():
+            return ['node', str(cli)]
+    except subprocess.TimeoutExpired:
+        pass
+    root_bin = root / 'node_modules/.bin/playwright'
+    if root_bin.is_file() and os.access(root_bin, os.X_OK):
+        return [str(root_bin)]
+    raise ValueError('Frontend Playwright is not installed (frontend bin/package and root bin missing)')
+
+
 def native_inventory(root, directory, env=None):
     """Playwright --list loads the exact specs/config without running hooks or tests."""
     result = {}
-    cli = root / 'node_modules/@playwright/test/cli.js'
+    cli = playwright_command(root, env)
     for lane in LANES:
         path = directory / (lane + '-list.jsonl')
-        argv = ['node', str(cli), 'test', '--list', '--reporter=' + str(root / REPORTER)]
+        argv = [*cli, 'test', '--list', '--reporter=' + str(root / REPORTER)]
         argv += (['--grep-invert=chat full-lifecycle latency'] if lane == 'ui'
                  else ['tests-e2e/chat-lifecycle-latency.spec.ts'])
         lane_env = {**(env or os.environ), 'DEPLOY_SEMANTIC_LIFECYCLE': str(path)}

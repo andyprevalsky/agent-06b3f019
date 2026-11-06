@@ -21,6 +21,7 @@ type PaneProps = Pick<
   | 'taskId'
   | 'browserUrl'
   | 'browserLive'
+  | 'browserEnded'
   | 'messages'
   | 'authAssistanceRequest'
   | 'isResuming'
@@ -40,6 +41,7 @@ export function BrowserPaneBody({
   taskId,
   browserUrl,
   browserLive = true,
+  browserEnded = false,
   messages,
   controlState,
   authAssistanceRequest,
@@ -56,6 +58,7 @@ export function BrowserPaneBody({
     <LiveViewFrame
       url={browserUrl}
       live={browserLive}
+      ended={browserEnded}
       title="Browser"
       interactive={
         !attention.id &&
@@ -81,11 +84,16 @@ export function BrowserPaneBody({
         </>
       }
     >
-      {!phone.visible && controlState === 'active' && !isUserControlling && (
+      {!phone.visible && !browserEnded && controlState === 'active' && !isUserControlling && (
         <BrowserBorderGlow tone={glowTone} />
       )}
-      {!phone.visible && controlState === 'active' && !isUserControlling && (
-        <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
+      {!phone.visible && !browserEnded && controlState === 'active' && !isUserControlling && (
+        <BrowserCursorOverlay
+          agentId={agentId}
+          taskId={taskId}
+          messages={messages}
+          browserUrl={browserUrl}
+        />
       )}
       {!phone.visible && !attention.id && !readOnly && !isMobile && controlState === 'active' && (
         <TakeControlChip

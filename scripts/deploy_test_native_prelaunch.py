@@ -1,4 +1,7 @@
-"""Launch-only reconciliation for a positively identified pre-controller relay startup failure."""
+"""Launch-only reconciliation for the identified non-strict relay startup failure.
+
+Strict-start campaigns with startup cohorts remain outside this proof shape.
+"""
 import copy
 import hashlib
 from datetime import datetime

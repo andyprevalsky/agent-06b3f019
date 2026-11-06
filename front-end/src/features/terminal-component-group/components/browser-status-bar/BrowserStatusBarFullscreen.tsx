@@ -64,6 +64,8 @@ export interface FullscreenProps {
   browserUrl: string;
   /** False when the bound session is closed or ended: loading screen, no iframe. */
   browserLive?: boolean;
+  /** Finished owner: terminal browser state rather than connection loading. */
+  browserEnded?: boolean;
   messages: Message[];
   outputSchema: OutputSchemaRef | undefined;
   browserSessionMetadata: BrowserSessionMetadata | null;
