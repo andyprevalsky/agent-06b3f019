@@ -3833,6 +3833,65 @@ async def test_rejected_completed_child_handoff_returns_control_to_llm():
     assert cache_steps == [1], "the synthetic completion must not consume a provider-cache position"
 
 
+async def test_completed_child_handoff_yields_to_later_failed_action():
+    """A planned action that failed after the child completed gets an LLM recovery turn.
+
+    agent-display-revenue-chart (descend 2026-11-06, agent 38a8d172): the code child
+    returned a schema-covering chart, the planned display of its SVG was rejected
+    ("SVG excluded"), and the fast path completed the parent without a display.
+    """
+    response_schema = {
+        "fields": [
+            {"name": "revenue_chart", "type": "str", "required": True},
+            {"name": "daily_totals", "type": "list", "required": True},
+        ]
+    }
+    child_result = {"revenue_chart": "chart.svg", "daily_totals": [{"date": "2026-09-21", "usd": 1.0}]}
+    context = [
+        {"role": "USER", "text": "Chart the revenue in Agent Display", "timestamp": "2026-09-10T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "Status: SUCCESS",
+            "timestamp": "2026-09-10T00:00:01Z",
+            "metadata": {
+                "toolCallId": "code-one",
+                "toolName": "spawn_claude_code_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "task_complete",
+                "success": True,
+                "structured_response": child_result,
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Invalid media:\n- #1 chart.svg: is not a displayable file (SVG excluded)",
+            "timestamp": "2026-09-10T00:00:02Z",
+            "metadata": {"toolCallId": "display-one", "toolName": "display", "toolStatus": "ERROR"},
+        },
+    ]
+    llm_calls = 0
+
+    def recovery_llm_turn():
+        nonlocal llm_calls
+        llm_calls += 1
+        return [{"tool": "web_search", "query": "recover the failed display"}]
+
+    result, _, executed = await _run_single_iteration(
+        [],
+        [],
+        skip_verification=False,
+        initial_context=context,
+        response_schema=response_schema,
+        verifier_score=0.4,
+        verifier_reasoning="The chart was never displayed.",
+        llm_tool_calls_factory=recovery_llm_turn,
+        max_iterations=1,
+    )
+
+    assert llm_calls == 1, f"expected an LLM recovery turn, got synthesized actions {executed}"
+    assert [item["tool_name"] for item in executed][:1] == ["web_search"]
+
+
 async def test_verifier_usage_preserves_cache_sequence_identity():
     usage_calls = []
 
@@ -4821,6 +4880,10 @@ async def run_all_tests():
     await r.record_async(
         "rejected_completed_child_handoff_returns_control_to_llm",
         test_rejected_completed_child_handoff_returns_control_to_llm,
+    )
+    await r.record_async(
+        "completed_child_handoff_yields_to_later_failed_action",
+        test_completed_child_handoff_yields_to_later_failed_action,
     )
     await r.record_async(
         "pause_after_forced_completion_llm_still_dispatches_attempt_completion",
