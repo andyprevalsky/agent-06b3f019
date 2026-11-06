@@ -21,7 +21,8 @@ const GITHUB_COMMITS_PER_PAGE = 100;
 // ~100 pages of commits took ~35s one at a time; GitHub allows 100 concurrent requests.
 const GITHUB_PAGE_CONCURRENCY = 20;
 const GITHUB_FETCH_BUDGET_MS = 60_000;
-const GITHUB_AUTH_FAILURE = /^GitHub (401|403|429)$/;
+// 404 counts: GitHub answers 404 when a credential cannot see the private repo.
+const GITHUB_AUTH_FAILURE = /^GitHub (401|403|404|429)$/;
 
 function lastPageFromLink(link: string | null): number | null {
   for (const part of (link ?? '').split(',')) {

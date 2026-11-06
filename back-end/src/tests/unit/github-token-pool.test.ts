@@ -65,7 +65,7 @@ async function main(): Promise<void> {
   // Unknown quota keeps pool order; dispatch stays last.
   reset();
   assert.deepStrictEqual(githubTokenCandidates(), ['primary', 'bot2', 'bot3', 'dispatch']);
-  assert.deepStrictEqual(githubTokenCandidates('primary'), ['primary', 'dispatch']);
+  assert.deepStrictEqual(githubTokenCandidates('primary'), ['primary']);
 
   // Learned quota reorders members: most remaining first.
   const quota: Record<string, number> = {
@@ -164,10 +164,11 @@ async function main(): Promise<void> {
     ['Bearer bot2', 'Bearer primary']
   );
 
-  // Primary identity never uses a machine account, even when primary is exhausted.
+  // Primary identity uses GITHUB_TOKEN alone, even when it is exhausted: never a machine
+  // account, the app or the dispatch token (a PR must not open under another account).
   reset();
   respond = (call) =>
-    call.auth === 'Bearer primary' || call.auth === 'Bearer dispatch'
+    call.auth === 'Bearer primary'
       ? limited(0, 403, JSON.stringify({ message: 'API rate limit exceeded' }))
       : limited(4999);
   const write = await githubFetch(
@@ -178,7 +179,7 @@ async function main(): Promise<void> {
   assert.strictEqual(write.status, 403);
   assert.deepStrictEqual(
     calls.map((c) => c.auth),
-    ['Bearer primary', 'Bearer dispatch']
+    ['Bearer primary']
   );
 
   // No member configured: unauthenticated, as before.
@@ -307,6 +308,25 @@ async function main(): Promise<void> {
     calls.filter((c) => !c.url.includes('/app/')).map((c) => c.auth),
     ['Bearer primary']
   );
+  // The failed mint starts a cooldown: later reads in the window send no new mint request.
+  await githubFetch('https://api.github.com/repos/o/r', {}, { fetchImpl: fakeFetch });
+  await githubFetch('https://api.github.com/repos/o/r', {}, { fetchImpl: fakeFetch });
+  assert.strictEqual(
+    calls.filter((c) => c.url.includes('/app/')).length,
+    1,
+    'one failed mint per cooldown window, not one per read'
+  );
+  // Once the cooldown ends (reset hook) a healthy mint is attempted again.
+  reset();
+  mintStatus = 201;
+  await githubFetch('https://api.github.com/repos/o/r', {}, { fetchImpl: fakeFetch });
+  assert.strictEqual(
+    calls.filter((c) => c.url.includes('/app/')).length,
+    1,
+    'a mint is attempted again after the cooldown'
+  );
+  mintStatus = 500;
+  reset();
 
   // Primary-identity writes never use the app.
   reset();

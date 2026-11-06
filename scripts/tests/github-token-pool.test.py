@@ -256,6 +256,41 @@ class GithubTokenPoolTests(unittest.TestCase):
         self.assertEqual(self.pick(env), "tok-primary")
         APP_MINT_STATUS["777"] = 201
 
+    def test_github_app_malformed_private_key_skips_the_member_instead_of_crashing(self) -> None:
+        BEHAVIOUR.update({"tok-primary": (200, 400, 400, RESET, 0)})
+        for bad in ("!!!not base64!!!", base64.b64encode(b"\xff\xfe\xfa").decode()):
+            env = {"GITHUB_TOKEN": "tok-primary", "GITHUB_APP_ID": "424242", "GITHUB_APP_INSTALLATION_ID": "777",
+                   "GITHUB_APP_PRIVATE_KEY_B64": bad}
+            status = self.cli("status", environ=env)
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertIn("GITHUB_TOKEN http=200", status.stdout)
+            self.assertNotIn("GITHUB_APP", status.stdout)
+            self.assertIn("skipping the GitHub App member", status.stderr)
+            self.assertNotIn("Traceback", status.stderr)
+            self.assertEqual(self.cli("pick", environ=env).stdout.strip(), "tok-primary")
+
+    def test_github_app_cache_is_private_and_untrusted_when_not(self) -> None:
+        APP_MINTS.clear()
+        APP_MINT_STATUS["777"] = 201
+        APP_EXPIRES_IN["seconds"] = 3600
+        env = self.app_env()
+        BEHAVIOUR.update({"tok-primary": (200, 400, 400, RESET, 0), "tok-dispatch": (200, 400, 400, RESET, 0)})
+        cache = Path(os.environ["GITHUB_APP_TOKEN_CACHE"])
+        cache.parent.mkdir(parents=True)
+        os.chmod(cache.parent, 0o777)  # a pre-existing, wide-open directory that we own is tightened
+        pool.members(self.tmp, env, self.base)
+        self.assertEqual(cache.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+        self.assertEqual([entry.name for entry in cache.parent.iterdir()], [cache.name],
+                         "the exclusive staging file is renamed away, never left behind")
+        minted = len(APP_MINTS)
+        pool.members(self.tmp, env, self.base)
+        self.assertEqual(len(APP_MINTS), minted, "a private cache is reused")
+        os.chmod(cache, 0o644)  # a readable cache file is not trusted: a fresh mint replaces it
+        pool.members(self.tmp, env, self.base)
+        self.assertEqual(len(APP_MINTS), minted + 1)
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+
     def tearDown(self) -> None:
         os.environ.pop("GITHUB_APP_TOKEN_CACHE", None)
 

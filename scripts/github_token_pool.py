@@ -31,6 +31,8 @@ import base64
 import datetime as dt
 import json
 import os
+import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -59,12 +61,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 @dataclass(frozen=True)
 class Member:
+    """One pool member: its env name and token value."""
     name: str
     token: str
 
 
 @dataclass(frozen=True)
 class Quota:
+    """One rate-limit resource: calls remaining, the limit and its reset epoch."""
     remaining: int
     limit: int
     reset: int
@@ -72,6 +76,7 @@ class Quota:
 
 @dataclass(frozen=True)
 class Probe:
+    """The /rate_limit answer for one member, or the error that replaced it."""
     member: Member
     status: int | None
     core: Quota | None = None
@@ -102,6 +107,7 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 
 def _lookup(name: str, env: Mapping[str, str], files: Sequence[Mapping[str, str]]) -> str:
+    """The setting from the process env, else the first env file that has it, else blank."""
     value = (env.get(name) or "").strip()
     if value:
         return value
@@ -113,6 +119,7 @@ def _lookup(name: str, env: Mapping[str, str], files: Sequence[Mapping[str, str]
 
 
 def _b64url(data: bytes) -> str:
+    """URL-safe base64 without padding, as JWT segments require."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
 
 
@@ -137,11 +144,51 @@ def app_jwt(app_id: str, private_key_pem: str, now: int | None = None) -> str:
 
 
 def _app_cache_path() -> Path:
+    """Where the minted installation token is cached (GITHUB_APP_TOKEN_CACHE overrides)."""
     override = os.environ.get("GITHUB_APP_TOKEN_CACHE")
     if override:
         return Path(override)
     base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     return base / "rose" / "github-app-token.json"
+
+
+def _owned_private(path: Path, directory: bool) -> bool:
+    """True when `path` (not a symlink) is ours and closed to group and others."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    kind = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    return kind and info.st_uid == os.getuid() and (info.st_mode & 0o077) == 0
+
+
+def _private_cache_dir(directory: Path) -> bool:
+    """Create the cache directory 0700, or tighten one we own; False when it cannot be made private."""
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        info = os.lstat(directory)
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and (info.st_mode & 0o077):
+            os.chmod(directory, 0o700)
+    except OSError:
+        return False
+    return _owned_private(directory, directory=True)
+
+
+def _write_cache(cache: Path, payload: Mapping[str, object]) -> None:
+    """Persist the token privately: 0700 directory, exclusively created 0600 staging file, atomic replace."""
+    if not _private_cache_dir(cache.parent):
+        return
+    staging = cache.with_name(f".{cache.name}.{os.getpid()}.{secrets.token_hex(8)}")
+    try:
+        descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(payload, handle)
+        os.replace(staging, cache)
+    except OSError:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
 
 
 def app_token(
@@ -152,6 +199,8 @@ def app_token(
     cache = _app_cache_path()
     key = f"{app_id}:{installation_id}"
     try:
+        if not (_owned_private(cache.parent, directory=True) and _owned_private(cache, directory=False)):
+            raise OSError("cache is absent or not private")
         cached = json.loads(cache.read_text())
         if cached.get("key") == key and float(cached["expires_at"]) - time.time() > APP_REFRESH_MARGIN_SECONDS:
             return str(cached["token"])
@@ -174,14 +223,7 @@ def app_token(
     except Exception as error:  # mint failures leave the static members usable
         print(f"github_token_pool: GitHub App token mint failed ({type(error).__name__})", file=sys.stderr)
         return None
-    try:
-        cache.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        staging = cache.with_name(f".{cache.name}.{os.getpid()}")
-        staging.touch(mode=0o600)
-        staging.write_text(json.dumps({"key": key, "token": token, "expires_at": expires_at}))
-        os.replace(staging, cache)
-    except OSError:
-        pass
+    _write_cache(cache, {"key": key, "token": token, "expires_at": expires_at})
     return token
 
 
@@ -197,6 +239,7 @@ def members(
     seen: set[str] = set()
 
     def add(name: str, value: str) -> None:
+        """Append a member once, skipping blanks and a repeated token."""
         if value and value not in seen:
             seen.add(value)
             found.append(Member(name, value))
@@ -205,13 +248,21 @@ def members(
         if name == "GITHUB_DISPATCH_TOKEN" and include_app:
             app_id, installation_id, key_b64 = (_lookup(key, env, files) for key in APP_KEYS)
             if app_id and installation_id and key_b64:
-                pem = base64.b64decode(key_b64).decode()
-                add(APP_MEMBER_NAME, app_token(app_id, installation_id, pem, base_url) or "")
+                try:
+                    pem = base64.b64decode(key_b64, validate=True).decode()
+                except ValueError:  # binascii.Error and UnicodeDecodeError both subclass it
+                    print(
+                        "github_token_pool: GITHUB_APP_PRIVATE_KEY_B64 is not valid base64 text; "
+                        "skipping the GitHub App member", file=sys.stderr,
+                    )
+                else:
+                    add(APP_MEMBER_NAME, app_token(app_id, installation_id, pem, base_url) or "")
         add(name, _lookup(name, env, files))
     return found
 
 
 def _quota(resources: object, key: str) -> Quota | None:
+    """The named resource of a /rate_limit body as a Quota, or None when it is absent or malformed."""
     if not isinstance(resources, dict) or not isinstance(resources.get(key), dict):
         return None
     entry = resources[key]
@@ -222,6 +273,7 @@ def _quota(resources: object, key: str) -> Quota | None:
 
 
 def _redact(text: str, tokens: Sequence[str]) -> str:
+    """`text` with every token value replaced, so errors never print a secret."""
     for token in tokens:
         if token:
             text = text.replace(token, "<redacted>")
@@ -229,6 +281,7 @@ def _redact(text: str, tokens: Sequence[str]) -> str:
 
 
 def probe_one(member: Member, base_url: str, timeout: float) -> Probe:
+    """Ask GitHub's free /rate_limit endpoint about one member."""
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/rate_limit",
         headers={
@@ -263,6 +316,7 @@ def probe(
 
 
 def _remaining(result: Probe, resource: str) -> Quota | None:
+    """The Quota ranked for `resource`; 'both' takes whichever of core/graphql has fewer calls left."""
     if resource == "core":
         return result.core
     if resource == "graphql":
@@ -303,10 +357,12 @@ def pick_token(
 
 
 def _iso(epoch: int) -> str:
+    """A reset epoch as a UTC timestamp."""
     return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def status_lines(results: Sequence[Probe]) -> list[str]:
+    """One redacted status line per member."""
     tokens = [result.member.token for result in results]
     lines = []
     for result in results:
@@ -321,6 +377,7 @@ def status_lines(results: Sequence[Probe]) -> list[str]:
 
 
 def _timeout() -> float:
+    """The per-probe timeout (GITHUB_TOKEN_POOL_TIMEOUT_SECONDS overrides the 5 s default)."""
     try:
         return float(os.environ.get("GITHUB_TOKEN_POOL_TIMEOUT_SECONDS") or DEFAULT_TIMEOUT_SECONDS)
     except ValueError:
@@ -328,6 +385,7 @@ def _timeout() -> float:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run `pick` or `status`; returns the process exit code."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
     pick_parser = commands.add_parser("pick", help="print the token with the most remaining quota")

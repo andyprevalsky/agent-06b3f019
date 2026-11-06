@@ -56,6 +56,7 @@ interface MemberState {
 
 const memberState = new Map<string, MemberState>();
 
+/** The learned quota/cooldown record for one member, created on first use. */
 function stateFor(token: string): MemberState {
   let state = memberState.get(token);
   if (state === undefined) {
@@ -67,6 +68,9 @@ function stateFor(token: string): MemberState {
 
 /** Refresh an installation token this long before GitHub expires it. */
 const APP_TOKEN_REFRESH_MARGIN_MS = 5 * 60_000;
+/** After a failed mint, skip new mints for this long so a bad key or an outage costs one request per window, not one per read. */
+const APP_MINT_FAILURE_COOLDOWN_MS = 60_000;
+let appMintBlockedUntil = 0;
 let appToken: { token: string; expiresAt: number } | null = null;
 let appTokenInFlight: Promise<string | null> | null = null;
 
@@ -89,6 +93,7 @@ export function githubAppPoolEnabled(env: NodeJS.ProcessEnv = process.env): bool
   return env.RENDER === 'true';
 }
 
+/** The configured GitHub App, or null when the app member is disabled or any setting is blank. */
 function githubAppConfig(env: NodeJS.ProcessEnv): GithubAppConfig | null {
   if (!githubAppPoolEnabled(env)) return null;
   const appId = (env.GITHUB_APP_ID ?? '').trim();
@@ -98,6 +103,7 @@ function githubAppConfig(env: NodeJS.ProcessEnv): GithubAppConfig | null {
   return { appId, installationId, privateKey: Buffer.from(keyB64, 'base64').toString('utf8') };
 }
 
+/** URL-safe base64 (no padding), as JWT segments require. */
 function base64Url(value: string): string {
   return Buffer.from(value).toString('base64url');
 }
@@ -112,6 +118,7 @@ export function githubAppJwt(appId: string, privateKey: string, nowMs = Date.now
   return `${unsigned}.${signature}`;
 }
 
+/** Mint one installation token; a failure starts the mint cooldown and returns any still-valid token. */
 async function mintGithubAppToken(
   config: GithubAppConfig,
   fetchImpl: typeof fetch
@@ -131,30 +138,35 @@ async function mintGithubAppToken(
       }
     );
     if (!response.ok) {
+      appMintBlockedUntil = Date.now() + APP_MINT_FAILURE_COOLDOWN_MS;
       log.warn('GitHub App installation token mint failed', { status: response.status });
-      return appToken?.token ?? null;
+      return currentAppToken() || null;
     }
     const body = (await response.json()) as { token?: string; expires_at?: string };
     const expiresAt = Date.parse(body.expires_at ?? '');
     if (typeof body.token !== 'string' || body.token === '' || !Number.isFinite(expiresAt)) {
+      appMintBlockedUntil = Date.now() + APP_MINT_FAILURE_COOLDOWN_MS;
       log.warn('GitHub App installation token response was malformed');
-      return appToken?.token ?? null;
+      return currentAppToken() || null;
     }
     if (appToken !== null) memberState.delete(appToken.token);
     appToken = { token: body.token, expiresAt };
+    appMintBlockedUntil = 0;
     return body.token;
   } catch (error) {
+    appMintBlockedUntil = Date.now() + APP_MINT_FAILURE_COOLDOWN_MS;
     log.warn('GitHub App installation token mint errored', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return appToken?.token ?? null;
+    return currentAppToken() || null;
   }
 }
 
 /**
  * Make sure the GitHub App member holds an unexpired installation token.
- * Concurrent callers share one mint; a failed mint keeps any still-valid token
- * and never blocks the static members. Returns null when no app is configured.
+ * Concurrent callers share one mint; a failed mint keeps any still-valid token,
+ * starts a cooldown (no new mint until it ends) and never blocks the static
+ * members. Returns null when no app is configured.
  */
 export async function ensureGithubAppToken(
   fetchImpl: typeof fetch = fetch
@@ -164,12 +176,14 @@ export async function ensureGithubAppToken(
   if (appToken !== null && appToken.expiresAt - Date.now() > APP_TOKEN_REFRESH_MARGIN_MS) {
     return appToken.token;
   }
+  if (Date.now() < appMintBlockedUntil) return currentAppToken() || null;
   appTokenInFlight ??= mintGithubAppToken(config, fetchImpl).finally(() => {
     appTokenInFlight = null;
   });
   return appTokenInFlight;
 }
 
+/** The installation token while it is unexpired, else an empty string. */
 function currentAppToken(): string {
   return appToken !== null && appToken.expiresAt > Date.now() ? appToken.token : '';
 }
@@ -190,9 +204,9 @@ export function githubTokenCandidates(
 ): string[] {
   const tokens = githubPoolTokens(env);
   if (identity === 'primary') {
+    // Writes that act as Andy use GITHUB_TOKEN alone: never a machine account, the app or the dispatch token.
     const primary = (env.GITHUB_TOKEN ?? '').trim();
-    const dispatch = (env.GITHUB_DISPATCH_TOKEN ?? '').trim();
-    return [...new Set([primary, dispatch].filter((token) => token !== ''))];
+    return primary === '' ? [] : [primary];
   }
   const now = Date.now();
   const dispatch = (env.GITHUB_DISPATCH_TOKEN ?? '').trim();
@@ -268,6 +282,7 @@ export interface GithubFetchOptions {
   fetchImpl?: typeof fetch;
 }
 
+/** Send one request with one member's token, record what GitHub says about it, and report whether it was rejected. */
 async function sendWithToken(
   fetchImpl: typeof fetch,
   url: string,
@@ -327,7 +342,9 @@ export async function githubFetch(
   return response as Response;
 }
 
+/** Test hook: forget every learned quota, the cached app token and the mint cooldown. */
 export function resetGithubTokenPoolForTests(): void {
+  appMintBlockedUntil = 0;
   memberState.clear();
   appToken = null;
   appTokenInFlight = null;
