@@ -2627,7 +2627,8 @@ def main() -> int:
         join_native_hubs(root, campaign_dir)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         state['shared_transport_cleanup_pending'] = True
-        state['status'] = 'failed'
+        if state['status'] == 'passed':
+            state['status'] = 'failed'
         result = result or 1
     # Publication is part of the campaign lifetime, including cancellation
     # during its final handoff. Preserve the original child outcomes.

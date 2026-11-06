@@ -4188,6 +4188,56 @@ class RelayStartupEvidence(unittest.TestCase):
                 module['join_native_hubs'](self.base,runs.parent/'campaigns'/('deploy-'+runs.parent.name))
         self.assertEqual(calls,['2','3'])
 
+    def campaign_hub_cleanup_failure(self, cancel):
+        import runpy,signal
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        namespace=module['main'].__globals__
+        scripts=self.base/'scripts';scripts.mkdir()
+        (scripts/'run-bench').write_text('exit 0\n')
+        arguments=['campaign','--root',str(self.base),'--runs','1','--concurrency','2',
+                   '--retry-infra','0','--task=fixture']
+        published=[]
+        def publish(_workspace,_directory,summary,**_kwargs):
+            if _kwargs.get('live'):return True
+            published.append(summary['status'])
+            if cancel:
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM,None)
+                return False
+            return True
+        def refuse_inventory(*_args,**_kwargs):
+            raise RuntimeError('fixture refuses before controller admission')
+        def refuse_join(*_args):raise ValueError('fixture Hub join failed')
+        replacements=dict(campaign_workspace=lambda root,_forward:(root,None),provider_capacity_refusal=lambda _n:None,
+            scorecard_hooks=lambda:None,start_shared_inventory=refuse_inventory,
+            publish_campaign_group=publish,join_native_hubs=refuse_join,
+            infra_stop_predicate=lambda:lambda *_args:False)
+        handlers={number:signal.getsignal(number)for number in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP)}
+        try:
+            with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),patch.dict(os.environ,{
+                'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'hub-failure',
+                'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY':'1' if cancel else '0','CLOUDBENCH_STRICT_BARRIER':'0',
+                'BENCHMARK_HUB_GROUP_RUN_ID':'','BENCHMARK_HUB_PARENT_RUN_ID':''}):
+                code=module['main']()
+        finally:
+            for number,handler in handlers.items():signal.signal(number,handler)
+        summary=json.loads((self.base/'campaigns/hub-failure/summary.json').read_text())
+        return code,summary,published
+
+    def test_publication_cancellation_stays_cancelled_when_hub_join_fails(self):
+        code,summary,_published=self.campaign_hub_cleanup_failure(True)
+        self.assertEqual(code,143)
+        self.assertEqual(summary['status'],'cancelled')
+        self.assertTrue(summary['shared_transport_cleanup_pending'])
+        self.assertEqual(summary['peak_concurrency'],0)
+        self.assertTrue(all(job.get('controller_pid')is None for job in summary['jobs']))
+
+    def test_successful_campaign_still_fails_when_hub_join_fails(self):
+        code,summary,published=self.campaign_hub_cleanup_failure(False)
+        self.assertEqual(published,['passed'])
+        self.assertNotEqual(code,0)
+        self.assertEqual(summary['status'],'failed')
+        self.assertTrue(summary['shared_transport_cleanup_pending'])
+
     def test_campaign_persists_fixed_commands_before_any_controller_admission(self):
         import runpy
         module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
