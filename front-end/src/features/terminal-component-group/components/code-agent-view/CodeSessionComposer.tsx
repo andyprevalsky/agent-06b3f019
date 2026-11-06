@@ -104,9 +104,9 @@ export function CodeSessionComposer({
     (model ? [{ id: model, name: model }] : [])
   ).map((item) => ({ ...item, provider: c.provider }));
   const canChangeSpeed = !!choices && choices.speeds.includes('fast') && !sending;
-  const window = settings.contextWindow;
+  const contextWindow = settings.contextWindow;
   const contextSize = settings.contextTokens ?? 0;
-  const contextPercentage = window ? Math.min(100, (contextSize / window) * 100) : 0;
+  const contextPercentage = contextWindow ? Math.min(100, (contextSize / contextWindow) * 100) : 0;
   const submit = async (attachments?: FilePointer[]) => {
     const delivered = await send(draft.text, {
       ...draft.options,
@@ -150,12 +150,12 @@ export function CodeSessionComposer({
         }
         nub={
           <>
-            {window !== undefined && (
+            {contextWindow !== undefined && (
               <ContextMeter
                 variant="nub"
                 contextPercentage={contextPercentage}
                 contextSize={contextSize}
-                restartThreshold={window}
+                restartThreshold={contextWindow}
               />
             )}
             <QueryInfoMenu />
