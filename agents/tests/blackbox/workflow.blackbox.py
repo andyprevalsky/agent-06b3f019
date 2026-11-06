@@ -2993,6 +2993,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.custom_system_prompt = "Be concise"
     wf.agent_source = "SMS"
     wf.user_context_section = "cached user context"
+    wf.project_context_section = "## Project\nYou are working in the user's project \"Rose\"."
     wf.demo_cache_goal = "stable persisted goal"
     # A simulated agent's clock reads world time (two weeks before today here).
     wf.simulated_clock_offset_seconds = -1_209_600
@@ -3029,6 +3030,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored.compute_token_fetched_at is None
     assert restored.start_time == wf.start_time
     assert restored.user_context_section == "cached user context"
+    assert restored.project_context_section == wf.project_context_section
     assert restored.context == context
     assert restored.simulated_clock_offset_seconds == -1_209_600
     assert restored._continuation_resume_state(context) == state
@@ -3058,6 +3060,44 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     }
     restored.max_iterations = 80
     assert restored._iteration_resume_kwargs()["max_iterations"] == 80
+
+
+async def test_workflow_project_context_appears_once_across_continuation():
+    """V2 (RCA 2026-11-06): the project section is derived from agent config, never duplicated.
+
+    It is kept apart from user_context_section (which a failed context fetch falls
+    back to), recomputed on every start, and carried across continue_as_new so a
+    failed config fetch on the new run keeps it exactly once.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    project = {"name": "Rose", "repo_url": "https://github.com/Rose-Ai-Labs/rose", "default_branch": "main"}
+    wf = _bare_workflow_instance()
+    wf.current_phase = "PLAN"
+    wf.user_context_section = "## Personal Information\nFull Name: Test User"
+    assert wf.project_context_section == ""
+
+    async def prompt(instance) -> str:
+        with patch.object(type(instance), "_advance_cloud_agent_lifecycle", new=AsyncMock()):
+            return await instance.build_system_prompt()
+
+    home_prompt = await prompt(wf)
+    wf._apply_agent_project({"response_schema": None, "project": project})
+    first = await prompt(wf)
+    assert first.count("## Project") == 1 and first.count("Rose-Ai-Labs/rose") == 1
+    assert "## Project" not in wf.user_context_section, "user context stays the per-user section"
+    wf._apply_agent_project({"response_schema": None, "project": project})
+    assert await prompt(wf) == first, "a repeated start recomputes, never appends"
+
+    restored = _bare_workflow_instance()
+    restored.current_phase = "PLAN"
+    restored.user_context_section = wf.user_context_section
+    # wf_continuation_state_round_trip proves project_context_section survives continue_as_new.
+    restored.project_context_section = wf.project_context_section
+    restored._apply_agent_project({})  # the new run's config fetch failed
+    assert await prompt(restored) == first, "a failed fetch keeps the section exactly once"
+    restored._apply_agent_project({"response_schema": None, "project": None})
+    assert await prompt(restored) == home_prompt, "an agent moved to Home drops the section"
 
 
 def test_pending_tool_records_copy_args_and_respect_the_handoff_budget():
@@ -13680,6 +13720,10 @@ async def run_all_tests():
     r.record(
         "wf_continuation_state_round_trip",
         test_workflow_continuation_state_round_trips_complete_runtime,
+    )
+    await r.record_async(
+        "wf_project_context_once_across_continuation",
+        test_workflow_project_context_appears_once_across_continuation,
     )
     r.record("pending_tool_records_budget", test_pending_tool_records_copy_args_and_respect_the_handoff_budget)
     r.record("wf_parks_only_live_run_agent_calls", test_workflow_parks_only_live_run_agent_tool_calls_within_budget)
