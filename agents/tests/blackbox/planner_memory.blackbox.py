@@ -545,6 +545,35 @@ def test_stale_compressor_cache_is_recomputed_without_a_ttl():
     assert by_id["current"].critical_path is not None, "the current version remains a cache hit"
 
 
+def test_benchmark_memory_fixtures_are_cache_hits_at_the_current_compressor_version():
+    """Memory fixtures are pre-compressed history: every row must be a retrieval cache hit.
+
+    A row compressed by an older compressor is treated as stale and recompressed at plan
+    time; when that LLM call cannot finish inside the compression budget the memory-on arm
+    plans with no memory at all (planner-memory-blue-bottle-on, 2026-11-06).
+    """
+    from providers.planner_memory import COMPRESSOR_VERSION, RetrievalConfig, select_hits
+    from scripts.build_memory_fixture import FIXTURE_DIR
+
+    checked = 0
+    for path in sorted(FIXTURE_DIR.glob("*.json")):
+        fixture = json.loads(path.read_text(encoding="utf-8"))
+        rows = fixture.get("rows") if isinstance(fixture, dict) else None
+        if not isinstance(rows, list):
+            continue
+        candidates = [{**row, "similarity": 1.0} for row in rows]
+        hits = {hit.id: hit for hit in select_hits(candidates, RetrievalConfig(min_similarity=0.0, k=len(rows)))}
+        for row in rows:
+            hit = hits.get(row["id"])
+            assert hit is not None, f"{path.name}: row {row['id']} is not retrievable"
+            assert hit.critical_path is not None, (
+                f"{path.name}: row {row['id']} was compressed by {row.get('compressor_version')!r}, "
+                f"not {COMPRESSOR_VERSION!r}; rebuild it with scripts/build_memory_fixture.py"
+            )
+            checked += 1
+    assert checked > 0, "no memory fixture rows were checked"
+
+
 # ── fork ────────────────────────────────────────────────────────────────────
 
 
@@ -1090,6 +1119,10 @@ async def run_all_tests():
     r.record("select_cutoff_dedupe_success", test_select_hits_cutoff_dedupe_success_filter_and_top_k)
     r.record("default_top3_cutoff_070", test_default_config_is_top3_at_cutoff_070)
     r.record("compressor_cache_version", test_stale_compressor_cache_is_recomputed_without_a_ttl)
+    r.record(
+        "memory_fixtures_current_compressor",
+        test_benchmark_memory_fixtures_are_cache_hits_at_the_current_compressor_version,
+    )
     r.record("fork_shape_pairing_render", test_fork_shape_pairing_and_render)
     r.record("render_caps", test_render_caps_total_size)
     r.record("scenario_fixture_exactness", test_memory_scenario_runner_rejects_shared_history)
