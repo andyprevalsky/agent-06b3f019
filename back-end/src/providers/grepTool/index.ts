@@ -9,9 +9,10 @@
  *        ├─ SMS supervisor: grepToolCallSchema in its strict tool union
  *        └─ web chat router: grep action + GREP_TOOL_STRICT_PARAMETERS
  *
- * Strict surfaces receive the same properties, types, enums and descriptions;
- * the only change is the mechanical strict form (every key required, absent
- * values spelled null). grep-tool-single-definition.test.ts fails when a
+ * Strict surfaces receive the same properties, enums and descriptions; the
+ * only changes are the mechanical strict form (every key required, absent
+ * values spelled null) and integers rendered as JSON `number` by the shared
+ * strict emitter (validation still requires whole numbers). grep-tool-single-definition.test.ts fails when a
  * surface sends anything else or defines its own grep, and grep.blackbox.py
  * fails when the JSON drifts from the Python source.
  */

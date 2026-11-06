@@ -42,7 +42,8 @@ function sameJson(a: unknown, b: unknown): boolean {
 
 // --- The strict form is the canonical definition, mechanically --------------
 // Same keys in the same order, same descriptions, enums and value types; the
-// only differences are every key required and absence spelled null.
+// only differences are every key required, absence spelled null, and integers
+// spelled `number`.
 function nonNull(node: JsonSchema): JsonSchema {
   const branches = node.anyOf as JsonSchema[] | undefined;
   return branches === undefined ? node : (branches.find((b) => b.type !== 'null') as JsonSchema);
@@ -54,6 +55,8 @@ function checkStrictMirrors(canonical: JsonSchema, strict: JsonSchema, at: strin
   }
   const c = nonNull(canonical);
   const s = nonNull(strict);
+  // The shared strict emitter renders z.number().int() as `number`; Zod still
+  // rejects fractions, so only the JSON spelling differs.
   const expectedType = c.type === 'integer' ? 'number' : c.type;
   check(s.type === expectedType, `${at}: type ${String(s.type)} != ${String(c.type)}`);
   check(sameJson(c.enum, s.enum), `${at}: enum differs`);

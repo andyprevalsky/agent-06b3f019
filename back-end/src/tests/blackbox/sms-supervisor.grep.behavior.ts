@@ -114,6 +114,16 @@ export async function testGrep_smsRunsTheSharedGrepTool(prisma: PrismaClient) {
     if (multi.sources.join(',') !== 'messages,documents' || multi.matches.length !== 1) {
       throw new Error(`SMS multi-source grep failed: ${JSON.stringify(multi)}`);
     }
+    const defaults = parse(await executeGrepTool({ pattern: 'Gate code' }, userId));
+    if (
+      defaults.sources.join(',') !== 'messages,network,agent_network' ||
+      defaults.matches.length !== 1 ||
+      !String(defaults.message).includes('no current agent tree')
+    ) {
+      throw new Error(
+        `SMS default grep must search the documented defaults: ${JSON.stringify(defaults)}`
+      );
+    }
     const summary = parse(await executeGrepTool({ sources: ['summary'] }, userId));
     if (!String(summary.message).startsWith('LOCAL DATA SOURCES:')) {
       throw new Error(`SMS summary source failed: ${JSON.stringify(summary)}`);

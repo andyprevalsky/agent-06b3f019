@@ -300,14 +300,24 @@ async function testSummarySource(userId: string): Promise<void> {
   }
 }
 
-// A caller with no agent tree (the SMS supervisor) searches the local defaults
-// without agent_network instead of failing on a missing agent_id.
+// A caller with no agent tree (the SMS supervisor) searches the documented
+// defaults; its current agent tree is empty, said in a notice. Naming
+// agent_network explicitly without an agent still fails.
 async function testDefaultsWithoutAgentTree(userId: string): Promise<void> {
   const res = await requestGrep(userId, { pattern: 'Aurora' });
   assertStatus(res.status, 200, res.data);
   const body = assertBody(res.data);
-  if (body.sources.join(',') !== 'messages,network') {
-    throw new Error(`Expected messages,network without an agent, got ${body.sources.join(',')}`);
+  if (body.sources.join(',') !== 'messages,network,agent_network') {
+    throw new Error(`Expected the documented defaults, got ${body.sources.join(',')}`);
+  }
+  requireContent(body, 'Aurora');
+  if (
+    body.matches.some((match) => match.source === 'agent_network') ||
+    !String((res.data as { message?: string }).message).includes('no current agent tree')
+  ) {
+    throw new Error(
+      `Expected an empty agent tree with its notice, got ${JSON.stringify(res.data)}`
+    );
   }
   const explicit = await requestGrep(userId, { pattern: 'Aurora', source: 'agent_network' });
   assertStatus(explicit.status, 400, explicit.data);

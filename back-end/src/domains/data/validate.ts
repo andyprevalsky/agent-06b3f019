@@ -42,6 +42,7 @@ function databaseRegexPattern(pattern: string, multiline: boolean): string {
 }
 
 interface ResolvedSourceSelection {
+  /** The DEFAULT_GREP_SOURCES array itself when the caller named no source. */
   resolvedSources: ValidSource[];
   /** No pattern means "list": agent sources, or only calendar/drive. */
   patternOptional: boolean;
@@ -126,11 +127,11 @@ function requireKnownSources(params: GrepParams): void {
   }
 }
 
-/** The local defaults; agent_network needs an agent tree, so callers without one skip it. */
-function defaultSources(params: GrepParams): ValidSource[] {
-  return params.agent_id === undefined || params.agent_id === ''
-    ? DEFAULT_GREP_SOURCES.filter((source) => source !== 'agent_network')
-    : DEFAULT_GREP_SOURCES;
+/** Defaults without an agent tree search an empty agent_network, which lists nothing. */
+function searchesAnAgentTree(params: GrepParams, sources: ValidSource[]): boolean {
+  return (
+    sources !== DEFAULT_GREP_SOURCES || (params.agent_id !== undefined && params.agent_id !== '')
+  );
 }
 
 /**
@@ -154,13 +155,13 @@ function resolveSourceSelection(params: GrepParams, split: SplitFilters): Resolv
           ? named
           : hasTrajectoryNarrowing(params, split)
             ? ['agent_trajectories']
-            : defaultSources(params);
+            : DEFAULT_GREP_SOURCES;
   validateAgentSourceSelection(params, resolvedSources);
   return {
     resolvedSources,
     patternOptional:
       resolvedSources.includes('agent_trajectories') ||
-      resolvedSources.includes('agent_network') ||
+      (resolvedSources.includes('agent_network') && searchesAnAgentTree(params, resolvedSources)) ||
       resolvedSources.every(isGoogleGrepSource),
   };
 }

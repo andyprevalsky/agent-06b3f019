@@ -916,8 +916,8 @@ class GrepTool(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-
 GrepTool.__doc__ = GREP_TOOL_PROMPT
+
 
 class InspectCodeTool(BaseModel):
     """Ask a read-only code agent about the files in a code agent's workspace.
