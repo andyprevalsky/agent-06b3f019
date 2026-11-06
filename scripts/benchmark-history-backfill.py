@@ -326,6 +326,9 @@ def plan(repo: Path, base: str, hub_runs: list[dict] | None, scan_branches: bool
         windows = [(latest_only._window(r), r) for r in rows]
         prior = [(w, None) for w in landed.get((where, task), [])]
         everything = [item for item in windows + prior if item[0]]
+        if not everything:  # no parseable timestamp orders this group's runs
+            gaps["pre-merge rows without a parseable timestamp"] += len(rows)
+            continue
         latest_start, latest_end = max(everything, key=lambda item: item[0][1])[0]
         for window, row in windows:
             if window and window[0] <= latest_end and window[1] >= latest_start:

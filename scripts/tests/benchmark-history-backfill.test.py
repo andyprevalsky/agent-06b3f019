@@ -83,6 +83,10 @@ class BackfillTests(unittest.TestCase):
             self.git("checkout", "-q", "-b", branch, self.fix_sha)
             self.write_ledger(self.current() + [attempt("t12", True, end, agent)])
             self.commit(f"{branch} history")
+        # a pre-merge row whose timestamp cannot be parsed is reported, never fatal
+        self.git("checkout", "-q", "-b", "fix-bad-time", self.fix_sha)
+        self.write_ledger(self.current() + [attempt("t13", True, "not-a-time", "fix-bad-time")])
+        self.commit("fix-bad-time history")
         self.git("checkout", "-q", "main")
 
         self.hub = Path(self.tmp.name) / "hub.json"
@@ -142,6 +146,7 @@ class BackfillTests(unittest.TestCase):
     def test_backfill_lands_only_merged_latest_runs(self):
         dry = self.run_tool()
         self.assertIn("dry-run:", dry)
+        self.assertIn("gap: pre-merge rows without a parseable timestamp: 1", dry)
         self.assertEqual(self.current()[-1]["agent_id"], "feat-t3", "dry run must not write")
         self.run_tool("--write")
         added = {r["agent_id"]: r for r in self.current() if r.get("backfill_source")}
