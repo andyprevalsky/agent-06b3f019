@@ -212,7 +212,7 @@ async function main(): Promise<void> {
   );
 
   // Admin-health candidates follow the pool ranking.
-  const { githubApiTokenCandidates } = await import('../../domains/admin-health/config');
+  const { githubApiTokenCandidates } = await import('../../domains/admin-health/githubCommits');
   reset();
   pool.recordGithubResponse('primary', 200, limited(0).headers);
   assert.deepStrictEqual(githubApiTokenCandidates(), ['bot2', 'bot3', 'dispatch', 'primary']);

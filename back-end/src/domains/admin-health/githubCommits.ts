@@ -1,7 +1,11 @@
 import { mapWithConcurrency } from '../../providers/concurrency';
-import { ensureGithubAppToken, recordGithubResponse } from '../../providers/githubTokenPool';
+import {
+  ensureGithubAppToken,
+  githubTokenCandidates,
+  recordGithubResponse,
+} from '../../providers/githubTokenPool';
 import { createLogger } from '../../providers/logger';
-import { GITHUB_REPO, githubApiTokenCandidates } from './config';
+import { GITHUB_REPO } from './config';
 
 const log = createLogger('AdminHealth');
 
@@ -21,6 +25,19 @@ const GITHUB_COMMITS_PER_PAGE = 100;
 // ~100 pages of commits took ~35s one at a time; GitHub allows 100 concurrent requests.
 const GITHUB_PAGE_CONCURRENCY = 20;
 const GITHUB_FETCH_BUDGET_MS = 60_000;
+/**
+ * GitHub API tokens for admin-health velocity (commits graph), best first.
+ *
+ * Read at call time (not module load) from the shared token pool: members with
+ * the most remaining quota first, and a present-but-stale `GITHUB_TOKEN` can
+ * still fall back to `GITHUB_DISPATCH_TOKEN` (Render has repeatedly shipped a
+ * dead fine-grained PAT while the dispatch oauth token still has `repo` scope).
+ * It lives here, not in config.ts: the config layer may not import providers.
+ */
+export function githubApiTokenCandidates(): string[] {
+  return githubTokenCandidates('pool');
+}
+
 // 404 counts: GitHub answers 404 when a credential cannot see the private repo.
 const GITHUB_AUTH_FAILURE = /^GitHub (401|403|404|429)$/;
 

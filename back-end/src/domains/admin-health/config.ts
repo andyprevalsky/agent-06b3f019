@@ -1,4 +1,3 @@
-import { githubTokenCandidates } from '../../providers/githubTokenPool';
 import type { AdminHealthTimeSlice } from './types';
 
 // Only production actually contacts waitlist people. The local dev DB is seeded
@@ -39,17 +38,6 @@ export const DAYS_BY_SLICE: Record<AdminHealthTimeSlice, number> = {
 
 export const LINEAR_GRAPHQL_URL = 'https://api.linear.app/graphql';
 export const LINEAR_API_KEY = process.env.LINEAR_API_KEY ?? '';
-/**
- * GitHub API tokens for admin-health velocity (commits graph), best first.
- *
- * Read at call time (not module load) from the shared token pool: members with
- * the most remaining quota first, and a present-but-stale `GITHUB_TOKEN` can
- * still fall back to `GITHUB_DISPATCH_TOKEN` (Render has repeatedly shipped a
- * dead fine-grained PAT while the dispatch oauth token still has `repo` scope).
- */
-export function githubApiTokenCandidates(): string[] {
-  return githubTokenCandidates('pool');
-}
 export const GITHUB_REPO = process.env.ADMIN_HEALTH_GITHUB_REPO ?? 'Rose-Ai-Labs/rose';
 export const LINEAR_ANDY_NAMES = ['Andy Prevalsky', 'Andy'];
 export const LINEAR_TAMARA_NAMES = ['Tamara Chayo', 'Tamy Chayo', 'Tamy', 'Tamara', 'tamarachayo'];

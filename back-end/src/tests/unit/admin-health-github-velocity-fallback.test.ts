@@ -58,7 +58,7 @@ globalThis.fetch = (async (
 }) as typeof fetch;
 
 async function main(): Promise<void> {
-  const { githubApiTokenCandidates } = await import('../../domains/admin-health/config');
+  const { githubApiTokenCandidates } = await import('../../domains/admin-health/githubCommits');
   assert.deepStrictEqual(githubApiTokenCandidates(), [
     'stale_github_pat_should_401',
     'working_dispatch_token',
