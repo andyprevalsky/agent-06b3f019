@@ -1356,10 +1356,16 @@ github_token_can_fetch_repo() {
     }
     printf '[http]\n\textraheader = %s\n' "$header" >"$cfg"
     chmod 600 "$cfg"
-    if ! GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
-        GIT_CONFIG_GLOBAL="$cfg" GIT_CONFIG_NOSYSTEM=1 \
-        git -c credential.helper= ls-remote --exit-code \
-        'https://github.com/Rose-Ai-Labs/rose.git' HEAD >/dev/null 2>&1; then
+    if ! (
+        trap 'rm -f "$cfg"' EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+            GIT_CONFIG_GLOBAL="$cfg" GIT_CONFIG_NOSYSTEM=1 \
+            git -c credential.helper= ls-remote --exit-code \
+            'https://github.com/Rose-Ai-Labs/rose.git' HEAD >/dev/null 2>&1
+    ); then
         rm -f "$cfg"
         return 1
     fi

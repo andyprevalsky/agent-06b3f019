@@ -1470,9 +1470,9 @@ cloudbench_git_credential_github_token() {
       'protocol=https' \
       'host=github.com' \
       'path=Rose-Ai-Labs/rose.git' \
-      'username=x-access-token' \
       '' \
-      | GIT_TERMINAL_PROMPT=0 git -C "$workspace_root" credential fill 2>/dev/null || true
+      | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+          git -c credential.interactive=false -C "$workspace_root" credential fill 2>/dev/null || true
   )
   [ -n "$token" ] || return 1
   printf '%s' "$token"
