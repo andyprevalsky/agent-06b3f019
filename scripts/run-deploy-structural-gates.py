@@ -519,6 +519,14 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
     ),
     Gate(
+        "cloudbench-disposable-volume",
+        ("python3", "scripts/tests/cloudbench-disposable-volume.test.py"),
+    ),
+    Gate(
+        "cloudbench-disposable-volume-cli",
+        ("python3", "scripts/tests/cloudbench-disposable-volume-cli.test.py"),
+    ),
+    Gate(
         "cloudbench-bootstrap-recovery",
         ("python3", "scripts/tests/cloudbench-bootstrap-recovery.test.py"), expected_seconds=200, shards=2
     ),

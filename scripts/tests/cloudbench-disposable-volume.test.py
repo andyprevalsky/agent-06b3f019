@@ -31,8 +31,56 @@ class Backup(unittest.TestCase):
    if self.drift:self.volume['size_gb']=41
    return copy.deepcopy(self.volume)
   raise AssertionError(args)
- def run_config(self,protected=()):
-  self.mod['configure'](self.reg,self.owner,'fixture','cloudbench-fixture','abcd1234','vol_owned',protected,self.command,audit=self.audit,run='run')
+ def run_config(self,protected=(),snapshot_restored=False):
+  self.mod['configure'](self.reg,self.owner,'fixture','cloudbench-fixture','abcd1234','vol_owned',protected,self.command,audit=self.audit,run='run',snapshot_restored=snapshot_restored)
+ def restoring_reads(self,states,ids=None):
+  # Observed descend batch 1 (campaign-20261106-095011-2029870 r001-j0020): the
+  # storage gate saw the snapshot-forked Volume `created`, then the exact GET in
+  # configure returned `restoring` (attached_machine_id null). Two live 40 GB
+  # restores of vs_pRyp2eZ65NwhqMYJLogB stayed `restoring` 6.8 and 8.4 minutes.
+  original=self.command;states=list(states);ids=list(ids or [])
+  self.restore_pauses=[];self.mod['configure'].__globals__['pause_restoring']=lambda:self.restore_pauses.append(1)
+  def restoring(args):
+   value=original(args)
+   if args[:2]==['volumes','show'] and states:
+    value['state']=states.pop(0);value['attached_machine_id']=None
+    if ids:value['id']=ids.pop(0)
+   return value
+  self.command=restoring
+ def test_snapshot_restore_waits_for_created_before_backup_update(self):
+  self.restoring_reads(['restoring','restoring','restoring','created'])
+  self.run_config(snapshot_restored=True)
+  self.assertEqual(len(self.restore_pauses),3)
+  shows=[c[:2] for c in self.calls].index(['volumes','update'])
+  self.assertEqual(sum(c[:2]==['volumes','show'] for c in self.calls[:shows]),4,'backup update issued before the restore settled')
+  self.assertEqual(sum(c[:2]==['volumes','update'] for c in self.calls),1)
+  self.assertFalse(json.loads((self.audit/'volume-backups/vol_owned/verified.json').read_text())['auto_backup_enabled'])
+ def test_snapshot_restore_wait_is_bounded_and_unverified(self):
+  self.restoring_reads(['restoring']*500)
+  self.mod['configure'].__globals__['RESTORE_WAIT_SECONDS']=3*self.mod['RESTORE_POLL_SECONDS']
+  with self.assertRaisesRegex(ValueError,'still restoring'):self.run_config(snapshot_restored=True)
+  self.assertEqual(len(self.restore_pauses),3)
+  self.assertFalse(any(c[:2]==['volumes','update'] for c in self.calls))
+  self.assertFalse((self.audit/'volume-backups/vol_owned/verified.json').exists())
+ def test_restoring_state_on_a_fresh_volume_fails_closed_at_once(self):
+  self.restoring_reads(['restoring','created'])
+  with self.assertRaisesRegex(ValueError,'identity/state changed'):self.run_config()
+  self.assertEqual(self.restore_pauses,[])
+  self.assertFalse(any(c[:2]==['volumes','update'] for c in self.calls))
+ def test_restoring_volume_identity_change_fails_closed(self):
+  self.restoring_reads(['restoring','restoring'],ids=['vol_owned','vol_other'])
+  with self.assertRaisesRegex(ValueError,'identity/state changed'):self.run_config(snapshot_restored=True)
+  self.assertFalse(any(c[:2]==['volumes','update'] for c in self.calls))
+ def test_unknown_state_on_a_snapshot_restore_fails_closed(self):
+  self.restoring_reads(['failed'])
+  with self.assertRaisesRegex(ValueError,'identity/state changed'):self.run_config(snapshot_restored=True)
+  self.assertEqual(self.restore_pauses,[])
+ def test_snapshot_restore_deadline_covers_the_restore_wait(self):
+  seen=[];original=self.mod['bounded']
+  def recording(seconds):seen.append(seconds);return original(seconds)
+  self.mod['configure'].__globals__['bounded']=recording
+  self.run_config(snapshot_restored=True);self.run_config()
+  self.assertEqual(seen,[60+self.mod['RESTORE_WAIT_SECONDS'],60])
  def test_exact_owned_before_boot_and_second_revision_no_update(self):
   self.run_config();self.run_config()
   self.assertEqual(sum(c[:2]==['volumes','update'] for c in self.calls),1)
