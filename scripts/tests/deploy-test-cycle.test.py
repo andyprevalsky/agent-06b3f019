@@ -2306,6 +2306,53 @@ class Cycle(unittest.TestCase):
         job.write_text('controller was admitted\n')
         with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
 
+    def unlaunched_relay_state(self):
+        import shutil
+        state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
+        temporary = tempfile.TemporaryDirectory(prefix='cb-relay-')
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+        authority = dict(parent_pid=2147483000, parent_start='retired-parent',
+            agent_socket=str(directory / 'fly-agent.sock'), inventory_directory=str(campaign / 'shared-inventory'))
+        c.write(directory / 'authority.private.json', authority)
+        c.write(directory / 'startup-cleanup.json', dict(bootstrap_joined=True, broker_joined=True,
+            agent_shutdown_verified=False, agent_retirement_pending=True))
+        for role in ('bootstrap', 'broker'):
+            c.write(directory / (role + '-owner.json'), dict(pid=2147483001, birth='retired-child',
+                parent_pid=authority['parent_pid'], parent_start=authority['parent_start']))
+            (directory / (role + '.private.log')).write_text('unsupported Fly agent version\n')
+        archive = campaign / 'shared-relay'
+        shutil.copytree(directory, archive)
+        c.write(campaign / 'shared-relay-location.json', dict(directory=str(directory)))
+        cli = Path(c.read(paths['adapter'])['runner_log'])
+        cli.write_text(f'Native campaign {campaign}\nValueError: shared transport broker did not initialize\n')
+        proof.update(layout='campaign-unlaunched-relay-v1')
+        proof['files'].update({str(p): c.sha_file(p) for p in [campaign / 'shared-relay-location.json',
+            *directory.iterdir(), *archive.iterdir(), cli]})
+        return state, occurrence, proof, directory
+
+    def test_unlaunched_relay_reconciles_retired_startup_without_test_credit(self):
+        state, occurrence, proof, directory = self.unlaunched_relay_state()
+        original = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
+        self.assertEqual(original, state['attempts'])
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+
+    def test_unlaunched_relay_refuses_an_unsealed_live_agent(self):
+        state, occurrence, proof, directory = self.unlaunched_relay_state()
+        child = subprocess.Popen([sys.executable, '-c',
+            "import ctypes,sys;ctypes.CDLL(None).prctl(15,b'flyctl',0,0,0);print('ready',flush=True);sys.stdin.read()"],
+            env={**os.environ, 'FLY_AGENT_SOCKET_PATH': str(directory / 'fly-agent.sock')},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual('ready', child.stdout.readline().strip())
+            with self.assertRaisesRegex(ValueError, 'unsealed startup agent remains'):
+                c.reconcile(state, occurrence['id'], proof)
+        finally:
+            child.stdin.close();child.wait(timeout=10);child.stdout.close()
+        c.reconcile(state, occurrence['id'], proof)
+
     def isolated_campaign_state(self):
         import time
         state, occurrence, paths, proof, parents = self.campaign_recon_state()

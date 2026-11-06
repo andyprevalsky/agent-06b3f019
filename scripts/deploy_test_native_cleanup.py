@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import runpy
@@ -279,6 +280,62 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     return not rows  # Missing provenance is supported only before ANY native guest allocation.
 
 
+def unlaunched_relay_retired(campaign, bound, document):
+    """Observe startup-only local custody after every exact producer has joined."""
+    location = document(campaign / 'shared-relay-location.json')
+    directory = Path(location['directory'])
+    need(directory.is_absolute() and directory.resolve() == directory
+         and directory.parent == Path('/tmp') and directory.name.startswith('cb-relay-')
+         and directory.is_dir() and not directory.is_symlink(), 'relay startup directory')
+    archive = campaign / 'shared-relay'
+    for name in ('authority.private.json', 'startup-cleanup.json', 'bootstrap.private.log', 'broker.private.log'):
+        need(bound(directory / name) == bound(archive / name), 'relay startup archive differs')
+    authority = document(directory / 'authority.private.json')
+    cleanup = document(directory / 'startup-cleanup.json')
+    socket = directory / 'fly-agent.sock'
+    need(authority.get('agent_socket') == str(socket)
+         and authority.get('inventory_directory') == str(campaign / 'shared-inventory')
+         and cleanup.get('bootstrap_joined') is True
+         and cleanup.get('agent_shutdown_verified') is False
+         and cleanup.get('agent_retirement_pending') is True,
+         'original startup custody')
+    native = runpy.run_path(str(Path(__file__).with_name('cloudbench-shared-relay.py')))
+    native['physical'](directory, True)
+    need(type(authority.get('parent_pid')) is int and authority['parent_pid'] > 1
+         and isinstance(authority.get('parent_start'), str) and bool(authority['parent_start'])
+         and native['birth'](authority['parent_pid']) != authority['parent_start'], 'startup parent still live')
+    for role in ('bootstrap', 'broker'):
+        path = directory / (role + '-owner.json')
+        if not path.exists():
+            need(role == 'broker' and cleanup.get('broker_joined') is False
+                 and not path.is_symlink() and not (archive / path.name).exists(), 'startup producer evidence absent')
+            continue
+        need(bound(path) == bound(archive / path.name), 'startup producer archive differs')
+        owner = document(path)
+        need(owner.get('parent_pid') == authority['parent_pid']
+             and owner.get('parent_start') == authority['parent_start']
+             and type(owner.get('pid')) is int and owner['pid'] > 1
+             and isinstance(owner.get('birth'), str) and bool(owner['birth'])
+             and cleanup.get(role + '_joined') is True
+             and native['birth'](owner['pid']) != owner['birth'], 'startup producer still live')
+    need(not socket.exists() and not socket.is_symlink()
+         and not (directory / 'ready.json').exists() and not (directory / 'ready.json').is_symlink(),
+         'startup agent socket or admitted broker remains')
+    # Before PING/version validation there is no sealed agent PID. Observe the
+    # official executable's unique inherited socket scope, never signal by name.
+    expected = ('FLY_AGENT_SOCKET_PATH=' + str(socket)).encode()
+    for process in Path('/proc').glob('[0-9]*'):
+        try:
+            if process.stat().st_uid != os.getuid() or not (process / 'comm').read_text().strip().startswith('flyctl'):
+                continue
+            need(expected not in (process / 'environ').read_bytes().split(b'\0'), 'unsealed startup agent remains')
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    logs = [directory / name for name in ('bootstrap.private.log', 'broker.private.log')]
+    holders = subprocess.run(['lsof', '-t', '--', *map(str, logs)], capture_output=True, timeout=10)
+    need(holders.returncode == 1 and not holders.stdout and not holders.stderr, 'startup log holder remains')
+
+
 def validate(receipt, owner, proof):
     """Verify immutable native custody evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
@@ -338,7 +395,7 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links = {}, {}
     layout = proof.get('layout')
-    if layout == 'campaign-unlaunched-v1':
+    if layout in {'campaign-unlaunched-v1', 'campaign-unlaunched-relay-v1'}:
         # Missing host tooling can stop inventory before any controller exists.
         # Reconcile only that zero-admission boundary, retaining every native
         # UNVERIFIED outcome. A launched campaign still needs the fleet audit.
@@ -346,8 +403,12 @@ def validate(receipt, owner, proof):
         need(proof.get('campaign') == str(campaign) and not proof.get('purpose')
              and not proof.get('controller_log') and not proof.get('recovered_runtime')
              and reference.get('native_directory') == str(campaign)
-             and str(campaign) in cli_text and "No such file or directory: 'flyctl'" in cli_text,
+             and str(campaign) in cli_text,
              'unlaunched startup failure binding')
+        if layout == 'campaign-unlaunched-v1':
+            need("No such file or directory: 'flyctl'" in cli_text, 'missing executable boundary')
+        else:
+            unlaunched_relay_retired(campaign, bound, document)
         summary = document(campaign / 'summary.json')
         checks, jobs = request['checks'], summary['jobs']
         need(checks and len(set(checks)) == len(checks)
