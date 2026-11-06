@@ -6773,14 +6773,17 @@ async def test_native_codex_terminal_respects_hold_and_newer_active_turn():
         teardown_mock()
 
 
-def _claude_process_session_stream(task, *, filler_events=0, forbidden_write=False):
-    """Claude-native SDK stream for a real Process Bench fixture session.
+def _process_session_stream(task, *, provider="claude", filler_events=0, forbidden_write=False):
+    """Native SDK stream for a real Process Bench fixture session.
 
-    Codec shapes captured from process-meeting-scheduling r001-j0015 (agent
-    4fc14e8a, task f67005e9, 333 raw events): every narrated message streams
-    cumulative ``agent_message`` snapshots keyed by ``item_id`` before its final
-    block, and every Bash call streams a partial ``tool_use`` block start (empty
-    input) before the assistant envelope with the same ``tool_use_id``.
+    Claude codec shapes captured from process-meeting-scheduling r001-j0015
+    (agent 4fc14e8a, task f67005e9, 333 raw events): every narrated message
+    streams cumulative ``agent_message`` snapshots keyed by ``item_id`` before
+    its final block, and every Bash call streams a partial ``tool_use`` block
+    start (empty input) before the assistant envelope with the same
+    ``tool_use_id``. Codex shapes are e2b-templates/codex-code/ws-server.mjs:
+    agent_message deltas, then ``item/started`` (``partial: true``) and
+    ``item/completed`` events sharing the item's ``item_id``.
     """
     import hashlib
     import importlib.util
@@ -6798,16 +6801,30 @@ def _claude_process_session_stream(task, *, filler_events=0, forbidden_write=Fal
     samples = json.loads(
         (Path(__file__).resolve().parents[2] / "benchmarks/fixtures/process-positive-inputs.json").read_text()
     )
-    events: list[dict] = [{"provider": "claude", "type": "session", "status": "starting"}]
-    events += [{"provider": "claude", "type": "cli_message", "text": f"hook {i}"} for i in range(filler_events)]
+    events: list[dict] = [{"provider": provider, "type": "session", "status": "starting"}]
+    events += [{"provider": provider, "type": "cli_message", "text": f"hook {i}"} for i in range(filler_events)]
 
     def narrate(item_id, text, snapshots):
         for size in range(1, snapshots + 1):
             prefix = text[: max(1, len(text) * size // (snapshots + 1))]
-            events.append({"provider": "claude", "type": "agent_message", "item_id": item_id, "text": prefix, "partial": True})
-        events.append({"provider": "claude", "type": "agent_message", "item_id": item_id, "text": text, "partial": False})
+            events.append({"provider": provider, "type": "agent_message", "item_id": item_id, "text": prefix, "partial": True})
+        completed = {"status": "completed"} if provider == "codex" else {}
+        events.append({"provider": provider, "type": "agent_message", "item_id": item_id, "text": text, "partial": False, **completed})
 
     def bash(tool_use_id, tool_input, stdout, tool="Bash"):
+        if provider == "codex":
+            item = {"provider": "codex", "item_id": tool_use_id}
+            if tool == "Write":
+                change = {"type": "file_change", "tool_kind": "file", "changes": [{"path": tool_input["file_path"]}]}
+                events.append({**item, **change, "status": "started", "partial": True})
+                events.append({**item, **change, "status": "completed", "partial": False})
+                return
+            command = shlex.join(["/bin/bash", "-lc", tool_input["command"]])
+            shell = {"type": "command", "tool_kind": "shell", "command": command}
+            events.append({**item, **shell, "status": "started", "partial": True, "output": "", "exit_code": None})
+            events.append({"provider": "codex", "type": "usage", "usage_scope": "turn", "output_tokens": 10})
+            events.append({**item, **shell, "status": "completed", "partial": False, "output": stdout, "exit_code": 0})
+            return
         events.append({"provider": "claude", "type": "tool_use", "tool": tool, "tool_use_id": tool_use_id, "input": {}, "partial": True})
         events.append({"provider": "claude", "type": "tool_use", "tool": tool, "tool_use_id": tool_use_id, "input": tool_input})
         events.append({"provider": "claude", "type": "usage", "usage_scope": "turn", "output_tokens": 10})
@@ -6832,19 +6849,19 @@ def _claude_process_session_stream(task, *, filler_events=0, forbidden_write=Fal
             narrate(f"msg_{index}:1", f"Next I am running {step['action']} for {step['entity']}.", 10)
             bash(f"toolu_{index}", {"command": shlex.join(["python3", FIXTURE_PATH, *args])}, json.dumps(receipt))
     narrate("msg_final:1", "The process is complete; every step returned its fixture receipt. " * 4, 205)
-    events += [{"provider": "claude", "type": "result", "status": "completed"},
-               {"provider": "claude", "type": "turn_ended"}, {"provider": "claude", "type": "final", "status": "completed"}]
+    events += [{"provider": provider, "type": "result", "status": "completed"},
+               {"provider": provider, "type": "turn_ended"}, {"provider": provider, "type": "final", "status": "completed"}]
     return events
 
 
-async def _persisted_judge_evidence_rows(code_events):
+async def _persisted_judge_evidence_rows(code_events, provider="claude"):
     """Run the real producer and repo; return the TOOL rows the backend received."""
     from domains.spawn_claude_code_agent import service
 
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     try:
         await service._persist_code_agent_judge_evidence(
-            agent_id="root", task_id="code-session-1", code_provider="claude",
+            agent_id="root", task_id="code-session-1", code_provider=provider,
             code_events=code_events, output_files=[], action_summary=["ran the process"],
         )
         rows = []
@@ -6859,13 +6876,15 @@ async def _persisted_judge_evidence_rows(code_events):
 
 
 async def test_judge_evidence_of_streamed_claude_session_satisfies_native_process_trace():
-    """H-18 (descend 2026-11-06): a streamed Claude session's judge evidence is complete and counted.
+    """H-18 (descend 2026-11-06): a streamed session's judge evidence is complete and counted.
 
     Observed: process-meeting-scheduling r001-j0015 persisted 84 events with
     steps_taken=333 (raw events incl. superseded agent_message snapshots), and
     the partial tool_use block starts duplicated every native tool identity;
     sessions over 200 retained events were cut to their last 200. Every
     process-* task failed process-native-trace "missing/truncated SDK evidence count".
+    The same collapse dropped every Codex ``command`` start (``partial: true``,
+    same ``item_id`` as its completion): "missing native command start".
     """
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.process_bench import check_process_trace
@@ -6875,28 +6894,29 @@ async def test_judge_evidence_of_streamed_claude_session_satisfies_native_proces
     def trace(rows):
         return {"agent": {"agent_id": "root"}, "messages": rows, "_benchmark": {}}
 
-    # The j0015 shape: well under any page bound once superseded snapshots go.
-    rows = await _persisted_judge_evidence_rows(_claude_process_session_stream(task))
-    passed, reason = check_process_trace(task.process_spec, trace(rows))
-    assert passed, reason
+    for provider in ("claude", "codex"):
+        # The j0015 shape: well under any page bound once superseded snapshots go.
+        rows = await _persisted_judge_evidence_rows(_process_session_stream(task, provider=provider), provider)
+        passed, reason = check_process_trace(task.process_spec, trace(rows))
+        assert passed, (provider, reason)
 
-    # A long session keeps every retained event, so nothing is cut from its head.
-    long_stream = _claude_process_session_stream(task, filler_events=450)
-    rows = await _persisted_judge_evidence_rows(long_stream)
-    passed, reason = check_process_trace(task.process_spec, trace(rows))
-    assert passed, reason
-    assert len(rows) > 1, "the long session must span more than one bounded evidence row"
-    assert all(len(json.loads(r["message"].split("\n\n", 1)[1])["code_agent_events"]) <= 200 for r in rows)
-    # A missing evidence row is still detected as truncated evidence.
-    passed, reason = check_process_trace(task.process_spec, trace(rows[1:]))
-    assert not passed and "truncated SDK evidence count" in reason, reason
+        # A long session keeps every retained event, so nothing is cut from its head.
+        long_stream = _process_session_stream(task, provider=provider, filler_events=450)
+        rows = await _persisted_judge_evidence_rows(long_stream, provider)
+        passed, reason = check_process_trace(task.process_spec, trace(rows))
+        assert passed, (provider, reason)
+        assert len(rows) > 1, "the long session must span more than one bounded evidence row"
+        assert all(len(json.loads(r["message"].split("\n\n", 1)[1])["code_agent_events"]) <= 200 for r in rows)
+        # A missing evidence row is still detected as truncated evidence.
+        passed, reason = check_process_trace(task.process_spec, trace(rows[1:]))
+        assert not passed and "truncated SDK evidence count" in reason, (provider, reason)
 
-    # A forbidden fixture edit at the head of a long session stays visible.
-    rows = await _persisted_judge_evidence_rows(
-        _claude_process_session_stream(task, filler_events=450, forbidden_write=True)
-    )
-    passed, reason = check_process_trace(task.process_spec, trace(rows))
-    assert not passed and "protected fixture was modified" in reason, reason
+        # A forbidden fixture edit at the head of a long session stays visible.
+        rows = await _persisted_judge_evidence_rows(
+            _process_session_stream(task, provider=provider, filler_events=450, forbidden_write=True), provider
+        )
+        passed, reason = check_process_trace(task.process_spec, trace(rows))
+        assert not passed and "protected fixture was modified" in reason, (provider, reason)
 
 
 def test_native_codex_usage_retains_session_scope():

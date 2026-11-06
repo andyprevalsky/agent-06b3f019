@@ -1962,12 +1962,21 @@ def _read_handoff(
     return result, None
 
 
+# Event types whose partial events are snapshots a later event of the same item
+# replaces. Lifecycle events such as a Codex ``command``/``file_change``
+# ``item/started`` (``partial: true``) are not: the start is distinct evidence
+# that its completion does not repeat.
+_SNAPSHOT_EVENT_TYPES = frozenset({"agent_message", "thinking", "tool_use"})
+
+
 def _stream_item_key(event: Dict[str, Any]) -> Optional[tuple[Any, str]]:
-    """The streamed item an event upserts: its ``item_id``, else a ``tool_use`` call's id.
+    """The streamed item a snapshot event upserts: its ``item_id``, else a ``tool_use`` call's id.
 
     Claude streams a tool call's block start as a partial ``tool_use`` (empty
     input) and then the assistant envelope for the same ``tool_use_id``.
     """
+    if event.get("type") not in _SNAPSHOT_EVENT_TYPES:
+        return None
     item_id = event.get("item_id")
     if isinstance(item_id, str):
         return (event.get("type"), item_id)
@@ -1982,9 +1991,10 @@ def _latest_stream_snapshots(code_events: list[Dict[str, Any]]) -> list[Dict[str
 
     Partial ``agent_message``/``thinking`` events carry the cumulative text, so
     every earlier snapshot is a prefix of the latest one (the same upsert-by-item
-    rule ``utils.code_transcript`` applies), and a partial ``tool_use`` block
-    start is replaced by its call's full envelope. The judge evidence would
-    otherwise grow quadratically with the streamed answer and repeat each call.
+    rule ``utils.code_transcript`` applies), and a partial ``tool_use`` is
+    replaced by its call's full record. The judge evidence would otherwise grow
+    quadratically with the streamed answer and repeat each call. Lifecycle
+    starts of other item types are kept (``_SNAPSHOT_EVENT_TYPES``).
     """
     latest: Dict[tuple[Any, str], int] = {}
     for index, event in enumerate(code_events):

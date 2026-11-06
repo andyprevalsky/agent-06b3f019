@@ -11,6 +11,7 @@ symptoms:
   - "Declared evaluator process-native-trace failed: Process Bench: missing/truncated SDK evidence count"
   - "Process Bench: missing/truncated SDK evidence count"
   - "Process Bench: missing/duplicate native tool identity"
+  - "Process Bench: missing native command start"
   - code_agent_sdk_events chip metadata.steps_taken=333 but only 84 code_agent_events
 tags:
   - process-bench
@@ -78,9 +79,7 @@ process-native-trace. The rest now reach agent-behavior checks (`not a direct
 fixture action`, wrong inputs) or were cut at capture and cannot be recovered.
 10k-agent behavior: per code session, ceil(events/200) child-scoped rows,
 each bounded like the old single row. There is no fan-in and no LLM context.
-Known sibling, not changed here: Codex `command` started events
-(`partial: true`, same `item_id` as the completed event) are compacted away,
-so a Codex process session would fail `missing native command start`.
+The same collapse also dropped every Codex `command` start (`partial: true`, same `item_id` as its completion), so a Codex process session failed `missing native command start`. Supersession now applies only to snapshot types (`agent_message`, `thinking`, `tool_use`; `_SNAPSHOT_EVENT_TYPES`). Lifecycle starts of other item types are kept. The blackbox regression covers both providers.
 
 ## Human feedback
 
