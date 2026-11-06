@@ -1,0 +1,46 @@
+{
+ "pr": 1703,
+ "merged_sha": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+ "merged_at": "2026-11-06T13:00:00Z",
+ "reviewed_head": "b02d32ef957b124614ca7a7b62fb5bc58f48c6e9",
+ "scope": "agents runtime only (browser tools); no back-end, front-end or mac-app change",
+ "fly": {
+  "workflow": "deploy-agents.yml",
+  "run_id": 42221949310,
+  "attempt": 1,
+  "conclusion": "success",
+  "deployment_token": "42221949310-1",
+  "job_id": "4c7309dce95df87de7c13a385d0c1197fc2d14b20df710fa9a70788914ef1fae",
+  "job_stage": "SUCCEEDED",
+  "cutover_verify": "monitor-cooperative-cutover --verify run between the deploy-agents completion (13:12:27Z) and the semantic dispatch (13:13:05Z): phase cooperative_drain_complete, live pointer hash f8c85da67cfd matched expected, durable job SUCCEEDED (output observed in-session; not retained as a log)",
+  "superseded_by": "deploy-agents run 42225762040 (PR #1732, 25b44dff3, started 13:28:24Z) moved the live pointer to hash a85f3c9e6fbc, observed 14:36Z; that run later completed with failure at 14:59Z and is not owned by this deploy"
+ },
+ "workflow_migration_validation_13ac": {
+  "command": "validate-prod-workflow-migration.ts --execute",
+  "exit": 0,
+  "result": "every row PASS (45 PASS entries, no FAIL row)",
+  "log_in_archive": "var/tmp/webdecoy-rca/gate13ac.log"
+ },
+ "backend_probes_13a": {
+  "render_lane": "not required (no back-end change); probes run anyway",
+  "health": "ok",
+  "api_agents": 200,
+  "endpoint_smoke": "15/15 production checks healthy",
+  "post_deploy_log_scan": "0 error lines",
+  "evidence": "results observed in-session at about 13:14-13:15Z; command output was not retained as a log"
+ },
+ "semantic_13b": {
+  "workflow": "chat-lifecycle-ratchet.yml",
+  "run_id": 42223715662,
+  "dispatched_at": "2026-11-06T13:13:05Z",
+  "source_sha": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+  "conclusion": "success",
+  "jobs": "all 5 success (Semantic frontend flows; chat latency ratchet agent_execute, web_search, direct_answer, agent_plan)",
+  "observed_complete": "2026-11-06T14:36:05Z",
+  "cli_receipt": "run_deploy_pipeline.py production-semantic recorded status=blocked at 14:36:00Z: gh run view failed with a connection reset by peer while polling (the poller sat from 13:13Z to 14:36Z). The run itself had completed successfully. The CLI could not be rerun: production had since advanced to a later agents deploy, so its Fly lane gate refuses. Receipts: evidence/production-semantic-blocked-receipt.json (top-level status passed refers to the dispatch step; semantic.outcome is failed with the connection-reset error and the run recorded as in_progress), and production receipt after supersede kept in the control archive.",
+  "classification": "gate CLI result remains blocked/unverified; the exact-SHA workflow run is verified success"
+ },
+ "agentcard_13c": "SKIPPED - explicit AgentCard election: browser pointer-tool change; no AgentCard, payment or purchase path changed. Not PASS; no settlement claimed.",
+ "mac_local_execution_acceptance": "SKIPPED - no Mac available: read-only production query 2026-11-06T14:41:48Z (SET TRANSACTION READ ONLY, table LocalDevice, owner 1f85ff25-6e29-4c1b-8739-f917bd101a30) returned 0 rows, 0 seen in the last 15 minutes",
+ "repair_outcome_independent": "original cloud command scripts/run-bench browser-biometrics-webdecoy --ref fa676edc7 --wait PASS (run 20261106-131544-295004, agent d5672824, risk 0.0906 < 0.163; hover before clicks and 0 drags are from the RCA case text written by that thread), recorded by the PR1735 thread: docs/handoffs/pr-1735-closeout/evidence/cloud-pass-fa676edc7.json"
+}

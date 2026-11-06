@@ -1,0 +1,48 @@
+{
+ "failures": [
+  {
+   "id": "32b5b0d2a2444fb3bd2b49b627238647",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "bf81ac6a48871d10d973cd443ce4b31175975a47",
+    "digest": "7d94c78b7b68cc0a58df99354b00d891eff60486901a7fdcea256da264abc4fc"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "description": "deploy-command-structural aggregate: suite deploy-pipeline (scripts/tests/run-deploy-pipeline.test.py) failed check_materialized_reservation_credit(inherited-flag): assert holder['tree_peak_anon_mb'] >= 50 -> KeyError: 'tree_peak_anon_mb'; every other registered suite passed.",
+   "evidence": "Native log /home/boxes/deploy-workers/structural/.context/deploy-worker/4f3cc093ca6512f2cd0501a52af35dbaeefe332ab74329e8e7330856adb5ad5d/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log (suite output after line 126). Load-dependent sampler assertion: the holder lane recorded no anon-PSS peak while 11 gates ran concurrently (load 10-18, MemoryHigh=11G with swap in use). PR #1724 bc31eb4..bf81ac6 changes only scripts/benchmark-history-backfill.py, its test and the ledgers; neither scripts/run_deploy_pipeline.py nor its test changed, and the identical suite passed on bc31eb4 (.context/deploy-pipeline-bc31eb4/attempts/2/initial/deploy-command-structural/receipt.json). Post-merge repair packet: .context/deploy-pipeline-bf81ac6/post-merge-packet-run-deploy-pipeline-tree-peak-anon.json.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound deploy-command-structural gate unchanged without the 11-gate contention; the flaky sampler test gets a post-merge repair packet.",
+   "assigned_evidence": "/home/boxes/deploy-workers/structural/.context/deploy-worker/4f3cc093ca6512f2cd0501a52af35dbaeefe332ab74329e8e7330856adb5ad5d/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log"
+  },
+  {
+   "id": "d8ab9e3c2b9f4cefb93276242b52a9a8",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/cbcontroller/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/cbcontroller",
+    "--stdio"
+   ],
+   "source": {
+    "head": "bf81ac6a48871d10d973cd443ce4b31175975a47",
+    "digest": "7d94c78b7b68cc0a58df99354b00d891eff60486901a7fdcea256da264abc4fc"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "description": "cloudbench-controller aggregate: step environment (scripts/tests/cloudbench-env.test.sh) failed 'FAIL: resolve_github_token returned empty despite available controller credentials' / 'FAIL: validated GitHub token resolver regression failed'; the other 11 steps passed.",
+   "evidence": "Step log /home/boxes/deploy-workers/cbcontroller/.context/cloudbench-local/run-qg83nf8h/environment.log (07:51Z). The live resolver accepts a token only if GET api.github.com/repos/Rose-Ai-Labs/rose/contents returns 200 (REST core quota). The repo GITHUB_TOKEN's REST core quota had been exhausted earlier this deploy (coordinator: until 06:55:47Z) and the 9-controller smoke campaigns plus review traffic drew on the same hourly window ending 07:55:50Z. Reproduced at 08:19Z with quota available (3491/5000): the same resolver snippet from scripts/run-bench-cloud returns a 40-char token (RESOLVED_NONEMPTY). PR #1724 does not touch scripts/run-bench-cloud or cloudbench-env.test.sh.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound cloudbench-controller gate unchanged now that the GitHub REST quota is available.",
+   "assigned_evidence": "/home/boxes/deploy-workers/cbcontroller/.context/cloudbench-local/run-qg83nf8h/environment.log"
+  }
+ ]
+}

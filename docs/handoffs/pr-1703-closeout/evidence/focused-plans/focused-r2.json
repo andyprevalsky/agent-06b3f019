@@ -1,0 +1,99 @@
+{
+ "source": {
+  "head": "4b79be50e644aab2aceb399c1f106b97708f5a2e",
+  "digest": "8186aeab3ffb2ab6609024dcfc7f97007845d2057134912221a78129b712bb58"
+ },
+ "gates": {
+  "agents-coverage-blackbox": {
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/agents-coverage/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/agents-coverage",
+    "--stdio"
+   ],
+   "checks": [
+    "agents-coverage-blackbox"
+   ],
+   "worker_recipe": {
+    "cases": {
+     "agents-coverage-blackbox": {
+      "command": [
+       "bash",
+       "scripts/run-coverage.sh"
+      ],
+      "cwd": "agents",
+      "env": {
+       "AGENTS_COVERAGE_CONCURRENCY": "2",
+       "CONDUCTOR_WORKSPACE_NAME": "dw-agents-coverage",
+       "CONDUCTOR_PORT": "14550",
+       "CONDUCTOR_ROOT_PATH": "/var/tmp/deploy-workers/agents-coverage",
+       "ROSE_USE_SYSTEM_PG": "true",
+       "LOCAL_DB_PORT": "5432",
+       "TMPDIR": "/var/tmp",
+       "NO_PROXY": "localhost,127.0.0.1,::1",
+       "no_proxy": "localhost,127.0.0.1,::1"
+      },
+      "aggregate": true
+     }
+    }
+   }
+  },
+  "deploy-command-structural": {
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "checks": [
+    "deploy-command-structural"
+   ],
+   "worker_recipe": {
+    "cases": {
+     "deploy-command-structural": {
+      "command": [
+       "python3",
+       "scripts/run-deploy-structural-gates.py",
+       "--max-workers",
+       "5"
+      ],
+      "cwd": ".",
+      "env": {
+       "CONDUCTOR_WORKSPACE_NAME": "dw-structural",
+       "CONDUCTOR_PORT": "12000",
+       "CONDUCTOR_ROOT_PATH": "/var/tmp/deploy-workers/structural",
+       "ROSE_USE_SYSTEM_PG": "true",
+       "LOCAL_DB_PORT": "5432",
+       "TMPDIR": "/var/tmp",
+       "NO_PROXY": "localhost,127.0.0.1,::1",
+       "no_proxy": "localhost,127.0.0.1,::1"
+      },
+      "aggregate": true
+     }
+    }
+   }
+  },
+  "smoke": {
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "checks": [
+    "test-mass-agent-run-0",
+    "chat-mode",
+    "spawn-sub-agents",
+    "parallel-tool-calls",
+    "background-agent-message-smoke",
+    "claude-code-agent",
+    "browser-smoke",
+    "browser-biometrics-webdecoy",
+    "agent-payment-new-user-journey",
+    "browser-auth-saved-password-retry",
+    "browser-auth-account-locked",
+    "browser-auth-email-otp"
+   ]
+  }
+ }
+}

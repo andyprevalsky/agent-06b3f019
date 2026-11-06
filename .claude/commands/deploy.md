@@ -1072,6 +1072,7 @@ their assertions or test counts:
 `python3 scripts/tests/deploy-test-semantic.test.py`,
 `python3 scripts/tests/deploy-test-static.test.py`,
 `python3 scripts/tests/benchmark-history-latest-only.test.py`,
+`python3 scripts/tests/benchmark-history-backfill.test.py`,
 `python3 scripts/tests/cloudbench-full-selection.test.py`,
 `python3 -m unittest discover -s scripts/live_display -p test_*.py`,
 `python3 scripts/tests/cloudbench-provider-capacity.test.py`,

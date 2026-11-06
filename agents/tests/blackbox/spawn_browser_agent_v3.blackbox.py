@@ -11938,7 +11938,7 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     ah = MagicMock()
     ah.record_action = AsyncMock()
 
-    async def drag(dom_service, action_history, params):
+    async def drag(dom_service, action_history, params, humanizer=None):
         await action_history.record_action(
             dom_service=dom_service,
             action="drag",
@@ -11976,6 +11976,188 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     assert recorded["params"] == {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4, "steps": 10}
     assert drag_mock.await_args.args[2]["start_x"] == 1
     assert drag_mock.await_args.args[2]["end_y"] == 4
+
+
+async def test_execute_action_hover_moves_pointer_without_pressing():
+    """hover is the pointer-only move the webdecoy agents tried to fake with drag.
+
+    Repro: browser-biometrics-webdecoy agents 98fac0b3/1eeef95c sent
+    drag({"end_x": 480, "end_y": 408}) 147-177 times because no advertised tool
+    could move the pointer without pressing the button.
+    """
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    submit = SimpleNamespace(tag_name="button", text_content="Submit", get_all_children_text=lambda: "Submit")
+    dom = SimpleNamespace(
+        session=MagicMock(),
+        selector_map={2827: submit},
+        get_element_coordinates=AsyncMock(return_value=(481, 409)),
+        get_element_at_coordinates=AsyncMock(return_value=None),
+        ensure_browser_overlays_suppressed=AsyncMock(),
+    )
+    humanizer = MagicMock()
+    humanizer.hover = AsyncMock()
+    humanizer.click_at_coords = AsyncMock()
+    humanizer.drag_between = AsyncMock()
+    history = ActionHistory()
+
+    to_point = await execute_action(dom, history, {"action": "hover", "params": {"x": 480, "y": 408}}, humanizer=humanizer)
+    assert to_point["success"] is True, to_point
+    to_element = await execute_action(dom, history, {"action": "hover", "index": 2827, "params": {"index": 2827}}, humanizer=humanizer)
+    assert to_element["success"] is True, to_element
+
+    assert [call.args for call in humanizer.hover.await_args_list] == [(480, 408), (481, 409)]
+    humanizer.click_at_coords.assert_not_awaited()
+    humanizer.drag_between.assert_not_awaited()
+    entries = history.get_entries()
+    assert [entry["action"] for entry in entries[-2:]] == ["hover", "hover"]
+    assert entries[-2]["coordinates"] == {"x": 480, "y": 408}
+    assert entries[-1]["coordinates"] == {"x": 481, "y": 409}
+
+    missing = await execute_action(dom, history, {"action": "hover", "params": {}}, humanizer=humanizer)
+    assert missing["success"] is False and "hover requires index" in missing["error"]
+
+    # Without a humanizer, hover falls back like an unhumanized click: one pointer move, no press.
+    send = AsyncMock()
+    dom.session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=SimpleNamespace(
+        session_id="sess-1",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Input=SimpleNamespace(dispatchMouseEvent=send))),
+    )))
+    unhumanized = await execute_action(dom, history, {"action": "hover", "params": {"x": 10, "y": 20}})
+    assert unhumanized["success"] is True, unhumanized
+    assert [call.kwargs["params"] for call in send.await_args_list] == [{"type": "mouseMoved", "x": 10, "y": 20}]
+
+
+async def test_humanized_drag_approaches_start_before_pressing():
+    """A raw CDP drag presses where the pointer teleported to.
+
+    Repro: browser-biometrics-webdecoy dc306296 (0.164 > 0.163 ratchet) and local
+    1eeef95c each made one drag and FCaptcha reported "vision_ai: Click injected
+    with no pointer trajectory (1 teleport clicks)"; humanizer.drag_between first
+    travels to the start point, so the dispatcher must use it when present.
+    """
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    send = AsyncMock()
+    dom = SimpleNamespace(
+        session=SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=SimpleNamespace(
+            session_id="sess-1",
+            cdp_client=SimpleNamespace(send=SimpleNamespace(Input=SimpleNamespace(dispatchMouseEvent=send))),
+        ))),
+        selector_map={},
+        get_element_at_coordinates=AsyncMock(return_value=None),
+        ensure_browser_overlays_suppressed=AsyncMock(),
+    )
+    humanizer = MagicMock()
+    humanizer.drag_between = AsyncMock()
+    history = ActionHistory()
+    out = await execute_action(
+        dom,
+        history,
+        {"action": "drag", "params": {"start_x": 400, "start_y": 450, "end_x": 565, "end_y": 592, "steps": 30}},
+        humanizer=humanizer,
+    )
+    assert out["success"] is True, out
+    humanizer.drag_between.assert_awaited_once_with(400, 450, 565, 592, steps=30)
+    send.assert_not_awaited()
+    assert history.get_entries()[-1]["action"] == "drag"
+
+
+async def test_humanized_drag_fails_when_cdp_move_breaks_after_press():
+    """A CDP press followed by a failed CDP move must release and fail, not report success.
+
+    CodeRabbit on PR #1703: drag_between used to continue with Playwright moves
+    that have no matching Playwright press, so the drag could fail while the
+    executor recorded success.
+    """
+    from browser_tools.dom_service import ActionHistory
+    from browser_tools.humanizer import BrowserHumanizer
+    from browser_tools.tool_executor_v2 import _execute_drag
+
+    sent = []
+
+    class FakeCdp:
+        async def send(self, method, params):
+            sent.append(params)
+            if params.get("type") == "mouseMoved" and params.get("buttons") == 1:
+                raise RuntimeError("Target closed")
+            return {}
+
+    class FakeMouse:
+        def __init__(self):
+            self.ups = 0
+
+        async def move(self, *args, **kwargs):
+            return None
+
+        async def down(self, *args, **kwargs):
+            return None
+
+        async def up(self, *args, **kwargs):
+            self.ups += 1
+
+    mouse = FakeMouse()
+    cdp = FakeCdp()
+    page = SimpleNamespace(
+        mouse=mouse,
+        keyboard=SimpleNamespace(press=AsyncMock()),
+        viewport_size={"width": 1280, "height": 800},
+        context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=cdp)),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+    humanizer._cdp_mouse_transport_enabled = True
+    history = ActionHistory()
+    dom = SimpleNamespace(session=SimpleNamespace(), selector_map={}, get_element_at_coordinates=AsyncMock(return_value=None))
+    with patch("browser_tools.humanizer.asyncio.sleep", new_callable=AsyncMock):
+        out = await _execute_drag(
+            dom, history, {"start_x": 10, "start_y": 20, "end_x": 300, "end_y": 20, "steps": 4}, humanizer=humanizer,
+        )
+    assert out["success"] is False and "drag failed" in out["error"], out
+    assert any(p.get("type") == "mousePressed" for p in sent)
+    assert mouse.ups == 1
+    assert not history.get_entries()
+
+
+async def test_humanized_drag_releases_button_when_cancelled_after_press():
+    """Cancellation between press and release must still release the button.
+
+    CodeRabbit on PR #1703: the raw-CDP drag releases in a finally; the humanized
+    drag_between had no equivalent, so a cancelled step left the button held.
+    """
+    from browser_tools.humanizer import BrowserHumanizer
+
+    sent = []
+    held_move_started = asyncio.Event()
+
+    class FakeCdp:
+        async def send(self, method, params):
+            sent.append(params)
+            if params.get("type") == "mouseMoved" and params.get("buttons") == 1:
+                held_move_started.set()
+                await asyncio.Event().wait()  # never answers: the step gets cancelled here
+            return {}
+
+    page = SimpleNamespace(
+        mouse=SimpleNamespace(move=AsyncMock(), down=AsyncMock(), up=AsyncMock()),
+        keyboard=SimpleNamespace(press=AsyncMock()),
+        viewport_size={"width": 1280, "height": 800},
+        context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=FakeCdp())),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+    humanizer._cdp_mouse_transport_enabled = True
+    task = asyncio.create_task(humanizer.drag_between(10, 20, 300, 20, steps=4))
+    await asyncio.wait_for(held_move_started.wait(), timeout=10)
+    task.cancel()
+    try:
+        await task
+        raise AssertionError("cancelled drag must propagate CancelledError")
+    except asyncio.CancelledError:
+        pass
+    types = [p.get("type") for p in sent]
+    assert "mousePressed" in types
+    assert types[-1] == "mouseReleased", types
 
 
 async def test_action_history_record_action_accepts_tuple_coordinates():
@@ -31557,7 +31739,7 @@ async def _drive_browser_write_pause_archive_boundary(
                     carrier.is_paused = wf.is_paused
                     carrier._pause_signal_sequence = getattr(wf, "_pause_signal_sequence", 0)
                     carrier._pending_tool_resumes = wf._pending_tool_resumes
-                    state = carrier._continuation_resume_state(copy.deepcopy(wf.context))
+                    state = carrier._continuation_resume_state()
                     restored = AgentWorkflow()
                     restored._restore_deployment_state(state)
                     assert restored._pause_signal_sequence == (1 if pause else 0)
@@ -35767,6 +35949,22 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_drag_dispatches_to_tool_executor",
         test_execute_action_drag_dispatches_to_tool_executor,
+    )
+    await r.record_async(
+        "execute_action_hover_moves_pointer_without_pressing",
+        test_execute_action_hover_moves_pointer_without_pressing,
+    )
+    await r.record_async(
+        "humanized_drag_approaches_start_before_pressing",
+        test_humanized_drag_approaches_start_before_pressing,
+    )
+    await r.record_async(
+        "humanized_drag_fails_when_cdp_move_breaks_after_press",
+        test_humanized_drag_fails_when_cdp_move_breaks_after_press,
+    )
+    await r.record_async(
+        "humanized_drag_releases_button_when_cancelled_after_press",
+        test_humanized_drag_releases_button_when_cancelled_after_press,
     )
     await r.record_async(
         "action_history_record_action_accepts_tuple_coordinates",

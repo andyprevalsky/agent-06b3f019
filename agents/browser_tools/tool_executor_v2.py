@@ -261,8 +261,15 @@ async def _execute_drag(
     dom_service: DOMService,
     action_history: ActionHistory,
     args: Dict[str, Any],
+    *,
+    humanizer: Any = None,
 ) -> Dict[str, Any]:
-    """Drag via CDP mousePressed → mouseMoved → mouseReleased (browser-use Element.drag_to)."""
+    """Drag via CDP mousePressed → mouseMoved → mouseReleased (browser-use Element.drag_to).
+
+    With a humanizer the pointer first travels to the start point along a human
+    trajectory; the raw CDP path presses at a pointer that jumped there, which
+    FCaptcha scores as "Click injected with no pointer trajectory (teleport clicks)".
+    """
     session = dom_service.session
     if not session:
         return {"success": False, "error": "Browser not connected"}
@@ -292,6 +299,23 @@ async def _execute_drag(
         start_x, start_y = start
         end_x, end_y = end
         steps = max(2, min(120, int(args.get("steps") or 24)))
+        result = {
+            "success": True,
+            "start": {"x": start_x, "y": start_y},
+            "end": {"x": end_x, "y": end_y},
+            "steps": steps,
+        }
+
+        if humanizer is not None:
+            await humanizer.drag_between(start_x, start_y, end_x, end_y, steps=steps)
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="drag",
+                coordinates=(start_x, start_y),
+                params={"end": {"x": end_x, "y": end_y}, "steps": steps},
+                result={"success": True},
+            )
+            return result
 
         cdp_session = await session.get_or_create_cdp_session()
         session_id = cdp_session.session_id
@@ -344,12 +368,7 @@ async def _execute_drag(
                 params={"end": {"x": end_x, "y": end_y}, "steps": steps},
                 result={"success": True},
             )
-            return {
-                "success": True,
-                "start": {"x": start_x, "y": start_y},
-                "end": {"x": end_x, "y": end_y},
-                "steps": steps,
-            }
+            return result
         finally:
             if pressed:
                 with contextlib.suppress(Exception):
