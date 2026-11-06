@@ -1,0 +1,219 @@
+{
+ "failures": [
+  {
+   "id": "634b6e5b42374fd394830f73d5737f91",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/cbcontroller/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/cbcontroller",
+    "--stdio"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloudbench-controller: worker setup `bash scripts/run-deploy-stage --start` refused with 'deploy timing run already active: 20261106-0654\u2026' left open by the e51b568 cycle's TERM interruption; no test executed.",
+   "evidence": "Worker setup log /home/boxes/deploy-workers/cbcontroller/.context/deploy-worker/3d2b620d79f5e7156e7df86236cebddb6fb292105d90e7c45bd3ccc0febe8521/8fb6d5f37e8055ce720bd0b1d56587f88c0071f285966ba17e72b2b12672aa73.log: 'deploy timing lifecycle error: deploy timing run already active'. Worker-state artifact of the earlier interruption (.context/deploy-pipeline/evidence/attempt6-final-e51b568-infra-failures.json), not PR code; this attempt's cleanup ran `run-deploy-stage --finish`, closing the stale run.",
+   "assigned_reason": "Deploy owner keeps the repair: the stale timing run is closed; rerun the bound gate unchanged.",
+   "assigned_evidence": "/home/boxes/deploy-workers/cbcontroller/.context/deploy-worker/3d2b620d79f5e7156e7df86236cebddb6fb292105d90e7c45bd3ccc0febe8521/8fb6d5f37e8055ce720bd0b1d56587f88c0071f285966ba17e72b2b12672aa73.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "fa185319e4394dbeaa64bd5f5c5aea79",
+   "check": "semantic-stack/semantic-stack",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/semantic/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/semantic",
+    "--stdio"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "semantic-stack: worker setup `bash scripts/run-deploy-stage --start` refused with 'deploy timing run already active: 20261106-0654\u2026' left open by the e51b568 cycle's TERM interruption; no test executed.",
+   "evidence": "Worker setup log /home/boxes/deploy-workers/semantic/.context/deploy-worker/2e7234f8d0e908b54b3cc3944a8802b6e82e8084983a8cb34b3880bce04d831b/8fb6d5f37e8055ce720bd0b1d56587f88c0071f285966ba17e72b2b12672aa73.log: 'deploy timing lifecycle error: deploy timing run already active'. Worker-state artifact of the earlier interruption (.context/deploy-pipeline/evidence/attempt6-final-e51b568-infra-failures.json), not PR code; this attempt's cleanup ran `run-deploy-stage --finish`, closing the stale run.",
+   "assigned_reason": "Deploy owner keeps the repair: the stale timing run is closed; rerun the bound gate unchanged.",
+   "assigned_evidence": "/home/boxes/deploy-workers/semantic/.context/deploy-worker/2e7234f8d0e908b54b3cc3944a8802b6e82e8084983a8cb34b3880bce04d831b/8fb6d5f37e8055ce720bd0b1d56587f88c0071f285966ba17e72b2b12672aa73.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "30771871314f4a3d9ddf7fa2d5460616",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/test-mass-agent-run-0: campaign job never provisioned. The controller waited on the shared warm-source donor 683e47df5094d8, which another owner's fleet had started (12 navi-whisper-lux-bench Machines created 07:03-07:13Z, no controller on this host); 6 jobs exited with '\u274c warm source must be stopped before fleet provisioning (state=started)' and 3 were TERMed during the wait (07:20:13, exit 143).",
+   "evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log and campaign job logs r001-j000*.log (each shows 'waiting for machine 683e47df5094d8 to stop' x8). Campaign summary status failed, no shared-cleanup flags, nothing provisioned. Shared-resource contention on the Fly bench app; PR #1724 changes no cloudbench/controller code (scripts/benchmark-history-*.py, CLAUDE.md, deploy.md, ledgers). Donor observed 'stopped' and the app back to 14 Machines at 07:25Z.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound smoke gate unchanged once the shared donor is free (it was stopped at 07:25Z).",
+   "assigned_evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "635cccc885c74b09898246e37c27fdbf",
+   "check": "smoke/chat-mode",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/chat-mode: campaign job never provisioned. The controller waited on the shared warm-source donor 683e47df5094d8, which another owner's fleet had started (12 navi-whisper-lux-bench Machines created 07:03-07:13Z, no controller on this host); 6 jobs exited with '\u274c warm source must be stopped before fleet provisioning (state=started)' and 3 were TERMed during the wait (07:20:13, exit 143).",
+   "evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log and campaign job logs r001-j000*.log (each shows 'waiting for machine 683e47df5094d8 to stop' x8). Campaign summary status failed, no shared-cleanup flags, nothing provisioned. Shared-resource contention on the Fly bench app; PR #1724 changes no cloudbench/controller code (scripts/benchmark-history-*.py, CLAUDE.md, deploy.md, ledgers). Donor observed 'stopped' and the app back to 14 Machines at 07:25Z.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound smoke gate unchanged once the shared donor is free (it was stopped at 07:25Z).",
+   "assigned_evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "6719bde41650405bbb570a1bd196cd96",
+   "check": "smoke/spawn-sub-agents",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/spawn-sub-agents: campaign job never provisioned. The controller waited on the shared warm-source donor 683e47df5094d8, which another owner's fleet had started (12 navi-whisper-lux-bench Machines created 07:03-07:13Z, no controller on this host); 6 jobs exited with '\u274c warm source must be stopped before fleet provisioning (state=started)' and 3 were TERMed during the wait (07:20:13, exit 143).",
+   "evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log and campaign job logs r001-j000*.log (each shows 'waiting for machine 683e47df5094d8 to stop' x8). Campaign summary status failed, no shared-cleanup flags, nothing provisioned. Shared-resource contention on the Fly bench app; PR #1724 changes no cloudbench/controller code (scripts/benchmark-history-*.py, CLAUDE.md, deploy.md, ledgers). Donor observed 'stopped' and the app back to 14 Machines at 07:25Z.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound smoke gate unchanged once the shared donor is free (it was stopped at 07:25Z).",
+   "assigned_evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "3ecb5bbcc3384bcca555bc9d92fc0e80",
+   "check": "smoke/parallel-tool-calls",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/parallel-tool-calls: campaign job never provisioned. The controller waited on the shared warm-source donor 683e47df5094d8, which another owner's fleet had started (12 navi-whisper-lux-bench Machines created 07:03-07:13Z, no controller on this host); 6 jobs exited with '\u274c warm source must be stopped before fleet provisioning (state=started)' and 3 were TERMed during the wait (07:20:13, exit 143).",
+   "evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log and campaign job logs r001-j000*.log (each shows 'waiting for machine 683e47df5094d8 to stop' x8). Campaign summary status failed, no shared-cleanup flags, nothing provisioned. Shared-resource contention on the Fly bench app; PR #1724 changes no cloudbench/controller code (scripts/benchmark-history-*.py, CLAUDE.md, deploy.md, ledgers). Donor observed 'stopped' and the app back to 14 Machines at 07:25Z.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound smoke gate unchanged once the shared donor is free (it was stopped at 07:25Z).",
+   "assigned_evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "8409c94c63ed4608bc80b7d854e59e3c",
+   "check": "smoke/background-agent-message-smoke",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/background-agent-message-smoke: campaign job never provisioned. The controller waited on the shared warm-source donor 683e47df5094d8, which another owner's fleet had started (12 navi-whisper-lux-bench Machines created 07:03-07:13Z, no controller on this host); 6 jobs exited with '\u274c warm source must be stopped before fleet provisioning (state=started)' and 3 were TERMed during the wait (07:20:13, exit 143).",
+   "evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log and campaign job logs r001-j000*.log (each shows 'waiting for machine 683e47df5094d8 to stop' x8). Campaign summary status failed, no shared-cleanup flags, nothing provisioned. Shared-resource contention on the Fly bench app; PR #1724 changes no cloudbench/controller code (scripts/benchmark-history-*.py, CLAUDE.md, deploy.md, ledgers). Donor observed 'stopped' and the app back to 14 Machines at 07:25Z.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound smoke gate unchanged once the shared donor is free (it was stopped at 07:25Z).",
+   "assigned_evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "0ebdeccd1810440e8ac42b3e9914a194",
+   "check": "smoke/claude-code-agent",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/claude-code-agent: campaign job never provisioned. The controller waited on the shared warm-source donor 683e47df5094d8, which another owner's fleet had started (12 navi-whisper-lux-bench Machines created 07:03-07:13Z, no controller on this host); 6 jobs exited with '\u274c warm source must be stopped before fleet provisioning (state=started)' and 3 were TERMed during the wait (07:20:13, exit 143).",
+   "evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log and campaign job logs r001-j000*.log (each shows 'waiting for machine 683e47df5094d8 to stop' x8). Campaign summary status failed, no shared-cleanup flags, nothing provisioned. Shared-resource contention on the Fly bench app; PR #1724 changes no cloudbench/controller code (scripts/benchmark-history-*.py, CLAUDE.md, deploy.md, ledgers). Donor observed 'stopped' and the app back to 14 Machines at 07:25Z.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound smoke gate unchanged once the shared donor is free (it was stopped at 07:25Z).",
+   "assigned_evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "72e3b042cc7a4599aac7d8f3a9ae9f15",
+   "check": "smoke/browser-smoke",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/browser-smoke: campaign job never provisioned. The controller waited on the shared warm-source donor 683e47df5094d8, which another owner's fleet had started (12 navi-whisper-lux-bench Machines created 07:03-07:13Z, no controller on this host); 6 jobs exited with '\u274c warm source must be stopped before fleet provisioning (state=started)' and 3 were TERMed during the wait (07:20:13, exit 143).",
+   "evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log and campaign job logs r001-j000*.log (each shows 'waiting for machine 683e47df5094d8 to stop' x8). Campaign summary status failed, no shared-cleanup flags, nothing provisioned. Shared-resource contention on the Fly bench app; PR #1724 changes no cloudbench/controller code (scripts/benchmark-history-*.py, CLAUDE.md, deploy.md, ledgers). Donor observed 'stopped' and the app back to 14 Machines at 07:25Z.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound smoke gate unchanged once the shared donor is free (it was stopped at 07:25Z).",
+   "assigned_evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "e60ced2f220747e9bdb7d05a163c80f1",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/browser-biometrics-webdecoy: campaign job never provisioned. The controller waited on the shared warm-source donor 683e47df5094d8, which another owner's fleet had started (12 navi-whisper-lux-bench Machines created 07:03-07:13Z, no controller on this host); 6 jobs exited with '\u274c warm source must be stopped before fleet provisioning (state=started)' and 3 were TERMed during the wait (07:20:13, exit 143).",
+   "evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log and campaign job logs r001-j000*.log (each shows 'waiting for machine 683e47df5094d8 to stop' x8). Campaign summary status failed, no shared-cleanup flags, nothing provisioned. Shared-resource contention on the Fly bench app; PR #1724 changes no cloudbench/controller code (scripts/benchmark-history-*.py, CLAUDE.md, deploy.md, ledgers). Donor observed 'stopped' and the app back to 14 Machines at 07:25Z.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound smoke gate unchanged once the shared donor is free (it was stopped at 07:25Z).",
+   "assigned_evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log",
+   "assigned_repair": true
+  },
+  {
+   "id": "684942a0af9b4cada846c07c26071814",
+   "check": "smoke/agent-payment-new-user-journey",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+    "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-new-user-journey: campaign job never provisioned. The controller waited on the shared warm-source donor 683e47df5094d8, which another owner's fleet had started (12 navi-whisper-lux-bench Machines created 07:03-07:13Z, no controller on this host); 6 jobs exited with '\u274c warm source must be stopped before fleet provisioning (state=started)' and 3 were TERMed during the wait (07:20:13, exit 143).",
+   "evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log and campaign job logs r001-j000*.log (each shows 'waiting for machine 683e47df5094d8 to stop' x8). Campaign summary status failed, no shared-cleanup flags, nothing provisioned. Shared-resource contention on the Fly bench app; PR #1724 changes no cloudbench/controller code (scripts/benchmark-history-*.py, CLAUDE.md, deploy.md, ledgers). Donor observed 'stopped' and the app back to 14 Machines at 07:25Z.",
+   "assigned_reason": "Deploy owner keeps the repair: rerun the bound smoke gate unchanged once the shared donor is free (it was stopped at 07:25Z).",
+   "assigned_evidence": ".context/deploy-cloud/f4850a7b42809d5ca44d2dc70585b4e3a2777efe3a31394e20c08bca8e091b36/cli.log",
+   "assigned_repair": true
+  }
+ ]
+}

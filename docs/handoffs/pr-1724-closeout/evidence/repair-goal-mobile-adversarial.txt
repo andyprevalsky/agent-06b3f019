@@ -1,0 +1,24 @@
+First, set this thread's title to start with the exact prefix `--ai--` (for example `dvb-onbox threads set-title --title " --ai-- Test repair: mobile-adversarial 10k copy-menus Open menu timeout"`) and verify it.
+
+/goal Fix front-end/tests-e2e/mobile-adversarial-trajectories.spec.ts › "10k message details, source links and mobile/desktop copy menus remain usable" within the production semantic frontend gate, make the original failing command pass reliably, and finish /deploy through merge, production verification, cleanup and a completed deploy scorecard.
+
+Failed test: front-end/tests-e2e/mobile-adversarial-trajectories.spec.ts:327 › 10k message details, source links and mobile/desktop copy menus remain usable
+Command: production semantic workflow `chat-lifecycle-ratchet.yml` job "Semantic frontend flows" (`SEMANTIC_GREP_INVERT="chat full-lifecycle latency" SEMANTIC_WORKERS=4 bash front-end/scripts/run-semantic-tests.sh --prod` against https://www.roselabs.ai + https://navi-j9a9.onrender.com), dispatched by `python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha 0ee70b27c83a9ac586a958fb3db4df8f5e5d9c32 ...`
+Scope: the mobile adversarial trajectory semantic suite (10k-message history, details/source links, mobile and desktop copy menus). Determine whether the stall is a real UI responsiveness defect on large histories (long tasks up to 2.3 s observed in the run's MASSIVE_SAMPLE lines) or a test synchronization race, and fix the root cause. Do not raise timeouts, weaken assertions, or skip the case.
+Exact error:
+```
+✘ 53 [chromium] › tests-e2e/mobile-adversarial-trajectories.spec.ts:327:1 › 10k message details, source links and mobile/desktop copy menus remain usable (30.2s)
+TimeoutError: locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for getByRole('button', { name: 'Open menu', exact: true })
+> 16 |   await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+    at select (front-end/tests-e2e/mobile-adversarial-trajectories.spec.ts:16:70)
+    at front-end/tests-e2e/mobile-adversarial-trajectories.spec.ts:346:11
+1 failed, 6 skipped, 46 passed (5.0m)
+```
+Failure evidence: GitHub Actions run https://github.com/Rose-Ai-Labs/rose/actions/runs/42191005446 attempt 1 (job "Semantic frontend flows", 2026-11-06T08:54–08:59Z; Playwright artifacts test-results/mobile-adversarial-traject-746e6-op-copy-menus-remain-usable-chromium/ incl. test-failed-1.png and error-context.md). The same job passed on attempt 2 (same source, 09:01–09:07Z). The previous dispatched production semantic run 42168007805 (24357305f, 05:22Z) passed; no front-end/ change landed between 24357305f and 0ee70b27c.
+Failed source: 0ee70b27c83a9ac586a958fb3db4df8f5e5d9c32 (production at that time; PR #1724 changed no front-end/back-end code)
+Originating merge: 0ee70b27c83a9ac586a958fb3db4df8f5e5d9c32 (PR #1724)
+Originating devbox: b2fce81e-aeaa-470a-a8d8-e357c322fe90 (this repair must run elsewhere)
+
+Read CLAUDE.md and follow /RCA. Work autonomously from current main; before repair work, verify this is a different devbox and its project-folder membership is Bugs using the boxes-devbox-folders skill. Keep this /goal and all deployment coordination here; never depend on the originating box staying open. Retain every needed artifact here or in accessible durable storage. Do not ask questions or depend on human replies. Resolve implementation choices using the existing instructions and evidence. Prove the assigned test passes, then carry the fix through /deploy to its completed scorecard. An OPEN diagnosis, observability report, draft PR or stopped investigation does not complete this goal. Do not waive or re-delegate the assigned test as a substitute for fixing it. Preserve test intent, assertions, timeouts and existing permissions; never fabricate success. Keep working until the goal is achieved, including ordinary review and production work.
