@@ -210,7 +210,10 @@ Outcome on the merged fix: `scripts/run-bench browser-biometrics-webdecoy
 --ref fa676edc7 --wait` (cloud fleet, Tilion, run 20261106-131544-295004,
 agent d5672824, receipt base_sha fa676edc7) passed in 133 s with captured risk
 0.0906. It made no drag, called `hover` before its clicks, and had no
-`vision_ai` or teleport detection.
+`vision_ai` or teleport detection. Summary and receipt hash:
+`docs/handoffs/pr-1735-closeout/evidence/cloud-pass-fa676edc7.json`. The
+control and cloud-pass ledger rows are in
+`docs/handoffs/pr-1735-closeout/evidence/ledger-rows-pending-main.jsonl`.
 
 ## Human feedback
 

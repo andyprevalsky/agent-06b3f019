@@ -1,0 +1,13 @@
+Original failing command shape on merged main fa676edc7 (PR #1703 merge):
+  scripts/run-bench browser-biometrics-webdecoy --ref fa676edc7e68cdf13616f945f8362c06f6cbf417 --wait
+
+Attempt 1, fleet run 20261106-130054-65322 (controller log detached-20261106-130054-64870), NOT a task run:
+  run-bench-cloud exited 125: "execution provenance rejected: execution provenance workspace patch does
+  not match the staged guest patch". Cause: operator error. I edited the RCA doc in the launch checkout
+  (/home/boxes/rose) after launch, so the guest patch staged later no longer matched the launch provenance.
+  Teardown: clone 84eee55cd45658 state=destroyed. Volumes vol_vjy236qzypyw2exv, vol_vjy236yg286e97pv and
+  vol_4y8l2o8xml31jper were pending_destroy (flyctl volumes show, 13:16Z). Controller exit 1.
+  Not recorded as a task attempt: no task executed.
+
+Attempt 2, fleet run 20261106-131544-295004 (controller log detached-20261106-131544-294592), from a clean
+detached worktree at fa676edc7: REAL PASS, controller exit 0. See cloud-pass-fa676edc7.json.

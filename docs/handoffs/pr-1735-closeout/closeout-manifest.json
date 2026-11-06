@@ -1,0 +1,24 @@
+{
+ "schema_version": 1,
+ "pr": 1735,
+ "title": "docs(rca): webdecoy 0.164 drag-teleport failures (PR1730/PR1725) + merged-fix cloud pass",
+ "assignment": "post-merge repair goal from PR #1730 deploy: smoke/browser-biometrics-webdecoy FCaptcha 0.164 > 0.163 (vision_ai 3 teleport clicks), failed source f25d7c064, originating merge db5b15de9, originating devbox 80412093-97ba-491d-ade5-b2df24f7ef5b; repair devbox 42e8c626-9a15-4b3c-8da7-13f386ee4546, Bugs folder z57k17gzz4egv17ag6qqtasexs8h273j revision 1",
+ "root_cause_fix": "PR #1703 (merged fa676edc7): hover tool + drag through humanizer.drag_between; coordinated with its owner thread ph748rvfxv8j1zba79brna917s8hqvc8, no duplicate code change here",
+ "outcome_proof": "evidence/cloud-pass-fa676edc7.json (original cloud command on merged main, PASS, risk 0.0906)",
+ "records": [
+  {"path": "docs/rca/cases/2026-11-06-browser-pointer-move-intent-had-no-tool.md", "disposition": "committed"},
+  {"path": "evidence/failing-agents-pointer-timelines.json", "disposition": "committed", "source": "prod Benchmark Hub exports of agents 3c057de1 and c19b68c8; full exports reproducible via GET /api/benchmarks/runs/<run>/agents/<agent>"},
+  {"path": "evidence/cloud-pass-fa676edc7.json", "disposition": "committed summary", "full_receipt": "sha256 2809237aecb98a9d8e41d3ce28a1ca5f69e57e76d097eefd86c111d081718229, durable copy in prod Benchmark Hub run 20261106-131544-295004 and trace archive manifest for agent d5672824"},
+  {"path": "evidence/causal-regression.txt", "disposition": "committed"},
+  {"path": "evidence/cloud-attempts.txt", "disposition": "committed", "note": "includes the operator-error boot refusal (run 20261106-130054-65322), preserved as not-a-task-run"},
+  {"path": "evidence/review-findings.txt", "disposition": "committed"},
+  {"path": "evidence/ledger-rows-pending-main.jsonl", "disposition": "committed; appended to agents/benchmarks/history/task_attempts.jsonl and task_durations.jsonl on main by a post-merge data-only commit (held out of the gated tree because ledger paths widen gate selection)"},
+  {"path": "agents/benchmarks/history/span_durations.20261106.main.jsonl (local control run spans, 767952 bytes, sha256 23824daac398b1920a155a954a5af2c1677460e3c6535a687d71a870bbdbd4d7)", "disposition": "landed with the post-merge data-only ledger commit"},
+  {"path": "agents/benchmarks/runs/20261106_111943_82ae3704-bc5a-420c-8775-86e9bb1215ac_browser-biometrics-webdecoy.json", "disposition": "local evidence (runs/*.json are local by repo rule); durable agent view https://www.roselabs.ai/?agent-id=97aa455f-1fe8-407b-9fa5-f8bad701fc71; summarized in causal-regression.txt"},
+  {"path": "/var/tmp/wd-1703 (detached 052ac6ce7)", "disposition": "scratch worktree of merged PR #1703; reproducible; retire after merge"},
+  {"path": "/var/tmp/wd-bench (detached fa676edc7)", "disposition": "clean benchmark launch worktree; its fleet run dirs are uploaded to the Hub; retire after merge"},
+  {"path": "/var/tmp/rdw, /var/tmp/rdw2 (deploy worker checkouts)", "disposition": "reproducible via scripts/deploy_test_worker.py --prepare-checkout; retire after the cycle"},
+  {"path": ".context/deploy-pipeline*, .context/deploy-runs/20261106-134623-765009", "disposition": "generated deploy evidence; final cycle/plan summarized in the post-merge records follow-up"}
+ ],
+ "secrets": "none committed; no env files, tokens or raw transcripts in this directory"
+}

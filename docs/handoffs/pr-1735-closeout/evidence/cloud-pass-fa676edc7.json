@@ -1,0 +1,34 @@
+{
+ "fleet_run": "20261106-131544-295004",
+ "hub_run": "20261106-131544-295004",
+ "receipt_run_id": "99ab6174-51ed-4482-9439-73069ab2c0a8",
+ "receipt_timestamp": "2026-11-06T13:37:38.031465+00:00",
+ "base_sha": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+ "command": "scripts/run-bench browser-biometrics-webdecoy --ref fa676edc7e68cdf13616f945f8362c06f6cbf417 --wait (launched from clean detached worktree at fa676edc7)",
+ "controller_exit": 0,
+ "cleanup": "every guest acknowledged browser/session cleanup before fleet machine teardown; fleet-owned clones destroyed",
+ "task": {
+  "name": "browser-biometrics-webdecoy",
+  "agent_id": "d5672824-be5a-4873-839a-351de889f6e3",
+  "passed": true,
+  "benchmark_status": "PASSED",
+  "status": "COMPLETED",
+  "duration_seconds": 133.2,
+  "cost_cents": 41.0,
+  "failure_reason": null,
+  "cleanup_failure": null,
+  "world_model_mode": "real",
+  "fast_mode_cache_enabled": true,
+  "llm_call_count": 25,
+  "message_count": 81
+ },
+ "fcaptcha_scores_in_receipt": [
+  "0.09060000000000001"
+ ],
+ "drag_actions": 0,
+ "teleport_mentions": 0,
+ "vision_ai_mentions": 0,
+ "full_receipt_sha256": "2809237aecb98a9d8e41d3ce28a1ca5f69e57e76d097eefd86c111d081718229",
+ "full_receipt_bytes": 13625898,
+ "durable_copy": "prod Benchmark Hub run bundle 20261106-131544-295004 (uploaded by the fleet controller); trace archive r2://trace-archive/trace-archive/d5672824-be5a-4873-839a-351de889f6e3/manifest.json.gz.enc"
+}

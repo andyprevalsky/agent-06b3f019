@@ -1,0 +1,167 @@
+{
+ "3c057de1-d449-49b9-b76c-a5c72ca3d140": {
+  "source_export": "prod Benchmark Hub GET /api/benchmarks/runs/<run>/agents/<agent>",
+  "export_sha256": "7a2633622ac15d52ec4193dc56574ee1e27d4e1ed9b31fe640fe8c9d719adee3",
+  "benchmark_duration_seconds": 361.8,
+  "drag_count": 3,
+  "hover_count": 0,
+  "pointer_timeline": [
+   {
+    "t": "2026-11-06T10:48:58.912Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 500px"
+   },
+   {
+    "t": "2026-11-06T10:49:02.680Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 500px"
+   },
+   {
+    "t": "2026-11-06T10:49:09.249Z",
+    "action": "drag",
+    "title": "drag"
+   },
+   {
+    "t": "2026-11-06T10:49:11.180Z",
+    "action": "drag",
+    "title": "drag"
+   },
+   {
+    "t": "2026-11-06T10:49:13.854Z",
+    "action": "drag",
+    "title": "drag"
+   },
+   {
+    "t": "2026-11-06T10:49:16.583Z",
+    "action": "click",
+    "title": "Clicked <div \"\u2713\n\u2715\">"
+   },
+   {
+    "t": "2026-11-06T10:49:24.225Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 500px"
+   },
+   {
+    "t": "2026-11-06T10:49:32.165Z",
+    "action": "click",
+    "title": "Clicked <input placeholder=\"you@example.com\">"
+   },
+   {
+    "t": "2026-11-06T10:49:37.790Z",
+    "action": "input_text",
+    "title": "Typed 'benchmark-human@example.c' into <input placeholder=\"you@example.com\">"
+   },
+   {
+    "t": "2026-11-06T10:49:39.976Z",
+    "action": "click",
+    "title": "Clicked <textarea placeholder=\"Type something he"
+   },
+   {
+    "t": "2026-11-06T10:49:50.545Z",
+    "action": "input_text",
+    "title": "Typed 'Hello, this is a test mes' into <textarea placeholder=\"Type something he"
+   },
+   {
+    "t": "2026-11-06T10:49:52.908Z",
+    "action": "click",
+    "title": "Clicked <button \"Submit (Protected by Invisible\""
+   },
+   {
+    "t": "2026-11-06T10:50:02.335Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 400px"
+   },
+   {
+    "t": "2026-11-06T10:50:06.451Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 300px"
+   },
+   {
+    "t": "2026-11-06T10:50:10.458Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 300px"
+   },
+   {
+    "t": "2026-11-06T10:50:14.588Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 300px"
+   }
+  ],
+  "hub_run": "20261106-103815-953003-m7cf1c7ff9d3f"
+ },
+ "c19b68c8-5306-4f81-ab50-9fee95a7760d": {
+  "source_export": "prod Benchmark Hub GET /api/benchmarks/runs/<run>/agents/<agent>",
+  "export_sha256": "6b2be12ce4ad58c6791656ed4b0f58ec3387c35559ffc83d4f76fa23395c1357",
+  "benchmark_duration_seconds": 173.8,
+  "drag_count": 3,
+  "hover_count": 0,
+  "pointer_timeline": [
+   {
+    "t": "2026-11-06T10:18:35.486Z",
+    "action": "drag",
+    "title": "drag"
+   },
+   {
+    "t": "2026-11-06T10:18:39.195Z",
+    "action": "drag",
+    "title": "drag"
+   },
+   {
+    "t": "2026-11-06T10:18:41.717Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 600px"
+   },
+   {
+    "t": "2026-11-06T10:18:49.037Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 500px"
+   },
+   {
+    "t": "2026-11-06T10:18:56.581Z",
+    "action": "drag",
+    "title": "drag"
+   },
+   {
+    "t": "2026-11-06T10:18:59.460Z",
+    "action": "click",
+    "title": "Clicked <div \"\u2713\n\u2715\">"
+   },
+   {
+    "t": "2026-11-06T10:19:10.534Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 600px"
+   },
+   {
+    "t": "2026-11-06T10:19:17.739Z",
+    "action": "click",
+    "title": "Clicked at (490, 308)"
+   },
+   {
+    "t": "2026-11-06T10:19:24.860Z",
+    "action": "input_text",
+    "title": "Typed 'benchmark-human@example.c' into <input placeholder=\"you@example.com\">"
+   },
+   {
+    "t": "2026-11-06T10:19:27.990Z",
+    "action": "click",
+    "title": "Clicked at (490, 394)"
+   },
+   {
+    "t": "2026-11-06T10:19:40.747Z",
+    "action": "input_text",
+    "title": "Typed 'Hi, I'm testing this demo' into <textarea placeholder=\"Type something he"
+   },
+   {
+    "t": "2026-11-06T10:19:44.297Z",
+    "action": "click",
+    "title": "Clicked <button \"Submit (Protected by Invisible\""
+   },
+   {
+    "t": "2026-11-06T10:19:56.731Z",
+    "action": "scroll_down",
+    "title": "Scrolled down 400px"
+   }
+  ],
+  "hub_run": "20261106-095657-2926622-mc29e58eff36d"
+ }
+}
