@@ -184,6 +184,22 @@ echo "PASS: cloud benchmarks expose no autoscale off-state"
 finalization_harness="$TMP_ROOT/finalization-harness.sh"
 {
     printf 'set -uo pipefail\n'
+    # These are fixture children, not controllers. Join them on every exit;
+    # the production finalization function intentionally stops at its marker.
+    cat <<'SH'
+fixture_children=()
+reap_fixture_children() {
+    local status=$? child
+    trap - EXIT
+    for child in "${fixture_children[@]}"; do
+        if wait "$child"; then :; else
+            [ "$status" -ne 0 ] || status=5
+        fi
+    done
+    exit "$status"
+}
+trap reap_fixture_children EXIT
+SH
     for fn in fleet_job_running fleet_job_may_be_running wait_for_autoscaler_finalization; do
         awk -v start="^${fn}\\\\(\\\\) \\\\{" '$0 ~ start {p=1} p {print} p && /^\}/ {exit}' \
             "$ROOT_DIR/scripts/run-bench-fleet"
@@ -192,12 +208,12 @@ finalization_harness="$TMP_ROOT/finalization-harness.sh"
     printf 'fleet_job_running() { return 1; }\n'
     printf 'out="$1"; AUTOSCALER_FINALIZATION_WAIT_SECONDS=20\n'
     printf '( sleep 1.5; : > "$out/autoscaler.completed-after-child"; sleep 0.5 ) &\n'
-    printf 'AUTOSCALER_PIDS=("$!"); CHILD_OUT=("$out")\n'
+    printf 'fixture_children+=("$!"); AUTOSCALER_PIDS=("$!"); CHILD_OUT=("$out")\n'
     printf 'wait_for_autoscaler_finalization\n'
     printf '[ -e "$out/autoscaler.completed-after-child" ] || exit 3\n'
     # An autoscaler that exits without a marker must not hold the wait open.
     printf 'rm -f "$out/autoscaler.completed-after-child"; ( sleep 0.3 ) &\n'
-    printf 'AUTOSCALER_PIDS=("$!"); started=$SECONDS\n'
+    printf 'fixture_children+=("$!"); AUTOSCALER_PIDS=("$!"); started=$SECONDS\n'
     printf 'wait_for_autoscaler_finalization\n'
     printf '[ $((SECONDS - started)) -lt 10 ] || exit 4\n'
 } > "$finalization_harness"
@@ -215,3 +231,28 @@ case "$finalization_status" in
     4) echo "FAIL: an exited autoscaler without a marker held finalization open" >&2; exit 1 ;;
     *) echo "FAIL: finalization harness exited $finalization_status" >&2; exit 1 ;;
 esac
+
+# Fault-inject the generated fixture only: an assertion failure must join the
+# child before the outer test removes its directory, preserving the exit code.
+failure_harness="$TMP_ROOT/finalization-failure.sh"
+awk '$0 == "wait_for_autoscaler_finalization" && !injected {print "exit 3"; injected=1; next} {print}' \
+    "$finalization_harness" > "$failure_harness"
+failure_out="$TMP_ROOT/finalization-failure-out"
+mkdir -p "$failure_out"
+failure_status=0
+bash "$failure_harness" "$failure_out" || failure_status=$?
+[ "$failure_status" -eq 3 ] && [ -e "$failure_out/autoscaler.completed-after-child" ] || {
+    echo "FAIL: assertion-failure cleanup did not join its fixture child and preserve status" >&2
+    exit 1
+}
+# A child failure after publication must not disappear behind successful assertions.
+sed 's/; sleep 0.5 )/; sleep 0.5; exit 7 )/' "$finalization_harness" > "$failure_harness"
+child_failure_out="$TMP_ROOT/finalization-child-failure-out"
+mkdir -p "$child_failure_out"
+child_failure_status=0
+bash "$failure_harness" "$child_failure_out" || child_failure_status=$?
+[ "$child_failure_status" -eq 5 ] || {
+    echo "FAIL: fixture child failure was ignored (status $child_failure_status)" >&2
+    exit 1
+}
+echo "PASS: fixture children are joined on assertion failure and child failures stay visible"
