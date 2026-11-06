@@ -539,6 +539,9 @@ GATES = (
         "agents-blackbox-registration",
         ("python3", "agents/tests/structural/structural_test_registration.py"),
     ),
+    # Scripts rank GITHUB_TOKEN, GITHUB_TOKEN_2..9 and GITHUB_DISPATCH_TOKEN by
+    # remaining quota; one shared user token was drained twice in an hour.
+    Gate("github-token-pool", ("python3", "scripts/tests/github-token-pool.test.py")),
 )
 
 

@@ -75,6 +75,20 @@ cloudbench_resolve_github_token() {
     candidates+=("$candidate")
   fi
 
+  # Machine-account pool members (GITHUB_TOKEN_2..9, scripts/lib/github_token_pool.py)
+  # hold separate quotas, so a rate-limited GITHUB_TOKEN falls through to them.
+  local index pool_key
+  for index in 2 3 4 5 6 7 8 9; do
+    pool_key="GITHUB_TOKEN_${index}"
+    [ -n "${!pool_key:-}" ] && candidates+=("${!pool_key}")
+    if candidate="$(cloudbench_github_token_from_env_file "$root/back-end/.env" "$pool_key")"; then
+      candidates+=("$candidate")
+    fi
+    if candidate="$(cloudbench_github_token_from_env_file "$root/agents/.env" "$pool_key")"; then
+      candidates+=("$candidate")
+    fi
+  done
+
   local seen=""
   for candidate in "${candidates[@]}"; do
     [ -n "$candidate" ] || continue

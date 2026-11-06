@@ -1394,6 +1394,21 @@ Code: `agents/providers/planner_memory/`, backend `src/domains/planner-memory/` 
   bundles into `agents/benchmarks/fixtures/memory/<n>.json`; `run_benchmark.py` loads them into the local stack's
   history table (internal PUT) for `memory: "on"` tasks. Global kill switch: `PLANNER_MEMORY_ENABLED=0`.
 
+## GitHub token pool
+
+`GITHUB_TOKEN` (Andy's primary identity) and the machine-account tokens
+`GITHUB_TOKEN_2` … `GITHUB_TOKEN_9` form one pool, each with its own 5,000/h
+quota. Store every member in `agents/.env`, `back-end/.env`, Render, both Fly
+apps and the boxes.dev managed env. Rotation is automatic: backend reads use
+`githubFetch` (`back-end/src/providers/githubTokenPool.ts`), which picks the
+member with the most quota left and moves on when one is rate limited.
+Actions that act as Andy (agent repo creation, PRs, pushes to his personal
+repos) keep `identity: 'primary'`. When a script or ad-hoc `gh` call hits a
+rate limit, rerun it with
+`GH_TOKEN="$(python3 scripts/lib/github_token_pool.py pick)"`; `status` shows
+each member's quota without printing tokens. Never print or commit a token,
+and never revoke or replace a member without Andy's explicit OK.
+
 ## Production Logs (Render)
 
 Fetch backend prod logs via Render API:
