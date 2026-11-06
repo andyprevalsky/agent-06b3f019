@@ -2244,6 +2244,68 @@ class Cycle(unittest.TestCase):
         proof['files'] = {str(p): c.sha_file(p) for p in files}
         return state, occurrence, paths, proof, parents
 
+    def unlaunched_campaign_state(self):
+        import shutil
+        import runpy
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        campaign = Path(proof['campaign'])
+        runs = parents[0].parent
+        for child in runs.iterdir():
+            shutil.rmtree(child) if child.is_dir() else child.unlink()
+        summary = c.read(campaign / 'summary.json')
+        summary.update(peak_concurrency=0, shared_inventory_failed=True)
+        for job in summary['jobs']:
+            Path(job['log']).unlink()
+            job.update(status='cancelled', controller_exit_code=None, started_at=None,
+                       finished_at=None, wall_clock_seconds=None)
+            job.pop('controller_pid', None)
+        c.write(campaign / 'summary.json', summary)
+        native = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+        group = native['campaign_group_record'](summary)
+        c.write(campaign / 'hub-group.json', group)
+        import hashlib
+        c.write(campaign / 'hub-group-publication-ack.private.json', dict(pid=2147483000,
+            token='d' * 32, record_sha256=hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest()))
+        inventory = campaign / 'shared-inventory'
+        inventory.mkdir()
+        (inventory / 'stop').touch()
+        (inventory / 'publisher.private.log').write_text('read-only inventory startup failed\n')
+        (campaign / 'hub-group-publication.private.log').write_text('published\n')
+        cli = runs.parent / 'cli.log'
+        cli.write_text(f"Native campaign {campaign}\nFileNotFoundError: [Errno 2] No such file or directory: 'flyctl'\n")
+        proof['layout'] = 'campaign-unlaunched-v1'
+        files = [paths['receipt'].parent / 'request.json', cli, *campaign.glob('*.json'),
+                 inventory / 'stop', inventory / 'publisher.private.log',
+                 campaign / 'hub-group-publication.private.log']
+        proof['files'] = {str(p): c.sha_file(p) for p in files}
+        return state, occurrence, paths, proof, campaign
+
+    def test_unlaunched_campaign_reconciles_without_test_credit(self):
+        state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
+        original = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
+        self.assertEqual(original, state['attempts'])
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual([], entry['participants'])
+
+    def test_unlaunched_campaign_rejects_admission_or_active_writer(self):
+        state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
+        summary = campaign / 'summary.json'
+        original = c.read(summary)
+        for field, value in [('peak_concurrency', 1), ('startup_cohorts', [{'prepared': True}])]:
+            changed = {**original, field: value}
+            c.write(summary, changed); proof['files'][str(summary)] = c.sha_file(summary)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], proof)
+        c.write(summary, original); proof['files'][str(summary)] = c.sha_file(summary)
+        with (campaign / 'shared-inventory/publisher.private.log').open('a'):
+            with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+        job = campaign / 'r001-j0001.log'
+        job.write_text('controller was admitted\n')
+        with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
+
     def isolated_campaign_state(self):
         import time
         state, occurrence, paths, proof, parents = self.campaign_recon_state()

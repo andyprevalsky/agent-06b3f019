@@ -280,6 +280,7 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
 
 
 def validate(receipt, owner, proof):
+    """Verify immutable native custody evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
     need(set(owner) == {'request_token', 'worker_root', 'native_cleanup_reference'}, 'unsupported owner shape')
@@ -337,6 +338,57 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links = {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-unlaunched-v1':
+        # Missing host tooling can stop inventory before any controller exists.
+        # Reconcile only that zero-admission boundary, retaining every native
+        # UNVERIFIED outcome. A launched campaign still needs the fleet audit.
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        need(proof.get('campaign') == str(campaign) and not proof.get('purpose')
+             and not proof.get('controller_log') and not proof.get('recovered_runtime')
+             and reference.get('native_directory') == str(campaign)
+             and str(campaign) in cli_text and "No such file or directory: 'flyctl'" in cli_text,
+             'unlaunched startup failure binding')
+        summary = document(campaign / 'summary.json')
+        checks, jobs = request['checks'], summary['jobs']
+        need(checks and len(set(checks)) == len(checks)
+             and summary.get('campaign_id') == campaign.name and summary.get('runs') == 1
+             and summary.get('retry_infra') == 0 and summary.get('status') == 'failed'
+             and type(summary.get('peak_concurrency')) is int and summary['peak_concurrency'] == 0
+             and summary.get('shared_inventory_failed') is True and not summary.get('startup_cohorts')
+             and summary.get('task_count') == summary.get('total_jobs') == len(checks) == len(jobs),
+             'unlaunched campaign inventory')
+        need({job.get('task') for job in jobs} == set(checks)
+             and all(job.get('job_id') == f'r001-j{index:04d}' and job.get('run') == 1
+                     and job.get('attempt') == 1 and job.get('attempts') == []
+                     and job.get('status') == 'cancelled'
+                     and all(job.get(key) is None for key in
+                             ('controller_pid', 'controller_exit_code', 'started_at', 'finished_at', 'wall_clock_seconds'))
+                     and job.get('log') == str(campaign / (job['job_id'] + '.log'))
+                     and not Path(job['log']).exists() and not Path(job['log']).is_symlink()
+                     for index, job in enumerate(jobs, 1)), 'a campaign controller was admitted')
+        need(runs.is_dir() and not runs.is_symlink() and not any(runs.iterdir()), 'native fleet resources exist')
+        from datetime import datetime
+        start, finish = (datetime.fromisoformat(summary[key]).timestamp() for key in ('started_at', 'finished_at'))
+        need(adapter['started_at'] <= start <= finish <= receipt['finished_at'] <= confirmed,
+             'unlaunched terminal clocks')
+        inventory = campaign / 'shared-inventory'
+        need(bound(inventory / 'stop') == b'' and not (inventory / 'owner').exists()
+             and not (inventory / 'owner').is_symlink(), 'inventory publisher still owns startup')
+        logs = [cli, inventory / 'publisher.private.log', campaign / 'hub-group-publication.private.log']
+        for path in logs[1:]:
+            bound(path)
+        holders = subprocess.run(['lsof', '-t', '--', *map(str, logs)], capture_output=True, timeout=10)
+        need(holders.returncode == 1 and not holders.stdout and not holders.stderr,
+             'startup log writer or unknown process observation')
+        for name in ('hub-group.json', 'hub-group-publication-ack.private.json'):
+            document(campaign / name)
+        from deploy_test_cloud import campaign_published
+        native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+        need(campaign_published(summary, campaign, adapter['started_at'], native), 'startup publication or publisher cleanup')
+        need(used == set(bindings), 'unlaunched proof file closure')
+        return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
+                'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
+                'participants': [], 'native_audit_seals': {}, 'retained_services': [], 'credit_granted': False}
     if layout == 'campaign-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
