@@ -28,7 +28,8 @@
   "vercel": "not applicable: no front-end/ changes",
   "production_semantics": "chat-lifecycle-ratchet run 42157665439 success (5/5 jobs), source_sha c9fa8005d627",
   "agentcard_production": "SKIPPED - elected: no payment code in diff",
-  "mac_execution_acceptance": "SKIPPED - no Mac available: read-only prod LocalDevice query for user 1f85ff25 returned 0 rows at 2026-11-06T03:43:56Z"
+  "mac_execution_acceptance": "SKIPPED - no Mac available: owner-scoped backend discovery GET https://api.roselabs.ai/api/local-devices/agent-target/ff1a1383-6e5a-4069-84cb-a06827f2adf5 (owner 1f85ff25's latest root agent) returned available=false reason=no_owned_device at 2026-11-06T04:10:14Z; the read-only LocalDevice query with the same owner predicate returned 0 rows at 03:43:56Z and 04:08:09Z",
+  "fly_evidence": "no deploy-agents.yml run exists for head_sha c9fa8005d6 (runtime classification empty); workflow runs on that SHA: production semantic gate success, auto-tag mac app success (no MAC-APP-RELEASE label)"
  },
  "archives": [
   {
