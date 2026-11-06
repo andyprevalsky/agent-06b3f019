@@ -1044,6 +1044,7 @@ their assertions or test counts:
 `python3 scripts/tests/temporal-namespace-isolation.test.py`,
 `python3 scripts/tests/swap-harness.test.py`,
 `bash scripts/tests/kill-services.test.sh`,
+`bash scripts/tests/devbox-teardown.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/seed-cache-decision.test.sh`,
 `bash scripts/tests/canonical-seed-whatsapp-content.test.sh`,

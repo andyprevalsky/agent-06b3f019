@@ -288,6 +288,7 @@ GATES = (
     Gate("rose-startup-script", ("bash", "scripts/tests/rose-startup-script.test.sh")),
     Gate("temporal-namespace-isolation", ("python3", "scripts/tests/temporal-namespace-isolation.test.py")),
     Gate("kill-services", ("bash", "scripts/tests/kill-services.test.sh"), expected_seconds=55),
+    Gate("devbox-teardown", ("bash", "scripts/tests/devbox-teardown.test.sh"), expected_seconds=15),
     Gate(
         "deploy-worktree-preflight",
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),

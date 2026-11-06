@@ -7,10 +7,17 @@
  *
  * Refuses a non-local DATABASE_URL unless ROSE_SANDBOX_STACK_ID names the stack
  * explicitly: a laptop pointed at the production database must not act on it.
+ *
+ *   --print-stack  print this workspace's stack id (roseSandboxIdentity) and exit
+ *   --dry-run      list the sandboxes that would be killed; kill nothing
+ * scripts/devbox-teardown.sh uses both to tear down exactly one devbox's sandboxes.
  */
 import 'dotenv/config';
 import { roseSandboxIdentity } from '../src/providers/e2bSandboxCreate';
-import { killStackSandboxes } from '../src/providers/codeSessions/sandboxReaper';
+import {
+  defaultSandboxReaperDeps,
+  killStackSandboxes,
+} from '../src/providers/codeSessions/sandboxReaper';
 
 function localDatabase(): boolean {
   try {
@@ -23,6 +30,11 @@ function localDatabase(): boolean {
 
 async function main(): Promise<void> {
   const { roseStack } = roseSandboxIdentity();
+  if (process.argv.includes('--print-stack')) {
+    console.log(roseStack);
+    return;
+  }
+  const dryRun = process.argv.includes('--dry-run');
   if (!process.env.ROSE_SANDBOX_STACK_ID?.trim() && !localDatabase()) {
     console.error(`kill-stack-sandboxes: refusing non-local stack ${roseStack}`);
     return;
@@ -31,8 +43,16 @@ async function main(): Promise<void> {
     console.log('kill-stack-sandboxes: no E2B_API_KEY; nothing to do');
     return;
   }
-  const killed = await killStackSandboxes();
-  console.log(`kill-stack-sandboxes: killed ${killed} sandbox(es) of ${roseStack}`);
+  const killed = await killStackSandboxes({
+    ...defaultSandboxReaperDeps,
+    kill: async (sandboxId) => {
+      console.log(`kill-stack-sandboxes: ${dryRun ? 'would kill' : 'killing'} ${sandboxId}`);
+      if (!dryRun) await defaultSandboxReaperDeps.kill(sandboxId);
+    },
+  });
+  console.log(
+    `kill-stack-sandboxes: ${dryRun ? 'would kill' : 'killed'} ${killed} sandbox(es) of ${roseStack}`
+  );
 }
 
 main()
