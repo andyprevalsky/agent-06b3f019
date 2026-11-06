@@ -2596,6 +2596,9 @@ def _merge_close_code_session_facts(
             # True only when GitHub confirms the PR merged and the target contains head (C4).
             "merged": merge.get("merged") is True,
             "merge_target_contains_head": merge.get("merge_target_contains_head"),
+            # How GitHub answered; `merged` is only a confirmed fact when it did.
+            "merge_source": merge.get("source"),
+            "rate_limited_until": merge.get("rate_limited_until"),
         }
     )
     return merged
@@ -2993,7 +2996,15 @@ def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
     if isinstance(pr, dict) and pr.get("number"):
         lines.append(f"PR: #{pr['number']} {pr.get('state') or ''} {pr.get('url') or ''}".rstrip())
     if facts.get("branch"):
-        lines.append(f"Merged: {'yes' if facts.get('merged') else 'no'} (confirmed with GitHub)")
+        source = facts.get("merge_source")
+        until = facts.get("rate_limited_until")
+        if source == "github_rate_limited":
+            retry = f"; retry after {until}" if until else ""
+            lines.append(f"Merged: unknown (GitHub rate limit reached{retry})")
+        elif source == "github_unavailable":
+            lines.append("Merged: unknown (GitHub could not be reached)")
+        else:
+            lines.append(f"Merged: {'yes' if facts.get('merged') else 'no'} (confirmed with GitHub)")
     return "\n".join(lines)
 
 

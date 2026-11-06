@@ -12,6 +12,7 @@
  */
 
 import assert from 'node:assert';
+import { rateLimitResponse, toResponse } from '../helpers/fake-github';
 
 process.env.GITHUB_REPO_CREATE_MIN_INTERVAL_MS = '150';
 process.env.GITHUB_REPO_CREATE_MAX_WAIT_MS = '200';
@@ -40,7 +41,12 @@ globalThis.fetch = (async (
 
 async function main(): Promise<void> {
   const github = await import('../../providers/github');
-  const { createGithubRepo, agentRepoCreationEnabled, resetGithubRepoCreateStateForTests } = github;
+  const {
+    createGithubRepo,
+    agentRepoCreationEnabled,
+    fetchGithubRepoVisibility,
+    resetGithubRepoCreateStateForTests,
+  } = github;
   const reset = () => {
     calls.length = 0;
     resetGithubRepoCreateStateForTests();
@@ -81,20 +87,31 @@ async function main(): Promise<void> {
   assert.strictEqual(calls.length, 0, 'a non-production stack must not call GitHub');
   process.env.GITHUB_AGENT_REPOS = 'on';
 
-  // Secondary limit: block all creates for Retry-After, without calling GitHub again.
-  respond = () =>
-    new Response(
-      JSON.stringify({
-        message:
-          'You have exceeded a secondary rate limit and have been temporarily blocked from content creation.',
-      }),
-      { status: 403, headers: { 'retry-after': '120' } }
-    );
+  // Secondary limit (the real response, with GitHub's documented retry-after):
+  // block all creates for Retry-After, without calling GitHub again.
+  respond = () => toResponse(rateLimitResponse('secondary', { retryAfterS: 120 }));
   reset();
   assert.strictEqual(await createGithubRepo('agent-limited'), null);
   assert.strictEqual(calls.length, 1);
   assert.strictEqual(await createGithubRepo('agent-limited-2'), null);
   assert.strictEqual(calls.length, 1, 'a blocked create must not hit GitHub until Retry-After');
+
+  // Primary limit (the real capture): one block shared with every GitHub call, so a
+  // limit seen by a read stops creates too, and one seen by a create stops reads.
+  const resetEpochS = Math.floor(Date.now() / 1000) + 3600;
+  respond = () => toResponse(rateLimitResponse('primary', { resetEpochS }));
+  reset();
+  assert.strictEqual(await createGithubRepo('agent-primary'), null);
+  assert.strictEqual(calls.length, 1);
+  const read = await fetchGithubRepoVisibility('rose-test', 'app');
+  assert.strictEqual(read, 'rate_limited', 'a create-detected limit blocks later reads');
+  assert.strictEqual(calls.length, 1, 'the read never reached GitHub');
+  reset();
+  assert.strictEqual(await fetchGithubRepoVisibility('rose-test', 'app'), 'rate_limited');
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(await createGithubRepo('agent-after-read'), null);
+  assert.strictEqual(calls.length, 1, 'a read-detected limit blocks creates');
+  reset();
 
   // Name already exists: return the existing repo.
   respond = (call) => {
