@@ -1,0 +1,48 @@
+{
+  "pr": 1700,
+  "deployed_sha": "75d1b1df8f877f20a60cc5cf84cf0219e451715c",
+  "gated_source": "4eb891c57f0a7013d1eebd71f46b793503d2df65",
+  "reviewed_head": "4e6bb9e20deac16768d41f41f2cca59750a852ec",
+  "originating_devbox": "f7fd9f3f-bede-47d6-9eea-9138a0e0fcf9",
+  "archive": {
+    "key": "deploy-closeouts/pr1700/core-20261106T0435Z.rpgt",
+    "manifest_sha256": "802b858e23ba97cb407b08a5b2831533b56f3fe688977de1c13ae223e4a5f0a9",
+    "files": 8508,
+    "original_bytes": 5112453748,
+    "full_readback_verified": true,
+    "independent_restore": {
+      "at": "2026-11-06T04:39:03Z",
+      "restored_files": 8508,
+      "member_hashes_verified": true,
+      "spot_checks_vs_original": [
+        "rose/.context/deploy-pipeline/cycle.json",
+        "rose/.context/deploy-pipeline/plan.json",
+        "rose/.context/pr1700-closeout-stage/var-tmp-rose-deploy-tools/triage3.json"
+      ]
+    }
+  },
+  "key_recovery": "project-managed TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (key id trace-archive-prod-2026-07-03) and R2 credentials in managed agents/.env + back-end/.env, provisioned to every project devbox; not stored only on this disk",
+  "configuration_recovery": "no new configuration created; deploy env files are the managed project env. Host-only changes on this devbox: apt lsof install and /usr/local/bin symlinks to ~/.fly/bin/flyctl and ~/.local/bin/uv (not needed elsewhere)",
+  "source": {
+    "branch": "fix/grep-proto-flat-filter (pushed; 4eb891c57 is a parent of 75d1b1df8)",
+    "local_only_refs": [
+      "backup/cerebras-chat-quota-prepush-20261002 (14 commits from 2026-10-02, predates this work; preserved by the PR1634 source bundles per the PR1691 closeout)"
+    ]
+  },
+  "resource_disposition": {
+    "worker_checkouts": "10 clones under /var/tmp/rose-dw, clean and detached at 4eb891c57 with no unique commits: removed after archive verification",
+    "worker_databases": "8 disposable victoria_* worker databases dropped (recreated by any gate run)",
+    "cloud_smoke": "all four smoke results recorded cleanup_complete=true",
+    "restore_copy": "removed",
+    "repair_handoffs": [
+      "https://boxes.dev/thread/thr_b3d9b9b42d5f41a6a202ae10475b4cdc (existing webdecoy repair; evidence note undelivered: threads send denied, permission request expired)",
+      "https://boxes.dev/thread/thr_68bad7a6608142a9a2e6b01cd72f3ef3 (new, devbox 2f182bba-3c66-45eb-bd89-0f1c208f1758 in Bugs)"
+    ]
+  },
+  "not_archived_reproducible": [
+    "raw V8 coverage dumps and Playwright run dirs in worker checkouts",
+    "worker checkouts",
+    "worker databases"
+  ],
+  "freedom": "untouched"
+}

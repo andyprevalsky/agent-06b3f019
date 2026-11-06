@@ -8,6 +8,10 @@
  * mobile drawer keeps that button: #f2f2ef fill / #1f1f1d label in dark),
  * plain nav rows (Archived, Browse, Health) and the account row. Stateless.
  *
+ * Mac app (Electron, hiddenInset title bar): RoseMacTitleBarInset adds a
+ * draggable strip above the top row so Back | Search clears the traffic lights
+ * (Andy 2026-11-06); the web layout has no strip.
+ *
  * Every row keeps its icon at the same x whether the bar is collapsed (64px)
  * or hover-expanded (236px); labels fade in. Active = color/weight, no fills.
  */
@@ -65,6 +69,26 @@ export function RoseNewAgentButton({
   );
 }
 
+/** The Mac app's hiddenInset title bar: traffic lights sit in the window's top ~28px. */
+function isMacAppWindow(): boolean {
+  return typeof window !== 'undefined' && window.api?.isElectron === true;
+}
+
+/**
+ * Mac app only: a draggable strip (the window's title-bar area) above the top
+ * row, so Back | Search sit below the traffic lights instead of touching them.
+ */
+export function RoseMacTitleBarInset() {
+  if (!isMacAppWindow()) return null;
+  return (
+    <div
+      aria-hidden="true"
+      data-testid="rose-sidebar-titlebar-inset"
+      className="h-6 w-full flex-none [-webkit-app-region:drag]"
+    />
+  );
+}
+
 export function RoseSearchRow({
   isExpanded,
   value,
@@ -79,7 +103,10 @@ export function RoseSearchRow({
 }) {
   const showBack = isExpanded && onBack !== undefined;
   return (
-    <div data-testid="rose-sidebar-top-row" className="flex h-[38px] flex-none items-center">
+    <div
+      data-testid="rose-sidebar-top-row"
+      className="flex h-[38px] flex-none items-center [-webkit-app-region:no-drag]"
+    >
       {showBack && (
         <button
           type="button"

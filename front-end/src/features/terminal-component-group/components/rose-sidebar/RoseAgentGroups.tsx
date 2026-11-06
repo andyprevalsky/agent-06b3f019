@@ -97,7 +97,8 @@ export interface RoseAgentGroupsProps {
   /** Group (project id or HOME_GROUP) the next new agent is created in, if marked. */
   pendingGroupKey?: string | null;
   onSelectAgent: (agentId: string) => void;
-  actionsFor: (agent: Agent) => RoseAgentMenuActions;
+  /** `root` is the top-level agent that owns `agent` (sub-agent rows move their root). */
+  actionsFor: (agent: Agent, root?: Agent) => RoseAgentMenuActions;
   onMenuOpenChange: (open: boolean) => void;
   projectActions: RoseProjectActions;
   /** Code agents listed under an agent row (its tree's sessions). */
