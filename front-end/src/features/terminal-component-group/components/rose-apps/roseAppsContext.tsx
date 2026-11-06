@@ -160,6 +160,7 @@ function useDrawerWidthState() {
   return { drawerWidth, setDrawerWidth };
 }
 
+/** Coordinate app drawers and deferred browser-tab selection for the selected agent. */
 export function RoseAppsProvider({
   children,
   agents = [],

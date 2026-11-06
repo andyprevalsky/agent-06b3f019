@@ -62,6 +62,7 @@ function extractStepProgress(browserMessages: Message[]): StepProgress | null {
   return null;
 }
 
+/** Reduce partial metadata for the latest native session without inheriting an old exit. */
 function extractBrowserSessionMetadata(browserMessages: Message[]): BrowserSessionMetadata | null {
   let metadata: BrowserSessionMetadata | null = null;
   let bindingKey: string | undefined;
