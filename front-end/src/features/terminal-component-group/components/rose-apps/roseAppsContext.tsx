@@ -211,7 +211,7 @@ export function RoseAppsProvider({
   // may register after the selection, so a pending switch completes on register.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
-  const pendingSwitchRef = useRef<string | null>(null);
+  const pendingSwitchRef = useRef<string | null>(selectedAgentId);
   const isFirstSelectionRef = useRef(true);
   useEffect(() => {
     if (isFirstSelectionRef.current) {
@@ -247,6 +247,7 @@ export function RoseAppsProvider({
       if (app === 'browser' && openApp !== 'browser') {
         setBrowserRootChosen(false);
         const tab = tabsRef.current.find((t) => t.agentId === selectedAgentId);
+        pendingSwitchRef.current = tab ? null : selectedAgentId;
         setBrowserSelection((current) => {
           if (
             current &&
@@ -281,6 +282,7 @@ export function RoseAppsProvider({
         (t) => t.agentId === agentId && (taskId === undefined || t.taskId === taskId),
       );
       setBrowserSelection(tab ? { agentId: tab.agentId, taskId: tab.taskId } : null);
+      pendingSwitchRef.current = null;
       setBrowserRootChosen(agentId === null);
       if (agentId !== null && agentId !== selectedAgentId) onSelectAgent?.(agentId);
     },

@@ -4,7 +4,7 @@ import type { Prisma } from '@prisma/client';
 import { EMPTY_BROWSER_BASELINE } from './checkpoint';
 import { runTransactionWithRetry } from '../database';
 import { rootBrowserAgentId } from './worldStateMerge';
-import { browserUseEnabled } from './config';
+import { browserUseEnabled, DEFAULT_BROWSER_PROVIDER, tilionEnabled } from './config';
 import { storedBrowserProvider } from './types';
 
 export function logicalBrowserTaskId(agentId: string): string {
@@ -39,8 +39,13 @@ export async function createLogicalBrowserInTransaction(
     update: {},
     create: { userId },
   });
-  const configured = storedBrowserProvider(process.env.BROWSER_PROVIDER ?? 'kernel');
-  const provider = configured === 'browser-use' && !browserUseEnabled() ? 'kernel' : configured;
+  const configured = storedBrowserProvider(
+    process.env.BROWSER_PROVIDER ?? DEFAULT_BROWSER_PROVIDER
+  );
+  const disabled =
+    (configured === 'browser-use' && !browserUseEnabled()) ||
+    (configured === 'tilion' && !tilionEnabled());
+  const provider = disabled ? 'kernel' : configured;
   const existingHome = await tx.browserSession.findUnique({
     where: { logicalOwnerKey: `home:${userId}` },
   });
