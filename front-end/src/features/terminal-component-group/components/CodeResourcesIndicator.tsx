@@ -16,6 +16,8 @@
  *             With `preview`: one "Open app" link (OpenAppButton: the session's
  *             full-screen dev preview, UI ledger rows 10/39). When no sample is live
  *             (sandbox asleep) the popover holds only that link.
+ *             The surface is opaque (the nub's info popover surface), never the base
+ *             popover's 80% glass: the transcript text behind it must not bleed through.
  *      │ mouse leave, click / tap again, or Escape
  *      ▼
  *   [BARS]
@@ -171,7 +173,7 @@ export function CodeResourcesIndicator({
       <PopoverContent
         data-testid="code-resources-popover"
         align="end"
-        className="w-64 p-3 text-[13px]"
+        className="w-64 border-border bg-background p-3 text-[13px] shadow-lg dark:bg-navi-black"
         onOpenAutoFocus={(event) => event.preventDefault()}
         onClick={(event) => event.stopPropagation()}
       >

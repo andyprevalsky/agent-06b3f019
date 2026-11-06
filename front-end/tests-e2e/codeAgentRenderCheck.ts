@@ -22,7 +22,7 @@
  *              "Worked for …" rows
  *         C10/C13 no branch/commit rows, no "Session settings unavailable"
  *         C5   no floating "Open app" link in the view (it lives only inside the
- *              devbox usage popover, closed by default)
+ *              devbox usage popover, closed by default); that popover is opaque
  *         C11  the query box's model chip names a model; the speed toggle exists
  *         C12  the query box nub carries the context meter
  * C15 (sub-agents in the running-agents drawer) is only visible while a
@@ -95,6 +95,19 @@ async function checkCodeAgent(page: Page, frontendUrl: string, rootAgentId: stri
     view.getByRole('button', { name: 'Open app' }),
     `C5: no floating "Open app" in the view of ${id}`,
   ).toHaveCount(0);
+  const usage = view.getByTestId('code-resources');
+  if ((await usage.count()) > 0) {
+    // The devbox usage popover is an opaque surface: no text bleeds through it.
+    await usage.hover();
+    const popover = page.getByTestId('code-resources-popover');
+    await expect(popover, `${id} usage popover`).toBeVisible();
+    const background = await popover.evaluate((el) => getComputedStyle(el).backgroundColor);
+    const alpha = /rgba\([^)]*,\s*([0-9.]+)\)/.exec(background)?.[1];
+    expect(alpha === undefined || Number(alpha) === 1, `C5: opaque popover (${background})`).toBe(
+      true,
+    );
+    await page.keyboard.press('Escape');
+  }
   const box = page.getByTestId('query-input-host');
   await expect(box, 'the code agent query box').toBeVisible();
   for (const scope of [view, box]) {

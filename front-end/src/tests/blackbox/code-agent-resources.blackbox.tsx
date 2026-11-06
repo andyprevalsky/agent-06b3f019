@@ -246,6 +246,16 @@ describe('code-agent sandbox resources', () => {
       expect(screen.getByTestId('opened-app')).toHaveTextContent('task-1');
     });
 
+    it('the popover surface is opaque, like the nub info popover: nothing behind it bleeds through', () => {
+      deliver(sample());
+      renderIndicator(true, PREVIEW);
+      const classes = openPopover(document.body).className.split(/\s+/);
+      // The base popover's translucent glass (bg-[…]/80) is overridden by the opaque surface.
+      expect(classes).toContain('bg-background');
+      expect(classes).toContain('dark:bg-navi-black');
+      expect(classes.filter((name) => /^(dark:)?bg-\[.*\]\/\d+$/.test(name))).toEqual([]);
+    });
+
     it('sandbox asleep (not running): the indicator stays for the link, with no measured values', () => {
       deliver(sample());
       renderIndicator(false, PREVIEW);
