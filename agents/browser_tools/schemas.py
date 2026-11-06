@@ -1025,8 +1025,8 @@ class BrowserToolArgsValidationError(ValueError):
     """The model produced browser tool-call arguments that fail schema validation.
 
     This is a MODEL-OUTPUT error, not a Rose transport/infra failure: the model chose
-    a real tool but supplied arguments the tool's schema rejects (e.g. a checkout URL
-    where a product-detail URL is required). It must be fed back to the model as a
+    a real tool but supplied arguments the tool's schema rejects (e.g. a non-URL
+    where a product URL is required). It must be fed back to the model as a
     normal tool-result observation so it can self-correct, exactly like an execution
     error — never swallowed, hidden from the trajectory, or counted toward the
     consecutive-API-failure abort budget.

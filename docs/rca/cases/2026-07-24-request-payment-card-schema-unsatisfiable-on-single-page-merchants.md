@@ -93,11 +93,13 @@ constant beside the validator.
 
 2026-11-06 (H-38, branch `rca/h-38-20261106`, pending approval): one shared
 `PRODUCT_URL_GUIDANCE` in `agents/utils/purchase_approval.py` states the enforced
-contract: use the item's own product page when it has one, otherwise the URL of the page
-where it was selected, without searching for a URL the site does not have and without
+contract: use the item's own product page (or a deep link that reopens it) when it has
+one, otherwise the URL of the page where it was selected, without searching for a URL the site does not have and without
 substituting a cart/checkout URL when the item is shown elsewhere. Every LLM-visible
-product_url statement (Pydantic field descriptions, Rose browser-use tool definitions,
-Purchase Approval Context and the write-lock purchase example) uses it. The validator is
+product_url statement (Pydantic field descriptions, Rose browser-use tool definitions
+including the request_payment_card line_items summary, Purchase Approval Context and the
+write-lock purchase example) uses it; the regression rejects any surface still saying
+"product-detail" or "canonical product". The validator is
 unchanged: non-URLs and unvisited hosts remain rejected. Regression:
 `test_modal_menu_item_without_its_own_page_is_satisfiable_and_the_contract_teaches_it`
 (red on `3271548804`, green on the fix). Outcome proof on the exact benchmark is still

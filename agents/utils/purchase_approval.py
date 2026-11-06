@@ -58,12 +58,15 @@ def validate_product_detail_url(value: Any) -> str:
     return text
 
 
-# The LLM-visible product_url contract. Every tool schema and prompt states this
-# one text so the model is never told a stricter rule than the validators here
-# enforce: items that open in a modal over a menu, and single-page merchants,
-# have no product page of their own to link to.
+# The LLM-visible product_url contract, stated once for every tool schema and
+# prompt. Its requirement matches what the validators here enforce (a well-formed
+# URL on a visited host), so items that open in a modal over a menu, and
+# single-page merchants, stay representable. Preferring the item's own page and
+# not substituting a cart/checkout URL is unenforced preference prose, not a
+# stricter requirement.
 PRODUCT_URL_GUIDANCE = (
-    "Link to this item's own product page when it has one. If it has no page of its own "
+    "Link to this item's own product page when it has one (a deep link that reopens the item "
+    "counts). If it has no page of its own "
     "(for example it opens in a modal on a menu or store page, or the whole site is one page), "
     "use the URL of the page where you selected it; do not keep searching for a product URL "
     "the site does not have. Do not substitute a cart or checkout URL when the item is shown "

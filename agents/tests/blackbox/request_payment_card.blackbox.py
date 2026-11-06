@@ -355,6 +355,7 @@ def test_modal_menu_item_without_its_own_page_is_satisfiable_and_the_contract_te
         ),
         "WriteLockPurchaseItem.product_url": WriteLockPurchaseItem.model_fields["product_url"].description,
         "browser_use request_payment_card": payment_tool["description"],
+        "browser_use request_payment_card line_items": payment_tool["params"]["line_items"]["description"],
         "browser_use request_payment_card product_url": (
             payment_tool["params"]["line_items"]["items"]["properties"]["product_url"]["description"]
         ),
@@ -371,7 +372,8 @@ def test_modal_menu_item_without_its_own_page_is_satisfiable_and_the_contract_te
     for name, text in surfaces.items():
         text = (text or "").lower()
         # No surface may demand a page kind that modal/single-page merchants lack...
-        assert "product-detail" not in text, f"{name} still demands a product-detail page: {text!r}"
+        for stale in ("product-detail", "canonical product"):
+            assert stale not in text, f"{name} still demands a {stale} page: {text!r}"
         # ...and each one must teach the truthful value the validator accepts.
         assert "page where you selected it" in text, f"{name} does not teach the no-own-page case: {text!r}"
 

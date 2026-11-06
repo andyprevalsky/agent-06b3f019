@@ -4690,7 +4690,7 @@ _WRITE_LOCK_NOTIFICATION_EXAMPLES: tuple[tuple[str, Dict[str, Any], str], ...] =
         (
             "Every visible item; one media image (or rendered_summary for multi-item). "
             "Per item require title, numeric rating, review count, and a product URL already in the "
-            f"trajectory, never an order or return URL. {PRODUCT_URL_GUIDANCE} "
+            f"trajectory, never an order-confirmation or return URL. {PRODUCT_URL_GUIDANCE} "
             "Include price, qty, description (<80 chars), seller, shipping, totals, payment, address when visible."
         ),
     ),

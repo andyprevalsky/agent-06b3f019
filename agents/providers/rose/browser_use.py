@@ -326,7 +326,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "line_items": {
                 "type": "array",
                 "description": (
-                    "Full itemized receipt. Reviews and canonical product links are required for every item."
+                    "Full itemized receipt. Every item requires its rating, review count, and product URL "
+                    "(its own product page, or the page where you selected it when it has none)."
                 ),
                 "required": True,
                 "items": {
