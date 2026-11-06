@@ -82,6 +82,7 @@ export interface AgentReportBugDeps {
   isProduction?: () => boolean;
 }
 
+/** The Report Bug button's /goal + /rca prompt, marked as filed by the agent itself. */
 export function buildAgentBugReportPrompt(agentId: string, description: string): string {
   return buildManualBugReportPrompt(
     agentId,
@@ -94,6 +95,7 @@ export function buildAgentBugReportIdempotencyKey(agentId: string): string {
   return `rose-agent-report-bug-${agentId}`;
 }
 
+/** The agent is the owner's own live, real-world, non-benchmark root run. */
 async function assertReportableRootRun(
   userId: string,
   agentId: string,
@@ -136,6 +138,7 @@ async function claimReport(
   return (deps.claim ?? claimAgentSelfBugReport)(agentId, request, now);
 }
 
+/** Launch the frozen request, then record the run on both claims. */
 async function launchClaim(
   agentId: string,
   claim: AgentSelfBugReportClaim,
@@ -170,6 +173,7 @@ async function launchClaim(
   return launched;
 }
 
+/** File the calling root agent's one bug report (see the file header for every gate). */
 export async function reportAgentBugFromAgent(
   userId: string | undefined,
   agentId: string,

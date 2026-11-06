@@ -40,6 +40,7 @@ export function agentBugReportKey(agentId: string): string {
   return `agent-bug-report:${agentId}`;
 }
 
+/** The report_bug tool's own claim key: one per agent run. */
 export function agentSelfBugReportKey(agentId: string): string {
   return `agent-self-bug-report:${agentId}`;
 }
@@ -236,6 +237,7 @@ export interface AgentSelfBugReportClaim extends AgentSelfBugReportRequest {
   runId: string | null;
 }
 
+/** Read a claim row back into its frozen request; null when the row is malformed. */
 function selfClaimFromRow(row: {
   status: string;
   externalId: string | null;
@@ -292,6 +294,7 @@ export async function claimAgentSelfBugReport(
   return claim;
 }
 
+/** Record the boxes.dev run that the frozen request launched. */
 export async function markAgentSelfBugReportLaunched(
   agentId: string,
   runId: string
@@ -302,6 +305,7 @@ export async function markAgentSelfBugReportLaunched(
   });
 }
 
+/** Keep the frozen request after a failed launch so a retry re-sends it unchanged. */
 export async function markAgentSelfBugReportFailed(agentId: string, error: string): Promise<void> {
   await prisma.toolSideEffect.updateMany({
     where: { operationKey: agentSelfBugReportKey(agentId), status: { not: 'SUCCEEDED' } },

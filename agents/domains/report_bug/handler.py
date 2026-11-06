@@ -50,6 +50,7 @@ def with_report_bug(tools: Sequence[str], workflow_instance: Any) -> List[str]:
 
 
 def _result_text(result: Dict[str, Any]) -> str:
+    """Truthful tool result: the filed report, or the run's earlier one."""
     title = str(result.get("name") or "bug report")
     run = str(result.get("run_id") or "")
     if result.get("already_reported"):

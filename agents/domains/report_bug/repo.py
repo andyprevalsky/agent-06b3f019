@@ -19,6 +19,7 @@ logger = structlog.get_logger()
 
 
 def _error_text(response: Any) -> str:
+    """The backend's refusal reason, bounded for the tool result."""
     try:
         body = response.json()
     except ValueError:
