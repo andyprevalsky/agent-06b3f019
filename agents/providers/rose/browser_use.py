@@ -31,6 +31,7 @@ from utils.browser_auth_contract import build_authentication_contract
 # same grading block as the main agent so attempt_completion semantics do not
 # drift between agent types.
 from utils.prompts import VERIFICATION_RULES
+from utils.purchase_approval import PRODUCT_URL_GUIDANCE
 
 logger = structlog.get_logger()
 
@@ -307,8 +308,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "enter new card details. If a valid saved payment method is already selected and no card entry is "
             "required, do not call this tool; continue with that saved method. Before typing any new card details, "
             "first read the full itemized receipt off "
-            "the page and visit each product page as needed. Every item MUST include its canonical product-detail "
-            "URL (never the cart or checkout URL), numeric rating, and numeric review count, plus its name, image "
+            "the page and visit each product page as needed. Every item MUST include its product URL (its own "
+            "product page, or the page where you selected it when it has none), numeric rating, and numeric "
+            "review count, plus its name, image "
             "URL if visible, unit price in cents, quantity, and line total in cents. Include every fee, the "
             "subtotal, and the final total. After the user approves, the card is "
             "minted on demand and the one-time card refs are returned for you to type into the payment fields. "
@@ -345,10 +347,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                         "image_url": {"type": "string", "description": "Product image URL, when visible"},
                         "product_url": {
                             "type": "string",
-                            "description": (
-                                "Canonical product-detail URL. Never use a cart, basket, checkout, payment, "
-                                "or order-confirmation URL."
-                            ),
+                            "description": PRODUCT_URL_GUIDANCE,
                         },
                         "rating": {
                             "type": "string",
@@ -434,7 +433,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                 "type": "object",
                 "description": (
                     "Required when trigger_type is purchase. Every item MUST include a real numeric rating, "
-                    "numeric review count, and canonical product-detail URL. Never use the current cart or checkout URL."
+                    "numeric review count, and product URL (its own product page, or the page where you "
+                    "selected it when it has none)."
                 ),
                 "properties": {
                     "items": {
@@ -474,7 +474,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                                 "image_url": {"type": "string", "description": "Best visible product image URL"},
                                 "product_url": {
                                     "type": "string",
-                                    "description": "Required canonical product-detail URL; never cart or checkout",
+                                    "description": f"Required. {PRODUCT_URL_GUIDANCE}",
                                 },
                                 "seller": {"type": "string", "description": "Visible seller"},
                                 "shipping": {"type": "string", "description": "Visible delivery details"},

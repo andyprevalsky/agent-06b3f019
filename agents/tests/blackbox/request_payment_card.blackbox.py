@@ -306,6 +306,76 @@ def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
     assert "do not keep searching" in action_src
 
 
+# Captured from browser-blue-bottle-challenge-recovery r001-j0002 (agent 7d569891,
+# 2026-11-06). On sf-classic.order.online the shakerato opens as a modal over the
+# store menu: the item has no page of its own, only the store URL (and an
+# `?item=<id>` deep link that re-opens the modal on that same store page).
+_BLUE_BOTTLE_STORE_URL = "https://sf-classic.order.online/en-US/store/BlueBottleCoffee-2188540"
+
+
+def test_modal_menu_item_without_its_own_page_is_satisfiable_and_the_contract_teaches_it():
+    """H-38: an item that only exists as a modal on a menu page must be representable.
+
+    Enforcement already accepts the page the item was selected on (path/page-kind
+    heuristics were removed on 2026-07-28; only well-formedness and a visited host
+    are checked). The failure was every LLM-visible surface still demanding a
+    "canonical product-detail" page, so the browser agent spent ~19 minutes
+    reverse-engineering script modules for a URL the site does not have and never
+    added the item to the cart. This cements the truthful value AND that every
+    LLM-facing statement of the product_url contract teaches it, mirroring H-01's
+    '0 stars' guidance. Host grounding and non-URL rejection stay intact.
+    """
+    from browser_tools.schemas import (
+        PaymentLineItem,
+        RequestPaymentCardBrowserTool,
+        WriteLockPurchaseItem,
+    )
+    from domains.spawn_browser_agent_v3 import handler
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+    from utils.purchase_approval import validate_product_url_for_pages
+
+    valid_item = _sample_tool_call()["line_items"][0]
+    item = PaymentLineItem.model_validate({**valid_item, "product_url": _BLUE_BOTTLE_STORE_URL})
+    assert item.product_url == _BLUE_BOTTLE_STORE_URL
+    assert validate_product_url_for_pages(_BLUE_BOTTLE_STORE_URL, [_BLUE_BOTTLE_STORE_URL]) == (
+        _BLUE_BOTTLE_STORE_URL
+    )
+    write_lock_item = WriteLockPurchaseItem.model_validate(
+        {"title": "Iced Vanilla Bean Shakerato", "rating": "0 stars", "review_count": "0 reviews",
+         "product_url": _BLUE_BOTTLE_STORE_URL}
+    )
+    assert write_lock_item.product_url == _BLUE_BOTTLE_STORE_URL
+
+    payment_tool = BROWSER_USE_TOOLS["request_payment_card"]
+    write_lock_tool = BROWSER_USE_TOOLS["generate_write_lock_notification"]["params"]["purchase"]
+    surfaces = {
+        "PaymentLineItem.product_url": PaymentLineItem.model_fields["product_url"].description,
+        "RequestPaymentCardBrowserTool.line_items": (
+            RequestPaymentCardBrowserTool.model_fields["line_items"].description
+        ),
+        "WriteLockPurchaseItem.product_url": WriteLockPurchaseItem.model_fields["product_url"].description,
+        "browser_use request_payment_card": payment_tool["description"],
+        "browser_use request_payment_card product_url": (
+            payment_tool["params"]["line_items"]["items"]["properties"]["product_url"]["description"]
+        ),
+        "browser_use write-lock purchase": write_lock_tool["description"],
+        "browser_use write-lock product_url": (
+            write_lock_tool["properties"]["items"]["items"]["properties"]["product_url"]["description"]
+        ),
+        "write-lock purchase example notes": next(
+            notes for title, _payload, notes in handler._WRITE_LOCK_NOTIFICATION_EXAMPLES
+            if title.startswith("Purchases")
+        ),
+        "browser system Purchase Approval Context": getattr(handler, "PURCHASE_APPROVAL_CONTEXT", ""),
+    }
+    for name, text in surfaces.items():
+        text = (text or "").lower()
+        # No surface may demand a page kind that modal/single-page merchants lack...
+        assert "product-detail" not in text, f"{name} still demands a product-detail page: {text!r}"
+        # ...and each one must teach the truthful value the validator accepts.
+        assert "page where you selected it" in text, f"{name} does not teach the no-own-page case: {text!r}"
+
+
 # Captured verbatim from browser-hotel-booking r001-j0020 (agent 3e9daf89, step 63).
 # hotels.com shows "9.2 out of 10" for Hotel Kabuki; the validator only accepted 0-5,
 # so the truthful receipt was rejected and no payment approval was ever requested.
@@ -1208,6 +1278,10 @@ async def run_all_tests():
     result.record(
         "reviewless_bookings_pass_with_zero",
         test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it,
+    )
+    result.record(
+        "modal_menu_item_without_its_own_page",
+        test_modal_menu_item_without_its_own_page_is_satisfiable_and_the_contract_teaches_it,
     )
     result.record(
         "rating_keeps_merchant_scale",

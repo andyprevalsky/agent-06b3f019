@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Literal, Optional, Type
 from pydantic import AliasChoices, BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from utils.purchase_approval import (
+    PRODUCT_URL_GUIDANCE,
     validate_product_detail_url,
     validate_product_rating,
     validate_product_review_count,
@@ -562,10 +563,7 @@ class PaymentLineItem(BaseModel):
         validation_alias=AliasChoices("image_url", "imageUrl"),
     )
     product_url: str = Field(
-        description=(
-            "Canonical product-detail page URL for this item. This must link to the product itself, "
-            "never a cart, basket, checkout, payment, or order-confirmation page."
-        ),
+        description=PRODUCT_URL_GUIDANCE,
         validation_alias=AliasChoices("product_url", "productUrl"),
     )
     rating: str = Field(
@@ -629,8 +627,9 @@ class RequestPaymentCardBrowserTool(BaseModel):
     currency: Literal["USD"] = Field(default="USD", description="Purchase currency; currently only USD")
     line_items: List[PaymentLineItem] = Field(
         description=(
-            "Full itemized receipt. Every item must include its canonical product-detail URL, rating, "
-            "review count, image URL if visible, quantity, unit price, and line total."
+            "Full itemized receipt. Every item must include its product URL (its own product page, or the "
+            "page where you selected it when it has none), rating, review count, image URL if visible, "
+            "quantity, unit price, and line total."
         ),
         min_length=1,
         validation_alias=AliasChoices("line_items", "lineItems"),
@@ -731,7 +730,7 @@ class WriteLockPurchaseItem(BaseModel):
     )
     image_url: Optional[str] = Field(default=None, description="Best image URL for this item.")
     product_url: str = Field(
-        description="Required canonical product-detail URL; never use a cart, checkout, payment, or order URL.",
+        description=f"Required. {PRODUCT_URL_GUIDANCE}",
         validation_alias=AliasChoices("product_url", "productUrl"),
     )
     seller: Optional[str] = Field(default=None, description="Visible seller or merchant for this item.")

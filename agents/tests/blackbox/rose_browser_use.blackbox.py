@@ -2994,10 +2994,14 @@ def test_phone_off_matches_prephone_bytes():
     browser-pointer-move-intent-had-no-tool): the hover action plus truthful
     click/click_coordinates/drag/evaluate descriptions changed only the tools hash
     in both modes; system/messages hashes are unchanged.
+    Re-pinned for H-38 (rca/h-38-20261106, pending approval): the request_payment_card and
+    write-lock purchase product_url descriptions now state the shared PRODUCT_URL_GUIDANCE
+    contract. Only the tools hash changed in both modes; HEAD 3271548804 reproduces the
+    previous tools hash exactly; system/messages are unchanged.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('6ffbcc0f7fcbe140cb3e16f21bed939c2c90e036cc3f90c61af1c0569c5ddfbc', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('acde06b7d166b911ac003b267c35c45e9666377be0fe8c29bec9a6d9db88c47d', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
+    expected = {'0': ('184b8c76960a00ed1a98bab60c36ae09dc4628b444b92e2667aaa7a9466f6236', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('56f83f83fc7b5f922b8c9aedb24a0c280ad8a41540214bf516e1f1cc030e39e8', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
