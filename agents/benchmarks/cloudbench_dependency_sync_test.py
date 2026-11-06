@@ -10865,6 +10865,8 @@ def _fleet_capacity_guard(source: str) -> str:
             _extract_fleet_function(source, signature)
             for signature in (
                 "archived_reuse_capacity_credit() {",
+                "bench_uses_shared_demo_cache() {",
+                "admit_lane_capacity() {",
                 "enforce_app_capacity_guard() {",
             )
         )

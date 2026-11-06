@@ -2660,8 +2660,8 @@ def test_campaign_inventory_stress_defaults_derive_actual_vm_profiles_and_withho
     assert result['admission'] == 'local-defaults-derived-native-guards-required'
 
     env = module.stress_default_environment(result, {})
-    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '160'
-    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '56'
+    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '1000'
+    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '300'
     assert env['CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION'] == '1'
     assert module.stress_default_environment(result, {'CLOUDBENCH_APP_MACHINE_CEILING': '1'})['CLOUDBENCH_APP_MACHINE_CEILING'] == '1'
     with pytest.raises(ValueError, match='unknown native baseline'):
