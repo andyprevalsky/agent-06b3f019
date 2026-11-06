@@ -301,6 +301,8 @@ require_text "$FORMAT" "**Golden review:** verdict" \
   "an approval that reaches the user without its review verdict must be invalid"
 require_text "$DEPLOY" 'a `GROUNDED` verdict clears them: `scripts/deploy approval decide --decision grounded --evidence' \
   "/deploy must record a GROUNDED golden-reference review instead of stopping"
+require_text "$DEPLOY" 'every `GROUNDED` line' \
+  "/deploy must list each GROUNDED review in the PR body"
 require_text "$DEPLOY_CLI" "approval.add_argument('--decision', choices=['approved', 'grounded', 'rejected'])" \
   "scripts/deploy approval decide must accept a grounded decision"
 require_text "$DEPLOY_CLI" "if args.decision != 'grounded':" \
