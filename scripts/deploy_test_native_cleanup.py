@@ -347,7 +347,7 @@ def validate(receipt, owner, proof):
         result = validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
         need(used == set(bindings), 'proof file closure')
         return result
-    if layout == 'campaign-v1':
+    if layout in {'campaign-v1', 'campaign-admission-rejected-v1'}:
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
              and reference.get('native_directory') == str(campaign)
@@ -444,6 +444,10 @@ def validate(receipt, owner, proof):
     retained, audit_seals, recovered, excluded = {}, {}, {}, {}
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
+    admission_parents = frozenset()
+    if layout == 'campaign-admission-rejected-v1':
+        from deploy_test_native_admission import validate_campaign
+        admission_parents = validate_campaign(receipt, proof, root, runs, parents, participants, bound, document)
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
     for fleet in sorted(participants):
         benches = json.loads(bound(fleet / '_batch/benches.json'))
@@ -467,9 +471,13 @@ def validate(receipt, owner, proof):
             link = canary_links.get(fleet)
             need(link and link['parent'] in parents, 'failed canary parent link')
             zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
+        admission_parent = fleet in admission_parents
+        if admission_parent:
+            from deploy_test_native_admission import validate_parent
+            validate_parent(fleet, life, benches, run, root, bound, document, tree)
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
-        if failed_canary and zero_allocation and not provenance_path.exists() and not matrix_path.exists():
-            pass  # Positive linked infra-probe + sealed zero-resource release above; absence alone proves nothing.
+        if ((failed_canary and zero_allocation) or admission_parent) and not provenance_path.exists() and not matrix_path.exists():
+            pass  # Positive linked admission boundary + sealed empty ownership; absence alone proves nothing.
         else:
             provenance, matrix = document(provenance_path), document(matrix_path)
             need(not validate_provenance(provenance) and not validate_task_matrix_binding(provenance, matrix)

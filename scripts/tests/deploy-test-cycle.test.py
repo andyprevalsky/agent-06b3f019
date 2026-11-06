@@ -2573,6 +2573,149 @@ class Cycle(unittest.TestCase):
         proof['files'] = {str(p): c.sha_file(p) for p in files}
         return state, occurrence, paths, proof, parents
 
+    def admission_campaign_state(self):
+        import hashlib, shutil, time, runpy
+        from datetime import datetime, timezone
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        runs = parents[0].parent
+        for fleet in [*parents[10:], runs / 'canary']:
+            token = c.read(fleet/'_batch/lifecycle.json')['fleet_owner_token']
+            shutil.rmtree(fleet)
+            shutil.rmtree(self.root/'.git/cloudbench-fleet-audits'/token)
+        parents = parents[:10]
+        sources = ['scripts/run-bench-fleet', 'scripts/run-bench-campaign.py', 'scripts/lib/cloudbench-env.sh', 'scripts/cloudbench_execution_provenance.py']
+        for relative in sources:
+            (self.root/relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT/relative, self.root/relative)
+        subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=t','-c','user.email=t@x','commit','-qm','admission producer'],check=True)
+        source = c.source(self.root)
+        receipt = state['attempts'][-1]['results'][0]
+        campaign = Path(proof['campaign'])
+        summary = c.read(campaign/'summary.json')
+        jobs = summary['jobs'][:10]
+        iso = lambda v: datetime.fromtimestamp(v, timezone.utc).isoformat()
+        start, end = receipt['started_at'], receipt['finished_at']
+        for index, (fleet, job) in enumerate(zip(parents, jobs)):
+            code = 1 if index == 9 else 143
+            job.update(status='failed' if code==1 else 'cancelled', controller_exit_code=code,
+                       started_at=iso(start+.1), finished_at=iso(end-.2 if code==1 else end-.1))
+            text = (f'{self.root}/scripts/run-bench monitor {fleet}\n')
+            if code==1:
+                text += 'cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\n❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation\n'
+            else:
+                text += 'Terminated\n⚰️  controller received TERM (02:28:28)\n'
+            Path(job['log']).write_text(text)
+            life = c.read(fleet/'_batch/lifecycle.json'); life.update(status='failed',controller_exit_code=code)
+            c.write(fleet/'_batch/lifecycle.json',life)
+            c.write(fleet/'_batch/run.json',dict(run_id=fleet.name,status='failed',controller_exit_code=code,
+                tasks=[dict(name=job['task'],status='INFRA_ERROR',passed=False,lifecycle_stage='released',failure_reason='no current run artifact produced')]))
+            for name in ('execution-provenance.json','execution-task-matrix.json'): (fleet/name).unlink()
+        for path in list(campaign.glob('*.log')):
+            if path not in {Path(j['log']) for j in jobs}: path.unlink()
+        summary.update(jobs=jobs,task_count=10,total_jobs=10,concurrency=10,peak_concurrency=10,started_at=iso(start),finished_at=iso(end))
+        c.write(campaign/'summary.json',summary)
+        native=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
+        group=native['campaign_group_record'](summary)
+        c.write(campaign/'hub-group.json',group)
+        c.write(campaign/'hub-group-publication-ack.private.json',dict(pid=2147483000,token='d'*32,
+            record_sha256=hashlib.sha256(json.dumps(group,sort_keys=True).encode()).hexdigest()))
+        checks=[j['task'] for j in jobs]; cases=dict.fromkeys(checks,'UNVERIFIED')
+        request_path=paths['receipt'].parent/'request.json'
+        request=c.read(request_path); request.update(source=source,checks=checks); c.write(request_path,request)
+        adapter=c.read(paths['adapter']); adapter.update(source=source,cases=cases); c.write(paths['adapter'],adapter)
+        receipt.update(source=source,cases=cases,case_complete=dict.fromkeys(checks,False))
+        receipt['native_cleanup_reference']['result_sha256']=c.sha_file(paths['adapter'])
+        receipt['cleanup_owner']['native_cleanup_reference']=receipt['native_cleanup_reference']
+        c.write(paths['receipt'],receipt)
+        proof.update(layout='campaign-admission-rejected-v1',source=source,owner=copy.deepcopy(receipt['cleanup_owner']),
+            receipt_sha256=c.sha_file(paths['receipt']),worker_result_sha256=c.sha_file(paths['adapter']),confirmed_at=time.time())
+        files=[request_path,runs.parent/'cli.log',*campaign.rglob('*'),*runs.rglob('*'),
+               *(self.root/p for p in sources),
+               *(p for fleet in parents for p in (self.root/'.git/cloudbench-fleet-audits'/c.read(fleet/'_batch/lifecycle.json')['fleet_owner_token']).rglob('*'))]
+        proof['files']={str(p):c.sha_file(p) for p in files if p.is_file()}
+        return state,occurrence,paths,proof,parents
+
+    def test_admission_requires_full_source_before_git_io(self):
+        from deploy_test_native_admission import validate_campaign
+        for head in (None, '4f219', 'a'*39, 'g'*40, True):
+            with self.subTest(head=head), patch('deploy_test_native_admission.subprocess.check_output') as io:
+                with self.assertRaises(ValueError):
+                    validate_campaign({'source':{'head':head}}, {}, self.root, None, {}, set(), None, None)
+                io.assert_not_called()
+
+    def test_admission_rejection_retains_ten_parent_custody_without_credit(self):
+        state, occurrence, paths, proof, parents = self.admission_campaign_state()
+        before=copy.deepcopy(state)
+        c.reconcile(state,occurrence['id'],proof)
+        entry=next(iter(state['reconciled_owners'].values()))
+        self.assertEqual(before['attempts'],state['attempts'])
+        self.assertEqual(before['failures'],state['failures'])
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual(10,len(entry['participants']))
+        self.assertTrue(entry['retained_services'])
+        self.assertEqual([],c.retained_owners(state,[occurrence['gate']]))
+
+    def test_admission_rejection_fails_closed_on_malformed_or_nonempty_closure(self):
+        state, occurrence, paths, proof, parents = self.admission_campaign_state()
+        original={Path(p):Path(p).read_bytes() for p in proof['files']}
+        campaign=Path(proof['campaign']); summary_path=campaign/'summary.json'
+        before=copy.deepcopy(state)
+        for mutation in ('purpose','source','prefix','boolean-pass','boolean-exit','false-root','executed','metadata','duplicate-pid','boolean-pid',
+                         'reverse-clock','early-cancel','late-start','nonterminal','live-group','nonempty','unknown-record','unknown-audit','registry','foreign-hub'):
+            with self.subTest(mutation=mutation):
+                candidate=copy.deepcopy(proof); added=[]
+                try:
+                    summary=c.read(summary_path)
+                    if mutation=='purpose': candidate['purpose']='isolated-validation'
+                    if mutation=='source': (self.root/'scripts/run-bench-fleet').write_text('changed producer')
+                    if mutation=='prefix':
+                        p=Path(summary['jobs'][-1]['log']); p.write_text(p.read_text().replace('cleanup reserve admission failed:','forged cleanup reserve admission failed:'))
+                    if mutation in ('boolean-pass','executed'):
+                        p=parents[0]/'_batch/run.json'; value=c.read(p); value['tasks'][0]['passed']=0 if mutation=='boolean-pass' else True; c.write(p,value)
+                    if mutation in ('boolean-exit','false-root'):
+                        p=parents[-1]/'_batch/run.json'; value=c.read(p)
+                        if mutation=='boolean-exit': value['controller_exit_code']=True
+                        else: value['tasks'][0]['owned_roots']=False
+                        c.write(p,value)
+                    if mutation=='unknown-record':
+                        p=parents[0]/'teardown-ownership/unrecognized'; p.write_text('unknown'); added.append(p)
+                    if mutation=='metadata':
+                        p=parents[0]/'execution-provenance.json'; c.write(p,{}); added.append(p)
+                    if mutation=='duplicate-pid': summary['jobs'][1]['controller_pid']=summary['jobs'][0]['controller_pid']
+                    if mutation=='boolean-pid': summary['jobs'][0]['controller_pid']=True
+                    if mutation=='reverse-clock': summary['jobs'][0]['started_at']=summary['jobs'][0]['finished_at']
+                    if mutation=='early-cancel': summary['jobs'][0]['finished_at']=summary['jobs'][0]['started_at']
+                    if mutation=='late-start': summary['jobs'][0]['started_at']=summary['jobs'][0]['finished_at']
+                    if mutation=='nonterminal': summary['jobs'][0]['status']='running'
+                    if mutation in ('duplicate-pid','boolean-pid','reverse-clock','early-cancel','late-start','nonterminal'): c.write(summary_path,summary)
+                    if mutation=='nonempty':
+                        p=parents[0]/'teardown-ownership/expected-fresh/x'; p.parent.mkdir(exist_ok=True); p.write_text('owned'); added.append(p)
+                    if mutation=='unknown-audit':
+                        p=parents[0]/'teardown-ownership/meta'; p.write_text(p.read_text().replace('provider-teardown-verified','unknown'))
+                    if mutation=='registry':
+                        owner=c.read(parents[0]/'_batch/lifecycle.json')['fleet_owner_token']; p=self.root/'.git/cloudbench-fleet-ownership'/owner; p.mkdir(parents=True); added.append(p)
+                    if mutation=='foreign-hub':
+                        p=next(p for p in original if p.name.endswith('.owner')); p.write_text(p.read_text().replace('live-transfer-required','unknown'))
+                    candidate['files'].update({str(p):c.sha_file(p) for p in original if p.exists()})
+                    candidate['files'].update({str(p):c.sha_file(p) for p in added if p.is_file()})
+                    if mutation=='live-group':
+                        from deploy_test_native_cleanup import subprocess as native_subprocess
+                        actual=native_subprocess.check_output
+                        def process_result(args, *a, **kw):
+                            if args[:1]==['ps']: return '999999 310001 S\n'
+                            return actual(args,*a,**kw)
+                        with patch.object(native_subprocess,'check_output',side_effect=process_result):
+                            with self.assertRaises(ValueError): c.reconcile(state,occurrence['id'],candidate)
+                    else:
+                        with self.assertRaises(ValueError): c.reconcile(state,occurrence['id'],candidate)
+                    self.assertEqual(before,state)
+                finally:
+                    for p in added:
+                        if p.is_dir(): p.rmdir()
+                        elif p.exists(): p.unlink()
+                    for p,raw in original.items(): p.write_bytes(raw)
+
     def isolated_campaign_state(self):
         import time
         state, occurrence, paths, proof, parents = self.campaign_recon_state()
@@ -3940,6 +4083,115 @@ class StructuralSupervisorCleanup(unittest.TestCase):
         newer={**self.receipt,'token':'new-unreconciled-owner'}
         self.state['attempts'].append({'results':[newer]})
         self.assertEqual([self.gate['name']],c.retained_owners(self.state,[self.gate['name']]))
+
+
+    def set_cases_only_recipe(self):
+        self.recipe.clear()
+        self.recipe['cases'] = {'deploy-command-structural': {
+            'command':['python3','scripts/run-deploy-structural-gates.py','--max-workers','5'],
+            'cwd':'.', 'env':{'FIXTURE':'synthetic'}, 'aggregate':True}}
+        self.result['recipe_digest'] = c.digest(self.recipe)
+        self.result['evidence']['deploy-command-structural']['command'] = self.recipe['cases']['deploy-command-structural']['command']
+        self.receipt['execution_binding']['contract_digest'] = c.digest(self.gate)
+        self.write_native()
+
+    def test_cases_only_structural_recipe_allows_launch_only(self):
+        self.set_cases_only_recipe()
+        self.test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts()
+
+    def test_cases_only_recipe_rejects_unknown_services_extra_keys_and_wrong_command(self):
+        import copy
+        self.set_cases_only_recipe()
+        original = copy.deepcopy(self.recipe)
+        variants = [{**original,'services':False}, {**original,'unexpected':True}]
+        for field, value in [('command',['python3','other.py']), ('cwd','elsewhere'), ('aggregate',False)]:
+            changed = copy.deepcopy(original)
+            changed['cases']['deploy-command-structural'][field] = value
+            variants.append(changed)
+        for recipe in variants:
+            with self.subTest(recipe=recipe):
+                self.recipe.clear()
+                self.recipe.update(recipe)
+                self.result['recipe_digest'] = c.digest(self.recipe)
+                self.receipt['execution_binding']['contract_digest'] = c.digest(self.gate)
+                self.write_native()
+                before = copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):
+                    self.reconcile()
+                self.assertEqual(before,self.state)
+
+    def test_file_transport_exact_command_allows_launch_only(self):
+        self.gate['result_transport'] = 'file'
+        self.gate['command'] = self.gate['command'][:-1]
+        self.receipt['command'] = self.gate['command']
+        self.receipt['execution_binding']['contract_digest'] = c.digest(self.gate)
+        self.write_native()
+        self.test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts()
+
+    def test_transport_command_pairs_reject_mismatches(self):
+        import copy
+        original_gate, original_receipt = copy.deepcopy(self.gate), copy.deepcopy(self.receipt)
+        command = original_gate['command']
+        for transport, args in [('file', command), ('stdout', command[:-1]),
+                                ('other', command), ('file', command[:-1] + ['extra']),
+                                ('stdout', command + ['extra'])]:
+            with self.subTest(transport=transport, args=args):
+                self.gate.clear()
+                self.gate.update(copy.deepcopy(original_gate), result_transport=transport, command=args)
+                self.receipt = {**copy.deepcopy(original_receipt), 'command':args}
+                self.receipt['execution_binding']['contract_digest'] = c.digest(self.gate)
+                self.write_native()
+                before = copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):
+                    self.reconcile()
+                self.assertEqual(before, self.state)
+
+    def test_reaped_sigkill_allows_launch_only_with_all_failure_facts_preserved(self):
+        import signal
+        self.process['kill_sent'] = [125]
+        self.process['reaped'][1]['status'] = signal.SIGKILL
+        self.write_native()
+        self.test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts()
+        self.assertEqual([125], self.process['kill_sent'])
+        self.assertEqual('FAIL', self.receipt['status'])
+        self.assertFalse(self.result['complete'])
+
+    def test_kill_requires_unique_numeric_term_and_exact_reaped_sigkill(self):
+        import signal
+        original = copy.deepcopy(self.process)
+        original['kill_sent'] = [125]
+        original['reaped'][1]['status'] = signal.SIGKILL
+        variants = [('kill_sent', value) for value in
+                    (None, [True], [125.0], ['125'], [-1], [125, 125], [999], [124])]
+        variants += [('term_sent', []), ('term_sent', [126]), ('remaining', [125])]
+        for status in (0, signal.SIGTERM, 127, None, True, 9.0):
+            rows = copy.deepcopy(original['reaped'])
+            rows[1]['status'] = status
+            variants.append(('reaped', rows))
+        variants.append(('reaped', [row for row in original['reaped'] if row['pid'] != 125]))
+        for key, value in variants:
+            with self.subTest(key=key, value=value):
+                self.process = {**original, key: value}
+                self.write_native()
+                before = copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):
+                    self.reconcile()
+                self.assertEqual(before, self.state)
+
+    def test_valid_reaped_kill_still_refuses_a_current_live_root(self):
+        import signal
+        self.process['kill_sent'] = [125]
+        self.process['reaped'][1]['status'] = signal.SIGKILL
+        self.write_native()
+        child = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(10)'], cwd=self.worker)
+        try:
+            before = copy.deepcopy(self.state)
+            with self.assertRaises(ValueError):
+                self.reconcile()
+            self.assertEqual(before, self.state)
+        finally:
+            child.terminate()
+            child.wait(timeout=2)
 
 
 class InterruptedLocalRecovery(unittest.TestCase):

@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import time
 
 KIND = 'local-supervisor-cleanup-v1'
@@ -176,11 +177,12 @@ def structural_cleanup(state, receipt, proof):
     name = gate['name']
     need(gate.get('category') == name == 'deploy-command-structural'
          and gate.get('worker_transport') == 'local-isolated' and gate.get('case_protocol') is True
-         and gate.get('result_transport') == 'stdout' and str(root) == gate['worker_root'] == gate.get('cwd')
+         and gate.get('result_transport') in ('stdout', 'file') and str(root) == gate['worker_root'] == gate.get('cwd')
          and not gate.get('native_cloud') and not gate.get('native_backend'), 'owned structural binding')
     command = gate['command']
-    need(receipt.get('command') == command and len(command) == 5
-         and command[1:] == [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root), '--stdio'],
+    need(receipt.get('command') == command
+         and command[1:] == [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root)]
+         + (['--stdio'] if gate['result_transport'] == 'stdout' else []),
          'native structural command')
     binding = receipt.get('execution_binding', {})
     need(binding.get('contract_digest') == digest(gate)
@@ -215,10 +217,17 @@ def structural_cleanup(state, receipt, proof):
          and result.get('complete') is False and result.get('cleanup_complete') is True
          and result.get('reused') is False and not result.get('cleanup_owner'), 'structural result incomplete cleanup')
     recipe = request['worker_recipe']
-    need(recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
+    service_recipe = (recipe.get('services') is True and recipe.get('cleanup', {}).get('command') == [
         'bash', '-c', 'bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish']
-         and recipe['cleanup'].get('cwd', '.') == '.' and set(recipe['cases']) == {name}
-         and recipe['cases'][name].get('aggregate') is True, 'native structural cleanup recipe')
+        and recipe['cleanup'].get('cwd', '.') == '.')
+    structural_case = recipe.get('cases', {}).get(name, {})
+    cases_only = (set(recipe) == {'cases'}
+                  and set(structural_case) == {'command', 'cwd', 'env', 'aggregate'}
+                  and structural_case.get('command') == [
+                      'python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '5']
+                  and structural_case.get('cwd') == '.')
+    need((service_recipe or cases_only) and set(recipe['cases']) == {name}
+         and structural_case.get('aggregate') is True, 'native structural cleanup recipe')
     case = result['evidence'][name]
     native = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest()
     log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
@@ -231,12 +240,13 @@ def structural_cleanup(state, receipt, proof):
     need(type(process.get('native_exit')) is int and process['native_exit'] == receipt['native_exit']
          and process.get('quiescent') is True and process.get('orphaned_children') is True
          and all(process.get(k) is False for k in ('cancelled', 'timed_out'))
-         and process.get('remaining') == [] and process.get('kill_sent') == []
+         and process.get('remaining') == []
          and process.get('error') is None, 'structural supervisor closure incomplete')
     child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
-    rows, terms = process.get('reaped'), process.get('term_sent')
+    rows, terms, kills = (process.get(key) for key in ('reaped', 'term_sent', 'kill_sent'))
     need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
          and isinstance(rows, list) and len(rows) > 1 and isinstance(terms, list) and terms
+         and isinstance(kills, list)
          and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
                  and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
                  and type(row['status']) is int and 0 <= row['status'] <= 65535
@@ -244,8 +254,10 @@ def structural_cleanup(state, receipt, proof):
          'unknown structural descendant wait records')
     reaped = {row['pid']: row['status'] for row in rows}
     need(len(reaped) == len(rows) and reaped.get(child) == 256
-         and all(type(pid) is int and pid > 1 and pid != child and pid in reaped for pid in terms)
-         and len(set(terms)) == len(terms), 'structural owned descendants not all reaped')
+         and all(type(pid) is int and pid > 1 and pid != child and pid in reaped for pid in terms + kills)
+         and len(set(terms)) == len(terms) and len(set(kills)) == len(kills)
+         and set(kills) <= set(terms)
+         and all(os.WIFSIGNALED(reaped[pid]) and os.WTERMSIG(reaped[pid]) == signal.SIGKILL for pid in kills), 'structural owned descendants not all reaped')
     quiet(root)
     return gate
 
