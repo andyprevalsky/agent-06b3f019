@@ -6838,6 +6838,58 @@ def test_agent_payment_accepts_grounded_finished_browser_text_without_structured
         assert _extract_agent_payment_output_blob({"messages": [invalid_result]}) == ""
 
 
+async def test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules():
+    """deploy.md Step 13c (orig L3407-3434): when the non-admin production identity is missing,
+    `agent-payment-production-abandonment` stops before any live spend and its own error carries
+    the exact provisioning command, the credential source and the guardrails, so the agent that
+    hits it needs no other document and never asks the user."""
+    import contextlib
+    import io
+
+    import httpx
+    import pytest
+
+    import benchmarks.run_benchmark as bench
+
+    original_client = httpx.AsyncClient
+    seen = []
+    printed = io.StringIO()
+
+    def missing_identity(request):
+        seen.append(request)
+        return httpx.Response(200, json={"tier": None, "remaining": 0})
+
+    assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME == "agent-payment-production-abandonment"
+    assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME in bench.AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES
+    with patch.object(bench, "_api_headers", new=AsyncMock(return_value={})), \
+         patch.object(bench.httpx, "AsyncClient",
+                      side_effect=lambda **kw: original_client(transport=httpx.MockTransport(missing_identity), **kw)):
+        with pytest.raises(RuntimeError) as raised, contextlib.redirect_stdout(printed):
+            await bench._preflight_production_payment_identity("https://api.fixture.invalid")
+    assert [(r.url.path, r.url.params.get("userId")) for r in seen] == [
+        ("/api/credits/usage", "00000000-0000-4000-8000-000000000107")]
+    message = str(raised.value)
+    command = (
+        "  cd back-end && set -a && . ./.env && set +a && \\\n"
+        '    DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
+        "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
+        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107 \\\n"
+        '    --agentcard-cardholder-id "$DEDICATED_AGENTCARD_CARDHOLDER_ID"\n'
+    )
+    assert command in message
+    for rule in (
+        "is not provisioned: it has no Subscription row",
+        "Every credential it needs is already in back-end/.env; do not ask the user",
+        "the 6543 pooler fails",
+        "EXISTING dedicated benchmark cardholder only",
+        "never create an identity automatically or bypass pending KYC",
+        "never enter a card number",
+        "one-time hosted Stripe Checkout link: a human saves the live card there once",
+    ):
+        assert rule in message, rule
+    assert message in printed.getvalue()  # printed in full, not only raised
+
+
 def test_production_payment_lifecycle_refuses_sandbox_target():
     import pytest
 
@@ -27806,6 +27858,10 @@ async def run_all_tests():
     r.record(
         "production_payment_rejects_sandbox_target",
         test_production_payment_lifecycle_refuses_sandbox_target,
+    )
+    await r.record_async(
+        "production_payment_identity_gap_prints_its_provisioning_rules",
+        test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules,
     )
     r.record(
         "production_frontend_ignores_stale_local_manifest",

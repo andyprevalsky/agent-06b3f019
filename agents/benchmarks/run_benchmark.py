@@ -2617,10 +2617,21 @@ async def _preflight_message_person_bridge(base_url: str) -> None:
         )
 
 
+# deploy.md Step 13c's identity rules travel with the task's own fail-closed path, so an agent
+# that hits it needs no other document and never asks the user for credentials.
 PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
-    "Provision it once with: cd back-end && STRIPE_SECRET_KEY=<production sk_live_ key> "
-    "BENCHMARK_AGENTCARD_CARDHOLDER_ID=<production cardholder id> "
-    "npx tsx scripts/setup-benchmark-payment.ts --live"
+    "Provision the non-admin production identity once. Every credential it needs is already in "
+    "back-end/.env; do not ask the user for any of them. Run (DIRECT_URL: the 6543 pooler fails "
+    "with \"Can't reach database server\"):\n"
+    "  cd back-end && set -a && . ./.env && set +a && \\\n"
+    "    DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
+    "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
+    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} \\\n"
+    "    --agentcard-cardholder-id \"$DEDICATED_AGENTCARD_CARDHOLDER_ID\"\n"
+    "Guardrails: bind an EXISTING dedicated benchmark cardholder only (never Andy's or another "
+    "actor's); never create an identity automatically or bypass pending KYC; never enter a card "
+    "number. When the live customer has no saved card the script prints a one-time hosted Stripe "
+    "Checkout link: a human saves the live card there once, then re-run the command."
 )
 
 
@@ -2659,9 +2670,12 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     gap = _production_payment_identity_gap(response.json())
     if gap is None:
         return
-    raise RuntimeError(
-        f"Production payment identity {user_id} is not provisioned: {gap}. {PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
+    message = (
+        f"Production payment identity {user_id} is not provisioned: {gap}.\n"
+        f"{PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
     )
+    print(f"\n    ⛔ {message}")
+    raise RuntimeError(message)
 
 
 async def _preflight_close_purchase_reuse_gate(base_url: str) -> None:
