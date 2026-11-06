@@ -1,0 +1,31 @@
+/goal Fix the production cooperative-cutover verification failure (monitor-cooperative-cutover.ts --verify stays DRAINING because one old-bank agent workflow cannot hand off: its workflow task fails with TMPRL1103 payload size exceeded), make that exact command pass for a fresh deploy, and finish /deploy through merge, production verification, cleanup and a completed deploy scorecard.
+
+Failed test: production gate "Step 13ab cooperative generation cutover verification" (scripts/monitor-cooperative-cutover.ts --verify) for deployment job 39e1d2df83d3be9b74681f789c9932eae7117319a5ae85774d8ca886ddd36839 (workflow run 42225762040, deploy-agents.yml, merged source 25b44dff334567fec68534aed3a0cccb28da23ca)
+Command: cd back-end && source .env && H=$(python3 ../scripts/agent_workflow_surface_hash.py) && node --import tsx scripts/monitor-cooperative-cutover.ts --job-id 39e1d2df83d3be9b74681f789c9932eae7117319a5ae85774d8ca886ddd36839 --expected-hash "$H" --verify   (H=a85f3c9e6fbc; exit 1)
+Scope: the old generation bank (queue navi-agent-tasks-pool-648c5ce9fa7d@f8c85da67cfd) never drains, so the durable managed job stays DRAINING (new pointer navi-agent-tasks-pool-31f329790ca3@a85f3c9e6fbc has been live and matching since 2026-11-06T13:36:19Z). The deploy-agents.yml step hit its 90-minute timeout at 14:59:06Z ("Old bank is still draining; retaining every Machine" repeated). Preserve the cooperative design: never force-clear a bank, never destroy Machines, no forced workflow migration just to turn the status green, do not roll the pointer back. Because deploy-agents jobs are a FIFO, every later agent deploy waits behind this job, so this blocks all future agent-runtime deploys.
+Exact error: verify output: "Cooperative cutover phase: managed_deployment_pending ... → Durable job 39e1d2df...: DRAINING (Error: Owned deployment child exited 1). → A managed predecessor requires its durable qualified retirement certificate." (the "child exited 1" is a single extra failed resume by the deploy owner whose env lacked FLY_API_TOKEN at ~15:05Z; the DRAINING state predates it: the 90-min CI step was already stuck at "Old bank is still draining".)
+Failure evidence (original, read-only; everything below can be re-queried with back-end/.env credentials):
+- Open workflow on the old queue (Temporal visibility TaskQueue = "navi-agent-tasks-pool-648c5ce9fa7d@f8c85da67cfd" AND ExecutionStatus = "Running"): exactly one, id 76aac11b-7c50-4d3c-9741-47e2cdb912a5:start:8b570470-ec81-4013-8b7d-328d0880a392, type AgentWorkflow, started 2026-11-06T13:06:58Z (created by the previous deploy's migration).
+- Its Agent row: id 76aac11b-7c50-4d3c-9741-47e2cdb912a5, status ACTIVE, created 2026-10-28, userId 1f85ff25-6e29-4c1b-8739-f917bd101a30, goal "DEMO fleet concurrency probe alpha: call attempt_completion with result READY and stop. Do not use other tools." Last messages: send_message_to_user "The planning gate rejects this one-step probe because it has no tasks to plan. Should I return READY as a plain response instead?" (13:07), then TOOL "new code version deployed, retry this tool" (13:36:24).
+- Temporal history: describe shows RUNNING, no pending activities, history length 778. Each generation_handoff_available signal (queue navi-agent-tasks-pool-31f329790ca3@a85f3c9e6fbc) at 14:22:30, 15:01:21, 15:11:49 is followed by workflowTaskScheduled/Started then WorkflowTaskFailed; the failure cause is 37 (WORKFLOW_WORKER_UNHANDLED_FAILURE) with message "[TMPRL1103] Attempted to upload payloads with size that exceeded the error limit." (5 failed tasks so far). Old-queue workflow and activity pollers are alive (8 each), so this is not a missing-worker problem: the handoff (continue_as_new / state payload) for this agent exceeds the Temporal payload limit.
+- Tools: back-end/scripts/count-open-workflows-on-queue.ts, monitor-cooperative-cutover.ts, worker-deployment-queue.ts (head/read/run), migrate-open-agent-workflows.ts; design notes in docs/existing-worker-process-deployment.md and deploy.md Step 13ab.
+Failed source: 25b44dff334567fec68534aed3a0cccb28da23ca (PR #1732 merge; the same agent workflow was already unmovable before it: it came through the previous deploy at 13:06Z)
+Originating merge: 25b44dff334567fec68534aed3a0cccb28da23ca
+Originating devbox: 1483da82-0d27-4ae6-a916-720b5a62db29 (deploy owner of PR #1732); this repair must run elsewhere
+
+Diagnosis hints (not conclusions; reproduce first per /RCA): which payload is oversized (accumulated state/conversation passed to continue_as_new or signal handoff?), why the workflow task fails instead of falling back to a claim-check / DB-backed state (CLAUDE.md "Keep activity args small ... 2MB payload limit"), and whether any production agent with large state can wedge a future cutover. The right fix makes the handoff of an oversized-state agent succeed (or park-classify it safely) so the cutover drains without force, then verify the live job completes (SUCCEEDED) and later deploys proceed.
+
+Read CLAUDE.md and follow /RCA. Work autonomously from current main;
+before repair work, verify this is a different devbox and its project-folder
+membership is Bugs using the boxes-devbox-folders skill. Keep this /goal and
+all deployment coordination here; never depend on the originating box staying
+open. Retain every needed artifact here or in accessible durable storage.
+Do not ask questions or depend on human replies. Resolve implementation
+choices using the existing instructions and evidence. Prove the assigned
+test passes, then carry the fix through /deploy to its completed scorecard.
+An OPEN diagnosis, observability report, draft PR or stopped investigation
+does not complete this goal. Do not waive or re-delegate the assigned test
+as a substitute for fixing it. Preserve test intent, assertions, timeouts
+and existing permissions; never fabricate success. Keep working until
+the goal is achieved, including ordinary review and production work.
+Every agent-created thread title must start with --ai-- (set it with dvb-onbox threads set-title --title " --ai-- <title>" as soon as you start and verify it).

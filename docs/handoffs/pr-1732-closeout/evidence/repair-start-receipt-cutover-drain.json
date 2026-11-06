@@ -1,0 +1,8 @@
+{
+ "threadId": "ph70npy4v8me1r7f1bt3s5zbfn8hp0fk",
+ "devboxId": "17dd522e-2d46-4dc9-943b-29962da8834d",
+ "status": "accepted",
+ "agent": "claude",
+ "requested": "claude-sonnet-5-5, reasoning high, speed standard (effective settings not exposed by threads read)",
+ "note": "threads start with the full goal prompt returned agent_start_failed three times (keys ptc1732-cutover-drain-repair-1/2/4); a ping prompt (key ptc1732-ping-1) started the thread, and the /goal packet was delivered with threads send (turn 2, key ptc1732-repair-goal-send-1). Devbox placed in Bugs (revision 1) by this deploy owner."
+}
