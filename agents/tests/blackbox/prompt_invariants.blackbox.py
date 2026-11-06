@@ -2133,6 +2133,13 @@ def test_planner_routes_retrieval_before_stateful_execution():
     prompt = build_planner_system_prompt(SPAWN_AGENT_PROMPT)
     assert "Plan information retrieval and discovery in spawn_explore_agent before dependent execution." in prompt
     assert "spawn_browser_agent may read pages only while executing a known stateful trajectory" in prompt
+    # A route a retrieved memory already shows is known: the invariant must not force a
+    # discovery task the memory makes unnecessary (H-07, planner-memory-blue-bottle-on).
+    assert (
+        "A route a get_memories result already shows (its known entry points and critical path) is a known "
+        "stateful trajectory: plan it directly in spawn_browser_agent, without a separate discovery task."
+        in prompt
+    )
     assert (
         "Step 0 spawn_explore_agent retrieves the public target or route; "
         "Step 1 spawn_browser_agent executes the complete stateful flow" in prompt
