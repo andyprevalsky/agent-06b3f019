@@ -367,7 +367,8 @@ Every approval request passes this review before it reaches the user. Draft
 the complete packet first; the reviewer reads the packet, not a summary.
 
 Scope: only the hunks inside the mandatory user-approval section, meaning the
-hunks a gate flagged for human approval (deploy Steps 0p/0b/0c, Zod schema
+hunks a gate flagged for human approval (the deploy prompt, agent-behavior and
+trajectory-injection guards, Zod schema
 changes, `/RCA` or `/descend` harness-fix packets). Never ground the rest of
 the diff: ordinary code, tests and UI changes outside that scope need no
 golden citation and are not reviewed here.
@@ -405,7 +406,8 @@ golden citation and are not reviewed here.
    authorization, destructive or irreversible actions, explicit gate overrides,
    and benchmark definition, pass-criteria or timeout changes.
 4. **`GROUNDED` clears the human gate.** The change passes every manual
-   human-review gate for deploy (`/deploy` Steps 0p, 0b and 0c, Zod schema
+   human-review gate for deploy (the `/deploy` prompt, agent-behavior and
+   trajectory-injection guards, Zod schema
    changes) and the `/RCA` or `/descend` harness-fix decision without reaching
    the user. Record the approval ID, snapshot, reviewer agent ID and verified
    citations where the human decision would have been recorded (`TEST_REPORT`,

@@ -35,7 +35,7 @@ REMEDIATION = {
         "Mint a new token with `claude setup-token` and update the repository secret "
         "(user approval required for the secret write), then rerun this workflow."
     ),
-    USAGE_EXHAUSTED: "Provider usage exhausted; follow /deploy Step 9a usage-exhaustion clause.",
+    USAGE_EXHAUSTED: "Provider usage exhausted; the fallback review stays disabled in /deploy (CodeRabbit quota uses deploy_review_cycle.py skip).",
     EXECUTION_ERROR: "Review execution failed or reached a configured limit; inspect subtype/errors and repair the workflow.",
     PROVIDER_ERROR: "Provider/API error; inspect the message, repair and rerun (repairable).",
     NO_RESULT: "No Claude result message was recorded; the action failed before or outside the CLI run.",
