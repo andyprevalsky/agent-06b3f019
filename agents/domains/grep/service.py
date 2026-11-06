@@ -14,8 +14,10 @@ from domains.grep.config import (
     ACTIVITY_MAX_ATTEMPTS,
     ACTIVITY_MAX_INTERVAL_SECONDS,
     ACTIVITY_TIMEOUT_SECONDS,
+    BROADCAST_GREP_PARAMS,
     DISPLAY_PATTERN_MAX_LENGTH,
     LOG_PATTERN_MAX_LENGTH,
+    SOURCE_FILTER_KEYS,
 )
 from domains.grep.repo import grep_activity
 from domains.grep.types import ExecuteActivityCallable
@@ -59,8 +61,49 @@ def _format_source(source: str) -> str:
 _MESSAGE_TITLE_SOURCES = {"", "messages", "email", "gmail", "imessage", "whatsapp"}
 
 
-# Sources a printed path selects by itself when the caller names none.
-_PATH_NAMED_SOURCES = {"calendar", "drive"}
+# Every backend grep source name; a `filters` key with one of these names is
+# that source's nested filter block (backend validate.normalize.ts).
+_GREP_SOURCES = set(SOURCE_FILTER_KEYS)
+_MESSAGE_FAMILY_SOURCES = {"messages", "email", "gmail", "imessage", "whatsapp"}
+
+
+def _filters(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    filters = tool_call.get("filters")
+    return filters if isinstance(filters, dict) else {}
+
+
+def _sources_named_by_filters(tool_call: Dict[str, Any]) -> list:
+    """Sources the filters select when the caller names none: nested blocks, then a printed path."""
+    filters = _filters(tool_call)
+    named = [key for key, value in filters.items() if key in _GREP_SOURCES and isinstance(value, dict) and value]
+    path = filters.get("path")
+    if isinstance(path, str):
+        root = path.split("/", 1)[0]
+        if root in _GREP_SOURCES and root not in named:
+            named.append(root)
+    return named
+
+
+def _narrowed_to(search_call: Dict[str, Any], kept_sources: list) -> Dict[str, Any]:
+    """Drop the filters only skipped sources accepted: their nested blocks, and
+    flat or top-level keys no kept source accepts (the backend rejects both)."""
+    kept_keys = {key for source in kept_sources for key in SOURCE_FILTER_KEYS.get(source, ())}
+    kept_family = any(source in _MESSAGE_FAMILY_SOURCES for source in kept_sources)
+    narrowed = {
+        key: value
+        for key, value in search_call.items()
+        if key not in BROADCAST_GREP_PARAMS or key in kept_keys
+    }
+    filters = search_call.get("filters")
+    if isinstance(filters, dict):
+
+        def kept(key: str) -> bool:
+            if key in _GREP_SOURCES:
+                return key in kept_sources or (key == "messages" and kept_family)
+            return key in kept_keys
+
+        narrowed["filters"] = {key: value for key, value in filters.items() if kept(key)}
+    return narrowed
 
 
 def _title_source(tool_call: Dict[str, Any]) -> str:
@@ -112,10 +155,10 @@ def _normalize_source_key(value: Any) -> str:
 
 
 def _document_provider(tool_call: Dict[str, Any]) -> Optional[str]:
-    filters = tool_call.get("filters")
-    if not isinstance(filters, dict):
-        return None
-    raw_provider = filters.get("document_source")
+    filters = _filters(tool_call)
+    nested = filters.get("documents")
+    nested_provider = nested.get("document_source") if isinstance(nested, dict) else None
+    raw_provider = nested_provider or filters.get("document_source")
     if not raw_provider:
         return None
     return _normalize_source_key(raw_provider)
@@ -138,15 +181,9 @@ def _extract_sources(tool_call: Dict[str, Any]) -> list:
     single = tool_call.get("source")
     if single:
         return [str(single)]
-    # A printed calendar or drive path names its own source (the backend
-    # resolves it the same way), so the connection check must cover it too.
-    filters = tool_call.get("filters")
-    path = filters.get("path") if isinstance(filters, dict) else None
-    if isinstance(path, str):
-        root = path.split("/", 1)[0]
-        if root in _PATH_NAMED_SOURCES:
-            return [root]
-    return []
+    # A nested filter block or a printed path names its own source (the
+    # backend resolves it the same way), so the connection check covers it too.
+    return _sources_named_by_filters(tool_call)
 
 
 def _source_status_targets(tool_call: Dict[str, Any]) -> tuple[list, Dict[str, set]]:
@@ -271,7 +308,9 @@ async def execute_grep(
                         "unavailable_sources": unavailable,
                     }
                 # Partial: search only the connected sources this call.
-                search_call = {**_backend_grep_call(tool_call), "sources": connected_sources}
+                search_call = _narrowed_to(
+                    {**_backend_grep_call(tool_call), "sources": connected_sources}, connected_sources
+                )
                 search_call.pop("source", None)
 
         logger.info(

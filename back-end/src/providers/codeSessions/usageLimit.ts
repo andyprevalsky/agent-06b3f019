@@ -34,7 +34,11 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '../database';
 import type { CodeAgentTier } from '../codeAgentModels';
 import { createLogger } from '../logger';
-import { markPoolTokenRateLimited, markUserTokenRateLimited } from '../claudeCredentials';
+import {
+  hasExpiredClaudeCodeToken,
+  markPoolTokenRateLimited,
+  markUserTokenRateLimited,
+} from '../claudeCredentials';
 import {
   claudeCodeSandboxKeyUsable,
   resolveCodexAzureFunding,
@@ -50,6 +54,7 @@ import {
   fetchGptCodeCredentialsWithMeta,
   markGptIntegrationRateLimited,
   type GptCodeCredentialEnvelopeResult,
+  hasExpiredCodexToken,
 } from '../gptCredentials';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { checkpointKey, getCheckpointObject } from './artifactStore';
@@ -151,23 +156,34 @@ export async function markCodeTaskUsageLimited(
   return { marked: 'anthropic_api_key' };
 }
 
+/**
+ * Whether a spawn could lease a `name` login right now (connected, not
+ * rate-limited), own first, then shared pool. A login whose stored access token
+ * has expired is not a subscription: serving skips it for the funded key.
+ */
 async function hasLeasableIntegration(
   userId: string,
-  name: string,
+  name: 'claude_code' | 'gpt_code',
   now: Date,
   ownOnly: boolean,
   excludeId?: string
 ): Promise<boolean> {
-  const notLimited = [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }];
-  const excluded = excludeId !== undefined ? { id: { not: excludeId } } : {};
-  const own = await prisma.integration.count({
-    where: { userId, name, status: 'CONNECTED', OR: notLimited, ...excluded },
+  const expired = name === 'claude_code' ? hasExpiredClaudeCodeToken : hasExpiredCodexToken;
+  const where = {
+    name,
+    status: 'CONNECTED' as const,
+    OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+    ...(excludeId !== undefined ? { id: { not: excludeId } } : {}),
+  };
+  const select = { id: true, config: true };
+  const own = await prisma.integration.findMany({ where: { ...where, userId }, select });
+  if (own.some((row) => !expired(row))) return true;
+  if (ownOnly) return false;
+  const pooled = await prisma.integration.findMany({
+    where: { ...where, poolingEnabled: true },
+    select,
   });
-  if (own > 0 || ownOnly) return own > 0;
-  const pooled = await prisma.integration.count({
-    where: { name, status: 'CONNECTED', poolingEnabled: true, OR: notLimited, ...excluded },
-  });
-  return pooled > 0;
+  return pooled.some((row) => !expired(row));
 }
 
 /** The funded key a Claude Code sandbox would use when no login is leased. */

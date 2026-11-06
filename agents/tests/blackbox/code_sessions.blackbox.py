@@ -105,7 +105,76 @@ if resume is None and os.environ.get("STUB_MODE") == "login_unusable":
           "usage_limit": None, "login_unusable": {"reason": "oauth_refresh_invalid"}}})
     while True:
         time.sleep(0.1)
-if resume is None and os.environ.get("STUB_MODE") not in ("finish", "rate_limit", "billing", "login_unusable"):
+if resume is None and os.environ.get("STUB_MODE") == "auth_expired":
+    # The sandbox's access token expired mid-run: the SDK marks the assistant
+    # message error=authentication_failed and prints the non-interactive 401 banner.
+    notes.write_text("uncommitted work\n")
+    banner = ('Failed to authenticate. API Error: 401 {"type":"error","error":'
+              '{"type":"authentication_error","message":"OAuth token has expired."}}')
+    emit({"type": "assistant", "error": "authentication_failed", "message": {"content": [
+        {"type": "text", "text": banner}]}})
+    emit({"type": "result", "subtype": "success", "is_error": True, "result": banner, "usage": {}})
+    while True:
+        time.sleep(0.1)
+if resume is None and os.environ.get("STUB_MODE") == "mentions_auth_text":
+    # A healthy session whose own tool call, tool output and prose mention every
+    # credential-failure string (e.g. an agent working on the Rose repo).
+    mentions = ("authentication_error | Invalid authentication credentials | API Error: 401 | "
+                "Please run /login | Not logged in | You've hit your limit | /rate-limit-options | "
+                "Credit balance is too low | Credit balance too low | "
+                "Add funds: https://platform.claude.com/settings/billing")
+    # The live repro on 28a7bfc99 (local stack): this exact command aborted the
+    # session non-retryably as CLAUDE_CODE_FATAL, and the parent retried into it.
+    note = "debug note: our log viewer shows the literal text API Error: 401 and Please run /login in old entries"
+    notes.write_text("uncommitted work\n")
+    emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_e", "name": "Bash",
+          "input": {"command": f"echo '{note}'"}}]}})
+    emit({"type": "user", "tool_use_result": {"stdout": note + "\n", "stderr": ""},
+          "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_e", "content": note}]}})
+    emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_g", "name": "Bash",
+          "input": {"command": 'grep -rn "API Error: 401\\|Please run /login" agents/'}}]}})
+    emit({"type": "user", "tool_use_result": {"stdout": mentions, "stderr": ""},
+          "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_g", "content": mentions}]}})
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": f"Found: {mentions}"}]}})
+if resume is None and os.environ.get("STUB_MODE") == "loop":
+    # A Bash tool running a loop that appends 1..STUB_LOOP_LINES to counter.txt.
+    # A turn written meanwhile is merged into this turn (one result), as Claude
+    # Code does; the result names the turn it answered.
+    import select
+    lines = int(os.environ.get("STUB_LOOP_LINES", "60"))
+    loop = subprocess.Popen(["sh", "-c", f'i=0; while [ $i -lt {lines} ]; do i=$((i+1)); echo $i >> "$1"; sleep 0.04; done',
+                             "sh", str(home / "counter.txt")])
+    emit({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "toolu_loop", "name": "Bash", "input": {"command": "counter loop"}}]}})
+    if os.environ.get("STUB_LOOP_AUTH_FAILED"):
+        # The sandbox's login is rejected mid-run (structured SDK error, as in auth_expired).
+        emit({"type": "assistant", "error": "authentication_failed", "message": {"content": [
+            {"type": "text", "text": "Failed to authenticate. API Error: 401"}]}})
+    if os.environ.get("STUB_LOOP_RATE_LIMIT"):
+        # The subscription's limit hits while the tool runs (the parent pauses on it).
+        emit({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "rateLimitType": "five_hour",
+              "resetsAt": 1790988600, "utilization": 1.0}})
+    loop.wait()
+    emit({"type": "user", "tool_use_result": {"stdout": "loop done", "stderr": ""},
+          "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_loop", "content": "loop done"}]}})
+    queued, pending = [], b""
+    while select.select([sys.stdin.fileno()], [], [], 0.2)[0]:
+        chunk = os.read(sys.stdin.fileno(), 65536)
+        if not chunk:
+            break
+        pending += chunk
+    for line in pending.decode().splitlines():
+        queued.append("".join(p.get("text", "") for p in json.loads(line)["message"]["content"]))
+    (gate / "merged_turns.json").write_text(json.dumps(queued))
+    count = len((home / "counter.txt").read_text().split())
+    emit({"type": "result", "subtype": "success", "result": f"answer is {count} lines", "usage": {},
+          "queued_turn_count": 0})
+    while os.read(sys.stdin.fileno(), 65536):
+        pass
+    sys.exit(0)
+if resume is None and os.environ.get("STUB_MODE") not in (
+    "finish", "rate_limit", "billing", "login_unusable", "auth_expired", "mentions_auth_text"
+):
     notes.write_text("uncommitted work\n")
     emit({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "sleep 99999"}}]}})
@@ -206,7 +275,20 @@ class _SessionHome:
                     self.process.wait(timeout=5)
         self.process = None
 
+    def freeze(self) -> None:
+        """E2B pause: memory and processes are kept, nothing runs."""
+        assert self.process is not None and self.process.poll() is None, "freeze needs a live ws-server"
+        os.killpg(self.process.pid, signal.SIGSTOP)
+
+    def thaw(self) -> None:
+        """E2B resume of the paused sandbox: the frozen tree continues."""
+        assert self.process is not None
+        os.killpg(self.process.pid, signal.SIGCONT)
+
     def cleanup(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(self.process.pid, signal.SIGCONT)
         self.pause()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -219,7 +301,6 @@ class _Backend:
         session_home: _SessionHome,
         *,
         fail_first_persist: bool = False,
-        question_after: int | None = None,
         resize_after: int | None = None,
     ) -> None:
         self.session_home = session_home
@@ -231,9 +312,6 @@ class _Backend:
         self.fail_first_persist = fail_first_persist
         self._persists = 0
         self.credential_feedback: list = []
-        # Keepalive number after which the backend reports a question the code
-        # agent asked its (blocked) spawning agent.
-        self.question_after = question_after
         self.usage_reports: list[tuple] = []
         # Credential availability the backend reports to each spawn (C15).
         self.availability: list[dict] = []
@@ -250,6 +328,8 @@ class _Backend:
         self.resize_after = resize_after
         self.resize_calls: list[tuple] = []
         self.resized_ws_url: str | None = None
+        # history_events the create response reports (T8 live attach); 0 = a fresh CLI.
+        self.history_events = 0
 
     async def create_session(self, **kwargs):
         self.created.append(kwargs)
@@ -285,6 +365,8 @@ class _Backend:
             "uploaded_files": [],
             "code_session_id": code_session_id,
             "resumed_from": "paused_sandbox" if len(self.created) > 1 else "new",
+            # A spawn attached to a live CLI: the ws-server's events before its goal turn.
+            **({"history_events": self.history_events} if self.history_events else {}),
             "branch": "rose/write-answer-0a1b2c3d",
             "base_branch": None,
             "merge_target": None,
@@ -333,10 +415,7 @@ class _Backend:
 
     async def keepalive(self, *args, **kwargs):
         self.keepalives += 1
-        awaiting = None
-        if self.question_after is not None and self.keepalives >= self.question_after:
-            awaiting = {"message_id": "q-1", "question": "Which database should I use?", "at": "2026-10-20T00:00:00Z"}
-        reply = {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de", "awaiting_parent": awaiting}
+        reply = {"alive": True, "code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de"}
         if self.resize_after is not None and self.keepalives >= self.resize_after and not self.resize_calls:
             reply["resize_requested"] = {
                 "request_id": _RESIZE_REQUEST_ID,
@@ -565,138 +644,10 @@ async def test_idle_past_every_old_limit_is_paused_not_failed_then_resumes():
         session_home.cleanup()
 
 
-async def test_question_to_blocked_spawner_pauses_session_and_returns_it():
-    """L-A2A deadlock: a code agent asks its spawning agent, which is blocked in this spawn.
-
-    The question arrives through the keepalive while a tool is still in flight
-    (so idle never fires). The session is paused, not failed, and the tool
-    result carries the question so the spawner can answer by resuming it.
-    """
-    from temporalio.testing import ActivityEnvironment
-
-    from domains.spawn_claude_code_agent import service
-
-    session_home = _SessionHome()
-    backend = _Backend(session_home, question_after=3)
-    try:
-        with backend.patched(clock=_virtual_clock(2000.0)):
-            outcome = await asyncio.wait_for(
-                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
-            )
-        assert outcome["status"] == "paused" and outcome["success"] is False, outcome
-        assert "Which database should I use?" in outcome["message"], outcome["message"]
-        assert "code_session_id" in outcome["message"], outcome["message"]
-        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
-        assert outcome["code_agent"]["state"] == "paused", outcome["code_agent"]
-        assert backend.keepalives >= 3, backend.keepalives
-    finally:
-        session_home.cleanup()
-
-
-async def test_question_while_cli_waits_for_its_answer_is_handed_over_before_idle():
-    """L-A2A-ADV 1: the code agent asked and went quiet waiting for its answer.
-
-    Its spawning agent is blocked inside this very spawn, so both would wait.
-    The next keepalive (well before the idle pause) must pause the session for
-    the question exactly once and hand it to the spawner; resuming the session
-    then runs normally with no stale question.
-    """
-    from temporalio.testing import ActivityEnvironment
-
-    from domains.spawn_claude_code_agent import service
-    from domains.spawn_claude_code_agent.config import (
-        CODE_SESSION_IDLE_PAUSE_S,
-        CODE_SESSION_KEEPALIVE_INTERVAL_S,
-    )
-
-    # Advance application time at observed events, never by multiplying
-    # scheduler, transport or process-cleanup latency into virtual seconds.
-    virtual_now = time.time()
-    tool_finished = asyncio.Event()
-    keepalive_replies = asyncio.Queue()
-    session_home = _SessionHome()
-    backend = _Backend(session_home)
-
-    def clock():
-        return virtual_now
-
-    def observe_event(event, **kwargs):
-        if event.get("type") == "tool_result":
-            tool_finished.set()
-
-    async def observe_keepalive(*args, **kwargs):
-        reply = await backend.keepalive(*args, **kwargs)
-        keepalive_replies.put_nowait((clock(), backend.keepalives, reply))
-        return reply
-
-    try:
-        with (
-            backend.patched(clock=clock),
-            patch.object(service, "_log_code_agent_event", side_effect=observe_event),
-            patch.object(service, "keepalive_e2b_session", side_effect=observe_keepalive),
-        ):
-            spawn = asyncio.create_task(
-                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args())
-            )
-            try:
-                async with asyncio.timeout(30):
-                    await _wait_until(lambda: session_home.runs(), "the CLI to start")
-                    session_home.release("tool_done")
-                    await tool_finished.wait()  # the monitor observed the quiet, waiting CLI
-                    virtual_now += CODE_SESSION_KEEPALIVE_INTERVAL_S
-                    _, before_question, first_reply = await keepalive_replies.get()
-                    assert first_reply["awaiting_parent"] is None, first_reply
-                    assert not spawn.done(), "the session is still attached before the question"
-                    asked_at = clock()
-                    backend.question_after = before_question + 1
-                    virtual_now += CODE_SESSION_KEEPALIVE_INTERVAL_S
-                    answered_at, answered_on, reply = await keepalive_replies.get()
-                    assert answered_on == before_question + 1, "question skipped the next keepalive"
-                    assert reply["awaiting_parent"]["message_id"] == "q-1", reply
-                    # Hold application time here. Waiting for another keepalive
-                    # or idle expiry cannot make a missed handoff pass.
-                    outcome = await spawn
-                    assert backend.keepalives == answered_on, "handoff required another keepalive"
-                    handoff_virtual_s = answered_at - asked_at
-            finally:
-                if not spawn.done():
-                    spawn.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await spawn
-        assert outcome["status"] == "paused" and outcome["success"] is False, outcome
-        assert "Which database should I use?" in outcome["message"], outcome["message"]
-        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent"], backend.closed
-        handoff_bound_s = 2 * CODE_SESSION_KEEPALIVE_INTERVAL_S
-        assert handoff_bound_s < CODE_SESSION_IDLE_PAUSE_S, (handoff_bound_s, CODE_SESSION_IDLE_PAUSE_S)
-        assert handoff_virtual_s <= handoff_bound_s, f"handed over after {handoff_virtual_s:.0f}s, not by a keepalive"
-        paused_rows = [m for m in backend.messages if m.get("action_type") == "session_paused"]
-        assert len(paused_rows) == 1, paused_rows
-        code_session_id = outcome["code_session"]["code_session_id"]
-
-        # The spawner answers by resuming the session; the new task has no question.
-        backend.question_after = None
-        with backend.patched():
-            resumed = await asyncio.wait_for(
-                ActivityEnvironment().run(
-                    service.spawn_claude_code_activity,
-                    *_activity_args(
-                        code_session_request={"code_session_id": code_session_id}, tool_call_id="tc-answer"
-                    ),
-                ),
-                timeout=30,
-            )
-        assert resumed["status"] == "completed" and resumed["success"] is True, resumed
-        assert backend.created[-1]["code_session_id"] == code_session_id, backend.created
-        assert [call.get("reason") for call in backend.closed] == ["awaiting_parent", "close"], backend.closed
-    finally:
-        session_home.cleanup()
-
-
 async def test_cancelled_spawner_unblocks_a_child_waiting_for_its_answer():
     """L-A2A-ADV 10: the spawner is cancelled while its code agent waits for an answer.
 
-    The child asked and is idle; before the keepalive hands the question over,
-    the user cancels the spawning agent (the workflow cancels the activity).
+    The child is idle waiting on its spawner; the user cancels the spawning agent (the workflow cancels the activity).
     The spawn returns a cancelled outcome promptly, the session is closed once,
     and nothing keeps polling for it afterwards.
     """
@@ -748,6 +699,9 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches(*, first
 
     session_home = _SessionHome(extra_env={"STUB_FIRST_START_DELAY_S": str(first_start_delay_s)})
     backend = _Backend(session_home, resize_after=2)
+    # The first spawn attached to a live CLI with a long history (T8); the
+    # resized sandbox's ws-server is new, so none of its events are history.
+    backend.history_events = 10_000
     try:
         with backend.patched(clock=_virtual_clock(2000.0)):
             first = await asyncio.wait_for(
@@ -759,6 +713,7 @@ async def test_resize_request_moves_session_and_next_attempt_reattaches(*, first
         assert moved["task_id"] == "task-resized" and moved["ws_url"] == backend.resized_ws_url, moved
         assert moved["sandbox_size"] == {"cpu": 2, "memory_gb": 8}, moved
         assert moved["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", moved
+        assert not moved.get("history_events"), f"a resized sandbox starts with no history: {moved}"
         assert backend.resize_calls == [("task-1", _RESIZE_REQUEST_ID, "claude")], backend.resize_calls
         assert backend.closed == [], f"the backend's resize owns the old sandbox: {backend.closed}"
         rows = [m for m in backend.messages if m.get("action_type") == "environment_resized"]
@@ -1062,7 +1017,7 @@ def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_re
         "- Claude Code me@example.com: disconnected (the user must reconnect it)\n"
         "Retry with spawn_agent(type='code', code_session_id='cs-1', goal=<the same goal>) to continue: "
         "no credential is free until 2026-10-20T18:00:00.000Z (the earliest reset: Codex Codex account 1); "
-        "a retry before that stays paused and starts nothing."
+        "a retry before that stays paused and starts nothing, so wait with wait_for(until_timestamp=<that time>) first."
     ), blocked
     unknown = format_usage_limit_message(code_provider="claude", resets_at_iso=None, facts=facts)
     assert unknown == (
@@ -1084,9 +1039,9 @@ def test_usage_limit_parent_message_without_a_free_account_names_the_earliest_re
 async def test_failed_attempt_retry_keeps_state_and_code_session_id():
     """C2: an attempt fails after writing an uncommitted file; the Temporal retry resumes it.
 
-    The failing attempt closes with reason "failure" (checkpoint + pause), the
-    retry discards the unreachable sandbox record but keeps the code_session_id
-    and lease owner from the heartbeat, and the resumed CLI finds the file.
+    A retryable failure leaves the sandbox live (no close) and carries the
+    session (code_session_id, lease owner) on its heartbeat; the retry
+    reattaches to the same sandbox and the CLI still finds the file.
     """
     from temporalio.testing import ActivityEnvironment
 
@@ -1108,7 +1063,10 @@ async def test_failed_attempt_retry_keeps_state_and_code_session_id():
                 raise AssertionError("the first attempt must fail")
             except RuntimeError as error:
                 assert "transcript store unavailable" in str(error), error
-            assert [call.get("reason") for call in backend.closed] == ["failure"], backend.closed
+            # A retryable error leaves the live sandbox for the retry to reattach
+            # (2026-11-04-code-agent-retryable-error-closed-live-sandbox); only a
+            # final error checkpoints and pauses it.
+            assert backend.closed == [], backend.closed
             carried = [
                 detail
                 for beat in beats
@@ -1121,9 +1079,10 @@ async def test_failed_attempt_retry_keeps_state_and_code_session_id():
             retry.info = dataclasses.replace(retry.info, attempt=2, heartbeat_details=list(beats[-1]))
             outcome = await asyncio.wait_for(retry.run(service.spawn_claude_code_activity, *_activity_args()), 30)
         assert outcome["status"] == "completed" and outcome["success"] is True, outcome
-        assert len(backend.created) == 2, backend.created
-        assert backend.created[1]["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", backend.created[1]
-        assert backend.created[0]["lease_owner"] == backend.created[1]["lease_owner"] == "tool:agent-code:tc-code"
+        # The retry reattached to the still-live sandbox: no second create.
+        assert len(backend.created) == 1, backend.created
+        assert backend.created[0]["lease_owner"] == "tool:agent-code:tc-code", backend.created[0]
+        assert outcome["code_session"]["code_session_id"] == carried[-1]["code_session"]["code_session_id"], outcome
         texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
         assert "notes: uncommitted work" in texts, texts
     finally:
@@ -1667,7 +1626,8 @@ def _codex_events():
 
 
 def test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect():
-    """The ws-server's ``login_unusable`` error: parsed without prose matching, fed back as a revocation."""
+    """The ws-server's ``login_unusable`` error: parsed without prose matching, fed back as a rejected login
+    (the backend disables it only when the stored login is still the held one and not expired)."""
     from domains.spawn_claude_code_agent.service import build_codex_credential_feedback, login_unusable_from_event
 
     event = {
@@ -1679,7 +1639,7 @@ def test_unusable_login_event_is_structured_and_marks_the_login_for_reconnect():
     }
     assert login_unusable_from_event(event) == {"provider": "codex", "reason": "oauth_refresh_invalid"}
     assert login_unusable_from_event({**event, "login_unusable": None}) is None, "the switch path is not a pause"
-    # The backend reads reason oauth_refresh_invalid as a revocation: needs reconnect, never a rate limit.
+    # Never a rate limit; code-agent-login-rejection.blackbox.ts owns revoked vs expired vs replaced.
     assert build_codex_credential_feedback([event]) == [{"source": "initial", "reason": "oauth_refresh_invalid"}]
 
 
@@ -1752,9 +1712,9 @@ async def test_unusable_login_pauses_and_the_retry_switches_to_a_claude_subscrip
             "the persisted feedback marks exactly that login for reconnect",
             backend.credential_feedback,
         )
-        assert first["usage_limit"]["credential_marked"] == "reconnect", first["usage_limit"]
+        assert first["usage_limit"]["credential_marked"] == "login_rejected", first["usage_limit"]
         assert first["message"] == (
-            "Code agent stopped: the Codex login can no longer be used (sign in again to reconnect it). "
+            "Code agent stopped: the Codex login was rejected (its access token expired or was revoked). "
             "Its work is saved on branch rose/write-answer-0a1b2c3d (checkpoint 1); the sandbox is paused, "
             "not killed.\nConnected accounts:\n"
             "- Claude Code me@example.com: available\n"
@@ -1768,7 +1728,7 @@ async def test_unusable_login_pauses_and_the_retry_switches_to_a_claude_subscrip
         assert "rate-limited" not in first["message"] and "out of quota" not in first["message"]
         assert first["code_agent"]["state"] == "paused", first["code_agent"]
         assert first["code_agent"]["failure_message"] == (
-            "Paused: the Codex login needs to be reconnected. Work is saved."
+            "Paused: the Codex login was rejected (expired or revoked). Work is saved."
         ), first["code_agent"]
         assert backend.created[1]["code_provider"] == "claude", backend.created[1]
         assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
@@ -1792,16 +1752,120 @@ async def test_unusable_login_with_nothing_else_stays_paused_with_the_reconnect_
     try:
         assert first["status"] == "usage_limit" and first["failure_kind"] == "login_unusable", first
         assert first["message"].startswith(
-            "Code agent stopped: the Codex login can no longer be used (sign in again to reconnect it). "
+            "Code agent stopped: the Codex login was rejected (its access token expired or was revoked). "
         ), first["message"]
         assert first["message"].endswith(
             _retry_line(
                 "no other credential can be leased right now, so a retry stays paused and starts nothing until "
-                "the login is reconnected or another account is connected."
+                "the credential is re-synced, reconnected or replaced, or another account is connected."
             )
         ), first["message"]
         assert len(backend.created) == 1, f"no agent may start without a credential: {backend.created}"
         assert retry["status"] == "usage_limit" and retry["failure_kind"] == "no_credentials", retry
+    finally:
+        session_home.cleanup()
+
+
+_STUB_OAUTH_TOKEN = "sk-ant-oat01-stub-expiring-access-token"
+# What the ws-server reports as the credential it held: a digest, never the token.
+_STUB_OAUTH_FINGERPRINT = __import__("hashlib").sha256(_STUB_OAUTH_TOKEN.encode()).hexdigest()[:16]
+
+
+def test_claude_auth_failure_is_structured_and_text_alone_is_ignored():
+    """Claude's structured ``authentication_failed`` is an unusable login; the printed banner alone is not."""
+    from domains.spawn_claude_code_agent.service import build_credential_feedback, login_unusable_from_event
+
+    event = {
+        "type": "cli_message",
+        "raw_type": "assistant.api_error",
+        "cli_message": {"type": "assistant_api_error", "error": "authentication_failed"},
+        "credential": _STUB_OAUTH_FINGERPRINT,
+    }
+    assert login_unusable_from_event(event) == {
+        "provider": "claude",
+        "reason": "authentication_failed",
+        "credential": _STUB_OAUTH_FINGERPRINT,
+    }
+    assert build_credential_feedback([event], "claude") == [
+        {"source": "initial", "reason": "authentication_failed", "credential": _STUB_OAUTH_FINGERPRINT}
+    ]
+    banner_only = [
+        {"type": "assistant", "text": "Failed to authenticate. API Error: 401 authentication_error"},
+        {"type": "tool_result", "text": "Please run /login · Not logged in · Credit balance is too low"},
+    ]
+    assert [login_unusable_from_event(e) for e in banner_only] == [None, None]
+    assert build_credential_feedback(banner_only, "claude") == []
+
+
+async def test_expired_claude_token_pauses_and_the_retry_resumes_on_a_fresh_lease():
+    """The sandbox's Claude access token expires mid-run (structured 401): the session is checkpointed and
+    paused (not a fatal non-retryable abort), the held credential is reported by fingerprint, and the
+    parent's retry re-leases and resumes the same CLI conversation."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "auth_expired", "CLAUDE_CODE_OAUTH_TOKEN": _STUB_OAUTH_TOKEN})
+    backend = _Backend(session_home)
+    available = {"claude": True, "codex": False, "session_provider": "claude"}
+    backend.availability = [available, {**available, "outlook": {"next_lease": dict(_SHARED_CLAUDE_LEASE)}}, available]
+    try:
+        with backend.patched():
+            first = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
+            )
+            retry = await asyncio.wait_for(
+                ActivityEnvironment().run(
+                    service.spawn_claude_code_activity,
+                    *_activity_args(
+                        code_session_request={"code_session_id": (first.get("retry") or {}).get("code_session_id")},
+                        tool_call_id="tc-retry",
+                    ),
+                ),
+                timeout=30,
+            )
+        assert first["status"] == "usage_limit" and first["failure_kind"] == "login_unusable", first
+        assert first["retryable"] is True and first["success"] is False, first
+        assert first["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": _SESSION_ID}, first
+        assert [call.get("reason") for call in backend.closed][0] == "usage_limit", "checkpoint + pause"
+        assert backend.usage_reports == [], "an expired token is never put on a rate-limit cooldown"
+        assert backend.credential_feedback[0] == [
+            {"source": "initial", "reason": "authentication_failed", "credential": _STUB_OAUTH_FINGERPRINT}
+        ], backend.credential_feedback
+        assert first["message"].startswith(
+            "Code agent stopped: the Claude Code credential was rejected by the provider (authentication failed). "
+            "Its work is saved on branch rose/write-answer-0a1b2c3d (checkpoint 1); the sandbox is paused, not killed."
+        ), first["message"]
+        assert _STUB_OAUTH_TOKEN not in json.dumps(first), "the token never reaches the parent"
+        assert first["code_agent"]["state"] == "paused", first["code_agent"]
+        assert backend.created[1]["code_session_id"] == _SESSION_ID, backend.created[1]
+        runs = session_home.runs()
+        assert len(runs) == 2 and "--resume" in runs[1]["argv"], runs
+        assert retry["code_provider"] == "claude" and retry["status"] == "completed", retry
+        texts = [e.get("text") for e in backend.verified_events[-1] if e.get("type") == "agent_message"]
+        assert "notes: uncommitted work" in texts, f"the resumed run kept the paused work: {texts}"
+    finally:
+        session_home.cleanup()
+
+
+async def test_auth_strings_in_tool_output_and_prose_never_abort_a_healthy_session():
+    """An agent grepping for "API Error: 401" (and reading every banner string) finishes normally:
+    only structured CLI signals classify credential failures."""
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+
+    session_home = _SessionHome(extra_env={"STUB_MODE": "mentions_auth_text"})
+    backend = _Backend(session_home)
+    backend.availability = [{"claude": True, "codex": True}]
+    try:
+        with backend.patched():
+            result = await asyncio.wait_for(
+                ActivityEnvironment().run(service.spawn_claude_code_activity, *_activity_args()), timeout=30
+            )
+        assert result["status"] == "completed", result
+        assert not [m for m in backend.messages if m.get("title") == "Authentication Error"], backend.messages
+        assert all(feedback in (None, []) for feedback in backend.credential_feedback), backend.credential_feedback
     finally:
         session_home.cleanup()
 
@@ -1854,7 +1918,8 @@ async def test_rotation_d_no_credential_keeps_the_session_paused_and_starts_noth
             "- funded Anthropic API key: limited until 2026-10-03T01:20:00.000Z\n"
             "- funded Azure OpenAI deployment: not configured\n"
             "The earliest reset is 2026-10-03T00:50:00.000Z (Claude Code me@example.com). "
-            f"Retry with spawn_agent(type='code', code_session_id='{_SESSION_ID}', goal=<the same goal>) after that."
+            "Wait with wait_for(until_timestamp=<that time>), then retry with "
+            f"spawn_agent(type='code', code_session_id='{_SESSION_ID}', goal=<the same goal>)."
         ), retry["message"]
         assert retry["code_agent"]["state"] == "paused", retry["code_agent"]
         assert retry["code_agent"]["failure_message"] == (
@@ -1960,6 +2025,191 @@ async def test_rotation_f_duplicate_concurrent_retry_starts_one_agent():
         session_home.cleanup()
 
 
+class _LiveResumeBackend(_Backend):
+    """Backend whose pause freezes the sandbox and whose resume attaches to the live CLI (T8).
+
+    Mirrors back-end attachLiveCodeCli: the resumed sandbox's ws-server keeps
+    running, the new spawn's goal is delivered as an agent turn with the new
+    task's token (``attach``) and the create response names the same ws_url.
+    """
+
+    def __init__(self, session_home: _SessionHome) -> None:
+        super().__init__(session_home)
+        self.attach_acks: list[dict] = []
+
+    async def create_session(self, **kwargs):
+        if not self.created:
+            return await super().create_session(**kwargs)
+        self.created.append(kwargs)
+        import aiohttp
+
+        from helpers.code_session_turns import _send_once, code_session_turn_token
+
+        self.session_home.thaw()
+        task_id = f"task-{len(self.created)}"
+        payload = {
+            "type": "user_turn",
+            "id": "spawn-attach-1",
+            "token": code_session_turn_token("task-1"),
+            "text": f"Task:\n{kwargs['goal']}",
+            "sender": "agent",
+            "attach": {
+                "token": code_session_turn_token(task_id),
+                # Same credential env as the live CLI (ANTHROPIC_API_KEY=stub-key, nothing else).
+                "credential": _credential_digest(["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+                                                 {"ANTHROPIC_API_KEY": "stub-key"}),
+            },
+        }
+        relay = {
+            "type": "user_turn",
+            "id": "relay-1",
+            "token": code_session_turn_token(task_id),
+            "text": "ping from the parent",
+            "sender": "agent",
+        }
+        async with aiohttp.ClientSession() as http:
+            ack = await _send_once(http, self.session_home.ws_url, payload, "user_turn_ack", 10.0)
+            # The new task id now addresses the live CLI (agent relays, direct chat).
+            relayed = await _send_once(http, self.session_home.ws_url, relay, "user_turn_ack", 10.0)
+        self.attach_acks.extend([ack, relayed])
+        assert ack.get("status") == "delivered" and ack.get("attached") is True, ack
+        return {
+            "task_id": task_id,
+            "sandbox_id": "sb-persistent",
+            "ws_url": self.session_home.ws_url,
+            "uploaded_files": [],
+            "code_session_id": kwargs.get("code_session_id"),
+            "resumed_from": "live_cli",
+            "history_events": ack.get("history_events", 0),
+            "branch": "rose/write-answer-0a1b2c3d",
+            "base_branch": None,
+            "merge_target": None,
+        }
+
+    async def close_session(self, **kwargs):
+        self.closed.append(kwargs)
+        if len(self.closed) == 1:
+            self.session_home.freeze()  # E2B pause: memory and processes kept
+        else:
+            self.session_home.pause()
+        return {"output_files": [], "usage": None}
+
+
+def _credential_digest(keys: list[str], env: dict[str, str]) -> dict:
+    import hashlib
+
+    names = sorted(set(keys))
+    digest = hashlib.sha256(
+        json.dumps([[key, env.get(key)] for key in names], separators=(",", ":")).encode()
+    ).hexdigest()
+    return {"keys": names, "digest": digest}
+
+
+def _counter(session_home: _SessionHome) -> list[int]:
+    path = session_home.home / "counter.txt"
+    return [int(line) for line in path.read_text().split()] if path.exists() else []
+
+
+async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(
+    *, rate_limited: bool = False, auth_failed: bool = False
+):
+    """T8: a resumed spawn attaches to the CLI still running in the paused sandbox.
+
+    Spawn 1 runs a Bash loop writing counter.txt; the user pauses (activity
+    cancel → close reason ``cancel`` → the sandbox freezes, processes kept).
+    Spawn 2 resumes the session: its goal reaches the same CLI as a turn, the
+    activity attaches to the same ws-server, sees the in-flight tool finish and
+    completes with every loop line written once — no restart, no ``--resume``.
+    ``rate_limited``: spawn 1 pauses on a usage limit instead; spawn 2 resumes on
+    the same (reset) credential and must not act on spawn 1's limit event.
+    ``auth_failed``: spawn 1's login is rejected; spawn 2 attaches and must not
+    report spawn 1's rejection as its own credential feedback.
+    """
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import service
+    from helpers.code_session_turns import code_session_turn_token
+
+    os.environ.setdefault("BACKEND_API_KEY", "code-sessions-live-resume-key")
+    lines = 60
+    session_home = _SessionHome(
+        extra_env={
+            "STUB_MODE": "loop",
+            "STUB_LOOP_LINES": str(lines),
+            **({"STUB_LOOP_RATE_LIMIT": "1"} if rate_limited else {}),
+            **({"STUB_LOOP_AUTH_FAILED": "1"} if auth_failed else {}),
+            # Spawn 1's ws-server addresses task-1 (backend e2b.ts sets this per task).
+            "CODE_SESSION_TURN_TOKEN": code_session_turn_token("task-1"),
+        }
+    )
+    backend = _LiveResumeBackend(session_home)
+    try:
+        with backend.patched():
+            env = ActivityEnvironment()
+            first = asyncio.create_task(env.run(service.spawn_claude_code_activity, *_activity_args()))
+            if not rate_limited and not auth_failed:  # these pause spawn 1 by themselves
+                await _wait_until(lambda: len(_counter(session_home)) >= 5, "the loop to start writing")
+                env.cancel()  # the user pauses the root
+            paused = await asyncio.wait_for(first, timeout=15)
+        if auth_failed:
+            assert len(backend.closed) == 1, backend.closed
+            assert backend.credential_feedback and backend.credential_feedback[0], (
+                f"spawn 1 reports its rejected login: {backend.credential_feedback}"
+            )
+        else:
+            expected_close = "usage_limit" if rate_limited else "cancel"
+            assert [call.get("reason") for call in backend.closed] == [expected_close], backend.closed
+        assert len(backend.usage_reports) == (1 if rate_limited else 0), backend.usage_reports
+        frozen = len(_counter(session_home))
+        await asyncio.sleep(0.4)
+        assert len(_counter(session_home)) == frozen, "a paused sandbox runs nothing"
+        assert frozen < lines, f"the loop must still be in flight at the pause: {frozen}"
+
+        with backend.patched():
+            resumed = await asyncio.wait_for(
+                ActivityEnvironment().run(
+                    service.spawn_claude_code_activity,
+                    *_activity_args(
+                        code_session_request={"code_session_id": "6c1d6f1e-0000-4000-8000-00000000c0de"},
+                        tool_call_id="tc-code-resume",
+                    ),
+                ),
+                timeout=40,
+            )
+        assert resumed["status"] == "completed" and resumed["success"] is True, resumed
+        assert _counter(session_home) == list(range(1, lines + 1)), "the loop ran once, start to finish"
+        assert len(session_home.runs()) == 1, f"one CLI process, never restarted: {session_home.runs()}"
+        merged = json.loads((session_home.tmp / "merged_turns.json").read_text())
+        assert [ack.get("status") for ack in backend.attach_acks] == ["delivered", "delivered"], backend.attach_acks
+        assert len(merged) == 2 and merged[0].startswith("Task:\nWrite answer.txt with the answer"), merged
+        assert merged[1] == "ping from the parent", merged
+        results = [e.get("text") or e.get("result") for e in backend.verified_events[-1] if e.get("type") == "result"]
+        assert any(f"answer is {lines} lines" in str(text) for text in results) or any(
+            f"answer is {lines} lines" in json.dumps(e) for e in backend.verified_events[-1]
+        ), backend.verified_events[-1]
+        if auth_failed:
+            assert not backend.credential_feedback[-1], (
+                f"spawn 1's rejected login is history to spawn 2: {backend.credential_feedback}"
+            )
+        else:
+            assert paused["status"] == ("usage_limit" if rate_limited else "cancelled"), paused
+        assert len(backend.usage_reports) == (1 if rate_limited else 0), (
+            f"spawn 1's limit is history to spawn 2: {backend.usage_reports}"
+        )
+    finally:
+        session_home.cleanup()
+
+
+async def test_usage_limit_pause_then_resume_attach_ignores_the_old_limit():
+    """T8 + T2: spawn 1 pauses on a usage limit; spawn 2 attaches on the reset credential and completes."""
+    await test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(rate_limited=True)
+
+
+async def test_rejected_login_pause_then_resume_attach_reports_no_old_feedback():
+    """T8 + T2: spawn 1's login is rejected; spawn 2 attaches and reports no credential feedback of its own."""
+    await test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(auth_failed=True)
+
+
 async def _run_all_tests():
     print("code-sessions blackbox tests:")
     r = BlackboxResult()
@@ -1969,18 +2219,22 @@ async def _run_all_tests():
         test_idle_past_every_old_limit_is_paused_not_failed_then_resumes,
     )
     await r.record_async(
-        "question_to_blocked_spawner_pauses_session",
-        test_question_to_blocked_spawner_pauses_session_and_returns_it,
-    )
-    await r.record_async(
-        "question_while_cli_waits_handed_over_before_idle",
-        test_question_while_cli_waits_for_its_answer_is_handed_over_before_idle,
-    )
-    await r.record_async(
         "cancelled_spawner_unblocks_waiting_child",
         test_cancelled_spawner_unblocks_a_child_waiting_for_its_answer,
     )
     await r.record_async("failed_attempt_retry_keeps_state", test_failed_attempt_retry_keeps_state_and_code_session_id)
+    await r.record_async(
+        "user_pause_resume_keeps_live_cli_and_loop",
+        test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop,
+    )
+    await r.record_async(
+        "usage_limit_pause_resume_attach_ignores_old_limit",
+        test_usage_limit_pause_then_resume_attach_ignores_the_old_limit,
+    )
+    await r.record_async(
+        "rejected_login_pause_resume_attach_no_old_feedback",
+        test_rejected_login_pause_then_resume_attach_reports_no_old_feedback,
+    )
     await r.record_async(
         "resize_request_moves_session_and_reattaches",
         test_resize_request_moves_session_and_next_attempt_reattaches,
@@ -1998,6 +2252,14 @@ async def _run_all_tests():
         test_usage_limit_retry_switches_provider_when_pool_is_exhausted,
     )
     r.record("usage_limit_detection_structured_only", test_usage_limit_detection_reads_structured_events_only)
+    r.record("claude_auth_failure_structured_only", test_claude_auth_failure_is_structured_and_text_alone_is_ignored)
+    await r.record_async(
+        "expired_claude_token_pauses_and_retry_resumes",
+        test_expired_claude_token_pauses_and_the_retry_resumes_on_a_fresh_lease,
+    )
+    await r.record_async(
+        "auth_strings_in_output_never_abort", test_auth_strings_in_tool_output_and_prose_never_abort_a_healthy_session
+    )
     r.record("usage_limit_user_message_names_reset_utc", test_usage_limit_user_message_names_the_reset_in_utc)
     r.record(
         "usage_limit_parent_message_names_earliest_reset",

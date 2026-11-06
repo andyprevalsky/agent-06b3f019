@@ -355,6 +355,16 @@ export async function testSourceStatus(userId: string): Promise<void> {
   if ((badRes.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
     throw new Error(`Expected SOURCE_NOT_FOUND, got ${JSON.stringify(badRes.data)}`);
   }
+
+  // Object.prototype names are unknown sources too, not connectors.
+  for (const inherited of ['constructor', 'toString', 'hasOwnProperty', 'valueOf', '__proto__']) {
+    const res = await requestSourceStatus(userId, inherited);
+    if (res.status !== 400 || (res.data as { error?: string }).error !== 'SOURCE_NOT_FOUND') {
+      throw new Error(
+        `Expected SOURCE_NOT_FOUND for ${inherited}, got ${res.status} ${JSON.stringify(res.data)}`
+      );
+    }
+  }
 }
 
 export async function requestSnapshot(userId: string) {

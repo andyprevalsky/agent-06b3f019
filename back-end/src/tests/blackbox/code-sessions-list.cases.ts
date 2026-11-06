@@ -12,7 +12,6 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { Sandbox } from 'e2b';
 import { prisma } from '../../providers/database';
-import { markAwaitingParent } from '../../providers/codeSessions/spawn';
 import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 
 export interface CodeSessionListContext {
@@ -69,28 +68,20 @@ export async function testResumableCloseListsPaused(ctx: CodeSessionListContext)
   ctx.patchConnect(async () => fake.sandbox);
   try {
     const asked = await newTask(0);
-    await markAwaitingParent(asked.id, {
-      message_id: 'q-list',
-      question: 'Which branch should I merge into?',
-    });
-    await closeClaudeCodeSession(asked.id, ctx.userA, root, [], { reason: 'awaiting_parent' });
+    await closeClaudeCodeSession(asked.id, ctx.userA, root, [], { reason: 'idle' });
     const askedRow = await prisma.claudeCodeSession.findUniqueOrThrow({ where: { id: asked.id } });
     assert.equal(askedRow.status, 'CLOSED', 'the task row itself stays CLOSED for the chip');
-    assert.equal(askedRow.closeReason, 'awaiting_parent', 'the close records its reason');
+    assert.equal(askedRow.closeReason, 'idle', 'the close records its reason');
     const paused = (await list()).get(asked.id);
     assert.equal(paused?.status, 'PAUSED', JSON.stringify(paused));
     assert.equal(paused?.code_session_id, codeSession.id);
-    const question = paused?.awaiting_parent as Record<string, unknown> | null;
-    assert.deepEqual(Object.keys(question ?? {}).sort(), ['at', 'question']);
-    assert.equal(question?.question, 'Which branch should I merge into?');
-    assert.ok(!Number.isNaN(Date.parse(String(question?.at))), JSON.stringify(question));
+    assert.equal(paused?.awaiting_parent, null, 'code agents ask no questions');
 
-    // The answer resumes the session as a new task; a finished task is not a pause.
+    // The next spawn resumes the session as a new task; a finished task is not a pause.
     const answered = await newTask(1000);
     await closeClaudeCodeSession(answered.id, ctx.userA, root, [], { reason: 'close' });
     let items = await list();
     assert.equal(items.get(asked.id)?.status, 'CLOSED', 'a superseded pause lists as closed');
-    assert.equal(items.get(asked.id)?.awaiting_parent, null, 'its question was answered');
     assert.equal(items.get(answered.id)?.status, 'CLOSED', 'a normal close is not a pause');
 
     const failed = await newTask(2000);

@@ -25,6 +25,7 @@ import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconcile
 import { runStuckAgentBugReports } from './domains/agents/stuckAgentBugReportService';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
 import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
+import { scheduleCodeSandboxReaper } from './providers/codeSessions/sandboxReaper';
 import { runTraceArchiveFinalizationRetries } from './providers/traceArchiveFinalizationRetry';
 import { runSteelSessionReaperWithLease } from './providers/steel/sessionReaper';
 import { recoverConfiguredWorkerProcesses } from './providers/workerProcessRecovery';
@@ -618,6 +619,7 @@ function scheduleProjectMaintenance(isProduction: boolean): void {
 }
 
 export function registerCronJobs(isProduction: boolean): void {
+  scheduleCodeSandboxReaper(isProduction);
   scheduleWorkerProcessRecovery(isProduction);
   scheduleTraceArchiveFinalizationRetries(isProduction);
   scheduleTemporalWorkflowCleanup(isProduction);
