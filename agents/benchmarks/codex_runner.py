@@ -144,7 +144,7 @@ async def _poll_codex_ws_until_exit(ws_url: str, timeout_seconds: float) -> tupl
         listen_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await listen_task
-        await client.close()
+        await client.disconnect()
 
     return output_buffer, exit_code
 

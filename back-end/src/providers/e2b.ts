@@ -21,6 +21,9 @@ import {
 } from './e2bWsServerOverlay';
 import {
   acquireCodeSandbox,
+  attachLiveCodeCli,
+  CLAUDE_CONFIG_ENV_KEYS,
+  CLAUDE_CREDENTIAL_ENV_KEYS,
   codeSessionBranchEnvs,
   codeSandboxUserId,
   codeSessionTaskFields,
@@ -29,6 +32,7 @@ import {
   createLocalCodeSessionFallback,
   recordE2bCodeSessionSandbox,
   releaseSandboxAfterFailedStart,
+  stopStaleWsServer,
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
 import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
@@ -373,19 +377,63 @@ async function createClaudeCodeSessionUnlocked(
   log.info(`Using sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayClaudeCodeWsServer(sandbox);
   await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
-  const project = await restoreSandboxProject(
-    taskId,
-    sandbox,
-    projectWorkspace,
-    acquired.fromSnapshot
-  );
-
+  // Before the goal reaches a live CLI, which may read the files it names.
   const uploadedFiles = await uploadAttachmentsToSandbox(sandbox, attachments, 'Claude Code');
 
   // Get WebSocket URL for the frontend to connect to
   const wsHost = sandbox.getHost(WS_PORT);
   const wsUrl = `wss://${wsHost}`;
   const previewUrl = applyPreviewUrlEnv(envs, wsUrl, sandbox.sandboxId);
+  const taskRow = {
+    id: taskId,
+    agentId,
+    sandboxId: sandbox.sandboxId,
+    streamUrl: wsUrl,
+    goal,
+    status: 'ACTIVE' as const,
+    claudeTokenSource,
+    claudeTokenIntegrationId: claudeTaskIntegrationId(credentialMeta),
+    ...codeSessionTaskFields(codeSession, 'claude'),
+    projectId: projectWorkspace?.project.id ?? null,
+  };
+  if (resumedFrom === 'paused_sandbox' && options.freshConversation !== true) {
+    // The paused CLI may still be running in the resumed sandbox: keep it
+    // (its turn, tools and processes continue) and hand it this goal.
+    const live = await attachLiveCodeCli(sandbox, codeSession, {
+      provider: 'claude',
+      wsUrl,
+      taskId,
+      text: `Task:\n${goal.replace(/\0/g, '')}`,
+      envs,
+      credentialKeys: CLAUDE_CREDENTIAL_ENV_KEYS,
+      configKeys: CLAUDE_CONFIG_ENV_KEYS,
+    });
+    if (live.attached) {
+      await prisma.claudeCodeSession.create({ data: taskRow });
+      await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
+      log.info(`Session attached to the live CLI: ${taskId}, WS: ${wsUrl}`);
+      return {
+        wsUrl,
+        taskId,
+        sandboxId: sandbox.sandboxId,
+        uploadedFiles,
+        resumedFrom: 'live_cli',
+        cliSessionId,
+        projectRestore: null,
+        previewUrl,
+        sandboxSize: acquired.size,
+        historyEvents: live.historyEvents ?? 0,
+      };
+    }
+  } else if (resumedFrom === 'paused_sandbox') {
+    await stopStaleWsServer(sandbox);
+  }
+  const project = await restoreSandboxProject(
+    taskId,
+    sandbox,
+    projectWorkspace,
+    acquired.fromSnapshot
+  );
   const sessionEnvs = { ...envs, ...(project.envs ?? {}) };
   const wsLaunchedAt = Date.now();
 
@@ -429,20 +477,7 @@ async function createClaudeCodeSessionUnlocked(
   });
 
   // Create DB record with real values (no placeholders)
-  await prisma.claudeCodeSession.create({
-    data: {
-      id: taskId,
-      agentId,
-      sandboxId: sandbox.sandboxId,
-      streamUrl: wsUrl,
-      goal,
-      status: 'ACTIVE',
-      claudeTokenSource,
-      claudeTokenIntegrationId: claudeTaskIntegrationId(credentialMeta),
-      ...codeSessionTaskFields(codeSession, 'claude'),
-      projectId: projectWorkspace?.project.id ?? null,
-    },
-  });
+  await prisma.claudeCodeSession.create({ data: taskRow });
   await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
 
   log.info(`Session ready: ${taskId}, WS: ${wsUrl}`);
@@ -587,6 +622,22 @@ export async function createCodexCodeSession(
   const wsHost = sandbox.getHost(WS_PORT);
   const wsUrl = `wss://${wsHost}`;
   const previewUrl = applyPreviewUrlEnv(envs, wsUrl, sandbox.sandboxId);
+  const taskRow = {
+    id: taskId,
+    agentId,
+    sandboxId: sandbox.sandboxId,
+    streamUrl: wsUrl,
+    goal,
+    status: 'ACTIVE' as const,
+    // What serves the run: 'user' | 'pool' login, or 'azure' (the funded deployment alone).
+    claudeTokenSource: servedBy,
+    claudeTokenIntegrationId: credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
+    ...codeSessionTaskFields(codeSession, 'codex'),
+  };
+  // A resumed sandbox may still run the paused Codex CLI: stop it before
+  // starting this spawn's (live attach is Claude Code only: Codex binds the
+  // handoff outputSchema to its first turn).
+  if (resumedFrom === 'paused_sandbox') await stopStaleWsServer(sandbox);
   const wsLaunchedAt = Date.now();
 
   // Filesystem snapshots do not preserve the base template's default command user.
@@ -618,21 +669,7 @@ export async function createCodexCodeSession(
   }
   await autostartRosePreview(sandbox, { envs, repoUrl: githubRepoUrl, launchedAt: wsLaunchedAt });
 
-  await prisma.claudeCodeSession.create({
-    data: {
-      id: taskId,
-      agentId,
-      sandboxId: sandbox.sandboxId,
-      streamUrl: wsUrl,
-      goal,
-      status: 'ACTIVE',
-      // What serves the run: 'user' | 'pool' login, or 'azure' (the funded deployment alone).
-      claudeTokenSource: servedBy,
-      claudeTokenIntegrationId:
-        credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
-      ...codeSessionTaskFields(codeSession, 'codex'),
-    },
-  });
+  await prisma.claudeCodeSession.create({ data: taskRow });
   await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
 
   log.info(`Codex session ready: ${taskId}, WS: ${wsUrl}`);

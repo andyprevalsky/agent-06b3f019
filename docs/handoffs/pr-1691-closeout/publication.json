@@ -1,0 +1,35 @@
+{
+  "format": "PR1691-CLOSEOUT-PUBLICATION-V1",
+  "status": "COMPLETE",
+  "deployed_source": "05826f6dd4f260fdc3602ab3e63095d13d2ddc81",
+  "deployed_pr": "https://github.com/Rose-Ai-Labs/rose/pull/1691",
+  "records_pr": "https://github.com/Rose-Ai-Labs/rose/pull/1705",
+  "records_branch_base": "beb1ceecfd44045a6b4b3a25665c07d2575a5119",
+  "records_commit_binding": "The Git commit containing this publication record and its listed files. The deployed PR links the final merged commit and manifest.",
+  "private_preservation_verified": true,
+  "files_sha256": {
+    "README.md": "3ca6b9bb7652dfab9478e61db979082ac2c7bf6e7f74981328ae718a30b0cca1",
+    "RECOVERY.md": "3ee38d3ed8ab785b7889cdeb68616023a10b2e7444aca8314d57ef4bf2d3fc04",
+    "closeout-manifest.json": "5d9446b435d1dd636adb572a4102385c2068469576746eec3ff9c0034ef3bd68",
+    "control-bindings-verification.json": "0d487d9ef29484d0883a370c87f26457ee62949b2c3ebcdbe79497350818f74b",
+    "deletion-readiness.json": "36e0a5bb2e6f86267e5a4e7e63704477670189006e2362ab3b8db030e3b17f47",
+    "parent-validation.json": "3b35251fdb05878228a0791313992557e9bf6c2198402db17e0520a4de76d73c",
+    "private-preservation-verification.json": "c95009a924219321c1ebd7afa191bc69885dbb5627c371bf58e962890ebb5c67",
+    "private-proof-index.json": "47762575cf7ccbf4877bb019379ea2fbb864405298e1e2186318787d952fb022",
+    "recover_closeout.py": "0c469e18e5b391bedc53669781e2633145d564156476955097be51ec554afe32",
+    "recovery-validation.json": "ed5f0ff257a1f4b7d9ddbc7ee18a63fc0fac6b8255a1158f756cb8ce3acddefc"
+  },
+  "resources": "No PR1691-owned Fly Machine remains; the shared cloudbench source base (832717a71940d8, vol_r7yn2m8y78mwkx3r) is retained as a protected shared resource. Worker clones, local test databases and closeout scratch remain for the parent retirement decision. No process was signalled; Freedom and protected resources unchanged.",
+  "limits": "Finite per-file cutoffs; approved deletions and the accidental backend-coverage .port-locks/browser-provider-custody journal loss are disclosed, not recovered; original failures, NOT_INTRODUCED repair handoffs and the SKIPPED Mac acceptance remain as recorded. No bucket access-policy audit is claimed.",
+  "deletion_performed": false,
+  "deletion_ready": true,
+  "records_pr_merge_commit": "8defa4a649447d3bd77d0673a93b28c1e0988372",
+  "deployed_pr_link_verified": true,
+  "deployed_pr_link": "https://github.com/Rose-Ai-Labs/rose/pull/1691#issuecomment-6675158473",
+  "verified_at": "2026-11-06T02:24:01.589484+00:00",
+  "completion_conditions_satisfied": [
+    "This records PR is merged into main",
+    "The deployed PR links the merged records commit and closeout manifest",
+    "No intended source or required record remains only on the old devbox"
+  ]
+}

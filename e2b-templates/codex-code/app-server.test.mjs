@@ -15,6 +15,13 @@ import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+
+const FIXTURE_ACCESS_TOKEN = "fixture-chatgpt-access-token";
+const FIXTURE_ACCESS_FINGERPRINT = createHash("sha256")
+  .update(FIXTURE_ACCESS_TOKEN)
+  .digest("hex")
+  .slice(0, 16);
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 const require = createRequire(
@@ -858,7 +865,10 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         PATH: `${directory}:${process.env.PATH}`,
         HOME: directory,
         CODEX_AUTH_JSON: oauth
-          ? JSON.stringify({ auth_mode: "chatgpt", tokens: {} })
+          ? JSON.stringify({
+              auth_mode: "chatgpt",
+              tokens: { access_token: FIXTURE_ACCESS_TOKEN },
+            })
           : "",
         OPENAI_API_KEY: "",
         // Not armed (another subscription is leasable): no funded provider in the sandbox.
@@ -1123,6 +1133,10 @@ test("app-server reports an unusable login for the pause when no Azure switch is
     oauthErrors.every(
       (e) =>
         e.login_unusable?.reason === "oauth_refresh_invalid" &&
+        // The held login as a fingerprint (the backend tells expired or
+        // since-replaced from revoked by it), never the token itself.
+        e.login_unusable?.credential === FIXTURE_ACCESS_FINGERPRINT &&
+        !JSON.stringify(e).includes(FIXTURE_ACCESS_TOKEN) &&
         e.usage_limit === null,
     ),
     `every OAuth error carries login_unusable, never a usage limit: ${JSON.stringify(oauthErrors)}`,
@@ -1207,8 +1221,11 @@ for (const [speed, expectedTier] of [
   test(`a ${speed} session funded by Azure alone starts GPT-6.1 Sol at ${expectedTier ?? "standard"}`, async () => {
     const { seen, calls, logs } = await runOAuthFailureFixture(
       {},
+      // The fake turn can end before the server emits "ready" (after turn/start returns).
       (events) =>
-        events.some((e) => e.type === "turn_ended" && e.status === "completed"),
+        events.some(
+          (e) => e.type === "turn_ended" && e.status === "completed",
+        ) && events.some((e) => e.type === "session" && e.status === "ready"),
       {
         oauth: false,
         model: "gpt-6.1-sol",

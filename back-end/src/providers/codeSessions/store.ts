@@ -4,7 +4,8 @@
  *   resolveCodeSession(user, owner agent, repo, id?, leaseOwner)
  *     ├─ id given ──► must belong to user (else CodeSessionNotFoundError → 404)
  *     ├─ no id ─────► the owner's primary live session for (user, owner, repoKey)
- *     │                (expired by TTL → retired, then a new one on a planned branch)
+ *     │                (idle past the TTL → skipped; the TTL sweep retires it, then
+ *     │                 a new one on a planned branch)
  *     └─ lease ─────► conditional update; a lease held by another spawn means
  *                     a parallel spawn: explicit id / shared → CodeSessionBusyError,
  *                     default → an idle parallel session, else a new one whose
@@ -51,8 +52,17 @@ export class CodeSessionBusyError extends Error {
   }
 }
 
+/**
+ * One key per repository: `owner/repo`, `owner/repo/` and `owner/repo.git` name
+ * the same remote, so they must resolve the same session (and its branch).
+ */
 export function repoKeyFor(repoUrl: string | null | undefined): string {
-  return repoUrl !== undefined && repoUrl !== null ? repoUrl.trim() : '';
+  if (repoUrl === undefined || repoUrl === null) return '';
+  return repoUrl
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\.git$/, '')
+    .replace(/\/+$/, '');
 }
 
 /** Branch a new session works on (see branch.ts). Null fields for repo-less sessions. */
@@ -96,10 +106,6 @@ export interface ResolvedCodeSession {
 /** Owner sessions inspected per resolve: the primary plus a few parallel ones. */
 const OWNER_SESSION_SCAN = 10;
 
-function isExpired(session: { lastActiveAt: Date }, now: Date): boolean {
-  return now.getTime() - session.lastActiveAt.getTime() > codeSessionTtlMs();
-}
-
 async function tryLease(id: string, leaseOwner: string, now: Date): Promise<boolean> {
   const result = await prisma.codeSession.updateMany({
     where: {
@@ -142,13 +148,19 @@ async function createSession(
   });
 }
 
-/** Live sessions of one owner for one repo, primary (oldest) first. */
+/**
+ * Live sessions of one owner for one repo, primary (oldest) first. Sessions idle
+ * past the TTL are not live unless referenced by a published CLI template;
+ * only the retire path (lifecycle.ts: kill sandbox,
+ * delete checkpoints) may mark them RETIRED.
+ */
 export async function ownerCodeSessions(
   userId: string,
   ownerAgentId: string,
-  repoUrl: string | null
+  repoUrl: string | null,
+  now = new Date()
 ): Promise<CodeSessionRow[]> {
-  return prisma.codeSession.findMany({
+  const candidates = await prisma.codeSession.findMany({
     where: {
       userId,
       ownerAgentId,
@@ -158,6 +170,18 @@ export async function ownerCodeSessions(
     orderBy: { createdAt: 'asc' },
     take: OWNER_SESSION_SCAN,
   });
+  const live: CodeSessionRow[] = [];
+  for (const candidate of candidates) {
+    // A published CLI template retains its session beyond the idle TTL.
+    // Expired unreferenced sessions are left for the lifecycle retirement path.
+    if (
+      now.getTime() - candidate.lastActiveAt.getTime() <= codeSessionTtlMs() ||
+      (await isCliTemplateSession(candidate.userId, candidate.id))
+    ) {
+      live.push(candidate);
+    }
+  }
+  return live;
 }
 
 /** Find a session the caller owns; foreign and unknown ids are indistinguishable. */
@@ -189,16 +213,7 @@ export async function resolveCodeSession(
   // The owner's primary session first; when another spawn holds it, an idle
   // parallel session of the same owner, else a new parallel one branched from
   // the primary so two CLIs never share one worktree.
-  const live: CodeSessionRow[] = [];
-  for (const candidate of await ownerCodeSessions(
-    params.userId,
-    params.ownerAgentId,
-    params.repoUrl
-  )) {
-    if (isExpired(candidate, now) && !(await isCliTemplateSession(candidate.userId, candidate.id)))
-      await markRetired(candidate.id, now);
-    else live.push(candidate);
-  }
+  const live = await ownerCodeSessions(params.userId, params.ownerAgentId, params.repoUrl, now);
   for (const candidate of live) {
     if (await tryLease(candidate.id, params.leaseOwner, now)) {
       const leased = await prisma.codeSession.findUniqueOrThrow({ where: { id: candidate.id } });

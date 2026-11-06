@@ -13,6 +13,7 @@ import { withSteelLifecycleClaim } from './steel/lifecycleClaim';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
+import { closeClaudeCodeSession } from './e2bCloseSession';
 
 const log = createLogger('Cleanup');
 
@@ -27,12 +28,17 @@ export interface BrowserSessionReleaseDependencies {
 interface ActiveCodeSession {
   id: string;
   sandboxId: string;
+  /** Persistent code session the task runs in (null for one-shot sandboxes). */
   codeSessionId?: string | null;
 }
 
 export interface CodeSessionReleaseDependencies {
   findActiveCodeSessions: (agentId: string) => Promise<ActiveCodeSession[]>;
-  /** Resolves once the sandbox is gone, including when it was already absent; throws when that is unknown. */
+  /**
+   * Resolves once the task's sandbox no longer runs: a one-shot sandbox is
+   * killed (already absent counts); a persistent session is checkpointed and
+   * paused. Throws when that is unknown.
+   */
   killSandbox: (session: ActiveCodeSession) => Promise<void>;
   markClosed: (sessionId: string) => Promise<void>;
 }
@@ -114,6 +120,16 @@ function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
         select: { id: true, sandboxId: true, codeSessionId: true },
       }),
     killSandbox: async (session) => {
+      if (session.codeSessionId !== null && session.codeSessionId !== undefined) {
+        // Persistent session: the canonical close (checkpoint, pause, PAUSED,
+        // resumable `cancel`). Never a bare kill, which left the session ACTIVE,
+        // leased and without a checkpoint. Archive is reversible (unarchive), so
+        // it pauses too; the TTL sweep retires sessions nobody resumes.
+        await closeClaudeCodeSession(session.id, undefined, undefined, undefined, {
+          reason: 'cancel',
+        });
+        return;
+      }
       if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
         await closeLocalClaudeCodeSession(session.id);
         return;
@@ -409,7 +425,9 @@ export async function cleanupAgentSessions(agentId: string): Promise<void> {
 }
 
 /**
- * Kill every code sandbox (E2B or local) an agent still holds and close its row.
+ * Stop every code sandbox (E2B or local) an agent still holds and close its row:
+ * one-shot sandboxes are killed, persistent code sessions are checkpointed and
+ * paused.
  *
  * The Python code-agent activity closes its own sandbox, but it cannot when its
  * worker is dead, and a replaced workflow never schedules the retry that would

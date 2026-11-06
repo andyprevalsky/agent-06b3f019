@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "fs";
 import { spawn, execFileSync } from "child_process";
-import { timingSafeEqual } from "crypto";
+import { createHash, timingSafeEqual } from "crypto";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -161,9 +161,29 @@ function reportedLoginUnusable(message) {
   if (FUNDED_PROVIDER || oauthFallbackReason !== "oauth_refresh_invalid")
     return null;
   return classifyOAuthFallbackReason(message || "") === "oauth_refresh_invalid"
-    ? { reason: "oauth_refresh_invalid" }
+    ? {
+        reason: "oauth_refresh_invalid",
+        ...(CREDENTIAL_FINGERPRINT
+          ? { credential: CREDENTIAL_FINGERPRINT }
+          : {}),
+      }
     : null;
 }
+/**
+ * Which leased login this sandbox holds, as a digest of its access token (never
+ * the token): the backend marks a login for reconnect only when the stored
+ * credential is still this one and has not simply expired (credentialFeedback.ts).
+ */
+const CREDENTIAL_FINGERPRINT = (() => {
+  try {
+    const token = JSON.parse(CODEX_AUTH_JSON || "null")?.tokens?.access_token;
+    return typeof token === "string" && token
+      ? createHash("sha256").update(token).digest("hex").slice(0, 16)
+      : null;
+  } catch {
+    return null;
+  }
+})();
 // C15: Codex's own rate-limit snapshot (the rollout's latest `token_count`
 // event: rate_limits.{primary,secondary}.used_percent / resets_at and
 // rate_limit_reached_type) says whether a failed turn hit a usage limit. A
@@ -273,6 +293,27 @@ function appendOutput(type, data) {
   broadcast(type, data);
 }
 
+// Each partial stream event carries the whole item so far. Once a newer
+// snapshot or the completed item arrives, the stored copy keeps only its
+// delta, so the replay buffer grows with the output, not its square.
+const latestPartialIndex = new Map();
+function supersedePartialSnapshot(event, index) {
+  // An empty final (e.g. redacted thinking) supersedes nothing: the streamed
+  // text is the only copy.
+  if (typeof event.item_id !== "string" || typeof event.text !== "string")
+    return;
+  if (!event.text) return;
+  const key = `${event.type}:${event.turn_id ?? ""}:${event.item_id}`;
+  const previous = latestPartialIndex.get(key);
+  if (previous !== undefined) {
+    const compacted = { ...eventBuffer[previous] };
+    delete compacted.text;
+    eventBuffer[previous] = compacted;
+  }
+  if (event.partial === true) latestPartialIndex.set(key, index);
+  else latestPartialIndex.delete(key);
+}
+
 function appendEvent(event) {
   const normalized = {
     version: 1,
@@ -284,8 +325,61 @@ function appendEvent(event) {
       ? { seq: eventBuffer.length + 1 }
       : {}),
   };
+  supersedePartialSnapshot(normalized, eventBuffer.length);
   eventBuffer.push(normalized);
   broadcast("code_agent_event", normalized);
+}
+
+// Replay frames stay far below a client's receive limit (aiohttp: 4 MiB). One
+// frame for a long session's whole history exceeded it, and the client then
+// reconnected forever without reading the exit queued behind it.
+const REPLAY_FRAME_BYTES = 1024 * 1024;
+const REPLAY_OUTPUT_CHARS = 256 * 1024;
+
+// The terminal buffer replays as `buffer` (reset) followed by `stdout` (append)
+// chunks, which every client already handles.
+function sendOutputReplay(ws) {
+  for (let start = 0; start < outputBuffer.length;) {
+    let end = Math.min(start + REPLAY_OUTPUT_CHARS, outputBuffer.length);
+    const last = outputBuffer.charCodeAt(end - 1);
+    if (end < outputBuffer.length && last >= 0xd800 && last <= 0xdbff) end--;
+    ws.send(
+      JSON.stringify({
+        type: start === 0 ? "buffer" : "stdout",
+        data: outputBuffer.slice(start, end),
+      }),
+    );
+    start = end;
+  }
+}
+
+// A client that asks for `?replay_chunks=1` gets the event history as bounded
+// `code_agent_events` frames: chunk 0 replaces what it holds, later chunks
+// append, `last` marks the end. Older clients get the single frame they expect.
+function sendEventReplay(ws, events, chunked) {
+  if (!chunked) {
+    ws.send(JSON.stringify({ type: "code_agent_events", data: events }));
+    return;
+  }
+  let parts = [];
+  let bytes = 0;
+  let chunk = 0;
+  const flush = (last) => {
+    ws.send(
+      `{"type":"code_agent_events","chunk":${chunk},"last":${last},"data":[${parts.join(",")}]}`,
+    );
+    chunk++;
+    parts = [];
+    bytes = 0;
+  };
+  for (const event of events) {
+    const part = JSON.stringify(event);
+    const size = Buffer.byteLength(part);
+    if (parts.length > 0 && bytes + size > REPLAY_FRAME_BYTES) flush(false);
+    parts.push(part);
+    bytes += size;
+  }
+  flush(true);
 }
 
 function describeFileChanges(changes = []) {
@@ -566,18 +660,14 @@ wss.on("connection", (ws, req) => {
   } catch {
     replay = true;
   }
-  if (replay && outputBuffer.length > 0)
-    ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
-  const cursor = Number(
-    new URL(req?.url || "/", "http://localhost").searchParams.get("cursor") ||
-      0,
-  );
+  const params = new URL(req?.url || "/", "http://localhost").searchParams;
+  if (replay && outputBuffer.length > 0) sendOutputReplay(ws);
+  const cursor = Number(params.get("cursor") || 0);
   if (replay && eventBuffer.length > 0)
-    ws.send(
-      JSON.stringify({
-        type: "code_agent_events",
-        data: eventBuffer.filter((event) => !event.seq || event.seq > cursor),
-      }),
+    sendEventReplay(
+      ws,
+      eventBuffer.filter((event) => !event.seq || event.seq > cursor),
+      params.get("replay_chunks") === "1",
     );
   if (processExited)
     ws.send(JSON.stringify({ type: "exit", code: exitCode ?? 0 }));
@@ -685,7 +775,9 @@ function useFundedProvider() {
 
 /** Exec-transport default tier on Azure; app-server turns name theirs explicitly. */
 function azureServiceTier() {
-  return CODEX_SPEED === "fast" || CODEX_SPEED === "priority" || CODEX_SPEED === "ultrafast"
+  return CODEX_SPEED === "fast" ||
+    CODEX_SPEED === "priority" ||
+    CODEX_SPEED === "ultrafast"
     ? CODEX_AZURE_SERVICE_TIER
     : null;
 }

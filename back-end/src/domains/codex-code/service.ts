@@ -15,6 +15,7 @@ export { checkSandboxHealth } from './health';
 
 export type { CodexCredentialFeedback } from './credentialFeedback';
 import { detectAndMarkCodexExhaustion, type CodexCredentialFeedback } from './credentialFeedback';
+export { isCodexCredentialFeedback } from './credentialFeedback';
 
 const log = createLogger('CodexCode');
 

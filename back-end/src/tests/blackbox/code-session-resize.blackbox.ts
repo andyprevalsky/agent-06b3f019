@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { Sandbox } from 'e2b';
+import { Sandbox, SandboxNotFoundError } from 'e2b';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
@@ -299,7 +299,7 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     async (id) => {
       if (id === sandboxId) return held.sandbox;
       if (id === next.sandbox.sandboxId) return next.sandbox;
-      throw new Error(`sandbox ${id} not found`);
+      throw new SandboxNotFoundError(`Paused sandbox ${id} not found`);
     },
     async (templateId) => {
       clock.create = performance.now();
