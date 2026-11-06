@@ -27174,7 +27174,9 @@ def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -
         (binaries / name).chmod(0o755)
     driver = DRIVER_SCRIPT.read_text()
     start = driver.index('BENCH_TARGET_MODE_FOR_STACK=""')
-    end = driver.index('log "launching stack (run.sh --benchmark)', start)
+    # Bootstrap ends before the independent launch-custody stage. Its real
+    # guard is covered by cloudbench-kernel-custody.test.py, not stubbed here.
+    end = driver.index("# Cloud guest Kernel proxy custody", start)
     target = "prod" if scenario == "production" else "local"
     requested_repo = tmp_path / "historical-repo" if scenario == "historical" else ROOT
     requested_repo.mkdir(exist_ok=True)

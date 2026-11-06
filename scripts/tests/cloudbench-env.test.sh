@@ -2811,6 +2811,17 @@ readiness_function() {
   ' "$ROOT_DIR/scripts/run-bench-cloud"
 }
 
+warm_resize_fixture_helpers() {
+  # The extracted resize also uses the real owner and acknowledged-completion
+  # helpers. Bind a private lease to this live shell, never bypass the guard.
+  source "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh"
+  APP_ENV_LOCK_FILE="$TMP_ROOT/warm-resize-owner.lock"
+  printf '%s\n' "$$" > "$APP_ENV_LOCK_FILE"
+  function_body="$(readiness_function wait_for_warm_resize)"
+  [ -n "$function_body" ] || fail "could not load production wait_for_warm_resize"
+  eval "$function_body"
+}
+
 readiness_failures=0
 
 # The shared warm source is durable provider state and can retain a stale or
@@ -2821,14 +2832,27 @@ readiness_failures=0
   function_body="$(readiness_function resize_stopped_warm_source)"
   [ -n "$function_body" ] || fail "could not load production resize_stopped_warm_source"
   eval "$function_body"
+  warm_resize_fixture_helpers
   APP="cloudbench-readiness-regression"
   resize_args="$TMP_ROOT/warm-resize.args"
   machine_state() { echo stopped; }
-  FLY() { printf '%s\n' "$*" > "$resize_args"; }
+  FLY() {
+    case "$1 $2" in
+      'machine update') printf '%s\n' "$*" > "$resize_args" ;;
+      'machines list') printf '%s\n' '[{"id":"warm-1","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}}]' ;;
+      *) return 1 ;;
+    esac
+  }
   resize_stopped_warm_source warm-1 shared-cpu-4x 8192 maintenance >/dev/null ||
     fail "warm-source maintenance resize must succeed"
   grep -Fq -- '--command sleep infinity' "$resize_args" ||
     fail "warm-source resize must normalize the durable keepalive command"
+  release_app_environment_lock
+  : > "$resize_args"
+  if resize_stopped_warm_source warm-1 shared-cpu-4x 8192 maintenance >/dev/null 2>&1; then
+    fail "warm-source resize must refuse a missing owner lease"
+  fi
+  [ ! -s "$resize_args" ] || fail "unowned warm-source resize must not issue an update"
 ) || readiness_failures=$((readiness_failures + 1))
 
 (
@@ -3021,6 +3045,7 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
   ' "$ROOT_DIR/scripts/run-bench-cloud")"
   [ -n "$function_body" ] || fail "could not load resize_stopped_warm_source"
   eval "$function_body"
+  warm_resize_fixture_helpers
   APP="cloudbench-resize-rate-limit"
   CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
   CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
@@ -3033,6 +3058,10 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
   stop_machine_strict() { return 0; }
   sleep() { :; }
   FLY() {
+    if [ "$1 $2" = 'machines list' ]; then
+      printf '%s\n' '[{"id":"mid-rl","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}}]'
+      return 0
+    fi
     local c
     c="$(cat "$call_file")"
     c=$((c + 1))
@@ -3056,6 +3085,7 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-cloud")"
   eval "$function_body"
+  warm_resize_fixture_helpers
   APP="cloudbench-resize-rate-limit"
   CLOUDBENCH_WARM_RESIZE_ATTEMPTS=2
   CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
@@ -3081,6 +3111,7 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-cloud")"
   eval "$function_body"
+  warm_resize_fixture_helpers
   APP="cloudbench-resize-concurrent"
   CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
   CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
@@ -3092,6 +3123,10 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
   stop_machine_strict() { return 0; }
   sleep() { :; }
   FLY() {
+    if [ "$1 $2" = 'machines list' ]; then
+      printf '%s\n' '[{"id":"mid-cu","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}}]'
+      return 0
+    fi
     local c
     c="$(cat "$call_file")"
     c=$((c + 1))
@@ -3760,9 +3795,15 @@ guest_temporal_case() {  # <case> ; prints nothing on success
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-cloud")"
   [ -n "$function_body" ] || fail "could not load _inject_secrets_locked"
+  local maintenance_targets_body
+  maintenance_targets_body="$(readiness_function maintenance_targets)"
+  [ -n "$maintenance_targets_body" ] || fail "could not load production maintenance_targets"
   (
     cd "$dir/repo"
     eval "$function_body"
+    eval "$maintenance_targets_body"
+    # This fixture stages ordinary pool secrets, outside a maintenance capture.
+    MAINTENANCE_POINTER=""
     APP="$app"
     ROOT_DIR="$dir/repo"
     export TMPDIR="$dir/tmp"
