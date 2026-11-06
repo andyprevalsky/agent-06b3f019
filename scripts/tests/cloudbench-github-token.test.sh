@@ -13,7 +13,33 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"; kill "$SERVER_PID" 2>/dev/null || true' EXIT
+SERVER_PID=""
+cleanup_mock_server() {
+  local original_status=$? child wait_status=0 cleanup_failed=0
+  trap - EXIT
+  if [ -n "$SERVER_PID" ]; then
+    # Only signal a still-running child owned by this shell, never a reused PID.
+    for child in $(jobs -pr); do
+      if [ "$child" = "$SERVER_PID" ]; then
+        kill -TERM "$SERVER_PID" 2>/dev/null || cleanup_failed=1
+        break
+      fi
+    done
+    wait "$SERVER_PID" 2>/dev/null || wait_status=$?
+    if [ "$wait_status" -ne 0 ] && [ "$wait_status" -ne 143 ]; then
+      cleanup_failed=1
+    fi
+  fi
+  if [ "$cleanup_failed" -ne 0 ]; then
+    echo "FAIL: mock server cleanup unconfirmed; retained $TMP" >&2
+    [ "$original_status" -ne 0 ] || exit 1
+  else
+    rm -rf "$TMP" || { [ "$original_status" -ne 0 ] || exit 1; }
+  fi
+  # Return rather than exit so a terminating signal keeps its original status.
+  return "$original_status"
+}
+trap cleanup_mock_server EXIT
 
 LIVE_DISPATCH="${GITHUB_DISPATCH_TOKEN:-}"
 GOOD_TOKEN="gho_test_dispatch_token_good_for_repo_read"

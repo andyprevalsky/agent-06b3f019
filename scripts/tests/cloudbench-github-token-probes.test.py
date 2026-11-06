@@ -99,4 +99,113 @@ print(status,end='')
             result,calls=self.run_case(b64='same',statuses={'same':status})
             self.assertEqual(result.returncode,expected); self.assertEqual(calls,['same'])
 
+class MockServerCleanup(unittest.TestCase):
+    def run_cleanup(self, *, delayed=False, early=False, cancelled=False, uncertain=False, failure=False):
+        import signal
+        import time
+        root = Path(__file__).resolve().parents[2]
+        source = (root / 'scripts/tests/cloudbench-github-token.test.sh').read_text()
+        # Execute the exact owning shell cleanup, not a reimplementation.
+        cleanup = source[source.index('TMP="$(mktemp -d)"'):source.index('LIVE_DISPATCH=')]
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            child = folder / 'server.py'
+            child.write_text("""import http.server,json,os,signal,sys,time
+from pathlib import Path
+root=Path(sys.argv[1])
+server=http.server.HTTPServer(('127.0.0.1',0),http.server.BaseHTTPRequestHandler)
+raw=Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()
+(root/'identity.json').write_text(json.dumps({'pid':os.getpid(),'birth':int(raw[19]),'parent':os.getppid(),'argv':sys.argv}))
+if sys.argv[2]=='delay':
+ def stop(sig,frame):
+  signal.signal(signal.SIGTERM,signal.SIG_IGN)
+  time.sleep(.2)
+  signal.signal(signal.SIGTERM,signal.SIG_DFL)
+  os.kill(os.getpid(),signal.SIGTERM)
+ signal.signal(signal.SIGTERM,stop)
+(root/'ready').touch()
+while True: server.handle_request()
+""")
+            body = 'set -euo pipefail\n' + cleanup + '\nprintf %s "$TMP" > "$CASE_ROOT/temporary"\n'
+            if early:
+                body += 'exit 23\n'
+            else:
+                body += 'python3 "$CASE_ROOT/server.py" "$CASE_ROOT" ' + ('delay' if delayed else 'normal') + ' &\nSERVER_PID=$!\n'
+                body += 'for i in $(seq 1 100); do [ ! -f "$CASE_ROOT/ready" ] || break; sleep .01; done\n[ -f "$CASE_ROOT/ready" ]\n'
+                if uncertain:
+                    body += 'wait() { return 127; }\n'
+                body += 'kill -TERM $$\n' if cancelled else ('exit 23\n' if failure else 'exit 0\n')
+            script = folder / 'case.sh';script.write_text(body)
+            receipt = folder / 'receipt.json'
+            process = subprocess.Popen(['python3',str(root/'scripts/cloudbench-local-supervisor.py'),
+                '--receipt',str(receipt),'--','bash',str(script)],
+                env={**os.environ,'CASE_ROOT':str(folder)},stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            try:
+                stdout,stderr=process.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                stdout,stderr=process.communicate(timeout=10)
+                self.fail('exact fixture supervisor exceeded bounded cleanup')
+            result=json.loads(receipt.read_text())
+            self.assertTrue(result['quiescent'],stderr.decode())
+            self.assertEqual([],result['remaining'])
+            identity=json.loads((folder/'identity.json').read_text()) if (folder/'identity.json').exists() else None
+            if identity:
+                self.assertFalse(Path('/proc',str(identity['pid'])).exists())
+            retained=Path((folder/'temporary').read_text()).exists()
+            if os.environ.get('CLOUDBENCH_JOIN_TEST_EVIDENCE'):
+                evidence = Path(os.environ['CLOUDBENCH_JOIN_TEST_EVIDENCE'])
+                evidence.mkdir(parents=True,exist_ok=True)
+                target = Path(tempfile.mkdtemp(prefix='join-',dir=evidence))
+                (target/'supervisor.json').write_text(json.dumps(result,indent=2)+'\n')
+                (target/'identity.json').write_text(json.dumps(identity,indent=2)+'\n')
+                (target/'stdout.log').write_bytes(stdout)
+                (target/'stderr.log').write_bytes(stderr)
+                (target/'case.sh').write_text(body)
+                (target/'case.json').write_text(json.dumps({'delayed':delayed,'early':early,
+                    'cancelled':cancelled,'uncertain':uncertain,'failure':failure,'retained':retained,
+                    'supervisor_pid':process.pid,'supervisor_exit':process.returncode},indent=2)+'\n')
+            if retained:
+                # Only remove expected test evidence after native quiescence.
+                import shutil
+                shutil.rmtree(Path((folder/'temporary').read_text()))
+            return process.returncode,result,retained,identity,stderr.decode()
+
+    def test_delayed_term_is_joined_before_parent_exit(self):
+        code,result,retained,identity,_=self.run_cleanup(delayed=True)
+        self.assertEqual(0,code)
+        self.assertEqual(0,result['native_exit'])
+        self.assertFalse(result['orphaned_children'])
+        self.assertEqual([],result['term_sent'])
+        self.assertEqual([identity['parent']],[row['pid'] for row in result['reaped']])
+        self.assertFalse(retained)
+
+    def test_failure_before_assignment_keeps_original_status(self):
+        _,result,retained,identity,_=self.run_cleanup(early=True)
+        self.assertEqual(23,result['native_exit'])
+        self.assertFalse(result['orphaned_children'])
+        self.assertIsNone(identity)
+        self.assertFalse(retained)
+
+    def test_normal_and_cancelled_parent_join_owned_child(self):
+        for cancelled in (False,True):
+            with self.subTest(cancelled=cancelled):
+                _,result,retained,_,_=self.run_cleanup(cancelled=cancelled)
+                self.assertEqual(-15 if cancelled else 0,result['native_exit'])
+                self.assertFalse(result['orphaned_children'])
+                self.assertEqual([],result['term_sent'])
+                self.assertFalse(retained)
+
+    def test_failed_assertion_status_is_preserved_after_join(self):
+        _,result,retained,_,_=self.run_cleanup(delayed=True,failure=True)
+        self.assertEqual(23,result['native_exit'])
+        self.assertFalse(result['orphaned_children'])
+        self.assertFalse(retained)
+
+    def test_unconfirmed_wait_retains_evidence_and_fails(self):
+        _,result,retained,_,stderr=self.run_cleanup(delayed=True,uncertain=True)
+        self.assertNotEqual(0,result['native_exit'])
+        self.assertTrue(retained)
+        self.assertIn('cleanup unconfirmed',stderr)
+
 if __name__ == '__main__': unittest.main()
