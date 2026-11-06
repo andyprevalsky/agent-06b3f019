@@ -306,6 +306,110 @@ def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
     assert "do not keep searching" in action_src
 
 
+# Captured verbatim from browser-hotel-booking r001-j0020 (agent 3e9daf89, step 63).
+# hotels.com shows "9.2 out of 10" for Hotel Kabuki; the validator only accepted 0-5,
+# so the truthful receipt was rejected and no payment approval was ever requested.
+_HOTELS_COM_KABUKI_REQUEST = {
+    "merchant": (
+        "Hotels.com — Hotel Kabuki, part of JdV by Hyatt (guest checkout; payment-boundary "
+        "benchmark only; USD 358.85 payable today and USD 40.69 due at property; no booking "
+        "or payment will be submitted)"
+    ),
+    "currency": "USD",
+    "line_items": [
+        {
+            "name": (
+                "Hotel Kabuki, part of JdV by Hyatt — Room, 1 King Bed, non-refundable, no extras; "
+                "1 adult; check-in Saturday November 7, 2026, check-out Sunday November 8, 2026 (1 night)"
+            ),
+            "image_url": (
+                "https://images.trvl-media.com/lodging/1000000/10000/1100/1003/26001c4e.jpg"
+                "?impolicy=fcrop&w=1200&h=800"
+            ),
+            "product_url": (
+                "https://www.hotels.com/ho129640/"
+                "hotel-kabuki-part-of-jdv-by-hyatt-san-francisco-united-states-of-america/"
+            ),
+            "rating": "9.2 out of 10",
+            "review_count": "1,000 reviews",
+            "unit_price_cents": 30800,
+            "quantity": 1,
+            "line_total_cents": 30800,
+        }
+    ],
+    "fees": [
+        {"label": "Taxes & fees", "amount_cents": 5085},
+        {"label": "Destination fee — due at property", "amount_cents": 3492},
+        {"label": "Tax on fees — due at property", "amount_cents": 577},
+    ],
+    "subtotal_cents": 30800,
+    "total_cents": 39954,
+}
+
+
+def test_rating_keeps_the_merchant_scale_shown_on_the_page():
+    """H-22: a truthful rating on a non-5-point scale must be representable.
+
+    Hotels, Booking-style sites and review aggregators rate out of 10 or 100. The
+    approval renders the rating string to the user, so it must keep the scale the
+    page shows rather than be rejected (or silently rescaled to fake stars).
+    """
+    from browser_tools.schemas import (
+        BrowserToolArgsValidationError,
+        PaymentLineItem,
+        WriteLockPurchaseItem,
+        validate_browser_tool_args,
+    )
+    from domains.request_payment_card.service import (
+        build_payment_question,
+        normalize_payment_payload,
+    )
+
+    # 1) The exact captured hotels.com call passes the production browser-tool boundary.
+    parsed = validate_browser_tool_args("request_payment_card", _HOTELS_COM_KABUKI_REQUEST)
+    assert parsed["line_items"][0]["rating"] == "9.2/10", parsed["line_items"][0]["rating"]
+
+    # 2) The approval the user sees carries the page's own scale, not invented stars.
+    payload = normalize_payment_payload(_HOTELS_COM_KABUKI_REQUEST, "user-123")
+    assert payload["lineItems"][0]["rating"] == "9.2/10"
+    question = build_payment_question(payload)
+    assert "9.2/10" in question.replace("\\", ""), question
+    assert "4.6 stars" not in question
+
+    # 3) Every scale form normalizes deterministically (stable fingerprints); 5-point
+    #    ratings keep their existing "<score> stars" form.
+    valid_item = _sample_tool_call()["line_items"][0]
+    expected = {
+        "4.8 stars": "4.8 stars",
+        "4.8 out of 5 stars": "4.8 stars",
+        "4.5/5": "4.5 stars",
+        "0 stars": "0 stars",
+        "9.2 out of 10": "9.2/10",
+        "9.2/10 Wonderful": "9.2/10",
+        "Rated 8.7 of 10": "8.7/10",
+        "10/10": "10/10",
+        "85 out of 100": "85/100",
+        "94%": "94%",
+    }
+    for submitted, normalized in expected.items():
+        for model in (PaymentLineItem, WriteLockPurchaseItem):
+            item = {**valid_item, "title": valid_item["name"], "rating": submitted}
+            assert model.model_validate(item).rating == normalized, (model.__name__, submitted)
+
+    # 4) Unscaled or impossible scores are still rejected, with an error that names
+    #    the scale requirement so the model can fix the call truthfully.
+    for submitted in ("9.2", "12 out of 10", "120%", "N/A", "312 reviews"):
+        request = json.loads(json.dumps(_HOTELS_COM_KABUKI_REQUEST))
+        request["line_items"][0]["rating"] = submitted
+        try:
+            validate_browser_tool_args("request_payment_card", request)
+        except BrowserToolArgsValidationError as error:
+            if submitted in ("9.2", "12 out of 10", "120%"):
+                assert "9.2 out of 10" in error.detail, error.detail
+            continue
+        raise AssertionError(f"request_payment_card accepted rating {submitted!r}")
+
+
 def test_payment_tool_accepts_flexible_merchant_labels():
     """Merchant is a free-form label — no Eventim-shaped format gate at schema time."""
     from browser_tools.schemas import RequestPaymentCardBrowserTool
@@ -1094,6 +1198,10 @@ async def run_all_tests():
     result.record(
         "reviewless_bookings_pass_with_zero",
         test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it,
+    )
+    result.record(
+        "rating_keeps_merchant_scale",
+        test_rating_keeps_the_merchant_scale_shown_on_the_page,
     )
     result.record(
         "flexible_merchant_labels",

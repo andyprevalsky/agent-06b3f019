@@ -9,7 +9,18 @@ _PLACEHOLDER_RE = re.compile(
     r"\b(?:n\s*/?\s*a|none|not\s+available|unavailable|unknown)\b",
     re.IGNORECASE,
 )
-_RATING_RE = re.compile(r"(?<![\d.,])(\d(?:\.\d+)?)(?![\d.,])")
+# A score, optionally followed by the scale the page shows it on: "94%",
+# "9.2/10", "9.2 out of 10", "8.7 of 10". No scale means a 5-star rating.
+_RATING_SCORE = r"\d{1,3}(?:\.\d+)?"
+_RATING_RE = re.compile(
+    rf"(?<![\d.,])({_RATING_SCORE})(?![\d.,])"
+    rf"(?:\s*(%)|\s*(?:/|\bout\s+of\b|\bof\b)\s*({_RATING_SCORE})(?![\d.,]))?",
+    re.IGNORECASE,
+)
+_RATING_ERROR = (
+    "rating must be the numeric score shown on the page, with its scale unless it is "
+    "out of 5 stars (for example '4.8 stars' or '9.2 out of 10')"
+)
 _REVIEW_COUNT_RE = re.compile(
     r"\b\d[\d,]*(?:\.\d+)?\s*[kmb]?\+?\s+(?:customer\s+)?(?:reviews?|ratings?)\b",
     re.IGNORECASE,
@@ -196,13 +207,28 @@ def validate_image_url_for_page(value: Any, page_image_urls: Iterable[Any], page
 
 
 def validate_product_rating(value: Any) -> str:
+    """Normalize a page rating while keeping the scale the merchant shows.
+
+    Merchants rate on different scales (hotels.com shows "9.2 out of 10"), and the
+    approval renders this string to the user, so a score is never rescaled into
+    stars it was not given. Five-point ratings keep their "<score> stars" form.
+    """
     text = _validated_review_text(value)
     if re.search(r"\breviews?\b|\bratings\b", text, re.IGNORECASE):
         raise ValueError("rating must be a product score, not a review count")
-    match = _RATING_RE.search(text)
-    if not match or not 0 <= float(match.group(1)) <= 5:
-        raise ValueError("rating must include a numeric product score from 0 to 5")
-    return f"{match.group(1)} stars"
+    matches = list(_RATING_RE.finditer(text))
+    # Prefer the score whose scale is explicit over an unrelated bare number.
+    match = next((m for m in matches if m.group(2) or m.group(3)), matches[0] if matches else None)
+    if match:
+        score, percent, scale = match.groups()
+        maximum = 100.0 if percent else float(scale) if scale else 5.0
+        if maximum > 0 and float(score) <= maximum:
+            if percent:
+                return f"{score}%"
+            if maximum == 5:
+                return f"{score} stars"
+            return f"{score}/{scale}"
+    raise ValueError(_RATING_ERROR)
 
 
 def validate_product_review_count(value: Any) -> str:
