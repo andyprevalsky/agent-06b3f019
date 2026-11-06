@@ -1178,6 +1178,7 @@ async def mock_spawn_browser_agent_activity_v3(
     agent_model: Optional[str] = None,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
+    approved_message_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Browser task that checkpoints once (drain yield or write approval), then completes.
 

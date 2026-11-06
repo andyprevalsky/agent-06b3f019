@@ -2550,30 +2550,49 @@ async def _cancelled_queue_owning_case(mode="allocated"):
             '_remember_live_agent':lambda name,aid:live.setdefault(name,[]).append(aid),
             '_emit_report':lambda **kwargs:None,'checkpoint_source_mode':False,'args':SimpleNamespace(parallel=True,keep_failed_agents=True,max_concurrency=5,prod=False),
             'tasks':tasks,'run':run,'max_concurrency':5,'base_url':'http://offline.invalid',
-            '_run_with_sandbox_payment_lock':bench._run_with_sandbox_payment_lock,'_report_ticker_task':SimpleNamespace(cancel=lambda:None),
+            '_run_with_sandbox_payment_lock':bench._run_with_sandbox_payment_lock,
             'stop_fly_log_collector':stop_collector,'realtime_started':False,'memory_gate_enabled':False,'owned_batch_cleanup':True,
             '_finalize_owned_cloud_batch':finalize,'_complete_interrupt_cleanup':lambda:None,'_live_task_agent_ids':live,'_wmh_evidence':SimpleNamespace(finalize=lambda:None),
             '_fetch_wmh_retrieval_audit':lambda:None,'cloud_batch_cleanup':SimpleNamespace(contract=lambda:None)})
         code=ast.fix_missing_locations(ast.Module(body=[wrapper,coordinator],type_ignores=[]))
         exec(compile(code,str(bench.__file__),'exec'),namespace)
-        with ExitStack() as patches:
-            if mode=='never':patches.enter_context(patch.object(bench,'_sandbox_agentcard_payment_lock',blocked_lock))
-            for obj,name,value in [(socket.socket,'connect',deny),(socket,'getaddrinfo',deny),
-                (bench,'pause_agent',AsyncMock(return_value=True)),(cleanup,'exact_root_sessions',query),
-                (bench,'_refresh_browser_archive_snapshot',query_snapshot),
-                (bench,'finalize_archive_and_score_world_model',AsyncMock(return_value=('archive-ref',{}))),
-                (bench,'delete_agent',AsyncMock()),(cleanup,'close_exact_root_sessions',release),
-                (bench,'_finalize_owned_root_payments',AsyncMock(return_value={})),
-                (bench,'fetch_local_worker_logs',lambda *args,**kwargs:[])]:patches.enter_context(patch.object(obj,name,value))
-            task=asyncio.create_task(namespace['_cancel_coordinator']())
-            ready=asyncio.create_task(entered.wait())
-            done,_=await asyncio.wait({task,ready},return_when=asyncio.FIRST_COMPLETED)
-            if task in done:
-                ready.cancel();await asyncio.gather(ready,return_exceptions=True);await task
-            await ready;await asyncio.sleep(0);task.cancel()
-            with pytest.raises(RuntimeError if mode=='unknown' else asyncio.CancelledError) as stopped:
-                await task
-            if mode=='unknown':assert 'unknown root creation outcome' in str(stopped.value)
+        ticker_started = asyncio.Event()
+        ticker_stopped = asyncio.Event()
+        async def report_ticker():
+            ticker_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                ticker_stopped.set()
+        ticker = asyncio.create_task(report_ticker())
+        namespace['_report_ticker_task'] = ticker
+        await ticker_started.wait()
+        try:
+            with ExitStack() as patches:
+                if mode=='never':patches.enter_context(patch.object(bench,'_sandbox_agentcard_payment_lock',blocked_lock))
+                for obj,name,value in [(socket.socket,'connect',deny),(socket,'getaddrinfo',deny),
+                    (bench,'pause_agent',AsyncMock(return_value=True)),(cleanup,'exact_root_sessions',query),
+                    (bench,'_refresh_browser_archive_snapshot',query_snapshot),
+                    (bench,'finalize_archive_and_score_world_model',AsyncMock(return_value=('archive-ref',{}))),
+                    (bench,'delete_agent',AsyncMock()),(cleanup,'close_exact_root_sessions',release),
+                    (bench,'_finalize_owned_root_payments',AsyncMock(return_value={})),
+                    (bench,'fetch_local_worker_logs',lambda *args,**kwargs:[])]:patches.enter_context(patch.object(obj,name,value))
+                task=asyncio.create_task(namespace['_cancel_coordinator']())
+                ready=asyncio.create_task(entered.wait())
+                done,_=await asyncio.wait({task,ready},return_when=asyncio.FIRST_COMPLETED)
+                if task in done:
+                    ready.cancel();await asyncio.gather(ready,return_exceptions=True);await task
+                await ready;await asyncio.sleep(0);task.cancel()
+                with pytest.raises(RuntimeError if mode=='unknown' else asyncio.CancelledError) as stopped:
+                    await task
+                if mode=='unknown':assert 'unknown root creation outcome' in str(stopped.value)
+        finally:
+            coordinator_retired_ticker = ticker.done()
+            if not coordinator_retired_ticker:
+                ticker.cancel()
+                await asyncio.gather(ticker, return_exceptions=True)
+            assert coordinator_retired_ticker, 'coordinator returned before retiring its ticker'
+            assert ticker.cancelled() and ticker_stopped.is_set()
         assert saved==[True] and closed==([ROOT] if mode=='allocated' else []) and external==[]
 
 @async_case
