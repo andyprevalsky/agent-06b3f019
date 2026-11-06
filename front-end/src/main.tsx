@@ -22,6 +22,7 @@ import { Toaster as Sonner } from '@/components/ui/sonner';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import { initAppVersionWatch } from '@/lib/appVersion';
 import { captureBenchmarkShareToken } from '@/lib/benchmarkShare';
+import { initThemeColorSync } from '@/lib/themeColor';
 import { startPreviewHandoff } from '@/lib/previewHandoff';
 import AppShell, {
   initDevLogging,
@@ -42,6 +43,7 @@ initAmplitude();
 initViewportHeight();
 initViewportScale();
 initAppVersionWatch();
+initThemeColorSync();
 
 function renderApp(): void {
   // Render main app
