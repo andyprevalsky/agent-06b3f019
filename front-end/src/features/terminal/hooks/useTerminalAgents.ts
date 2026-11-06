@@ -34,8 +34,9 @@ export function overlaySelectedAgentTitle(
 ) {
   if (!selectedAgent) return agents;
   return agents.map((agent) =>
-    agent.agent_id === selectedAgent.agent_id && agent.title !== selectedAgent.title
-      ? { ...agent, title: selectedAgent.title }
+    agent.agent_id === selectedAgent.agent_id &&
+    (agent.title !== selectedAgent.title || agent.status !== selectedAgent.status)
+      ? { ...agent, title: selectedAgent.title, status: selectedAgent.status }
       : agent,
   );
 }
@@ -228,6 +229,14 @@ function buildNewAgentHandlers({
 function buildReturn(a: BuildArgs) {
   const { handleLoginClick, handleJoinWaitlist } = buildAuthModalHandlers(a.modals);
   const newAgent = buildNewAgentHandlers(a);
+  // Project user intent while the request/refresh is pending. Canonical context
+  // remains untouched, so errors reveal the latest server state automatically.
+  const agentDetail =
+    a.actions.isPausing &&
+    a.ctx.agent?.agent_id === a.ctx.selectedAgentId &&
+    (a.ctx.agent.status === 'ACTIVE' || a.ctx.agent.status === 'STARTING_UP')
+      ? { ...a.ctx.agent, status: 'PAUSED' as const }
+      : a.ctx.agent;
   return {
     user: a.auth.isFullySignedIn ? a.auth.user : null,
     authUser: a.auth.user,
@@ -238,7 +247,7 @@ function buildReturn(a: BuildArgs) {
     refreshAuthState: a.auth.refreshAuthState,
     realtimeReady: a.auth.realtimeReady,
     canSubmitGoals: a.canSubmitGoals,
-    agentDetail: a.ctx.agent,
+    agentDetail,
     inspectionContext: a.ctx.inspectionContext,
     selectedAgentId: a.ctx.selectedAgentId,
     messages: a.ctx.messages,
@@ -248,7 +257,7 @@ function buildReturn(a: BuildArgs) {
     isLoadingAgent: a.ctx.isLoadingAgent,
     forceResubscribeContext: a.ctx.forceResubscribe,
     isChatMode: a.ctx.isChatMode,
-    agents: overlaySelectedAgentTitle(a.agentList.agents, a.ctx.agent),
+    agents: overlaySelectedAgentTitle(a.agentList.agents, agentDetail),
     isLoadingAgents: a.agentList.isLoadingAgents,
     hasLoadedAgents: a.agentList.hasLoadedAgents,
     resumingAgentId: a.actions.resumingAgentId,

@@ -40,7 +40,8 @@ export function useAgentActions({
 }: UseAgentActionsArgs) {
   const { toast } = useToast();
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
-  const [isPausing, setIsPausing] = useState(false);
+  const [pausingAgentId, setPausingAgentId] = useState<string | null>(null);
+  const isPausing = pausingAgentId !== null && pausingAgentId === selectedAgentId;
   const selectedAgentIdRef = useRef(selectedAgentId);
   selectedAgentIdRef.current = selectedAgentId;
 
@@ -99,14 +100,14 @@ export function useAgentActions({
   const handlePauseAgent = useCallback(async () => {
     if (!selectedAgentId || !agentDetail) return;
     try {
-      setIsPausing(true);
+      setPausingAgentId(selectedAgentId);
       await pauseAgent(selectedAgentId);
       await refreshAgentDetail(selectedAgentId);
       toast({ title: 'Agent pausing', description: 'The agent will pause shortly' });
     } catch (_e: unknown) {
       toast({ title: 'Error', description: 'Failed to pause agent', variant: 'destructive' });
     } finally {
-      setIsPausing(false);
+      setPausingAgentId((current) => (current === selectedAgentId ? null : current));
     }
   }, [selectedAgentId, agentDetail, refreshAgentDetail, toast]);
 
