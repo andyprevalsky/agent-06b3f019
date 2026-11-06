@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -297,6 +298,51 @@ async def test_fast_mode_never_contacts_lantern():
     assert result["providers_attempted"] == []
     assert result["_fast_cache_hit"] is True
     assert get_captured_requests() == []
+
+
+def _paged_upstream(sessions, calls, cursor=None):
+    import httpx
+
+    def upstream(request: httpx.Request):
+        expected = {"request": "engineer", "limit": 2, "includeContacts": False, "titles": ["Software Engineer"]}
+        assert json.loads(request.content) == {**expected, **({"cursor": cursor} if cursor else {})}
+        next_cursor, expires_at = sessions[len(calls)]
+        calls.append(datetime.now(UTC))
+        data = {"people": _people(2), "nextCursor": next_cursor, "expiresAt": expires_at.isoformat()}
+        return httpx.Response(200, json={"ok": True, "data": data})
+
+    return upstream
+
+
+async def test_reused_near_expiry_search_session_is_refreshed_before_returning_cursor():
+    # Lantern answers a repeated identical search from its existing session, whose
+    # TTL started at the first search. A first page that arrives seconds before that
+    # session expires must not hand the agent a cursor that is already dead.
+    teardown_mock()
+    reused_expiry = datetime.now(UTC) + timedelta(seconds=0.5)
+    fresh_expiry = datetime.now(UTC) + timedelta(minutes=15)
+    calls = []
+    setup_mock_fn(
+        _paged_upstream([("reused-session.2.2.sig", reused_expiry), ("fresh-session.2.2.sig", fresh_expiry)], calls)
+    )
+    result = await _run(query="engineer", limit=2, search_options={"titles": ["Software Engineer"]})
+    assert len(calls) == 2, calls
+    assert calls[1] > reused_expiry
+    assert result["next_cursor"] == "fresh-session.2.2.sig"
+    assert result["search_metadata"]["expiresAt"] == fresh_expiry.isoformat()
+    assert len(result["results"]) == 2
+
+
+async def test_search_session_with_usable_lifetime_or_cursor_is_never_refetched():
+    # A continuation cannot open a new session, so its short lifetime is reported as-is.
+    for cursor, lifetime in ((None, timedelta(minutes=14)), ("page-2", timedelta(seconds=0.5))):
+        teardown_mock()
+        calls = []
+        setup_mock_fn(_paged_upstream([("same-session.4.2.sig", datetime.now(UTC) + lifetime)], calls, cursor))
+        options = {"titles": ["Software Engineer"], **({"cursor": cursor} if cursor else {})}
+        result = await _run(query="engineer", limit=2, search_options=options)
+        assert len(calls) == 1, (cursor, calls)
+        assert result["next_cursor"] == "same-session.4.2.sig"
 
 
 async def test_oauth_uses_owner_credentials_and_never_exposes_tokens():
@@ -798,6 +844,8 @@ async def run_all_tests():
         test_schema_defaults_and_pairing,
         test_limit_clamp_discover,
         test_discover_request_normalization_and_criteria,
+        test_reused_near_expiry_search_session_is_refreshed_before_returning_cursor,
+        test_search_session_with_usable_lifetime_or_cursor_is_never_refetched,
         test_enrich_by_id_preserves_fields_without_contact_reveals,
         test_exact_enrichment_missing_record_is_typed_error,
         test_missing_enrichment_manager_reports_error_without_query_charge,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -17,6 +18,8 @@ from tools.people_search.config import (
     HTTP_TIMEOUT,
     MODES,
     PROVIDERS,
+    SEARCH_SESSION_MIN_LIFETIME_SECONDS,
+    SEARCH_SESSION_REFRESH_RESERVE_SECONDS,
 )
 from tools.people_search.repo import fetch_lantern_connection, fetch_lantern_people, lantern_error, validate_api_origin
 
@@ -117,6 +120,18 @@ def _normalize_person(row: dict[str, Any], fields: list[str] | None) -> PersonRe
     return person
 
 
+def _session_seconds_left(data: dict[str, Any]) -> float | None:
+    """Remaining lifetime of the session behind a page's next_cursor, when stated."""
+    expires_at = data.get("expiresAt")
+    if not isinstance(data.get("nextCursor"), str) or not isinstance(expires_at, str):
+        return None
+    try:
+        expires = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return None
+    return (expires - datetime.now(UTC)).total_seconds() if expires.tzinfo else None
+
+
 def _build_request(
     query: str,
     mode: str,
@@ -171,7 +186,7 @@ async def execute_people_search(
     operation, payload = _build_request(query, mode, limit, search_options)
     source_id = (search_options or {}).get("sourceRecordId")
     app_config = load_config()
-    async with asyncio.timeout(HTTP_TIMEOUT):
+    async with asyncio.timeout(HTTP_TIMEOUT) as budget:
         origin = validate_api_origin(app_config.lantern.api_url)
         token = app_config.lantern.api_token
         broker_url = getattr(app_config.lantern, "credential_broker_url", "").strip()
@@ -184,6 +199,14 @@ async def execute_people_search(
                 expected_origin=origin,
             )
         data = await fetch_lantern_people(api_url=origin, api_token=token, operation=operation, payload=payload)
+        seconds_left = _session_seconds_left(data) if "cursor" not in payload else None
+        if seconds_left is not None and seconds_left < SEARCH_SESSION_MIN_LIFETIME_SECONDS:
+            wait = max(seconds_left, 0.0) + 1.0
+            budget_left = (budget.when() or 0.0) - asyncio.get_running_loop().time()
+            if wait + SEARCH_SESSION_REFRESH_RESERVE_SECONDS <= budget_left:
+                logger.info("Refreshing reused Lantern search session", seconds_left=round(seconds_left, 1))
+                await asyncio.sleep(wait)
+                data = await fetch_lantern_people(api_url=origin, api_token=token, operation=operation, payload=payload)
     rows = data.get("items" if operation == "people_profiles_get" else "people")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise lantern_error("INVALID_RESPONSE")
