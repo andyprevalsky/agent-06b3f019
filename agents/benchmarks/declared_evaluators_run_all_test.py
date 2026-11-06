@@ -67,6 +67,21 @@ def test_all_failing_evaluators_each_report_a_verdict():
     assert "(+2 more failing: b, c)" in reason
 
 
+def test_a_task_namespace_without_the_option_keeps_the_stop_at_first_failure_loop():
+    """benchmark.blackbox builds fake tasks as plain namespaces (declared_judge_low_score_verdict_is_not_rejudged)."""
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(
+        name="plain",
+        enforce_declared_evaluators=True,
+        evaluators=[_status("a", "PAUSED"), _status("b", "PAUSED")],
+        process_spec=None,
+        tags=[],
+    )
+    ok, reason, results = _run(task)
+    assert not ok and _verdicts(results) == [("a", False)] and "more failing" not in reason
+
+
 def test_without_the_option_the_loop_still_stops_at_the_first_failure():
     task = _task([_status("a", "COMPLETED"), _status("b", "PAUSED"), _status("c", "PAUSED")], run_all=False)
     ok, reason, results = _run(task)

@@ -14850,6 +14850,11 @@ def _run_declared_static_check(
     return True, "All declared static checks passed"
 
 
+def _run_all_evaluators(task: Any) -> bool:
+    """The task's run_all_evaluators option (tests build tasks as plain namespaces without it)."""
+    return bool(getattr(task, "run_all_evaluators", False))
+
+
 def _runs_declared_evaluators(task: BenchmarkTask, passed: bool) -> bool:
     """Whether the declared evaluators run for this run.
 
@@ -14858,13 +14863,13 @@ def _runs_declared_evaluators(task: BenchmarkTask, passed: bool) -> bool:
     """
     return bool(
         task.enforce_declared_evaluators
-        and (passed or task.run_all_evaluators or _task_declares_static_check(task, "claude_code_session_output"))
+        and (passed or _run_all_evaluators(task) or _task_declares_static_check(task, "claude_code_session_output"))
     )
 
 
 def _declared_failure_reason(task: BenchmarkTask, earlier_failure: Optional[str], evaluator_reason: str) -> str:
     """A run-all task keeps the run's own failure (e.g. the timeout) beside the evaluators' verdict."""
-    if task.run_all_evaluators and earlier_failure:
+    if _run_all_evaluators(task) and earlier_failure:
         return f"{earlier_failure} | {evaluator_reason}"
     return evaluator_reason
 
@@ -15036,7 +15041,7 @@ async def _run_declared_evaluators(
                 result["perfect"] = polar_results.get("perfect")
                 result["num_screenshots_sent"] = polar_results.get("num_screenshots_sent")
         results.append(result)
-        if not passed and not task.run_all_evaluators:
+        if not passed and not _run_all_evaluators(task):
             return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
     failed = [r for r in results if not r["passed"]]
     if failed:
@@ -15879,7 +15884,7 @@ async def _run_single_task_as_run_user(
 
         declared_evaluator_results: list[dict] = []
         run_declared = _runs_declared_evaluators(task, passed)
-        if run_declared and (passed or task.run_all_evaluators):
+        if run_declared and (passed or _run_all_evaluators(task)):
             try:
                 tree_agents = await get_agent_tree(base_url, agent_id)
                 tree = canonicalize_agent_tree(
