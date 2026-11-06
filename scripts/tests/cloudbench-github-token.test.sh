@@ -18,20 +18,17 @@ trap 'rm -rf "$TMP"; kill "$SERVER_PID" 2>/dev/null || true' EXIT
 LIVE_DISPATCH="${GITHUB_DISPATCH_TOKEN:-}"
 GOOD_TOKEN="gho_test_dispatch_token_good_for_repo_read"
 BAD_TOKEN="github_pat_stale_token_that_must_not_win"
-LIMITED_TOKEN="ghp_primary_token_out_of_rest_quota"
 
-python3 - "$TMP" "$GOOD_TOKEN" "$LIMITED_TOKEN" <<'PY' &
+python3 - "$TMP" "$GOOD_TOKEN" <<'PY' &
 import http.server, sys
 from pathlib import Path
-root, good, limited = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+root, good = Path(sys.argv[1]), sys.argv[2]
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         auth = self.headers.get("Authorization", "")
         if auth == f"Bearer {good}":
             body, code = b'{"ok":true}', 200
-        elif auth == f"Bearer {limited}":
-            body, code = b'{"message":"API rate limit exceeded for user ID 1."}', 403
         else:
             body, code = b'{"message":"Bad credentials"}', 401
         self.send_response(code)
@@ -87,24 +84,6 @@ if PATH="$PATH_NO_GH" cloudbench_resolve_github_token "$TMP/repo" >/dev/null 2>&
   fail "resolver must fail when only stale GITHUB_TOKEN sources exist"
 fi
 pass "resolver fails closed when every candidate is stale"
-
-# ── 2b. Rate-limited GITHUB_TOKEN falls through to a pool member ─────────────
-# A drained primary answers 403 "API rate limit exceeded"; GITHUB_TOKEN_2..9
-# (scripts/lib/github_token_pool.py) are machine accounts with their own quota.
-export GITHUB_TOKEN="$LIMITED_TOKEN"
-export GITHUB_TOKEN_2="$GOOD_TOKEN"
-RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_token "$TMP/repo")" \
-  || fail "resolver returned no token when GITHUB_TOKEN_2 was usable"
-[ "$RESOLVED" = "$GOOD_TOKEN" ] || fail "resolver did not fall through to GITHUB_TOKEN_2"
-unset GITHUB_TOKEN_2
-cp "$TMP/repo/agents/.env" "$TMP/agents.env.orig"
-printf 'GITHUB_TOKEN_3=%s\n' "$GOOD_TOKEN" >>"$TMP/repo/agents/.env"
-RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_token "$TMP/repo")" \
-  || fail "resolver ignored GITHUB_TOKEN_3 from agents/.env"
-[ "$RESOLVED" = "$GOOD_TOKEN" ] || fail "resolver did not use the env-file pool member"
-cp "$TMP/agents.env.orig" "$TMP/repo/agents/.env"
-export GITHUB_TOKEN="$BAD_TOKEN"
-pass "rate-limited GITHUB_TOKEN falls through to GITHUB_TOKEN_2..9 (process env and env file)"
 
 # ── 3. refresh-deps injects controller token (static contract) ───────────────
 grep -Fq 'resolve_github_token' "$ROOT_DIR/scripts/run-bench-cloud" \

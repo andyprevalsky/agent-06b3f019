@@ -16,8 +16,8 @@ that answers 401 is skipped. Members with quota left rank first (most remaining
 wins, ties keep member order); members whose probe failed or timed out rank
 next; exhausted members rank last, soonest reset first.
 
-  python3 scripts/lib/github_token_pool.py pick [--resource core|graphql|both] [--repo-root DIR]
-  python3 scripts/lib/github_token_pool.py status [--repo-root DIR]
+  python3 scripts/github_token_pool.py pick [--resource core|graphql|both] [--repo-root DIR]
+  python3 scripts/github_token_pool.py status [--repo-root DIR]
 
 `pick` prints only the chosen token (for `GH_TOKEN=$(...) gh ...`); `status`
 prints one line per member and never a token value.
@@ -53,7 +53,7 @@ ENV_FILES = ("agents/.env", "back-end/.env")
 DEFAULT_API_BASE = "https://api.github.com"
 DEFAULT_TIMEOUT_SECONDS = 5.0
 RESOURCES = ("core", "graphql", "both")
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)

@@ -1407,7 +1407,7 @@ member with the most quota left and moves on when one is rate limited.
 Actions that act as Andy (agent repo creation, PRs, pushes to his personal
 repos) keep `identity: 'primary'`. When a script or ad-hoc `gh` call hits a
 rate limit, rerun it with
-`GH_TOKEN="$(python3 scripts/lib/github_token_pool.py pick)"`; `status` shows
+`GH_TOKEN="$(python3 scripts/github_token_pool.py pick)"`; `status` shows
 each member's quota without printing tokens. Never print or commit a token,
 and never revoke or replace a member without Andy's explicit OK.
 

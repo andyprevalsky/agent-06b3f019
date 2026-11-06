@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Owning-boundary regressions for scripts/lib/github_token_pool.py.
+"""Owning-boundary regressions for scripts/github_token_pool.py.
 
 Every GitHub consumer shared one user token whose 5,000/h quota other threads
 drained to 0 twice within an hour (2026-11-06). The pool ranks GITHUB_TOKEN,
-GITHUB_TOKEN_2..9 and GITHUB_DISPATCH_TOKEN by remaining quota from the free
+GITHUB_TOKEN_2..9, the GitHub App and GITHUB_DISPATCH_TOKEN by remaining quota from the free
 /rate_limit endpoint. A local fake GitHub serves per-token quotas; no live call.
 """
 
@@ -23,7 +23,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts/lib/github_token_pool.py"
+SCRIPT = ROOT / "scripts/github_token_pool.py"
 spec = importlib.util.spec_from_file_location("github_token_pool", SCRIPT)
 pool = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = pool
