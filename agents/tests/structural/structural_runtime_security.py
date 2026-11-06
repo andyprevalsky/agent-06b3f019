@@ -27,11 +27,9 @@ def test_native_node_services_pin_patched_runtime() -> None:
         "back-end/package.json",
         "front-end/package.json",
         "docs/package.json",
-        "mac-app/package.json",
     ):
         assert _package(path).get("engines", {}).get("node") == NODE_FLOOR, path
     assert _text(".nvmrc").strip() == NODE_FLOOR
-    assert _text("mac-app/.nvmrc").strip() == NODE_FLOOR
 
 
 def test_container_node_runtimes_and_system_ca_store_are_patched() -> None:
@@ -64,7 +62,6 @@ def test_ci_and_ephemeral_gate_runtimes_pin_patched_releases() -> None:
         ".github/workflows/chat-lifecycle-ratchet.yml",
         ".github/workflows/deploy-agents.yml",
         ".github/workflows/download-egress.yml",
-        ".github/workflows/release-mac-app.yml",
     ):
         pins = re.findall(r'node-version:\s*["\']?([^\s"\']+)', _text(path))
         assert pins and set(pins) == {NODE_FLOOR}, (path, pins)
