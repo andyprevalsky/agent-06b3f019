@@ -1,5 +1,6 @@
 /** Real routes and issuer state, no outbound transport credentials or live messages. */
 import { prisma } from '../../providers/database';
+import { phoneFixtureNumber, ineligiblePhoneFixtureNumber } from './phone-fixture-users';
 import { ALLOWED_ACCOUNT_IDS } from '../../providers/phoneAccountPolicy';
 import { resolvePlanContext } from '../../domains/auth-test-site/servicePlanContext';
 import { findSite } from '../../domains/auth-test-site/service';
@@ -22,12 +23,13 @@ function allowNextPhoneRequest(site: AuthTestSite) {
 }
 test('phone_sms_otp uses only owned configured phone, no minted identity or AgentPhone mirror', async () => {
   const userId = await createUser();
+  const phone = phoneFixtureNumber();
   const prior = process.env.CLOUD_IPHONE_ENABLED;
   try {
     process.env.CLOUD_IPHONE_ENABLED = '1';
     await prisma.user.update({
       where: { userId },
-      data: { phone: '+19729777432', isAnonymous: false },
+      data: { phone, isAnonymous: false },
     });
     await prisma.iPhoneDevice.create({
       data: { userId, providerDeviceId: `phone-sms-${userId}`, enabled: true },
@@ -51,7 +53,7 @@ test('phone_sms_otp uses only owned configured phone, no minted identity or Agen
       const first = site.codes[0]!;
       const report = await fetchReport(base, manifest.siteId);
       assert(!JSON.stringify(report).includes(first.code), 'Report leaked OTP');
-      assert(!JSON.stringify(report).includes('+19729777432'), 'Report leaked full phone');
+      assert(!JSON.stringify(report).includes(phone), 'Report leaked full phone');
       assert(
         (await prisma.agentPhoneMessage.count({ where: { userId } })) === 0,
         'No AgentPhone shortcut'
@@ -104,7 +106,7 @@ test('phone_sms_otp uses only owned configured phone, no minted identity or Agen
       assert(final.phoneSmsChallenges[1]!.codeDigest.length === 64, 'Keyed code proof digest');
       assert(final.sessions.length === 1, 'Exactly one authenticated session');
       assert(!JSON.stringify(final).includes(newest.code), 'Final report hides code');
-      assert(!JSON.stringify(final).includes('+19729777432'), 'Final report hides destination');
+      assert(!JSON.stringify(final).includes(phone), 'Final report hides destination');
       allowNextPhoneRequest(site);
       await postForm(base, pagePath(manifest, '/login/sms'), {});
       site.codes.at(-1)!.expiresAtMs = Date.now() - 1;
@@ -123,6 +125,7 @@ test('phone_sms_otp uses only owned configured phone, no minted identity or Agen
 
 test('phone_sms_otp rejects missing or ineligible cloud phone configuration', async () => {
   const userId = await createUser();
+  const phone = phoneFixtureNumber();
   const prior = process.env.CLOUD_IPHONE_ENABLED;
   try {
     process.env.CLOUD_IPHONE_ENABLED = '1';
@@ -132,13 +135,13 @@ test('phone_sms_otp rejects missing or ineligible cloud phone configuration', as
       assert((await create()).status === 409, 'Missing configuration rejected');
       await prisma.user.update({
         where: { userId },
-        data: { phone: '+15555550000', isAnonymous: false },
+        data: { phone: ineligiblePhoneFixtureNumber(), isAnonymous: false },
       });
       await prisma.iPhoneDevice.create({
         data: { userId, providerDeviceId: `ineligible-${userId}`, enabled: true },
       });
       assert((await create()).status === 409, 'Foreign/noneligible account rejected');
-      await prisma.user.update({ where: { userId }, data: { phone: '+19729777432' } });
+      await prisma.user.update({ where: { userId }, data: { phone } });
       process.env.CLOUD_IPHONE_ENABLED = '0';
       assert((await create()).status === 409, 'Rollout-off rejected');
     });
@@ -152,6 +155,7 @@ test('phone_sms_otp rejects missing or ineligible cloud phone configuration', as
 
 test('phone_sms_otp failed replacement cannot authenticate and cannot revive an earlier challenge', async () => {
   const userId = await createUser();
+  const phone = phoneFixtureNumber();
   const saved = {
     CLOUD_IPHONE_ENABLED: process.env.CLOUD_IPHONE_ENABLED,
     SURGE_API_KEY: process.env.SURGE_API_KEY,
@@ -163,7 +167,7 @@ test('phone_sms_otp failed replacement cannot authenticate and cannot revive an 
     process.env.CLOUD_IPHONE_ENABLED = '1';
     await prisma.user.update({
       where: { userId },
-      data: { phone: '+19729777432', isAnonymous: false },
+      data: { phone, isAnonymous: false },
     });
     await prisma.iPhoneDevice.create({
       data: { userId, providerDeviceId: `failed-sms-${userId}`, enabled: true },
@@ -311,12 +315,13 @@ test('phone_sms_otp failed replacement cannot authenticate and cannot revive an 
 
 test('phone SMS verification page distinguishes missing and unacknowledged sends without exposing secrets', async () => {
   const userId = await createUser();
+  const phone = phoneFixtureNumber();
   const prior = process.env.CLOUD_IPHONE_ENABLED;
   try {
     process.env.CLOUD_IPHONE_ENABLED = '1';
     await prisma.user.update({
       where: { userId },
-      data: { phone: '+19729777432', isAnonymous: false },
+      data: { phone, isAnonymous: false },
     });
     await prisma.iPhoneDevice.create({
       data: { userId, providerDeviceId: `sms-notice-${userId}`, enabled: true },
@@ -348,7 +353,7 @@ test('phone SMS verification page distinguishes missing and unacknowledged sends
         'Missing challenge needs distinct notice'
       );
       assert(
-        !failed.includes(issued.code) && !failed.includes('+19729777432'),
+        !failed.includes(issued.code) && !failed.includes(phone),
         'Notice leaked OTP or full phone'
       );
     });
