@@ -32,6 +32,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   mkdtempSync,
   readFileSync,
   readlinkSync,
@@ -298,6 +299,47 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     `only changed file: ${third.written}`
   );
 
+  // --files-only pushes the named env files and nothing else: a new unpushed branch
+  // is not bundled and the stored artifacts are neither replaced nor cleared.
+  const snapshotBefore = await prisma.projectSyncSnapshot.findUniqueOrThrow({
+    where: { projectId: project.id },
+  });
+  sh(
+    checkout,
+    `git branch files-only-extra $(git -c user.name=t -c user.email=t@example.com commit-tree -m extra -p HEAD 'HEAD^{tree}')`
+  );
+  writeFileSync(join(checkout, 'app', '.env.local'), 'APP_MODE=files-only\n');
+  const filesOnly = await runSync(s, [
+    'push',
+    '--dir',
+    checkout,
+    '--project',
+    project.id,
+    '--files-only',
+    '--include',
+    'app/.env.local',
+  ]);
+  assert(
+    JSON.stringify(filesOnly.written) === JSON.stringify(['app/.env.local']),
+    `files-only writes the changed env file: ${filesOnly.written}`
+  );
+  assert(
+    filesOnly.gitBundle === 'unchanged' && filesOnly.uncommittedPatch === 'unchanged',
+    `files-only leaves the stored artifacts alone: ${filesOnly.gitBundle}/${filesOnly.uncommittedPatch}`
+  );
+  assert(filesOnly.deleted.length === 0, 'files-only never prunes');
+  const snapshotAfter = await prisma.projectSyncSnapshot.findUniqueOrThrow({
+    where: { projectId: project.id },
+  });
+  assert(
+    snapshotAfter.gitBundleFingerprint === snapshotBefore.gitBundleFingerprint &&
+      snapshotAfter.patchFingerprint === snapshotBefore.patchFingerprint,
+    'files-only did not upload the new unpushed branch'
+  );
+  sh(checkout, 'git branch -D files-only-extra');
+  writeFileSync(join(checkout, 'app', '.env.local'), 'APP_MODE=staging\n');
+  await runSync(s, ['push', '--dir', checkout, '--project', project.id]);
+
   const envRow = await prisma.projectEnvFile.findUniqueOrThrow({
     where: { projectId_path: { projectId: project.id, path: '.env' } },
   });
@@ -349,13 +391,16 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     'unpushed commit present'
   );
   const stash = sh(repo, 'git stash list');
-  assert(/rose-sync uncommitted \(r3, feature\)/.test(stash), `uncommitted work stashed: ${stash}`);
+  assert(/rose-sync uncommitted \(r\d+, feature\)/.test(stash), `uncommitted work stashed: ${stash}`);
   const stashed = sh(repo, 'git show stash@{0}:README.md');
   assert(stashed.includes('uncommitted edit'), 'tracked edit in the stash');
   // `git apply --index` stages new files, so untracked work lands in the stash tree itself.
   const untracked = sh(repo, 'git show "stash@{0}:untracked-note.txt"');
   assert(untracked.includes('untracked work'), 'untracked file in the stash');
-  assert(existsSync(join(home, '.rose/project/uncommitted-r3.patch')), 'patch file kept');
+  assert(
+    readdirSync(join(home, '.rose/project')).some((f) => /^uncommitted-r\d+\.patch$/.test(f)),
+    'patch file kept'
+  );
 
   // Resume (W5 hook): restoring into an existing workspace keeps the session's
   // branch and local work, and refreshes env files.
