@@ -28,6 +28,47 @@ from pathlib import Path
 from types import ModuleType
 
 
+def native_hub_owner_retired(owner, runs, root):
+    """Recognize current absence, never synthesize a historical Hub termination."""
+    import stat
+    if owner.is_symlink() or owner.resolve(strict=True) != owner or not owner.is_file():
+        raise ValueError('native Hub owner path changed')
+    info = owner.stat()
+    rows = [line.split('=', 1) for line in owner.read_text().splitlines()]
+    fields = dict(rows)
+    required = {'version','pid','pid_start','pgid','owner_token','command','argv_sha256',
+                'root','runs_root','repo_root','context_dir','host','port','status'}
+    if len(rows) != len(fields) or set(fields) != required:
+        raise ValueError('native Hub owner fields')
+    pid, pgid, port = (int(fields[key]) for key in ('pid','pgid','port'))
+    token = fields['owner_token']
+    expected = {'root':runs,'runs_root':runs,'repo_root':root,'context_dir':runs/'_hub',
+                'command':root/'agents/benchmarks/agent_link_server.py'}
+    if (info.st_uid != os.getuid() or pid <= 1 or pgid != pid or not 1 <= port <= 65535
+            or fields['version'] != '1' or fields['host'] != '127.0.0.1'
+            or fields['status'] not in {'starting','live-transfer-required'}
+            or not re.fullmatch('[0-9a-f]{32}', token)
+            or not re.fullmatch('[0-9a-f]{64}', fields['argv_sha256'])
+            or any(fields[key] != str(value) for key,value in expected.items())
+            or owner.parent != runs/'_hub'
+            or owner.name != f'agent-link-server.{port}.{token}.owner'
+            or stat.S_IMODE(info.st_mode) != (0o644 if fields['status']=='starting' else 0o444)):
+        raise ValueError('native Hub owner binding')
+    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    if not re.fullmatch('proc-start:'+re.escape(boot)+':[0-9]+', fields['pid_start']):
+        raise ValueError('native Hub owner boot identity')
+    try:
+        (Path('/proc')/str(pid)/'stat').read_text()
+    except FileNotFoundError:
+        pass
+    else:
+        return False  # Live or reused PID must satisfy the existing live protocol.
+    groups = subprocess.check_output(['ps','-ax','-o','pgid='],text=True)
+    if any(int(value) == pgid for value in groups.split()):
+        return False  # Never skip a remaining or reused group.
+    return True
+
+
 def join_native_hubs(root, campaign):
     """Join only this native request's Hub through its existing exact-owner protocol."""
     if os.environ.get('DEPLOY_NATIVE_HUB_JOIN') != '1':
@@ -50,6 +91,8 @@ def join_native_hubs(root, campaign):
             fields = dict(rows)
             if len(rows) != len(fields):
                 raise ValueError('duplicate native Hub owner fields')
+            if native_hub_owner_retired(owner, runs, root):
+                continue
             subprocess.run(['bash', '-c', 'source "$1"; cloudbench_terminate_central_hub_owner "$2" "$3" "$4" "$5" 10',
                             'native-hub-join', str(root/'scripts/lib/cloudbench-env.sh'), fields['port'],
                             str(runs), str(root), str(owner)], check=True)

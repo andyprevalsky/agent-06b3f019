@@ -9,6 +9,15 @@ with tempfile.TemporaryDirectory(prefix='native-hub-join-') as tmp:
  for rel in ['agents/benchmarks/agent_link_server.py','scripts/lib/cloudbench-env.sh']:
   dest=root/rel;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(ROOT/rel,dest)
  with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+ # Keep a real failed-bind starting owner ahead of the subsequently live Hub.
+ with socket.socket() as occupied:
+  occupied.bind(('127.0.0.1',0));occupied.listen();failed_port=occupied.getsockname()[1]
+  failed_owner=hub/('agent-link-server.'+str(failed_port)+'.'+'0'*32+'.owner')
+  failed=subprocess.run([sys.executable,str(root/'agents/benchmarks/agent_link_server.py'),
+   '--root',str(runs),'--repo-root',str(root),'--context-dir',str(hub),
+   '--frontend-dir',str(root/'front-end'),'--port',str(failed_port),'--hub-runs-dir',str(runs),
+   '--owner-file',str(failed_owner),'--owner-token','0'*32],start_new_session=True,capture_output=True,timeout=5)
+  assert failed.returncode!=0 and 'status=starting' in failed_owner.read_text()
  owner=hub/('agent-link-server.'+str(port)+'.'+'b'*32+'.owner')
  child_code='''from pathlib import Path
 import sys,subprocess,time,runpy,json
@@ -29,3 +38,5 @@ m=runpy.run_path(sys.argv[1]);m.get('join_native_hubs',lambda *_:True)(root,camp
  assert result==(0,False,False,False),result
  assert sidecar['orphaned_children'] is False and sidecar['remaining']==[] and sidecar['term_sent']==[]
  assert Path(str(owner)+'.terminal').exists()
+
+ assert not Path(str(failed_owner)+'.terminal').exists(), 'already-retired owner must not gain fabricated termination'

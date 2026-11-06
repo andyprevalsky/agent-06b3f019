@@ -675,8 +675,10 @@ def validate(receipt, owner, proof):
         start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
         need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
              <= receipt['finished_at'] <= confirmed, 'campaign terminal clocks')
-        need(not any(summary.get(key) for key in
-                     ('shared_transport_cleanup_pending', 'cleanup_ticket_failure', 'shared_inventory_failed')),
+        pending_hubs = summary.get('shared_transport_cleanup_pending')
+        need(not any(summary.get(key) for key in ('cleanup_ticket_failure', 'shared_inventory_failed'))
+             and (not pending_hubs or preallocation and pending_hubs is True
+                  and isinstance(proof.get('current_hub_retirement'),dict)),
              'campaign shared cleanup pending')
         cohorts = summary.get('startup_cohorts', [])
         need(isinstance(cohorts, list) and all(isinstance(c, dict) for c in cohorts)
@@ -699,6 +701,24 @@ def validate(receipt, owner, proof):
                  and receipt['cases']==dict.fromkeys(checks,'UNVERIFIED'),
                  'preallocation outcomes')
             supervision=preallocation_processes(root,runs,campaign,request,receipt,adapter,document,bound)
+            if pending_hubs:
+                marker=proof['current_hub_retirement']
+                hub=runs/'_hub'
+                need(hub.is_dir() and not hub.is_symlink() and hub.resolve()==hub,
+                     'current Hub inventory root')
+                owners=sorted(hub.glob('agent-link-server.*.owner'))
+                need(set(marker)=={'kind','owners'}
+                     and marker['kind']=='current-native-hub-retirement-v1'
+                     and marker['owners']==list(map(str,owners)) and owners
+                     and supervision['quiescent'] is True and supervision['orphaned_children'] is False
+                     and supervision['term_sent']==supervision['kill_sent']==supervision['remaining']==[],
+                     'current Hub retirement proof')
+                for path in owners:
+                    before=bound(path)
+                    need(native['native_hub_owner_retired'](path,runs,root), 'current Hub remains live')
+                    need(bound(path)==before, 'current Hub owner changed')
+            else:
+                need(not proof.get('current_hub_retirement'), 'unexpected current Hub retirement proof')
         handles = []
         for job in jobs:
             need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']), 'campaign job id')
@@ -889,6 +909,8 @@ def validate(receipt, owner, proof):
             'retained_services': [retained[k] for k in sorted(retained)], 'credit_granted': False}
     if preallocation:
         result['preallocation_source_authorities']={str(k):v['source_authority']for k,v in preallocation_links.items()}
+    if preallocation and proof.get('current_hub_retirement'):
+        result['current_hub_retirement']=copy.deepcopy(proof['current_hub_retirement'])
     if isolated:
         need(isinstance(proof.get('validation_source'), dict) and set(proof['validation_source']) == {'head', 'digest'}, 'next source')
         result.update(purpose='isolated-validation', validation_source=proof['validation_source'], excluded_resources=excluded,

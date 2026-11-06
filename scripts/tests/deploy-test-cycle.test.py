@@ -3971,10 +3971,13 @@ class RelayStartupEvidence(unittest.TestCase):
         return receipt,owner,proof
 
     def validate_fixture(self,receipt,owner,proof):
-        import types
+        import types,runpy
+        retired_hub=runpy.run_path(str(self.target/'run-bench-campaign.py'))['native_hub_owner_retired']
+        original_check_output=subprocess.check_output
         published=types.ModuleType('deploy_test_cloud');published.campaign_published=lambda *_a:True
-        with patch.dict(sys.modules,deploy_test_cloud=published),patch.object(self.native.runpy,'run_path',return_value={}),\
-             patch.object(self.native.subprocess,'check_output',side_effect=lambda args:
+        with patch.dict(sys.modules,deploy_test_cloud=published),patch.object(self.native.runpy,'run_path',return_value={'native_hub_owner_retired':retired_hub}),\
+             patch.object(self.native.subprocess,'check_output',side_effect=lambda args,**kwargs:
+                 original_check_output(args,**kwargs) if args[0]=='ps' else
                  b'original-broker' if args[-1].endswith('cloudbench-shared-relay.py') else
                  (ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes() if args[-1].endswith('cloudbench-campaign-inventory.sh') else b'original-campaign'):
             state={'plan':{'gates':[{'name':'smoke','native_cloud':True}]},
@@ -4135,6 +4138,38 @@ class RelayStartupEvidence(unittest.TestCase):
                                str(self.target/'run-bench-campaign.py')],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
+    def test_native_retired_hub_owner_refuses_foreign_paths_live_pids_and_reused_groups(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        runs=self.base/'.context/deploy-cloud'/('a'*64)/'runs';hub=runs/'_hub';hub.mkdir(parents=True)
+        child=subprocess.run([sys.executable,'-c',
+            "import os;from pathlib import Path;print(str(os.getpid())+' '+Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19])"],
+            start_new_session=True,capture_output=True,text=True,check=True)
+        pid,ticks=child.stdout.split();token='b'*32;port='12345'
+        owner=hub/f'agent-link-server.{port}.{token}.owner'
+        boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        fields=dict(version='1',pid=pid,pgid=pid,pid_start=f'proc-start:{boot}:{ticks}',
+            owner_token=token,command=str(self.base/'agents/benchmarks/agent_link_server.py'),
+            argv_sha256='c'*64,root=str(runs),runs_root=str(runs),repo_root=str(self.base),
+            context_dir=str(hub),host='127.0.0.1',port=port,status='starting')
+        def save(values):
+            owner.write_text(''.join(k+'='+v+'\n' for k,v in values.items()));owner.chmod(0o644)
+        retired=module['native_hub_owner_retired'];save(fields)
+        self.assertTrue(retired(owner,runs,self.base))
+        with patch.object(subprocess,'check_output',return_value=pid+'\n'):
+            self.assertFalse(retired(owner,runs,self.base),'a reused or remaining group must not be skipped')
+        for key,value in [('repo_root',str(self.base/'foreign')),('command','/foreign/hub.py'),
+                          ('root','/foreign'),('owner_token','d'*32),('port','23456'),
+                          ('pgid',str(int(pid)+1)),('pid_start','unknown'),('status','unknown')]:
+            with self.subTest(key=key):
+                save({**fields,key:value})
+                with self.assertRaises(ValueError):retired(owner,runs,self.base)
+        save({**fields,'pid':str(os.getpid()),'pgid':str(os.getpid())})
+        live_owner=hub/f'agent-link-server.{port}.{token}.owner'
+        self.assertFalse(retired(live_owner,runs,self.base),'live/reused PID must use original live protocol')
+        save(fields);owner.unlink();owner.symlink_to(self.base/'foreign-owner')
+        with self.assertRaises(ValueError):retired(owner,runs,self.base)
+
     def test_native_hub_join_attempts_later_owners_after_each_failure(self):
         import runpy
         module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
@@ -4147,7 +4182,8 @@ class RelayStartupEvidence(unittest.TestCase):
             calls.append(command[-4])
             if command[-4]=='2':raise subprocess.CalledProcessError(1,command)
         with patch.dict(os.environ,{'DEPLOY_NATIVE_HUB_JOIN':'1','CLOUDBENCH_RUNS_ROOT':str(runs)}), \
-             patch.object(subprocess,'run',side_effect=terminate):
+             patch.object(subprocess,'run',side_effect=terminate), \
+             patch.dict(module['join_native_hubs'].__globals__,native_hub_owner_retired=lambda *_:False):
             with self.assertRaisesRegex(ValueError,'native Hub join incomplete'):
                 module['join_native_hubs'](self.base,runs.parent/'campaigns'/('deploy-'+runs.parent.name))
         self.assertEqual(calls,['2','3'])
@@ -4232,6 +4268,45 @@ class RelayStartupEvidence(unittest.TestCase):
         self.save(Path(receipt['log']).parent/'receipt.json',receipt)
         proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
         self.reseal();return receipt,owner,proof,fleet
+
+    def pending_hub_fixture(self):
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary['shared_transport_cleanup_pending']=True;self.save(self.campaign/'summary.json',summary)
+        side=self.runs.parent/'cli.log.process.json';value=json.loads(side.read_text())
+        value.update(orphaned_children=False,term_sent=[]);self.save(side,value)
+        owners=sorted((self.runs/'_hub').glob('*.owner'))
+        for path in owners:
+            fields=dict(line.split('=',1)for line in path.read_text().splitlines())
+            fields.update(host='127.0.0.1',port='8765')
+            path.write_text(''.join(k+'='+v+'\n'for k,v in fields.items()));path.chmod(0o444)
+        proof['current_hub_retirement']={'kind':'current-native-hub-retirement-v1','owners':list(map(str,owners))}
+        self.reseal();return receipt,owner,proof,fleet
+
+    def test_pending_preallocation_hubs_require_current_exact_retirement_without_rewriting_summary(self):
+        receipt,owner,proof,fleet=self.pending_hub_fixture()
+        before=(self.campaign/'summary.json').read_bytes()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(before,(self.campaign/'summary.json').read_bytes())
+        self.assertEqual(result['current_hub_retirement'],proof['current_hub_retirement'])
+
+    def test_pending_preallocation_hubs_refuse_unbound_inventory_or_unknown_supervisor_termination(self):
+        receipt,owner,proof,fleet=self.pending_hub_fixture()
+        original=copy.deepcopy(proof['current_hub_retirement'])
+        for marker in [None,{'kind':'foreign','owners':original['owners']},
+                       {**original,'owners':[]},{**original,'owners':original['owners']*2}]:
+            proof['current_hub_retirement']=marker
+            with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+        proof['current_hub_retirement']=original
+        side=self.runs.parent/'cli.log.process.json';value=json.loads(side.read_text())
+        for change in [dict(orphaned_children=True),dict(term_sent=[os.getpid()]),dict(quiescent=False)]:
+            self.save(side,{**value,**change});self.reseal()
+            with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+        self.save(side,value);self.reseal()
+        path=Path(original['owners'][0]);content=path.read_text();path.chmod(0o644)
+        path.write_text(content.replace('repo_root='+str(self.base),'repo_root=/foreign'));path.chmod(0o444);self.reseal()
+        with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
 
     def test_preallocation_campaign_reconciliation_keeps_original_unverified(self):
         receipt,owner,proof,fleet=self.preallocation_fixture()
