@@ -16,6 +16,7 @@ import {
   buildBugReportChatName,
   buildBugReportIdempotencyKey,
   buildBugReportPrompt,
+  buildManualBugReportPrompt,
   buildBugReportTitle,
   ReportBugNotConfiguredError,
   reportAgentBug,
@@ -56,6 +57,14 @@ function testPromptIncludesRcaAndAgentId(): void {
   assert.equal(prompt.startsWith('Bug |'), false);
 }
 
+function testManualPromptLeadsWithDeployGoal(): void {
+  assert.equal(
+    buildManualBugReportPrompt('abc-123', '  It crashed after pause.  '),
+    '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful\n' +
+      '/rca the following bug for agent with ID: [abc-123]\nIt crashed after pause.'
+  );
+}
+
 async function testReportAgentBugDoesNotTextOrRequireSms(): Promise<void> {
   let launchArgs: ReportBugLaunchArgs | null = null;
   const recorded: Array<[string, string]> = [];
@@ -91,7 +100,9 @@ async function testReportAgentBugDoesNotTextOrRequireSms(): Promise<void> {
   });
   assert.deepEqual(launchArgs, {
     name: 'Checkout never finished',
-    promptText: '/rca the following bug for agent with ID: [agent-xyz]\nCheckout never finished',
+    promptText:
+      '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful\n' +
+      '/rca the following bug for agent with ID: [agent-xyz]\nCheckout never finished',
     idempotencyKey: buildBugReportIdempotencyKey('agent-xyz', 'Checkout never finished'),
   });
 }
@@ -393,6 +404,7 @@ async function main(): Promise<void> {
     ['title truncates long descriptions at a word', testTitleTruncatesAtWord],
     ['chat name is plain title without prefix', testChatNamePrefix],
     ['prompt embeds /rca + agent id', testPromptIncludesRcaAndAgentId],
+    ['manual prompt leads with /goal through /deploy', testManualPromptLeadsWithDeployGoal],
     ['reportAgentBug launches without sending SMS', testReportAgentBugDoesNotTextOrRequireSms],
     ['report-bug service has no SMS side effect', testServiceHasNoSmsSideEffect],
     [

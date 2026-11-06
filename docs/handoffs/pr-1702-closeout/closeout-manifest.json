@@ -1,0 +1,146 @@
+{
+ "format": "PR1702-DELETION-READINESS-MANIFEST-V1",
+ "generated_at": "2026-11-06T04:03:28Z",
+ "status": "PRESERVATION_VERIFIED",
+ "deletion_ready": true,
+ "deployment_pr": 1702,
+ "deployed_merge_sha": "c9fa8005d627dafced4376262551566bcce26b21",
+ "validated_source": {
+  "head": "45727f24e000aa4e162b56207dd48031f397f11e",
+  "pipeline_digest": "8fb17d133dcc",
+  "pipeline_verify": "status=bound"
+ },
+ "follow_up_commits": {
+  "benchmark_history": "7ba3c3f399",
+  "factory_ledger": "efdf804f56"
+ },
+ "assigned_test": {
+  "test": "smoke/test-mass-agent-run-0",
+  "local_buggy": "main 05826f6dd: SKIPPED 'Codex compute token unavailable for agentic benchmark judge' (run 385bcde5)",
+  "local_fixed": "e4c57373c: PASSED, judge served by funded Azure Codex, score 1.0 (run b69a2022)",
+  "cloud_original_command": "84812e5647: PASSED, T7 agentic judge score 1.0 (fleet 20261106-012742-2880910); judge got a user Codex login after prod reconnects ~02:13Z, so non-discriminating",
+  "deploy_smoke": "45727f24e0: 9/9 local smoke PASSED incl. test-mass-agent-run-0",
+  "rca_case": "docs/rca/cases/2026-10-25-benchmark-judge-compute-token-unavailable-classified-infra.md"
+ },
+ "production_verification": {
+  "fly": "not applicable: no agent runtime paths (classify-agent-runtime-changes empty)",
+  "render_backend_probes": "not applicable: no back-end/ changes",
+  "vercel": "not applicable: no front-end/ changes",
+  "production_semantics": "chat-lifecycle-ratchet run 42157665439 success (5/5 jobs), source_sha c9fa8005d627",
+  "agentcard_production": "SKIPPED - elected: no payment code in diff",
+  "mac_execution_acceptance": "SKIPPED - no Mac available: owner-scoped backend discovery GET https://api.roselabs.ai/api/local-devices/agent-target/ff1a1383-6e5a-4069-84cb-a06827f2adf5 (owner 1f85ff25's latest root agent) returned available=false reason=no_owned_device at 2026-11-06T04:10:14Z; the read-only LocalDevice query with the same owner predicate returned 0 rows at 03:43:56Z and 04:08:09Z",
+  "fly_evidence": "no deploy-agents.yml run exists for head_sha c9fa8005d6 (runtime classification empty); workflow runs on that SHA: production semantic gate success, auto-tag mac app success (no MAC-APP-RELEASE label)"
+ },
+ "archives": [
+  {
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1702-c9fa8005/20261106T040048Z.tar.aesgcm",
+   "encryption": "aes-256-gcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "key_source": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (managed production secret; same key as live trace archive)",
+   "nonce_b64": "HDDxKbpFkBzMA4gb",
+   "aad": "devbox-closeout-private/pr1702-c9fa8005/20261106T040048Z.tar.aesgcm",
+   "compression": "gzip",
+   "plaintext_sha256": "7f16cbdfb2d32b0ffba301deb292eca4259cfad56e5721257e9017b14b4f5a01",
+   "ciphertext_sha256": "008b88cfe42e82e3221605d0a8982d0b47fb834d80839aa3821c2bfe4a90d616",
+   "plaintext_bytes": 2485145600,
+   "ciphertext_bytes": 654074856,
+   "member_count": 624,
+   "members_sha256": "3a4e6981eef3e5a464206873319e955c444b8944b9174c996f7060279ae1c33c",
+   "verified_at": "2026-11-06T04:02:19Z",
+   "full_readback_verified": true,
+   "authenticated_decryption_verified": true,
+   "all_tar_members_hash_verified": true,
+   "contents": "RCA evidence (prod Hub/Render/ClickHouse pulls, local main/fix repro logs, cloud proof run record, owner-recovery logs), deploy pipeline plans/receipts/logs for attempts 1-4, deploy timing run 20261106-011444-2622224, review/approval ledgers, parked+applied ledger rows, local benchmark run dirs and agents/benchmarks/runs records for 2026-11-06, fleet audits, retired launch/cloud-proof worktree archives"
+  },
+  {
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1702-c9fa8005/20261106T040522Z-preexisting-backup-cerebras-chat-quota.bundle.aesgcm",
+   "encryption": "aes-256-gcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "nonce_b64": "OUO2HUoy4Le3+EsT",
+   "aad": "devbox-closeout-private/pr1702-c9fa8005/20261106T040522Z-preexisting-backup-cerebras-chat-quota.bundle.aesgcm",
+   "compression": "gzip",
+   "plaintext_sha256": "1e046637095047acdaddefe26165f91e1fcbd07b3e05e25cbbefa237b7d2ab07",
+   "ciphertext_sha256": "e9dffd30643d69bbe00db30d15d8ff72092de0febcd72db8eb7b03ebde1c6668",
+   "plaintext_bytes": 1147327,
+   "ciphertext_bytes": 1014442,
+   "verified_at": "2026-11-06T04:05:23Z",
+   "full_readback_verified": true,
+   "authenticated_decryption_verified": true,
+   "contents": "pre-existing local branch backup/cerebras-chat-quota-prepush-20261002 (andyprevalsky, 2026-10-02) as git bundle --not origin/main; not authored by this deploy; left untouched locally"
+  }
+ ],
+ "superseded_archives": [
+  {
+   "key": "devbox-closeout-private/pr1702-c9fa8005/20261106T034225Z.tar.aesgcm",
+   "plaintext_sha256": "f0a23399ae0d9e2193072589b728ebc90abc13e2f78b50a82c21a3e7d6070335",
+   "ciphertext_sha256": "37bc94b4427fbba404f9ef88dca6e912c02b984c62ed2747cae982d78863e915",
+   "member_count": 623,
+   "verified_at": "2026-11-06T03:43:48Z",
+   "superseded_by": "devbox-closeout-private/pr1702-c9fa8005/20261106T040048Z.tar.aesgcm"
+  }
+ ],
+ "key_recovery": {
+  "variable": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+  "key_id": "trace-archive-prod-2026-07-03",
+  "recovery": "managed production secret (same key as the live trace archive; Render/Fly/agents env). Decrypt: AESGCM(key).decrypt(nonce, object_bytes, aad=object key), gunzip, untar; verify plaintext_sha256 and per-member sha256.",
+  "never_commit": true
+ },
+ "inventory": [
+  {
+   "path": "source: fix/agentic-judge-c15-credential-order e4c57373c, af7eefec7, 84812e5647, ce4a3c701, 744781d758, 4cc3d9547 (+ main syncs)",
+   "disposition": "committed (merged in c9fa8005d6); branch kept on origin"
+  },
+  {
+   "path": "docs/plans/active",
+   "disposition": "no related plan; nothing to archive"
+  },
+  {
+   "path": ".context/rca-mass-agent-judge-token, .context/deploy-pipeline, .context/deploy-runs/20261106-011444-2622224, review/approval ledgers, .context/deploy-ledger-park (applied), .context/predeploy-runs",
+   "disposition": "durably archived and verified (archives[0])"
+  },
+  {
+   "path": ".context/benchmarks/1793* local run dirs, agents/benchmarks/runs/20261106_*",
+   "disposition": "durably archived and verified (archives[0]); Hub bundles also uploaded"
+  },
+  {
+   "path": "/project/run-evidence/.context--{launch-fix,launch-main,cloud-proof-1}.tar.gz, .context/cloud-proof-1 sealed remnants, .git/cloudbench-fleet-audits",
+   "disposition": "durably archived and verified (archives[0])"
+  },
+  {
+   "path": ".context/test-runs (coverage gate logs, 3.2 GB)",
+   "disposition": "reproducible and unneeded: rerun gates at 45727f24e0; per-lane stage logs archived"
+  },
+  {
+   "path": "system PG: prisma_local_push_ddl_test_{2656495,2794894,3133428,3756426}",
+   "disposition": "leaked structural-suite fixtures from this deploy; dropped 2026-11-06"
+  },
+  {
+   "path": "system PG: victoria, victoria_cloud-0ef40938{,_s0,_s1,_s2}",
+   "disposition": "standing workspace databases; reproducible via scripts/cloud-init.sh / blackbox runner"
+  },
+  {
+   "path": "agents/.env, back-end/.env, front-end/.env",
+   "disposition": "not committed; recoverable from managed project env / production secret surfaces"
+  },
+  {
+   "path": "local branch backup/cerebras-chat-quota-prepush-20261002 (14 commits not on origin, pre-existing)",
+   "disposition": "durably archived and verified (archives[1]); left untouched locally; owner follow-up"
+  }
+ ],
+ "resource_disposition": {
+  "fly_bench": "interrupted runs: Machines 82d1e66c610048, 784ee602b06328 destroyed; volumes vol_vly706qpo9l8n7d4, vol_4y8lq5znk9jpyeer pending_destroy; owners 7b3b5a6f, 2e035719 reconciled. cloud proof: 4 Machines destroyed, 4 volumes pending_destroy",
+  "local_processes": "none (pipeline, 4cb, 13b transient units exited)",
+  "worktrees": "launch-fix, launch-main, cloud-proof-1, ledger/attribution temp worktrees removed"
+ },
+ "followups": [
+  "Step 4cb Fly gate entrypoint refuses unadmitted Machine creation; suites ran directly on the Linux devbox per deploy.md",
+  "CodeRabbit path filters skip benchmark-only PRs; no review-ledger disposition for that case",
+  "GitHub API rate limit for the shared user token drained twice in an hour by an external consumer",
+  "run-bench-fleet recovery-lock handle inherited by background flyctl agent (memory flyctl-agent-inherits-recovery-lock)",
+  "structural suite leaks a prisma_local_push_ddl_test_<pid> database per run",
+  "pre-existing local branch backup/cerebras-chat-quota-prepush-20261002: owner to decide integration or discard (8 commits have no patch-equivalent on main)"
+ ],
+ "closeout_commit": "bb5b527f18"
+}
