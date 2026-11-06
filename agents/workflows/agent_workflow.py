@@ -3768,10 +3768,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         ``helpers.generation_handoff.park_pending_tool``). Returns False when
         the tool must instead close its chip with DEPLOY_INTERRUPTED.
         """
-        if tool_call_id in self._background_tasks:
+        record = self._background_tasks.get(tool_call_id)
+        if record is not None and not record.get("foreground"):
             # Background records already travel in the continuation snapshot;
             # keep the hint so the next generation relaunches it in the background.
-            self._background_tasks[tool_call_id]["resume"] = dict(resume)
+            # A foreground spawn's record is only its address: the call itself parks
+            # below and is re-entered through _execute_tool like any foreground tool.
+            record["resume"] = dict(resume)
             workflow.logger.info(f"Parked background task {tool_call_id} for generation handoff")
             return True
         if not self._tool_parking_enabled:
@@ -4373,14 +4376,17 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         A foreground explore/browser/code spawn is recorded under its task path
         while it runs (workflows/background_agents.py), so it is addressable.
         """
-        refused = await self._begin_foreground_spawn(tool_name, tool_args, tool_call_id)
-        if refused is not None:
-            return refused
+        tracked = self._tracks_foreground_spawn(tool_name, tool_args)
+        if tracked:
+            refused = await self._begin_foreground_spawn(tool_name, tool_args, tool_call_id)
+            if refused is not None:
+                return refused
         result: Any = None
         try:
             result = await self._execute_tool_once(tool_name, tool_args, tool_call_id)
         finally:
-            await self._end_foreground_spawn(tool_call_id, result)
+            if tracked:
+                await self._end_foreground_spawn(tool_call_id, result)
         await self._refresh_world_time_cursor_after_tool()
         return result
 

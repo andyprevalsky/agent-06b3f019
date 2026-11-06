@@ -875,6 +875,74 @@ async def test_foreground_spawns_are_addressable_and_answer_truthfully_once_fini
         assert not any(wf._retired_task_names), "its task_name stays free for the plan's tasks"
 
 
+async def test_a_foreground_spawn_parked_for_a_deploy_handoff_is_resumed_not_relaunched():
+    """A parked foreground spawn is carried by the normal parking path and re-entered next generation.
+
+    RCA 2026-11-06-foreground-spawn-promised-an-address-it-never-registered: the foreground
+    record lives in ``_background_tasks``, and ``_park_pending_tool`` treated every call found
+    there as a background task (hint on the record, relaunched in the background), so a drained
+    foreground browser/code tool was never resumed ("expected one interrupted + one resumed
+    activity, got 1" in the workflow and deploy-resume-e2e suites).
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from tools.base import MessageStatus
+
+    harness = _Harness()
+    args = {**FOREGROUND_SPAWNS["code"], "run_in_background": False}
+    call_id = "toolu_parked_code"
+    resume = {"sandbox_id": "sb-parked"}
+
+    async def parks_itself(wf, tool_call, tool_call_id):
+        assert wf._park_pending_tool(tool_call_id, resume) is True
+        raise GenerationHandoffRequested("queue-2", parked=True)
+
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": parks_itself}),
+    ):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+        wf._tool_parking_enabled = True
+        result = await wf._execute_tool("spawn_agent", dict(args), call_id)
+        assert result.get("pending_tool_resume") is True and result.get("generation_handoff") is True, result
+        assert [r["tool_call_id"] for r in wf._pending_tool_resumes] == [call_id], "parked as a foreground tool call"
+        record = wf._background_tasks[call_id]
+        assert record["foreground"] is True and record["status"] == "running"
+        assert "resume" not in record, "not parked as a background task (that would relaunch it in the background)"
+        assert call_id not in wf._background_finished, "a parked call is not finished"
+
+        # The next generation: the snapshot carries the address, the parked call is re-entered.
+        snapshot = wf._background_state_snapshot()
+        parked_records = list(wf._pending_tool_resumes)
+
+    ran = []
+
+    async def resumed(wf, tool_call, tool_call_id):
+        ran.append((tool_call_id, wf._take_tool_resume(tool_call_id)))
+        return MessageStatus.FINISHED, "report"
+
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": resumed}),
+    ):
+        wf2 = _workflow(harness)
+        wf2.current_phase = "EXECUTE"
+        wf2._restore_background_state(snapshot)
+        wf2._pending_tool_resumes = parked_records
+        wf2._relaunch_background_tasks()
+        assert not wf2._background_handles, "a foreground record is never relaunched in the background"
+        assert await wf2._resume_pending_tools() is None
+        assert ran == [(call_id, resume)], "the parked call re-entered once, with its resume payload"
+        assert call_id not in wf2._background_tasks
+        finished = wf2._background_finished[call_id]
+        assert finished["foreground"] is True and finished["status"] == "completed", finished
+        assert not _notifications(harness), "a foreground result is never re-sent as a notification"
+
+
 def test_tool_schemas_and_prompts_register_agent_messaging():
     from tools.prompts import TOOL_PROMPTS
     from utils.tool_schemas import (
@@ -2552,6 +2620,10 @@ async def run_all_tests():
     await r.record_async(
         "foreground_spawns_addressable_and_truthful_once_finished",
         test_foreground_spawns_are_addressable_and_answer_truthfully_once_finished,
+    )
+    await r.record_async(
+        "foreground_spawn_parked_for_handoff_is_resumed_not_relaunched",
+        test_a_foreground_spawn_parked_for_a_deploy_handoff_is_resumed_not_relaunched,
     )
     await r.record_async(
         "dag_planned_spawn_background_dependent_sees_result",

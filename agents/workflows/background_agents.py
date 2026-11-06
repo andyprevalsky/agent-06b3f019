@@ -504,6 +504,11 @@ class BackgroundAgentsMixin:
         await self._update_tree_state()
         return {"success": True, "message": text, "background_task_id": task_id, "address": address}
 
+    @staticmethod
+    def _tracks_foreground_spawn(tool_name: str, tool_args: Dict[str, Any]) -> bool:
+        """True for the calls that get a foreground record. Pure: decided before any state is read."""
+        return tool_name == "spawn_agent" and tool_args.get("type") in WAKEABLE_TASK_TYPES
+
     async def _begin_foreground_spawn(
         self, tool_name: str, tool_args: Dict[str, Any], tool_call_id: str
     ) -> Optional[Dict[str, Any]]:
@@ -513,8 +518,6 @@ class BackgroundAgentsMixin:
         A background spawn (or a background run's executor, or a foreground
         spawn resumed after a handoff) already has its record and is skipped.
         """
-        if tool_name != "spawn_agent" or tool_args.get("type") not in WAKEABLE_TASK_TYPES:
-            return None
         if getattr(self, "current_phase", None) == "PLAN":
             return None  # no send_message_to_agent in PLAN: nothing could address it, and its name stays free
         if self._spawn_runs_in_background(tool_name, tool_args):

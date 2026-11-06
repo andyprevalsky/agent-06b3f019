@@ -68,6 +68,20 @@ generation). While running it is in the tree state, so other agents' sends
 reach its inbox, and for code the backend's existing running-code-task path
 makes the message a CLI turn. Its rows stay the model's result (never stamped
 FE-only), it posts no notification and never relaunches after a continuation.
+Two defects of the first version of this fix, both caught by the full agents lane and
+fixed before merge. (1) The foreground bookkeeping ran after every tool, so a workflow
+built without background state (the WMH world-clock tests build one with `__new__`)
+failed on a plain `web_search` with `AttributeError: … '_background_tasks'`: it now
+runs only for the spawn calls it tracks, decided by a pure predicate before any
+state is read. (2) `_park_pending_tool` decides how to carry a call across a deploy
+handoff by "is it in `_background_tasks`?" (background: hint on the record and
+relaunch; foreground: `_pending_tool_resumes`, re-entered through `_execute_tool`).
+The foreground record put a drained foreground browser/code tool on the background
+branch, which the relaunch then skipped, so it was never resumed (`workflow`:
+"expected one interrupted + one resumed browser activity, got 1"; `deploy-resume-e2e`:
+"the code task must finish exactly once"). A foreground record now takes the normal
+parking path; regression
+`foreground_spawn_parked_for_handoff_is_resumed_not_relaunched`.
 PLAN-phase foreground explores are not recorded: PLAN has no `send_message_to_agent`,
 and recording them would reserve their `task_name` against the plan's own tasks.
 Once finished, a send gets `<path> is a <status> foreground <type> agent: its
