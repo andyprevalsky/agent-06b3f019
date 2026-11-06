@@ -1095,6 +1095,10 @@ async def run_all_tests():
     r.record("format_sim_happy", test_format_messages_for_simulation_happy)
     r.record("fmt_ctx_empty", test_format_user_context_empty_returns_empty)
     r.record("fmt_ctx_integ_no_creds", test_format_user_context_integration_no_creds)
+    r.record(
+        "fmt_ctx_sync_failed_data_integration",
+        test_format_user_context_lists_sync_failed_data_integrations,
+    )
     r.record("fmt_ctx_snapshot", test_format_user_context_snapshot)
     r.record("fmt_ctx_skips_disconnected", test_format_user_context_skips_disconnected_no_creds)
     r.record(

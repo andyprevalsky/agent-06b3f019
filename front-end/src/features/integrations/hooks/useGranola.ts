@@ -125,9 +125,16 @@ export function useGranola(enabled: boolean, onChange?: () => Promise<void> | vo
       }
       await electron.openExternal(authorizeUrl);
       const startedAt = Date.now();
+      // One read at a time: a newer poll would otherwise supersede every slow
+      // read (only the newest read applies), so sign-in could never be seen.
+      let reading = false;
       signInPoll.current = setInterval(() => {
+        if (reading) return;
+        reading = true;
         void (async () => {
-          const next = await refresh();
+          const next = await refresh().finally(() => {
+            reading = false;
+          });
           // An EXPIRED grant still reads as connected; wait for the new one.
           const signedIn = next?.connected === true && next.status !== 'EXPIRED';
           if (signedIn || Date.now() - startedAt > SIGN_IN_TIMEOUT_MS) {
