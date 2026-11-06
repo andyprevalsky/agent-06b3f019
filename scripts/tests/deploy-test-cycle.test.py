@@ -2784,6 +2784,96 @@ class Cycle(unittest.TestCase):
                 finally:
                     for p,raw in originals.items():p.write_bytes(raw)
 
+    def cancelled_parent_campaign_state(self):
+        import hashlib, shutil, time, runpy
+        from cloudbench_execution_provenance import build_config, build_task_matrix
+        state, occurrence, paths, proof, parents = self.admission_campaign_state()
+        names=('scripts/deploy_test_cloud.py','scripts/run-bench','scripts/run-bench-campaign.py','scripts/run-bench-fleet','scripts/cloudbench_execution_provenance.py','scripts/cloudbench-script-snapshot.py')
+        for name in names:
+            raw=(ROOT/name).read_bytes()
+            (self.root/name).parent.mkdir(parents=True,exist_ok=True);(self.root/name).write_bytes(raw)
+        subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=t','-c','user.email=t@x','commit','-qm','cancel producer'],check=True)
+        source=c.source(self.root);campaign=Path(proof['campaign']);summary=c.read(campaign/'summary.json');runs=parents[0].parent
+        for index,fleet in enumerate(parents):
+            if index in (0,1):continue
+            bench=json.loads((fleet/'_batch/benches.json').read_text())[0]['name'];matrix=build_task_matrix([bench+'=real'])
+            c.write(fleet/'execution-task-matrix.json',matrix)
+            c.write(fleet/'execution-provenance.json',dict(schema_version='cloudbench-execution-provenance-v1',base_sha=source['head'],workspace_patch_sha256='none',config=build_config('cloudbench-fleet-config-v1',['task_count=1','task_matrix_sha256='+matrix['sha256']]),controller_snapshot=dict(schema_version='cloudbench-controller-snapshot-v1',sha256='d'*64)))
+        for index in (2,8):
+            fleet=runs/('20261103-080441-'+str(2147483000+index));shutil.copytree(parents[0],fleet)
+            owner=('a' if index==2 else 'b')*32;life=c.read(fleet/'_batch/lifecycle.json');old=life['fleet_owner_token'];oldrun=life['run_id'];audit=fleet/'teardown-ownership';(audit/'source-audit').unlink()
+            meta=(audit/'meta').read_text().replace('fleet_owner_token='+old,'fleet_owner_token='+owner).replace('run_id='+oldrun,'run_id='+fleet.name);(audit/'meta').write_text(meta)
+            canonical=self.root/'.git/cloudbench-fleet-audits'/owner;shutil.copytree(audit,canonical)
+            seal=hashlib.sha256()
+            for p in sorted(audit.rglob('*'),key=lambda p:str(p.relative_to(audit))):
+                if p.is_file():
+                    for raw in(str(p.relative_to(audit)).encode(),p.read_bytes()):seal.update(len(raw).to_bytes(8,'big'));seal.update(raw)
+            (audit/'source-audit').write_text(f'path={canonical}\nsha256={seal.hexdigest()}\n')
+            life.update(fleet_owner_token=owner,run_id=fleet.name,audit_sha256=seal.hexdigest(),controller_exit_code=1,status='failed');c.write(fleet/'_batch/lifecycle.json',life)
+            disp=c.read(fleet/'_batch/disposable-cleanup.json');disp['owner']=owner;c.write(fleet/'_batch/disposable-cleanup.json',disp)
+            c.write(fleet/'_batch/run.json',dict(run_id=fleet.name,status='failed',controller_exit_code=1,tasks=[dict(name='infra-probe',status='INFRA_ERROR',passed=False,lifecycle_stage='released',failure_reason='no current run artifact produced')]))
+            c.write(fleet/'_batch/benches.json',[dict(name='infra-probe',mode='REAL')])
+            log=Path(summary['jobs'][index]['log']);log.write_text(log.read_text()+f'ref : {source["head"]}\nmode: --infra-probe (strict barrier, no LLM / run_benchmark)\n{self.root}/scripts/run-bench monitor {fleet}\nowner: {owner}; private controller diagnostics stay in this run directory.\n')
+        request_path=paths['receipt'].parent/'request.json';request=c.read(request_path);request['source']=source;c.write(request_path,request)
+        adapter=c.read(paths['adapter']);adapter.update(source=source,native_command=['bash','scripts/run-bench',*request['checks'],'--runs','1','--concurrency','10','--retry-infra','0','--ref',source['head']]);c.write(paths['adapter'],adapter)
+        receipt=state['attempts'][-1]['results'][0];receipt['source']=source;receipt['native_cleanup_reference']['result_sha256']=c.sha_file(paths['adapter']);receipt['cleanup_owner']['native_cleanup_reference']=receipt['native_cleanup_reference'];c.write(paths['receipt'],receipt)
+        proof.update(layout='campaign-v1',purpose='isolated-validation',validation_source=source,execution_quiescence={},cancelled_parent_admission=[str(p)for p in parents[:2]],source=source,owner=copy.deepcopy(receipt['cleanup_owner']),receipt_sha256=c.sha_file(paths['receipt']),worker_result_sha256=c.sha_file(paths['adapter']),confirmed_at=time.time())
+        files=[request_path,runs.parent/'cli.log',*campaign.rglob('*'),*runs.rglob('*'),*(self.root/name for name in names),*(self.root/'.git/cloudbench-fleet-audits').rglob('*')]
+        proof['files']={str(p):c.sha_file(p)for p in files if p.is_file()}
+        return state,occurrence,paths,proof,parents
+
+    def test_cancelled_parent_admission_isolated_preserves_all_twelve_and_no_credit(self):
+        state,occurrence,paths,proof,parents=self.cancelled_parent_campaign_state();before=copy.deepcopy(state)
+        c.reconcile(state,occurrence['id'],proof);entry=next(iter(state['reconciled_owners'].values()))
+        self.assertEqual(12,len(entry['participants']));self.assertFalse(entry['credit_granted']);self.assertFalse(entry['cleanup_complete']);self.assertTrue(entry['obligations_preserved']);self.assertTrue(entry['retained_services'])
+        self.assertEqual(before['attempts'],state['attempts']);self.assertEqual(before['failures'],state['failures'])
+
+    def test_cancelled_parent_admission_strict_contract_negatives(self):
+        state,occurrence,paths,proof,parents=self.cancelled_parent_campaign_state();originals={Path(p):Path(p).read_bytes()for p in proof['files']};before=copy.deepcopy(state);campaign=Path(proof['campaign']);rollback={**originals,paths['receipt']:paths['receipt'].read_bytes(),paths['adapter']:paths['adapter'].read_bytes()}
+        for mutation in ('empty','malformed','duplicate','foreign','ordinary','partial','malformed-provenance','maintenance','wrong-pin','boolean-code','nonterminal','no-term','duplicate-term','nonzero-audit','foreign-owner','live-group'):
+            with self.subTest(mutation=mutation):
+                candidate=copy.deepcopy(proof);added=[];case_state=copy.deepcopy(state)
+                try:
+                    if mutation=='empty':candidate['cancelled_parent_admission']=[]
+                    if mutation=='malformed':candidate['cancelled_parent_admission']=True
+                    if mutation=='duplicate':candidate['cancelled_parent_admission']*=2
+                    if mutation=='foreign':candidate['cancelled_parent_admission']=[str(self.root/'foreign')]
+                    if mutation=='ordinary':candidate.pop('purpose')
+                    if mutation in ('partial','malformed-provenance'):
+                        for name in (('execution-provenance.json',)if mutation=='partial'else('execution-provenance.json','execution-task-matrix.json')):
+                            p=parents[0]/name;c.write(p,{});added.append(p)
+                    if mutation=='maintenance':
+                        value=c.read(paths['adapter']);value['native_command']+=['--provision-pool','1'];c.write(paths['adapter'],value)
+                        receipt=c.read(paths['receipt']);receipt['native_cleanup_reference']['result_sha256']=c.sha_file(paths['adapter']);receipt['cleanup_owner']['native_cleanup_reference']=receipt['native_cleanup_reference'];c.write(paths['receipt'],receipt);candidate.update(owner=receipt['cleanup_owner'],receipt_sha256=c.sha_file(paths['receipt']),worker_result_sha256=c.sha_file(paths['adapter']));case_state['attempts'][-1]['results'][0]=receipt
+                    if mutation in ('boolean-code','nonterminal'):
+                        value=c.read(campaign/'summary.json');value['jobs'][0]['controller_exit_code'if mutation=='boolean-code'else'status']=True if mutation=='boolean-code'else'running';c.write(campaign/'summary.json',value)
+                    if mutation in ('no-term','duplicate-term'):
+                        p=Path(c.read(campaign/'summary.json')['jobs'][0]['log']);text=p.read_text();line='⚰️  controller received TERM (02:28:28)\n';p.write_text(text.replace(line,'')if mutation=='no-term'else text+line)
+                    if mutation=='nonzero-audit':p=parents[0]/'teardown-ownership/fresh/owned';p.parent.mkdir(exist_ok=True);p.write_text('owned');added.append(p)
+                    if mutation=='foreign-owner':p=parents[0]/'_batch/lifecycle.json';value=c.read(p);value['fleet_owner_token']='f'*32;c.write(p,value)
+                    candidate['files'].update({str(p):c.sha_file(p)for p in originals if p.exists()});candidate['files'].update({str(p):c.sha_file(p)for p in added})
+                    case_before=copy.deepcopy(case_state)
+                    if mutation=='wrong-pin':
+                        import deploy_test_native_cancelled_parent as native_parent
+                        with patch.dict(native_parent.REVIEWED_SOURCES,{'scripts/run-bench-fleet':'0'*64}):
+                            with self.assertRaisesRegex(ValueError,'producer changed'):c.reconcile(case_state,occurrence['id'],candidate)
+                    elif mutation=='live-group':
+                        import deploy_test_native_cleanup as native
+                        actual=native.subprocess.check_output
+                        def observed(args,*a,**kw):
+                            if args[:1]==['ps']:return '999999 310001 S\n'
+                            return actual(args,*a,**kw)
+                        with patch.object(native.subprocess,'check_output',side_effect=observed):
+                            with self.assertRaises(ValueError):c.reconcile(case_state,occurrence['id'],candidate)
+                    else:
+                        with self.assertRaises(ValueError):c.reconcile(case_state,occurrence['id'],candidate)
+                    self.assertEqual(before,state)
+                    self.assertEqual(case_before,case_state)
+                finally:
+                    for p in added:p.unlink()
+                    for p,raw in rollback.items():p.write_bytes(raw)
+
     def isolated_campaign_state(self):
         import time
         state, occurrence, paths, proof, parents = self.campaign_recon_state()

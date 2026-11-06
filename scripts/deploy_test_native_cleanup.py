@@ -448,6 +448,10 @@ def validate(receipt, owner, proof):
     if layout == 'campaign-admission-rejected-v1':
         from deploy_test_native_admission import validate_campaign
         admission_parents = validate_campaign(receipt, proof, root, runs, parents, participants, bound, document)
+    cancelled_parent_zero = frozenset()
+    if 'cancelled_parent_admission' in proof:
+        from deploy_test_native_cancelled_parent import cancelled_parent_admission
+        cancelled_parent_zero = cancelled_parent_admission(receipt, proof, adapter, root, parents, participants, bound, document, tree)
     from cloudbench_execution_provenance import validate_provenance, validate_task_matrix_binding
     for fleet in sorted(participants):
         benches = json.loads(bound(fleet / '_batch/benches.json'))
@@ -476,7 +480,7 @@ def validate(receipt, owner, proof):
             from deploy_test_native_admission import validate_parent
             validate_parent(fleet, life, benches, run, root, bound, document, tree)
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
-        if ((failed_canary and zero_allocation) or admission_parent) and not provenance_path.exists() and not matrix_path.exists():
+        if ((failed_canary and zero_allocation) or admission_parent or fleet in cancelled_parent_zero) and not provenance_path.exists() and not matrix_path.exists():
             pass  # Positive linked admission boundary + sealed empty ownership; absence alone proves nothing.
         else:
             provenance, matrix = document(provenance_path), document(matrix_path)
