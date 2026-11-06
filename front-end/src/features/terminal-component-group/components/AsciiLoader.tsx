@@ -1,13 +1,19 @@
 /**
  * STATE MACHINE: AsciiLoader
  *
- * [ANIMATING] --> cycles through ASCII frames
+ * [ANIMATING] --> cycles through ASCII frames every 40ms
  *     |
- *     +--> frameIndex: 0..N (cycles via setInterval)
- *     +--> dotCount: 1..3 (loading dots animation)
+ *     +--> frameIndex: 0..N (setInterval writes each frame straight into the
+ *     |    <pre> layers' text — no React render per frame)
+ *     +--> dotCount: 1..3 (loading dots animation, only while shown)
+ *     |
+ *     v  page hidden OR loader out of view (IntersectionObserver)
+ * [HELD] --> interval stopped on the current frame; resumes from it when the
+ *            page is visible and the loader is in view again
  *
- * Animation runs continuously while component is mounted.
  * Frame set determined by variant prop ('default' | 'engine').
+ * The frame layers carry data-amp-block: session replay records a placeholder
+ * instead of 25 full-frame text mutations per second (no visual effect).
  *
  * CTA OVERLAY (optional `cta` prop):
  *   A pill-shaped window over the animation. Inside the pill the SAME frame is
@@ -21,7 +27,7 @@
  *   ANIMATING machine.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import asciiFramesData from './ascii-frames.json';
 import asciiFramesEngineData from './ascii-frames-engine.json';
 
@@ -59,11 +65,20 @@ function getFontSize(size: NonNullable<AsciiLoaderProps['size']>): string {
   return '0.5rem';
 }
 
-function AsciiPre({ frame, fontSize }: { frame: string; fontSize: string }) {
+const FRAME_INTERVAL_MS = 40;
+
+/** A <pre> whose text the frame ticker writes: 'frame' shows the frame as-is,
+ * 'cta' shows it with whitespace filled (CTA pill layers). */
+type AsciiLayer = 'frame' | 'cta';
+
+function AsciiPre({ fontSize }: { fontSize: string }) {
   return (
-    <pre className="leading-none font-mono select-none" style={{ ...BASE_PRE_STYLE, fontSize }}>
-      {frame}
-    </pre>
+    <pre
+      data-ascii-layer="frame"
+      data-amp-block=""
+      className="leading-none font-mono select-none"
+      style={{ ...BASE_PRE_STYLE, fontSize }}
+    />
   );
 }
 
@@ -98,6 +113,37 @@ function buildCtaFrame(frame: string, frameIndex: number): string {
       ).join(''),
     )
     .join('\n');
+}
+
+const ctaFrameCache = new WeakMap<readonly string[], Map<number, string>>();
+
+/** buildCtaFrame is pure per (frame set, index): build each pill frame once. */
+function ctaFrameFor(frames: readonly string[], frameIndex: number): string {
+  let cache = ctaFrameCache.get(frames);
+  if (cache === undefined) {
+    cache = new Map();
+    ctaFrameCache.set(frames, cache);
+  }
+  let frame = cache.get(frameIndex);
+  if (frame === undefined) {
+    frame = buildCtaFrame(frames[frameIndex], frameIndex);
+    cache.set(frameIndex, frame);
+  }
+  return frame;
+}
+
+function setLayerText(pre: HTMLPreElement, text: string): void {
+  const node = pre.firstChild;
+  if (node instanceof Text && node === pre.lastChild) node.data = text;
+  else pre.textContent = text;
+}
+
+/** Writes frame `frameIndex` into every ASCII layer under `container`. */
+function paintFrame(container: HTMLElement, frames: readonly string[], frameIndex: number): void {
+  for (const pre of container.querySelectorAll<HTMLPreElement>('pre[data-ascii-layer]')) {
+    const layer = pre.dataset.asciiLayer as AsciiLayer;
+    setLayerText(pre, layer === 'cta' ? ctaFrameFor(frames, frameIndex) : frames[frameIndex]);
+  }
 }
 
 // Pill window: clip-path keeps only the capsule (centered, shifted down one
@@ -138,37 +184,25 @@ const CTA_GLYPH_STYLE: React.CSSProperties = {
   textShadow: '0 1px 5px rgba(0, 0, 0, 0.9), 0 0 1px rgba(0, 0, 0, 0.9)',
 };
 
-function AsciiCtaOverlay({
-  frame,
-  frameIndex,
-  fontSize,
-  cta,
-}: {
-  frame: string;
-  frameIndex: number;
-  fontSize: string;
-  cta: AsciiLoaderCta;
-}) {
-  const ctaFrame = buildCtaFrame(frame, frameIndex);
-
+function AsciiCtaOverlay({ fontSize, cta }: { fontSize: string; cta: AsciiLoaderCta }) {
   return (
     <>
       <pre
         aria-hidden
         data-testid="opening-join-prism-shadow"
+        data-ascii-layer="cta"
+        data-amp-block=""
         className="leading-none font-mono select-none pointer-events-none absolute inset-0"
         style={{ ...CTA_SHADOW_STYLE, fontSize }}
-      >
-        {ctaFrame}
-      </pre>
+      />
       <pre
         aria-hidden
         data-testid="opening-join-prism"
+        data-ascii-layer="cta"
+        data-amp-block=""
         className="leading-none font-mono select-none pointer-events-none absolute inset-0"
         style={{ ...CTA_OVERLAY_STYLE, fontSize }}
-      >
-        {ctaFrame}
-      </pre>
+      />
       <button
         type="button"
         onClick={cta.onClick}
@@ -193,28 +227,73 @@ function AsciiCtaOverlay({
   );
 }
 
-function useAnimatedFrame(totalFrames: number): number {
-  const [frameIndex, setFrameIndex] = useState(0);
+/**
+ * Cycles `frames` through the layers under `containerRef` every 40ms while the
+ * page is visible and the loader is in view. `layersKey` changes whenever the
+ * set of layers does, so new layers get the current frame before paint.
+ */
+function useAsciiFrames(
+  containerRef: RefObject<HTMLElement>,
+  frames: readonly string[],
+  layersKey: string,
+): void {
+  const frameIndexRef = useRef(0);
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    frameIndexRef.current %= frames.length;
+    paintFrame(container, frames, frameIndexRef.current);
+  }, [containerRef, frames, layersKey]);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      setFrameIndex((prev) => (prev + 1) % totalFrames);
-    }, 40);
-    return () => clearInterval(interval);
-  }, [totalFrames]);
+    const container = containerRef.current;
+    if (!container) return;
+    let interval: ReturnType<typeof setInterval> | null = null;
+    let inView = true;
 
-  return frameIndex;
+    const sync = () => {
+      const run = inView && !document.hidden;
+      if (run && interval === null) {
+        interval = setInterval(() => {
+          frameIndexRef.current = (frameIndexRef.current + 1) % frames.length;
+          paintFrame(container, frames, frameIndexRef.current);
+        }, FRAME_INTERVAL_MS);
+      } else if (!run && interval !== null) {
+        clearInterval(interval);
+        interval = null;
+      }
+    };
+
+    const observer =
+      typeof IntersectionObserver === 'undefined'
+        ? null
+        : new IntersectionObserver((entries) => {
+            inView = entries.some((entry) => entry.isIntersecting);
+            sync();
+          });
+    observer?.observe(container);
+    document.addEventListener('visibilitychange', sync);
+    sync();
+
+    return () => {
+      observer?.disconnect();
+      document.removeEventListener('visibilitychange', sync);
+      if (interval !== null) clearInterval(interval);
+    };
+  }, [containerRef, frames, layersKey]);
 }
 
-function useAnimatedDots(): number {
+function useAnimatedDots(enabled: boolean): number {
   const [dotCount, setDotCount] = useState(1);
 
   useEffect(() => {
+    if (!enabled) return;
     const dotInterval = setInterval(() => {
       setDotCount((prev) => (prev % 3) + 1);
     }, 500);
     return () => clearInterval(dotInterval);
-  }, []);
+  }, [enabled]);
 
   return dotCount;
 }
@@ -228,34 +307,27 @@ export default function AsciiLoader({
   cta,
 }: AsciiLoaderProps) {
   const frames = variant === 'engine' ? ASCII_FRAMES_ENGINE : ASCII_FRAMES;
-  const frameIndex = useAnimatedFrame(frames.length);
-  const dotCount = useAnimatedDots();
+  const layersRef = useRef<HTMLDivElement>(null);
+  useAsciiFrames(layersRef, frames, `${fitContainer}:${cta !== undefined}`);
+  const dotCount = useAnimatedDots(showWarmingUp && !fitContainer);
   const fontSize = getFontSize(size);
   const dots = '.'.repeat(dotCount);
-  const currentFrame = frames[frameIndex];
 
   if (fitContainer) {
     return (
-      <div className="flex items-center gap-1">
-        <AsciiPre frame={currentFrame} fontSize="0.06rem" />
-        <AsciiPre frame={currentFrame} fontSize="0.06rem" />
-        <AsciiPre frame={currentFrame} fontSize="0.06rem" />
+      <div ref={layersRef} className="flex items-center gap-1">
+        <AsciiPre fontSize="0.06rem" />
+        <AsciiPre fontSize="0.06rem" />
+        <AsciiPre fontSize="0.06rem" />
       </div>
     );
   }
 
   return (
     <div className="flex flex-col items-center justify-center h-full space-y-4">
-      <div className="relative">
-        <AsciiPre frame={currentFrame} fontSize={fontSize} />
-        {cta && (
-          <AsciiCtaOverlay
-            frame={currentFrame}
-            frameIndex={frameIndex}
-            fontSize={fontSize}
-            cta={cta}
-          />
-        )}
+      <div ref={layersRef} className="relative">
+        <AsciiPre fontSize={fontSize} />
+        {cta && <AsciiCtaOverlay fontSize={fontSize} cta={cta} />}
       </div>
       {showWarmingUp && <p className="text-sm text-muted-foreground">Warming up{dots}</p>}
       {status && (

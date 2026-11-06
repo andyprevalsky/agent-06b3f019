@@ -5,6 +5,12 @@
  * does not broadcast to Supabase), and the realtime subscription that keeps
  * the list in sync via INSERT/UPDATE/DELETE events on the user channel. Also
  * exposes `refetch` for imperative refresh after an action.
+ *
+ * Polling state:
+ *   VISIBLE --every 10s--> refetch --same rows--> keep previous list (no commit)
+ *                                   --changed----> replace list
+ *   VISIBLE --document hidden--> PAUSED (interval ticks skip the request)
+ *   PAUSED  --visibilitychange to visible--> refetch now --> VISIBLE
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -18,6 +24,7 @@ import {
 } from '../../hooks';
 import { supabase } from '@/lib/supabase';
 import { isSubscriptionAbort } from '@/lib/realtime';
+import { keepIfUnchanged } from '@/lib/stableData';
 import type { AttentionRequest } from './types';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -114,6 +121,25 @@ export function unansweredCount(requests: AttentionRequest[]): number {
   return requests.filter((r) => !r.answered).length;
 }
 
+/**
+ * Initial fetch + polling fallback. Nothing is shown while the page is hidden,
+ * so polls pause then and a refetch runs as soon as it is visible again.
+ */
+function useVisiblePolling(refetch: () => Promise<void>): void {
+  useEffect(() => {
+    void refetch();
+    const pollVisible = () => {
+      if (!document.hidden) void refetch();
+    };
+    const pollInterval = setInterval(pollVisible, POLL_INTERVAL_MS);
+    document.addEventListener('visibilitychange', pollVisible);
+    return () => {
+      clearInterval(pollInterval);
+      document.removeEventListener('visibilitychange', pollVisible);
+    };
+  }, [refetch]);
+}
+
 export function useAttentionRequests(realtimeReady: boolean): UseAttentionRequestsResult {
   const [requests, setRequests] = useState<AttentionRequest[]>([]);
   const channelRef = useRef<RealtimeChannel | null>(null);
@@ -124,20 +150,13 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
   const refetch = useCallback(async () => {
     try {
       const fresh = await getAttentionRequests();
-      setRequests(fresh);
+      setRequests((previous) => keepIfUnchanged(previous, fresh));
     } catch (error) {
       console.error('Failed to fetch attention requests:', error);
     }
   }, []);
 
-  // Initial fetch + polling fallback
-  useEffect(() => {
-    void refetch();
-    const pollInterval = setInterval(() => {
-      void refetch();
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(pollInterval);
-  }, [refetch]);
+  useVisiblePolling(refetch);
 
   // Realtime subscription (wired once auth is ready)
   useEffect(() => {

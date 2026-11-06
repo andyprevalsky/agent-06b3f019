@@ -19,6 +19,28 @@ const final = msg(
   { toolName: 'send_message_to_user', isUserAttentionMessage: true },
   { text: 'Done' },
 );
+const tool = (id: string) =>
+  msg({ toolName: 'read_file', toolCallId: id, toolStatus: 'FINISHED' }, { message_id: id });
+/** Rose's own inbound agent message (`metadata.agentMessage`), as the backend stores it. */
+const agentMessage = (role: 'USER' | 'ASSISTANT', id = 'agent-message') =>
+  msg(
+    {
+      agentMessage: true,
+      messageType: 'MESSAGE',
+      fromAgentId: 'root-agent',
+      fromAgentPath: '/root',
+      toAgentPath: '/root/research',
+    },
+    {
+      message_id: id,
+      role,
+      text: 'Message Type: MESSAGE\nTask name: research\nSender: /root\nPayload:\nUse the March numbers.',
+    },
+  );
+const onlyGroup = (groups: ReturnType<typeof groupTrajectoryWork>) => {
+  expect(groups.groupsByLeadId.size).toBe(1);
+  return [...groups.groupsByLeadId.values()][0];
+};
 describe('ordered work projection boundaries', () => {
   it('projects 200,000 persisted rows without overflowing the argument stack or losing history', () => {
     const row = msg({ toolName: 'read_file' }, { timestamp: '2026-10-21T12:00:00.000Z' });
@@ -43,6 +65,39 @@ describe('ordered work projection boundaries', () => {
     const groups = groupTrajectoryWork([comm('one'), final, comm('one', 'late-mirror')], 'ACTIVE');
     expect(groups.groupsByLeadId.size).toBe(1);
     expect(groups.foldedIds.has('late-mirror')).toBe(true);
+  });
+  it.each(['USER', 'ASSISTANT'] as const)(
+    'folds a %s inbound agent message into the surrounding work like a tool call',
+    (role) => {
+      const message = agentMessage(role);
+      const group = onlyGroup(
+        groupTrajectoryWork([tool('before'), message, tool('after')], 'COMPLETED'),
+      );
+      expect(group.activities.map((a) => a.message.message_id)).toEqual([
+        'before',
+        message.message_id,
+        'after',
+      ]);
+      expect(group.activities[1]).toMatchObject({ kind: 'work', label: 'Message from /root' });
+    },
+  );
+  it('keeps a running batch key when an inbound agent message joins it mid-batch', () => {
+    const human = msg({}, { message_id: 'human', role: 'USER', text: 'Research March' });
+    const rows = [human, tool('before')];
+    const key = onlyGroup(groupTrajectoryWork(rows, 'ACTIVE')).key;
+    for (const next of [agentMessage('USER'), tool('after')]) {
+      rows.push(next);
+      const group = onlyGroup(groupTrajectoryWork(rows, 'ACTIVE'));
+      expect(group.key).toBe(key);
+      expect(group.leadId).toBe('before');
+      expect(group.status).toBe('running');
+    }
+  });
+  it('still ends work at a genuine human USER message', () => {
+    const human = msg({}, { message_id: 'human', role: 'USER', text: 'Also check April' });
+    const groups = groupTrajectoryWork([tool('before'), human, tool('after')], 'COMPLETED');
+    expect(groups.groupsByLeadId.size).toBe(2);
+    expect(groups.foldedIds.has('human')).toBe(false);
   });
   it('leaves pending approvals, pinned questions and media outside the history', () => {
     const boundary = [msg({ toolName: 'request_user_approval' }), msg({ toolName: 'display' })];
