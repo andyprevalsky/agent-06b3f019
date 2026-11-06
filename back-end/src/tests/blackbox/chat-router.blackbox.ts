@@ -3,13 +3,22 @@
  * Black-box tests for chat router stream-derived UI metadata.
  */
 
+import 'dotenv/config';
+import './assertLocalDatabase';
+import { randomUUID } from 'node:crypto';
 import {
   buildRouterSystemMessage,
   getWebSearchStreamTitleFromPartialRouterJson,
 } from '../../providers/chat/routerLlm';
-import { ROUTER_SYSTEM_PROMPT } from '../../providers/chat/chatPrompts';
+import { buildGeneratorSystemMessage } from '../../providers/chat/generatorLlm';
+import { GENERATOR_SYSTEM_PROMPT, ROUTER_SYSTEM_PROMPT } from '../../providers/chat/chatPrompts';
 import { renderRouterProjectContext } from '../../providers/chat/projectContext';
+import { __flushBroadcastQueueForTests } from '../../providers/chat/supabaseBroadcast';
+import { postMessage } from '../../domains/agents/agentMessageService';
+import { prisma } from '../../providers/database';
 import { markCacheable } from '../../providers/rose/cache';
+import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
+import { replayCall, stalledResponse } from './chat-search-escalation.network.support';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
 import {
   createClosedRouterActionDetector,
@@ -44,6 +53,82 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
     throw new Error(
       `${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
     );
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+type ChatSystems = { router: string[]; generator: string[]; projectReads: number };
+
+/**
+ * One public chat turn (postMessage → handleChatMessage) answered directly, with
+ * only the provider boundary replaced. Returns every Router/Generator system
+ * message and how many agent→project reads the turn made.
+ */
+async function directAnswerTurn(project: { repoUrl: string | null } | null): Promise<ChatSystems> {
+  const userId = randomUUID();
+  const agentId = randomUUID();
+  await prisma.user.create({ data: { userId, isAnonymous: true } });
+  const placed =
+    project === null
+      ? null
+      : await prisma.project.create({
+          data: { userId, name: 'Rose', repoUrl: project.repoUrl, syncSalt: randomUUID() },
+        });
+  await prisma.agent.create({
+    data: {
+      id: agentId,
+      userId,
+      goal: 'Whats our rose repo loooking like?',
+      status: 'ACTIVE',
+      source: 'MAC_APP',
+      model: 'rose-labs/rose-1-ultra',
+      projectId: placed?.id ?? null,
+      verifier: { create: {} },
+    },
+  });
+  const seen: ChatSystems = { router: [], generator: [], projectReads: 0 };
+  const originalFetch = globalThis.fetch;
+  const originalFindUnique = prisma.agent.findUnique.bind(prisma.agent);
+  prisma.agent.findUnique = ((args: { where: { id?: string }; select?: { project?: unknown } }) => {
+    if (args.where.id === agentId && args.select?.project !== undefined) seen.projectReads += 1;
+    return originalFindUnique(args as never);
+  }) as unknown as typeof prisma.agent.findUnique;
+  globalThis.fetch = (async (input, init) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (url.endsWith('/realtime/v1/api/broadcast')) return new Response('{}', { status: 202 });
+    if (url === OPENROUTER_API_URL) return stalledResponse(init?.signal);
+    if (url !== CEREBRAS_API_URL) throw new Error(`unexpected outbound ${url}`);
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ role: string; content: unknown }>;
+      response_format: { json_schema: { name: string } };
+    };
+    const router = body.response_format.json_schema.name === 'router_decision';
+    const systems = body.messages.filter((m) => m.role === 'system').map((m) => String(m.content));
+    (router ? seen.router : seen.generator).push(...systems);
+    const content = router
+      ? JSON.stringify({ reasoning: 'answer directly', action: 'direct_answer' })
+      : JSON.stringify({ reasoning: 'answer', response: 'The repo is synced.' });
+    return replayCall({ model: 'qwen-3.8-27b', content }, init?.signal, () => undefined);
+  }) as typeof fetch;
+  try {
+    const posted = await postMessage(agentId, { message: 'Whats our rose repo?' }, false, userId);
+    if ('error' in posted) throw new Error(`postMessage failed: ${JSON.stringify(posted)}`);
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const rows = await prisma.message.findMany({ where: { agentId, role: 'TOOL' } });
+      const toolName = (m: unknown) => (m as { toolName?: string } | null)?.toolName;
+      if (rows.some((row) => toolName(row.metadata) === 'send_message_to_user')) break;
+      await sleep(25);
+    }
+    await sleep(100);
+    return seen;
+  } finally {
+    await __flushBroadcastQueueForTests();
+    globalThis.fetch = originalFetch;
+    prisma.agent.findUnique = originalFindUnique as typeof prisma.agent.findUnique;
+    await prisma.toolUsage.deleteMany({ where: { agentId } });
+    await prisma.agent.deleteMany({ where: { id: agentId } });
+    await prisma.user.deleteMany({ where: { userId } }); // cascades to the project
   }
 }
 
@@ -179,6 +264,49 @@ const tests: Array<[string, () => Promise<void> | void]> = [
       );
     },
   ],
+  [
+    'project chats give the generator the project section after its cached prompt (RCA 2026-11-06)',
+    () => {
+      const home = buildGeneratorSystemMessage();
+      assertEqual(home.content, markCacheable(GENERATOR_SYSTEM_PROMPT).content, 'Home generator');
+      const section = renderRouterProjectContext({
+        name: 'Rose',
+        repoUrl: 'https://github.com/Rose-Ai-Labs/rose',
+        defaultBranch: 'main',
+      });
+      const placed = buildGeneratorSystemMessage(section);
+      assertEqual(placed.role, 'system', 'one system message');
+      assertEqual(placed.content, home.content + section, 'static prefix kept');
+    },
+  ],
+  [
+    'a chat turn gives the router and the generator its project from one read',
+    async () => {
+      process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND = '1';
+      process.env.BLACKBOX_TEST_FAKE_TEMPORAL = '1';
+      process.env.CEREBRAS_API_KEY = 'blackbox-cerebras-key';
+      process.env.OPENROUTER_API_KEY = 'blackbox-openrouter-key';
+      const section = renderRouterProjectContext({
+        name: 'Rose',
+        repoUrl: 'https://github.com/Rose-Ai-Labs/rose',
+        defaultBranch: 'main',
+      });
+      const routerHome = markCacheable(ROUTER_SYSTEM_PROMPT).content;
+      const generatorHome = markCacheable(GENERATOR_SYSTEM_PROMPT).content;
+      const placed = await directAnswerTurn({ repoUrl: 'https://github.com/Rose-Ai-Labs/rose' });
+      assertEqual(placed.router.length > 0 && placed.generator.length > 0, true, 'both phases ran');
+      for (const content of placed.router) assertEqual(content, routerHome + section, 'router');
+      for (const content of placed.generator) {
+        assertEqual(content, generatorHome + section, 'generator');
+      }
+      assertEqual(placed.projectReads, 1, 'one project read per turn, shared by both phases');
+      const home = await directAnswerTurn(null);
+      for (const content of home.router) assertEqual(content, routerHome, 'Home router unchanged');
+      for (const content of home.generator) {
+        assertEqual(content, generatorHome, 'Home generator unchanged');
+      }
+    },
+  ],
 ];
 
 async function main(): Promise<void> {
@@ -193,6 +321,7 @@ async function main(): Promise<void> {
     if (result.error) process.stderr.write(`${result.error}\n`);
   }
 
+  await prisma.$disconnect();
   const failed = results.filter((r) => !r.passed);
   process.stdout.write(`\n${results.length - failed.length}/${results.length} tests passed\n`);
   if (failed.length > 0) process.exit(1);

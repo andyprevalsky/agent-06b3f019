@@ -15,7 +15,8 @@ import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
  * System context / state flow:
  *
  *   startInitialChatContext ──┬─ messages ──> Router (GLM) ──> Cerebras
- *   loadRouterProjectContext ─┤  (project section after the router prompt's cache boundary)
+ *   loadRouterProjectContext ─┤  (one read per turn: project section after the Router's and
+ *                             │   the Generator's cached prompts)
  *                             │                 │                 (fail closed)
  *                             │                 ├─ escalation ──> Temporal (router only)
  *                             │                 v
@@ -107,6 +108,7 @@ export async function handleChatMessage(config: {
       providerRoute: phaseModels.generatorProviderRoute,
       abortSignal: speculative?.abortSignal,
       streamGate: speculative?.streamGate,
+      projectContext,
     });
   };
 

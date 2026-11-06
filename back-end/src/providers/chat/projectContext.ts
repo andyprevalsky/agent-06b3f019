@@ -2,11 +2,11 @@
  * Chat router project context (RCA 2026-11-06 root-agent-project-context).
  *
  *   handleChatMessage ──┬─ messages ─────────────────────────┐
- *                       └─ loadRouterProjectContext(agentId) ┴─> callRouterLlm
- *                            one PK read (Agent ⋈ Project)         markCacheable(ROUTER prompt, project)
+ *                       └─ loadRouterProjectContext(agentId) ┴─> callRouterLlm / callGeneratorLlm
+ *                            one PK read per turn (Agent ⋈ Project)   markCacheable(prompt, project)
  *
- * The section rides after the static router prompt's cache boundary, so the
- * static prefix stays byte-identical and a Home agent's router call is unchanged.
+ * The section rides after the static Router/Generator prompts' cache boundary,
+ * so each static prefix stays byte-identical and a Home chat is unchanged.
  * 10k agents: one indexed PK read per chat turn, no shared row or channel.
  */
 import { prisma } from '../database';
