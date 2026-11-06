@@ -100,17 +100,17 @@ test('desktop inline display expands real WebGL output and keeps controls in its
     '[data-message-id="game-display"][data-message-kind="display-media"]',
   );
   const toggle = display.getByTestId('display-toggle');
-  await expect(toggle).toHaveAccessibleName('Expand display: Orbit Runner');
-  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  // A display starts fully expanded: no clipped box, nothing scrolling inside it.
+  await expect(toggle).toHaveAccessibleName('Collapse display: Orbit Runner');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   const iframe = display.getByTestId('display-html-frame');
   await expect(iframe).toHaveCount(1);
   await expect(iframe).toHaveAttribute('src', GAME_URL);
   await expect(iframe).toHaveAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-popups');
-  const originalFrame = await iframe.elementHandle();
-  await toggle.click();
-  await expect(toggle).toHaveAccessibleName('Collapse display: Orbit Runner');
-  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   expect((await iframe.boundingBox())!.height).toBeGreaterThan(480);
+  const body = display.getByTestId('display-body');
+  expect(await body.evaluate((element) => getComputedStyle(element).overflowY)).toBe('visible');
+  const originalFrame = await iframe.elementHandle();
   const game = page.frameLocator(
     '[data-message-id="game-display"] [data-testid="display-html-frame"]',
   );
@@ -128,9 +128,11 @@ test('desktop inline display expands real WebGL output and keeps controls in its
     .toBeGreaterThan(3);
   const framesBeforeToggle = Number(await canvas.getAttribute('data-frames'));
   await toggle.click();
+  await expect(toggle).toHaveAccessibleName('Expand display: Orbit Runner');
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await expect(iframe).toHaveCount(1);
   await toggle.click();
+  await expect(toggle).toHaveAccessibleName('Collapse display: Orbit Runner');
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   expect(await iframe.evaluate((element, original) => element === original, originalFrame)).toBe(
     true,

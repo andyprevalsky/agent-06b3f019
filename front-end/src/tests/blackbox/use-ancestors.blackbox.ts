@@ -165,4 +165,34 @@ describe('useAncestors (hub / archived sub-agents)', () => {
     expect(result.current).toEqual([{ id: 'new-parent', goal: 'NEW AGENT PARENT' }]);
     unmount();
   });
+
+  it('fetches a root agent ancestors once when its detail loads (undefined -> null parent)', async () => {
+    const requested: string[] = [];
+    server.use(
+      http.get(`${API_BASE}/agents/:agentId/ancestors`, ({ params }) => {
+        requested.push(String(params.agentId));
+        return HttpResponse.json({ ancestors: [] });
+      }),
+    );
+    // Navigation selects the agent before its detail arrives (parent fields
+    // undefined); the loaded root detail then reports them as null.
+    const { result, rerender, unmount } = renderHook(
+      ({ parentId, goal }: { parentId?: string | null; goal?: string | null }) =>
+        useAncestors(ROOT, parentId, goal),
+      {
+        initialProps: { parentId: undefined, goal: undefined } as {
+          parentId?: string | null;
+          goal?: string | null;
+        },
+      },
+    );
+    await waitFor(() => expect(requested).toEqual([ROOT]));
+    rerender({ parentId: null, goal: null });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(requested).toEqual([ROOT]);
+    expect(result.current).toEqual([]);
+    unmount();
+  });
 });

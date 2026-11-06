@@ -56,3 +56,12 @@ The dispatcher fix held. The next `browser-biometrics-webdecoy` timeout
 (`c247de84`) is a different boundary: `_execute_drag` still passed a
 coordinate tuple into `ActionHistory.record_action`, which indexed it as a
 dict. See `2026-09-02-browser-biometrics-drag-record-action-tuple`.
+
+## Recurrence 2026-11-06
+
+The behaviour behind "agent burns early steps simulating human mouse motion"
+was never fixed. Only the drag plumbing was. With drag dispatching correctly,
+the model kept using it to fake pointer movement, which raised FCaptcha risk.
+For move-from-current-position it sent end-only drags that looped until the
+timeout. The missing guardrail was a pointer-only move tool. See
+`2026-11-06-browser-pointer-move-intent-had-no-tool`.

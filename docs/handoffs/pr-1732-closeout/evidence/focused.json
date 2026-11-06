@@ -1,0 +1,43 @@
+{
+ "source": {
+  "head": "e2894e1a356bfd030249af33b407ec64fb81e9b0",
+  "digest": "bb6f62f50c2dd4f55c90ac74fa7e823bc6de3ae4b3b710eb95db0c24154a43d0"
+ },
+ "gates": {
+  "deploy-command-structural": {
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/rdw/deploy-command-structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/rdw/deploy-command-structural",
+    "--stdio"
+   ],
+   "checks": [
+    "deploy-command-structural"
+   ],
+   "worker_recipe": {
+    "cases": {
+     "deploy-command-structural": {
+      "command": [
+       "python3",
+       "scripts/run-deploy-structural-gates.py",
+       "--max-workers",
+       "5"
+      ],
+      "cwd": ".",
+      "env": {
+       "CONDUCTOR_WORKSPACE_NAME": "rdw-deploy-command-structural",
+       "CONDUCTOR_PORT": "20000",
+       "CONDUCTOR_ROOT_PATH": "/var/tmp/rdw/deploy-command-structural",
+       "ROSE_USE_SYSTEM_PG": "true",
+       "PATH": "/home/boxes/.local/bin:/home/boxes/.fly/bin:/home/boxes/rose/agents/venv/bin:/opt/devbox-tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin",
+       "TMPDIR": "/var/tmp",
+       "HOME": "/home/boxes"
+      },
+      "aggregate": true
+     }
+    }
+   }
+  }
+ }
+}

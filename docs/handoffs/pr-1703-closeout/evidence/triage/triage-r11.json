@@ -1,0 +1,83 @@
+{
+ "failures": [
+  {
+   "id": "19ccca0a8eb54f5f8daf8ac92a92259b",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "structural gate: load-sensitive timing assertion in an unrelated deploy-pipeline test",
+   "evidence": "Native exit 1 at 052ac6ce7 (structural gate at --max-workers 2, lingering_group=false): scripts/tests/run-deploy-pipeline.test.py check_declared_phase_lanes line 4548 'semantic is not gated by the smoke lane' (a lane-start vs lane-finish epoch comparison in fixture lanes) failed during the 11-gate sweep at load ~14-25; 40+ prior checks in that suite passed in the same run. Same suite passes on these bytes on a quiet box (run-deploy-pipeline.test.py alone 'all checks passed', /var/tmp/webdecoy-rca/branch-deploy-pipeline.log; full structural gate 91/91 in earlier quiet focused runs). The diff touches no deploy tooling or test timing; fix for these timing flakes is open in PR #1706/#1727.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Native exit 1 at 052ac6ce7 (structural gate at --max-workers 2, lingering_group=false): scripts/tests/run-deploy-pipeline.test.py check_declared_phase_lanes line 4548 'semantic is not gated by the smoke lane' (a lane-start vs lane-finish epoch comparison in fixture lanes) failed during the 11-gate sweep at load ~14-25; 40+ prior checks in that suite passed in the same run. Same suite passes on these bytes on a quiet box (run-deploy-pipeline.test.py alone 'all checks passed', /var/tmp/webdecoy-rca/branch-deploy-pipeline.log; full structural gate 91/91 in earlier quiet focused runs). The diff touches no deploy tooling or test timing; fix for these timing flakes is open in PR #1706/#1727."
+  },
+  {
+   "id": "61d5d55e897640e4b86e76e467426c5c",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member failed: compute token pool exhausted for the benchmark judge (external provider)",
+   "evidence": "Member test-mass-agent-run-0 (agent 237e99b9, run 20261106-100308-2109442): failure_reason 'Compute token pool exhausted or cooling down: Declared evaluator t7-schema-task-complete execution failed: Codex compute token unavailable for agentic benchmark judge'. Agent finished its work; the Codex judge lease was unavailable. It passed in 4 earlier rounds on the same agent code. The diff does not touch token leasing, the judge or mass-agent code.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Member test-mass-agent-run-0 (agent 237e99b9, run 20261106-100308-2109442): failure_reason 'Compute token pool exhausted or cooling down: Declared evaluator t7-schema-task-complete execution failed: Codex compute token unavailable for agentic benchmark judge'. Agent finished its work; the Codex judge lease was unavailable. It passed in 4 earlier rounds on the same agent code. The diff does not touch token leasing, the judge or mass-agent code."
+  },
+  {
+   "id": "4dcdcdff988e47f1a755759e37fc5c9f",
+   "check": "smoke/browser-smoke",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member failed: browser target closed mid-run (browser-use state read returned no result), agent never used the changed tools",
+   "evidence": "Member browser-smoke (agent dc2e5d53, run 20261106-100307-2109485): after browser step 9 the verifier failed 'Expected at least one handler to return a non-None result ... BrowserStateRequestEvent' and the worker log shows 'Page.screenshot: Target page, context or browser has been closed'; 8/8 supervisor recoveries then timeout at 451s vs 450s. The trajectory contains only goto/screenshot/evaluate/scroll_down: no hover, no drag, no rejected call. Passed in 4 earlier rounds on the same agent code; the same campaign's other browser members (webdecoy, account-locked, email-otp) passed. The diff changes only hover/drag dispatch, descriptions and the humanized drag path.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Member browser-smoke (agent dc2e5d53, run 20261106-100307-2109485): after browser step 9 the verifier failed 'Expected at least one handler to return a non-None result ... BrowserStateRequestEvent' and the worker log shows 'Page.screenshot: Target page, context or browser has been closed'; 8/8 supervisor recoveries then timeout at 451s vs 450s. The trajectory contains only goto/screenshot/evaluate/scroll_down: no hover, no drag, no rejected call. Passed in 4 earlier rounds on the same agent code; the same campaign's other browser members (webdecoy, account-locked, email-otp) passed. The diff changes only hover/drag dispatch, descriptions and the humanized drag path."
+  },
+  {
+   "id": "7232bde5e48a4c589cbbf42cc868d3ff",
+   "check": "smoke/browser-auth-saved-password-retry",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member failed: first browser agent lost its browser target (BrowserStateRequestEvent), model then spawned a retry browser agent over the exact-1 limit",
+   "evidence": "Member browser-auth-saved-password-retry (agent 877e955c, run 20261106-100307-2109521): failure_reason 'Tool spawn_browser_agent exceeded its exact root call limit: expected 1, got 2'. The first browser agent hit 8 supervisor recoveries with 'Expected at least one handler to return a non-None result ... BrowserStateRequestEvent' (+ input_text 'no coordinates available' error), classified auth_failed, and the root agent spawned member_lookup_retry. No hover/drag calls ('Pre-hover dwell' is the existing humanizer click log). Passed in 4 earlier rounds on the same agent code.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Member browser-auth-saved-password-retry (agent 877e955c, run 20261106-100307-2109521): failure_reason 'Tool spawn_browser_agent exceeded its exact root call limit: expected 1, got 2'. The first browser agent hit 8 supervisor recoveries with 'Expected at least one handler to return a non-None result ... BrowserStateRequestEvent' (+ input_text 'no coordinates available' error), classified auth_failed, and the root agent spawned member_lookup_retry. No hover/drag calls ('Pre-hover dwell' is the existing humanizer click log). Passed in 4 earlier rounds on the same agent code."
+  }
+ ]
+}

@@ -665,7 +665,7 @@ async def test_restored_pin_cannot_declare_or_run_side_effect_tool_for_unflagged
         old.user_tools = pinned
         old.user_tools_pinned = True
         restored = AgentWorkflow()
-        restored._restore_deployment_state(old._continuation_resume_state([]))
+        restored._restore_deployment_state(old._continuation_resume_state())
         assert restored.user_tools_pinned and restored.user_tools["tools"]
         restored.agent_id, restored.user_id = "agent-1", STOCK_USER
         restored.events = []
@@ -724,7 +724,7 @@ async def test_pinned_version_survives_mid_run_publish():
         old.max_iterations, old.context_gates = None, {}
         old.user_tools = wf.user_tools
         old.user_tools_pinned = True
-        state = old._continuation_resume_state([])
+        state = old._continuation_resume_state()
         restored = AgentWorkflow()
         restored._restore_deployment_state(state)
         assert restored.user_tools_pinned and restored.user_tools["version_id"] == "v1"

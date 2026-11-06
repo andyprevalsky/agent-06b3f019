@@ -100,12 +100,37 @@ describe('ordered work projection boundaries', () => {
     expect(groups.foldedIds.has('human')).toBe(false);
   });
   it('leaves pending approvals, pinned questions and media outside the history', () => {
-    const boundary = [msg({ toolName: 'request_user_approval' }), msg({ toolName: 'display' })];
+    const media = msg(
+      { display: { placement: 'inline', kind: 'media', media_kind: 'page' } },
+      {
+        role: 'ASSISTANT',
+        file_pointer: {
+          id: 'page',
+          original_filename: 'page.html',
+          storage_path: 'display/page.html',
+          mime_type: 'text/html',
+          size_bytes: 1,
+          created_at: '2026-10-20T12:00:00Z',
+        },
+      },
+    );
+    const failedDisplay = msg({ toolName: 'display', toolStatus: 'ERROR', error: 'rejected' });
+    const boundary = [msg({ toolName: 'request_user_approval' }), media, failedDisplay];
     for (const message of boundary) {
       const groups = groupTrajectoryWork([comm('one'), message], 'ACTIVE');
       expect(groups.foldedIds.has(message.message_id)).toBe(false);
       expect([...groups.groupsByLeadId.values()][0].status).not.toBe('running');
     }
+  });
+  it('hides a successful display tool row: the displayed media is the visible row', () => {
+    const shown = msg({
+      toolName: 'display',
+      toolStatus: 'FINISHED',
+      title: 'Displayed for the user',
+    });
+    const groups = groupTrajectoryWork([comm('one'), shown], 'ACTIVE');
+    expect(groups.foldedIds.has(shown.message_id)).toBe(true);
+    expect(onlyGroup(groups).activities).toHaveLength(1);
   });
   it.each([
     {
