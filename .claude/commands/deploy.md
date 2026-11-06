@@ -188,7 +188,7 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 | Render live on the merged SHA, then endpoint probes and log scan | `back-end/` changed |
 | Fly worker cutover, then the workflow migration matrix | agent runtime or `deploy-agents.yml` changed |
 | Vercel live on the merged SHA | `front-end/` changed |
-| Production semantics | always, after the lanes above |
+| Production semantics | always, after the Render, Vercel and Fly lanes it exercises |
 | AgentCard production lifecycle | AgentCard or payment paths changed |
 | WMH SIM smoke | World Model Harness paths changed |
 | Mac release | `scripts/mac-app-release-decision` ships (shipped Mac surface changed, or the `MAC-APP-RELEASE` label) |

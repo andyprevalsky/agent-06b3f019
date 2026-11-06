@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# /deploy Group 4 semantic lane as one versioned command (deploy.md Steps 5, 6b
-# and 6c; `run_deploy_pipeline.py plan --semantic-stack` / `--e2b-smoke`).
+# /deploy semantic lane as one versioned command (the local stack, the semantic
+# suite and the E2B smoke; `run_deploy_pipeline.py plan --semantic-stack` / `--e2b-smoke`).
 #
 # Default mode starts this worktree's local stack through `run.sh --benchmark`
 # on the deploy stack database, runs the Playwright UI semantics (four workers,
@@ -27,7 +27,7 @@
 #                             the running stack's manifest port, else LOCAL_DB_PORT
 #   DEPLOY_SEMANTIC_WORKER_PROCESSES
 #                             agent worker processes for the stack's run.sh (WORKER_PROCESSES);
-#                             default 8, the deploy.md Step 5 value. Lower it only to fit a
+#                             default 8, the stack's standard value. Lower it only to fit a
 #                             memory-bounded host; the specs and their assertions are unchanged
 #
 # The E2B smoke prints its own verdict line, E2B_SMOKE_VERDICT PASS|SKIPPED|FAIL
@@ -165,7 +165,7 @@ if [ "$MODE" = e2b-only ]; then
 fi
 
 # Prerequisites before any side effect: a valid worker count, and the stack
-# database must already be up (deploy.md Step 5 pre-starts it so run.sh never
+# database must already be up (the prepared worktree pre-starts it so run.sh never
 # owns or stops it).
 SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"
 if ! [[ "$SEMANTIC_WORKER_PROCESSES" =~ ^[1-9][0-9]{0,2}$ ]]; then
