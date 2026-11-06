@@ -78,10 +78,16 @@ def physical_quiet(proof):
          and physical.get('services_status') == 'stopped' and physical.get('financial_cleanup_verified') is False,
          'physical closure must remain distinct from financial cleanup')
     run = Path(physical['run'])
+    need(run.is_absolute() and run == run.resolve()
+         and Path(proof['run_json']) == run / 'run.json', 'physical closure must identify the original run')
     need(physical.get('source') == proof['source']['head'], 'physical source mismatch')
     owner = document(run / 'local-stack-owner.json')
     services = document(run / 'services.json')
     benchmark = document(run / 'local-benchmark-owner.json')
+    consumed = [run / name for name in ('local-stack-owner.json', 'services.json', 'local-benchmark-owner.json')]
+    consumed.append(run / ('benchmark-cleanup-' + benchmark['token'] + '.status'))
+    need(all(proof['files'].get(str(path)) == sha(path) for path in consumed),
+         'original physical owner/service/cleanup records must be bound')
     need(services.get('benchmark_mode') is True and services.get('status') == 'stopped'
          and services.get('run_sh_pid') == owner.get('pid') and benchmark.get('state') == 'failed_retained'
          and benchmark.get('run_id') == owner.get('run_id') == run.name,
@@ -166,11 +172,26 @@ def validate_custody(proof, receipt):
     entries = inventory if isinstance(inventory, list) else inventory.get('files', [])
     archived_entries = {x['original_path']: x for x in entries}
     archived = {path: row['sha256'] for path, row in archived_entries.items()}
+    run_directory = Path(physical['run'])
+    benchmark = document(run_directory / 'local-benchmark-owner.json')
+    physical_files = [run_directory / name for name in
+                      ('local-stack-owner.json', 'services.json', 'local-benchmark-owner.json')]
+    physical_files.append(run_directory / ('benchmark-cleanup-' + benchmark['token'] + '.status'))
+    for path in physical_files:
+        need(str(path) in files and archived.get(str(path)) == files[str(path)],
+             'original physical records were not archived and bound')
     for name in ('request.json', 'receipt.json', 'result.json'):
         path = str(folder / name)
         need(archived.get(path) == files[path], 'original native evidence was not archived')
     need(archived.get(proof['run_json']) == files[proof['run_json']], 'original run was not archived')
     run = native_run(proof['run_json'], archived_entries[proof['run_json']])
+    case = result['evidence'][GATE]
+    log = case['log']
+    need(log in files and files[log] == case['sha256'] == archived.get(log)
+         and ('Owned cleanup is unverified; retaining services and database: ' + str(run_directory))
+             in Path(log).read_text()
+         and document(run_directory / 'services.json').get('worktree') == proof['owner']['worker_root'],
+         'original producer must identify this exact retained run and worker')
     card = document(proof['report_card'])
     need(card.get('source_sha') == receipt['source']['head'] and card.get('run_id') == run.get('run_id'),
          'native run source binding')
@@ -232,6 +253,10 @@ def prepare(state, old, new, proof):
     latest = latest_receipts(state).get(GATE)
     pending = [f for f in state['failures'] if f['id'] in state.get('pending', []) and f['gate'] == GATE]
     if latest is not None:
+        need(not any(f.get('gate') == GATE and (f.get('rca') or {}).get('assigned_repair') is True
+                     for f in state['failures']) or GATE not in
+                     set(state['repair_gates']) | set(state.get('triage_repair_gates', [])),
+             'an adjudicated or carried assigned repair remains owned')
         need(proof is not None, 'started optional gate requires preserved physical/financial custody')
         validate_custody(proof, latest)
         entries = proof.get('rca', [])
@@ -305,18 +330,29 @@ def accept(state, proof):
     election = elections[0]
     acceptance = document(proof['acceptance'])
     platform = document(proof['platform_result'])
+    start = document(proof['platform_start'])
     need(sha(proof['acceptance']) == proof['acceptance_sha256']
-         and sha(proof['platform_result']) == proof['platform_result_sha256'], 'acceptance evidence changed')
+         and sha(proof['platform_result']) == proof['platform_result_sha256']
+         and sha(proof['platform_start']) == proof['platform_start_sha256'], 'acceptance evidence changed')
     data = platform.get('data') or {}
     text = (data.get('output') or {}).get('text', '')
     original = election['proof']
     archive = document(original['archive'])
+    destination = acceptance.get('custodian_devbox')
+    uuid_pattern = r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}'
     need(platform.get('ok') is True and data.get('status') == 'completed'
-         and isinstance(data.get('completedAt'), (int, float)) and data.get('executionInstanceId') == acceptance.get('custodian_devbox')
+         and type(data.get('completedAt')) in (int, float) and math.isfinite(data['completedAt'])
+         and data['completedAt'] > 0 and isinstance(data.get('turnId'), str)
+         and re.fullmatch(uuid_pattern, data['turnId'])
+         and isinstance(destination, str) and re.fullmatch(uuid_pattern, destination)
+         and data.get('executionInstanceId') == destination
          and isinstance(original.get('originating_devbox'), str) and original['originating_devbox']
          and proof.get('originating_devbox') == original['originating_devbox']
          and acceptance.get('custodian_devbox') != original['originating_devbox']
          and re.fullmatch(r'https://boxes\.dev/thread/[A-Za-z0-9_-]+', proof.get('custody_link', ''))
+         and start.get('ok') is True and start.get('threadId') == proof['custody_link'].rsplit('/', 1)[1]
+         and start.get('devboxId') == destination
+         and (start.get('target') or {}).get('executionInstanceId') == destination
          and acceptance.get('thread_url') == proof['custody_link']
          and 'OPERATIONAL_CUSTODY_ACCEPTED_SHA256 ' + proof['acceptance_sha256'] in text.splitlines()
          and acceptance.get('obligations') == original['obligations']

@@ -19,7 +19,7 @@ sources:
   - PR #1708
   - commit 429d9ac6f9520597ba4145df096e7c37fae1d879
   - task .context/rca-browser-4f77/agentcard-election-native-replay-streamed.log
-repro: scripts/tests/deploy-test-election.test.py
+repro: scripts/tests/deploy-test-plan.test.py AgentCardElection
 status: mitigated
 ---
 
@@ -44,6 +44,8 @@ Recognize only the existing planner's exact AgentCard omission during quiescent 
 For an already admitted incomplete lane, require the original native request/result/receipt and full task membership, unchanged original-source payment and physical-observation policies, sealed/deleted provider roots, exact captured pending obligations, a read-only matching provider observation, verified private archive/member recovery, explicit known loss and continuing accountability, and fresh independent physical closure. The original failed benchmark cleanup marker remains failed. Reject assigned-repair substitution, arbitrary removals, mismatched identity, changed evidence and active resources.
 
 A read-only replay against the actual preserved occurrence passed without changing canonical state, original outcomes or owners. Final completion still requires a different devbox's explicit, hash-bound operational custody acceptance and independent archive recovery; an archive or a promised handoff alone is insufficient. That acceptance provides no task, release, refund or settlement credit.
+
+Independent review also reproduced three guard gaps in the candidate: adjudicated assigned repairs outside pending triage could be dropped, missing destination identities compared equal, and physical closure could describe another run. The final guards reject carried assigned repairs, require present native destination/start/result identities, and bind archived owner/service/cleanup records and the original producer log to the exact retained run. Permanent negative cases cover each boundary. The review failures remain recorded; no candidate was published before repair.
 
 The native run is projected with a streaming JSON reader, excluding messages and raw logs while binding exact archived bytes. This is an explicit operator transition, not application polling; its work scales with the one optional run and its evidence, not every production agent.
 

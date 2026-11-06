@@ -19,7 +19,8 @@ operation is performed by selection or custody validation.
 
 After merge, `accept-omitted-custody --input <acceptance-proof.json>` records a
 different devbox's exact operational custody acceptance and independent archive
-recovery. `complete` and `verify --require-resolved` remain blocked until that
+recovery. Hash-bind both its native start receipt (thread and devbox identity)
+and completed result (execution identity, turn and acceptance hash). `complete` and `verify --require-resolved` remain blocked until that
 acceptance exists. It supplies no task, native release or financial-settlement
 credit. Report the elected lane as SKIPPED alongside its original actual
 outcomes and outstanding liabilities.
