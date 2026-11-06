@@ -84,7 +84,7 @@ function steelSession() {
   };
 }
 
-async function testLearnedConfigSeedsTheNextSession(): Promise<void> {
+async function testSameProviderLearnedConfigSeedsTheNextSession(): Promise<void> {
   const location = { country: 'US', state: 'CA', city: 'SAN FRANCISCO' };
   const cached = buildPreferredBrowserConfig(
     {
@@ -100,7 +100,7 @@ async function testLearnedConfigSeedsTheNextSession(): Promise<void> {
   let steelCalls = 0;
   const dependencies: BrowserSessionCreationDependencies = {
     readPreferredConfig: async () => cached,
-    defaultProvider: () => 'steel',
+    defaultProvider: () => 'kernel',
     createKernel: async (...args) => {
       kernelCalls.push(args);
       return providerSession('kernel');
@@ -121,8 +121,8 @@ async function testLearnedConfigSeedsTheNextSession(): Promise<void> {
   );
 
   assert.strictEqual(session.provider, 'kernel');
-  assert.strictEqual(kernelCalls.length, 1, 'the next session starts with the learned provider');
-  assert.strictEqual(steelCalls, 0, 'the deployment default is not tried first');
+  assert.strictEqual(kernelCalls.length, 1, 'the selected provider uses its learned proxy');
+  assert.strictEqual(steelCalls, 0, 'a same-provider preference does not allocate another provider');
   assert.deepStrictEqual(kernelCalls[0]?.[4], {
     keepValidationConnection: true,
     exactManagedProxy: { type: 'isp', specificity: 'city' },
@@ -144,7 +144,7 @@ async function testLearnedSteelFixedConfigSeedsTheNextSession(): Promise<void> {
   const steelCalls: Parameters<BrowserSessionCreationDependencies['createSteel']>[] = [];
   const dependencies: BrowserSessionCreationDependencies = {
     readPreferredConfig: async () => cached,
-    defaultProvider: () => 'kernel',
+    defaultProvider: () => 'steel',
     createKernel: async () => {
       kernelCalls += 1;
       return providerSession('kernel');
@@ -228,14 +228,15 @@ async function testUnavailableLearnedConfigFallsBackToDeploymentDefault(): Promi
   let kernelCalls = 0;
   const dependencies: BrowserSessionCreationDependencies = {
     readPreferredConfig: async () => cached,
-    defaultProvider: () => 'kernel',
+    defaultProvider: () => 'steel',
     createKernel: async () => {
       kernelCalls += 1;
       return providerSession('kernel');
     },
     createSteel: async (_contextId, _agentId, _location, _url, options) => {
       steelOptions.push(options);
-      throw new Error('fixed proxy temporarily unavailable');
+      if (options?.proxyMode === 'fixed') throw new Error('fixed proxy temporarily unavailable');
+      return steelSession();
     },
   };
 
@@ -248,9 +249,9 @@ async function testUnavailableLearnedConfigFallsBackToDeploymentDefault(): Promi
     dependencies
   );
 
-  assert.strictEqual(session.provider, 'kernel');
-  assert.strictEqual(kernelCalls, 1);
-  assert.deepStrictEqual(steelOptions, [{ proxyMode: 'fixed' }]);
+  assert.strictEqual(session.provider, 'steel');
+  assert.strictEqual(kernelCalls, 0, 'preference failure retains the selected provider');
+  assert.deepStrictEqual(steelOptions, [{ proxyMode: 'fixed' }, {}]);
 }
 
 function testRecoveryRequestSchema(): void {
@@ -482,7 +483,7 @@ function testSteelPreferredWhenCdnHardFilterActive(): void {
 async function main(): Promise<void> {
   testPreferredConfigCompatibility();
   await testCloseValidationBrowserNeverBlocksRelease();
-  await testLearnedConfigSeedsTheNextSession();
+  await testSameProviderLearnedConfigSeedsTheNextSession();
   await testLearnedSteelFixedConfigSeedsTheNextSession();
   await testIncompatibleLearnedConfigFallsBackWithoutLeakingGeo();
   await testUnavailableLearnedConfigFallsBackToDeploymentDefault();
