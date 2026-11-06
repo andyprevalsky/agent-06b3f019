@@ -291,6 +291,15 @@ function fetchInitialTree(
         if (node) nodes.set(id, withProgressUpdate(node, update));
       }
       subscription.pendingUpdates.clear();
+      // A send while the fetch was in flight patched the published node; a REST-only
+      // child has no realtime copy to reconcile, so keep its later stamp here.
+      for (const [id, node] of nodes) {
+        const stamp = laterTimestamp(
+          node.lastUserMessageAt,
+          subscription.nodes.get(id)?.lastUserMessageAt,
+        );
+        if (stamp !== node.lastUserMessageAt) nodes.set(id, { ...node, lastUserMessageAt: stamp });
+      }
       publishNodes(subscription, nodes);
     })
     .catch((error) => {

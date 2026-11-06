@@ -93,6 +93,10 @@ sub-agent children order" — no prior case; novel.
   and patches the live tree node (`noteTreeUserMessage`), so a messaged sub-agent
   reorders among its siblings at once; a realtime-spawned child sorts by its
   event time instead of the root's creation.
+- CodeRabbit round 2 found the same class on the other side: a reconnect snapshot
+  fetched before a send replaced the newer stamp of a REST-only child. The fetch now
+  keeps the later stamp from the published node
+  (`agent-tree-snapshot-race.blackbox.ts`, failing on the old code, 5/5 after).
 - Sibling failures prevented: folders, mobile list and stock sidebar inherit the
   same comparator; any new list reuses `runStateRank`/`lastUserMessageTime`.
 - 10k-agent behavior: one keyed `UPDATE "Agent"` per person message; the list and
