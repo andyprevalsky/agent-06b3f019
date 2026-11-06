@@ -8,7 +8,9 @@ import { createLogger } from '../../providers/logger';
 import {
   markGptIntegrationRateLimited,
   markGptUserTokenRateLimited,
+  storedCodexLogin,
 } from '../../providers/gptCredentials';
+import { classifyLoginRejection, isFeedbackCredential } from '../../providers/codeLoginRejection';
 import { markCodexFundedCooldown } from '../../providers/codeSessions/usageLimit';
 import { classifyComputeGrantFailure } from '../../providers/computeGrantFailure';
 
@@ -21,7 +23,25 @@ export const CODEX_AZURE_SWITCH_LINE =
 export type CodexCredentialFeedback = {
   source: 'initial' | 'oauth' | 'funded_api_key';
   reason: string;
+  /** The ws-server's fingerprint of the login it held (codeLoginRejection.ts). */
+  credential?: string;
 };
+
+const FEEDBACK_SOURCES = new Set(['initial', 'oauth', 'funded_api_key']);
+
+/** One well-formed structured feedback event from the agents worker. */
+export function isCodexCredentialFeedback(item: unknown): item is CodexCredentialFeedback {
+  if (typeof item !== 'object' || item === null) return false;
+  const candidate = item as Record<string, unknown>;
+  return (
+    typeof candidate.source === 'string' &&
+    FEEDBACK_SOURCES.has(candidate.source) &&
+    typeof candidate.reason === 'string' &&
+    candidate.reason.length > 0 &&
+    candidate.reason.length <= 2000 &&
+    isFeedbackCredential(candidate.credential)
+  );
+}
 
 function parseCodexResetTime(output: string): Date | null {
   const match = output.match(
@@ -96,6 +116,7 @@ export async function detectAndMarkCodexExhaustion(
   let switched = credentialFeedback?.some((feedback) => feedback.source === 'oauth') === true;
   let oauthReason = '';
   let oauthRevoked = false;
+  let oauthCredential: string | undefined;
   let fundedKeyReason = '';
 
   if (credentialFeedback !== undefined) {
@@ -105,6 +126,7 @@ export async function detectAndMarkCodexExhaustion(
         if (revoked || !oauthReason) {
           oauthReason = feedback.reason;
           oauthRevoked = revoked;
+          oauthCredential = feedback.credential;
         }
       } else if (
         feedback.source === 'funded_api_key' ||
@@ -136,7 +158,8 @@ export async function detectAndMarkCodexExhaustion(
     }
   }
 
-  if (oauthReason !== '') await markCodexOAuthFailure(taskId, session, oauthReason, oauthRevoked);
+  if (oauthReason !== '')
+    await markCodexOAuthFailure(taskId, session, oauthReason, oauthRevoked, oauthCredential);
   // The sandbox switched to Azure (auth_fallback): later limits belong to Azure (C15 report).
   if (switched && session.claudeTokenSource !== 'azure') {
     await repo.markSessionServedByAzure(taskId);
@@ -154,12 +177,23 @@ async function markCodexOAuthFailure(
   taskId: string,
   session: NonNullable<Awaited<ReturnType<typeof repo.findSessionById>>>,
   reason: string,
-  revoked: boolean
+  revoked: boolean,
+  heldFingerprint?: string
 ): Promise<void> {
   const integrationId = session.claudeTokenIntegrationId ?? '';
   if (integrationId === '')
     return log.warn(`Codex OAuth exhaustion lacks credential identity for session ${taskId}`);
   if (revoked) {
+    // The sandbox holds no refresh token, so its own access token expiring also
+    // surfaces as a failed refresh: only a live, still-stored login is revoked.
+    const rejection = classifyLoginRejection(
+      await storedCodexLogin(integrationId),
+      heldFingerprint
+    );
+    if (rejection !== 'revoked') {
+      log.info(`Codex login ${integrationId} rejected in ${taskId}: ${rejection}; not disabled`);
+      return;
+    }
     const integration = await repo.findCredentialIntegration(integrationId);
     if (integration) {
       await markGptUserTokenRateLimited(integration.userId, {

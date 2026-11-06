@@ -459,7 +459,7 @@ async def close_e2b_session(
 async def keepalive_e2b_session(task_id: str, code_provider: str = "claude") -> Optional[dict[str, Any]]:
     """Extend an attached session's sandbox idle window and lease. Best-effort.
 
-    Returns the backend's answer (``alive``, ``awaiting_parent``) or None when
+    Returns the backend's answer (``alive``, ``resize_requested``) or None when
     the call failed; a failed keepalive never ends the session.
     """
     config = load_config()
