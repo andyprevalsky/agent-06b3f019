@@ -83,7 +83,7 @@ jobs:
       - name: Mount dependency disk
         uses: useblacksmith/stickydisk@v1
         with:
-          key: rose-deploy-gates-deps-node${{ env.NODE_VERSION }}-uvpy${{ env.PYTHON_VERSION }}-${{ hashFiles('package.json', 'back-end/package.json', 'front-end/package.json', 'back-end/package-lock.json', 'front-end/package-lock.json', 'agents/requirements.txt') }}
+          key: rose-deploy-gates-deps-v3-node${{ env.NODE_VERSION }}-uvpy${{ env.PYTHON_VERSION }}-${{ hashFiles('package.json', 'back-end/package.json', 'front-end/package.json', 'back-end/package-lock.json', 'front-end/package-lock.json', 'agents/requirements.txt') }}
           path: /home/runner/rose-deps
           commit: on-change
 

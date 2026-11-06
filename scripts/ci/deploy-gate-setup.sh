@@ -112,8 +112,9 @@ else
   step "agents venv"
   # uv's managed CPython, as on the devbox (its build lacks os.pidfd_open and has a different
   # address-space baseline than the runner image's Python). It lives on the disk so a warm VM keeps it.
+  # The stdlib venv module seeds the same pip/setuptools (ensurepip) as the devbox venv.
   uv python install --quiet "$PYTHON_VERSION"
-  uv venv --quiet --allow-existing --python "$PYTHON_VERSION" --python-preference only-managed agents/venv
+  "$(uv python find --python-preference only-managed "$PYTHON_VERSION")" -m venv agents/venv
   uv pip install --quiet --python agents/venv/bin/python -r agents/requirements.txt
   step "playwright"
   agents/venv/bin/python -m playwright install chromium >/dev/null
