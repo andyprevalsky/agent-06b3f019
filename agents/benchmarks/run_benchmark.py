@@ -14850,6 +14850,25 @@ def _run_declared_static_check(
     return True, "All declared static checks passed"
 
 
+def _runs_declared_evaluators(task: BenchmarkTask, passed: bool) -> bool:
+    """Whether the declared evaluators run for this run.
+
+    A pass always runs them; a ``run_all_evaluators`` task also evaluates a failed or timed-out run's
+    collected evidence (static checks only) so every verdict is reported, not just the first failure.
+    """
+    return bool(
+        task.enforce_declared_evaluators
+        and (passed or task.run_all_evaluators or _task_declares_static_check(task, "claude_code_session_output"))
+    )
+
+
+def _declared_failure_reason(task: BenchmarkTask, earlier_failure: Optional[str], evaluator_reason: str) -> str:
+    """A run-all task keeps the run's own failure (e.g. the timeout) beside the evaluators' verdict."""
+    if task.run_all_evaluators and earlier_failure:
+        return f"{earlier_failure} | {evaluator_reason}"
+    return evaluator_reason
+
+
 async def _run_declared_evaluators(
     task: BenchmarkTask,
     data: dict,
@@ -15017,8 +15036,13 @@ async def _run_declared_evaluators(
                 result["perfect"] = polar_results.get("perfect")
                 result["num_screenshots_sent"] = polar_results.get("num_screenshots_sent")
         results.append(result)
-        if not passed:
+        if not passed and not task.run_all_evaluators:
             return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
+    failed = [r for r in results if not r["passed"]]
+    if failed:
+        first = failed[0]
+        others = f" (+{len(failed) - 1} more failing: {', '.join(r['id'] for r in failed[1:])})" if len(failed) > 1 else ""
+        return False, f"Declared evaluator {first['id']} failed: {first['reasoning']}{others}", results
     return True, None, results
 
 
@@ -15854,10 +15878,8 @@ async def _run_single_task_as_run_user(
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
         declared_evaluator_results: list[dict] = []
-        run_declared = task.enforce_declared_evaluators and (
-            passed or _task_declares_static_check(task, "claude_code_session_output")
-        )
-        if run_declared and passed:
+        run_declared = _runs_declared_evaluators(task, passed)
+        if run_declared and (passed or task.run_all_evaluators):
             try:
                 tree_agents = await get_agent_tree(base_url, agent_id)
                 tree = canonicalize_agent_tree(
@@ -15900,8 +15922,10 @@ async def _run_single_task_as_run_user(
                 "declared_evaluator_results": declared_evaluator_results,
             }
             if not evaluator_passed:
+                failure_reason = _declared_failure_reason(
+                    task, None if passed else failure_reason, evaluator_reason
+                )
                 passed = False
-                failure_reason = evaluator_reason
 
         # Collect diagnostic logs; prod log APIs only for prod-backed runs.
         print("    Collecting logs...")

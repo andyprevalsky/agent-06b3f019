@@ -1174,7 +1174,14 @@ def test_code_agent_checks_are_in_permanent_gate():
     """
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", str(repo_root / "agents/benchmarks/code_agent_checks_test.py")],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            str(repo_root / "agents/benchmarks/code_agent_checks_test.py"),
+            str(repo_root / "agents/benchmarks/declared_evaluators_run_all_test.py"),
+        ],
         cwd=repo_root,
         text=True,
         capture_output=True,

@@ -99,6 +99,7 @@ class BenchmarkTask:
     evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge | polar)
     process_spec: Optional[dict] = None  # Authored Process Bench obligations; evaluators are generated and drift-checked
     enforce_declared_evaluators: bool = False  # Execute evaluators[] and require them to pass in run_benchmark.py
+    run_all_evaluators: bool = False  # With enforce_declared_evaluators: run EVERY evaluator and report every verdict (no stop at the first failure), including for a failed or timed-out run (static checks only)
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)
     group: Optional[str] = None  # Benchmarks-page group label the UI groups off (canonical tokens: pre-deploy | daily | rose-bench | polar-bench | incomplete). Absent → backend derives from status/tags/bench.
     human_time: Optional[str] = None  # Approximate human-equivalent time for capability/complexity bucketing

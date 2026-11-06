@@ -488,6 +488,9 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     enforce_declared_evaluators = raw.get("enforce_declared_evaluators", False)
     if not isinstance(enforce_declared_evaluators, bool):
         raise ValueError(f"{item_id}: enforce_declared_evaluators must be a boolean")
+    run_all_evaluators = raw.get("run_all_evaluators", False)
+    if not isinstance(run_all_evaluators, bool) or (run_all_evaluators and not enforce_declared_evaluators):
+        raise ValueError(f"{item_id}: run_all_evaluators must be a boolean and requires enforce_declared_evaluators")
     if enforce_declared_evaluators:
         if not evaluators:
             raise ValueError(f"{item_id}: enforced declared evaluators must be non-empty")
