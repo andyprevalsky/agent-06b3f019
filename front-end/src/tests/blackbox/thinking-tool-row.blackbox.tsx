@@ -22,6 +22,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import { MessageListItems } from '@/features/terminal-component-group/components/MessageListItems';
+import {
+  BURST_REASON,
+  MAX_STREAMING_TOKENS_PER_SECOND,
+  thoughtGeneration,
+} from '@/features/terminal-component-group/components/thoughtGeneration';
 import { buildCodeSession } from '@/features/terminal-component-group/hooks/codeSessionTurns';
 import { checkThinkingRows } from '@/features/terminal-component-group/benchmark/thinkingRowsCheck';
 import type { Message } from '@/lib/api';
@@ -315,14 +320,31 @@ describe('benchmark check (C21): rows are checked when they exist, required only
       });
     });
 
-    it('fails an implausible recorded rate', () => {
+    it('reports, never fails, a root burst: a response that arrived in one flush has no rate', () => {
       const burst = { ...generation, ended_at: '2026-11-06T04:21:06.550Z' }; // 597 tokens in 50 ms
       const report = run([
         rootRow('r1', { tool_calls: [], generation: burst }),
         carrier('T', measuredAgent),
       ]);
-      expect(report.ok).toBe(false);
-      expect(report.failures[0]).toContain('root: thought r1 runs at 11940.0 tok/s');
+      expect(report.failures).toEqual([]);
+      expect(report.root.verdict).toBe('checked');
+      expect(report.root.unmeasured).toEqual([
+        { messageId: 'r1', reason: BURST_REASON, failing: false },
+      ]);
+      expect(report.notes).toContain(`root: thought r1 not measurable (${BURST_REASON})`);
+    });
+
+    it('still fails an out-of-range rate that is NOT a flagged burst (the bounds stay)', () => {
+      const rows = [runAgentRow('r1', true), carrier('T', measuredAgent)];
+      // 82.9 tok/s against a caller's tighter ceiling, and a 0.5 tok/s crawl below the floor.
+      expect(
+        checkThinkingRows([goal, ...rows], 'root', { maxTokensPerSecond: 50 }).failures[0],
+      ).toContain('root: thought r1 runs at 82.9 tok/s (597 tokens / 7.20s), outside 1–50');
+      const slow = { output_tokens: 5, started_at: second(0), ended_at: second(10) };
+      expect(
+        run([rootRow('slow', { tool_calls: [], generation: slow }), carrier('T', measuredAgent)])
+          .failures[0],
+      ).toContain('root: thought slow runs at 0.5 tok/s');
     });
 
     it('fails when the root run-agent loop wrote thinking rows and none carries a generation', () => {
@@ -633,5 +655,40 @@ describe('an unfinalized thought never outlives its turn', () => {
 
   it('settles when the session closes with the turn still open', () => {
     expect(rows([started, streaming], 'paused')).toEqual([['FINISHED', 'Thought']]);
+  });
+});
+
+describe('thoughtGeneration: the one judge of what a recorded generation can show', () => {
+  const at = (ms: number) => new Date(Date.UTC(2026, 10, 6, 7, 0, 0) + ms).toISOString();
+  const recorded = (tokens: number, ms: number) => ({
+    generation: { output_tokens: tokens, started_at: at(0), ended_at: at(ms) },
+  });
+
+  it('exports the streaming bound once, for the row and the benchmark check alike', () => {
+    expect(MAX_STREAMING_TOKENS_PER_SECOND).toBe(5_000);
+  });
+
+  it('keeps the rate of a streamed response (an old-shape row renders unchanged)', () => {
+    expect(thoughtGeneration(recorded(817, 6050))).toEqual({
+      outputTokens: 817,
+      durationMs: 6050,
+      tokensPerSecond: 817 / 6.05,
+    });
+  });
+
+  it('a rate at the bound is measured; above it the response was not streamed', () => {
+    expect(thoughtGeneration(recorded(5_000, 1_000))?.tokensPerSecond).toBe(5_000);
+    expect(thoughtGeneration(recorded(5_001, 1_000))).toEqual({
+      outputTokens: 5_001,
+      durationMs: 1_000,
+      tokensPerSecond: null,
+      notMeasurable: BURST_REASON,
+    });
+  });
+
+  it('records no generation without a positive duration or any tokens', () => {
+    expect(thoughtGeneration(recorded(463, 0))).toBeNull();
+    expect(thoughtGeneration(recorded(0, 1_000))).toBeNull();
+    expect(thoughtGeneration({})).toBeNull();
   });
 });
