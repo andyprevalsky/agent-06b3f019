@@ -9,22 +9,7 @@ _PLACEHOLDER_RE = re.compile(
     r"\b(?:n\s*/?\s*a|none|not\s+available|unavailable|unknown)\b",
     re.IGNORECASE,
 )
-# A rating candidate is either a score with the scale the page shows it on
-# ("94%", "9.2/10", "9.2 out of 10") or a bare single-digit score, which is read
-# as out of 5 stars. Ranks ("#1") and multi-digit numbers without a scale
-# (guest counts, "Top 10") are never candidates.
-_RATING_RE = re.compile(
-    r"(?<![\d.,#])(?:"
-    r"(?P<score>\d{1,3}(?:\.\d+)?)\s*"
-    r"(?:(?P<percent>%)|(?:/|\bout\s+of\b)\s*(?P<scale>\d{1,3}(?:\.\d+)?)(?![\d.,]))"
-    r"|(?P<stars>\d(?:\.\d+)?)(?![\d.,])"
-    r")",
-    re.IGNORECASE,
-)
-_RATING_FORMAT = (
-    "give only the product's score as shown on the page, with its scale unless it is "
-    "out of 5 stars (for example '4.8 stars' or '9.2 out of 10')"
-)
+_RATING_RE = re.compile(r"(?<![\d.,])(\d(?:\.\d+)?)(?![\d.,])")
 _REVIEW_COUNT_RE = re.compile(
     r"\b\d[\d,]*(?:\.\d+)?\s*[kmb]?\+?\s+(?:customer\s+)?(?:reviews?|ratings?)\b",
     re.IGNORECASE,
@@ -211,45 +196,17 @@ def validate_image_url_for_page(value: Any, page_image_urls: Iterable[Any], page
 
 
 def validate_product_rating(value: Any) -> str:
-    """Normalize a page rating while keeping the scale the merchant shows.
-
-    Merchants rate on different scales (hotels.com shows "9.2 out of 10"), and the
-    approval renders this string to the user, so a score is never rescaled into
-    stars it was not given. Five-point ratings keep their "<score> stars" form.
-    When the text holds several scores that disagree ("4.5 stars, 98% recommend"),
-    the rating is ambiguous and is rejected rather than guessed.
-    """
     text = _validated_review_text(value)
     if re.search(r"\breviews?\b|\bratings\b", text, re.IGNORECASE):
         raise ValueError("rating must be a product score, not a review count")
-    normalized = [_normalized_rating(match) for match in _RATING_RE.finditer(text)]
-    if not normalized:
-        raise ValueError(f"rating must include a numeric score; {_RATING_FORMAT}")
-    if normalized[0] is None:
-        raise ValueError(
-            "rating score exceeds its scale (a score without a scale is read as out of "
-            f"5 stars); {_RATING_FORMAT}"
-        )
-    if any(candidate != normalized[0] for candidate in normalized[1:]):
-        raise ValueError(f"rating contains more than one score; {_RATING_FORMAT}")
-    return normalized[0]
-
-
-def _normalized_rating(match: re.Match[str]) -> str | None:
-    """Canonical display form of one rating candidate, or None when out of range."""
-    if match.group("stars") is not None:
-        score, scale = match.group("stars"), "5"
-    else:
-        score = match.group("score")
-        scale = "100" if match.group("percent") else match.group("scale")
-    maximum = float(scale)
-    if maximum <= 0 or float(score) > maximum:
-        return None
-    if match.group("percent"):
-        return f"{score}%"
-    if maximum == 5:
-        return f"{score} stars"
-    return f"{score}/{scale}"
+    match = _RATING_RE.search(text)
+    if not match:
+        raise ValueError("rating must include a numeric product score from 0 to 5")
+    if float(match.group(1)) > 5:
+        # Not a 5-star score: merchants rate on other scales (hotels.com shows
+        # "9.2 out of 10"). Keep the page's text rather than rescale or reject it.
+        return text
+    return f"{match.group(1)} stars"
 
 
 def validate_product_review_count(value: Any) -> str:

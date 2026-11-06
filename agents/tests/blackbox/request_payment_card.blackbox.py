@@ -350,12 +350,12 @@ _HOTELS_COM_KABUKI_REQUEST = {
 def test_rating_keeps_the_merchant_scale_shown_on_the_page():
     """H-22: a truthful rating on a non-5-point scale must be representable.
 
-    Hotels, Booking-style sites and review aggregators rate out of 10 or 100. The
-    approval renders the rating string to the user, so it must keep the scale the
-    page shows rather than be rejected (or silently rescaled to fake stars).
+    hotels.com shows "9.2 out of 10". The approval renders the rating string to the
+    user as written, so a first score above 5 is kept exactly as the page shows it
+    instead of being rejected or rescaled. Every 5-point input keeps its existing
+    "<score> stars" output, byte for byte, so receipt fingerprints are unchanged.
     """
     from browser_tools.schemas import (
-        BrowserToolArgsValidationError,
         PaymentLineItem,
         WriteLockPurchaseItem,
         validate_browser_tool_args,
@@ -367,77 +367,57 @@ def test_rating_keeps_the_merchant_scale_shown_on_the_page():
 
     # 1) The exact captured hotels.com call passes the production browser-tool boundary.
     parsed = validate_browser_tool_args("request_payment_card", _HOTELS_COM_KABUKI_REQUEST)
-    assert parsed["line_items"][0]["rating"] == "9.2/10", parsed["line_items"][0]["rating"]
+    assert parsed["line_items"][0]["rating"] == "9.2 out of 10", parsed["line_items"][0]["rating"]
 
-    # 2) The approval the user sees carries the page's own scale, not invented stars.
+    # 2) The approval the user sees carries the page's own rating, not invented stars.
     payload = normalize_payment_payload(_HOTELS_COM_KABUKI_REQUEST, "user-123")
-    assert payload["lineItems"][0]["rating"] == "9.2/10"
+    assert payload["lineItems"][0]["rating"] == "9.2 out of 10"
     question = build_payment_question(payload)
-    assert "9.2/10" in question.replace("\\", ""), question
-    assert "4.6 stars" not in question
+    assert "9.2 out of 10" in question.replace("\\", ""), question
 
-    # 3) Every scale form normalizes deterministically (stable fingerprints); 5-point
-    #    ratings keep their existing "<score> stars" form, and ranks ("#1") or
-    #    multi-digit numbers with no scale ("Top 10") never displace the star score.
     valid_item = _sample_tool_call()["line_items"][0]
-    expected = {
+    unchanged_five_point = {
         "4.8 stars": "4.8 stars",
         "4.8 out of 5 stars": "4.8 stars",
         "4.5/5": "4.5 stars",
         "0 stars": "0 stars",
         "5.0 stars": "5.0 stars",
         "4.8 (2,345)": "4.8 stars",
-        "4.8 stars (4.8 out of 5)": "4.8 stars",
+        "Rated 4.7 of 5": "4.7 stars",
+        "4.5 of 5": "4.5 stars",
+        "4.6 stars out of 5": "4.6 stars",
+        "4.5 (1.2K)": "4.5 stars",
+        "4.7 (2k+)": "4.7 stars",
+        "4.9 ⭐ (2.1k)": "4.9 stars",
+        "4.5 stars, 98% recommend": "4.5 stars",
+        "4.5 stars · 20% off": "4.5 stars",
+        "4.7★ · Top 5%": "4.7 stars",
+        "4.8 stars · 1 of 3 left": "4.8 stars",
+        "4.5 – #1 of 25": "4.5 stars",
         "#12 in Hotels · 4.5 stars": "4.5 stars",
         "Top 10 · 4.6 stars": "4.6 stars",
         "250 guests · 4.5 stars": "4.5 stars",
-        "4.5 – #1 of 25": "4.5 stars",
-        "9.2 out of 10": "9.2/10",
-        "9.2/10 Wonderful": "9.2/10",
-        "10/10": "10/10",
-        "85 out of 100": "85/100",
-        "94%": "94%",
+        "#1 of 25": "1 stars",
     }
-    rejected = (
-        # Several scores that disagree: ambiguous, so rejected rather than guessed.
-        "4.5 stars, 98% recommend",
-        "4.5 stars · 20% off",
-        "4.7★ · Top 5%",
-        "4.8 stars · 1 of 3 left",
-        # A rank is neither a score nor a scale.
-        "#1 of 25",
-        # Out of range for the stated or implied scale.
-        "9.2",
-        "Rated 8.7 of 10",
-        "12 out of 10",
-        "150%",
-        # Placeholders and review counts.
-        "N/A",
-        "312 reviews",
-    )
+    other_scales_kept_as_written = ("9.2 out of 10", "9.2/10 Wonderful", "Rated 8.7 of 10")
+    still_rejected = ("250 guests", "N/A", "312 reviews")
     for model in (PaymentLineItem, WriteLockPurchaseItem):
-        for submitted, normalized in expected.items():
+        # 3) 5-point outputs are identical to the pre-fix validator.
+        for submitted, normalized in unchanged_five_point.items():
             item = {**valid_item, "title": valid_item["name"], "rating": submitted}
             assert model.model_validate(item).rating == normalized, (model.__name__, submitted)
-        for submitted in rejected:
+        # 4) A first score above 5 is kept exactly as the page shows it.
+        for submitted in other_scales_kept_as_written:
+            item = {**valid_item, "title": valid_item["name"], "rating": submitted}
+            assert model.model_validate(item).rating == submitted, (model.__name__, submitted)
+        # 5) No score, placeholders and review counts are still rejected.
+        for submitted in still_rejected:
             item = {**valid_item, "title": valid_item["name"], "rating": submitted}
             try:
                 parsed_item = model.model_validate(item)
             except ValueError:
                 continue
             raise AssertionError(f"{model.__name__} accepted {submitted!r} as {parsed_item.rating!r}")
-
-    # 4) Through the production browser-tool boundary, every rejected score names the
-    #    expected form so the model can fix the call truthfully.
-    for submitted in rejected[:-2]:
-        request = json.loads(json.dumps(_HOTELS_COM_KABUKI_REQUEST))
-        request["line_items"][0]["rating"] = submitted
-        try:
-            validate_browser_tool_args("request_payment_card", request)
-        except BrowserToolArgsValidationError as error:
-            assert "'4.8 stars' or '9.2 out of 10'" in error.detail, (submitted, error.detail)
-            continue
-        raise AssertionError(f"request_payment_card accepted rating {submitted!r}")
 
 
 def test_payment_tool_accepts_flexible_merchant_labels():

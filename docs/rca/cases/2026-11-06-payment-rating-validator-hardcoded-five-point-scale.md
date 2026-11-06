@@ -67,38 +67,35 @@ feedback -> no card request -> no approval.
 
 ## Solution
 
-Candidate on branch `rca/h-22-20261106` (approval pending for the LLM-visible error
-text; outcome proof pending): `validate_product_rating` treats as rating candidates
-either a score with the scale the page shows (`/N`, `out of N`, `%`) or a bare
-single-digit score read as out of 5 stars. Ranks (`#1`) and multi-digit numbers without a
-scale (`Top 10`, `250 guests`) are never candidates, and bare `of N` is not a scale (a
-rank like `#1 of 25` is not a rating). Each candidate is normalized deterministically —
-five-point ratings keep `"<score> stars"` (existing fingerprints and fixtures unchanged),
-other scales become `"<score>/<scale>"` or `"<score>%"`. The first candidate is used; when
-other candidates disagree (`4.5 stars, 98% recommend`, `4.5 stars · 20% off`) the rating
-is ambiguous and rejected rather than guessed. Out-of-range scores (`9.2` with no scale,
-`12 out of 10`, `150%`) are rejected; every rejection names the expected form
-("'4.8 stars' or '9.2 out of 10'"). Placeholder and review-count rejection are unchanged.
-Tool descriptions are unchanged (they already say "rating shown on the product page"), so
-browser tool bytes and the phone-off golden hashes are stable. The first candidate
-(e99a9f0506) preferred any scaled match and widened bare scores to three digits; golden
-review returned NOT_GROUNDED because that misread `4.5 stars, 98% recommend` as `98%` and
-rejected `#12 in Hotels · 4.5 stars`. Those inputs are now regression cases.
-Sibling failures prevented: 10-point hotel/booking sites (Booking.com, Expedia,
-hotels.com), 100-point/percent ratings (Metacritic, Tomatometer, seller feedback), and the
-`generate_write_lock_notification` purchase item, which shares the validator.
+Candidate on branch `rca/h-22-20261106` (outcome proof pending): the minimal change.
+`validate_product_rating` keeps its base regex and logic; a first single-digit score in
+0-5 still returns `"<score> stars"`, so every 5-point output and receipt fingerprint is
+byte-identical to base. The only change: when the first matched score is above 5 (where
+base raised "from 0 to 5"), the rating is accepted and returned exactly as the agent wrote
+it after the existing placeholder and review-count checks (`"9.2 out of 10"` ->
+`"9.2 out of 10"`). No rescaling, parsing or scale inference; the backend, approval card
+and SMS render the string as-is (the approval question already collapses newlines and
+escapes Markdown). Inputs with no single-digit score keep the old error text. Tool
+descriptions are unchanged, so browser tool bytes and the phone-off golden hashes are
+stable. A base-vs-new comparison over 38 inputs changed only 4 outputs, all from REJECT
+to accepted-as-written: `9.2 out of 10`, `9.2/10 Wonderful`, `Rated 8.7 of 10`, `9.2`.
+Two earlier candidates (e99a9f0506, 80f4b0ee82) parsed scales and rejected disagreeing
+numbers; golden review returned NOT_GROUNDED on both because they changed base-correct
+5-point results (`4.5 stars, 98% recommend` -> `98%`; `Rated 4.7 of 5`, `4.5 (1.2K)`
+rejected) and drifted toward a number classifier (CLAUDE.md rule 25b). Simplicity won:
+keep base behavior and only stop rejecting what base could not represent.
+Sibling failures prevented: 10-point hotel/booking sites whose first score is above 5
+(Booking.com, Expedia, hotels.com) and the `generate_write_lock_notification` purchase
+item, which shares the validator. Ratings whose first number has two or more digits
+(`10/10`, `85 out of 100`, `94%`) are still rejected with the base error.
 10k-agent behavior: pure in-process string validation per tool call; no I/O, shared
 state, or per-agent growth.
 
-Golden reference: claude-code-src/src/services/tools/toolExecution.ts:615-675 with
-src/utils/toolErrors.ts:66 (invalid input returned as an is_error tool_result naming the
-parameter and expected shape); codex/codex-rs/core/src/tools/handlers/mod.rs:86-92
-(parse failure returned to the model with the expected-field detail);
-hermes-agent/tools/arg_coercion.py:1-7,20 (schema-guided conservative normalization of
-equivalent representations, keeping originals when ambiguous); openclaw
-src/agents/agent-tool-definition-adapter.ts:606-610 (ToolInputError message returned as
-a tool error). The fix converges: accept and unambiguously normalize the truthful value,
-and make the remaining rejection state the expected form.
+Golden reference: hermes-agent/tools/arg_coercion.py:1-7,20 (conservative coercion keeps
+the model's original value whenever a repair is not unambiguous) — the fix converges by
+keeping the page's text instead of rescaling it. Error feedback paths are unchanged
+(claude-code-src/src/services/tools/toolExecution.ts:615-675; codex/codex-rs/core/src/
+tools/handlers/mod.rs:86-92).
 
 ## Human feedback
 
