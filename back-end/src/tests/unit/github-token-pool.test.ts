@@ -182,6 +182,13 @@ async function main(): Promise<void> {
     ['Bearer primary']
   );
 
+  // A minimal response double (no status, no headers) passes through: learning a member's quota
+  // is advisory and must never throw into the read (github-agent-repo's body-stall fixture).
+  reset();
+  respond = () => ({ ok: true, text: async () => 'a'.repeat(40) }) as unknown as Response;
+  const stub = await githubFetch('https://api.github.com/stub', {}, { fetchImpl: fakeFetch });
+  assert.strictEqual(await stub.text(), 'a'.repeat(40));
+
   // No member configured: unauthenticated, as before.
   reset();
   const saved = { ...process.env };

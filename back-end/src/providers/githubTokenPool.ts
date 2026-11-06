@@ -299,7 +299,10 @@ async function sendWithToken(
           .text()
           .catch(() => '')
       : '';
-  recordGithubResponse(token, response.status, response.headers, body);
+  // Quota learning is advisory and must never throw into the read: a minimal response
+  // double without headers is passed through untouched.
+  const learned: Headers | undefined = response.headers;
+  recordGithubResponse(token, response.status, learned ?? new Headers(), body);
   const rejected =
     response.status === 401 || isGithubRateLimited(response.status, response.headers, body);
   return { response, rejected };
