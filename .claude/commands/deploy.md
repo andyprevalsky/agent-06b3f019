@@ -161,7 +161,7 @@ Never skip for an unexplained failure, an auth failure our own configuration cau
 8. Import the attributions: `python3 scripts/deploy_test_cycle.py triage --input report.json`.
 9. After a fix: `focus --input focused.json` then `run` (failing tests plus regressions), then the full failed gates, then every selected gate on the final source.
 10. A failure in the final sweep goes back to step 2; a focused pass is never a deploy pass.
-11. After two failed rounds the runner refuses a blind rerun; resume only with `run --after-rca "<rca ref>"`.
+11. Never rerun blind: the staged runner requests `/RCA` on the first failure of every round, so each rerun follows a repro, a fix and its regression.
 12. After merge, dispatch each NOT_INTRODUCED packet as a `/goal` on a new devbox in the Bugs folder at high effort and standard speed.
 
 Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.md`.

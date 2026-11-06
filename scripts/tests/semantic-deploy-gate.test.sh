@@ -243,7 +243,7 @@ require_text "$DEPLOY_COMMAND" "An override must name the gate explicitly; never
 require_text "$DEPLOY_COMMAND" '| Any gate | The user explicitly overrides that named gate | Record `⚠️ Overridden` |' "/deploy must allow explicit user overrides for every gate and record them as overridden"
 require_text "$DEPLOY_COMMAND" "A skip, waiver, exception or override is never PASS" "/deploy must disclose overridden gates instead of reporting them as passing"
 require_text "$DEPLOY_COMMAND" '| Credential health: Anthropic, Parallel.ai | Any failure (warn-only) |' "/deploy must keep the Anthropic and Parallel.ai credential probes warn-only"
-require_text "$DEPLOY_COMMAND" '| Production semantics | always, after the lanes above |' "/deploy must retain production semantic verification"
+require_text "$DEPLOY_COMMAND" '| Production semantics | always, after the Render, Vercel and Fly lanes it exercises |' "/deploy must retain production semantic verification"
 require_text "$PROD" "'semantic': Lane('semantic', True, 'always runs (Step 13b)')," "production semantic verification must run for every merge"
 # Retired with the inline skill: the Conductor PR-title lock step (and its path+branch
 # versus basename SQL rule); nothing in the deploy path touches the Conductor database.
