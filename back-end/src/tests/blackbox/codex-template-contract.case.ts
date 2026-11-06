@@ -105,9 +105,10 @@ export async function testTemplate_pinsCodexCliForGpt56() {
     `codexTemplate.ts codexVersion ${CODEX_CODE_TEMPLATE.codexVersion} != Dockerfile pin ${pin}; build a new template`
   );
   const [major, minor] = pin.split('.');
+  const expectedPrefix = `codex-code-v${major}${minor}-node${nodePin?.replace(/\./g, '')}`;
   assert(
-    CODEX_CODE_TEMPLATE.alias ===
-      `codex-code-v${major}${minor}-node${nodePin?.replace(/\./g, '')}` &&
+    CODEX_CODE_TEMPLATE.sizedAliasPrefix === expectedPrefix &&
+      CODEX_CODE_TEMPLATE.alias === `${expectedPrefix}-c2-m4` &&
       DEFAULT_CODEX_CODE_TEMPLATE_ID === CODEX_CODE_TEMPLATE.alias,
     `Codex template alias ${CODEX_CODE_TEMPLATE.alias} must include its CLI and Node versions`
   );

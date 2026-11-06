@@ -133,6 +133,10 @@ check('Claude templates pin a CLI that supports Opus 5.5', () => {
     CLAUDE_CODE_TEMPLATE.alias,
     `claude-code-v${pin.replace(/\./g, '')}-node${nodePin?.replace(/\./g, '')}-c${size.cpu}-m${size.memoryGb}`
   );
+  assert.strictEqual(
+    CLAUDE_CODE_TEMPLATE.sizedAliasPrefix,
+    `claude-code-v${pin.replace(/\./g, '')}-node${nodePin?.replace(/\./g, '')}`
+  );
   assert.strictEqual(CLAUDE_CODE_TEMPLATE.nodeVersion, nodePin);
   // The built template's CPU/memory (e2b-templates/.context receipt: 2 vCPU, 4096 MB).
   assert.deepStrictEqual(size, { cpu: 2, memoryGb: 4 });
