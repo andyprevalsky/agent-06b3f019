@@ -68,7 +68,7 @@ function reportHeight(frame: HTMLIFrameElement, height: number) {
     );
   });
 }
-function toolRow(id: string, title: string, toolStatus: string, error?: string): Message {
+function toolRow(id: string, title: string, toolStatus: string, error?: boolean): Message {
   return {
     message_id: id,
     role: 'TOOL',
@@ -158,7 +158,7 @@ describe('Agent displays render inline (no Agent Display icon or panel)', () => 
         messages={[
           toolRow('call', 'Displayed for the user', 'FINISHED'),
           output(),
-          toolRow('failed', '❌ Display failed', 'ERROR', 'storage unavailable'),
+          toolRow('failed', '❌ Display failed', 'ERROR', true),
         ]}
       />,
       { selectedAgentId: 'root' },
