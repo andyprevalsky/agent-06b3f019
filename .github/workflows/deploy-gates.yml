@@ -19,7 +19,6 @@ jobs:
     timeout-minutes: 270
     env:
       ROSE_USE_SYSTEM_PG: 'true'
-      ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME: '1'
       CONDUCTOR_ROOT_PATH: ${{ github.workspace }}
       CONDUCTOR_WORKSPACE_PATH: ${{ github.workspace }}
       NO_PROXY: localhost,127.0.0.1,::1
