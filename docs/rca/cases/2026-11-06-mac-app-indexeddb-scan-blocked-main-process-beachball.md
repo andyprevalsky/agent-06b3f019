@@ -8,9 +8,10 @@ classification: our-bug
 problem_class: concurrency-inefficiency
 first_bad_boundary: mac-app/main/domains/indexed-db-reader/service.ts readIndexedDB — `await Promise.resolve()` then a fully synchronous readIndexedDbDatabases + JSON.stringify hash per origin on the main process
 symptoms:
-  - "on the mac-app, i get stutters sometimes, it feels like the CPU gets throttled, I get the little mac spinner thing with the app freezing"
-  - "[IndexedDBReader] Read N origins, D databases, R records"
-  - "spinning beachball in the Rose Mac app every few minutes"
+  - "app freezing"
+  - "little mac spinner"
+  - "synchronous CPU/IO work"
+  - "readIndexedDbDatabases"
 tags:
   - mac-app
   - electron-main
@@ -18,10 +19,10 @@ tags:
   - indexeddb
   - browser-state-sync
 sources:
-  - commit 9966aa4036 (fix(mac-app): stop browser-state sync from freezing the main process)
-  - commit 3f3450e892 (merge of the beachball fix into main)
+  - commit 9966aa4036eaac792379e949d0e1ad6ed3dbe764
+  - task .context/beachball-rca
 repro: mac-app/tests/blackbox/indexed-db-reader.blackbox.ts › main-process responsiveness
-status: fixed
+status: mitigated
 ---
 
 ## Problem
@@ -54,6 +55,8 @@ main-process JavaScript runs for seconds.
    20,000-record profile (38 MB JSON) that alone blocked for **1,476 ms**.
 
 ## Solution
+
+Recorded implementation state: fixed (main-process stall); Mac-side confirmation pending.
 
 - `main/base/timeSlice.ts` `SliceClock` (8 ms budget) hands the loop back with
   `setImmediate` once a slice is used up.
@@ -107,16 +110,8 @@ the mac-app vitest suite used by `/deploy`.
 
 ## Human feedback
 
-Andy, 2026-11-06: "on the mac-app, i get stutters sometimes, it feels like the CPU
-gets throttled, I get the little mac spinner thing with the app freezing". The
-Mac-side confirmation that the beachball is gone is still pending (see the open
-items above); the fix is verified on Linux Node 22 with a real Chromium profile.
+The original source records Andy's November 6, 2026 report: "on the mac-app, i get stutters sometimes, it feels like the CPU gets throttled, I get the little mac spinner thing with the app freezing". Its local reproduction used a headless Chromium profile with 20,000 Gmail-like IndexedDB records under `.context/beachball-rca`. The Mac-side confirmation caveat remains open above.
 
 ## Reusable lesson
 
-`await Promise.resolve()` is a microtask, not a yield: it does not let the
-Electron main process handle events. Work that decodes or serializes
-user-sized data (IndexedDB stores, multi-MB JSON payloads) on a loop that owns
-the UI must hand the loop back on a time budget (`setImmediate` slices), keep the
-output byte-identical, and carry a responsiveness test that also asserts the
-synchronous control really stalls.
+A microtask yield does not make a long synchronous scan responsive. Bound work with event-loop yields while checking byte parity, and retain platform-specific validation limits.
