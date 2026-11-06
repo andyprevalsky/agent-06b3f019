@@ -19,7 +19,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
-import { isCliTemplateSession } from '../cliTemplateReferences';
 
 const log = createLogger('CodeSessionStore');
 
@@ -160,28 +159,29 @@ export async function ownerCodeSessions(
   repoUrl: string | null,
   now = new Date()
 ): Promise<CodeSessionRow[]> {
-  const candidates = await prisma.codeSession.findMany({
-    where: {
-      userId,
-      ownerAgentId,
-      repoKey: repoKeyFor(repoUrl),
-      state: { not: CODE_SESSION_STATES.RETIRED },
-    },
-    orderBy: { createdAt: 'asc' },
-    take: OWNER_SESSION_SCAN,
-  });
-  const live: CodeSessionRow[] = [];
-  for (const candidate of candidates) {
-    // A published CLI template retains its session beyond the idle TTL.
-    // Expired unreferenced sessions are left for the lifecycle retirement path.
-    if (
-      now.getTime() - candidate.lastActiveAt.getTime() <= codeSessionTtlMs() ||
-      (await isCliTemplateSession(candidate.userId, candidate.id))
-    ) {
-      live.push(candidate);
-    }
-  }
-  return live;
+  // Apply eligibility before LIMIT: old unpinned rows must not hide a live
+  // session or a published CLI template. EXISTS preserves one row per session
+  // even when multiple CLI integrations reference it, without loading all pins.
+  return prisma.$queryRaw<CodeSessionRow[]>(Prisma.sql`
+    SELECT session.*
+    FROM "CodeSession" AS session
+    WHERE session."userId" = ${userId}
+      AND session."ownerAgentId" = ${ownerAgentId}
+      AND session."repoKey" = ${repoKeyFor(repoUrl)}
+      AND session.state <> 'RETIRED'
+      AND (
+        session."lastActiveAt" >= ${new Date(now.getTime() - codeSessionTtlMs())}
+        OR EXISTS (
+          SELECT 1 FROM "Integration" AS integration
+          WHERE integration."userId" = session."userId"
+            AND integration.name = 'cli'
+            AND integration.type = 'TOOL_SETUP'
+            AND integration.config ->> 'code_session_id' = session.id
+        )
+      )
+    ORDER BY session."createdAt" ASC
+    LIMIT ${OWNER_SESSION_SCAN}
+  `);
 }
 
 /** Find a session the caller owns; foreign and unknown ids are indistinguishable. */
