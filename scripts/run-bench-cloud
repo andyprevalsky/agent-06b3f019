@@ -2474,8 +2474,10 @@ resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory
         echo "❌ CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS must be a non-negative integer (got: ${cap})" >&2
         return 1
     fi
+    assert_app_environment_lock_ownership || return 1
     state="$(machine_state "$id")"
     if [ "$state" != "stopped" ]; then
+        assert_app_environment_lock_ownership || return 1
         stop_machine_strict "$id" || return 1
     fi
     echo "🧮 sizing warm source for $purpose: $size/${memory}MB"
@@ -2483,6 +2485,7 @@ resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory
     # a peer workspace, or org API rate limits after park→prepare. Fail closed
     # after bounded attempts so a stuck donor cannot strand every later fleet.
     while true; do
+        assert_app_environment_lock_ownership || return 1
         update_rc=0
         update_out="$(FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
             --command "sleep infinity" --skip-start --yes 2>&1)" || update_rc=$?

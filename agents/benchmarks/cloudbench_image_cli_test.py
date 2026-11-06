@@ -1403,3 +1403,30 @@ resize_stopped_warm_source warm "shared-cpu-${EXPECTED_CPUS}x" "$EXPECTED_MEMORY
     assert "--skip-start --yes" in updates[0]
     if settle == "replacing":
         assert (tmp_path / "polls").read_text().strip() == "3"
+
+
+@pytest.mark.parametrize("lost", ["entry", "retry"])
+def test_warm_resize_lost_owner_cannot_stop_or_issue_next_update(tmp_path, lost):
+    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
+    start = cloud.index("wait_for_warm_resize() {")
+    last = cloud.index("resize_stopped_warm_source() {", start)
+    functions = cloud[start:cloud.index("\n}\n", last)+3]
+    (tmp_path / "updates").write_text("");(tmp_path / "stops").write_text("")
+    script = functions + r"""
+APP=fixture
+assert_app_environment_lock_ownership() { [ "$LOST" != entry ] && [ ! -s "$DIR/updates" ]; }
+machine_state() { [ "$LOST" = entry ] && echo started || echo stopped; }
+stop_machine_strict() { echo stop >> "$DIR/stops"; return 1; }
+sleep() { :; }
+FLY() {
+    [ "$1 $2 $3" = 'machine update warm' ] || return 91
+    echo "$*" >> "$DIR/updates"
+    echo 'lease currently held'; return 1
+}
+resize_stopped_warm_source warm shared-cpu-4x 8192 maintenance
+"""
+    result = subprocess.run([BASH,"-c",script],env={**os.environ,"DIR":str(tmp_path),"LOST":lost},
+        capture_output=True,text=True,timeout=15)
+    assert result.returncode != 0
+    assert (tmp_path / "stops").read_text() == ""
+    assert len((tmp_path / "updates").read_text().splitlines()) == (0 if lost == "entry" else 1)
