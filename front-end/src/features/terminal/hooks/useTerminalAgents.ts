@@ -15,7 +15,7 @@ import { isRoseDesktopUser } from '@/lib/roseDesktop';
 import { useAgentContext } from '@/features/agent-context';
 import { useToast } from '@/hooks/use-toast';
 
-import type { TerminalView } from '../types';
+import type { Agent, AgentDetail, TerminalView } from '../types';
 import { DEFAULT_MODEL, ROSE_DESKTOP_DEFAULT_MODEL } from '../config';
 
 import { useAgentList } from './useAgentList';
@@ -39,6 +39,32 @@ export function overlaySelectedAgentTitle(
       ? { ...agent, title: selectedAgent.title, status: selectedAgent.status }
       : agent,
   );
+}
+
+/** Reconcile status by producer freshness before projecting local user intent. */
+function fresherSelectedAgent(detail: AgentDetail | null, listed: Agent | undefined) {
+  if (!detail || !listed || Date.parse(listed.updated_at) <= Date.parse(detail.updated_at)) {
+    return detail;
+  }
+  return {
+    ...detail,
+    status: listed.status,
+    status_message: listed.status_message,
+    updated_at: listed.updated_at,
+  };
+}
+
+/** Cache list identity once per refresh; pause clicks perform one keyed lookup. */
+function useFreshAgentContext(agents: Agent[]) {
+  const context = useAgentContext();
+  const agentsById = useMemo(
+    () => new Map(agents.map((agent) => [agent.agent_id, agent])),
+    [agents],
+  );
+  return {
+    ...context,
+    agent: fresherSelectedAgent(context.agent, agentsById.get(context.selectedAgentId ?? '')),
+  };
 }
 
 export function useSelectedAgentModel(
@@ -92,9 +118,8 @@ export function useTerminalAgents(
   const auth = useAuth();
   const canSubmitGoals = auth.isFullySignedIn;
   const clientSource = useMemo(() => getClientSource(), []);
-  const ctx = useAgentContext();
-
   const agentList = useAgentList(canSubmitGoals);
+  const ctx = useFreshAgentContext(agentList.agents);
   const modals = useTerminalModals();
   const loading = useLoadingNetwork(ctx.selectedAgentId, ctx.isLoadingAgent, ctx.agent?.status);
   const ancestors = useAncestors(

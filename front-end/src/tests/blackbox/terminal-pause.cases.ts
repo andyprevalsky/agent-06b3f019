@@ -176,4 +176,40 @@ export function terminalPauseCases({ ctxState, setCurrentView, resetAnimationSta
     expect(view.result.current.agentDetail?.status).toBe('ACTIVE');
     view.unmount();
   });
+  it('uses newer list status for both views without making terminal status sticky', async () => {
+    const agent = makeAgent();
+    ctxState.agent = agent;
+    ctxState.selectedAgentId = agent.agent_id;
+    let listed = agent;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get(`${API_BASE}/agents`, () => HttpResponse.json({ agents: [listed] })),
+      http.post(`${API_BASE}/agents/:agentId/pause`, async () => {
+        await gate;
+        return HttpResponse.json({ error: 'rejected' }, { status: 500 });
+      }),
+    );
+    const view = renderHook(() => useTerminalAgents('agents', setCurrentView, resetAnimationState));
+    let pending = Promise.resolve();
+    act(() => {
+      pending = view.result.current.handlePauseAgent();
+    });
+    try {
+      listed = { ...agent, status: 'COMPLETED', updated_at: '2026-01-01T00:00:02Z' };
+      await act(async () => view.result.current.loadAgents());
+      expect(view.result.current.agentDetail?.status).toBe('COMPLETED');
+      expect(view.result.current.agents[0].status).toBe('COMPLETED');
+    } finally {
+      release();
+      await act(async () => pending);
+    }
+    listed = { ...agent, status: 'ACTIVE', updated_at: '2026-01-01T00:00:03Z' };
+    await act(async () => view.result.current.loadAgents());
+    expect(view.result.current.agentDetail?.status).toBe('ACTIVE');
+    expect(view.result.current.agents[0].status).toBe('ACTIVE');
+    view.unmount();
+  });
 }

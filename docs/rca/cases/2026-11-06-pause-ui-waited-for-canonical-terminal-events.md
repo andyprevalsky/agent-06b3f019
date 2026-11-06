@@ -67,7 +67,7 @@ Reproduction command (run from front-end):
 Before the production fix, both deferred-HTTP 200/500 cases failed with
 `AssertionError: expected 'ACTIVE' to be 'PAUSED'` on 75d1b1df8f. The identical
 command/assertion passed after the fix (2/2). The complete owning blackbox file
-also passed (41/41). Original outputs: .context/pause-rca/repro-before.log,
+also passed (42/42). Original outputs: .context/pause-rca/repro-before.log,
 repro-after.log and focused.log. Tests exercise the real composed terminal hooks,
 HTTP client and panel derivation with MSW holding the POST open. Canonical
 transcript and server state remain unchanged while pending. Additional checks
@@ -92,7 +92,7 @@ frontend-coverage-blackbox category. This is ordinary frontend state/UI code.
 Golden reference: not applicable (no approval-gated hunk).
 
 10k agents: a sparse map of this view's outstanding pause requests (not the
-owned-agent roster), each with one token, and a constant-size selected projection. No new
+owned-agent roster), each with one token, and a constant-size selected projection. The list index adds no per-pause roster scan. No new
 polling, subscriptions, broadcasts, DB work, per-agent timers or network requests.
 Existing panel reduction is unchanged and skipped entirely for a paused owner.
 
@@ -101,7 +101,15 @@ and concurrent-agent request ownership gaps in the first candidate. Both were
 reproduced before repair (three failing cases) using
 `npx vitest run src/tests/blackbox/terminal-hooks.blackbox.ts -t 'accepted pause|concurrent pause ownership'`.
 The unchanged cases pass in the full owning suite after token-scoped reconciliation.
-Original evidence: review-repro-before.log and review-repro-after2.log. Initial
+Original evidence: review-repro-before.log and review-repro-after2.log.
+CodeRabbit independently confirmed concurrent request ownership and found a
+newer-list-completion race. The latter was reproduced against 099001cceb using
+`npx vitest run src/tests/blackbox/terminal-hooks.blackbox.ts -t 'newer list status'`
+in the isolated frontend worker (freshness-before.log); the identical case passes
+with freshness reconciliation (freshness-after.log). A list index is rebuilt only
+when the list itself changes, then status is reconciled by updated_at before
+pause intent is projected. Both the detail and sidebar use the same fresher status;
+terminal states do not override a later ACTIVE version unconditionally. Initial
 candidate failures remain preserved, not rewritten as passes.
 
 ## Human feedback
