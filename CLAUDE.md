@@ -1396,10 +1396,12 @@ Code: `agents/providers/planner_memory/`, backend `src/domains/planner-memory/` 
 
 ## GitHub token pool
 
-`GITHUB_TOKEN` (Andy's primary identity) and the machine-account tokens
-`GITHUB_TOKEN_2` … `GITHUB_TOKEN_9` form one pool, each with its own 5,000/h
-quota. Store every member in `agents/.env`, `back-end/.env`, Render, both Fly
-apps and the boxes.dev managed env. Rotation is automatic: backend reads use
+`GITHUB_TOKEN` (Andy's primary identity), optional machine-account tokens
+`GITHUB_TOKEN_2` … `GITHUB_TOKEN_9` and the org's GitHub App
+(`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_B64`;
+hourly installation tokens are minted automatically) form one pool, each with
+its own quota. Store every member in `agents/.env`, `back-end/.env`, Render and
+the boxes.dev managed env. Rotation is automatic: backend reads use
 `githubFetch` (`back-end/src/providers/githubTokenPool.ts`), which picks the
 member with the most quota left and moves on when one is rate limited.
 Actions that act as Andy (agent repo creation, PRs, pushes to his personal
