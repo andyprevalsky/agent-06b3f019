@@ -12,6 +12,9 @@ Observable surface (rose-builds-rose C18, 2026-11-06):
     as a transient sandbox flake and not reported as an access denial.
   - A merge lookup that GitHub never answered (rate limited, or unreachable) is
     reported as unknown. The tool result never says "no (confirmed with GitHub)".
+  - benchmarks/github_rate_limit_check.py (the code-agent benchmark's check of a
+    finished run) accepts exactly those behaviours and rejects duplicate sessions,
+    credentials in output, a wrong reset time and a false "confirmed" claim.
 """
 
 import asyncio
@@ -186,12 +189,90 @@ async def test_merge_line_is_unknown_when_github_never_answered():
     assert "Merged: yes (confirmed with GitHub)" in confirmed, confirmed
 
 
+def _check_inputs():
+    from datetime import datetime, timezone
+
+    reset = datetime(2026, 11, 6, 6, 18, 42, tzinfo=timezone.utc)
+    tool_error = {
+        "role": "TOOL",
+        "message": LIMITED,
+        "metadata": {"toolName": "spawn_claude_code_agent", "error_code": "GITHUB_RATE_LIMITED", "status": "ERROR"},
+    }
+    tool_ok = {"role": "TOOL", "message": "done", "metadata": {"toolName": "spawn_claude_code_agent"}}
+    return reset, tool_error, tool_ok
+
+
+async def test_benchmark_check_startup_outcomes():
+    from benchmarks.github_rate_limit_check import GithubRateLimitExpectation, RunEvidence, evaluate
+
+    reset, tool_error, tool_ok = _check_inputs()
+    expect = GithubRateLimitExpectation(injected_reset_at=reset, phase="startup", secrets=("ghp_exact_secret_value",))
+
+    failed = evaluate(RunEvidence(sessions=[], messages=[tool_error]), expect)
+    assert failed.passed and failed.outcome == "failed_truthfully", failed
+
+    late = {"id": "s1", "createdAt": "2026-11-06T06:18:50.000Z", "output": "ok"}
+    started = evaluate(RunEvidence(sessions=[late], messages=[tool_ok]), expect)
+    assert started.passed and started.outcome == "started_after_reset", started
+
+    two = evaluate(RunEvidence(sessions=[late, {**late, "id": "s2"}], messages=[tool_ok]), expect)
+    assert not two.passed and any("duplicate sessions" in f for f in two.failures), two
+
+    early = {"id": "s1", "createdAt": "2026-11-06T06:10:00.000Z"}
+    too_soon = evaluate(RunEvidence(sessions=[early], messages=[tool_ok]), expect)
+    assert not too_soon.passed and any("before the limit ended" in f for f in too_soon.failures), too_soon
+
+    wrong = {**tool_error, "message": "GitHub rate limit reached (primary); retry after 2026-11-06T09:00:00.000Z."}
+    wrong_time = evaluate(RunEvidence(sessions=[], messages=[wrong]), expect)
+    assert not wrong_time.passed and any("does not name the injected reset" in f for f in wrong_time.failures), wrong_time
+
+    silent = evaluate(RunEvidence(sessions=[], messages=[tool_ok]), expect)
+    assert not silent.passed and any("neither a truthful failure" in f for f in silent.failures), silent
+
+
+async def test_benchmark_check_rejects_credentials_in_output():
+    from benchmarks.github_rate_limit_check import GithubRateLimitExpectation, RunEvidence, evaluate
+
+    reset, tool_error, _ = _check_inputs()
+    expect = GithubRateLimitExpectation(injected_reset_at=reset, phase="startup", secrets=("ghp_exact_secret_value",))
+    for leaked in (
+        "clone failed: ghp_exact_secret_value",
+        "token ghp_" + "A" * 36,
+        "fatal: unable to access 'https://x-access-token:abc123@github.com/o/r'",
+    ):
+        message = {**tool_error, "message": f"{LIMITED} {leaked}"}
+        result = evaluate(RunEvidence(sessions=[], messages=[message]), expect)
+        assert not result.passed and any("credential in output" in f for f in result.failures), (leaked, result)
+    leaky_session = {"id": "s1", "createdAt": "2026-11-06T06:19:00.000Z", "output": "ghp_exact_secret_value"}
+    in_session = evaluate(RunEvidence(sessions=[leaky_session], messages=[]), expect)
+    assert any("credential in output" in f for f in in_session.failures), in_session
+
+
+async def test_benchmark_check_merge_lookup_phase():
+    from benchmarks.github_rate_limit_check import GithubRateLimitExpectation, RunEvidence, evaluate
+
+    reset, _, _ = _check_inputs()
+    expect = GithubRateLimitExpectation(injected_reset_at=reset, phase="merge_lookup")
+    unknown = {"role": "TOOL", "message": f"Merged: unknown (GitHub rate limit reached; retry after {RESET_AT})"}
+    ok = evaluate(RunEvidence(sessions=[], messages=[unknown]), expect)
+    assert ok.passed and ok.outcome == "merge_unknown_reported", ok
+
+    claimed = {"role": "TOOL", "message": "Merged: no (confirmed with GitHub)"}
+    bad = evaluate(RunEvidence(sessions=[], messages=[claimed]), expect)
+    assert not bad.passed, bad
+    assert any("confirmed with GitHub" in f for f in bad.failures), bad
+    assert any("no 'Merged: unknown" in f for f in bad.failures), bad
+
+
 async def run_all_tests():
     print("code-agent-github-rate-limit blackbox tests:")
     r = BlackboxResult()
     await r.record_async("repo_github_429_typed", test_repo_maps_github_429_to_non_retryable_typed_error)
     await r.record_async("tool_fails_exact_message", test_tool_fails_with_exact_message_without_soft_fail)
     await r.record_async("merge_line_unknown_when_unanswered", test_merge_line_is_unknown_when_github_never_answered)
+    await r.record_async("check_startup_outcomes", test_benchmark_check_startup_outcomes)
+    await r.record_async("check_rejects_credentials", test_benchmark_check_rejects_credentials_in_output)
+    await r.record_async("check_merge_lookup_phase", test_benchmark_check_merge_lookup_phase)
     teardown_mock()
     return r.summary()
 
