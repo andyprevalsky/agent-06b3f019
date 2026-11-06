@@ -7,11 +7,21 @@ import {
   postMessage as postMessageAPI,
 } from '@/lib/api';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
+import { beginAgentDetailRead } from './detailReads';
 
 export { benchmarkAgentPreviewEnabled };
 
-/** Fetch agent detail and messages by agent ID. */
+/** Fetch agent detail and messages by agent ID (registered while in flight; see detailReads). */
 export async function fetchAgentDetail(agentId: string, signal?: AbortSignal) {
+  const settle = beginAgentDetailRead(agentId);
+  try {
+    return await readAgentDetail(agentId, signal);
+  } finally {
+    settle();
+  }
+}
+
+async function readAgentDetail(agentId: string, signal?: AbortSignal) {
   if (isBenchmarkSharedView()) return getBenchmarkSharedAgent(agentId, signal);
   try {
     return await getAgent(agentId, undefined, signal);

@@ -7,10 +7,23 @@ import {
   DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS,
 } from '../config';
 import { fetchAgentDetail } from '../api';
+import { hasRecentAgentDetailRead } from '../detailReads';
 import { applyAgentBackfill } from './agentBackfill';
 import type { RealtimeSubscriptionDeps } from './useRealtimeSubscription';
 
-/** Poll only while the current agent's realtime channel is disconnected. */
+/**
+ * Poll only while the current agent's realtime channel is disconnected.
+ *
+ * STATE MACHINE (per selected agent):
+ *   [POLLING] --tick, channel joined--------------------------> no-op
+ *   [POLLING] --tick, own read in flight----------------------> no-op
+ *   [POLLING] --tick, another read of this agent in flight
+ *               and younger than the request timeout----------> no-op (that
+ *               read's owner applies the same rows; next tick polls again)
+ *   [POLLING] --tick, otherwise------------------------------> GET detail -> merge
+ *   cadence: 300ms for the first 3s after selection, then 2s; cleared on
+ *   deselect/unmount (timers + in-flight read aborted).
+ */
 export function useDisconnectedAgentBackfill(deps: RealtimeSubscriptionDeps): void {
   useEffect(() => {
     const agentId = deps.selectedAgentId;
@@ -24,6 +37,9 @@ export function useDisconnectedAgentBackfill(deps: RealtimeSubscriptionDeps): vo
     const isActive = () => !cancelled && deps.selectedAgentIdRef.current === agentId;
     const poll = () => {
       if (!isActive() || deps.channelRef.current || inFlight) return;
+      // The selection's own detail load (or another reconcile) is already
+      // reading this trajectory; a second full read would duplicate it.
+      if (hasRecentAgentDetailRead(agentId, DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS)) return;
       inFlight = true;
       const controller = new AbortController();
       requestController = controller;
