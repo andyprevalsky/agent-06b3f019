@@ -5945,9 +5945,14 @@ async def test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_code
     judged_task = replace(task, evaluators=[{**evaluator, "method": "agentic_llm_judge"}])
     verdict = {"structured_response": {"score": 1.0, "reasoning": "every card shows real outputs"}}
 
-    async def judge(plan, gpt_token=None):
+    spawns: list[AsyncMock] = []
+
+    async def judge(plan, gpt_token=None, token_error=None):
         spawn = AsyncMock(return_value=verdict)
-        token = AsyncMock(return_value={"accessToken": gpt_token} if gpt_token else None)
+        spawns.append(spawn)
+        token = AsyncMock(
+            side_effect=token_error, return_value={"accessToken": gpt_token} if gpt_token else None
+        )
         with (
             patch.object(bench, "_sync_compute_tokens", lambda **_: True),
             patch.object(bench, "_fetch_agentic_judge_compute_token", token),
@@ -5969,11 +5974,18 @@ async def test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_code
     _, _, _, spawn, _ = await judge(codex_funded, gpt_token="pool-login")
     assert spawn.await_args.kwargs["gpt_token"] == "pool-login"
 
+    _, _, _, spawn, _ = await judge(codex_funded, token_error=bench.httpx.ConnectTimeout("token fetch"))
+    assert (spawn.await_args.kwargs["code_provider"], spawn.await_args.kwargs["gpt_token"]) == ("codex", None)
+
     claude_sub = {"claude": True, "codex": False, "next_credential": {"provider": "claude", "tier": "subscription"}}
     passed, _, _, spawn, token = await judge(claude_sub)
     assert passed is True
     assert (spawn.await_args.kwargs["code_provider"], spawn.await_args.kwargs["gpt_token"]) == ("claude", None)
     token.assert_not_awaited()
+
+    # An older backend without next_credential: the spawn's own fallback reads the provider flags.
+    passed, _, _, spawn, _ = await judge({"claude": True, "codex": False})
+    assert passed is True and spawn.await_args.kwargs["code_provider"] == "claude"
 
     try:
         await judge(None)
@@ -5981,6 +5993,7 @@ async def test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_code
         assert not isinstance(lookup_failed, bench.ComputeTokenUnavailable), lookup_failed
     else:
         raise AssertionError("a failed credential-plan lookup must not run the judge")
+    spawns[-1].assert_not_awaited()
 
 
 def test_ci_permits_only_the_opt_in_agentcard_release_skip():
