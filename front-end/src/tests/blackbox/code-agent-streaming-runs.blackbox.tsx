@@ -139,9 +139,13 @@ function runMessages(run: string): Message[] {
 }
 
 /** The thought row as the app draws it (useToolData -> ToolMessage). */
-function ThoughtRow({ message }: { message: Message }) {
-  const data = useToolData({ message, isStreaming: false, isAssistant: false, isTool: true });
-  return data ? createElement(ToolMessage, { data }) : null;
+function renderThought(message: Message) {
+  return render(
+    createElement(function Row() {
+      const data = useToolData({ message, isStreaming: false, isAssistant: false, isTool: true });
+      return data ? createElement(ToolMessage, { data }) : null;
+    }),
+  );
 }
 
 /**
@@ -176,12 +180,12 @@ describe('run 4: a response the gateway returned in one burst', () => {
   });
 
   it('renders the burst row with its duration and tokens and NO tok/s', () => {
-    const view = render(createElement(ThoughtRow, { message: thoughtRow(burstKey) }));
+    const view = renderThought(thoughtRow(burstKey));
     expect(view.container).toHaveTextContent('463 tokens');
     expect(view.container).toHaveTextContent('0.0s');
     expect(view.container).not.toHaveTextContent('tok/s');
     view.unmount();
-    const steady = render(createElement(ThoughtRow, { message: thoughtRow(steadyKey) }));
+    const steady = renderThought(thoughtRow(steadyKey));
     expect(steady.container).toHaveTextContent('158.6 tok/s'); // a streamed row keeps its rate
   });
 

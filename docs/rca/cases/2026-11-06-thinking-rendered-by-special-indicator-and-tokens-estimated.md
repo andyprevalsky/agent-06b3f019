@@ -86,8 +86,9 @@ FE function (`thoughtGeneration`); tok/s = recorded tokens / recorded window.
 
 - Root producer: `call_llm_structured_streaming` records the measured
   first-token → last-token window in its usage (measured usage only; excludes
-  queueing, failover legs and the final parse; a window under 100 ms is a single
-  flush and records nothing). `run_agent` attaches `llm_generation_metadata(usage)`
+  queueing, failover legs and the final parse; a zero-length window, a single
+  flush, records nothing; a short window is recorded and the reader judges it, see
+  C24). `run_agent` attaches `llm_generation_metadata(usage)`
   to the ASSISTANT row (never for estimated usage or Fast Mode replays).
   UI-only: a regression proves `build_llm_messages`, `convert_context_to_messages`,
   `build_planner_messages`, the compactor's `_format_middle_for_prompt` and
@@ -141,6 +142,27 @@ It now derives recordability from the raw folded records (`thoughtWindow`), repo
 "not measurable (reason)" for the rest, and fails only a recordable thought with no
 generation; a regression test stubs the projection to drop generations and requires
 the check to fail. Lane B's rewrite does not change either cause (verified on a merge).
+
+### C24 recurrence: a response returned in one burst drew 14,935.5 tok/s
+
+Qualification run 4 (run 080d3457) was served by a gateway route that does not
+stream (the Claude subscription login was rate-limited): its final response
+arrived in one burst. Raw records: usage sample 2410 tokens at 11:05:10.657, the
+thought at .659, the assistant message at .686 (67 partial revisions inside 27
+ms), the next sample 2873 tokens at .688: 463 tokens in 31 ms after a 5.35 s wait.
+`attachGeneration` records any positive-duration window and `thoughtGeneration`
+computed tokens / duration unconditionally, so the row drew `14935.5 tok/s` and the
+check (bound 1-5,000) failed the run.
+
+The fix is one judge and one bound: `thoughtGeneration` (the reader both producers go
+through) returns a recording whose implied rate exceeds
+`MAX_STREAMING_TOKENS_PER_SECOND` (5,000, exported once; the check imports it) as
+`notMeasurable: 'response arrived in one burst, not streamed'` with no rate. The row
+shows duration and tokens, no tok/s. The check reports a flagged burst as a note and
+still fails any other out-of-range rate. The stored shape is unchanged, so earlier
+rows render as before. The root producer's separate 100 ms floor is removed (it was
+a second, per-producer bound); a UI-only metadata change, proved invisible to every
+planner/model reader by the invisibility test, which now also runs a burst recording.
 
 ### Open gaps (not fixed here)
 

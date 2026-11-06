@@ -1951,11 +1951,6 @@ async def resolve_context_attachments(
     return resolved
 
 
-# A window shorter than this is a burst, not a measurable generation (a response
-# delivered in one network flush would read as an absurd tok/s).
-MIN_GENERATION_WINDOW_MS = 100
-
-
 def llm_generation_metadata(usage: Any) -> Optional[Dict[str, Any]]:
     """A persisted thought's recorded generation, or None.
 
@@ -1963,7 +1958,9 @@ def llm_generation_metadata(usage: Any) -> Optional[Dict[str, Any]]:
     output tokens over its measured first-token → last-token window, so the UI's
     tok/s is never estimated and never includes queueing, failover legs or parsing.
     Only measured usage qualifies: estimated usage has no window, and a Fast Mode
-    replay's window times the replay, not the model.
+    replay's window times the replay, not the model. A window of any positive length
+    is recorded, a burst included: the UI reader (thoughtGeneration) is the one judge of
+    whether the implied rate is a streaming speed, so the producer carries no bound of its own.
     UI-only: no message builder reads ``metadata.generation``.
     """
     if not isinstance(usage, dict) or usage.get("from_fast_cache"):
@@ -1973,7 +1970,7 @@ def llm_generation_metadata(usage: Any) -> Optional[Dict[str, Any]]:
     ended = usage.get("generation_ended_at_ms")
     if not all(isinstance(value, int) and not isinstance(value, bool) for value in (tokens, started, ended)):
         return None
-    if tokens <= 0 or ended - started < MIN_GENERATION_WINDOW_MS:
+    if tokens <= 0 or ended <= started:
         return None
 
     def _iso(ms: int) -> str:

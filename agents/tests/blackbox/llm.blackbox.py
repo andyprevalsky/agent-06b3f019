@@ -4154,10 +4154,17 @@ async def test_structured_streaming_records_the_first_to_last_token_generation_w
         generation["started_at"].replace("Z", "+00:00")
     )
     assert window == timedelta(seconds=3)
-    # A single token-bearing chunk (one flush) has no measurable window: no rate, never a guess.
+    # A single token-bearing chunk (one flush) has no window at all: nothing to record.
     flush = await run([])
     assert flush["generation_started_at_ms"] == flush["generation_ended_at_ms"]
     assert llm_generation_metadata(flush) is None
+    # C24: a 40 ms burst between two chunks IS recorded (tokens and duration). The UI reader
+    # (thoughtGeneration) is the one judge that calls 597 tokens in 40 ms a burst; this
+    # producer carries no bound of its own.
+    burst = await run([0.04])
+    burst_generation = llm_generation_metadata(burst)
+    assert burst_generation is not None and burst_generation["output_tokens"] == 597
+    assert burst["generation_ended_at_ms"] - burst["generation_started_at_ms"] == 40
 
 
 async def test_call_llm_structured_streaming_retries_malformed_output():

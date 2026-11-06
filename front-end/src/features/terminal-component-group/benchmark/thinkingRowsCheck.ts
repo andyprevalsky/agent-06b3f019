@@ -19,6 +19,11 @@
  *    recorded generation is RENDERED through the production path (useToolData +
  *    ToolMessage) and must show the lightbulb tool row, "<n>s", "<n> tokens" and
  *    "<n> tok/s", never the animated indicator, with a plausible rate.
+ *    A recorded generation whose implied rate exceeds the streaming bound is a response
+ *    returned in one burst (an unstreamed gateway route): thoughtGeneration flags it, the
+ *    row shows duration and tokens and no tok/s, and the check reports it as not
+ *    measurable (response arrived in one burst, not streamed) without failing. A rate
+ *    outside the bounds that is NOT such a flagged burst still fails.
  *    A row without a generation is "unmeasured". For a code agent the run's raw records
  *    decide (thoughtWindow): a thought whose bracketing usage samples (creation order, same
  *    turn) leave no tool running across the window was RECORDABLE, so the missing
@@ -39,7 +44,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { Message } from '@/lib/api/types';
 
 import { trajectoryActivity } from '../components/trajectoryWorkGroups';
-import { thoughtGeneration, type ThoughtGeneration } from '../components/thoughtGeneration';
+import {
+  MAX_STREAMING_TOKENS_PER_SECOND,
+  thoughtGeneration,
+  type ThoughtGeneration,
+} from '../components/thoughtGeneration';
 import { filterMessagesForSubAgent } from '../components/useMessageFiltering';
 import { ToolMessage } from '../components/message-bubble/ToolMessage';
 import { useToolData } from '../components/message-bubble/useToolData';
@@ -47,8 +56,11 @@ import { buildCodeSession } from '../hooks/codeSessionTurns';
 import { thoughtWindow } from './thoughtWindow';
 import { foldSessionTranscript, transcriptProvider } from '../hooks/codeSessionTranscript';
 
-export interface ThoughtRowReport extends ThoughtGeneration {
+export interface ThoughtRowReport {
   messageId: string;
+  outputTokens: number;
+  durationMs: number;
+  tokensPerSecond: number;
 }
 
 export interface UnmeasuredRow {
@@ -87,7 +99,11 @@ export interface ThinkingEvidence {
 }
 
 export interface ThinkingRowsOptions {
-  /** Plausible generation speeds; providers range from ~20 (slow) to ~3,000 (Cerebras). */
+  /**
+   * Plausible streaming speeds; providers range from ~20 (slow) to ~3,000 (Cerebras). The
+   * ceiling defaults to the bound the row itself uses to call a response a burst
+   * (MAX_STREAMING_TOKENS_PER_SECOND): one constant, not two.
+   */
   minTokensPerSecond?: number;
   maxTokensPerSecond?: number;
   evidence?: Record<string, ThinkingEvidence>;
@@ -111,12 +127,14 @@ function renderProblems(message: Message, generation: ThoughtGeneration): string
   if (!/Thought|Thinking/.test(html)) problems.push('no Thought/Thinking title');
   if (html.includes('thinking-indicator') || html.includes('thinking-animation'))
     problems.push('renders the animated thinking indicator');
+  const rate = generation.tokensPerSecond;
   const shown = [
     `${(generation.durationMs / 1000).toFixed(1)}s`,
     `${generation.outputTokens.toLocaleString()} tokens`,
-    `${generation.tokensPerSecond.toFixed(1)} tok/s`,
+    ...(rate !== null ? [`${rate.toFixed(1)} tok/s`] : []),
   ];
   for (const text of shown) if (!html.includes(text)) problems.push(`does not show "${text}"`);
+  if (rate === null && html.includes('tok/s')) problems.push('shows a tok/s for a burst');
   return problems;
 }
 
@@ -208,16 +226,29 @@ function collect(
       unmeasured.push({ messageId: row.message_id, ...classify(row) });
       continue;
     }
-    measured.push({ messageId: row.message_id, ...generation });
-    if (
-      generation.tokensPerSecond < options.minTokensPerSecond ||
-      generation.tokensPerSecond > options.maxTokensPerSecond
-    )
-      failures.push(
-        `${who}: thought ${row.message_id} runs at ${generation.tokensPerSecond.toFixed(1)} tok/s ` +
-          `(${generation.outputTokens} tokens / ${(generation.durationMs / 1000).toFixed(2)}s), ` +
-          `outside ${options.minTokensPerSecond}–${options.maxTokensPerSecond}`,
-      );
+    const rate = generation.tokensPerSecond;
+    if (rate === null || generation.notMeasurable) {
+      // A response returned in one burst: reported, not failed; the row must still render
+      // its duration and tokens and no tok/s.
+      unmeasured.push({
+        messageId: row.message_id,
+        reason: generation.notMeasurable ?? 'no streaming rate',
+        failing: false,
+      });
+    } else {
+      measured.push({
+        messageId: row.message_id,
+        outputTokens: generation.outputTokens,
+        durationMs: generation.durationMs,
+        tokensPerSecond: rate,
+      });
+      if (rate < options.minTokensPerSecond || rate > options.maxTokensPerSecond)
+        failures.push(
+          `${who}: thought ${row.message_id} runs at ${rate.toFixed(1)} tok/s ` +
+            `(${generation.outputTokens} tokens / ${(generation.durationMs / 1000).toFixed(2)}s), ` +
+            `outside ${options.minTokensPerSecond}–${options.maxTokensPerSecond}`,
+        );
+    }
     for (const problem of renderProblems(row, generation))
       failures.push(`${who}: thought ${row.message_id} ${problem}`);
   }
@@ -265,7 +296,7 @@ export function checkThinkingRows(
       return kind === 'run-agent turn'
         ? {
             reason:
-              'run-agent turn without usage window, e.g. a Fast Mode replay or a sub-100 ms burst',
+              'run-agent turn without a usage window, e.g. a Fast Mode replay or a single-flush response',
             failing: false,
           }
         : { reason: `${kind} row: its producer records no per-call usage`, failing: false };
