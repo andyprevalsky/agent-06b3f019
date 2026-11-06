@@ -225,7 +225,7 @@ from pathlib import Path
 import sys
 import re
 text = Path(sys.argv[1]).read_text()
-blocks = re.findall(r"(?ms)^      - uses: actions/checkout@[^\n]+\n(.*?)(?=^      - |\Z)", text)
+blocks = re.findall(r"(?ms)^      - uses: (?:actions|useblacksmith)/checkout@[^\n]+\n(.*?)(?=^      - |\Z)", text)
 assert len(blocks) == 2
 for block in blocks:
     assert re.search(r"^          persist-credentials: false$", block, re.M), block
