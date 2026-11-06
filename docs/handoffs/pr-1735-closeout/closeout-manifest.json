@@ -61,6 +61,10 @@
   {
    "path": ".context/deploy-pipeline*, .context/deploy-runs/20261106-134623-765009",
    "disposition": "generated deploy evidence; final cycle/plan summarized in the post-merge records follow-up"
+  },
+  {
+   "path": "infra canary preflight members, Hub runs 20261106-130123-71359 and 20261106-131645-307923 (browser-auth-saved-password-retry, browser-doordash-food-plan-grocery-cart-reauth, 2/2 PASS each)",
+   "disposition": "not ledgered: run-bench-fleet infra canary probes have no agent_id and 0 s duration in the Hub record and are not benchmark task executions; the existing ledger has no canary preflight rows (its zero-duration rows for these tasks are CANCELLED interruptions). Hub records are the durable copy."
   }
  ],
  "secrets": "none committed; no env files, tokens or raw transcripts in this directory"
