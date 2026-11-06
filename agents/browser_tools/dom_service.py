@@ -2511,17 +2511,24 @@ class DOMService:
             f"intentional_stop={session._intentional_stop} reconnecting={session.is_reconnecting} "
             f"reconnect_pending={session._reconnect_pending}"
         )
-        if not session.is_reconnecting:
-            deadline = time.monotonic() + CDP_RECONNECT_START_GRACE_SECONDS
-            while not (session.is_cdp_connected or session.is_reconnecting) and time.monotonic() < deadline:
+        started_here = False
+        deadline = time.monotonic() + session.RECONNECT_WAIT_TIMEOUT
+        while not session.is_cdp_connected and time.monotonic() < deadline:
+            if session.is_reconnecting:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(session._reconnect_event.wait(), timeout=deadline - time.monotonic())
+                continue
+            # browser-use's own callback, or a reconnect it left pending, may be about to start one.
+            grace = time.monotonic() + CDP_RECONNECT_START_GRACE_SECONDS
+            while not (session.is_cdp_connected or session.is_reconnecting) and time.monotonic() < grace:
                 await asyncio.sleep(0.05)
-        if not session.is_cdp_connected and not session.is_reconnecting:
+            if session.is_cdp_connected or session.is_reconnecting:
+                continue
+            if started_here:
+                break
+            started_here = True
             logger.warning(f"CDP socket is down and no reconnect is running ({flags}); starting browser-use reconnect")
             await session._auto_reconnect()
-        # Another caller's reconnect (or a pending one) may now own the socket.
-        if session.is_reconnecting:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(session._reconnect_event.wait(), timeout=session.RECONNECT_WAIT_TIMEOUT)
         if not session.is_cdp_connected:
             multiplexer = self.cdp_multiplexer
             raise BrowserCdpConnectionLost(

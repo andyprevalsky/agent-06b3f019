@@ -497,6 +497,41 @@ async def test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_ru
                     await _stop_dom_service(service)
 
 
+async def test_state_fetch_waits_for_a_reconnect_browser_use_left_pending():
+    """_auto_reconnect can return with the next cycle only scheduled; the read must not give up in that gap."""
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            with _tilion_env(gateway):
+                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, label="test")
+                service = DOMService(cdp_url=local_url, cdp_multiplexer=multiplexer)
+                try:
+                    await service.connect()
+                    session = service.session
+                    session._intentional_stop = True
+                    await gateway.drop_all()
+                    await asyncio.sleep(0.5)
+                    session._intentional_stop = False
+                    assert not session.is_cdp_connected and not session.is_reconnecting
+                    real_reconnect = type(session)._auto_reconnect
+                    loop = asyncio.get_running_loop()
+                    calls = []
+
+                    async def deferred_reconnect(max_attempts: int = 3) -> None:
+                        calls.append(max_attempts)
+                        # The cycle that was running finished without a socket; the next one is only scheduled.
+                        loop.call_later(0.4, lambda: loop.create_task(real_reconnect(session)))
+
+                    session._auto_reconnect = deferred_reconnect
+                    state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
+                    assert state["url"] is not None and session.is_cdp_connected
+                    assert calls == [3] or calls == [], calls
+                finally:
+                    await _stop_dom_service(service)
+
+
 async def test_state_fetch_reports_provider_close_when_the_socket_cannot_be_restored():
     """A socket that stays down fails the read with the provider's close code, not a bare ValueError."""
     from browser_tools.dom_service import BrowserCdpConnectionLost, DOMService
