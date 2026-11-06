@@ -1,0 +1,23 @@
+{
+ "schema_version": 1,
+ "pr": 1703,
+ "deployed_sha": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+ "validated_head": "b02d32ef957b124614ca7a7b62fb5bc58f48c6e9",
+ "records_branch": "records/pr1703-closeout",
+ "records_base": "0fc266ec6f40782037903a3cce5ab22c37a20d00",
+ "closeout_manifest": "docs/handoffs/pr-1703-closeout/closeout-manifest.json",
+ "recovery": "docs/handoffs/pr-1703-closeout/RECOVERY.md",
+ "archives": "four AES-GCM objects under devbox-closeout-private/pr1703-fa676edc/ in the trace-archive bucket (core 1933 files, workers 45997, cloud 7769, control 44); each uploader readback authenticated; core and control fully restored, workers and cloud authenticated end to end (private-preservation-verification.json)",
+ "key_recovery": "boxes.dev managed .context/pr1634-archive-recovery.env (PR1634_ARCHIVE_RECOVERY_KEY_B64) and managed agents/.env TRACE_ARCHIVE_ENCRYPTION_KEY_B64; decoded SHA256 e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+ "configuration_recovery": "project-managed env files (dvb-onbox env list); no values stored in git or archives",
+ "source": "merged on main (fa676edc7); branch fix/webdecoy-drag-pointer-contract and deploy-freeze refs pushed to origin; no unpushed local commits",
+ "resources": {
+  "fly": "128 owned Machines (119 primary.ids + 9 owned-clones.ids) and 111 owned volumes absent from navi-whisper-lux-bench at 2026-11-06T14:47-14:48Z; shared bench image retained (shared, protected)",
+  "local_retired": "11 deploy worker checkouts under /var/tmp/deploy-workers (~41 GB reclaimed), comparison worktree /var/tmp/webdecoy-rca/main-wt, hard-link staging and recovery-test scratch removed after archive verification",
+  "local_retained": "/home/boxes/rose checkout and .context, /var/tmp/webdecoy-rca working copy (all archived in the core/control sets), local Postgres test databases (seeded from the canonical fixture, no unique data)",
+  "processes": "none owned by this deploy remain; the devbox flyctl agent is the box's own"
+ },
+ "freedom": "untouched",
+ "open_items": [],
+ "non_pass_items_disclosed": "see closeout-manifest.json non_pass_items_disclosed (blocked semantic CLI receipt with a verified green workflow run; AgentCard and Mac acceptance SKIPPED)"
+}

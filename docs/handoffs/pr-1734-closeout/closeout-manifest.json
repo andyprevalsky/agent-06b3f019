@@ -1,0 +1,229 @@
+{
+ "schema_version": 1,
+ "pr": 1734,
+ "title": "fix(browser): restore a dropped CDP socket before failing a state read",
+ "assignment": "post-merge repair goal from PR #1725 deploy: smoke/agent-payment-new-user-journey browser agent BrowserStateRequestEvent ValueError (originating merge d5d852e5b, originating devbox c8cc9f58-7058-4394-a3b3-c8c96d57208c); repair devbox 558c0f16-794b-449c-9b6d-f941f8ece79c placed in Bugs folder z57k17gzz4egv17ag6qqtasexs8h273j revision 1",
+ "merge_commit": "e8d5f141612103323abb5cbb9dfa329184ab7e4b",
+ "gated_source": "466030ae3e5e7addf5752eb4fe3531b355af3e46",
+ "fix_commits": [
+  "cc11ccb60b fix(browser): wait for a reconnect browser-use left pending",
+  "e3793b25bc fix(browser): restore a dropped CDP socket before failing a state read",
+  "0918a0c656",
+  "6e331faf04 register the regressions",
+  "81a773c5ff test teardown so the deferred reconnect cannot restart the stopped event bus"
+ ],
+ "assigned_test_proof": {
+  "causal_repro": "agents/tests/blackbox/browser_tilion.blackbox.py::test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_running fails pre-fix with ValueError 'Expected at least one handler to return a non-None result ... BrowserStateRequestEvent' (2.2 s) and passes post-fix; evidence/repro and evidence/fix-v1.patch",
+  "outcome_proof": "original cloud command scripts/run-bench agent-payment-new-user-journey (deploy_test_cloud smoke, exact ref) PASS on 0918a0c(campaign 1ae8d604, cancelled for the source change after the task passed), 6e331fa (campaign 9602045d family: 11/11 incl. assigned task; webdecoy and background-agent-message-smoke failed there, both passed on later heads) and on the gated source 466030ae3e (11/11 PASS); evidence/smoke-campaign-*.json",
+  "gap": "Why the Tilion socket dropped in the incident is NOT observed (guest worker log not preserved); the exact benchmark was not reproduced locally before the fix (about 1 failure in 15 runs). RCA case status: mitigated."
+ },
+ "rca_case": "docs/rca/cases/2026-11-06-browser-state-fetch-failed-silently-on-dropped-cdp-socket.md",
+ "review": {
+  "cycles": "initial e3793b25b findings (1 fixed); incremental cc11ccb60 findings (1 fixed); verification 81a773c5f: CodeRabbit finding 4493445533 (diagnostics-only) DEFERRED under the standing three-round authorization (ledger: Overridden); 6e331fa/0918a0c were quota skips. Independent adversarial review thread ph72593g4c49bgrayx6jv0pb9x8hpfks (evidence/independent-review-thread-output.txt) findings addressed.",
+  "ledger": "evidence/review-ledger.json, review-dispositions.jsonl",
+  "ledger_correction": "cycle 3 on 81a773c5ff was closed 'findings' before the deferral could be applied (the CLI has no reopen); the deploy owner restored the open status (evidence/review-ledger-before-reopen.json) and then ran override. Disclosed here."
+ },
+ "staged_cycle": {
+  "final": "ready on 466030ae3e; PIPELINE_VERIFY bound-staged exit 0 (evidence/final-plan-466030a.json.gz, final-cycle-466030a.json.gz)",
+  "earlier_cycles": "evidence/cycle-*.tar.gz: attempt1 interrupted (review finding fix), attempt2 on 0918a0c (4 UNVERIFIED from worker timing runs not started + my unregistered tests found by agents-blackbox-registration; backend 'fps' abort from raw coverage left by my interrupt), attempt3 on 6e331fa (deploy-command-structural: load-sensitive native-stop timing test failed once under load 30; cloudbench autoscale orphan-child UNVERIFIED re-executed via reexecute/focus and passed; agents-coverage browser-tilion domain hung at process exit because my deferred-reconnect test restarted the stopped event bus - fixed in 81a773c5ff), attempt4 on 81a773c5ff ready",
+  "waived": "backend-coverage-blackbox blackbox:browser-provider live Kernel/Steel auth persist (Steel proxy tunnel ERR_TUNNEL_CONNECTION_FAILED) on 466030ae3e: Gate NOT_INTRODUCED, external provider exception (evidence/triage-report-466030a.json); same gate 249/249 on 81a773c5ff",
+  "agentcard": "SKIPPED by deploy-operator election: no payment/AgentCard path changed"
+ },
+ "production": {
+  "fly": "deploy-agents.yml run 42249499327 success; worker-deployment job 3550d9258e7c8a32ea0643346820a7b345cba01d4ecf8940a4d28dd0cc384f1e SUCCEEDED; monitor-cooperative-cutover --verify exit 0; token 42249499327-1",
+  "render": "not required (no back-end change)",
+  "vercel": "not required (no front-end change)",
+  "mac_release": "not required (no mac-app change)",
+  "workflow_migration_validation": "PRODUCTION_WORKFLOW_MIGRATION_VALIDATION 45/45 PASS (16:21:07-16:26:49Z); evidence/prod-workflow-migration-validation-45pass.log.gz",
+  "semantic": "chat-lifecycle-ratchet run 42251590295 source_sha e8d5f1416: attempt 1 FAILED (3 latency-ratchet jobs, sample-4 timeouts 16:24:30-16:25Z while the operator's own migration validation ran concurrently); failed-jobs retry attempt 2 PASSED all 5 jobs (finished 16:32:45Z). The concurrent run was an operator sequencing deviation from deploy.md 13ac->13b; attribution to that overlap is inferred from timing, not proven.",
+  "agentcard": "SKIPPED (election)",
+  "mac_local_acceptance": "SKIPPED - no Mac available: read-only production query at 2026-11-06T16:21:52Z returned 0 LocalDevice rows for owner 1f85ff25-6e29-4c1b-8739-f917bd101a30 (GET /api/local-devices with API key returns 401, not used as evidence)"
+ },
+ "preservation": {
+  "committed": "this directory",
+  "reproducible_unneeded": [
+   "/var/tmp/rdw/* worker clones (git clones of the gated source; regenerate with scripts/deploy_test_worker.py --prepare-checkout)",
+   "/var/tmp/rdw-archive coverage raw data (~190 MB; regenerate by rerunning the gates)",
+   "agents/venv, node_modules (pinned installs)"
+  ],
+  "not_preserved": "the incident's guest worker log (never retained before this repair); decrypted trace-archive artifacts (browser-resume/diagnostics) were read in place and are not copied (private; R2 trace-archive/f7900465-cee2-467f-95ce-f54854ebd8be/ keeps them)",
+  "secrets": "none committed; credentials stay in agents/.env and back-end/.env"
+ },
+ "files": [
+  {
+   "path": "evidence/cycle-deploy-pipeline-attempt1-interrupted.tar.gz",
+   "sha256": "f96193d729c7739ab83dbf84de77d65fc0353a31ff7c3b710eed6b7ec22a6de6",
+   "bytes": 150332
+  },
+  {
+   "path": "evidence/cycle-deploy-pipeline-attempt2-0918a0c.tar.gz",
+   "sha256": "976c377e05640044931fd9e46f255c977293f6798f98c2bb9bb636940e246497",
+   "bytes": 133489
+  },
+  {
+   "path": "evidence/cycle-deploy-pipeline-attempt3-6e331fa.tar.gz",
+   "sha256": "74364c65ebbe41a958b98f193042f9cb4748dbab7d1319b38a427a891908bb9a",
+   "bytes": 149710
+  },
+  {
+   "path": "evidence/cycle-deploy-pipeline-attempt4-81a773c-ready.tar.gz",
+   "sha256": "51e96573df4ffde8fa07824ca61c606d74570fa382377951431691d80fdd80aa",
+   "bytes": 217267
+  },
+  {
+   "path": "evidence/failed-run-agent-f7900465.json.gz",
+   "sha256": "d3776b71e9f73245fd74ed88ede0691089df1f260f78b2f3b8d491b54ae3992d",
+   "bytes": 22515
+  },
+  {
+   "path": "evidence/failed-run-hub-20261106-095658.json",
+   "sha256": "02b0dce6bb3a38e87e0d784edee45f0f2cfacab6fc25688f67ffdc6178f7987f",
+   "bytes": 1115
+  },
+  {
+   "path": "evidence/final-cycle-466030a.json.gz",
+   "sha256": "c125394207ce3d20a1de87828fb986303f321f62dd1f65be971d2b4cd2d7b5a7",
+   "bytes": 73655
+  },
+  {
+   "path": "evidence/final-plan-466030a.json.gz",
+   "sha256": "ffe66dc2442ce299420ee8a15f8affb1ea92972ff8e90379df48841b73626847",
+   "bytes": 10434
+  },
+  {
+   "path": "evidence/fix-v1.patch",
+   "sha256": "0c9638e00f0039faf75163400fa9302c912c49c27024f2bf7c294ed285f5bb56",
+   "bytes": 4779
+  },
+  {
+   "path": "evidence/independent-review-thread-output.txt",
+   "sha256": "ce2307d6cb10157548bda1f0b3f6fdeb6c50fe183f7905af1dc89b3c10259003",
+   "bytes": 4859
+  },
+  {
+   "path": "evidence/pipeline-attempt-outputs.tar.gz",
+   "sha256": "0d938c710e554f8a1f7095d70918091f79549e6169872f6d0b4eb0bce1d414f7",
+   "bytes": 665971
+  },
+  {
+   "path": "evidence/prod-semantic-attempt1-failed-jobs.log.gz",
+   "sha256": "26d467041c22ba643093beda9be00d650c0f3f5f263f169f7d3e3c488f2df0f6",
+   "bytes": 4917
+  },
+  {
+   "path": "evidence/prod-workflow-migration-validation-45pass.log.gz",
+   "sha256": "edfdb0ff4ad04c310e4f0dde4c96fa59634a62c96d4a8d6484cd01008a492dcc",
+   "bytes": 21554
+  },
+  {
+   "path": "evidence/review-dispositions.jsonl",
+   "sha256": "b772bddba27591529e1c5949c5fab41d5ae71b89a86e77f66fdc25debb9b3986",
+   "bytes": 3462
+  },
+  {
+   "path": "evidence/review-ledger-before-reopen.json",
+   "sha256": "37d994e4131cb636631d7b2d3a94605fce55f42f05b178ded7ab674f204381e7",
+   "bytes": 3893
+  },
+  {
+   "path": "evidence/review-ledger.json",
+   "sha256": "c77906fc96db3502b3f802157c9204c7b3f4605c5438a55e6639dfc64086535c",
+   "bytes": 5706
+  },
+  {
+   "path": "evidence/reviewer-prompt.txt",
+   "sha256": "904a91c6c80d0febb65d5686a7b1c290343215b30a11f0a921ae6b665a12eef7",
+   "bytes": 2038
+  },
+  {
+   "path": "evidence/smoke-0918a0c-summary-interrupted.json",
+   "sha256": "d907286ddcb1f7353b0372397ff935da5d68b299b3d1d8b5168bf6c71537697e",
+   "bytes": 9470
+  },
+  {
+   "path": "evidence/smoke-campaign-1ae8d604-summary.json",
+   "sha256": "d907286ddcb1f7353b0372397ff935da5d68b299b3d1d8b5168bf6c71537697e",
+   "bytes": 9470
+  },
+  {
+   "path": "evidence/smoke-campaign-20d56258-summary.json",
+   "sha256": "bf0e3ec6a3c7cf30c38d0ce8d5f4182a2a1c638cc638bd49eeec59d3690b330e",
+   "bytes": 9475
+  },
+  {
+   "path": "evidence/smoke-campaign-6ee2e247-summary.json",
+   "sha256": "82ee487c779c8cbf3ffea7d96e3f0f48c49fad774f8e5723702e669344719295",
+   "bytes": 9482
+  },
+  {
+   "path": "evidence/smoke-campaign-9602045d-summary.json",
+   "sha256": "86a1e603640ab0ba4356f2eab533bbad1caef84687f5a04999d1932f55ced7f1",
+   "bytes": 9475
+  },
+  {
+   "path": "evidence/smoke-campaign-b7f090af-summary.json",
+   "sha256": "aceb9e177aeab7557aa2a26cb82c3abcb73d9a5e8ab97cfe6e845ea12aeeb8b9",
+   "bytes": 9562
+  },
+  {
+   "path": "evidence/triage-report-466030a.json",
+   "sha256": "ed3324f7443631686a1256160948c74081a1b21824131198423c9cc9e0c6a57a",
+   "bytes": 1427
+  },
+  {
+   "path": "evidence/worker-gate-logs.tar.gz",
+   "sha256": "fb21243629ce75288c0994794e33319421af54ac8df82e4ee018d31a89597c35",
+   "bytes": 356207
+  },
+  {
+   "path": "evidence/repro/bis_run.py",
+   "sha256": "b4fe1cad14251425b6af56cbe3f1e91a7669684de66bee59d9d0ac2f936b8da3",
+   "bytes": 515
+  },
+  {
+   "path": "evidence/repro/dump2.py",
+   "sha256": "0ca90cc7b47d68d1d49becd0d5f7b906e7980599d266ffe2287d6c46b4ac0992",
+   "bytes": 1502
+  },
+  {
+   "path": "evidence/repro/dump3.py",
+   "sha256": "b8d64c7a72176305b72eb7f79352833d7fe914dc9394b5a761b0cf13fe19c2d9",
+   "bytes": 1278
+  },
+  {
+   "path": "evidence/repro/dump4.py",
+   "sha256": "0eb6c441b5f7c6fa8d0f575e7a37476793e43d01ef2477b0ea1d06b1a8709e71",
+   "bytes": 1341
+  },
+  {
+   "path": "evidence/repro/dump_tasks.py",
+   "sha256": "d97b4e59ac4bb8b2da66dbbbb71f4b27263a3807609307ad432b789487e9fdac",
+   "bytes": 665
+  },
+  {
+   "path": "evidence/repro/leak.py",
+   "sha256": "d4f324b6cf97db591e5de418aca1381590ce6933151cc329acd5aa8c4cf3af2e",
+   "bytes": 1077
+  },
+  {
+   "path": "evidence/repro/repro_drop.py",
+   "sha256": "743295cd54900dbf3b5c2a39d9de2217033e817b6bf4ce1250fbcd143e278033",
+   "bytes": 1571
+  },
+  {
+   "path": "evidence/repro/repro_flags.py",
+   "sha256": "57731ce2ef491d3d3e93ca3a0fb9212e4c4fe95f4875d275357211300edf1211",
+   "bytes": 1959
+  },
+  {
+   "path": "evidence/repro/run_two.py",
+   "sha256": "3c12d150baef934319c45828fbf47e8d2d5e2d4474e8aaaadf69293cd0654eba",
+   "bytes": 585
+  },
+  {
+   "path": "evidence/repro/tasks_left.py",
+   "sha256": "c89e4b152922350d812a5b21099804f4188f7ab7ff79ae74d0f36ebcaf09669b",
+   "bytes": 690
+  }
+ ]
+}

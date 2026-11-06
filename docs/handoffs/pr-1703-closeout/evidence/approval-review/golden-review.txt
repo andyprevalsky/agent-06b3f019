@@ -1,0 +1,56 @@
+# Golden-reference adversarial review — RCA-WEBDECOY-POINTER-1 @ cce696e9d
+
+Reviewer: fresh read-only sub-agent (did not author the change). Branch fix/webdecoy-drag-pointer-contract.
+
+## A. Mechanism grounding (all in-scope hunks): PASSES
+
+References I opened myself (≥3, chosen for the mechanism):
+
+1. `claude-code-src/cli.js:1830` (desktop computer use): `mouse_move` "Move the mouse cursor without clicking. Useful for triggering hover states."; `left_click_drag` "Press, move to target, and release."; `left_mouse_down` "Press the left mouse button at the current cursor position and leave it held … Use mouse_move first to position the cursor."; `left_click` "Left-click at the given coordinates." (click positions itself; no prior move needed). Dispatch `case"mouse_move":return gjz(...)` on the same line.
+2. `claude-code-src/cli.js:66` (Claude in Chrome `computer`): action enum includes `"hover"`; "`hover`: Move the mouse cursor to the specified coordinates or element without clicking. Useful for revealing tooltips, dropdown menus, or triggering hover states."; "`left_click_drag`: Drag from start_coordinate to coordinate."; clicks framed as cursor actions ("with the cursor tip in the center of the element").
+3. `claude-code-src/src/utils/computerUse/executor.ts:103-120`: `moveAndSettle` — instant move then 50 ms before click/scroll/drag-from; `animatedMove` reserved for drag-to because intermediate frames "were triggering hover states".
+4. `openclaw/extensions/browser/src/browser-tool.schema.ts:19` (`"hover"` act kind, alongside `"drag"` at :21, `startRef`/`endRef` at :164-166); `openclaw/extensions/browser/src/browser/routes/agent.act.normalize.ts:222-226` (hover normalize case, element target required) and `:228-237` (drag requires start AND end: "drag requires startRef or startSelector" / "drag requires endRef or endSelector"); `openclaw/extensions/browser/src/browser/pw-tools-core.interactions.actions.ts:159-161` (`hoverViaPlaywright` → `locator.hover`).
+5. `openclaw/src/agents/tools/computer-tool-schema.ts:204-210` (`pointerAction` enum starts with `"hover"`), `:85-90` (`startCoordinate` drag origin); `openclaw/src/agents/tools/computer-tool-guidance.ts:30` (`"mouse_move"` in PIXEL_ACTIONS).
+6. Contrary-practice search: `hermes-agent/tools/computer_use/schema.py:18-35` (action enum has `drag` but no hover/mouse_move) and `:117-131` (drag `from_*`/`to_*`, both ends); `hermes-agent/tools/browser_tool.py:505-506` (`browser_click` by ref, no pointer prose). `codex/`, `prime-agent/`, `/var/tmp/webdecoy-rca/kimi-code`: grep for `mouse_move|"hover"|left_click_drag` → no pointer tools (neutral).
+
+Packet citations: every one opened and confirmed at the stated `path:line` with the quoted text (cli.js:1830 mouse_move + drag text; cli.js:66 hover text; browser-tool.schema.ts:19; computer-tool-schema.ts:204-210 (hover at :205); computer-tool-guidance.ts:30; executor.ts:103-120). One precision note: executor.ts moves the pointer *instantly*, not along a natural path, and Claude Code does not describe that move to the model — the packet's "(Rose's click descriptions now say the same)" overstates that citation (see A-notes).
+
+Hunk → reference mapping:
+
+| Hunk | Reference behavior | Verdict |
+|---|---|---|
+| `HoverTool` schema (index or x+y, paired x/y) + `BROWSER_TOOL_MODELS["hover"]` | CC Chrome `hover` "coordinates or element" (cli.js:66); CC `mouse_move` coordinate (cli.js:1830); OpenClaw `hover` act kind by ref (browser-tool.schema.ts:19, normalize.ts:222) and computer `mouse_move`/`pointerAction:"hover"` | Converges; same shape (element or coords), no broader |
+| `hover` description ("…without clicking. Useful for triggering hover states such as menus and tooltips") | Near-verbatim CC cli.js:1830 / cli.js:66 | Converges |
+| `click` description (pointer moves first, no separate move needed) | CC executor moves before click (executor.ts:103-120); CC `left_click` needs no prior move whereas `left_mouse_down` says "Use mouse_move first" (cli.js:1830); CC Chrome frames clicks as cursor actions (cli.js:66) | Grounded in behavior; wording is Rose-specific but truthful to Rose runtime (`humanizer.click_at_coords` → `_move_to_unlocked` Bezier, humanizer.py:617-660; used for index clicks at service_actions.py:3603-3605) |
+| `click_coordinates` description | Same as click (coordinate clicks → `humanizer.click_at_coords`, service_actions.py:3654-3655) | Same |
+| `drag` description (button held; sliders/CAPTCHA/DnD only, never to move pointer; both ends required) | CC "Press, move to target, and release" (held button); CC separates positioning (`mouse_move`) from pressing; OpenClaw normalize.ts:228-237 and Hermes schema.py:117-131 require both ends; matches Rose's existing `DragTool.require_start_and_end` validator | Converges with OpenClaw/Hermes; CC desktop's optional start (drag from current cursor) is the minority divergence, explained by Rose's existing validator, not introduced here |
+| `_VALID_ACTIONS += "hover"` + `normalize_browser_use_response` hover branch | Structured action-name dispatch: CC `case"mouse_move"` (cli.js:1830), OpenClaw `case "hover"` (normalize.ts:222) | Converges; dispatch on a declared tool name, not a classifier |
+
+Contrary practice: Hermes computer_use offers drag without any hover/move tool — an omission, not a practice of using drag to move the pointer or of discouraging a hover tool. Every reference with pixel-level pointer control plus a move concept (CC ×2, OpenClaw ×2) exposes a separate non-pressing move/hover. Shared pattern converged on; change is no broader (one tool, existing humanizer, no new params beyond index/x/y).
+
+CLAUDE.md hard rules:
+- Rule 25 (reward hacking): commit touches no tasks.json, evaluator, timeout, concurrency or ratchet (verified `git show --stat cce696e9d`). General capability, not task-specific. PASS.
+- Rule 25a (runtime nudges): static tool schema/description text; no synthetic messages injected into the trajectory. The `client.py` change only dumps rejected args before re-raising (not LLM-visible). PASS.
+- Rule 25b (string-matching classifiers): normalize branch keys on the structured tool name. PASS.
+- Rule 28 (10k agents): per-session pointer move via the per-session humanizer; no shared state; one extra tool schema per browser call (bounded, one-time cache-prefix change). PASS.
+
+A-notes (non-blocking):
+- When `BROWSER_AGENT_HUMANIZER_ENABLED=false` (handler.py:9325-9328), hover is still advertised but returns an explicit error, and the click/click_coordinates "natural path" sentence is false (fallback ClickElementEvent/ClickCoordinateEvent). Default is enabled, so non-blocking; worth a Downstream mention.
+- Packet should state that Claude Code's pre-click move is instant and undescribed to the model; the "natural, human-like path" wording describes Rose's existing humanizer, not the reference.
+
+## B. Packet validity under approval-format.md: FAILS (blocking)
+
+The drafted packet (`/var/tmp/webdecoy-rca/packet.md`) is invalid under the file's explicit "An approval is invalid if…" clause. All fixes are packet-only; no in-scope code bytes need to change.
+
+1. No Links list after the block. Format requires "one code block followed by the Links list"; the packet says "FE links: see Links" but no Links list exists anywhere. The published URLs are in `/var/tmp/webdecoy-rca/publish.log` (FE links for 1eeef95c and d920016a, both "verified in fresh browser"; R2 rendered-dump URLs) but never reach the packet.
+2. No concrete FE agent link and no rendered last-call LLM dump. `LLM dump:` points at a raw JSON at `/var/tmp/webdecoy-rca/step6-drag-dump.json`; the format forbids raw JSON and VM-local paths and requires the HTTPS rendered dump. The step-6 decision is also not the *last* call of the trajectory, which is what the format requires. The field label is `FE links:` rather than `FE link: <verification status>`.
+3. Downstream is missing the three required labelled lines — `Severity:`, `Future prod trajectories affected:` (estimate with basis or `— unknown: <reason>`), `Risk:` — which the format calls out as invalid when missing. It also omits the humanizer-disabled impact above.
+4. No in-scope file links. The Scope lines name files without `:line` (for example `agents/browser_tools/schemas.py (HoverTool + registry)`), and the clickable Scope links are missing because there is no Links list. Each in-scope hunk needs its own line: schemas.py HoverTool and registry; browser_use.py click, click_coordinates, drag and hover descriptions; `_VALID_ACTIONS`; the normalize hover branch.
+5. `What failed:` does not follow the required task-framed form ("When <agent doing the task goal>, <step/site>, the LLM called `<tool>` to <attempt>, and <broke, measured>"). It opens with the benchmark name and SHA, and the tool name `drag` is not backticked.
+6. Local repro: the header lacks the measured `(<wall-clock>)`, and there are no labelled `Pre-fix:`/`Post-fix:` lines. The values exist in the steps, so this is a cheap fix.
+7. The response syntax is `Reply: approve … | reject …` instead of the required `Approve: RCA-WEBDECOY-POINTER-1 approve` and `Reject:  RCA-WEBDECOY-POINTER-1 reject: <reason>` lines.
+8. Golden reference has no line for hermes-agent, which has a drag analog (`tools/computer_use/schema.py:117-131`, both ends required, and no hover). The format asks for "one line per repo that has an analog". The packet should add a Hermes line that says it converges on both-ends-required and has no hover. It should also add `Not applicable` for codex, prime-agent and kimi-code, naming what was searched.
+
+Remediation: fix items 1–8 in the packet only. The bytes of the in-scope hunks are unchanged, so section A's grounding still applies to snapshot cce696e9d. A single re-review of the corrected packet should then return GROUNDED, provided the code is unchanged.
+
+VERDICT RCA-WEBDECOY-POINTER-1: NOT_GROUNDED

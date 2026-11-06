@@ -1,0 +1,26 @@
+{
+ "failures": [
+  {
+   "id": "545b1257e09f410986c423f93200430d",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "structural gate lingering-group failure from the semantic-deploy test fixture leak",
+   "evidence": "Native result PASS: 'All 91 deploy structural gates passed' (exit 0), but the coordinator receipt is FAIL 'worker exit and test results disagree' with lingering_group=true. Root cause (bisected, #1727): scripts/tests/semantic-deploy-gate.test.sh leaks a reparented 'sleep 30' (fake run.sh forks sleep; its EXIT trap kills only the bash pid). A 5-worker run schedules semantic-deploy about 36 s before the end, so the 30 s orphan can outlive the run (output.log.process.json term_sent has one pid). Pre-existing on main (the test and this timing are unchanged by this diff); the gate passes cleanly when the timing differs (attempts 3 and 4) and the full suite passes natively every time. Fix tracked in https://github.com/Rose-Ai-Labs/rose/issues/1727; it cannot land in this PR because the review ledger is at its 3-cycle cap.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate until it completes cleanly; no waiver",
+   "assigned_evidence": "Native result PASS: 'All 91 deploy structural gates passed' (exit 0), but the coordinator receipt is FAIL 'worker exit and test results disagree' with lingering_group=true. Root cause (bisected, #1727): scripts/tests/semantic-deploy-gate.test.sh leaks a reparented 'sleep 30' (fake run.sh forks sleep; its EXIT trap kills only the bash pid). A 5-worker run schedules semantic-deploy about 36 s before the end, so the 30 s orphan can outlive the run (output.log.process.json term_sent has one pid). Pre-existing on main (the test and this timing are unchanged by this diff); the gate passes cleanly when the timing differs (attempts 3 and 4) and the full suite passes natively every time. Fix tracked in https://github.com/Rose-Ai-Labs/rose/issues/1727; it cannot land in this PR because the review ledger is at its 3-cycle cap."
+  }
+ ]
+}

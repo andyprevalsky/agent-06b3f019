@@ -1,0 +1,756 @@
+{
+ "attempt1 e458be5cf (quick phase)": {
+  "source": {
+   "head": "e458be5cf59ccec1d6ee2f8681ae21f1f76c9cbf",
+   "digest": "d0c8dd78939a68b0d80c2ce539b91e4ec46987d0de5c33f9d9287a73b840a60a"
+  },
+  "phase_at_end": "triage",
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "format": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "typescript": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "eslint": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "backend-structural": {
+      "status": "FAIL",
+      "cases": {
+       "UNVERIFIED": 1
+      },
+      "reason": "missing complete case receipt"
+     }
+    }
+   }
+  ],
+  "failures": [
+   {
+    "check": "backend-structural/backend-structural",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   }
+  ]
+ },
+ "round2 a69a6d25db": {
+  "source": {
+   "head": "a69a6d25dba954dad44ac092cea8948cf646ee21",
+   "digest": "511c5794539613d2458dd7571acf30f9a5977d9b69e99368a2d3d75690dcc4b1"
+  },
+  "phase_at_end": "stale",
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "format": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "typescript": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "eslint": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "backend-structural": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     }
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "seed-cache-decision": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "frontend-coverage-blackbox": {
+      "status": "FAIL",
+      "cases": {
+       "UNVERIFIED": 1
+      },
+      "reason": null
+     },
+     "e2b-smoke": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "live-probes": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "seed-memory-ratchet": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "smoke": {
+      "status": "FAIL",
+      "cases": {
+       "UNVERIFIED": 9
+      },
+      "reason": "worker result identity/inventory mismatch"
+     },
+     "deploy-command-structural": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "agents-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "backend-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 249
+      },
+      "reason": null
+     },
+     "cloudbench-controller": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "semantic-stack": {
+      "status": "FAIL",
+      "cases": {
+       "UNVERIFIED": 1
+      },
+      "reason": null
+     }
+    }
+   }
+  ],
+  "failures": []
+ },
+ "round3 08b8054ead": {
+  "source": {
+   "head": "08b8054eadea2c182c525f62da5961eefe48c0ca",
+   "digest": "f966f33ff0f2f5f45dfdef4f1f6a6a610eb5ccb400b8f6dbbea5458fdc25496f"
+  },
+  "phase_at_end": "triage",
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "format": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "typescript": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "eslint": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "backend-structural": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     }
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "seed-cache-decision": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "e2b-smoke": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "live-probes": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "seed-memory-ratchet": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "smoke": {
+      "status": "FAIL",
+      "cases": {
+       "UNVERIFIED": 9
+      },
+      "reason": "worker result identity/inventory mismatch"
+     },
+     "deploy-command-structural": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "agents-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "frontend-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "backend-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 249
+      },
+      "reason": null
+     },
+     "cloudbench-controller": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "semantic-stack": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     }
+    }
+   }
+  ],
+  "failures": [
+   {
+    "check": "smoke/test-mass-agent-run-0",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/chat-mode",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/spawn-sub-agents",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/parallel-tool-calls",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/background-agent-message-smoke",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/claude-code-agent",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/browser-smoke",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/browser-biometrics-webdecoy",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/agent-payment-new-user-journey",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   }
+  ]
+ },
+ "round4 08b8054ead": {
+  "source": {
+   "head": "08b8054eadea2c182c525f62da5961eefe48c0ca",
+   "digest": "f966f33ff0f2f5f45dfdef4f1f6a6a610eb5ccb400b8f6dbbea5458fdc25496f"
+  },
+  "phase_at_end": "triage",
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "format": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "typescript": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "eslint": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "backend-structural": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     }
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "seed-cache-decision": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "e2b-smoke": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "live-probes": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "seed-memory-ratchet": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "deploy-command-structural": {
+      "status": "FAIL",
+      "cases": {
+       "UNVERIFIED": 1
+      },
+      "reason": null
+     },
+     "agents-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "frontend-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "smoke": {
+      "status": "FAIL",
+      "cases": {
+       "UNVERIFIED": 9
+      },
+      "reason": "worker result identity/inventory mismatch"
+     },
+     "backend-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 249
+      },
+      "reason": null
+     },
+     "cloudbench-controller": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "semantic-stack": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     }
+    }
+   }
+  ],
+  "failures": [
+   {
+    "check": "deploy-command-structural/deploy-command-structural",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/test-mass-agent-run-0",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/chat-mode",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/spawn-sub-agents",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/parallel-tool-calls",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/background-agent-message-smoke",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/claude-code-agent",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/browser-smoke",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/browser-biometrics-webdecoy",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   },
+   {
+    "check": "smoke/agent-payment-new-user-journey",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": null
+   }
+  ]
+ },
+ "round5 08b8054ead": {
+  "source": {
+   "head": "08b8054eadea2c182c525f62da5961eefe48c0ca",
+   "digest": "f966f33ff0f2f5f45dfdef4f1f6a6a610eb5ccb400b8f6dbbea5458fdc25496f"
+  },
+  "phase_at_end": "ready",
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "format": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "typescript": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "eslint": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "backend-structural": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     }
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "seed-cache-decision": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "deploy-command-structural": {
+      "status": "FAIL",
+      "cases": {
+       "UNVERIFIED": 1
+      },
+      "reason": "worker exit and test results disagree"
+     },
+     "e2b-smoke": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "live-probes": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "seed-memory-ratchet": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "agents-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "frontend-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "backend-coverage-blackbox": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 249
+      },
+      "reason": null
+     },
+     "cloudbench-controller": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "semantic-stack": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "smoke": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 9
+      },
+      "reason": null
+     }
+    }
+   },
+   {
+    "phase": "focused",
+    "results": {
+     "deploy-command-structural": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     }
+    }
+   },
+   {
+    "phase": "failed-gates",
+    "results": {}
+   },
+   {
+    "phase": "quick",
+    "results": {
+     "format": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "typescript": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "eslint": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     },
+     "backend-structural": {
+      "status": "PASS",
+      "cases": {
+       "PASS": 1
+      },
+      "reason": null
+     }
+    }
+   },
+   {
+    "phase": "final",
+    "results": {}
+   }
+  ],
+  "failures": [
+   {
+    "check": "deploy-command-structural/deploy-command-structural",
+    "native_result": "UNVERIFIED",
+    "complete": false,
+    "disposition": "blocking"
+   }
+  ]
+ }
+}

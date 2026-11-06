@@ -1,0 +1,19 @@
+import importlib.util, os, sys, tempfile
+from pathlib import Path
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("t", os.environ.get("TEST_FILE", "/home/boxes/rose/scripts/tests/run-deploy-pipeline.test.py"))
+t = importlib.util.module_from_spec(spec); spec.loader.exec_module(t)
+n = int(sys.argv[1]); fails = 0
+for i in range(n):
+    tmp = Path(tempfile.mkdtemp(prefix="rdpt-", dir="/var/tmp")); src = t.make_source_root(tmp / "source")
+    t.DRIVER = src / "scripts" / "run_deploy_pipeline.py"
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith("DEPLOY_ADMISSION_") and k not in {"FACTORY_METADATA_FILE","DEPLOY_LANE_SCOPED_REUSE"}},
+           "DEPLOY_RUN_ROOT": str(tmp/"runs"), "DEPLOY_PIPELINE_SOURCE_ROOT": str(src)}
+    t.start_timing(tmp/"runs", env)
+    (tmp/"inherited-flag").mkdir()
+    try:
+        with patch.dict(os.environ, {"DEPLOY_ADMISSION_CREDIT": "0"}):
+            t.check_materialized_reservation_credit(tmp/"inherited-flag", env, float(os.environ.get("DELAY","0")))
+    except BaseException as e:
+        fails += 1; print(f"iter {i}: FAIL {type(e).__name__}: {str(e)[:300]}")
+print(f"fails={fails}/{n}")

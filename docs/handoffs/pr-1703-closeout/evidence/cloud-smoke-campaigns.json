@@ -1,0 +1,202 @@
+[
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T11:33:30.533112+00:00",
+  "finished_at": "2026-11-06T12:20:05.588621+00:00",
+  "status": "failed",
+  "jobs": {
+   "test-mass-agent-run-0": "failed",
+   "chat-mode": "passed",
+   "spawn-sub-agents": "passed",
+   "parallel-tool-calls": "passed",
+   "background-agent-message-smoke": "passed",
+   "claude-code-agent": "passed",
+   "browser-smoke": "passed",
+   "browser-biometrics-webdecoy": "passed",
+   "agent-payment-new-user-journey": "passed",
+   "browser-auth-saved-password-retry": "passed",
+   "browser-auth-account-locked": "passed",
+   "browser-auth-email-otp": "passed"
+  }
+ },
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T04:45:07.642467+00:00",
+  "finished_at": "2026-11-06T05:25:58.115733+00:00",
+  "status": "passed",
+  "jobs": {
+   "test-mass-agent-run-0": "passed",
+   "chat-mode": "passed",
+   "spawn-sub-agents": "passed",
+   "parallel-tool-calls": "passed",
+   "background-agent-message-smoke": "passed",
+   "claude-code-agent": "passed",
+   "browser-smoke": "passed",
+   "browser-biometrics-webdecoy": "passed",
+   "agent-payment-new-user-journey": "passed",
+   "browser-auth-saved-password-retry": "passed",
+   "browser-auth-account-locked": "passed",
+   "browser-auth-email-otp": "passed"
+  }
+ },
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T02:40:39.564580+00:00",
+  "finished_at": "2026-11-06T03:10:53.940312+00:00",
+  "status": "passed",
+  "jobs": {
+   "test-mass-agent-run-0": "passed",
+   "chat-mode": "passed",
+   "spawn-sub-agents": "passed",
+   "parallel-tool-calls": "passed",
+   "background-agent-message-smoke": "passed",
+   "claude-code-agent": "passed",
+   "browser-smoke": "passed",
+   "browser-biometrics-webdecoy": "passed",
+   "agent-payment-new-user-journey": "passed",
+   "browser-auth-saved-password-retry": "passed",
+   "browser-auth-account-locked": "passed",
+   "browser-auth-email-otp": "passed"
+  }
+ },
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T02:29:23.552651+00:00",
+  "finished_at": "2026-11-06T02:37:43.277054+00:00",
+  "status": "failed",
+  "jobs": {
+   "test-mass-agent-run-0": "cancelled",
+   "chat-mode": "cancelled",
+   "spawn-sub-agents": "cancelled",
+   "parallel-tool-calls": "cancelled",
+   "background-agent-message-smoke": "cancelled",
+   "claude-code-agent": "cancelled",
+   "browser-smoke": "cancelled",
+   "browser-biometrics-webdecoy": "cancelled",
+   "agent-payment-new-user-journey": "cancelled",
+   "browser-auth-saved-password-retry": "cancelled",
+   "browser-auth-account-locked": "cancelled",
+   "browser-auth-email-otp": "failed"
+  }
+ },
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T10:02:46.346716+00:00",
+  "finished_at": "2026-11-06T10:50:44.199725+00:00",
+  "status": "failed",
+  "jobs": {
+   "test-mass-agent-run-0": "failed",
+   "chat-mode": "passed",
+   "spawn-sub-agents": "passed",
+   "parallel-tool-calls": "passed",
+   "background-agent-message-smoke": "passed",
+   "claude-code-agent": "passed",
+   "browser-smoke": "failed",
+   "browser-biometrics-webdecoy": "passed",
+   "agent-payment-new-user-journey": "passed",
+   "browser-auth-saved-password-retry": "failed",
+   "browser-auth-account-locked": "passed",
+   "browser-auth-email-otp": "passed"
+  }
+ },
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T08:45:00.850237+00:00",
+  "finished_at": "2026-11-06T09:26:37.907776+00:00",
+  "status": "failed",
+  "jobs": {
+   "test-mass-agent-run-0": "passed",
+   "chat-mode": "passed",
+   "spawn-sub-agents": "passed",
+   "parallel-tool-calls": "passed",
+   "background-agent-message-smoke": "passed",
+   "claude-code-agent": "failed",
+   "browser-smoke": "passed",
+   "browser-biometrics-webdecoy": "passed",
+   "agent-payment-new-user-journey": "passed",
+   "browser-auth-saved-password-retry": "passed",
+   "browser-auth-account-locked": "passed",
+   "browser-auth-email-otp": "passed"
+  }
+ },
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T01:40:10.473639+00:00",
+  "finished_at": "2026-11-06T02:00:15.243807+00:00",
+  "status": "failed",
+  "jobs": {
+   "test-mass-agent-run-0": "cancelled",
+   "chat-mode": "cancelled",
+   "spawn-sub-agents": "cancelled",
+   "parallel-tool-calls": "cancelled",
+   "background-agent-message-smoke": "cancelled",
+   "claude-code-agent": "cancelled",
+   "browser-smoke": "failed",
+   "browser-biometrics-webdecoy": "cancelled",
+   "agent-payment-new-user-journey": "cancelled",
+   "browser-auth-saved-password-retry": "cancelled",
+   "browser-auth-account-locked": "cancelled",
+   "browser-auth-email-otp": "cancelled"
+  }
+ },
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T12:23:59.598497+00:00",
+  "finished_at": "2026-11-06T12:54:40.469493+00:00",
+  "status": "passed",
+  "jobs": {
+   "test-mass-agent-run-0": "passed",
+   "chat-mode": "passed",
+   "spawn-sub-agents": "passed",
+   "parallel-tool-calls": "passed",
+   "background-agent-message-smoke": "passed",
+   "claude-code-agent": "passed",
+   "browser-smoke": "passed",
+   "browser-biometrics-webdecoy": "passed",
+   "agent-payment-new-user-journey": "passed",
+   "browser-auth-saved-password-retry": "passed",
+   "browser-auth-account-locked": "passed",
+   "browser-auth-email-otp": "passed"
+  }
+ },
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T09:31:34.479433+00:00",
+  "finished_at": "2026-11-06T09:41:45.449620+00:00",
+  "status": "failed",
+  "jobs": {
+   "test-mass-agent-run-0": "failed",
+   "chat-mode": "cancelled",
+   "spawn-sub-agents": "cancelled",
+   "parallel-tool-calls": "cancelled",
+   "background-agent-message-smoke": "cancelled",
+   "claude-code-agent": "cancelled",
+   "browser-smoke": "cancelled",
+   "browser-biometrics-webdecoy": "cancelled",
+   "agent-payment-new-user-journey": "cancelled",
+   "browser-auth-saved-password-retry": "cancelled",
+   "browser-auth-account-locked": "cancelled",
+   "browser-auth-email-otp": "cancelled"
+  }
+ },
+ {
+  "campaign": "campaigns",
+  "started_at": "2026-11-06T10:53:00.790844+00:00",
+  "finished_at": "2026-11-06T11:28:00.725055+00:00",
+  "status": "failed",
+  "jobs": {
+   "test-mass-agent-run-0": "failed",
+   "chat-mode": "passed",
+   "spawn-sub-agents": "passed",
+   "parallel-tool-calls": "passed",
+   "background-agent-message-smoke": "passed",
+   "claude-code-agent": "passed",
+   "browser-smoke": "passed",
+   "browser-biometrics-webdecoy": "passed",
+   "agent-payment-new-user-journey": "passed",
+   "browser-auth-saved-password-retry": "passed",
+   "browser-auth-account-locked": "passed",
+   "browser-auth-email-otp": "passed"
+  }
+ }
+]
