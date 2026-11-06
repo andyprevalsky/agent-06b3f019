@@ -1660,20 +1660,85 @@ class LocalController(unittest.TestCase):
                 if 'row' in locals() and Path(row['fixture_tmp']).exists():
                     shutil.rmtree(row['fixture_tmp'])
 
-    def test_complete_documented_inventory_and_registration(self):
-        text = (ROOT / '.claude/commands/deploy.md').read_text()
-        section = text.split('## Step 4cb:', 1)[1].split('## Step 4c:', 1)[0]
-        block = section.split('```bash\n')[2].split('```', 1)[0]
-        commands = []
-        for line in block.replace('\\\n', '').splitlines():
-            line = line.strip()
-            if line.startswith('if ['):
-                break
-            if line and not line.startswith('#'):
-                commands.append(shlex.split(line))
-        self.assertEqual([shlex.split(command) for _, command in local_runner.CASES], commands)
-        self.assertEqual(len(commands), 12)
+    # The twelve cloud-benchmark controller suites the staged `cloudbench-controller` gate runs (the former
+    # deploy.md Step 4cb inventory, preserved in .claude/commands/DEPRECATED_deploy.md at L1408). The concise
+    # deploy.md no longer lists them: scripts/run-cloudbench-controller-local.py CASES is the executing
+    # inventory, so it is pinned here and a change to it must be a deliberate edit of this test.
+    CONTROLLER_PYTEST_KEYWORDS = (
+        'fly_with_timeout', 'test_clone_retries_transient_volume_not_found', 'test_clone_gives_up_after_max_attempts',
+        'test_clone_times_out_and_retries_a_hung_clone', 'clone_creation_cannot_start_copied_primary',
+        'cloudbench_codex_auth', 'autoscaler_runtime_handoff', 'prisma_client',
+        'local_sync_and_stack_wire_prisma_freshness', 'cloud_patch_includes_tracked_and_untracked_changes',
+        'cloud_patch_detection_and_payload_include_staged_only_changes',
+        'worktree_patch_ignores_append_only_history_ledgers', 'patch_delivery_clears_stale_base64_configuration',
+        'shared_patch_digest_is_pinned_and_verified', 'declared_patch_payload_cannot_be_missing_or_empty',
+        'empty_local_patch_cleanup_is_nounset_safe', 'central_hub_runs_in_own_session_after_launcher_exit',
+        'boot_launch_delivers_the_exact_worktree_patch_to_every_guest',
+        'boot_launch_runs_the_current_driver_before_applying_the_patch', 'boot_payload',
+        'boot_launch_compresses_complete_payload', 'autoscaled_worker_failure_publishes_durable_failure_marker',
+        'data_plane_proxies_retry_machine_dns_and_restart_if_lost', 'status_polled_over_data_plane_proxy_not_ssh',
+        'cloud_runner_avoids_live_run_port_collisions', 'fleet_barrier_reads_the_authoritative_rotated_status_port',
+        'data_plane_barrier_release_at_full_fleet_width', 'storage_readiness_inventory_reads_are_bounded',
+        'fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown', 'isolated_backend',
+        'local_predeploy_skips_wmh', 'cloud_agentcard_payment_tasks_provide_onboarding_callback_env',
+        'fleet_shared_patch_remains_authoritative_until_transport_selection',
+        'fleet_patch_packages_clean_unpushed_head_from_fetchable_base', 'autoscaler_scale_down_cancels_pending_worker',
+        'fleet_registry_release_id_is_idempotent_with_other_records', 'refresh_deps_tracks_exact_created_snapshot',
+        'refresh_deps_applies_exact_workspace_before_rebuild', 'fetch_ref_restores_dirty_exact_sha',
+        'warm_deps_preflight', 'fresh_controller_reuses_only_proven_donor_dependencies', 'verified_legacy_snapshot',
+        'dependency_proof_publication', 'exact_volume_ownership_survives_delayed_visibility_and_failed_delete',
+        'exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers',
+        'pre_fix_guest_runner_receipt_cannot_authorize_exact_reaper',
+        'exact_recovery_seals_actual_retained_owner_remote_evidence_paths', 'hub_transport',
+        'guest_shutdown_child_confirmation', 'exact_guest_recovery_archives_bound_child_token',
+        'exact_recovery_consumes_runtime_receipt_completed_absent_primary',
+        'exact_recovery_consumes_runtime_receipt_publishes_audited_release',
+        'fleet_lifecycle_receipt_requires_final_registry_retirement',
+        'watchdog_collects_cancelled_artifact_after_bounded_shutdown', 'terminal_projection_preserves_benchmark_outcome',
+        'boot_driver_state_write_failure', 'driver_cleanup_persists_evidence_in_fresh_data_directory',
+        'driver_cleanup_requires_current_stack_receipt_on_normal_completion',
+        'autoscaled_worker_uses_authenticated_fetch_ref_helper', 'terminal_projection_empty_tasks',
+        'terminal_projection_rejection_removes_all_artifacts', 'status_recovery_read_closes_descriptor',
+        'cloudbench_recovery_review', 'migration', 'migrated_registry', 'owned_worker_volume',
+        'composite_result_finalizes_each_exact_root', 'minted_dispatch_preserves_live_root_observer',
+        'evaluated_wrapper_completion_publishes_once', 'data_plane_mirror_reads_current_owner_port',
+        'fleet_publishes_evaluation_before_teardown', 'boot_terminal_runtime_evidence_collects_complete_logs',
+        'cloudbench_worker_snapshot', 'quiesced_guest_writes_hashed_authoritative_zero_allocated_receipt',
+    )
+    CONTROLLER_INVENTORY = (
+        ('environment', ['bash', 'scripts/tests/cloudbench-env.test.sh']),
+        ('autoscale', ['bash', 'scripts/tests/cloudbench-acceptance-autoscale.test.sh']),
+        ('status-service-shutdown', ['python3', 'scripts/tests/run-cloudbench-controller-linux.py',
+                                     '--fixture', 'status-service-shutdown']),
+        ('infra-canary', ['bash', 'scripts/tests/fleet-infra-canary.test.sh']),
+        ('infra-stability', ['bash', 'scripts/tests/fleet-infra-stability-proof.test.sh']),
+        ('rootless-sms', ['python3', 'scripts/tests/cloudbench-exact-session-rootless-sms.test.py']),
+        ('multi-workstream', ['bash', 'scripts/tests/cloudbench-multi-workstream.test.sh']),
+        ('linux-contract', ['python3', 'scripts/tests/cloudbench-controller-linux.test.py']),
+        ('github-token', ['bash', 'scripts/tests/cloudbench-github-token.test.sh']),
+        ('seed-toolchain', ['bash', 'scripts/tests/seed-dump-toolchain.test.sh']),
+        ('wall-clock', ['agents/venv/bin/python', '-m', 'pytest', '-q',
+                        'agents/benchmarks/wall_clock_backstop_test.py']),
+        ('selected-pytest', ['agents/venv/bin/python', '-m', 'pytest', '-q',
+                             'agents/benchmarks/cloudbench_dependency_sync_test.py',
+                             'agents/benchmarks/cloudbench_worker_snapshot_test.py',
+                             'agents/benchmarks/cloudbench_recovery_review_test.py',
+                             'agents/benchmarks/cloudbench_codex_auth_test.py',
+                             'agents/benchmarks/cloud_batch_cleanup_test.py',
+                             '-k', ' or '.join(CONTROLLER_PYTEST_KEYWORDS)]),
+    )
+
+    def test_complete_inventory_and_registration(self):
+        self.assertEqual([(name, shlex.split(command)) for name, command in local_runner.CASES],
+                         [(name, argv) for name, argv in self.CONTROLLER_INVENTORY])
+        self.assertEqual(len(local_runner.CASES), 12)
         self.assertEqual(len({name for name, _ in local_runner.CASES}), 12)
+        self.assertEqual(len(self.CONTROLLER_PYTEST_KEYWORDS), len(set(self.CONTROLLER_PYTEST_KEYWORDS)))
+        # Every pinned command names suites that exist (a renamed or deleted suite cannot hide in the gate).
+        for name, argv in self.CONTROLLER_INVENTORY:
+            for token in argv:
+                if token.startswith(('scripts/', 'agents/benchmarks/')) and not token.startswith('agents/venv/'):
+                    self.assertTrue((ROOT / token).is_file(), f'{name}: {token} is not a file')
         registry = load('local_gate_registry', 'scripts/run-deploy-structural-gates.py')
         gate = next(gate for gate in registry.GATES if gate.name == 'deploy-test-worker')
         self.assertIn('scripts/tests/deploy-test-worker.test.py', gate.command)

@@ -1907,10 +1907,24 @@ def check_versioned_group4_lanes(tmp: Path) -> None:
     assert not {"semantic-stack", "e2b-smoke"} & set(projection["lanes"]), "unphased tails are not projected"
     assert isinstance(projection["phased_union_wall_s"], (int, float))
 
-    deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
-    for needle in ("plan --live-probes --semantic-stack", "--e2b-smoke", "scripts/run-deploy-semantic-stack.sh",
-                   "--e2b-smoke-only", "`bash scripts/tests/run-deploy-semantic-stack.test.sh`"):
-        assert needle in deploy_md, f"deploy.md must document {needle}"
+    # The old deploy.md Steps 5/6b/6c named these flags, the script, its standalone E2B mode and its
+    # regression. They are now anchored to the sources that execute them: the staged planner
+    # (deploy_test_plan.standard_template) calls the driver with the three flags and carries the three
+    # lanes with the driver's own commands; the script and its --e2b-smoke-only mode are the commands
+    # asserted above; the script's regression is a registered structural gate.
+    planner_text = (ROOT / "scripts" / "deploy_test_plan.py").read_text()
+    assert '"--live-probes", "--semantic-stack", "--e2b-smoke"' in planner_text, \
+        "the staged planner must request the versioned Group 4 lanes"
+    staged = {gate["name"]: gate for gate in staged_template()["gates"]}
+    for name in VERSIONED_TAIL_LANES:
+        assert name in staged, f"the staged template must carry the {name} lane"
+        assert staged[name]["command"] == lanes[name]["command"], (name, staged[name]["command"])
+        assert staged[name]["cwd"] == lanes[name]["cwd"], (name, staged[name]["cwd"])
+    assert staged["semantic-stack"]["command"] == ["bash", pipeline.SEMANTIC_STACK_SCRIPT]
+    assert staged["e2b-smoke"]["command"] == ["bash", pipeline.SEMANTIC_STACK_SCRIPT, "--e2b-smoke-only"]
+    registry = load_module("run_deploy_structural_gates_semantic_stack", STRUCTURAL_RUNNER)
+    semantic_gate = next(gate for gate in registry.GATES if gate.name == "deploy-semantic-stack")
+    assert tuple(semantic_gate.command) == ("bash", "scripts/tests/run-deploy-semantic-stack.test.sh"), semantic_gate
     print("versioned group 4 lanes: ok")
 
 
@@ -4253,9 +4267,37 @@ def check_env_cap(tmp: Path, env: dict[str, str], plan: Path) -> bool:
     return json.loads((state / "receipt.json").read_text())["fix_loop"]["cap"] == 3
 
 
+def staged_template() -> dict:
+    """``deploy_test_plan.standard_template()``: the gate template ``scripts/deploy gates`` plans
+    from (this driver's lanes plus the gates the staged runner adds), built by the real planner
+    in a child interpreter so no planner import state leaks into this suite."""
+    code = "import json, deploy_test_plan; print(json.dumps(deploy_test_plan.standard_template()))"
+    return json.loads(subprocess.run(
+        [sys.executable, "-c", code], cwd=ROOT / "scripts", stdout=subprocess.PIPE, text=True, check=True,
+    ).stdout)
+
+
+def staged_quick_typescript_recipe() -> list[str]:
+    """The only ``typescript`` command the staged runner's quick-triage refresh accepts: the literal
+    ``typescript = [...]`` recipe in ``deploy_test_cycle.triage_quick`` (rejects any other argv)."""
+    tree = ast.parse((ROOT / "scripts" / "deploy_test_cycle.py").read_text())
+    for function in ast.walk(tree):
+        if isinstance(function, ast.FunctionDef) and function.name == "triage_quick":
+            for node in ast.walk(function):
+                if (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "typescript"
+                                                         for t in node.targets)):
+                    return ast.literal_eval(node.value)
+    raise AssertionError("deploy_test_cycle.triage_quick no longer pins the typescript quick recipe")
+
+
 def check_standard_plan_typescript() -> None:
     """The typescript lane is an incremental check with a per-worktree buildinfo
-    under .context, and deploy.md Step 3 runs the identical command."""
+    under .context. ``scripts/deploy gates`` plans the identical command
+    (deploy_test_plan.standard_template takes its lanes from this driver), the staged
+    runner's quick recipe accepts only that command, and the merge path requires the
+    staged receipt bound to HEAD (verify --require-staged), so the lane, the staged
+    gate and the merge proof cannot drift apart. The old deploy.md Step 3 / Phase 3
+    wording that pinned these is retired with that document."""
     standard = json.loads(subprocess.run(
         [sys.executable, str(DRIVER), "plan", "--group", "3"], stdout=subprocess.PIPE, text=True, check=True,
     ).stdout)
@@ -4263,10 +4305,34 @@ def check_standard_plan_typescript() -> None:
     command = " ".join(typescript["command"])
     assert "tsc --noEmit --incremental --tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo" in command, command
     assert typescript["cwd"] == "back-end", typescript
-    deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
-    assert typescript["command"][-1] in deploy_md, "deploy.md Step 3 must run the same incremental tsc command"
-    assert "run_deploy_pipeline.py verify --require-staged" in deploy_md, "Phase 3 must require the staged receipt bound to HEAD"
-    assert "--follow-source" in deploy_md and "FIX_LOOP_CAP" in deploy_md
+    # Anchor 1: the staged plan carries this lane's exact command and cwd.
+    staged = next(gate for gate in staged_template()["gates"] if gate["name"] == "typescript")
+    assert staged["command"] == typescript["command"], "the staged typescript gate must run the lane's incremental tsc command"
+    assert staged["cwd"] == typescript["cwd"] and staged["checks"] == ["typescript"], staged
+    # Anchor 2: the staged runner's fixed quick recipe is the same command.
+    assert staged_quick_typescript_recipe() == typescript["command"], \
+        "deploy_test_cycle.triage_quick must accept the same incremental tsc command the plan emits"
+    # Anchor 3: the merge path (scripts/deploy merge) and the gates path both require the staged
+    # receipt bound to HEAD, and merge runs it before require-mergeable.
+    for relative in ("scripts/deploy_cli.py", "scripts/deploy_gates.py"):
+        text = " ".join((ROOT / relative).read_text().split())
+        assert re.search(r"'verify', '--require-staged', '--state-dir', str\(\w+\), '--expect-head', \w+\]", text), \
+            f"{relative} must require the staged receipt bound to HEAD (verify --require-staged --expect-head)"
+    merge = " ".join((ROOT / "scripts" / "deploy_cli.py").read_text().split())
+    assert merge.index("'verify', '--require-staged'") < merge.index("'require-mergeable'"), \
+        "scripts/deploy merge must verify the staged receipt before require-mergeable"
+    with tempfile.TemporaryDirectory(prefix="require-staged-") as raw:
+        refused = run_driver("verify", "--require-staged", "--state-dir", raw, env=dict(os.environ))
+    assert refused.returncode == 2 and "PIPELINE_VERIFY status=no-staged-cycle exit=2" in refused.stdout, \
+        (refused.returncode, refused.stdout, refused.stderr)
+    # The driver keeps the fix-loop and speculative-source flags the retired deploy.md Phase 3 pinned by
+    # wording (--follow-source, FIX_LOOP_CAP / --fix-loop-cap / --after-rca, default of two failed rounds);
+    # their behavior is asserted by check_follow_source, check_fix_loop_cap and check_env_cap.
+    pipeline = load_module("run_deploy_pipeline_fix_loop_rule", DRIVER)
+    assert pipeline.DEFAULT_FIX_LOOP_CAP == 2, "two failed rounds refuse a blind rerun"
+    run_help = run_driver("run", "--help", env=dict(os.environ), check=True).stdout
+    for flag in ("--follow-source", "--fix-loop-cap", "--after-rca"):
+        assert flag in run_help, f"run_deploy_pipeline.py run must keep {flag}"
 
 
 def check_schedule_phases(tmp: Path, env: dict[str, str]) -> None:
