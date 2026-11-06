@@ -2,7 +2,11 @@
 # Keep /deploy's post-merge proof bound to the managed job and its original bank.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-DEPLOY="$ROOT/.claude/commands/deploy.md"
+# The cutover lane is executed by `scripts/deploy production` (deploy_prod.py
+# lane_fly) and verified by run_deploy_pipeline.py cutover_verify; the concise
+# deploy.md carries no inline cutover script, so these are the real anchors.
+PROD="$ROOT/scripts/deploy_prod.py"
+PIPELINE="$ROOT/scripts/run_deploy_pipeline.py"
 MONITOR="$ROOT/back-end/scripts/monitor-cooperative-cutover.ts"
 DRIVER="$ROOT/scripts/worker_pool_cutover.py"
 WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
@@ -15,9 +19,30 @@ require_text "$MONITOR" 'job.stage === '\''SUCCEEDED'\''' 'a pending job cannot 
 require_text "$MONITOR" 'job.candidateMachineIds.length === 8' 'verification requires the complete reserved bank'
 require_text "$MONITOR" 'gate?.phase === '\''RETIRED'\''' 'a managed predecessor needs a retirement certificate'
 require_text "$MONITOR" 'retained_legacy_generation' 'legacy retention must remain a distinct reported outcome'
-require_text "$DEPLOY" 'stage-start cooperative-cutover' 'deploy must record the original cutover start'
-require_text "$DEPLOY" 'stage-finish cooperative-cutover' 'deploy must record actual completion'
-require_text "$DEPLOY" 'AGENT_DEPLOYMENT_JOB_ID' 'deploy verification must bind the exact workflow job'
+require_text "$PROD" "ctx.factory('stage-start', 'cooperative-cutover')" 'deploy must record the original cutover start'
+require_text "$PROD" "ctx.factory('stage-finish', 'cooperative-cutover')" 'deploy must record actual completion'
+# A resumed job keeps the original clock: one start, before the first cutover
+# command, and one finish, after the (possibly resumed) job succeeded.
+[ "$(grep -Fc "ctx.factory('stage-start', 'cooperative-cutover')" "$PROD")" = 1 ] || fail 'cutover start must be recorded exactly once so a resume keeps the original clock'
+[ "$(grep -Fc "ctx.factory('stage-finish', 'cooperative-cutover')" "$PROD")" = 1 ] || fail 'cutover finish must be recorded exactly once'
+python3 - "$PROD" <<'PY' || fail 'cutover stage must start before the production command and finish after the resumed job'
+import re, sys
+body = open(sys.argv[1]).read().split('def lane_fly(', 1)[1].split('\ndef ', 1)[0]
+start = body.index("ctx.factory('stage-start', 'cooperative-cutover')")
+first_run = body.index("ctx.sh('fly', production_argv(")
+resume = body.index("ctx.sh('fly', resume_argv(job)")
+finish = body.index("ctx.factory('stage-finish', 'cooperative-cutover')")
+assert start < first_run < resume < finish, (start, first_run, resume, finish)
+PY
+# The exact workflow job is bound: resume re-enters the SAME durable job id, and
+# verification reads that job, checks its merged source and workflow attempt,
+# then runs the managed monitor --verify on that id.
+require_text "$PROD" "'run', '--job-id', job_id, '--'" 'resume must re-enter the exact saved job id'
+require_text "$PROD" "resume_argv(job)" 'a failed cutover must resume the job recorded for this run'
+require_text "$PIPELINE" '"scripts/worker-deployment-queue.ts", "read", "--job-id", job_id' 'verification must read the exact workflow job'
+require_text "$PIPELINE" 'if source_commit != merged_sha or attempt != fly["deployment_token"]' 'verification must bind the merged SHA and workflow attempt'
+require_text "$PIPELINE" '"scripts/monitor-cooperative-cutover.ts", "--job-id", job_id,' 'monitor verification must target the exact job'
+require_text "$PIPELINE" '"--expected-hash", expected_hash, "--verify"' 'monitor verification must carry the expected surface hash'
 require_text "$DRIVER" 'except subprocess.CalledProcessError:' 'failed retirement cannot become a zero count'
 require_text "$DRIVER" 'raise PoolCapacityPending("Old bank remains served' 'drain timeout must retain unfinished work'
 if grep -Eq 'force-clear-generation-queue|migrate-open-agent-workflows|machines destroy' "$DRIVER"; then
