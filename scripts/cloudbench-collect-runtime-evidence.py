@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Collect a sealed, exact-owner runtime evidence bundle over the status data plane."""
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -162,11 +163,50 @@ def exited_without_ack():
             return response.read(256).strip() != run_token.encode()
     except urllib.error.HTTPError as error:
         return error.code == 404
+class TruncatedTransfer(ConnectionError):
+    """The guest stream ended before its sealed Content-Length was delivered."""
+
+class SealedReadAttempt:
+    """Absorb one transport fault of a sealed read so the caller can restart it.
+
+    The shared relay tunnel can freeze every stream for seconds (a 7 s stall
+    exceeded the 6 s socket budget mid run.json on 2026-11-06). A sealed file
+    is immutable and served afresh per request, so a bounded restart from byte
+    0 is exact; the per-read budget and whole-capture alarm stay unchanged.
+    HTTP errors are protocol answers, and assertions are integrity checks:
+    both propagate on the first attempt.
+    """
+    def __init__(self, name, number, last):
+        self.name, self.number, self.last, self.done = name, number, last, False
+    def __enter__(self):
+        return self
+    def __exit__(self, kind, error, _traceback):
+        if kind is None:
+            self.done = True
+            return False
+        if (self.last or issubclass(kind, urllib.error.HTTPError)
+                or not issubclass(kind, (urllib.error.URLError, http.client.IncompleteRead,
+                                         TimeoutError, ConnectionError))):
+            return False
+        print(f"⚠️  retrying runtime evidence file {self.name} from byte 0 after a transport "
+              f"fault (attempt {self.number}/{SEALED_READ_ATTEMPTS}): {error!r}",
+              file=sys.stderr, flush=True)
+        time.sleep(0.5)
+        return True
+SEALED_READ_ATTEMPTS = 3
+def sealed_read_attempts(name):
+    for number in range(1, SEALED_READ_ATTEMPTS + 1):
+        attempt = SealedReadAttempt(name, number, number == SEALED_READ_ATTEMPTS)
+        yield attempt
+        if attempt.done:
+            return
 unacked_exits = 0
 shutdown_complete = False
 # DONE precedes the guest EXIT trap. Retry only seal observation and transient
 # transport reads before the first manifest, within the unchanged whole-capture
-# alarm. Once sealed, transfers and the final manifest comparison fail closed.
+# alarm. Once sealed, transfers and the final manifest comparison fail closed on
+# any HTTP rejection, header/size disagreement, hash mismatch or manifest change;
+# only a transport fault restarts that exact read (sealed_read_attempts).
 while True:
     try:
         try:
@@ -228,19 +268,23 @@ pending = Path(tempfile.mkdtemp(prefix=".runtime-evidence-", dir=parent))
 for name, metadata in files.items():
     target = pending / name
     target.parent.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256()
-    remaining = metadata["bytes"]
-    with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
-        assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
-        while remaining:
-            chunk = response.read(min(65536, remaining))
-            assert chunk, "runtime evidence response ended early"
-            output.write(chunk)
-            digest.update(chunk)
-            remaining -= len(chunk)
-        assert not response.read(1), "runtime evidence response exceeded manifest"
-        output.flush()
-        os.fsync(output.fileno())
+    for attempt in sealed_read_attempts(name):
+        with attempt:
+            target.unlink(missing_ok=True)  # Restart from byte 0; never splice.
+            digest = hashlib.sha256()
+            remaining = metadata["bytes"]
+            with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
+                assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
+                while remaining:
+                    chunk = response.read(min(65536, remaining))
+                    if not chunk:
+                        raise TruncatedTransfer("runtime evidence response ended early")
+                    output.write(chunk)
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                assert not response.read(1), "runtime evidence response exceeded manifest"
+                output.flush()
+                os.fsync(output.fileno())
     assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
 if prelaunch:
     with (pending / "bench.log").open("rb") as log:
@@ -253,7 +297,10 @@ else:
     assert set(files) - OPTIONAL == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
 if options:
     collect_driver_log()
-assert manifest() == expected, "runtime evidence changed across collection"
+for attempt in sealed_read_attempts("manifest"):
+    with attempt:
+        final_manifest = manifest()
+assert final_manifest == expected, "runtime evidence changed across collection"
 with (pending / "manifest.json").open("x") as output:
     json.dump(expected, output, sort_keys=True)
     output.write("\n")
