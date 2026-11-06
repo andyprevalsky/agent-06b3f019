@@ -12488,8 +12488,13 @@ and `reasoning` fields, then validate that file exists before finishing.
 """
 
 
-async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dict[str, Any]:
-    """Resolve a synced GPT/Codex compute token for the benchmark judge harness."""
+async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dict[str, Any] | None:
+    """A synced GPT/Codex subscription token for the benchmark judge harness, or None.
+
+    None is not a failure: the judge then spawns Codex without a token and the
+    backend's own resolver chooses, subscriptions first and then the funded Azure
+    fallback (resolveCodexSpawnAuth), so an exhausted pool no longer breaks judging.
+    """
     from config import load_config
     from helpers.llm import fetch_gpt_code_token_activity
 
@@ -12519,7 +12524,7 @@ async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dic
                     "poolTokenId": data.get("poolTokenId"),
                 }
 
-    raise ComputeTokenUnavailable("Codex compute token unavailable for agentic benchmark judge")
+    return None
 
 
 async def _parse_agentic_judge_verdict(result: dict) -> tuple[float, str]:
@@ -12582,7 +12587,7 @@ async def _call_declared_agentic_llm_judge(
     user_id = _current_benchmark_user_id()
     judge_agent_id = str(uuid.uuid4())
     tool_call_id = str(uuid.uuid4())
-    token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id)
+    token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) or {}
 
     if getattr(task, "process_spec", None) is not None:
         from benchmarks.process_bench import process_evidence
@@ -12606,12 +12611,18 @@ async def _call_declared_agentic_llm_judge(
         output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
         attachments=[attachment],
         code_provider="codex",
-        gpt_token=token_data["accessToken"],
+        gpt_token=token_data.get("accessToken"),
         gpt_account_id=token_data.get("accountId"),
         gpt_token_source=token_data.get("source"),
         gpt_token_pool_id=token_data.get("poolTokenId"),
         fast_mode_cache_enabled=False,
     )
+    # Only when every funded path (subscriptions and the Azure fallback) is exhausted
+    # does judging stop; that stays a compute-token SKIP, never a task FAIL.
+    if result.get("failure_kind") == "no_credentials" or result.get("usage_limit"):
+        raise ComputeTokenUnavailable(
+            "No Codex subscription or funded Azure credential available for agentic benchmark judge"
+        )
 
     score, reasoning = await _parse_agentic_judge_verdict(result)
     usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []

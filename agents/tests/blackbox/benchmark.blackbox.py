@@ -5848,7 +5848,10 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     Codex account was in a provider cooldown when test-mass-agent-run-0's declared judge
     asked for a lease, so both copies ended ERROR and the campaign counted them INFRA.
     Per Andy, an exhausted or cooled-down token pool is a skipped test: the run record,
-    CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR."""
+    CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR.
+    Andy 2026-11-06: a missing Codex token must not break the judge at once; it falls back
+    through the backend resolver (subscriptions, then the funded Azure key). Only when every
+    funded path is exhausted is the judge a compute-token SKIP."""
     import importlib.util
     from dataclasses import replace
     from benchmarks import run_benchmark as bench
@@ -5876,18 +5879,43 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     task = get_task_by_name("test-mass-agent-run-0")
     evaluator = next(e for e in task.evaluators if e.get("id") == "t7-schema-task-complete")
     judged_task = replace(task, evaluators=[{**evaluator, "method": "agentic_llm_judge"}])
+    spawn = AsyncMock(
+        return_value={"structured_response": {"score": 1.0, "reasoning": "grounded in the evidence"}, "usage_items": []}
+    )
     with (
         patch.object(bench, "_sync_compute_tokens", lambda **_: None),
         patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
         patch.object(bench.httpx, "AsyncClient", _Client),
+        patch(
+            "helpers.attachments.upload_to_storage",
+            AsyncMock(return_value={"id": "evidence-1", "storage_path": "judge/benchmark_evidence.json"}),
+        ),
+        patch("domains.spawn_claude_code_agent.service.spawn_claude_code_activity", spawn),
     ):
+        # No synced Codex token: the judge still runs Codex with no token, so the backend
+        # resolver picks a subscription or the funded Azure fallback.
+        verdict = await bench._call_declared_agentic_llm_judge(
+            judged_task, {**evaluator, "method": "agentic_llm_judge"}, {"messages": []}
+        )
+        assert verdict["score"] == 1.0, verdict
+        spawn_kwargs = spawn.await_args.kwargs
+        assert spawn_kwargs["code_provider"] == "codex" and spawn_kwargs["gpt_token"] is None, spawn_kwargs
+
+        # Every funded path exhausted (no subscription and no Azure credential): SKIP, not FAIL.
+        spawn.return_value = {
+            "failure_kind": "no_credentials",
+            "usage_limit": {"provider": "codex"},
+            "structured_response": None,
+            "output_files": [],
+        }
         try:
             await bench._run_declared_evaluators(judged_task, {"messages": []})
         except Exception as error:  # the real judge path owns the raised type
             judge_error = error
         else:
-            raise AssertionError("judge must not succeed without a compute token")
-    assert "Codex compute token unavailable for agentic benchmark judge" in str(judge_error)
+            raise AssertionError("judge must not succeed with every funded credential exhausted")
+    assert isinstance(judge_error, bench.ComputeTokenUnavailable), judge_error
+    assert "No Codex subscription or funded Azure credential available for agentic benchmark judge" in str(judge_error)
 
     logs = {"failure_evidence": {"errors": []}}
     with contextlib.ExitStack() as stack:
@@ -5914,7 +5942,7 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
     assert result.failure_reason.startswith(
         f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
-        "failed: Codex compute token unavailable for agentic benchmark judge"
+        "failed: No Codex subscription or funded Azure credential available for agentic benchmark judge"
     ), result.failure_reason
     assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
 
