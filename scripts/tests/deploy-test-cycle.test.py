@@ -1755,6 +1755,25 @@ class Cycle(unittest.TestCase):
                 else:
                     self.assertIn(f' · Unreleased: $0.75 {mode} (transferredCents 100 / releasedCents 25)', warning)
 
+    def test_agentcard_release_stall_helpers_serve_the_production_lane_without_widening_smoke(self):
+        # scripts/deploy_prod.py reuses these two helpers for the production lane (production=True); the staged
+        # smoke qualification keeps its sandbox-only default, so a production row still blocks there.
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-abandonment'))
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-production-abandonment'))
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-production-abandonment', production=True))
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', production=True))
+        self.assertFalse(c.agentcard_release_stall_task('chat-mode', production=True))
+        self.assertEqual(c.unreleased_amount_text({'transferredCents': 4396, 'releasedCents': 0, 'livemode': True}),
+                         'Unreleased: $43.96 live (transferredCents 4396 / releasedCents 0)')
+        self.assertEqual(c.unreleased_amount_text({'transferredCents': 4396, 'releasedCents': 0, 'livemode': False}),
+                         'Unreleased: $43.96 sandbox (transferredCents 4396 / releasedCents 0)')
+        for livemode in (1, 0, None, [], 'true'):  # only a real boolean names the provider mode
+            self.assertIn('mode UNRECORDED', c.unreleased_amount_text(
+                {'transferredCents': 100, 'releasedCents': 25, 'livemode': livemode}))
+        for bad in (None, [], 'x', {}, {'transferredCents': 1}, {'releasedCents': 0}, {'transferredCents': True, 'releasedCents': 0},
+                    {'transferredCents': 1, 'releasedCents': 5}, {'transferredCents': -1, 'releasedCents': 0}):
+            self.assertEqual(c.unreleased_amount_text(bad), 'Unreleased: UNRECORDED', bad)
+
     def test_agentcard_release_stall_qualification_binds_the_exact_sandbox_row(self):
         pristine = copy.deepcopy(self.state)
         for label, row in {'production task': dict(name='agent-payment-production-abandonment'),

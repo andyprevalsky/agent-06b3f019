@@ -689,22 +689,41 @@ AGENTCARD_RELEASE_STALL_REASON = ("AgentCard never released the closed card's or
                                   "releasedCents=0); skipped under the standing user-approved warning policy")
 
 
-def agentcard_release_stall_task(name: object, root: Path = ROOT) -> bool:
-    """The same literal catalog predicate the selector prints for this standing warning (sandbox only)."""
+def agentcard_release_stall_task(name: object, root: Path = ROOT, production: bool = False) -> bool:
+    """The same literal catalog predicate the selector prints for this standing warning. Staged smoke qualifies
+    sandbox rows only (the default: production tasks never run there); scripts/deploy_prod.py's production
+    lane asks for the production task with production=True."""
     import runpy
     selector = runpy.run_path(str(root / 'agents/benchmarks/select_predeploy_benches.py'))
     tasks = [task for task in selector['load_tasks'](root / 'agents/benchmarks/tasks.json')
-             if task.name == name and not task.production_only]
+             if task.name == name and bool(task.production_only) is production]
     rules = selector['standing_skip_eligibility'](tasks, [name]).get(name, []) if tasks else []
     return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
+
+
+def unreleased_amount_text(transfer: object) -> str:
+    """The funds a standing release-stall leaves unreleased, from the runner's own typed org-transfer record:
+    transferredCents less releasedCents, with the provider mode (livemode false is the sandbox). An amount the
+    record does not state, or states inconsistently, is UNRECORDED, never zero. Shared by the staged cycle's
+    warning row and the production lane (scripts/deploy_prod.py)."""
+    try:
+        transferred, released = transfer['transferredCents'], transfer['releasedCents']
+        if any(type(v) is not int or v < 0 for v in (transferred, released)) or released > transferred:
+            raise ValueError('unreleased amount is not stated')
+    except (KeyError, TypeError, ValueError):
+        return 'Unreleased: UNRECORDED'
+    livemode = transfer.get('livemode')
+    mode = 'live' if livemode is True else 'sandbox' if livemode is False else 'mode UNRECORDED'
+    return (f"Unreleased: ${(transferred - released) / 100:.2f} {mode} "
+            f"(transferredCents {transferred} / releasedCents {released})")
 
 
 def agentcard_unreleased_text(state: dict, warning: dict) -> str:
     """The funds a standing release-stall warning leaves unreleased, for its report row.
 
     Read from the exact native run document the warning is bound to (its sha256 is checked), from the
-    runner's own typed org-transfer record: transferredCents less releasedCents, with the provider mode
-    (livemode false is the sandbox). An amount the record does not state is UNRECORDED, never zero.
+    runner's own typed org-transfer record (unreleased_amount_text). An amount the record does not state is
+    UNRECORDED, never zero.
     """
     failure = next((f for f in state['failures'] if f['id'] == warning['id']), {})
     evidence = failure.get('worker_evidence') if isinstance(failure.get('worker_evidence'), dict) else {}
@@ -715,14 +734,9 @@ def agentcard_unreleased_text(state: dict, warning: dict) -> str:
         name = warning['native_row']['name']
         task = next(t for t in bounded_read(path, 'native run document')['tasks'] if t.get('name') == name)
         transfer = task['logs']['agentcard_release_stall_lifecycle']['orgTransfer']
-        transferred, released = transfer['transferredCents'], transfer['releasedCents']
-        if any(type(v) is not int or v < 0 for v in (transferred, released)) or released > transferred:
-            raise ValueError('unreleased amount is not stated')
     except (KeyError, StopIteration, TypeError, ValueError, OSError):
         return 'Unreleased: UNRECORDED'
-    mode = {False: 'sandbox', True: 'live'}.get(transfer.get('livemode'), 'mode UNRECORDED')
-    return (f"Unreleased: ${(transferred - released) / 100:.2f} {mode} "
-            f"(transferredCents {transferred} / releasedCents {released})")
+    return unreleased_amount_text(transfer)
 
 
 def sidecar_finished_at(failure: dict):
