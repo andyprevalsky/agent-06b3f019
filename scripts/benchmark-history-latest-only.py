@@ -112,7 +112,10 @@ def _load(repo: Path, base: str, rel: str) -> Ledger:
             remaining[line] -= 1
             branch.append(False)
         else:
-            branch.append(True)
+            # benchmark-history-backfill.py rows are merged history it already
+            # selected latest-only per landing merge, not this branch's iterations
+            row = _row(line) if b'"backfill_source"' in line else None
+            branch.append(not (row and row.get("backfill_source")))
     return Ledger(path, lines, branch)
 
 

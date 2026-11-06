@@ -1,0 +1,26 @@
+Title this thread exactly: " --ai-- Test repair: agent-payment-new-user-journey browser agent BrowserStateRequestEvent ValueError" (set it with `dvb-onbox threads set-title --title " --ai-- Test repair: agent-payment-new-user-journey browser agent BrowserStateRequestEvent ValueError"` as soon as you start, verify it with get-title, and keep the `--ai--` prefix on any later rename).
+
+/goal Fix smoke/agent-payment-new-user-journey (benchmark task agent-payment-new-user-journey) within agents/ browser-use browser-state path and the ordered new-user payment evaluator; preserve the evaluator, payment assertions and AgentCard release-stall standing warning semantics, make the original failing command pass, and finish /deploy through merge, production verification, cleanup and a completed deploy scorecard.
+
+Failed test: smoke/agent-payment-new-user-journey (benchmark task agent-payment-new-user-journey)
+Command: bash scripts/run-bench <task> --runs 1 (cloud fleet, exact ref); the deploy ran it as: scripts/run-bench test-mass-agent-run-0 chat-mode spawn-sub-agents parallel-tool-calls background-agent-message-smoke claude-code-agent browser-smoke browser-biometrics-webdecoy agent-payment-new-user-journey --runs 1 --concurrency 9 --retry-infra 0 --ref 2731bfe53f7ace99196021906b423b2a6296766a (via scripts/deploy_test_cloud.py)
+Scope: agents/ browser-use browser-state path and the ordered new-user payment evaluator; preserve the evaluator, payment assertions and AgentCard release-stall standing warning semantics
+Exact error: Declared evaluator new-user-payment-ordered-contract failed: Observed browser agent failure: spawn_browser_agent toolu_012DH6aU1brAvAX8SuNRW6tV status=ERROR; child message: ValueError: Expected at least one handler to return a non-None result, but none did! ?▶ BrowserStateRequestEvent#be80 ✅ -> {browser_use DownloadsWatchdog.on_BrowserStateRequestEvent ✅, DOMWatchdog.on_BrowserStateRequestEvent ✅} (Session ID sess_c3d0eba6494749bfb53b8358962364df). Activity spawn_browser_agent_activity_v3 completed as failed.
+Failure evidence: Benchmark Hub run 20261106-095658-2926651-m9d4162203dc0 (task run_id 31416a57-5619-474a-af65-b5c0f3a0f31e, agent f7900465-cee2-467f-95ce-f54854ebd8be, 211s); the deploy report also keeps the native bundle under docs/handoffs/pr-1725-closeout/ on main once the closeout PR merges.
+Failed source: 2731bfe53f7ace99196021906b423b2a6296766a (PR #1725 sync head; the same task passed on the immediately preceding tree of the same deploy, and this PR changes no agents/ or scripts/ file)
+Originating merge: d5d852e5b0c8beb12e1d215c2c8bfa88fe416046 (PR #1725, merged to main 2026-11-06 ~11:31Z)
+Originating devbox: c8cc9f58-7058-4394-a3b3-c8c96d57208c; this repair must run elsewhere
+
+Read CLAUDE.md and follow /RCA. Work autonomously from current main;
+before repair work, verify this is a different devbox and its project-folder
+membership is Bugs using the boxes-devbox-folders skill. Keep this /goal and
+all deployment coordination here; never depend on the originating box staying
+open. Retain every needed artifact here or in accessible durable storage.
+Do not ask questions or depend on human replies. Resolve implementation
+choices using the existing instructions and evidence. Prove the assigned
+test passes, then carry the fix through /deploy to its completed scorecard.
+An OPEN diagnosis, observability report, draft PR or stopped investigation
+does not complete this goal. Do not waive or re-delegate the assigned test
+as a substitute for fixing it. Preserve test intent, assertions, timeouts
+and existing permissions; never fabricate success. Keep working until
+the goal is achieved, including ordinary review and production work.

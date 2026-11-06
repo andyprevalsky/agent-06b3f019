@@ -30,6 +30,7 @@ PREFETCH_AFTER_ACTIONS = frozenset(
         "close_tab",
         "drag",
         "goto",
+        "hover",
         "input_text",
         "navback",
         "open_new_tab",

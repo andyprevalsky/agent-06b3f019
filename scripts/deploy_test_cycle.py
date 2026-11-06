@@ -960,6 +960,9 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        if entry and entry.get('kind') == 'interrupted-preallocation-cleanup-v1':
+            from deploy_test_interrupted_cleanup import still_bound
+            return still_bound(state, receipt, entry)
         if entry and entry.get("kind") == "native-cloud-cleanup-v1":
             from deploy_test_native_cleanup import still_bound
             return still_bound(entry, receipt, owner)
@@ -1036,6 +1039,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'interrupted-preallocation-cleanup-v1':
+        from deploy_test_interrupted_cleanup import reconcile as reconcile_interrupted
+        reconcile_interrupted(state, occurrence_id, proof)
+        return
     if proof.get('kind') == 'local-supervisor-cleanup-v1':
         from deploy_test_local_cleanup import reconcile as reconcile_local
         reconcile_local(state, occurrence_id, proof)
@@ -1540,7 +1547,7 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                  phase='quick', next_after_quick='initial', focused={}, ready=False)
 
 
-def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
+def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
@@ -1562,9 +1569,14 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
         raise ValueError("new plan is not bound to current source")
     old_gates = {g["name"]: g for g in old["gates"]}
     new_gates = {g["name"]: g for g in new["gates"]}
-    if not old_gates.keys() <= new_gates.keys():
+    from deploy_test_election import prepare as prepare_election
+    election = prepare_election(state, old, new, election_proof)
+    removed = {election['gate']} if election else set()
+    if not old_gates.keys() <= new_gates.keys() | removed:
         raise ValueError("repair cannot silently remove originally selected gates")
     for name, gate in old_gates.items():
+        if name in removed:
+            continue
         preserve_contract(gate, new_gates[name])
         if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
             raise ValueError("repair cannot silently remove originally selected checks")
@@ -1579,6 +1591,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     pending_gates.update(state.get('triage_repair_gates', []))
     if state['environment'] == environment_digest():
         for name, gate in old_gates.items():
+            if name in removed:
+                continue
             binding = full_pass_binding(state, gate)
             if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate))
                     and digest(gate) == digest(new_gates[name])):
@@ -1599,6 +1613,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
     carry, revisit, superseded_pending = {}, [], []
     for key, skip in state["skips"].items():
         gate = key.split("/", 1)[0]
+        if gate in removed:
+            continue  # Original qualification remains in superseded_skips below.
         if skip.get("input_fingerprint") == fingerprints.get(gate):
             carry[key] = {**skip, "source": new["source"], "original_source": skip["source"]}
         elif skip.get("disposition") == "pending post-merge":
@@ -1643,6 +1659,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path) -> None:
         state.setdefault('pass_carryover_history', []).append(copy.deepcopy(carried))
     state['repair_gates'] = [name for name in state['repair_gates']
                             if name not in carried and name not in completed_repairs]
+    from deploy_test_election import apply as apply_election
+    apply_election(state, election)
     if interrupted_refresh:
         state.pop('resume_phase')
     state.update(plan=new, source=new["source"], plan_digest=digest(new), ready=False, focused={},
@@ -1671,6 +1689,10 @@ def resolve_post_merge(state: dict, occurrence_id: str, repair_agent: str) -> No
 
 def pending_completion_block(state: dict) -> str | None:
     try:
+        from deploy_test_election import completion_block as election_block
+        blocked = election_block(state)
+        if blocked:
+            return blocked
         for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
                      if e.get('purpose') == 'isolated-validation'}:
             isolated_admissions(state, gate)
@@ -1707,6 +1729,8 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
                 or (expect_head is not None and state["source"]["head"] != expect_head)):
             return 5  # Same stale-source result as the existing pipeline verifier.
         revalidate_standing_skips(state)
+        from deploy_test_election import verify as verify_elections
+        verify_elections(state)
         for gate in plan['gates']:
             if gate['name'] in state.get('carried_passes', {}) and not carried_pass(state, gate):
                 return 5
@@ -1720,7 +1744,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
@@ -1769,7 +1793,8 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "refresh":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
-                refresh(state, read(args.input), plan, args.root)
+                refresh(state, read(args.input), plan, args.root,
+                        election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None)
             elif args.action == 'rebind-local':
                 if args.input is None:
                     raise ValueError('--input previous frozen plan required')
@@ -1784,6 +1809,11 @@ def main(argv: list[str] | None = None) -> int:
                         job.result()
             elif args.action == "resolve":
                 resolve_post_merge(state, args.occurrence, args.repair_agent)
+            elif args.action == 'accept-omitted-custody':
+                if args.input is None:
+                    raise ValueError('--input native operational acceptance required')
+                from deploy_test_election import accept
+                accept(state, bounded_read(args.input, 'omitted operational acceptance'))
             elif args.action == "reexecute":
                 reexecute(state, args.occurrence)
             elif args.action == "standing-skip":
@@ -1801,6 +1831,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"DEPLOY_CYCLE INCOMPLETE: {blocked}", file=sys.stderr)
                     return 1
             elif args.action == "verify":
+                from deploy_test_election import verify as verify_elections
+                verify_elections(state)
                 if args.require_resolved and pending_completion_block(state):
                     raise ValueError(pending_completion_block(state))
                 if (not state["ready"] or state["phase"] != "ready"
@@ -1818,6 +1850,10 @@ def main(argv: list[str] | None = None) -> int:
                           f"Resource warnings: {len(state.get('resource_warnings', []))}\n")
                 # The header is not a scorecard: pass none so BLOCKING failures render (finding 4447557591).
                 text = header + render({"failures": failures})
+                for election in state.get('elected_omissions', []):
+                    text += ('\nOPTIONAL COVERAGE SKIPPED (no task or cleanup credit)\n'
+                             + election['reason'] + '\nNative: ' + election['native_result']
+                             + '\nOriginal financial/custody obligations remain recorded.\n')
                 warnings = state.get("resource_warnings", [])
                 if warnings:
                     text += "\nRESOURCE WARNINGS (third-party resource skipped with warning; no pass credit)\n"

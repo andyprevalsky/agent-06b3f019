@@ -1,0 +1,84 @@
+{
+ "schema_version": 1,
+ "pr": 1732,
+ "title": "fix(web_fetch): bound provider chain and downloads inside the activity timeout",
+ "assignment": "post-merge repair goal from the PR #1725 deploy: smoke/parallel-tool-calls 'Timeout after 553s (task timeout=549s)' (Hub run 20261106-105813-889402-mfa70829f6947, agent f6899445-88bc-4b28-890a-75aed858d46c; originating merge d5d852e5b; originating devbox c8cc9f58-7058-4394-a3b3-c8c96d57208c); repair devbox 1483da82-0d27-4ae6-a916-720b5a62db29 in Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1)",
+ "merge_commit": "25b44dff334567fec68534aed3a0cccb28da23ca",
+ "gated_source": "e2894e1a356bfd030249af33b407ec64fb81e9b0",
+ "branch_commits": [
+  "c8c9892a1f fix(web_fetch): bound provider chain and downloads inside the activity timeout",
+  "e2894e1a35 fix(web_fetch): keep httpx behind the repo layer (hang classifier moves to repo.py)"
+ ],
+ "assigned_test_proof": {
+  "diagnosis": "Hub message timestamps of the failed run (evidence/failed-run-agent-f6899445.json.gz): Lisbon explore's single web_fetch of https://www.visitlisboa.com/en/regions ran 11:08:28 to 11:15:02Z (394s, 'Activity timed out after 180.0s', 'Time Elapsed 6m 33s') while sibling fetches took 2-9s; root then needed 109s to synthesize and the 549s cap hit. Cause: Firecrawl 120s + Parallel Extract 120s (240s) and sequential 30s-per-phase downloads exceed the 180s activity timeout and loop/activity_helper.py retries a timeout (2 attempts). Which of the two activities timed out is not observable (cloud guest logs not retained); both are bounded.",
+  "causal_repro": "agents/tests/blackbox/web_fetch.blackbox.py test_hung_providers_fail_within_the_scrape_budget_and_are_not_retried and test_hung_file_downloads_return_inside_the_download_budget: both failed on the unfixed domain (hung stubs never return), pass after the fix; python scripts/run_blackbox_tests.py web-fetch",
+  "unchanged_task_outcome": "scripts/run-bench cloud smoke, task parallel-tool-calls unchanged: PASSED on c8c9892a1 (task 174s, agent d5c34793-330e-406e-bf2a-aaff9b3cf318) and on e2894e1a3 (task 351.6s, agent d36c4d07-4364-4596-affe-df6b15a8fdca), both inside the 549s task timeout (failed run: 555s).",
+  "open_gap": "The exact unchanged task could not be forced to fail locally/cloud on the buggy revision (it needs a page that hangs both providers), so the fail-before half of the outcome proof is not reproduced; the deterministic boundary regressions are the causal proof. Heavy-tailed task wall times remain (174-1699s observed across attempts)."
+ },
+ "rca_case": "docs/rca/cases/2026-11-06-web-fetch-provider-chain-exceeds-activity-timeout.md (status fixed)",
+ "independent_review": "boxes thread ph71qgdjy3qhqwey3vymg0te0x8hq07t (read-only), output in evidence/independent-review-thread-output.txt; its findings (narrow hang classifier to ReadTimeout, bound the download activity too) were applied.",
+ "review": {
+  "cycles": "c8c9892a1 initial: CodeRabbit substantive, no actionable comments. e2894e1a3 incremental: first request rate-limited ('Review limit reached', next window 8 min), re-requested at the window, 'Last reviewed commit e2894e1a3, no actionable comments'. Graphide: not requested (advisory).",
+  "ledger": "evidence/review-ledger.json"
+ },
+ "staged_cycle": {
+  "plan": "evidence/plan-e2894e1.json.gz (cycle 1 plan evidence/plan-c8c9892.json.gz); 10 isolated local workers (inventory evidence/worker-inventory.json.gz) + cloud smoke; frontend coverage, AgentCard lifecycle not selected (no dependency/runtime trigger), mac-app coverage unavailable on Linux.",
+  "cycle_1": "c8c9892a1: all gates PASS except deploy-command-structural UNVERIFIED (agents-structural data_access_boundary: httpx imported in service.py, INTRODUCED by this change; evidence/rca-report-c8c9892.json). Smoke 9/9 PASS on that source. Archived: evidence/cycle1-archived-c8c9892.tar.gz, evidence/smoke-summary-205feeac.json.gz.",
+  "repair": "e2894e1a3 moved ProviderHung and the classifier into repo.py (evidence/fix-v2-layer-boundary.diff). Focused rerun of deploy-command-structural finished native PASS but UNVERIFIED (supervisor reaped one orphan: lingering_group); reexecute and local-supervisor-cleanup reconcile refused it, so the cycle was archived and re-initialised on the same frozen source.",
+  "final": "ready on e2894e1a3 digest bb6f62f50c2dd4f55c90ac74fa7e823bc6de3ae4b3b710eb95db0c24154a43d0: every selected gate PASS incl. 249 backend cases and smoke 9/9 (evidence/final-cycle-e2894e1.json.gz, evidence/final-cycle-state-e2894e1.tar.gz, evidence/smoke-summary-b037b14d.json.gz); PIPELINE_VERIFY status=bound-staged exit=0."
+ },
+ "production": {
+  "fly": "deploy-agents.yml run 42225762040 (merged source 25b44dff3): new queue navi-agent-tasks-pool-31f329790ca3@a85f3c9e6fbc, surface hash a85f3c9e6fbc, pointer published 2026-11-06T13:36:19Z and matching the expected hash; the 90-minute cooperative-cutover step failed at 14:59:06Z ('Old bank is still draining; retaining every Machine') and durable job 39e1d2df83d3be9b74681f789c9932eae7117319a5ae85774d8ca886ddd36839 is still DRAINING (not SUCCEEDED): UNVERIFIED/OPEN, handed off below. One extra resume by this deploy owner at ~15:05Z crashed for a missing FLY_API_TOKEN (recorded on the job as 'Owned deployment child exited 1' and a 5-minute retry cadence); a corrected observer ran from 15:12Z and the scheduled recovery job also observes.",
+  "render": "not required (no back-end change)",
+  "vercel": "not required (no front-end change)",
+  "mac_release": "not required (no mac-app change)",
+  "semantic": "chat-lifecycle-ratchet run 42242284331 dispatched manually (the pipeline's production-semantic refused: Fly lane not SUCCEEDED) with source_sha=25b44dff3: all 5 jobs success 15:21Z-15:29Z",
+  "agentcard": "not selected (no AgentCard/payment path changed)",
+  "mac_local_acceptance": "SKIPPED - no Mac available: owner-scoped GET https://api.roselabs.ai/api/local-devices returned HTTP 200 devices=0 at 2026-11-06T15:27:18Z (locally signed in-memory owner JWT via generateSupabaseSession, never persisted)"
+ },
+ "repair_handoffs": [
+  {
+   "test": "production gate: scripts/monitor-cooperative-cutover.ts --verify (job 39e1d2df...)",
+   "error": "DRAINING: old-bank workflow 76aac11b-7c50-4d3c-9741-47e2cdb912a5:start:8b570470-ec81-4013-8b7d-328d0880a392 (stale 'DEMO fleet concurrency probe alpha' Agent, ACTIVE since 2026-10-28) fails every generation_handoff_available workflow task with [TMPRL1103] payload size exceeded",
+   "attribution": "NOT_INTRODUCED (the stale agent came through the previous deploy at 13:06Z; this PR changes only agents/domains/web_fetch)",
+   "thread": "https://boxes.dev/thread/ph70npy4v8me1r7f1bt3s5zbfn8hp0fk",
+   "devbox": "17dd522e-2d46-4dc9-943b-29962da8834d",
+   "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1; evidence/repair-folder-receipt-cutover-drain.json)",
+   "goal": "evidence/repair-goal-cutover-drain.txt",
+   "start_receipt": "evidence/repair-start-receipt-cutover-drain.json"
+  }
+ ],
+ "followups": [
+  "deploy-command-structural: one orphaned process was left at gate exit in the focused rerun (supervisor term_sent pid 1074179, lingering_group). A direct run of the same command and the clean final sweep left nothing; the suite that spawns it is unidentified. Not a failed test (no delegation).",
+  "Benchmark attempts ledger: the deploy cloud smoke attempts for this merged source are in the Hub (runs 20261106-115351-3435368-m7918c876e8a2 and 20261106-125628-1393323-me443bd2e0df8) but no local ledger rows exist on this devbox (task_attempts.jsonl last row 2026-10-18); not committed.",
+  "Observability: cloud guest worker logs are not retained, so the timed-out activity of the failed run (scrape vs download) is inferred, not observed.",
+  "Heavy-tailed smoke wall time: mass-agent and the whole group take 25-30 min of fleet time per cycle."
+ ],
+ "records": [
+  {
+   "path": "/home/boxes/rose/.context/deploy-pipeline (final cycle) and /home/boxes/evidence/ptc/cycle-1-archive-c8c9892-e2894e1-focused",
+   "disposition": "committed (compressed state/plans in evidence/; logs referenced by hash in cycle JSON)"
+  },
+  {
+   "path": "/home/boxes/evidence/ptc (failed-run Hub JSON, plans, diffs, reviewer output, repair packet)",
+   "disposition": "committed under evidence/"
+  },
+  {
+   "path": "/var/tmp/rdw/* (10 worker checkouts, ~52 GB)",
+   "disposition": "reproducible from the merge commit and unneeded; removed at closeout"
+  },
+  {
+   "path": "/home/boxes/evidence/ptc/orphan sampler logs",
+   "disposition": "reproducible, unneeded (no orphan captured)"
+  },
+  {
+   "path": "agents/.env, back-end/.env, front-end/.env",
+   "disposition": "unchanged, never copied into the repo; worker copies were deleted with their checkouts"
+  },
+  {
+   "path": "project memory /project/.claude/memory/boxes-devbox-deploy-constraints.md",
+   "disposition": "updated with staged-cycle lessons (outside Git; project memory store)"
+  }
+ ],
+ "deletion_readiness": "All intended source is in main (merge 25b44dff3) and this records-only PR; no secret or credential is stored in Git. Open items: the DRAINING cutover job (owned by the repair thread, scheduled recovery continues), no Mac acceptance. Freedom untouched."
+}
