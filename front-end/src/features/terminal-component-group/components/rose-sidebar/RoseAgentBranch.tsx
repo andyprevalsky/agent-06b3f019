@@ -156,7 +156,7 @@ export default function RoseAgentBranch({
           statusOverride={depth > 0 ? childStatus(row) : undefined}
           hasAttentionRequest={s.attentionAgentIds.has(id)}
           onClick={() => s.onSelectAgent(id)}
-          actions={s.actionsFor(row)}
+          actions={s.actionsFor(row, agent)}
           onMenuOpenChange={s.onMenuOpenChange}
           rowRef={depth === 0 ? s.observeRoot(id) : undefined}
         />
