@@ -42,7 +42,7 @@ PATHS = {
 }
 # Quick static checks that run only when triggered; every other quick category is mandatory.
 CONDITIONAL_QUICK = {'mac-app-static'}
-# Original /deploy Step 4m-lint (deploy.md L1380-1388): the Mac-app verifier when mac-app/ changed.
+# Original /deploy Step 4m-lint (DEPRECATED_deploy.md L1380-1388): the Mac-app verifier when mac-app/ changed.
 # Darwin-only; elsewhere a triggered run is recorded as a platform omission, never a pass.
 MAC_APP_STATIC = {'name': 'mac-app-static', 'category': 'mac-app-static',
                   'command': ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check'],
@@ -50,7 +50,7 @@ MAC_APP_STATIC = {'name': 'mac-app-static', 'category': 'mac-app-static',
 # Categories selected on every deploy regardless of the diff, with the reason recorded as evidence.
 ALWAYS = {
     'e2b-smoke': ('every deploy: the Claude Code E2B sandbox smoke is never diff-skipped '
-                  '(deploy.md 6c L2226; measured ~106 s, ~840 MB)'),
+                  '(DEPRECATED_deploy.md 6c L2226; measured ~106 s, ~840 MB)'),
 }
 
 

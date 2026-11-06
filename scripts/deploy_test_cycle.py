@@ -1357,7 +1357,7 @@ CLOUD_SMOKE, CLOUD_SMOKE_PREREQUISITE = 'smoke', 'cloudbench-controller'
 def cloud_smoke_prerequisite(plan: dict, state: dict, selected: list[dict]) -> dict | None:
     """The one cross-gate order in a phase: paid cloud smoke waits for the cloudbench-controller gate.
 
-    deploy.md Step 4cb: when the cloudbench-controller gate is planned (it is selected only when
+    Original /deploy Step 4cb (DEPRECATED_deploy.md): when the cloudbench-controller gate is planned (it is selected only when
     cloud benchmark scripts changed), its regressions must pass on this source before any paid cloud
     run. Returns that planned gate while it is not already credited for this source and the phase runs
     smoke; None otherwise. Every other gate stays unordered.
@@ -1379,7 +1379,7 @@ def cloud_smoke_held(gate: dict, why: str) -> dict:
     """Trace of a smoke gate that was not started this phase (no paid cloud run, no pass credit)."""
     return {"gate": gate["name"], "prerequisite": CLOUD_SMOKE_PREREQUISITE,
             "reason": f"paid cloud smoke not started: {CLOUD_SMOKE_PREREQUISITE} has not passed on this source "
-                      f"({why}; deploy.md Step 4cb)"}
+                      f"({why}; the controller gate guards paid cloud smoke)"}
 
 
 def cloud_smoke_blocked(gate: dict, state: dict, held: dict) -> dict:
