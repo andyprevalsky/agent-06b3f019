@@ -13,7 +13,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { CodeAgentConversationView } from '@/features/terminal-component-group/components/code-agent-view/CodeAgentConversationView';
 import { resetCodeAgentLocalState } from '@/features/terminal-component-group/hooks/codeAgentLocalState';
 import type { Message } from '@/lib/api';
-import { codeSessionMessages } from '@/features/terminal-component-group/hooks/codeSessionTurns';
+import { codeSessionMessages } from '@/features/terminal-component-group/hooks/codeSessionMessages';
 
 import {
   ROOT_AGENT_ID,

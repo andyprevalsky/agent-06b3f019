@@ -727,26 +727,3 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
   builder.close();
   return builder.out;
 }
-
-/**
- * The code session as ONE ordered main-chat message list, the shape the root
- * transcript renders: the turn slots dissolve into their activity rows, so the
- * root's work grouping (groupTrajectoryWork) folds them into "Worked for …"
- * between the user-facing rows exactly as it does for a Rose agent. A slot with
- * no activity contributes nothing (never an empty "Worked for" row).
- */
-export function codeSessionMessages(input: CodeSessionInput): Message[] {
-  return buildCodeSession(input)
-    .flatMap((entry) => (entry.kind === 'work' ? entry.turn.activities : [entry.message]))
-    .map(verbatim);
-}
-
-/**
- * A code agent's text is its own output on the user's repo (a grep, a file, its
- * thinking), never Rose's plumbing copy: the trajectory's Fast Mode / DEMO-cache
- * scrub (userFacingMessageText) must not blank "FastModeToggle" out of it.
- */
-function verbatim(message: Message): Message {
-  if (message.role === 'USER' || message.role === 'SYSTEM') return message;
-  return { ...message, metadata: { ...message.metadata, verbatimText: true } };
-}

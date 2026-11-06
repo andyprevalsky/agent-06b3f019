@@ -24,7 +24,7 @@ import type { ChipState } from '../../types';
 import { AgentContext, useAgentContext, type AgentContextValue } from '../../hooks';
 import { eventTimeMs } from '../../hooks/codeAgentContract';
 import { useLocalEchoes } from '../../hooks/codeAgentLocalState';
-import { codeSessionMessages } from '../../hooks/codeSessionTurns';
+import { codeSessionMessages } from '../../hooks/codeSessionMessages';
 import type { CodeSessionSettings } from '../../hooks/codeSessionSettings';
 import type { CodeAgentConversation } from './useCodeAgentConversation';
 import { codeAgentDetail } from './codeAgentDetail';
