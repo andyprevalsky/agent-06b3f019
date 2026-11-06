@@ -375,6 +375,10 @@ GATES = (
         ("python3", "scripts/tests/concurrent-pr-shared-paths.test.py"),
     ),
     Gate(
+        "cloudbench-disposable-lifecycle",
+        ("python3", "scripts/tests/cloudbench-disposable-lifecycle.test.py"),
+    ),
+    Gate(
         "cloudbench-full-selection",
         ("python3", "scripts/tests/cloudbench-full-selection.test.py"),
     ),

@@ -37,7 +37,7 @@ class Disposable(unittest.TestCase):
    write(index/'machines/abcd1234','cloudbench-fixture\n');write(index/'volumes/vol_owned','cloudbench-fixture\n')
    for n in ('guest-cleanup-unconfirmed','runtime-evidence-unconfirmed'):
     if missing:(reg/n).touch()
-   script='set -u\n'+''.join(function(n)for n in ('fleet_current_disposable_registry','fleet_disposable_registry_policy','fleet_disposable_delete_intent','fleet_retire_sealed_primary','fleet_disposable_resources_terminal','fleet_release_cleanup_capacity','capacity_release_owner_reservations','capacity_reserve_slots','reap_volume','reap_machine','fleet_validate_reap_cohort','fleet_reap_registry_record_native','fleet_reap_registry_record','reap_registry_clones','machine_creation_admission','provision_primary_machine'))+r'''
+   script='set -u\n'+''.join(function(n)for n in ('fleet_current_disposable_registry','fleet_disposable_registry_policy','fleet_disposable_delete_intent','fleet_disposable_redelete_intent','volume_exact_created_detached','fleet_retire_sealed_primary','fleet_disposable_resources_terminal','fleet_release_cleanup_capacity','capacity_release_owner_reservations','capacity_reserve_slots','reap_volume','reap_machine','fleet_validate_reap_cohort','fleet_reap_registry_record_native','fleet_reap_registry_record','reap_registry_clones','machine_creation_admission','provision_primary_machine'))+r'''
 APP=fixture; FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 FLEET_OWNERSHIP_ROOT="$CASE/owners";FLEET_REGISTRY_DIR="$FLEET_OWNERSHIP_ROOT/$FLEET_OWNER_TOKEN"
 GIT_COMMON_DIR="$CASE/common";mkdir -p "$GIT_COMMON_DIR"
@@ -103,6 +103,24 @@ mkdir -p "$CASE/out"
    self.assertEqual(r.returncode,74,r.stderr);self.assertEqual(v['calls'].splitlines(),['volumes destroy vol_owned -a fixture --yes'])
    self.assertNotIn('rc=1',r.stderr);self.assertIsNone(re.search(r'volume destroy attempt [2-6]/6',r.stderr),r.stderr)
    self.assertEqual(len(re.findall(r'volume destroy reconcile [23]/6 id=vol_owned state=created \(DELETE not resent\)',r.stderr)),2,r.stderr)
+ def dropped_delete_case(self,*,age='-20 minutes',detached=True,redispatched=False):
+  intent=json.dumps(dict(app='fixture',identifier='vol_owned',kind='volume',owner='a'*32),sort_keys=True)+'\n'
+  body=('printf %s '+shlex.quote(intent)+' > "$FLEET_REGISTRY_DIR/disposable-delete-volume-vol_owned.json"\n'
+        'touch -d '+shlex.quote(age)+' "$FLEET_REGISTRY_DIR/disposable-delete-volume-vol_owned.json"\n')
+  if redispatched:body+='cp "$FLEET_REGISTRY_DIR/disposable-delete-volume-vol_owned.json" "$FLEET_REGISTRY_DIR/disposable-redelete-volume-vol_owned.json"\n'
+  body+='volume_exact_created_detached(){ '+('[ "$(cat "$CASE/volume-state")" = created ]' if detached else 'return 1')+'; }\n'
+  return self.run_case(body+'SOFT=pending_destroy;DISPOSABLE_DELETE_REGISTRY="$FLEET_REGISTRY_DIR";reap_volume vol_owned')
+ def test_recovery_redispatches_a_dropped_volume_delete_once(self):
+  # descend batch-1 epoch 3 (2026-11-06): teardown's one DELETE was accepted while the
+  # volume was waiting_for_detach and Fly dropped it; after detach the volume read
+  # created and --recover-stale-owner reconciled 6/6 "(DELETE not resent)" and failed.
+  r,v,_=self.dropped_delete_case()
+  self.assertEqual(r.returncode,74,r.stderr);self.assertEqual(v['calls'].splitlines(),['volumes destroy vol_owned -a fixture --yes'])
+ def test_recent_volume_delete_intent_is_not_redispatched(self):
+  r,v,_=self.dropped_delete_case(age='-30 seconds');self.assertNotEqual(r.returncode,0);self.assertEqual(v['calls'],'')
+ def test_attached_or_already_redispatched_volume_is_not_deleted_again(self):
+  for kw in (dict(detached=False),dict(redispatched=True)):
+   r,v,_=self.dropped_delete_case(**kw);self.assertNotEqual(r.returncode,0,kw);self.assertEqual(v['calls'],'',kw)
  def test_warm_whm_borrowed_no_mutation(self):
   for body in ['reap_machine warm "$CASE/log" vol_warm','reap_machine 820224f7e069e8 "$CASE/log" vol_whm','mkdir -p "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs";touch "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/abcd1234.json";reap_machine abcd1234 "$CASE/log" vol_owned','reap_volume vol_warm']:
    r,v,_=self.run_case(body);self.assertNotEqual(r.returncode,0);self.assertEqual(v['calls'],'')
