@@ -7775,7 +7775,7 @@
   {
     "name": "code-agent-rose-repo",
     "title": "Code agent in the attached Rose repo",
-    "prompt": "This agent runs in the Rose project, so the Rose GitHub repository is attached to the code agents you start. Use exactly one code agent for this task; do not use browser or explore agents and do not modify any files. Start it with this task: from its checkout of the Rose repository, run these read-only commands one at a time, each as its own shell command, and report every output: git rev-parse --abbrev-ref HEAD, git rev-parse HEAD, git log -1 --format=%s, git count-objects -vH, and git ls-files | wc -l. Right after you start it, while it is still working, send that same code agent exactly one message with send_message_to_agent asking it to also report the output of git log -3 --format=%h. When it finishes, reply with the branch name, the SHA, the subject line and the three short hashes.",
+    "prompt": "This agent runs in the Rose project, so the Rose GitHub repository is attached to the code agents you start. Use exactly one code agent for this task; do not use browser or explore agents and do not modify any files. Start it in the background with this task: from its checkout of the Rose repository, run these read-only commands one at a time, each as its own shell command, and report every output: git rev-parse --abbrev-ref HEAD, git rev-parse HEAD, git log -1 --format=%s, git count-objects -vH, and git ls-files | wc -l. As your very next action after it has started, while it is still working, send that same code agent exactly one message with send_message_to_agent asking it to also report the output of git log -3 --format=%h. Do not put that request, or any instruction to wait for a message, in the code agent's task. When the code agent finishes, reply with the branch name, the SHA, the subject line and the three short hashes.",
     "timeout_seconds": 1500,
     "is_chat_mode": false,
     "expected_tools": [
@@ -7789,7 +7789,7 @@
     "requires_claude_code": true,
     "attachment": null,
     "approval_handling": null,
-    "start_phase": "plan",
+    "start_phase": "execute",
     "project": "Rose",
     "min_tool_counts": {
       "spawn_claude_code_agent": 1,
