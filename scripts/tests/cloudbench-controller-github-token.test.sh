@@ -45,9 +45,9 @@ expected="Authorization: Basic $(printf 'x-access-token:%s' 'controller-live-tok
 [ "$hdr" = "$expected" ] || fail "controller token must win over machine secret (got ${hdr:0:48}…)"
 pass "controller B64 token wins over stale machine GITHUB_TOKEN"
 
-# ── 4. Resolver prefers live git remote over injected dead GITHUB_TOKEN ──────
-# Reproduce the Cursor Cloud shape: env GITHUB_TOKEN is present but unusable,
-# while origin carries a working x-access-token (as observed on this workspace).
+# ── 4. Resolver prefers Git's live credential over injected dead token ───────
+# Reproduce the managed-box shape: env GITHUB_TOKEN is present but unusable,
+# while Git's repository-scoped helper carries the working credential.
 export GITHUB_TOKEN='github_pat_DEAD_TOKEN_FOR_REPRO_ONLY'
 resolved="$(cloudbench_resolve_controller_github_token "$ROOT_DIR")" \
   || fail "resolver must find the controller git credential despite a dead GITHUB_TOKEN"
@@ -78,6 +78,12 @@ require_text() {
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'token="$(resolve_github_token)"' \
   "run-bench-cloud must resolve a controller token for warm git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_git_credential_github_token "$ROOT_DIR"' \
+  "warm git-sync must consult Git's repository-scoped credential helper"
+require_text "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
+  'GIT_TERMINAL_PROMPT=0 git -C "$workspace_root" credential fill' \
+  "credential discovery must never prompt an unattended controller"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'export CLOUDBENCH_GITHUB_TOKEN_B64=\$(cat' \
   "warm git-sync must load its request-scoped controller token"

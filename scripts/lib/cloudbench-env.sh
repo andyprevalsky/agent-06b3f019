@@ -1455,6 +1455,29 @@ cloudbench_git_insteadof_github_token() {
   return 1
 }
 
+# Read the repository-scoped credential through Git's configured helper. On
+# boxes.dev the working short-lived credential is intentionally exposed only
+# through this standard interface; it is not copied into gh hosts.yml or an
+# ambient token variable. Keep the request path-scoped so helpers using
+# credential.useHttpPath cannot return a credential for another repository.
+cloudbench_git_credential_github_token() {
+  local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}"
+  local key value token=""
+  while IFS='=' read -r key value; do
+    [ "$key" = password ] && token="$value"
+  done < <(
+    printf '%s\n' \
+      'protocol=https' \
+      'host=github.com' \
+      'path=Rose-Ai-Labs/rose.git' \
+      'username=x-access-token' \
+      '' \
+      | GIT_TERMINAL_PROMPT=0 git -C "$workspace_root" credential fill 2>/dev/null || true
+  )
+  [ -n "$token" ] || return 1
+  printf '%s' "$token"
+}
+
 cloudbench_resolve_controller_github_token() {
   local token="" dotenv backend_env agents_env
   local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}"
@@ -1465,6 +1488,8 @@ cloudbench_resolve_controller_github_token() {
     [ -n "$token" ] && { printf '%s' "$token"; return 0; }
   fi
   token="$(cloudbench_git_insteadof_github_token 2>/dev/null || true)"
+  [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  token="$(cloudbench_git_credential_github_token "$workspace_root" 2>/dev/null || true)"
   [ -n "$token" ] && { printf '%s' "$token"; return 0; }
   if command -v gh >/dev/null 2>&1; then
     # gh prefers $GITHUB_TOKEN even when it is invalid; strip it so hosts.yml wins.

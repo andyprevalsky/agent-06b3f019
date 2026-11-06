@@ -1396,6 +1396,8 @@ resolve_github_token() {
         decoded="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
         [ -n "$decoded" ] && candidates+=("$decoded")
     fi
+    t="$(cloudbench_git_credential_github_token "$ROOT_DIR" 2>/dev/null || true)"
+    [ -n "$t" ] && candidates+=("$t")
     # gh prefers ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST over hosts.yml — unset them
     # so a stale env override cannot mask a working CLI login for github.com.
     gh_tok="$(env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com 2>/dev/null || true)"
