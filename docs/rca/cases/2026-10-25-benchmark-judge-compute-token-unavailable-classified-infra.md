@@ -172,6 +172,13 @@ Local outcome proof, unchanged task (`scripts/run-bench --local test-mass-agent-
 - e4c57373c: `RESULTS: 1/1 passed`. The judge ran Codex through `[E2B] Using Azure
   gpt-6.1-sol ... funded fallback` and scored 1.0.
 
+Cloud outcome, unchanged original command (`scripts/run-bench test-mass-agent-run-0 --runs 1
+--retry-infra 0 --ref 84812e5647`, fleet 20261106-012742-2880910): PASSED. T7 overflowed to the
+agentic judge, which scored 1.0. That judge was served by a user Codex login
+(`GPT token fetched ... source=user`). Prod gained newly CONNECTED claude_code and gpt_code
+logins at about 02:13-02:16Z, so this cloud run does not tell main and the fix apart. The local
+main/fix pair above is the discriminating proof.
+
 Causal repro: `test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_codex_login`
 fails on main and passes on the fix.
 
