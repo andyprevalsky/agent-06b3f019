@@ -1923,10 +1923,14 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
                   wait_seconds: float | None = None, kill_after: tuple[float, str] | None = None,
                   context_root: Path | None = None, proc: Path | None = None,
                   kill_wait_seconds: float = TEARDOWN_KILL_WAIT_SECONDS,
-                  poll_seconds: float = TEARDOWN_POLL_SECONDS) -> dict:
+                  poll_seconds: float = TEARDOWN_POLL_SECONDS, reconcile_runs: bool = True) -> dict:
     """Wait for, then reap, every stack/benchmark owner the terminated lane left
     behind (see the section comment) and write the receipt to
-    ``<state_dir>/teardown/attempt-<attempt>-<lane>.json``."""
+    ``<state_dir>/teardown/attempt-<attempt>-<lane>.json``.
+
+    ``reconcile_runs=False`` leaves the lane's run directories in place for a
+    caller with its own sealed recovery protocol (the staged deploy cycle's
+    interrupted-worker recovery binds them by path); signalling is unchanged."""
     wait_seconds = teardown_wait_seconds() if wait_seconds is None else wait_seconds
     context_root = benchmark_context_root() if context_root is None else context_root
     started = time.monotonic()
@@ -2013,7 +2017,8 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
     # inside the bootstrap grace is left for the next attempt's preflight.
     receipt["owner_runs"] = reconcile_owner_runs(
         context_root, state_dir, stage=f"attempt-{attempt}-teardown-{name}", proc=proc,
-        run_ids={record["run_id"] for record in records})
+        run_ids={record["run_id"] for record in records}) if reconcile_runs else {
+        "skipped": "caller owns run-directory reconciliation"}
     receipt.update(outcome=outcome, survivors=alive, finished_at=_now(),
                    wall_s=round(time.monotonic() - started, 2))
     path = state_dir / "teardown" / f"attempt-{attempt}-{name}.json"

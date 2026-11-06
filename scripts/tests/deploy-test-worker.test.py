@@ -2515,4 +2515,123 @@ class GenericLifecycle(unittest.TestCase):
         self.assertEqual(marker.read_text(), 'done')
 
 
+# A benchmarks/local.py stand-in that leads the case's group (run-bench execs it) and
+# keeps draining its runner/stack past the worker's ten-second TERM grace until the
+# test releases it. Its markers are replaced atomically (no torn reads under load).
+DRAINING_CONTROLLER = r"""
+import json, os, random, signal, sys, time
+from pathlib import Path
+root, marker, owner_record = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3] == 'owner'
+release = marker.parent / (marker.name + '.release')
+def publish(path, text):
+    staged = path.with_name(path.name + '.tmp')
+    staged.write_text(text)
+    os.replace(staged, path)
+stop = []
+signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+if owner_record:
+    run = root / '.context' / 'benchmarks' / f'{int(time.time())}-{os.getpid()}-{random.randrange(10000, 99999)}'
+    run.mkdir(parents=True)
+    publish(run / 'local-benchmark-owner.json', json.dumps({'run_id': run.name, 'state': 'running', 'pid': os.getpid()}))
+publish(marker.parent / (marker.name + '.ready'), str(os.getpid()))
+end = time.monotonic() + 120  # bounded: never outlive the test if nobody stops it
+while not stop and time.monotonic() < end:
+    time.sleep(.05)
+while not release.exists() and time.monotonic() < end:  # its own cleanup, past the grace
+    time.sleep(.05)
+publish(marker, 'clean')
+"""
+
+
+class WorkerBenchmarkControllerKill(unittest.TestCase):
+    """2026-11-05: the worker's case group leader was the benchmarks/local.py controller. Its
+    ten-second group KILL raced the cycle's own; a KILLed controller skips the cleanup traps that
+    stop its runner and isolated stack. A token-owned benchmark owner is left to the cycle's
+    token-bound teardown; any other TERM-ignoring case keeps the existing KILL."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='worker-controller-')
+        self.root = Path(self.temp.name) / 'worker'
+        self.root.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        (self.root / 'code').write_text('fixture')
+        (self.root / '.git/info/exclude').write_text('.context/\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'fixture'], check=True)
+        self.marker = Path(self.temp.name) / 'controller-cleanup'
+        self.release = self.marker.parent / (self.marker.name + '.release')
+        self.pid = None
+        cycle.CANCEL.clear()
+
+    def tearDown(self):
+        cycle.CANCEL.clear()
+        self.release.touch()
+        # Only the case this test started: the worker leaves a retained case unreaped, so
+        # signal its pid only while its argv still names this test's marker (no reuse).
+        if self.pid is not None:
+            try:
+                if str(self.marker).encode() in Path(f'/proc/{self.pid}/cmdline').read_bytes().split(b'\0'):
+                    os.kill(self.pid, signal.SIGKILL)
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+        self.temp.cleanup()
+
+    @staticmethod
+    def alive(pid):
+        try:
+            state = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[0]
+        except (OSError, IndexError):
+            return False
+        return state not in ('Z', 'X')
+
+    def run_cancelled(self, owner_record):
+        ready = self.marker.parent / (self.marker.name + '.ready')
+        recipe = {'cases': {'card': {'command': [sys.executable, '-c', DRAINING_CONTROLLER, str(self.root),
+                                                 str(self.marker), 'owner' if owner_record else 'plain'],
+                                     'aggregate': True}}}
+        request = {'token': 'controller-' + ('owner' if owner_record else 'plain'), 'source': cycle.source(self.root),
+                   'gate': 'bench-controller', 'checks': ['card'], 'skips': {}, 'phase': 'initial',
+                   'worker_recipe': recipe}
+
+        def cancel_when_ready():
+            end = time.monotonic() + 60
+            while not ready.exists() and time.monotonic() < end:
+                time.sleep(.02)
+            if ready.exists():
+                self.pid = int(ready.read_text())
+            cycle.CANCEL.set()  # the cycle's TERM reached this worker (always: never hang the worker)
+
+        timer = threading.Thread(target=cancel_when_ready)
+        with patch.dict(os.environ, {'DEPLOY_PIPELINE_LANE_TOKEN': 'cycle-request-token'}):
+            timer.start()
+            try:
+                result = worker.execute(request, self.root)
+            finally:
+                timer.join()
+        self.assertIsNotNone(self.pid, 'case never registered')
+        return result['evidence']['card']
+
+    def test_token_owned_controller_is_left_draining_for_cycle_teardown(self):
+        row = self.run_cancelled(owner_record=True)
+        # Still draining (held until released below): the worker did not KILL it.
+        self.assertTrue(self.alive(self.pid), 'worker KILLed the draining benchmark controller')
+        self.assertFalse(self.marker.exists())
+        self.assertIsNone(row['native_exit'])
+        self.assertEqual('UNVERIFIED', row['status'])
+        self.assertTrue(row['cancelled']); self.assertTrue(row['lingering_group'])
+        self.release.touch()
+        end = time.monotonic() + 30
+        while not self.marker.exists() and time.monotonic() < end:
+            time.sleep(.05)
+        self.assertEqual('clean', self.marker.read_text(), 'controller cleanup traps did not complete')
+
+    def test_case_without_owned_benchmark_record_keeps_group_kill(self):
+        row = self.run_cancelled(owner_record=False)
+        self.assertEqual(-signal.SIGKILL, row['native_exit'])
+        self.assertFalse(self.alive(self.pid))
+        self.assertFalse(self.marker.exists())
+        self.assertEqual('UNVERIFIED', row['status']); self.assertTrue(row['lingering_group'])
+
+
 if __name__=='__main__': unittest.main()

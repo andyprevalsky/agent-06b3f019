@@ -429,7 +429,26 @@ def execute(gate: dict, state: dict, directory: Path, root: Path, *, local_failu
             gate, state, directory, root, host_admission=admission, host_timeout=remaining))
 
 
+def benchmark_teardown(gate: dict, token: str, started: float, folder: Path, root: Path, attempt: int) -> dict:
+    """Reach the gate's own detached benchmark controllers once its process group ended.
+
+    benchmarks/local.py runs the runner and its isolated stack in sessions of their own, so the
+    gate's group TERM and ten-second group KILL never wait for their cleanup: on 2026-11-05 an
+    interrupted cycle left agentcard-lifecycle's controller running queued paid tasks for ~24
+    minutes. This is the legacy lane teardown bound to this request's token: only token-owned
+    owner records are signalled (the controller first, then its own published shutdown budget,
+    then the last-resort KILL), foreign runs are only reported, and run directories stay in place
+    for the interrupted-worker recovery protocol.
+    """
+    import run_deploy_pipeline as lanes
+    context = (root / gate.get('cwd', '.')).resolve() / '.context' / 'benchmarks'
+    receipt = lanes.teardown_lane(gate['name'], attempt=attempt, token=token, started_epoch=started,
+                                  state_dir=folder, context_root=context, reconcile_runs=False)
+    return lanes._teardown_summary(receipt)
+
+
 def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
+    from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
     token = uuid.uuid4().hex
@@ -461,7 +480,9 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
            "DEPLOY_GATE_RESULT": str(result_path), "DEPLOY_GATE_TOKEN": token,
-           "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1"}
+           "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1",
+           # Teardown ownership of every process the gate starts (benchmark_teardown).
+           LANE_TOKEN_ENV: token}
     admission = isolated_request(state, gate, request, root, env)
     if admission:
         request['isolated_validation'] = admission
@@ -535,6 +556,17 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         complete = True
     else:
         reason = "missing complete case receipt"
+    teardown = None
+    abnormal = timed_out or cancelled or lingering or any(
+        isinstance(row, dict) and any(row.get(k) is True for k in ('timed_out', 'cancelled', 'lingering_group'))
+        for row in worker_evidence.values())
+    if host_admission.get('started') is not False and abnormal:
+        try:
+            teardown = benchmark_teardown(gate, token, started, folder, root, state['round'])
+        except (OSError, ValueError) as error:
+            teardown = {'outcome': 'failed', 'error': f'{type(error).__name__}: {error}'}
+        if teardown['outcome'] not in ('clean', 'exited', 'terminated'):
+            lingering = True  # A KILLed or surviving owner leaves its resources unverified.
     if worker_cleanup_owner is not None:
         # The remote owner must be reconciled before any other token may use that worker
         # thread/root: no credit, and the existing resume guard refuses on lingering_group.
@@ -574,6 +606,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result['worker_evidence'] = worker_evidence
     result['resource_skips'] = qualified
     result['worker_result'] = str(result_path) if result_path.exists() else None
+    if teardown is not None:
+        result['teardown'] = teardown
     write(folder / "receipt.json", result)
     return result
 

@@ -3936,4 +3936,197 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
 
 
+# A benchmarks/local.py stand-in: its own session (a group TERM of the gate never
+# reaches it), a generated run id embedding its pid, an owner record, and a TERM
+# trap that runs its own cleanup before exiting. Every file it publishes is
+# replaced atomically, so a concurrent reader never sees a torn record or marker.
+FAKE_CONTROLLER = r"""
+import json, os, random, signal, sys, time
+from pathlib import Path
+root, marker = Path(sys.argv[1]), Path(sys.argv[2])
+def publish(path, text):
+    staged = path.with_name(path.name + '.tmp')
+    staged.write_text(text)
+    os.replace(staged, path)
+run = root / '.context' / 'benchmarks' / f'{int(time.time())}-{os.getpid()}-{random.randrange(10000, 99999)}'
+run.mkdir(parents=True)
+stop = []
+signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
+owner = run / 'local-benchmark-owner.json'
+publish(owner, json.dumps({'version': 1, 'run_id': run.name, 'state': 'running', 'pid': os.getpid()}))
+publish(marker.parent / (marker.name + '.ready'), str(os.getpid()))
+end = time.monotonic() + 120  # queued paid tasks, if nobody stops it
+while not stop and time.monotonic() < end:
+    time.sleep(.05)
+time.sleep(.3)  # its own cleanup traps
+publish(owner, json.dumps({'version': 1, 'run_id': run.name, 'state': 'cleanup_verified', 'pid': os.getpid()}))
+publish(marker, 'clean')
+"""
+
+
+class ExpiringClock:
+    """deploy_test_process's monotonic clock with the gate deadline elapsing on request.
+
+    A wall-clock deadline shorter than two interpreter startups let the gate time out
+    before its controller registered, so the teardown correctly found nothing yet and
+    the controller then outlived the test. The deadline now elapses only after the
+    controller registered; the TERM, teardown and receipt paths are the real ones."""
+
+    LEAP = 10 * 3600.0
+
+    def __init__(self):
+        import time
+        self.real = time
+        self.expired = threading.Event()
+
+    def monotonic(self):
+        return self.real.monotonic() + (self.LEAP if self.expired.is_set() else 0.0)
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+
+class GateBenchmarkControllerTeardown(unittest.TestCase):
+    """2026-11-05 measurement attempt 1: TERM of the staged cycle killed the gate's worker after
+    ten seconds and returned; its detached benchmarks/local.py controller kept running queued
+    paid tasks for ~24 minutes. The cycle must reach that exact token-owned controller, wait for
+    its own cleanup, record a teardown receipt and never signal a foreign run. Two gate
+    lifecycles reach it: a native producer (the measured one: plain group TERM, ten-second
+    KILL, no supervisor) and an owned worker whose supervisor hit its cleanup bound."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / 'repo'
+        self.root.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        (self.root / 'code').write_text('original')
+        (self.root / '.git' / 'info' / 'exclude').write_text('.context/\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'fixture'], check=True)
+        self.worker_root = Path(self.temp.name) / 'bench-worker'
+        self.worker_root.mkdir()
+        self.directory = self.root / '.context' / 'cycle'
+        self.marker = Path(self.temp.name) / 'controller-cleanup'
+        self.controllers, self.children = [], []
+        # The gate's own process starts the detached controller, then idles only while this
+        # test's temp directory exists (a supervisor-less leftover exits by itself afterwards).
+        worker = ('import subprocess,sys,time;from pathlib import Path;'
+                  f'subprocess.Popen([sys.executable,"-c",{FAKE_CONTROLLER!r},{str(self.worker_root)!r},'
+                  f'{str(self.marker)!r}],start_new_session=True);'
+                  f'end=time.monotonic()+120\nwhile Path({self.temp.name!r}).exists() and time.monotonic()<end:'
+                  'time.sleep(.1)')
+        # A root port no deploy-worktree claim can share (RCA
+        # 2026-11-05-interrupted-proof-fixture-port-inside-deploy-claim-range).
+        self.gate = {'name': 'bench-controller', 'category': 'generic',
+                     'worker_transport': 'local-isolated', 'case_protocol': True,
+                     'checks': ['bench-controller'], 'cwd': str(self.worker_root),
+                     'worker_root': str(self.worker_root), 'timeout_seconds': 60,
+                     'worker': 'bench-worker', 'command': [sys.executable, '-c', worker],
+                     'env': {'CONDUCTOR_WORKSPACE_NAME': 'bench', 'CONDUCTOR_PORT': str(interrupted_root_port())}}
+        quick = [{'name': name, 'category': name, 'quick': True, 'command': ['true'], 'checks': [name]}
+                 for name in ('eslint', 'format', 'typescript', 'backend-structural')]
+        plan = {'source': c.source(self.root), 'gates': [*quick, self.gate]}
+        self.state = c.initialize(plan, self.root)
+        self.state['phase'] = 'initial'
+        self.budget = patch.dict(os.environ, {'DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS': '0.5',
+                                              'DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS': '8'})
+        self.budget.start()
+
+    def tearDown(self):
+        import signal
+        self.budget.stop()
+        c.CANCEL.clear()
+        # Only processes this test started. A detached controller is reaped by init, so its
+        # pid may be reused: signal it only while its argv still names this test's marker.
+        for pid, marker in self.controllers:
+            try:
+                if str(marker).encode() in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0'):
+                    os.kill(pid, signal.SIGKILL)
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+        for proc in self.children:  # unreaped Popen children: their pid cannot be reused
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=10)
+        self.temp.cleanup()
+
+    @staticmethod
+    def alive(pid):
+        try:
+            state = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[0]
+        except (OSError, IndexError):
+            return False
+        return state not in ('Z', 'X')
+
+    def wait_for(self, path, seconds=30):
+        import time
+        end = time.monotonic() + seconds
+        while not path.exists() and time.monotonic() < end:
+            time.sleep(.02)
+        self.assertTrue(path.exists(), path)
+
+    def foreign_controller(self):
+        """Another run under the same context root that this gate does not own."""
+        marker = Path(self.temp.name) / 'foreign-cleanup'
+        env = {k: v for k, v in os.environ.items() if k != 'DEPLOY_PIPELINE_LANE_TOKEN'}
+        proc = subprocess.Popen([sys.executable, '-c', FAKE_CONTROLLER, str(self.worker_root), str(marker)],
+                                env=env, start_new_session=True)
+        self.children.append(proc)
+        self.wait_for(marker.parent / (marker.name + '.ready'))
+        return proc, marker
+
+    def run_gate(self, stop):
+        with ThreadPoolExecutor(1) as pool:
+            future = pool.submit(c.execute, self.gate, self.state, self.directory, self.root,
+                                 local_failure=threading.Event())
+            try:
+                ready = self.marker.parent / (self.marker.name + '.ready')
+                self.wait_for(ready)
+                controller = int(ready.read_text())
+                self.controllers.append((controller, self.marker))
+                foreign, foreign_marker = self.foreign_controller()
+            finally:
+                stop()  # never leave the gate running into the executor's join
+            result = future.result(timeout=120)
+        return result, controller, foreign, foreign_marker
+
+    def assert_owned_teardown(self, result, controller, foreign, foreign_marker):
+        self.assertFalse(self.alive(controller), 'detached token-owned controller survived the gate')
+        self.assertEqual('clean', self.marker.read_text(), 'controller cleanup trap did not run')
+        teardown = result.get('teardown')
+        self.assertIsInstance(teardown, dict, 'no teardown receipt recorded')
+        self.assertEqual('terminated', teardown['outcome'])
+        self.assertIn(controller, teardown['escalated'])
+        self.assertEqual([], teardown['killed'])
+        self.assertEqual([], teardown['survivors'])
+        receipt = c.read(Path(teardown['receipt']))
+        self.assertEqual(result['token'], receipt['token'])
+        self.assertTrue(Path(teardown['receipt']).is_relative_to(Path(result['log']).parent))
+        # The foreign run is reported, never signalled.
+        self.assertIn(foreign.pid, teardown['foreign_pids'])
+        self.assertNotIn(foreign.pid, teardown['escalated'] + teardown['killed'])
+        self.assertIsNone(foreign.poll())
+        self.assertFalse(foreign_marker.exists())
+        self.assertEqual(teardown, c.read(Path(result['log']).parent / 'receipt.json')['teardown'])
+
+    def test_cancelled_native_producer_tears_down_detached_controller(self):
+        self.gate['native_cloud'] = True  # the measured lifecycle: plain group TERM, then KILL
+        result, controller, foreign, marker = self.run_gate(c.CANCEL.set)
+        self.assertEqual('native-producer', result['lifecycle'])
+        self.assertTrue(result['cancelled'])
+        self.assert_owned_teardown(result, controller, foreign, marker)
+
+    def test_timed_out_owned_gate_tears_down_detached_controller(self):
+        import deploy_test_process
+        clock = ExpiringClock()
+        self.gate['timeout_seconds'] = 3600  # elapses only through clock.expired, after registration
+        with patch.object(deploy_test_process, 'time', clock):
+            result, controller, foreign, marker = self.run_gate(clock.expired.set)
+        self.assertEqual('owned', result['lifecycle'])
+        self.assertTrue(result['timed_out'])
+        self.assertFalse(result['cancelled'])
+        self.assert_owned_teardown(result, controller, foreign, marker)
+
+
 if __name__ == '__main__': unittest.main()
