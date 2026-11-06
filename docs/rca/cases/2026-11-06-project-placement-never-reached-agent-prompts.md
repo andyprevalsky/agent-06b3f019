@@ -75,12 +75,20 @@ agent reads the known URL for PR/issue counts. On the waterfall
 (`openai/gpt-6.1-sol`) the planner flipped the same way, while the flash
 plan_loop on `qwen/qwen3.8-27b` kept an explore repo search.
 
-Replay-tool gap found on the way: `scripts/replicate_llm_dump.py` renames the
+The fixed router escalates in `execute` mode, so the fixed flow's first decision
+is execute_loop. Replaying the prod execute_loop prompt and tools with the
+first-turn history on `claude-opus-5-5` (literal call site `execute_loop`):
+before, a `browser` agent "On GitHub (logged in as the user), find the user's
+main \"rose\" repository"; after, a `code` agent "Read-only report on the GitHub
+repo Rose-Ai-Labs/rose" with no `github_repo_link`.
+
+Replay-tool gap found on the way: `scripts/replicate_llm_dump.py` renamed the
 call site to `replicate_<site>`, and `providers/rose/flash_agent.py` grants
 subscription legs only to the literal `plan_loop` / `execute_loop` /
-`explore_agent` call sites, so a flash-agent replay silently skips the
-claude/gpt subscription leg prod used. The replay driver restored the original
-call site for routing; the tool itself is not yet fixed.
+`explore_agent` call sites, so a flash-agent replay silently skipped the
+claude/gpt subscription leg prod used and ran on the waterfall. The replay now
+keeps the dumped call site and marks itself via `dump_extra.replicated_from`
+(`agents/tests/unit/test_replicate_llm_dump.py`).
 
 ## Solution
 
