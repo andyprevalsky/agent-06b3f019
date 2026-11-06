@@ -178,10 +178,27 @@ function idbRecords(opts: {
 /** Frame key/value pairs into a single-block leveldb `.log` file and write it. */
 function writeLevelDbLog(leveldbDir: string, pairs: KvPair[]): void {
   fs.mkdirSync(leveldbDir, { recursive: true });
+  fs.writeFileSync(path.join(leveldbDir, '000001.log'), encodeLevelDbLog(pairs));
+}
+
+/**
+ * Write a large store as many single-block `.log` files (each batch must fit
+ * one 32 KiB log block), the way a long-lived Chrome profile accumulates them.
+ */
+function writeLevelDbLogFiles(leveldbDir: string, pairs: KvPair[], perFile: number): void {
+  fs.mkdirSync(leveldbDir, { recursive: true });
+  for (let i = 0; i * perFile < pairs.length; i++) {
+    const chunk = pairs.slice(i * perFile, (i + 1) * perFile);
+    const name = `${String(i + 1).padStart(6, '0')}.log`;
+    fs.writeFileSync(path.join(leveldbDir, name), encodeLevelDbLog(chunk, i * perFile + 1));
+  }
+}
+
+/** Frame key/value pairs into one single-block leveldb `.log` file's bytes. */
+function encodeLevelDbLog(pairs: KvPair[], seq = 1): Buffer {
   // WriteBatch: seq(8 LE) | count(4 LE) | entries[ type(1)=Put | keyLen varint | key | valLen varint | val ]
   const batch: number[] = [];
-  const seq = 1;
-  for (let i = 0; i < 8; i++) batch.push((seq >> (i * 8)) & 0xff);
+  for (let i = 0; i < 8; i++) batch.push(Math.floor(seq / 2 ** (i * 8)) & 0xff);
   const count = pairs.length;
   for (let i = 0; i < 4; i++) batch.push((count >> (i * 8)) & 0xff);
   for (const p of pairs) {
@@ -195,8 +212,7 @@ function writeLevelDbLog(leveldbDir: string, pairs: KvPair[]): void {
     batch.push(...leVarint(p.value.length), ...p.value);
   }
   // Physical log record: crc(4, ignored by reader) | length(2 LE) | type(1)=Full | data
-  const rec: number[] = [0, 0, 0, 0, batch.length & 0xff, (batch.length >> 8) & 0xff, 1, ...batch];
-  fs.writeFileSync(path.join(leveldbDir, '000001.log'), Buffer.from(rec));
+  return Buffer.from([0, 0, 0, 0, batch.length & 0xff, (batch.length >> 8) & 0xff, 1, ...batch]);
 }
 
 /** Create the Chrome profile tree (with a Preferences file) and return the leveldb dir. */
@@ -613,6 +629,95 @@ describe('indexed-db-reader blackbox', () => {
       const recs = readIndexedDbDatabases(leveldbDir)[0].objectStores[0].records;
       expect(recs).toEqual([{ key: 'gone', value: null }]);
     });
+  });
+
+  // ------------------------------------------------------------------
+  // main-process responsiveness (beachball regression)
+  // ------------------------------------------------------------------
+  describe('main-process responsiveness', () => {
+    /** Run `work` while a 5ms interval records the longest event-loop stall. */
+    async function longestStallDuring(work: () => Promise<unknown>): Promise<number> {
+      let last = performance.now();
+      let longest = 0;
+      const probe = setInterval(() => {
+        const now = performance.now();
+        longest = Math.max(longest, now - last);
+        last = now;
+      }, 5);
+      try {
+        last = performance.now();
+        await work();
+        const now = performance.now();
+        return Math.max(longest, now - last);
+      } finally {
+        clearInterval(probe);
+      }
+    }
+
+    /** A Gmail-offline-sized store: thousands of message-like records over many log files. */
+    function buildLargeGoogleStore(): string {
+      const body = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '.repeat(12);
+      const records: KvPair[] = [];
+      for (let i = 0; i < 8000; i++) {
+        records.push(
+          idbDataRecord(1, 1, idbStringKey(`m${i}`), {
+            id: `m${i}`,
+            thread: `t${i % 97}`,
+            from: `person${i % 31}@example.com`,
+            labels: ['INBOX', `L${i % 7}`],
+            ts: 1_700_000_000_000 + i,
+            body: `${body}${i}`,
+          })
+        );
+      }
+      const leveldbDir = profileIdbDir(tmp, 'https_mail.google.com_0.indexeddb.leveldb');
+      writeLevelDbLogFiles(
+        leveldbDir,
+        [...idbMetadata(1, 'https://mail.google.com', 'offline', 1, 'messages'), ...records],
+        20
+      );
+      return leveldbDir;
+    }
+
+    it('keeps the event loop responsive while scanning a large IndexedDB (no beachball)', async () => {
+      const leveldbDir = buildLargeGoogleStore();
+      const { readIndexedDbDatabases } =
+        await import('../../main/domains/indexed-db-reader/native/indexeddb');
+      const { IndexedDBReader } = await import('../../main/domains/indexed-db-reader/runtime');
+      const { computeOriginHash } = await import('../../main/domains/indexed-db-reader/service');
+
+      // Control: the old synchronous decode holds the loop for the whole scan.
+      let syncDatabases: ReturnType<typeof readIndexedDbDatabases> = [];
+      const syncStall = await longestStallDuring(async () => {
+        syncDatabases = readIndexedDbDatabases(leveldbDir);
+        await Promise.resolve();
+      });
+
+      let result: Awaited<ReturnType<typeof IndexedDBReader.readIndexedDB>> | null = null;
+      const slicedStall = await longestStallDuring(async () => {
+        result = await IndexedDBReader.readIndexedDB('google');
+      });
+
+      console.log(
+        `[indexed-db-reader] longest event-loop stall: sync ${Math.round(syncStall)}ms, ` +
+          `sliced ${Math.round(slicedStall)}ms`
+      );
+      // The fixture is heavy enough that a synchronous scan visibly freezes the app…
+      expect(syncStall).toBeGreaterThan(200);
+      // …while the production path stays far below beachball scale (~2s), even on a loaded host.
+      expect(slicedStall).toBeLessThan(250);
+      expect(slicedStall * 3).toBeLessThan(syncStall);
+
+      // Same decoded payload and the same change-detection hash as before.
+      const origin = { origin: 'https://mail.google.com', databases: syncDatabases };
+      expect(result).not.toBeNull();
+      const { origins, hashes } = result as unknown as Awaited<
+        ReturnType<typeof IndexedDBReader.readIndexedDB>
+      >;
+      expect(origins).toEqual([origin]);
+      expect(origins[0].databases[0].objectStores[0].records).toHaveLength(8000);
+      expect(hashes['https://mail.google.com']).toBe(computeOriginHash(origin));
+    }, 60_000);
   });
 
   // ------------------------------------------------------------------
