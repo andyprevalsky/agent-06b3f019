@@ -27,6 +27,7 @@ from utils.prompts import (
     PLANNER_TASK_DEPENDS_ON_DESCRIPTION,
     PLANNER_TASK_GOAL_DESCRIPTION,
     PLANNER_TASK_IDX_DESCRIPTION,
+    PLANNER_TASK_TITLE_DESCRIPTION,
     PLANNER_TASK_TOOL_NAME_DESCRIPTION,
     SELF_CONTAINED_GOAL_RULE,
 )
@@ -171,10 +172,24 @@ assert _plan_tool_values == _expected_tools, (
 # ============================================================================
 
 
-class PlannerTask(BaseModel):
+class _PlannerTaskBase(BaseModel):
+    """Shared validation for planner task models."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _untitled_legacy_task(cls, data: Any) -> Any:
+        # Plans recorded before per-task titles (Fast Mode replays) have no
+        # title; the schema still requires it from live planner calls.
+        if isinstance(data, dict) and "title" not in data:
+            return {**data, "title": ""}
+        return data
+
+
+class PlannerTask(_PlannerTaskBase):
     """A single task in the planner output."""
 
     task_idx: str = Field(description=PLANNER_TASK_IDX_DESCRIPTION)
+    title: str = Field(description=PLANNER_TASK_TITLE_DESCRIPTION)
     goal: str = Field(description=PLANNER_TASK_GOAL_DESCRIPTION)
     tool_name: PlanToolName = Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)
     depends_on: List[str] = Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION)
@@ -1832,13 +1847,14 @@ def get_planner_response_model() -> Type[BaseModel]:
     task_model = create_model(
         "PlannerTaskNoGP",
         task_idx=(str, Field(description=PLANNER_TASK_IDX_DESCRIPTION)),
+        title=(str, Field(description=PLANNER_TASK_TITLE_DESCRIPTION)),
         goal=(str, Field(description=PLANNER_TASK_GOAL_DESCRIPTION)),
         tool_name=(filtered_enum, Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)),
         depends_on=(
             List[str],
             Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION),
         ),
-        __base__=BaseModel,
+        __base__=_PlannerTaskBase,
     )
     return create_model(
         "PlannerResponseNoGP",
