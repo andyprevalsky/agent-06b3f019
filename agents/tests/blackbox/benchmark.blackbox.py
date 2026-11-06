@@ -25420,6 +25420,16 @@ def test_predeploy_selector_rejects_production_only_tasks():
             test_predeploy_excludes_production_only_even_with_pass_streak(Path(folder), surface)
 
 
+def test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke():
+    from benchmarks.select_predeploy_benches_test import (
+        test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures,
+    )
+
+    for surface in ("local", "cloud"):
+        with tempfile.TemporaryDirectory() as folder:
+            test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures(Path(folder), surface)
+
+
 async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, judge_cases):
     """Bound isolated native checks while existing live judge I/O progresses.
 
@@ -26704,6 +26714,7 @@ async def run_all_tests():
     r.record("local_worlds_controls", test_local_worlds_controls)
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
+    r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
     r.record(
         "local_cleanup_preserves_run_id_observers",
         test_local_cleanup_does_not_signal_processes_that_only_mention_run_id,
