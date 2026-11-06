@@ -9,6 +9,7 @@ import { useAgentMessaging } from './hooks/useAgentMessaging';
 import { useAgentProviderEffects } from './hooks/useAgentProviderEffects';
 import { useAgentProviderState } from './hooks/useAgentProviderState';
 import { useAgentSelection } from './hooks/useAgentSelection';
+import { useUserMessagePickup } from './hooks/optimisticUserMessages';
 
 export const AgentContext = createContext<AgentContextValue | null>(null);
 
@@ -35,6 +36,12 @@ export function useAgentProvider({
   const canLoadAgent = hasFullAccess || benchmarkAgentPreviewEnabled() || isBenchmarkSharedView();
   const messaging = useAgentMessaging(state);
   const selection = useAgentSelection(state, { canLoadAgent, hasFullAccess });
+  useUserMessagePickup(
+    state.selectedAgentId,
+    state.streamingBubbles,
+    state.messages,
+    state.setMessages,
+  );
   const { setForceResubscribeCounter } = state;
   const forceResubscribe = useCallback(() => {
     setForceResubscribeCounter((previous) => previous + 1);
@@ -56,6 +63,7 @@ export function useAgentProvider({
     stagePendingAgentCreation: selection.stagePendingAgentCreation,
     reconcilePendingAgentCreation: selection.reconcilePendingAgentCreation,
     rollbackPendingAgentCreation: selection.rollbackPendingAgentCreation,
+    stageUserMessage: messaging.stageUserMessage,
     messages: state.messages,
     streamingBubbles: state.streamingBubbles,
     streamingPlan: state.streamingPlan,

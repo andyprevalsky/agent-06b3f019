@@ -67,6 +67,7 @@ function makeContext(): AgentContextValue {
     stagePendingAgentCreation: () => undefined,
     reconcilePendingAgentCreation: async () => undefined,
     rollbackPendingAgentCreation: () => false,
+    stageUserMessage: () => ({ confirm: () => {}, drop: () => {} }),
     selectedAgentId: null,
     setSelectedAgentId: () => undefined,
     messages,

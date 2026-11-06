@@ -2,7 +2,11 @@ import type { ClientSource } from '@/lib/clientSource';
 /**
  * STATE MACHINE: terminal message sending
  *
- * [IDLE] -- existing agent --> [POSTING MESSAGE] --------> [IDLE]
+ * [IDLE] -- existing agent --> [OPTIMISTIC BUBBLE + POSTING] --ok--> [IDLE]
+ *    |                                  |  (input cleared at once; the bubble
+ *    |                                  |   reads "Sending" until the agent's
+ *    |                                  |   next step, optimisticUserMessages.ts)
+ *    |                                  +--fail--> bubble dropped, draft restored
  *    |
  *    +-- new goal --> [STAGED AGENT + USER BUBBLE] --> [CREATING]
  *                              |                         |
@@ -47,6 +51,7 @@ import type {
   AgentDetail,
   MessageTarget,
   PendingAgentCreationInput,
+  StagedUserMessage,
   TerminalView,
 } from '../types';
 
@@ -65,6 +70,7 @@ export interface UseMessageSendingArgs {
   stagePendingAgentCreation: (input: PendingAgentCreationInput) => void;
   reconcilePendingAgentCreation: (agentId: string) => Promise<void>;
   rollbackPendingAgentCreation: (agentId: string) => boolean;
+  stageUserMessage: (agentId: string, text: string) => StagedUserMessage;
 }
 
 export function useMessageSending({
@@ -82,6 +88,7 @@ export function useMessageSending({
   stagePendingAgentCreation,
   reconcilePendingAgentCreation,
   rollbackPendingAgentCreation,
+  stageUserMessage,
 }: UseMessageSendingArgs) {
   const { toast } = useToast();
 
@@ -261,6 +268,7 @@ export function useMessageSending({
         return;
       }
 
+      let staged: StagedUserMessage | null = null;
       try {
         setIsSendingMessage(true);
 
@@ -311,6 +319,14 @@ export function useMessageSending({
           return;
         }
 
+        // Render the message now; the server row (or the realtime INSERT)
+        // swaps in and shows Sending until the agent's next step picks it up.
+        // A Browser-composer message keeps its server-rendered "You → Browser" row.
+        if (target === undefined && trimmed) {
+          staged = stageUserMessage(selectedAgentId, messageInput);
+          setMessageInput('');
+        }
+
         // A Browser-composer message is the browser's input, never the owner's
         // answer to a pending question.
         const responded =
@@ -327,7 +343,8 @@ export function useMessageSending({
         // The backend lifts a user pause after delivering the message, so the
         // woken workflow always has it; resuming here first would not.
         // A Browser-composer target goes straight to that browser task.
-        await postMessage(selectedAgentId, messageInput, attachments, target);
+        const posted = await postMessage(selectedAgentId, messageInput, attachments, target);
+        staged?.confirm(posted);
         setMessageInput('');
         // Only a message to the agent itself lifts its pause.
         if (target === undefined && agentDetail?.status === 'PAUSED') {
@@ -337,6 +354,11 @@ export function useMessageSending({
           });
         }
       } catch (error: unknown) {
+        if (staged !== null) {
+          staged.drop();
+          const unsent = messageInput;
+          setMessageInput((current) => (current === '' ? unsent : current));
+        }
         const msg = error instanceof Error ? error.message : '';
         if (msg === 'Not authenticated' || msg.includes('401') || msg.includes('Unauthorized')) {
           setLoginModalOpen(true);
@@ -375,6 +397,7 @@ export function useMessageSending({
       stagePendingAgentCreation,
       reconcilePendingAgentCreation,
       rollbackPendingAgentCreation,
+      stageUserMessage,
       toast,
     ],
   );

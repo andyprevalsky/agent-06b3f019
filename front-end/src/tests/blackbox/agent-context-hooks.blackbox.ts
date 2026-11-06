@@ -612,6 +612,7 @@ describe('useAgentContext', () => {
       stagePendingAgentCreation: vi.fn(),
       reconcilePendingAgentCreation: vi.fn(async () => {}),
       rollbackPendingAgentCreation: vi.fn(() => true),
+      stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
       registerMessageHandler: vi.fn(() => () => {}),
       sendMessage: vi.fn(async () => {}),
       isLoadingAgent: false,

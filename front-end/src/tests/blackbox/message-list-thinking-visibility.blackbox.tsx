@@ -47,6 +47,7 @@ function makeContext(status: AgentDetail['status']): AgentContextValue {
     stagePendingAgentCreation: () => {},
     reconcilePendingAgentCreation: async () => {},
     rollbackPendingAgentCreation: () => false,
+    stageUserMessage: () => ({ confirm: () => {}, drop: () => {} }),
     selectedAgentId: 'agent-1',
     setSelectedAgentId: () => {},
     messages: [],
