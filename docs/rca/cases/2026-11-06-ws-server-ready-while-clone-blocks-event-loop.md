@@ -111,9 +111,23 @@ clone_ms}`, which reaches the "Claude Code Started" row as
 activity heartbeats, and a retried create waits on the same create
 (createWithCodeSession) instead of closing and re-creating the sandbox.
 
+Verification on the same local stack (no Project, same goal shape; root
+579592ee-ef44-4388-b39c-e99fdc1af24f, FE http://localhost:3601/?agent-id=579592ee-ef44-4388-b39c-e99fdc1af24f):
+the create waited for the clone (`WebSocket server ready in 175948ms (repo clone
+173210ms)`), the worker logged one `Creating E2B session` and one `Session created`
+(no retry), there is one `ClaudeCodeSession` row, five sends during the clone got
+the truthful `Code agent session has not started yet; send again once it runs`,
+the sixth was delivered, the code agent's transcript shows `[Agent → Claude]
+[Message from /root …] … ALSO report how many entries the repository's top-level
+directory has`, and its final handoff includes `git ls-tree origin/main --name-only
+| wc -l` = 39. The measured 173 s clone is what the 10-minute
+CODE_AGENT_STARTUP_BUDGET_MS default is sized against (about 3.4x).
+
 Not changed: the clone URL and the remote it leaves behind (the token in
 `origin`; deferred by the user), `prepareCodeSessionBranch`'s synchronous git
-calls (still short; they show as `starting`), clone depth.
+calls (still short; they show as `starting`), clone depth, and the ws-server
+writing the code-agent prompt over the repo's tracked CLAUDE.md after a non-Project
+clone (a "read-only" run therefore shows `+44 −1770 CLAUDE.md` in its diff).
 
 Golden reference: not applicable (no approval-gated hunk).
 

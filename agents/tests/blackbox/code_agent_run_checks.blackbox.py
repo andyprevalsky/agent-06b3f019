@@ -58,6 +58,13 @@ def _code_agent(task_id):
     return {"code_agent_id": task_id, "root_agent_id": ROOT, "owner_agent_id": ROOT, "status": "ACTIVE"}
 
 
+def _started_row(task_id, startup=None):
+    code_agent = {"state": "live", "task_id": task_id}
+    if startup is not None:
+        code_agent["startup"] = startup
+    return _code_row(SPAWN, task_id, toolStatus="IN_PROGRESS", title="Claude Code Started", code_agent=code_agent)
+
+
 def _incident_run():
     return {
         "root_agent_id": ROOT,
@@ -131,6 +138,37 @@ def test_healthy_run_passes_both_checks():
     assert reached["sends"][0]["delivered"] is True and reached["sends"][0]["seen"] is True
 
 
+def test_retried_sends_while_starting_are_tolerated_but_other_failures_are_not():
+    from benchmarks.code_agent_run_checks import check_message_reached_code_agent
+
+    not_started = "Message delivery failed: Code agent session has not started yet; send again once it runs"
+    run = _healthy_run()
+    # Two earlier sends were refused truthfully while the sandbox cloned its repo; the third was delivered.
+    early = [
+        _send("toolu_early1", "/root/rose_repo_status"),
+        _send_result("toolu_early1", "ERROR", not_started),
+        _send("toolu_early2", "/root/rose_repo_status"),
+        _send_result("toolu_early2", "ERROR", not_started),
+    ]
+    run["messages"] = run["messages"][:2] + early + run["messages"][2:]
+    ok = check_message_reached_code_agent(run)
+    assert ok["passed"] is True and "2 earlier send(s) retried while starting" in ok["detail"], ok
+
+    # Only pre-start refusals: nothing was ever delivered.
+    only_refused = {"root_agent_id": ROOT, "messages": [_spawn(SPAWN, "rose_repo_status"), _code_row(SPAWN, TASK)] + early}
+    refused = check_message_reached_code_agent(only_refused)
+    assert refused["passed"] is False and "no send was delivered" in refused["detail"], refused
+
+    # A different failure is never tolerated, even next to a delivered send.
+    run = _healthy_run()
+    run["messages"] = run["messages"][:2] + [
+        _send("toolu_bad", "/root/rose_repo_status"),
+        _send_result("toolu_bad", "ERROR", "Message delivery failed: Activity task failed"),
+    ] + run["messages"][2:]
+    bad = check_message_reached_code_agent(run)
+    assert bad["passed"] is False and "Activity task failed" in bad["detail"], bad
+
+
 def test_undelivered_or_unseen_message_fails():
     from benchmarks.code_agent_run_checks import check_message_reached_code_agent
 
@@ -149,12 +187,43 @@ def test_undelivered_or_unseen_message_fails():
     assert nothing["passed"] is False and "no send_message_to_agent" in nothing["detail"], nothing
 
 
+def test_startup_phase_is_read_from_the_start_row():
+    from benchmarks.code_agent_run_checks import check_startup_reported, startup_phases
+
+    run = {
+        "root_agent_id": ROOT,
+        "messages": [
+            _spawn(SPAWN, "rose_repo_status"),
+            _started_row(TASK, {"ws_ready_ms": 183_450, "clone_ms": 181_900}),
+        ],
+        "code_agents": [_code_agent(TASK)],
+    }
+    assert startup_phases(run["messages"]) == [{"task_id": TASK, "ws_ready_ms": 183_450, "clone_ms": 181_900}]
+    ok = check_startup_reported(run)
+    assert ok["passed"] is True and "clone 181900ms" in ok["detail"], ok
+    slow = check_startup_reported(run, max_ws_ready_ms=60_000)
+    assert slow["passed"] is False and "took 183450ms to serve" in slow["detail"], slow
+    # A resume has no clone: ws_ready_ms alone is a valid report.
+    resumed = check_startup_reported(
+        {"messages": [_spawn(SPAWN, "x"), _started_row(TASK, {"ws_ready_ms": 900, "clone_ms": None})]}
+    )
+    assert resumed["passed"] is True, resumed
+    # No startup on the row (an older backend, or a create that never reported it) fails loudly.
+    missing = check_startup_reported({"messages": [_spawn(SPAWN, "x"), _started_row(TASK)]})
+    assert missing["passed"] is False and "reported no startup phases" in missing["detail"], missing
+
+
 async def run_all_tests():
     print("code-agent-run-checks blackbox tests:")
     r = BlackboxResult()
     r.record("incident_run_fails_both_checks", test_incident_run_fails_both_checks)
     r.record("healthy_run_passes_both_checks", test_healthy_run_passes_both_checks)
     r.record("undelivered_or_unseen_message_fails", test_undelivered_or_unseen_message_fails)
+    r.record("startup_phase_is_read_from_the_start_row", test_startup_phase_is_read_from_the_start_row)
+    r.record(
+        "retried_sends_while_starting_are_tolerated_but_other_failures_are_not",
+        test_retried_sends_while_starting_are_tolerated_but_other_failures_are_not,
+    )
     return r.summary()
 
 

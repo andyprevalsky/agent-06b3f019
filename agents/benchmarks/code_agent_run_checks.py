@@ -13,9 +13,17 @@ background task at /root/rose_repo_status".
                pure checks on that record (each returns {"passed", "detail", ...evidence}):
                   check_single_code_agent           exactly `expected` code agents under the root,
                                                     one task per code spawn call, no orphan task
-                  check_message_reached_code_agent  every send_message_to_agent addressed to a code
-                                                    spawn succeeded, the backend delivered it as a
-                                                    CLI turn, and the CLI's transcript shows it
+                  check_message_reached_code_agent  a send_message_to_agent addressed to a code spawn
+                                                    succeeded, the backend delivered it as a CLI turn
+                                                    and the CLI's transcript shows it. A send that was
+                                                    refused with the truthful "has not started yet"
+                                                    (sandbox still starting) may be retried; any other
+                                                    failure fails the check.
+                  check_startup_reported            every code agent's "Claude Code Started" row carries
+                                                    code_agent.startup {ws_ready_ms, clone_ms}: how long
+                                                    its sandbox's ws-server took to serve, and the repo
+                                                    clone inside that (null: none, e.g. a resume). The
+                                                    benchmark reads the clone time from here.
 
 Message rows are the agent-detail shape: {role, message|text, metadata}.
 """
@@ -27,6 +35,9 @@ from typing import Any, Dict, Iterable, List, Optional
 import httpx
 
 CODE_SPAWN_TOOL = "spawn_claude_code_agent"
+# The backend's truthful answer to a send that arrives while the code agent's sandbox is still
+# starting (back-end agentCodeTurnDelivery.ts): the sender may retry, so it is not a failure.
+NOT_STARTED_TEXT = "has not started yet"
 # Characters of a sent message that must appear in the code agent's own turn.
 MESSAGE_MATCH_CHARS = 60
 
@@ -118,7 +129,7 @@ def check_single_code_agent(run: Dict[str, Any], expected: int = 1) -> Dict[str,
 
 
 def check_message_reached_code_agent(run: Dict[str, Any]) -> Dict[str, Any]:
-    """Every send_message_to_agent to a code spawn succeeded and its CLI saw the message."""
+    """At least one send to a code spawn was delivered and seen; no send failed for another reason."""
     rows = _rows(run.get("messages") or [])
     spawns = code_spawn_calls(rows)
     by_address: Dict[str, Dict[str, Any]] = {}
@@ -133,29 +144,78 @@ def check_message_reached_code_agent(run: Dict[str, Any]) -> Dict[str, Any]:
     for call in sends:
         spawn = by_address[call["to"]]
         message = str(call.get("message") or "")
-        needle = message.strip()[:MESSAGE_MATCH_CHARS]
         outcome = _send_outcome(rows, call["tool_call_id"])
-        receipt = _delivery_receipt(rows, spawn, message)
-        seen = any(
-            row["metadata"].get("toolCallId") == spawn["tool_call_id"]
-            and row["metadata"].get("toolName") == CODE_SPAWN_TOOL
-            and "[Agent → " in _text(row)
-            and needle in _text(row)
-            for row in rows
-        )
-        problems = []
-        if outcome is None or outcome.get("status") != "FINISHED":
-            problems.append(f"send {call['tool_call_id']} result: {outcome}")
-        if receipt is None:
-            problems.append("no delivered CLI turn (a2a received row) for the message")
-        if not seen:
-            problems.append("the code agent's transcript never shows the message")
-        results.append({"to": call["to"], "send": outcome, "delivered": receipt is not None, "seen": seen, "problems": problems})
-    failed = [result for result in results if result["problems"]]
+        entry: Dict[str, Any] = {"to": call["to"], "send": outcome, "delivered": False, "seen": False, "retryable": False}
+        if outcome is not None and outcome.get("status") == "ERROR" and NOT_STARTED_TEXT in str(outcome.get("text")):
+            entry["retryable"] = True  # refused truthfully while the sandbox started
+        elif outcome is None or outcome.get("status") != "FINISHED":
+            entry["problem"] = f"send {call['tool_call_id']} result: {outcome}"
+        else:
+            needle = message.strip()[:MESSAGE_MATCH_CHARS]
+            entry["delivered"] = _delivery_receipt(rows, spawn, message) is not None
+            entry["seen"] = any(
+                row["metadata"].get("toolCallId") == spawn["tool_call_id"]
+                and row["metadata"].get("toolName") == CODE_SPAWN_TOOL
+                and "[Agent → " in _text(row)
+                and needle in _text(row)
+                for row in rows
+            )
+            if not entry["delivered"]:
+                entry["problem"] = f"send {call['tool_call_id']} has no delivered CLI turn (a2a received row)"
+            elif not entry["seen"]:
+                entry["problem"] = f"send {call['tool_call_id']}: the code agent's transcript never shows the message"
+        results.append(entry)
+    problems = [entry["problem"] for entry in results if entry.get("problem")]
+    delivered = [entry for entry in results if entry["delivered"] and entry["seen"]]
+    if not delivered and not problems:
+        problems.append(f"no send was delivered ({len(results)} refused with '{NOT_STARTED_TEXT}')")
     return {
-        "passed": not failed,
-        "detail": "; ".join(p for result in failed for p in result["problems"]) or f"{len(results)} message(s) delivered",
+        "passed": not problems,
+        "detail": "; ".join(problems)
+        or f"{len(delivered)} message(s) delivered ({sum(e['retryable'] for e in results)} earlier send(s) retried while starting)",
         "sends": results,
+    }
+
+
+def startup_phases(messages: Iterable[Any]) -> List[Dict[str, Any]]:
+    """One {task_id, ws_ready_ms, clone_ms} per code-agent task whose start row reported its startup."""
+    phases: Dict[str, Dict[str, Any]] = {}
+    for row in _rows(messages):
+        metadata = row["metadata"]
+        code_agent = metadata.get("code_agent")
+        startup = code_agent.get("startup") if isinstance(code_agent, dict) else None
+        task_id = metadata.get("task_id")
+        if metadata.get("toolName") == CODE_SPAWN_TOOL and isinstance(startup, dict) and isinstance(task_id, str):
+            phases[task_id] = {
+                "task_id": task_id,
+                "ws_ready_ms": startup.get("ws_ready_ms"),
+                "clone_ms": startup.get("clone_ms"),
+            }
+    return list(phases.values())
+
+
+def check_startup_reported(run: Dict[str, Any], max_ws_ready_ms: Optional[int] = None) -> Dict[str, Any]:
+    """Every code agent reported how long its ws-server took to serve (optionally within a bound)."""
+    phases = startup_phases(run.get("messages") or [])
+    spawns = code_spawn_calls(run.get("messages") or [])
+    reported = {phase["task_id"] for phase in phases}
+    problems = []
+    for spawn in spawns:
+        missing = [task for task in spawn["task_ids"] if task not in reported]
+        if not spawn["task_ids"] or missing:
+            problems.append(f"spawn {spawn['tool_call_id']} reported no startup phases for {missing or 'any task'}")
+    if not spawns:
+        problems.append("no code spawn calls")
+    for phase in phases:
+        if not isinstance(phase["ws_ready_ms"], int):
+            problems.append(f"task {phase['task_id']} has no ws_ready_ms")
+        elif max_ws_ready_ms is not None and phase["ws_ready_ms"] > max_ws_ready_ms:
+            problems.append(f"task {phase['task_id']} took {phase['ws_ready_ms']}ms to serve (bound {max_ws_ready_ms}ms)")
+    return {
+        "passed": not problems,
+        "detail": "; ".join(problems)
+        or ", ".join(f"{p['task_id'][:8]}: ready {p['ws_ready_ms']}ms, clone {p['clone_ms']}ms" for p in phases),
+        "phases": phases,
     }
 
 

@@ -101,6 +101,11 @@ Agents `create_e2b_session` reads for the backend's own budget
 waits, so liveness stays the activity heartbeat and the heartbeat timeout never
 starts a second attempt beside the first.
 
+Verified end to end on a local stack (root 579592ee, repo attached, no Project): one
+spawn, one create request, one task row, no retry, a message delivered to the live
+CLI. A second, sequential path to the same symptom (the ws-server blocking on its
+own clone) is its own case: 2026-11-06-ws-server-ready-while-clone-blocks-event-loop.
+
 Siblings it prevents: duplicate tasks after a worker crash before the session
 heartbeat lands; a heartbeat-timeout retry during a queued create; leaked
 ACTIVE task rows that the sidebar lists and the composer cannot reach. Not
