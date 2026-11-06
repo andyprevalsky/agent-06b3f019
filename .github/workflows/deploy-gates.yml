@@ -29,10 +29,12 @@ jobs:
       - name: Start clock
         run: echo "DEPLOY_GATE_T0=$(date +%s.%N)" >> "$GITHUB_ENV"
 
+      # Full history (merge-bases against origin/main) without every historical blob: older
+      # blobs are fetched on demand with the job's read-only token.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: false
+          filter: blob:none
 
       - name: Read gate request
         env:
