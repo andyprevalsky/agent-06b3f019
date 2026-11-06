@@ -51,7 +51,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Run `gates` and `review-wait` in the background and watch both; start `/RCA` on each failure as soon as it appears, not when `gates` exits.
 - Never fire and forget: every background command has an owner that watches it until exit and cleanup.
 - Every lane owns its own setup, cleanup and teardown; never kill processes you did not start.
-- A Blacksmith gate's logs and result come back as its GitHub Actions run artifact; RCA reads them from that gate's evidence and run URL.
+- A Blacksmith gate's result and logs come back over the R2 result channel (and its GitHub Actions artifact); RCA reads the local copies in that gate's evidence and its run URL.
 - "Pre-existing", "flaky", "resource contention", "doesn't touch agent code" and "agents timing out" are never evidence for an exception or attribution.
 - Never change assertions, timeouts, concurrency, task definitions or coverage thresholds to get green.
 - Never disable a linter or type checker.
