@@ -1,0 +1,41 @@
+Trajectory open/navigation profiling (read-only against production, headless Chromium at 4x CPU throttle,
+worktree /home/boxes/perf-traj branch perf/trajectory-navigation, 2026-11-06). Final report of the profiling agent, as delivered.
+
+Two verified fixes are committed on perf/trajectory-navigation (merged into PR #1725); each has a regression test that fails without it.
+Checks on the final tree at the time of the report: full vitest run passed (289 files, 4325 tests); tsc -p tsconfig.app.json passed;
+eslint/prettier clean on the changed files; the new tests ran 5 times green.
+
+Commits: ad9e85fc67 (useAncestors fix; its backfill-dedupe half was reverted in d4e09c3af2), 96b7d0f4e1 (preview sheet mounts on first tap),
+4d484d7df5 (intermediate registry move, cancelled out by the revert), d4e09c3af2 (reverts the backfill-poll detail-read dedupe: no measured gain).
+
+Fix 1 - one GET /ancestors per navigation. Opening an agent selects it before its detail loads, so parent fields go undefined -> null on
+load, which re-ran the effect. undefined and null parent are now the same link. /ancestors requests: 22 per 11 navigations before, 11 after
+(about 5.8 KB less). Test: use-ancestors.blackbox.ts "fetches a root agent ancestors once..." (fails without the fix: ['root-creator-1','root-creator-1']).
+
+Fix 2 - no preview sheet built per gallery. Every InlineMediaGallery built its own DocumentPreviewDrawer (Radix sheet) though a closed sheet
+renders nothing; a 143-message launch-video trajectory has 25 galleries. The sheet now mounts on first tap and stays mounted (close animation
+unchanged). Over 11 navigations DocumentPreviewDrawer mounts/renders went from about 100/363 to 0/0 (roughly 9 sheet trees per navigation).
+Visual check: tapped a real image on the live trajectory; the sheet opened (402px wide) and closed on Escape.
+Test: inline-media-preview-mount.blackbox.tsx (fails without the fix: expected 3 to be +0).
+
+Per-navigation numbers (A->B->C->A on three long agents, 3 rounds, 11 navigations): JS heap grew about 0.1-0.2 MB per navigation; DOM nodes,
+listeners, intervals, observers and Supabase channels did not grow; 22 realtime joins and 22 leaves (no leak). Requests per navigation 25.3
+before, 24.5 after (about 8 attachment-URL signings, 4 invite-code checks, 2 full agent-detail GETs). Open-trajectory TTI about 6.4 s before and
+6.7 s after with about 30 long tasks totalling 4.1-4.3 s (unchanged, within noise). Idle busy 58% before / 41% after on the same trajectory,
+but the two runs shared CPU with another profile; not credited to the fixes.
+
+Findings NOT fixed (ranked by likely heat; changing any risks a visible difference):
+1. Idle busy about 40-60% on an open trajectory at 4x throttle: main thread mostly waiting on the GPU (WaitForGetOffset, 437 ms of 1,690 ms per 5 s);
+   software compositor busy 4.9 s per 5 s in headless Chromium (not representative of a phone GPU). Causes seen: about 52 fps rAF from the send
+   button's ShaderMount (includes the known remaining liquid-metal shader); the ASCII loader's 40 ms interval while visible (about 25 fires/s);
+   about 20 backdrop-filter elements, including a blur(12px) bubble 17,662 px tall.
+2. Eight inline videos render offscreen but only fetch metadata (paused); left alone.
+3. Three GET /agents/:id of 585-745 KB on every cold open, two per navigation (selection read, post-subscribe reconcile, and a fast-poll read on cold
+   open). A guard skipping poll ticks while the selection read is in flight did not remove the third read and delayed the fallback, so it was reverted.
+   Possible next step: server-side If-None-Match/ETag (/api/agents returns an ETag but ignores revalidation, 200 with the full 279 KB body;
+   /api/attention-requests 253 KB likewise) - a backend change, only measured.
+4. The invite-code check runs 4 times per navigation (useAuth() instances re-running applySession); not a hot path, auth code untouched.
+5. Attachment-URL signing takes about 8 requests per navigation; the 12 failed GETs + 4 blocked POSTs per run are an artifact of read-only profiling.
+
+Blockers: none. All profiling read-only against production. Measurements are headless Chromium at 4x CPU throttle; no WebKit sanity check and
+no real-device GPU/thermal measurement.

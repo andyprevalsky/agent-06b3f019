@@ -1,0 +1,174 @@
+{
+ "schema_version": 1,
+ "pr": 1725,
+ "title": "Displays start expanded at full height; hide display tool row; trim trajectory navigation fetches",
+ "merge_commit": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+ "merged_at": "2026-11-06T11:31Z",
+ "gated_source": "2731bfe53f7ace99196021906b423b2a6296766a (source digest 7342924de1a9e74d0a1c36cd26ff468d04f41a077a39ea9e01851d6dea7722b6); PR net diff vs main: 15 files, front-end display/trajectory UI + tests, back-end display route + height reporter + tests",
+ "branch_commits": [
+  "08b8054ead test(display): semantic e2e and blackbox follow the expanded-by-default display",
+  "a69a6d25db docs(rca): conform the mac-app beachball case to the archive schema",
+  "d4e09c3af2 revert(frontend): drop the backfill-poll detail-read dedupe (no measured gain)",
+  "96b7d0f4e1 perf(frontend): mount the inline-media preview sheet on first tap, not per gallery",
+  "4d484d7df5 fix(frontend): keep the detail-read registry in the agent-context api layer",
+  "f812baa43a test(trajectory): display media is the work boundary; the display tool row is hidden",
+  "32b2a5e6ba feat(display): start expanded at full content height; hide the display tool row",
+  "ad9e85fc67 perf(frontend): dedupe trajectory detail and ancestor reads on open/navigation"
+ ],
+ "user_goal": "phone heat on trajectory open/navigation (profiling + two verified fixes); displays start fully expanded at very tall height with no inner scroll; hide the 'Displayed for the user' tool row",
+ "production": {
+  "vercel": "www.roselabs.ai /version.json buildId d5d852e5b0c8-mw4we50p (merge commit d5d852e5b0) observed 2026-11-06T11:39Z",
+  "render": "dep-dbmrkmnf3r2c73aocfcg live on d5d852e5b0 at 2026-11-06T11:38:25Z (RENDER_LIVE)",
+  "backend_probes": "/health ok, /api/agents 200, prod-endpoint-smoke 15/15 healthy; Render log scan 0 error lines of 100 recent",
+  "display_route_live_check": "a production display page (api.roselabs.ai /usercontent/display/<agent>/bc842b7f....html, HTTP 200) now ends with exactly one data-rose-display-height reporter and its stored bytes still hash to the content-addressed path bc842b7fa7fb74d3...",
+  "fly": "not required (no agent runtime change)",
+  "semantic": "chat-lifecycle-ratchet run 42211766440 passed (all jobs), source_sha=d5d852e5b0 (2026-11-06T11:44:02Z)",
+  "agentcard": "SKIPPED - operator election (no payment/AgentCard surface; selected only by the broad back-end/src/providers/* path trigger); the production Step 13c task was not launched",
+  "mac_release": "auto-tag workflow created v1.1.280 on the merge commit",
+  "mac_local_acceptance": "SKIPPED - no Mac available: owner-scoped GET /api/local-devices (short-lived minted owner session, shredded) returned HTTP 200 devices=[] at 2026-11-06T11:45:54Z",
+  "device_confirmation": "pending (user): expanded display height and trajectory heat on the installed iPhone PWA / Mac app; also still pending from PR #1695: Amplitude 'iOS Viewport Geometry' standalone events with visual_height = screen_height"
+ },
+ "staged_cycle": {
+  "final": "ready on 2731bfe53f (evidence/final-cycle-2731bfe53f.json.gz, evidence/final-plan-2731bfe53f.json.gz); pending_post_merge 0 after the three repair links were recorded",
+  "gates": "quick 4/4 PASS; backend 249/249; frontend, agents, live-probes, e2b-smoke, semantic-stack, seed-cache-decision, canonical-seed-whatsapp-content, seed-memory-ratchet PASS; deploy-command-structural and cloudbench-controller PASS on solo reruns after load-flake initial failures (owner-kept repairs, evidence/rca-report-2731bfe53f-initial.json); smoke 6 PASS + 3 delegated (below)",
+  "rca_reports": [
+   "evidence/rca-report-structural-round5.json",
+   "evidence/rca-report-2731bfe53f-initial.json",
+   "evidence/rca-report-2731bfe53f-final-smoke.json"
+  ],
+  "earlier_rounds": "evidence/earlier-rounds-summary.json (round 2: front-end type error in the new test + old collapsed-by-default semantic e2e + smoke blocked by shared-donor/GitHub-quota infra; round 3: all local gates PASS, smoke infra; round 4: all local PASS, smoke guests got a stale peer image (dependency mismatch); round 5 on 08b8054ead: smoke 9/9 PASS, structural load flake -> solo PASS, ready - then main moved with conflicts so the branch was synced and everything re-ran on 2731bfe53f)",
+  "correction": "rca-report-2731bfe53f-final-smoke.json states the initial-sweep parallel-tool-calls wall time as 924.8s; that was the preceding cycle - in the initial sweep of the final cycle it passed at 1699.9s. The attribution is unchanged.",
+  "smoke_campaigns": "evidence/smoke-campaign-inventory.json (every cloud smoke attempt of this deploy with its Benchmark Hub run ids; the run bundles were uploaded to the hub by the fleet)"
+ },
+ "review": "CodeRabbit usage spending cap: Review limit reached on 08b8054ea and again on the synced head 2731bfe53; both closed with deploy_review_cycle.py skip --reason usage-cap (evidence/review-ledger.json). This diff merged unreviewed by CodeRabbit. Graphide review requested (no result)",
+ "approvals": "no approval-scoped hunks (evidence/approval-batch.json, status clear at the final freeze)",
+ "repair_handoffs": [
+  {
+   "test": "smoke/browser-biometrics-webdecoy",
+   "thread": "https://boxes.dev/thread/thr_628caaa496d742d198f643e4b885bfc0",
+   "note": "existing running owner of the identical failure (webdecoy FCaptcha 0.164 > 0.163 ratchet, PR1730 smoke); this deploy's evidence delivered with threads message; Bugs-folder devbox 42e8c626-9a15-4b3c-8da7-13f386ee4546"
+  },
+  {
+   "test": "smoke/agent-payment-new-user-journey",
+   "thread": "https://boxes.dev/thread/thr_ad8659f049ec45329f8d56f2e17d3ba4",
+   "devbox": "558c0f16-794b-449c-9b6d-f941f8ece79c",
+   "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1)",
+   "requested": "claude-sonnet-5-5 reasoning high speed standard muted (passed explicitly; the thread read API does not expose effective settings)",
+   "goal": "evidence/repair-goal-agent-payment-new-user-journey.txt"
+  },
+  {
+   "test": "smoke/parallel-tool-calls",
+   "thread": "https://boxes.dev/thread/thr_b32660a71e8f45279a6db56fd8a2cb5d",
+   "devbox": "1483da82-0d27-4ae6-a916-720b5a62db29",
+   "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1)",
+   "requested": "claude-sonnet-5-5 reasoning high speed standard muted",
+   "goal": "evidence/repair-goal-parallel-tool-calls.txt"
+  },
+  {
+   "test": "scripts/tests/run-deploy-pipeline.test.py (observation / credit timing) and cloudbench_campaign_inventory / cloudbench-multi-workstream under gate load",
+   "thread": "existing owners: https://boxes.dev/thread/ph74cbynqsekb8nevh8ns0yh7d8hpw6r and the PR #1724/#1730 repairs",
+   "note": "owner-kept: re-ran solo and passed; not delegated again"
+  }
+ ],
+ "followups": [
+  "Shared cloud donor contention: several sessions rebuild/retarget the one warm donor image/volume (images 063248, 063722, 095604 within three hours) and exhaust the single GitHub token's 5000/h core quota (this deploy's own backend gates are one consumer); smoke could not start in two rounds. No failed test exists to delegate; needs an owner decision (per-session donor image pinning or the token-pool PR #1723).",
+  "Benchmark smoke is flaky on browser-agent/live-web tasks (biometrics ratchet margin 0.001, browser_use state-request error, 4s timeout overrun); three repair threads above.",
+  "Remaining phone-heat sources found but not changed (would alter visuals): send-button shader ~52 fps, ASCII loader interval while visible, ~20 backdrop-filter elements, 585-745 KB agent-detail reads (ETag revalidation is a backend follow-up). evidence/trajectory-heat-profiling-findings.txt",
+  "Confirm on the user's devices: displays render fully expanded without an inner scroll; trajectory open/navigation heat.",
+  "AgentCard lifecycle (local + production) was elected SKIPPED for this deploy; no card or settlement credit is claimed."
+ ],
+ "inventory": [
+  {
+   "path": "PR #1725 source",
+   "disposition": "committed",
+   "detail": "all branch commits merged in d5d852e5b0"
+  },
+  {
+   "path": "branch perf/trajectory-navigation (4 commits)",
+   "disposition": "committed",
+   "detail": "ancestor of main via PR #1725"
+  },
+  {
+   "path": "/home/boxes/perf-traj (profiling worktree)",
+   "disposition": "retired",
+   "detail": "removed after its commits were merged; findings preserved in evidence/trajectory-heat-profiling-findings.txt"
+  },
+  {
+   "path": "/home/boxes/deploy-workers/{backend,frontend,agentscov,structural,semantic,e2b,liveprobes,seedcache,seedwa,seedmem,cloudctl}",
+   "disposition": "reproducible-unneeded",
+   "detail": "hardlinked clones of the committed source plus test-run caches; regenerate with evidence/prep-cycle-hardlinked-workers.py or scripts/deploy_test_worker.py --prepare-checkout; removed at retirement"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-pipeline*, deploy-review-cycle.json, deploy-approval-batch.json",
+   "disposition": "committed-summary",
+   "detail": "final cycle/plan, RCA reports, focused plans, review ledger, approval receipt and a per-round summary are committed in evidence/; raw attempt dirs are diagnostic"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-cloud (about 8.7 GB, 14 smoke campaign dirs)",
+   "disposition": "durably archived (Benchmark Hub)",
+   "detail": "each campaign's run bundles were uploaded to the Benchmark Hub by the fleet; ids in evidence/smoke-campaign-inventory.json; local copies are reproducible/diagnostic"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-env.json",
+   "disposition": "destroyed",
+   "detail": "frozen process environment (may hold credentials); never committed; deleted at retirement"
+  },
+  {
+   "path": "short-lived minted owner session for the Mac discovery",
+   "disposition": "destroyed",
+   "detail": "written 0600 under /var/tmp and shredded immediately after the single GET"
+  },
+  {
+   "path": "/var/tmp/disp-bb (logs, helper scripts)",
+   "disposition": "committed-summary",
+   "detail": "needed receipts copied into evidence/; the rest reproducible"
+  },
+  {
+   "path": "repo-local secrets (agents/.env, back-end/.env, front-end/.env)",
+   "disposition": "unchanged",
+   "detail": "managed project env; back-end/.env was rewritten by the managed-env sync at 06:19:10Z (E2B_CLAUDE_CODE_TEMPLATE_ID -> E2B_SANDBOX_TEMPLATES); nothing new is stored only on this disk"
+  },
+  {
+   "path": "Fly navi-whisper-lux-bench",
+   "disposition": "no owned resource",
+   "detail": "all machines/volumes created by this deploy's smoke campaigns were destroyed (verified against primary.ids); the shared warm donor machine is stopped; a dependency proof/snapshot for manifest fingerprint df9fc67a... was published on it (shared infra state, retained)"
+  },
+  {
+   "path": "/swapfile (4 GB, created for the gate cycle)",
+   "disposition": "retired",
+   "detail": "swapoff and removed at retirement"
+  },
+  {
+   "path": "609 pre-existing local branches in /home/boxes/rose (80 local-only with commits beyond main, 72 ahead of origin)",
+   "disposition": "reproducible-unneeded (inherited, not this deploy's work)",
+   "detail": "their ref files are dated 2026-10-08 21:07Z, before this devbox booted (2026-11-04 20:12Z): they were inherited from the project Template box clone and are retained there; none was created or modified by this deploy. Full list with commit counts: evidence/local-branch-inventory.json. Not pushed or deleted by this deploy."
+  },
+  {
+   "path": "/home/boxes/closeout-1725 (this records-only worktree, branch records/pr1725-closeout)",
+   "disposition": "committed",
+   "detail": "the closeout PR itself; worktree removed after merge"
+  }
+ ],
+ "files": {
+  "evidence/final-plan-2731bfe53f.json.gz": "33bc382c5f2241c2f7f714e77346ca7c27fe5064fe56a45690754f9c988063f3",
+  "evidence/repair-evidence-webdecoy-fcaptcha-owner.txt": "0ea728a6e84a7ed1105df35cf159d300089402ef3f332e8622d7b0fc82cc589b",
+  "evidence/production-d5d852e5b0.json": "e7f688eb99d0724a3acebf31a1e06e76c89d794c79e4138a7f64b8d763903e32",
+  "evidence/earlier-rounds-summary.json": "a21fc78bb8a908d1e6a855f8676e85bfcd880021da7e738381bb50fd4e0be939",
+  "evidence/review-ledger.json": "021623f81babeb5d985b0c4548fbdc33ebca7aca2b2aaaeb11e162ba90d7cc58",
+  "evidence/reconcile-structural-round5.json": "d54a982b9b6ff93a8f5fca7bde85c835718697df8d898a2cc8383bb1c0139ede",
+  "evidence/trajectory-heat-profiling-findings.txt": "187b4b4fb9e79fea73afa8ae852eabd61ee241c365031090e2b1bea06ae85491",
+  "evidence/repair-goal-agent-payment-new-user-journey.txt": "2245ab752bfd93230b112180037231e3b4abf81132d603641d81437fe9dc94d4",
+  "evidence/final-cycle-2731bfe53f.json.gz": "05b4355c5734c72d41ad894c0666a1b781a79f8042d4f5f9e4e481e10b075298",
+  "evidence/local-branch-inventory.json": "99d2155c5c012d6f89db3cb29e5dd5e8aa6050de56897c7d4603a8dd91b467cd",
+  "evidence/rca-report-2731bfe53f-initial.json": "e1dc3f7ba760c2db4b2968f34e5ce786eb69941147dbfb1c387b80dcb993e0e7",
+  "evidence/run-deploy-pipeline-solo-pass.log": "67247ce0abdf05c74b6b74f3afaf81c740f8d0437df6164da0335de4e88beef7",
+  "evidence/rca-report-2731bfe53f-final-smoke.json": "f1cc08be3a2fadf1c2c1b6c8135f929f492073053ab29a4ceb586df7ec50d4e4",
+  "evidence/smoke-campaign-inventory.json": "ca603fa78b5b311e88e1aea2d17a974268cdd4d4f7b7bd4a2d957fdd65342ec3",
+  "evidence/rca-report-structural-round5.json": "259559695d1cc2c0a05b5eeee5512f35a2d60b1239a08d78289943b5d9acba83",
+  "evidence/repair-goal-parallel-tool-calls.txt": "ee69fd580918034cd569ee244d93917e8dcd75a6eb0635d5ba088313d866dc8b",
+  "evidence/focused-2731bfe53f.json": "e96ba536fa60fe9e190073a5c3ef2782efb35a89b5d5c4415c4d7e6d412266ff",
+  "evidence/approval-batch.json": "0d365defc90ea2cad8149a36aeddd0677b1c6103f7a8a9dc77312868f9ee8575",
+  "evidence/focused-structural-round5.json": "331c4b97a6e39c7b4f095ada8e61aadf06a2fa02ab25d15c42ef9c2a33bb5166",
+  "evidence/prep-cycle-hardlinked-workers.py": "8edfd18a0ac49ac56df86477dc3cfa5eb0bcea626863e0653122aa7e7780952f"
+ }
+}
