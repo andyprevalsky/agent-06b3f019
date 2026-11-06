@@ -24,7 +24,9 @@ unset ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME \
   ROSE_DEPLOY_WORKTREE_PATH \
   ROSE_DEPLOY_SOURCE_WORKSPACE \
   ROSE_USE_SYSTEM_PG \
-  TEMPORAL_TASK_QUEUE 2>/dev/null || true
+  TEMPORAL_TASK_QUEUE \
+  BOXES_DEVBOX \
+  CLOUD_ENV_BOXES_DEVBOX_ID 2>/dev/null || true
 # The host's real agent store would otherwise pin every default-path identity.
 export CLOUD_ENV_AGENT_STORE_DIR="$TMP_ROOT/no-agent-store"
 
@@ -266,6 +268,33 @@ expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$boot_only_env' agent-id
   expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a stale store id without its daemon is ignored"
   printf 'pid=%s\n' "$$" >"$fake_store/ready"
   expect_eq "$(CLOUD_ENV_AGENT_STORE_DIR="$fake_store" bash -c ". '$HELPER_SRC'; cloud_env_agent_id")" "" "a reused pid that is not the store daemon is ignored"
+)
+
+# boxes.dev: a snapshot clone shares the snapshot's boot id, so the devbox id is the
+# agent id there (BOXES_DEVBOX=1); Cursor's store daemon id keeps precedence.
+(
+  fixture="$TMP_ROOT/boxes-identity"
+  mkdir -p "$fixture/bin"
+  printf '#!/bin/sh\necho "{\\"schemaVersion\\":1,\\"ok\\":true,\\"email\\":\\"x@example.com\\",\\"devboxId\\":\\"${STUB_DEVBOX:-}\\"}"\n' >"$fixture/bin/dvb-onbox"
+  chmod +x "$fixture/bin/dvb-onbox"
+  agent_id() { env "$@" bash -c ". '$HELPER_SRC'; cloud_env_agent_id"; }
+  expect_eq "$(agent_id CLOUD_ENV_BOXES_DEVBOX_ID=dvb-test)" "dvb-test" "the boxes devbox id is the agent id (override)"
+  expect_eq "$(agent_id BOXES_DEVBOX=1 STUB_DEVBOX=dvb-real PATH="$fixture/bin:$PATH")" "dvb-real" "dvb-onbox whoami supplies the devbox id on boxes"
+  expect_eq "$(agent_id STUB_DEVBOX=dvb-real PATH="$fixture/bin:$PATH")" "" "without BOXES_DEVBOX=1 no devbox id is read"
+  expect_eq "$(agent_id BOXES_DEVBOX=1 PATH="$fixture/bin:$PATH")" "" "an empty devbox id is no id"
+  # clone vs original: the stamp written under one id re-keys under another, keeps its name under the same one.
+  ws="$fixture/ws"; mkdir -p "$ws"
+  boot=same-boot-id
+  CLOUD_ENV_BOXES_DEVBOX_ID=dvb-template bash -c ". '$HELPER_SRC'; write_cloud_env '$ws/.cloud-env' 3001 cloud-template '$ws' $boot dvb-template; echo 'export ROSE_USE_SYSTEM_PG=true' >>'$ws/.cloud-env'"
+  rekey() { CLOUD_ENV_BOXES_DEVBOX_ID="$1" bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$ws/.cloud-env' \"\$(cloud_env_agent_id)\" $boot" 2>/dev/null; sed -n 's/^export CONDUCTOR_WORKSPACE_NAME=//p' "$ws/.cloud-env"; }
+  expect_eq "$(rekey dvb-template)" "cloud-template" "the same devbox keeps its workspace name across reboot/resume"
+  clone_name="$(rekey dvb-clone)"
+  case "$clone_name" in cloud-template | "") echo "FAIL: a clone with another devbox id must re-key (got '$clone_name')" >&2; exit 1 ;; esac
+  echo "PASS: a clone with a different devbox id re-keys"
+  expect_eq "$(grep -c '^export ROSE_USE_SYSTEM_PG=true$' "$ws/.cloud-env")" "1" "re-keying keeps the system-Postgres selection"
+  expect_eq "$(rekey dvb-clone)" "$clone_name" "the re-keyed clone keeps its new name"
+  # no id (neither store nor devbox): the same boot keeps the name, as before.
+  expect_eq "$(CLOUD_ENV_BOXES_DEVBOX_ID= bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$ws/.cloud-env' '' $boot" 2>/dev/null; sed -n 's/^export CONDUCTOR_WORKSPACE_NAME=//p' "$ws/.cloud-env")" "$clone_name" "no id keeps the same-boot behaviour"
 )
 
 explicit_queue="$(

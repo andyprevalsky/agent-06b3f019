@@ -17,6 +17,13 @@ cloud_env_boot_id() {
 # until its own store daemon starts. Trust the id only while the daemon that
 # wrote it is running.
 cloud_env_agent_id() {
+  local id
+  id="$(cloud_env_store_agent_id)"
+  [ -n "$id" ] || id="$(cloud_env_boxes_devbox_id)"
+  [ -z "$id" ] || printf '%s\n' "$id"
+}
+
+cloud_env_store_agent_id() {
   local dir="${CLOUD_ENV_AGENT_STORE_DIR:-/run/agent-store-fuse}" pid cmd
   pid="$(sed -n 's/^pid=//p' "$dir/ready" 2>/dev/null || true)"
   case "$pid" in '' | *[!0-9]*) return 0 ;; esac
@@ -28,6 +35,24 @@ cloud_env_agent_id() {
   fi
   printf '%s\n' "$cmd" | grep -q 'agent-store-fuse' || return 0
   cat "$dir/self-store-id" 2>/dev/null || true
+}
+
+# boxes.dev: a snapshot clone keeps the snapshot's kernel boot id, but every devbox
+# has its own id (BOXES_DEVBOX=1 is set on all of them). CLOUD_ENV_BOXES_DEVBOX_ID
+# overrides the lookup (tests); any failure yields no id.
+cloud_env_boxes_devbox_id() {
+  if [ "${CLOUD_ENV_BOXES_DEVBOX_ID+x}" = x ]; then
+    printf '%s\n' "$CLOUD_ENV_BOXES_DEVBOX_ID"
+    return 0
+  fi
+  [ "${BOXES_DEVBOX:-}" = 1 ] && command -v dvb-onbox >/dev/null 2>&1 || return 0
+  local json
+  if command -v timeout >/dev/null 2>&1; then
+    json="$(timeout 3 dvb-onbox whoami --json 2>/dev/null | tr -d '\n' || true)"
+  else
+    json="$(dvb-onbox whoami --json 2>/dev/null | tr -d '\n' || true)"
+  fi
+  printf '%s\n' "$json" | sed -n 's/.*"devboxId"[[:space:]]*:[[:space:]]*"\([A-Za-z0-9_-]*\)".*/\1/p'
 }
 
 cloud_env_value() {
@@ -105,7 +130,11 @@ refresh_cloud_env_identity() {
       name="$(new_cloud_workspace_name)"
       echo "Re-keyed $file minted on another instance: CONDUCTOR_WORKSPACE_NAME ${stale_name:-unset} -> $name" >&2
     fi
+    local keep_pg=0
+    ! grep -qx 'export ROSE_USE_SYSTEM_PG=true' "$file" || keep_pg=1
     write_cloud_env "$file" "${port:-3001}" "$name" "$root" "$boot_id" "$agent_id"
+    # The system-Postgres selection (boxes/E2B startup scripts) is not identity.
+    [ "$keep_pg" = 0 ] || echo 'export ROSE_USE_SYSTEM_PG=true' >>"$file"
   ) 9<"$file"
 }
 

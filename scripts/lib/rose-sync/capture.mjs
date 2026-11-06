@@ -425,7 +425,8 @@ export function checkoutRoot(dir) {
 
 /**
  * Capture `dir`'s checkout. Options: include (extra repo-relative paths),
- * setup (explicit setup commands), client (source label).
+ * setup (explicit setup commands), client (source label), filesOnly (skip the
+ * git bundle and uncommitted patch).
  */
 export function captureCheckout(dir, options = {}) {
   const include = (options.include ?? []).map((p) => p.replace(/^\.\/+/, ""));
@@ -439,9 +440,14 @@ export function captureCheckout(dir, options = {}) {
     tryGit(root, ["rev-parse", "--verify", "-q", "HEAD"])?.trim() || null;
   const out = { files: new Map(), symlinks: new Map(), warnings: [] };
   captureFiles(root, include, out);
-  const bundle = captureBundle(root, remoteUrl, headSha, out.warnings);
+  // filesOnly: no branch bundle and no uncommitted patch (neither is read).
+  const bundle = options.filesOnly
+    ? { bundle: null, kind: null, branches: [], unpushed: 0 }
+    : captureBundle(root, remoteUrl, headSha, out.warnings);
   const excluded = new Set([...out.files.keys(), ...out.symlinks.keys()]);
-  const patch = capturePatch(root, headSha, excluded, out.warnings);
+  const patch = options.filesOnly
+    ? null
+    : capturePatch(root, headSha, excluded, out.warnings);
   const dirty = dirtyPaths(root).filter((p) => !excluded.has(p));
   const dirs = projectDirs(root);
   const manifest = {
@@ -475,5 +481,6 @@ export function captureCheckout(dir, options = {}) {
     files: [...out.files.values()].sort((a, b) => a.path.localeCompare(b.path)),
     gitBundle: bundle.bundle,
     uncommittedPatch: patch,
+    filesOnly: options.filesOnly === true,
   };
 }
