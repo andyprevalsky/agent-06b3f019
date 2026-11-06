@@ -347,7 +347,7 @@ def producer_source(root):
     return block
 
 
-def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False, borrowed_transport_delay=False, native_read_delay=0):
+def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=False, production_only=False, post_canary=False, admission_wait=False, mutation=False, borrowed_transport_delay=False, native_read_delay=0, controlled_async_refresh=False):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     (scripts / "lib").mkdir()
@@ -442,6 +442,17 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         'finish() { if declare -F stop_owned_machines_snapshot_loop >/dev/null; then stop_owned_machines_snapshot_loop; else cloudbench_terminate_tree_and_wait 30 "$SNAPSHOT_LOOP_PID"; fi; touch "$FLEET_DIR/closed"; }\n'
         "trap finish EXIT\ntrap 'exit 143' TERM\n"
         + boundary
+        + 'fixture_snapshot_reads_before_start=0\n'
+        'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
+        ' fixture_snapshot_reads_before_start="$(python3 -c \'import json,os;from pathlib import Path;p=Path(os.environ["FIXTURE_CALLS"]);print(sum(row["kind"]=="machines" and row.get("job_id")==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,p.read_text().splitlines())) if p.exists() else 0)\')"\n'
+        'fi\n'
+        + ('eval "$(declare -f machines_snapshot_loop | sed 1s/machines_snapshot_loop/fixture_original_snapshot_loop/)"\n'
+           'machines_snapshot_loop() { touch "$FLEET_DIR/async-waiting"; '
+           'while [ ! -e "$FLEET_DIR/async-release" ]; do command sleep 0.01; done; '
+           'fixture_original_snapshot_loop; }\n'
+           'sleep() { if [ "$1" = 0.1 ] && [ -e "$FLEET_DIR/join-started" ]; then '
+           'touch "$FLEET_DIR/async-release"; fi; command sleep "$@"; }\n'
+           if controlled_async_refresh else '')
         + "start_machines_snapshot_loop\n"
         'if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then\n'
         ' python3 -c \'import json,os;from pathlib import Path;a=json.loads(os.environ["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"]);d=Path(os.environ["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"]);assert a["directory"]==str(d.resolve());assert a["owner"]==dict(line.split("=",1) for line in (d/"owner").read_text().splitlines());Path(os.environ["FIXTURE_ROOT"],os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"],"authority.json").write_text(json.dumps(a))\'\n'
@@ -450,7 +461,8 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         # the first asynchronous refresh before ending the scenario whose
         # assertion counts that refresh; startup only joins the initial read.
         'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
-        ' while [ "$(python3 -c \'import json,os;print(sum(row["kind"]=="machines" and row.get("job_id")==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,open(os.environ["FIXTURE_CALLS"]))))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
+        + (' touch "$FLEET_DIR/join-started"\n' if controlled_async_refresh else '')
+        + ' while [ "$(python3 -c \'import json,os;print(sum(row["kind"]=="machines" and row.get("job_id")==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,open(os.environ["FIXTURE_CALLS"]))))\')" -lt "$((fixture_snapshot_reads_before_start + 2))" ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
         'fi\n'
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
@@ -1989,6 +2001,18 @@ def test_campaign_inventory_post_canary_admission_wait_keeps_feed_and_standalone
     assert result.returncode == 0, result.stdout + result.stderr
     assert all(job["controller_exit_code"] == 0 for job in summary["jobs"])
     assert len([call for call in calls if call["kind"] == "machines"]) == (2 if shared else 8)
+
+
+def test_campaign_inventory_standalone_join_waits_for_first_async_refresh_after_admission(tmp_path):
+    result, calls, summary, _ = run_consumers(
+        tmp_path, shared=False, post_canary=True, admission_wait=True,
+        controlled_async_refresh=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert all(job["controller_exit_code"] == 0 for job in summary["jobs"])
+    per_job = {job["job_id"]: sum(call["kind"] == "machines" and call.get("job_id") == job["job_id"]
+                                for call in calls) for job in summary["jobs"]}
+    assert per_job == {"r001-j0001": 4, "r001-j0002": 4}, per_job
+    assert len([call for call in calls if call["kind"] == "machines"]) == 8
 
 
 @pytest.mark.parametrize("fault", ("missing-health", "expired-health"))
