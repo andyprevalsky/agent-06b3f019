@@ -15912,6 +15912,12 @@ async def _run_single_task_as_run_user(
         claude_code_sessions = (data.get("_benchmark") or {}).get("claude_code_sessions")
         if isinstance(claude_code_sessions, list) and claude_code_sessions:
             logs["claude_code_sessions"] = claude_code_sessions
+        # A passing run's evaluator reasoning is generic: keep the code-agent evidence
+        # (per-phase startup, spawn calls, session rows) in the run record. The external
+        # lane modules' raw run hydration ("run") can be large and is not persisted.
+        code_agent_evidence = (data.get("_benchmark") or {}).get(code_agent_checks.EVIDENCE_KEY)
+        if isinstance(code_agent_evidence, dict):
+            logs["code_agent_evidence"] = {k: v for k, v in code_agent_evidence.items() if k != "run"}
         session_evidence_error = (data.get("_benchmark") or {}).get("claude_code_session_evidence_error")
         if session_evidence_error:
             logs["claude_code_session_evidence_error"] = session_evidence_error

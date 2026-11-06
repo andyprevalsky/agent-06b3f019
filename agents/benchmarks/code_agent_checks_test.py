@@ -238,3 +238,24 @@ def test_retried_create_keeps_the_first_create_as_the_spawn_checkout():
     assert spawn["backend_creates"] == 2 and spawn["backend"]["checkoutSource"] == "remote"
     ok, reason = startup_time.check({"spawns": spawns}, {"max_ready_seconds": 600})
     assert ok and "backend_creates 2" in reason, reason
+
+
+def test_collect_keeps_per_phase_startup_for_the_run_record(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(ev, "fetch_local_worker_logs", lambda agent_id: _worker_lines())
+    monkeypatch.setattr(ev, "fetch_local_backend_log_lines", lambda needles: PROD_BACKEND_LINES)
+    monkeypatch.setattr(ev, "record_startup_spans", lambda *a, **k: 0)
+
+    async def no_sessions(data):
+        data.setdefault("_benchmark", {})["claude_code_sessions"] = []
+
+    import benchmarks.run_benchmark as rb
+
+    monkeypatch.setattr(rb, "_hydrate_claude_code_sessions", no_sessions)
+    data = {"agent": {"agent_id": AGENT}, "messages": []}
+    evidence = asyncio.run(ev.collect(data, benchmark=TASK, base_url="http://localhost:1"))
+    (phases,) = evidence["startup_phases"]
+    assert phases["phases_ms"]["ready"] == 303500.0 and phases["phases_ms"]["backend.workspace"] == 139601.0
+    assert phases["checkout_source"] == "remote" and phases["backend_creates"] == 1
+    json.dumps(evidence)  # persisted in the run record

@@ -317,6 +317,17 @@ async def collect(data: dict, *, benchmark: str, base_url: Optional[str]) -> dic
     return {
         "agent_ids": agent_ids,
         "spawns": spawns,
+        "startup_phases": [
+            {
+                "task_id": spawn["task_id"],
+                "agent_id": spawn["agent_id"],
+                "phases_ms": startup_time.spawn_phases(spawn),
+                "checkout_source": (spawn.get("backend") or {}).get("checkoutSource"),
+                "create_attempts": spawn.get("create_attempts"),
+                "backend_creates": spawn.get("backend_creates"),
+            }
+            for spawn in spawns
+        ],
         "backend_creates": creates,
         "spawn_calls_by_agent": spawn_calls_by_agent(data, agent_ids),
         "sessions_by_agent": sessions_by_agent(state.get("claude_code_sessions") or []),
