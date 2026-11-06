@@ -29,6 +29,6 @@
  "teleport_mentions": 0,
  "vision_ai_mentions": 0,
  "full_receipt_sha256": "2809237aecb98a9d8e41d3ce28a1ca5f69e57e76d097eefd86c111d081718229",
- "full_receipt_bytes": 13625898,
+ "full_receipt_bytes": 13626594,
  "durable_copy": "prod Benchmark Hub run bundle 20261106-131544-295004 (uploaded by the fleet controller); trace archive r2://trace-archive/trace-archive/d5672824-be5a-4873-839a-351de889f6e3/manifest.json.gz.enc"
 }
