@@ -1401,16 +1401,16 @@ Several GitHub identities share the load because each has its own API quota
 machine-account tokens `GITHUB_TOKEN_2` … `GITHUB_TOKEN_9`, the org's GitHub App
 `rose-labs-agents` (`GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`,
 `GITHUB_APP_PRIVATE_KEY_B64`; the backend mints its hourly installation tokens
-in production, or anywhere `GITHUB_APP_POOL=on`) and `GITHUB_DISPATCH_TOKEN` as the last resort. Members live in
-`agents/.env`, `back-end/.env` and Render; add one to the boxes.dev managed env
-when Andy supplies it. Backend reads (repo visibility, branch heads, merge
-facts, admin-health commits) use `githubFetch` / `githubTokenCandidates`
-(`back-end/src/providers/githubTokenPool.ts`), which prefer the member with the
-most quota left and move on when one is rate limited. Writes that act as Andy
-never use pool members: agent repo creation and code-agent clone/push
-credentials read `GITHUB_TOKEN` directly, and publishing a PR calls
-`githubFetch` with `identity: 'primary'`. When a read-only script or REST call
-hits a rate limit, take the token with the most quota left from
+in production, or anywhere `GITHUB_APP_POOL=on`) and `GITHUB_DISPATCH_TOKEN` as
+the last resort. Members live in `agents/.env`, `back-end/.env` and Render; add
+one to the boxes.dev managed env when Andy supplies it. Backend reads (repo
+visibility, branch heads, merge facts, admin-health commits) use `githubFetch` /
+`githubTokenCandidates` (`back-end/src/providers/githubTokenPool.ts`), which
+prefer the member with the most quota left and move on when one is rate limited.
+Writes that act as Andy never use pool members: agent repo creation and
+code-agent clone/push credentials read `GITHUB_TOKEN` directly, and publishing a
+PR calls `githubFetch` with `identity: 'primary'`. When a read-only script or
+REST call hits a rate limit, take the token with the most quota left from
 `python3 scripts/github_token_pool.py pick`; never use it for pushes, PRs or
 other writes. `status` shows each member's quota without printing tokens. On a
 boxes.dev devbox the `gh` wrapper ignores `GH_TOKEN`, so pass the picked token to
