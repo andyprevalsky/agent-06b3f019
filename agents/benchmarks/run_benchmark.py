@@ -17296,6 +17296,43 @@ def _parallel_task_phases(
     return [("exclusive", exclusive), ("parallel", parallel)]
 
 
+def _refuse_queued_after_interrupt(
+    queued: list[BenchmarkTask], start: int, results: list[TaskResult], never_admitted: list[TaskResult]
+) -> None:
+    """Stop a serial batch once its coordinator was cancelled by the owner.
+
+    ``run_single_task`` returns a CANCELLED row (after collecting evidence)
+    instead of re-raising, so a loop awaiting it directly sees an ordinary
+    result. The cancellation request stays pending on the coordinator task
+    (``cancelling()``); without this check a SIGINTed run admits every queued
+    task (2026-11-05: three paid AgentCard tasks ran ~24 minutes after the
+    owner's interrupt). Each queued occurrence keeps its nonadmission proof.
+    """
+    current = asyncio.current_task()
+    if current is None or not current.cancelling():
+        return
+    for position in range(start, len(queued)):
+        refused = TaskResult(
+            name=queued[position].name,
+            passed=False,
+            agent_id="",
+            status="CANCELLED",
+            benchmark_status="CANCELLED",
+            progress_score=0,
+            duration_seconds=0,
+            cost_cents=0,
+            message_count=0,
+            failure_reason="Benchmark interrupted before task produced logs: owner interrupt before admission",
+        )
+        refused.graded_root_creation_outcome = "not_started"
+        refused.stop_metadata = {
+            "runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": position,
+        }
+        never_admitted.append(refused)
+        results.append(refused)
+    raise asyncio.CancelledError("benchmark owner interrupt; queued tasks were not admitted")
+
+
 async def main_async(args):
     benchmark_wall_clock_backstop_seconds()  # Reject invalid limits before live setup.
     if args.list:
@@ -17785,7 +17822,7 @@ async def main_async(args):
             pending_results: dict[asyncio.Task, BenchmarkTask] = {}
             pending: set[asyncio.Task] = set()
             try:
-                for task in exclusive_db_tasks:
+                for index, task in enumerate(exclusive_db_tasks):
                     print(f"\n  Running exclusive task serially: {task.name}")
                     result = await _run_with_sandbox_payment_lock(
                         task,
@@ -17797,6 +17834,9 @@ async def main_async(args):
                     run.task_results.append(result)
                     _evaluated_task_results.pop(asyncio.current_task(), None)
                     _emit_report()
+                    _refuse_queued_after_interrupt(
+                        [*exclusive_db_tasks, *parallel_batch], index + 1, run.task_results, _never_admitted_results
+                    )
 
                 task_runners = _parallel_task_runners(
                     parallel_batch,
@@ -17861,7 +17901,7 @@ async def main_async(args):
                         run.task_results.append(cancelled_result)
                 raise
         else:
-            for task in tasks:
+            for index, task in enumerate(tasks):
                 result = await _run_with_sandbox_payment_lock(
                     task,
                     lambda: _run_reported_task(
@@ -17872,6 +17912,7 @@ async def main_async(args):
                 run.task_results.append(result)
                 _evaluated_task_results.pop(asyncio.current_task(), None)
                 _emit_report()
+                _refuse_queued_after_interrupt(tasks, index + 1, run.task_results, _never_admitted_results)
     finally:
         _report_ticker_task.cancel()
         _evaluated_task_results.clear()
