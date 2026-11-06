@@ -437,7 +437,7 @@ if [[ -n "${SEMANTIC_NATIVE_REPORT_PREFIX:-}" ]]; then
   [[ "$SEMANTIC_NATIVE_REPORT_PREFIX" = /* ]] || { echo "Native report prefix must be absolute" >&2; exit 2; }
   export PLAYWRIGHT_JSON_OUTPUT_FILE="${SEMANTIC_NATIVE_REPORT_PREFIX}.json"
   export DEPLOY_SEMANTIC_LIFECYCLE="${SEMANTIC_NATIVE_REPORT_PREFIX}.jsonl"
-  [[ ! -e "$PLAYWRIGHT_JSON_OUTPUT_FILE" && ! -e "$DEPLOY_SEMANTIC_LIFECYCLE" ]] || { echo "Native report already exists" >&2; exit 2; }
+  [[ ! -e "$PLAYWRIGHT_JSON_OUTPUT_FILE" && ! -e "$DEPLOY_SEMANTIC_LIFECYCLE" && ! -e "${SEMANTIC_NATIVE_REPORT_PREFIX}-artifacts" ]] || { echo "Native report already exists" >&2; exit 2; }
   SEMANTIC_REPORTERS="list,json,$REPO_DIR/scripts/deploy-semantic-reporter.cjs"
   SEMANTIC_OUTPUT_ARGS=("--output=${SEMANTIC_NATIVE_REPORT_PREFIX}-artifacts")
 fi

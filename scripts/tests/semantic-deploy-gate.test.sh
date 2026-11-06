@@ -112,6 +112,16 @@ for selected in (False, True):
                         '--workers=3', *(['--output=' + prefix + '-artifacts'] if native else []),
                         *(['--grep-invert=deferred'] if not selected else [])]
             assert json.loads(result.stdout) == expected, result.stdout
+            if native:
+                artifacts = Path(prefix + '-artifacts')
+                artifacts.mkdir()
+                evidence = artifacts / 'prior-evidence.txt'
+                evidence.write_text('retain prior evidence')
+                rejected = subprocess.run(['bash', str(script), *(['selected'] if selected else [])],
+                                          cwd=root, env=env, capture_output=True, text=True)
+                assert rejected.returncode == 2, 'existing artifacts must reject before Playwright starts'
+                assert not rejected.stdout, 'Playwright must not start against prior artifacts'
+                assert evidence.read_text() == 'retain prior evidence'
 print('PASS: all/named semantic argv, native output absent/present, spaces preserved (installed Bash)')
 PY_SEMANTIC_ARGS
 require_text "$HELPERS" "HAS_INJECTED_SESSION" "semantic helpers must expose injected-session auth"

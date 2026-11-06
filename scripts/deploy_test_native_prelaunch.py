@@ -15,6 +15,11 @@ def validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bou
     from deploy_test_native_cleanup import need, fields
     from deploy_test_cloud import campaign_published
     need(proof.get('purpose') is None, 'prelaunch proof supports cleanup only')
+    identity = receipt.get('source')
+    need(isinstance(identity, dict), 'prelaunch receipt source invalid')
+    head = identity.get('head')
+    need(isinstance(head, str) and re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', head),
+         'prelaunch receipt head invalid')
     campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
     need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
          and owner['native_cleanup_reference']['native_directory'] == str(campaign), 'prelaunch campaign binding')
@@ -58,7 +63,7 @@ def validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bou
     canonical_root = Path(__file__).resolve().parents[1]
     need(producer == (canonical_root / 'scripts/run-bench-campaign.py').read_bytes()
          and producer == subprocess.check_output(['git', '-C', str(root), 'show',
-                                                  receipt['source']['head'] + ':scripts/run-bench-campaign.py']),
+                                                  head + ':scripts/run-bench-campaign.py']),
          'prelaunch producer source differs from reviewed source')
     inventory = campaign / 'shared-inventory'
     for name, relative in (
@@ -70,7 +75,7 @@ def validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bou
         captured = bound(inventory / 'scripts' / name)
         need(captured == (canonical_root / relative).read_bytes()
              and captured == subprocess.check_output(['git', '-C', str(root), 'show',
-                                                       receipt['source']['head'] + ':' + relative]),
+                                                       head + ':' + relative]),
              'prelaunch inventory source differs from reviewed checkout or receipt head')
     need(bound(inventory / 'stop') == b'', 'prelaunch publisher stop missing')
     lock = fields(bound(inventory / 'machines-refresh.lock'))

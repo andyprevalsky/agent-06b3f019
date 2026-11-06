@@ -2266,6 +2266,15 @@ class Cycle(unittest.TestCase):
                     c.reconcile(state,occurrence['id'],candidate)
                 self.assertEqual(snapshot,state)
 
+    def test_native_prelaunch_rejects_invalid_git_head_before_io(self):
+        from deploy_test_native_prelaunch import validate_prelaunch
+        for head in ('', 'HEAD', '--output=/tmp/untrusted', 'a' * 39, None):
+            with self.subTest(head=head), patch('subprocess.check_output') as process:
+                with self.assertRaisesRegex(ValueError, 'prelaunch receipt head invalid'):
+                    validate_prelaunch({'source': {'head': head}}, None, {}, None,
+                                       None, None, None, None, None)
+                process.assert_not_called()
+
     def test_native_prelaunch_accepts_explicit_null_cleanup_purpose(self):
         state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()
         proof['purpose']=None
