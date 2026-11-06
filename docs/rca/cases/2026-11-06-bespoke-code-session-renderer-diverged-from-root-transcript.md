@@ -111,6 +111,9 @@ or subscription); the projection is O(owner messages) per render of one open vie
 
 - **'Open app' (item 2, decided by the orchestrator).** The floating pink "Open app" above the user message is header chrome and is gone; the only entry to the full-screen dev preview is now one link inside the existing devbox usage popover (`CodeResourcesIndicator` takes an optional `preview`), shown only for a session with a cross-origin `preview_url`, and kept for an idle session (no measured values, link only). Regressions: `app-view-preview-card` (no "Open app" in the view until the popover opens, the popover link opens the same preview), `code-agent-resources` (4 cases), and the ~30 app-view tests re-entered through the popover.
 
+- **Duplicate Thought rows (freeze review).** A model call's thinking record and its narration text each rendered as a Thought row carrying the same generation, so "Thought 0.0s · 495 tokens" and "1.0s · 240 tokens · 236.2 tok/s" each appeared twice in a row. The code view's list (`codeSessionMessages`) now keeps ONE row per model call: adjacent thought-like rows with the same generation window merge into the first row (metrics once; its content holds the reasoning, then the narration); a narration-only call keeps its one row. The root agent's rendering is untouched. Regression: `code-agent-narration-generation` replays final-run5 and asserts no two adjacent Thought rows share a window (red before: "rows 9 and 10 are one call").
+- **Translucent popover.** The usage popover inherited the base popover's 80% glass; it now uses the nub info popover's opaque surface (class assertion in `code-agent-resources`, computed `rgb(39, 39, 37)` measured in Chromium, and an alpha check in the benchmark render check).
+
 ## Human feedback
 
 Andy (via the orchestrator): "DON'T make a new display. Use the existing FE we already
