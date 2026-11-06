@@ -152,7 +152,7 @@ def cache_addition_projections(config, machine_id):
     return result
 
 
-def machine(value):
+def machine(value, *, cache_baseline=None):
     """Only hashes/presence of config and env/file contents persist in receipts."""
     config = copy.deepcopy(value['config'])
     stable = copy.deepcopy(config)
@@ -160,13 +160,16 @@ def machine(value):
     init = stable.get('init', {}); init.pop('cmd', None)
     if not init:
         stable.pop('init', None)
-    return {**{k: value[k] for k in ('id', 'instance_id', 'name', 'state')},
+    result = {**{k: value[k] for k in ('id', 'instance_id', 'name', 'state')},
             'config_sha256': hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
             'stable_sha256': digest(stable), 'cache_addition_projections':cache_addition_projections(stable,value['id']),
             'guest': config.get('guest'),
             'command': config.get('init', {}).get('cmd'),
             'image': config['image'], 'image_digest': value.get('image_ref', {}).get('digest'),
             'mounts': config.get('mounts', [])}
+    if cache_baseline is not None and value['id']==cache_baseline['machine']:
+        result['cache_renewal_projection']=cache_renewal_projection(stable,cache_baseline)
+    return result
 
 
 def diagnostic_machine(value):
@@ -182,7 +185,7 @@ def diagnostic_machine(value):
     return result
 
 
-def observation(app, warm_id, *, native_pid=None, failure_diagnostic=None, diagnostic_samples=None):
+def observation(app, warm_id, *, native_pid=None, failure_diagnostic=None, diagnostic_samples=None, cache_baseline=None):
     evidence = diagnostic_samples if diagnostic_samples is not None else {}
     samples = {}
     read_times = []
@@ -230,14 +233,14 @@ def observation(app, warm_id, *, native_pid=None, failure_diagnostic=None, diagn
                 'changed_fields':[k for k in samples['before'] if samples['before'][k]!=samples['after'].get(k)]})
 
     try:
-        before = machine(get(app, 'machines/' + warm_id))
+        before = machine(get(app, 'machines/' + warm_id),cache_baseline=cache_baseline)
         samples['before'] = before
         read_times.append({'kind':'machine-before','at':time.time()})
         inventory = get(app, 'machines')
         samples['inventory'] = inventory
         read_times.append({'kind':'inventory','at':time.time()})
         need(isinstance(inventory, list) and len({m['id'] for m in inventory}) == len(inventory), 'inventory unreadable')
-        need(any(machine(item)==before for item in inventory), 'warm missing/changed in global inventory')
+        need(any(machine(item,cache_baseline=cache_baseline)==before for item in inventory), 'warm missing/changed in global inventory')
         volumes = {}
         for mount in before['mounts']:
             vid = mount['volume']; volume = get(app, 'volumes/' + vid)
@@ -247,7 +250,7 @@ def observation(app, warm_id, *, native_pid=None, failure_diagnostic=None, diagn
                  and volume['state'] not in ('destroyed', 'pending_destroy'), 'retained volume ownership')
             volumes[vid] = {'id': vid, 'attached_machine_id': warm_id, 'state': volume['state']}
         need(volumes, 'retained volume missing')
-        after = machine(get(app, 'machines/' + warm_id))
+        after = machine(get(app, 'machines/' + warm_id),cache_baseline=cache_baseline)
         samples['after'] = after
         read_times.append({'kind':'machine-after','at':time.time()})
         need(before == after and before['state'] == 'stopped', 'unstable/nonstopped native partition')
@@ -408,12 +411,113 @@ def original_owned_baseline(state, root, entries):
     return intent['before']['warm'], {'nonce':record['nonce'],'intent_sha256':digest(intent),'result_sha256':digest(result)}
 
 
-def owned_scope(warm, original, *, app=None):
+CACHE_FIELDS=('node','python','epoch','snapshot','volume','machine','app')
+
+
+def native_cache_baseline(state, root, entries):
+    """Only historical native before records; failed outcomes stay failed."""
+    if not state.get('native_maintenance'):return None
+    original,_=original_owned_baseline(state,root,entries)  # verifies ALL state/file seals
+    for record in state['native_maintenance']:
+        directory=Path(record['directory']);intent=read(directory/'intent.json')
+        before=intent['before']['warm'];addition=intent['before'].get('cache_addition')
+        # Never derive authority from a renewal generation or its after-state.
+        if not isinstance(addition,dict) or 'schema' in addition or 'key' not in addition:continue
+        if addition.get('without_key_sha256')!=original['stable_sha256']:continue
+        need(intent['gate']==entries[0]['gate'] and intent['app']==addition['app']
+             and intent['targets']==[['warm',original['id']]]
+             and intent['requested_ref']==intent['source']['head'],'sealed cache native operation binding')
+        need(all(before[k]==original[k] for k in ('id','name','mounts')) and before['state']=='stopped'
+             and before['command']==['sleep','infinity'],'sealed cache baseline scope')
+        need(set(intent['scripts'])==set(SCRIPTS) and all(
+             hashlib.sha256(subprocess.check_output(['git','-C',str(root),'show',intent['source']['head']+':'+name],stderr=subprocess.PIPE)).hexdigest()==sha
+             for name,sha in intent['scripts'].items()),'sealed cache producer source')
+        values=before.get('cache_addition_projections',[])
+        known={v['key']:{k:v[k] for k in CACHE_FIELDS} for v in values}
+        need(len(known)==len(values) and addition['key'] in known and
+             known[addition['key']]=={k:addition[k] for k in CACHE_FIELDS},'sealed cache tuples')
+        # Tuple spelling is the publisher's exact seven-field value. Its bytes
+        # are independently checked against BOTH original native full hashes.
+        for key,v in known.items():
+            canonical=' '.join(str(v[k]) for k in CACHE_FIELDS)
+            parsed=cache_addition_projections({'metadata':{key:canonical},'mounts':before['mounts']},before['id'])
+            need(len(parsed)==1 and parsed[0]['app']==intent['app'],'sealed cache tuple identity')
+        return dict(schema='native-cache-baseline-v1',machine=before['id'],app=intent['app'],
+                    original_stable_sha256=original['stable_sha256'],before_stable_sha256=before['stable_sha256'],
+                    admitted_addition=addition['key'],entries=known,
+                    native_before=dict(nonce=record['nonce'],intent_sha256=record['intent_sha256'],
+                                       result_sha256=record['result_sha256'],source=record['source']))
+    return None
+
+
+def cache_renewal_projection(stable, baseline):
+    """Hash reconstruction only; invalid or missing data grants no coverage."""
+    try:
+        metadata=stable.get('metadata',{})
+        parsed=cache_addition_projections(stable,baseline['machine'])
+        current={v['key']:{k:v[k] for k in CACHE_FIELDS} for v in parsed}
+        # Unknown cache namespace entries cannot be excluded by a broad prefix.
+        if set(current)!=set(baseline['entries']):return None
+        # Legacy/unrecognized fields stay byte-for-byte in the full hash;
+        # they are never reconstructed or excluded as advisory entries.
+        restored=copy.deepcopy(stable)
+        for key,old in baseline['entries'].items():
+            value=current[key]
+            if any(value[k]!=old[k] for k in ('node','python','volume','machine','app')):return None
+            restored['metadata'][key]=' '.join(str(old[k]) for k in CACHE_FIELDS)
+        prior=digest(restored)
+        del restored['metadata'][baseline['admitted_addition']]
+        return dict(baseline_sha256=digest(baseline),before_stable_sha256=prior,
+                    original_stable_sha256=digest(restored),entries=current)
+    except (KeyError,TypeError,ValueError,AttributeError):
+        return None
+
+
+def qualified_cache_renewal(warm, original, baseline, app):
+    projection=warm.get('cache_renewal_projection')
+    need(baseline['app']==app and baseline['machine']==warm['id'] and projection is not None
+         and projection['baseline_sha256']==digest(baseline)
+         and projection['before_stable_sha256']==baseline['before_stable_sha256']
+         and projection['original_stable_sha256']==original['stable_sha256']==baseline['original_stable_sha256'],
+         'sealed native cache full-hash reconstruction')
+    current=projection['entries'];old=baseline['entries'];changed=[]
+    need(set(current)==set(old),'native cache entry set changed')
+    for key,value in current.items():
+        need(all(value[k]==old[key][k] for k in ('node','python','volume','machine','app')),'native cache tuple changed')
+        if value!=old[key]:
+            need(value['epoch']>old[key]['epoch'] and value['snapshot']!=old[key]['snapshot'], 'native cache renewal monotonicity')
+            changed.append(key)
+    # The original admitted addition must still have a completed live snapshot;
+    # unchanged historical entries are protected by the full hash, not re-used.
+    verify=sorted(set(changed)|{baseline['admitted_addition']});inventories={};proofs={}
+    import datetime
+    for key in verify:
+        value=current[key];vid=value['volume']
+        need(0<value['epoch']<=time.time(),'native cache future epoch')
+        if vid not in inventories:inventories[vid]=get(app,'volumes/'+vid+'/snapshots')
+        rows=inventories[vid]
+        need(isinstance(rows,list) and all(isinstance(r,dict) for r in rows),'native cache snapshot inventory')
+        found=[r for r in rows if r.get('id')==value['snapshot']]
+        need(len(found)==1,'native cache snapshot identity')
+        row=found[0]
+        need(row.get('volume_id',vid)==vid,'native cache snapshot volume')
+        created=datetime.datetime.fromisoformat(row['created_at'].replace('Z','+00:00')).timestamp()
+        need(row.get('status','').lower() in {'created','complete','completed','ready'}
+             and int(row.get('size') or 0)>0 and value['epoch']-60<=created<=time.time(), 'native cache snapshot completion')
+        proofs[key]={**value,'created_at':row['created_at'],'status':row['status'],'size':row['size']}
+    return dict(schema='native-cache-renewal-v1',baseline_sha256=digest(baseline),
+                native_before=baseline['native_before'],original_stable_sha256=original['stable_sha256'],
+                renewed_entries=sorted(changed),snapshots=proofs,dependency_reuse_credit=False)
+
+
+def owned_scope(warm, original, *, app=None, cache_baseline=None):
     # Full old digest remains the authority. A single additive advisory cache
     # entry may be projected out ONLY when the exact remaining digest matches.
     need(all(warm[k]==original[k] for k in ('id','name','mounts'))
          and warm['state']=='stopped' and warm['instance_id']
          and warm['command']==['sleep','infinity'], 'prospective original owned resource scope')
+    if cache_baseline is not None:
+        return qualified_cache_renewal(warm,original,cache_baseline,app)
     if warm['stable_sha256']==original['stable_sha256']:return None
     matching=[p for p in warm.get('cache_addition_projections',[])
               if p['without_key_sha256']==original['stable_sha256'] and p['app']==app]
@@ -477,6 +581,10 @@ def prestart(args):
     current=observation(intent['app'],intent['targets'][0][1],native_pid=args.pid,
                         failure_diagnostic=preserve_failure, diagnostic_samples=samples)
     try:
+        # Historical compatibility authorizes begin only. Before guest start,
+        # the NEW intent's entire protected config must remain unchanged.
+        need(current['warm']['stable_sha256']==intent['before']['warm']['stable_sha256'],
+             'prestart protected config changed')
         owned_scope(current['warm'],intent['before']['warm'],app=intent['app'])
         need(current['warm']['image']==intent['image'] and current['warm']['image_digest']==intent['image_digest'],
              'prestart desired immutable image')
@@ -520,13 +628,14 @@ def begin(args):
     need(targets == [['warm', expected['id']]], 'pool/extra target needs separate authority')
     pool = pool_binding(root)
     build = image_build(args.build, args.image, root, current)
-    started = time.time(); before = observation(args.app, expected['id'], native_pid=args.pid)
+    cache_baseline=native_cache_baseline(state,root,entries)
+    started = time.time(); before = observation(args.app, expected['id'], native_pid=args.pid,cache_baseline=cache_baseline)
     prospective=not all(before['warm'][key] == expected[key] for key in ('id','instance_id','name','state','config_sha256'))
     predecessor=None
     if prospective:
         need(historical_debt_audit(state,gate)==entries,'original historical debt authority')
         original,predecessor=original_owned_baseline(state,root,entries)
-        compatibility=owned_scope(before['warm'],original,app=args.app)
+        compatibility=owned_scope(before['warm'],original,app=args.app,cache_baseline=cache_baseline)
         if compatibility is not None:before['cache_addition']=compatibility
     else:
         need(sorted(isolated_admissions(state, args.gate), key=lambda e: e['token']) == entries, 'original debt authority')
@@ -662,7 +771,8 @@ def validate_current(state, entries, anchor, operation):
         historical_debt_audit(state,gate)
         original,predecessor=original_owned_baseline(state,root,entries)
         need(intent['prospective_origin']=={'predecessor':predecessor},'original prospective scope seal')
-        compatibility=owned_scope(intent['before']['warm'],original,app=intent['app'])
+        cache_baseline=native_cache_baseline(state,root,entries)
+        compatibility=owned_scope(intent['before']['warm'],original,app=intent['app'],cache_baseline=cache_baseline)
         need(intent['before'].get('cache_addition')==compatibility,'original cache addition proof changed')
     else:
         need(all(intent['before']['warm'][k] == expected[k] for k in ('id','instance_id','name','state','config_sha256')),

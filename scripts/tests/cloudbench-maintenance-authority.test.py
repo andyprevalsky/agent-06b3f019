@@ -141,6 +141,7 @@ exit "${FIXTURE_NATIVE_EXIT:-0}"
             value=self.provider['after']
             if resource=='machines':return [value]
             if resource=='machines/warm':return value
+            if resource=='volumes/vol-owned/snapshots':return copy.deepcopy(self.snapshots)
             if resource=='volumes/vol-owned':return {'id':'vol-owned','state':'created','attached_machine_id':'warm'}
             import urllib.error
             raise urllib.error.HTTPError(resource,404,'absent',{},None)
@@ -499,6 +500,139 @@ def get(app,resource):
         result=self.run_native();self.assertEqual(result.returncode,0,result.stderr)
         state=c.read(self.context/'cycle.json');state.pop('native_maintenance')
         with self.assertRaisesRegex(ValueError,'unique successful'):self.consumer(state)
+
+class NativeCacheRenewal(unittest.TestCase):
+    setUp=NativeTransition.setUp
+    run_native=NativeTransition.run_native
+    consumer=NativeTransition.consumer
+    prospective_fixture=NativeTransition.prospective_fixture
+
+    def renewal_fixture(self):
+        import datetime
+        app='navi-whisper-lux-bench';t=int(time.time())-1000
+        def key(node):return 'rose_cloudbench_deps_'+hashlib.sha256((node+'\0'+'c'*64).encode()).hexdigest()[:32]
+        self.a=key('a'*64);self.b=key('d'*64)
+        def value(node,epoch,snapshot):return f"{node} {'c'*64} {epoch} {snapshot} vol-owned warm {app}"
+        self.old_a=value('a'*64,t,'old_a');self.old_b=value('d'*64,t+100,'old_b')
+        self.new_a=value('a'*64,t+500,'new_a');self.new_b=value('d'*64,t+600,'new_b')
+        metadata={self.a:self.old_a,'owner':'keep','rose_cloudbench_deps_legacy':'unchanged'}
+        self.provider['before']['config']['metadata']=copy.deepcopy(metadata)
+        self.provider['after']['config']['metadata']=copy.deepcopy(metadata)
+        self.pin={k:m.machine(self.provider['before'])[k] for k in ('id','instance_id','name','state','config_sha256')}
+        self.entry['proof']['guest_observation']['warm']=self.pin
+        c.write(self.context/'cycle.json',self.state);c.write(self.context/'provider.json',self.provider)
+        self.snapshots=[dict(id=snapshot,status='created',size=123,volume_id='vol-owned',
+            created_at=datetime.datetime.fromtimestamp(epoch+1,datetime.timezone.utc).isoformat())
+            for snapshot,epoch in [('old_b',t+100),('new_a',t+500),('new_b',t+600)]]
+        c.write(self.context/'snapshots.json',self.snapshots)
+        site=self.fixture/'sitecustomize.py'
+        site.write_text(site.read_text().replace(" if resource=='machines':return [value]", " if resource=='volumes/vol-owned/snapshots':return json.loads((root/'.context/snapshots.json').read_text())\n if resource=='machines':return [value]"))
+        self.prospective_fixture()
+        self.provider['before']['config']['metadata'][self.b]=self.old_b
+        self.provider['after']['config']['metadata'][self.b]=self.old_b
+        c.write(self.context/'provider.json',self.provider)
+        denied=self.run_native(17);self.assertEqual(denied.returncode,17,denied.stderr)
+        self.saved_state=c.read(self.context/'cycle.json')
+        self.phase.write_text('before');(self.context/'output/cloudbench-maintenance.json').unlink()
+        (self.context/'start-marker').unlink()
+        for phase in ('before','after'):
+            self.provider[phase]['config']['metadata'].update({self.a:self.new_a,self.b:self.new_b})
+        c.write(self.context/'provider.json',self.provider)
+
+    def test_native_renewal_preserves_failed_history_and_exact_new_before(self):
+        self.renewal_fixture();result=self.run_native();self.assertEqual(result.returncode,0,result.stderr)
+        state=c.read(self.context/'cycle.json')
+        self.assertEqual(state['native_maintenance'][:2],self.saved_state['native_maintenance'])
+        self.assertEqual(state['reconciled_owners'],self.saved_state['reconciled_owners'])
+        self.assertTrue(state['native_maintenance'][-1]['qualified'])
+        intent=m.read(Path(state['native_maintenance'][-1]['directory'])/'intent.json')
+        proof=intent['before']['cache_addition']
+        self.assertEqual(proof['schema'],'native-cache-renewal-v1')
+        self.assertEqual(proof['renewed_entries'],sorted([self.a,self.b]))
+        self.assertFalse(proof['dependency_reuse_credit'])
+        with patch.object(m,'historical_debt_audit',return_value=[self.entry]):self.assertTrue(self.consumer())
+        bad=copy.deepcopy(state);bad['native_maintenance'][1]['intent_sha256']='0'*64
+        with self.assertRaises(ValueError):m.native_cache_baseline(bad,self.root,[self.entry])
+        bad=copy.deepcopy(state);bad['native_maintenance'][1]['source']={}
+        with self.assertRaises(ValueError):m.native_cache_baseline(bad,self.root,[self.entry])
+        target=Path(state['native_maintenance'][1]['directory'])/'intent.json';original_read=m.read
+        def tampered(path):
+            value=original_read(path)
+            if Path(path)==target:value['before']['warm']['stable_sha256']='0'*64
+            return value
+        with patch.object(m,'read',side_effect=tampered),self.assertRaises(ValueError):
+            m.native_cache_baseline(state,self.root,[self.entry])
+
+    def test_unrelated_removed_malformed_identity_and_epoch_changes_reject(self):
+        self.renewal_fixture();original=copy.deepcopy(self.provider)
+        mutations=[('env',lambda v:v['config']['env'].update(PRESENT='foreign')),
+          ('owner',lambda v:v['config']['metadata'].update(owner='foreign')),
+          ('legacy',lambda v:v['config']['metadata'].update(rose_cloudbench_deps_legacy='foreign')),
+          ('unknown',lambda v:v['config']['metadata'].update(unknown='foreign')),
+          ('removed',lambda v:v['config']['metadata'].pop(self.a)),
+          ('malformed',lambda v:v['config']['metadata'].update({self.a:'invalid'})),
+          ('identity',lambda v:v['config']['metadata'].update({self.a:self.new_a.replace('vol-owned','foreign')})),
+          ('app',lambda v:v['config']['metadata'].update({self.a:self.new_a.replace('navi-whisper-lux-bench','other-app')})),
+          ('machine',lambda v:v['config']['metadata'].update({self.a:self.new_a.replace(' warm ',' other ')})),
+          ('negative epoch',lambda v:v['config']['metadata'].update({self.a:self.new_a.replace(self.new_a.split()[2],'-1')})),
+          ('fingerprint',lambda v:v['config']['metadata'].update({self.a:self.new_a.replace('a'*64,'b'*64)})),
+          ('epoch',lambda v:v['config']['metadata'].update({self.a:self.old_a.replace('old_a','new_a')})),
+          ('old snapshot',lambda v:v['config']['metadata'].update({self.a:self.new_a.replace('new_a','old_a')})),
+          ('future',lambda v:v['config']['metadata'].update({self.a:self.new_a.replace(self.new_a.split()[2],str(int(time.time())+1000))}))]
+        for name,mutate in mutations:
+            self.provider=copy.deepcopy(original);mutate(self.provider['before']);c.write(self.context/'provider.json',self.provider)
+            with self.subTest(case=name):
+                result=self.run_native();self.assertNotEqual(result.returncode,0,result.stderr)
+                self.assertEqual(self.phase.read_text(),'before')
+                self.assertEqual(c.read(self.context/'cycle.json'),self.saved_state)
+
+    def test_missing_fake_wrong_volume_incomplete_and_stale_snapshots_reject(self):
+        self.renewal_fixture();original=copy.deepcopy(self.snapshots)
+        for name,change in [('missing',None),('fake',{'id':'other'}),('volume',{'volume_id':'foreign'}),
+                            ('pending',{'status':'pending'}),('zero',{'size':0}),
+                            ('stale',{'created_at':'2000-01-01T00:00:00+00:00'}),
+                            ('future',{'created_at':'2999-01-01T00:00:00+00:00'})]:
+            values=copy.deepcopy(original)
+            if change is None:values=[]
+            else:values[1].update(change)
+            c.write(self.context/'snapshots.json',values)
+            with self.subTest(case=name):
+                result=self.run_native();self.assertNotEqual(result.returncode,0,result.stderr)
+                self.assertEqual(self.phase.read_text(),'before')
+                self.assertEqual(c.read(self.context/'cycle.json'),self.saved_state)
+
+    def test_new_valid_cache_addition_after_begin_refuses_before_guest_start(self):
+        import datetime
+        self.renewal_fixture()
+        node='e'*64;python='c'*64;epoch=int(time.time())-100
+        key='rose_cloudbench_deps_'+hashlib.sha256((node+'\0'+python).encode()).hexdigest()[:32]
+        self.provider['after']['config']['metadata'][key]=f'{node} {python} {epoch} extra vol-owned warm navi-whisper-lux-bench'
+        self.snapshots.append(dict(id='extra',status='created',size=123,volume_id='vol-owned',
+            created_at=datetime.datetime.fromtimestamp(epoch+1,datetime.timezone.utc).isoformat()))
+        c.write(self.context/'provider.json',self.provider);c.write(self.context/'snapshots.json',self.snapshots)
+        denied=self.run_native();self.assertNotEqual(denied.returncode,0,denied.stderr)
+        self.assertIn('prestart protected config changed',denied.stderr)
+        state=c.read(self.context/'cycle.json');record=state['native_maintenance'][-1]
+        self.assertFalse((Path(record['directory'])/'prestart.json').exists())
+        self.assertFalse((self.context/'start-marker').exists())
+        self.assertFalse(record['qualified'])
+        self.assertEqual(state['native_maintenance'][:2],self.saved_state['native_maintenance'])
+        with patch.object(m,'historical_debt_audit',return_value=[self.entry]),self.assertRaises(ValueError):self.consumer()
+
+    def test_native_before_hash_tamper_and_post_begin_renewal_cannot_launder(self):
+        self.renewal_fixture()
+        baseline=m.native_cache_baseline(self.saved_state,self.root,[self.entry])
+        observed=m.machine(self.provider['before'],cache_baseline=baseline)
+        original,_=m.original_owned_baseline(self.saved_state,self.root,[self.entry])
+        observed['cache_renewal_projection']['original_stable_sha256']='0'*64
+        with self.assertRaises(ValueError):m.owned_scope(observed,original,app='navi-whisper-lux-bench',cache_baseline=baseline)
+        self.provider['after']['config']['metadata'][self.a]=self.new_a.replace('new_a','another_snapshot')
+        c.write(self.context/'provider.json',self.provider)
+        denied=self.run_native();self.assertNotEqual(denied.returncode,0,denied.stderr)
+        self.assertFalse((self.context/'start-marker').exists())
+        self.assertFalse(c.read(self.context/'cycle.json')['native_maintenance'][-1]['qualified'])
+        with patch.object(m,'historical_debt_audit',return_value=[self.entry]),self.assertRaises(ValueError):self.consumer()
+
 
 class Quiescence(unittest.TestCase):
     def test_actual_campaign_and_fleet_and_ancestor_are_not_quiescent(self):
