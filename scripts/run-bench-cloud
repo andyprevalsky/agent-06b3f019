@@ -1340,25 +1340,30 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
 # Never return an unvalidated token: an invalid PAT is worse than a missing one
 # because callers treat non-empty as "auth is configured".
 github_token_can_fetch_repo() {
-    local token="$1" code cfg
+    local token="$1" cfg header
     [ -n "$token" ] || return 1
-    # Metadata-only fine-grained PATs can pass GET /repos while lacking Contents
-    # and failing git clone/fetch. Probe the contents root (no trailing slash) so
-    # acceptance requires Contents: read — the permission git operations need.
-    # Keep the PAT out of curl argv (ps/audit) via a mode-0600 curl config file.
+    # Validate the operation this token is actually used for. The GitHub REST
+    # contents probe used here previously consumes the API rate window; once the
+    # shared credential hit that limit, a still-valid Git credential was falsely
+    # rejected and --refresh-deps failed before its git fetch. A metadata-only
+    # PAT cannot read the private Git remote, so ls-remote preserves the required
+    # Contents permission check without depending on REST quota.
+    # Keep the PAT out of argv and the ambient git config via a mode-0600 config.
     cfg="$(mktemp)"
-    printf 'header = "Authorization: Bearer %s"\n' "$token" >"$cfg"
-    chmod 600 "$cfg"
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
-        --config "$cfg" \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'User-Agent: cloudbench' \
-        'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' 2>/dev/null)" || {
+    header="$(token_to_git_auth_header "$token")" || {
         rm -f "$cfg"
         return 1
     }
+    printf '[http]\n\textraheader = %s\n' "$header" >"$cfg"
+    chmod 600 "$cfg"
+    if ! GIT_CONFIG_GLOBAL="$cfg" GIT_CONFIG_NOSYSTEM=1 \
+        git ls-remote --exit-code \
+        'https://github.com/Rose-Ai-Labs/rose.git' HEAD >/dev/null 2>&1; then
+        rm -f "$cfg"
+        return 1
+    fi
     rm -f "$cfg"
-    [ "$code" = "200" ]
+    return 0
 }
 
 # Long-lived token for Fly app secrets. Never use `gh auth token` here — those
