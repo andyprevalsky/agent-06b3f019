@@ -520,6 +520,19 @@ def _format_user_context(
                 emails = [email for email in readable if isinstance(email, str) and email]
                 if not emails:
                     continue
+            # One Google grant covers Gmail, Calendar and Drive; the backend marks a
+            # credential missing any of those scopes needs_reconnect. Name the
+            # synced sources so the planner reads them through grep, not a browser.
+            full_grant = {
+                credential["email"].lower()
+                for credential in creds
+                if isinstance(credential, dict)
+                and isinstance(credential.get("email"), str)
+                and credential.get("state") != "needs_reconnect"
+            }
+            google_sources = (
+                name.lower() == "gmail" and bool(emails) and all(email.lower() in full_grant for email in emails)
+            )
             # Include if CONNECTED, if it has email credentials (Gmail can send
             # even if sync failed), or if a non-Gmail sync failed (its synced
             # data stays searchable; Gmail is listed only for readable inboxes).
@@ -528,7 +541,11 @@ def _format_user_context(
                 or emails
                 or (status == "SYNC_FAILED" and name.lower() != "gmail")
             ):
-                if emails:
+                if google_sources:
+                    integration_lines.append(
+                        f"- {name}: {', '.join(emails)} (synced: Gmail, Google Calendar, Google Drive)"
+                    )
+                elif emails:
                     integration_lines.append(f"- {name}: {', '.join(emails)}")
                 else:
                     integration_lines.append(f"- {name}")
