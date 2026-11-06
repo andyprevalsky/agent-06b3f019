@@ -52,6 +52,10 @@ POLL_SECONDS = 20.0          # ETag-conditional: unchanged 304 answers do not sp
 CANCEL_SECONDS = 180.0       # cancel request -> run completed (VM destroyed)
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 MAX_RESULT_BYTES = 64 * 1024 * 1024
+BUNDLE_FILE_BYTES = 64 * 1024 * 1024
+BUNDLE_TOTAL_BYTES = 400 * 1024 * 1024
+BUNDLE_SKIP = {'seed-cache', 'tsbuildinfo', 'frontend-builds', 'experiential-venv', 'node_modules'}
+SERVICE_LOGS = ('back-end/backend-logs.log', 'agents/navi-worker-log.txt', 'front-end/frontend-logs.log')
 STOP = threading.Event()
 
 
@@ -451,15 +455,28 @@ def remote_bundle(args) -> int:
         for row in (json.loads((out / 'result.json').read_text()).get('evidence') or {}).values():
             if isinstance(row, dict):
                 paths.update(v for k, v in row.items() if isinstance(v, str) and v.startswith(str(root) + '/'))
-    for folder in ('.context/deploy-worker', '.context/deploy-runs'):
-        if (root / folder).is_dir():
-            paths.update(str(p) for p in (root / folder).rglob('*') if p.is_file())
-    for raw in sorted(paths):
+    # Everything a gate leaves for RCA: its .context state and logs plus the stack's service logs.
+    # Caches and dependency trees stay behind; per-file and total caps bound the artifact.
+    if (root / '.context').is_dir():
+        for path in (root / '.context').rglob('*'):
+            parts = path.relative_to(root / '.context').parts
+            if path.is_file() and not path.is_symlink() and parts[0] not in BUNDLE_SKIP:
+                paths.add(str(path))
+    paths.update(str(root / rel) for rel in SERVICE_LOGS if (root / rel).is_file())
+    total, skipped = 0, []
+    for raw in sorted(paths, key=lambda p: (Path(p).stat().st_size, p)):
         path = Path(raw)
-        if path.is_file() and root in path.resolve().parents:
-            target = artifact / 'files' / path.resolve().relative_to(root)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, target)
+        if not path.is_file() or root not in path.resolve().parents:
+            continue
+        size = path.stat().st_size
+        if size > BUNDLE_FILE_BYTES or total + size > BUNDLE_TOTAL_BYTES:
+            skipped.append({'path': str(path.relative_to(root)), 'bytes': size})
+            continue
+        target = artifact / 'files' / path.resolve().relative_to(root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+        total += size
+    (artifact / 'bundle.json').write_text(json.dumps({'bytes': total, 'skipped': skipped}, indent=1))
     return 0
 
 
