@@ -1,0 +1,179 @@
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { http, HttpResponse } from 'msw';
+import { expect, it, type Mock } from 'vitest';
+import type { AgentDetailResponse, Message } from '@/lib/api';
+import type { TerminalView } from '@/features/terminal/types';
+import { useTerminalAgents } from '@/features/terminal/hooks/useTerminalAgents';
+import { useTerminalDerivedState } from '@/features/terminal/components/terminalLayoutState';
+import { server } from './msw/server';
+import {
+  makeTerminalHookAgent as makeAgent,
+  mockTerminalHookSession as mockSession,
+} from './terminal-hooks.fixtures';
+import pauseTranscript from './browser-pause-1a3d.fixture.json';
+
+interface Args {
+  ctxState: {
+    agent: unknown;
+    selectedAgentId: string | null;
+    messages: Message[];
+    applyAgentDetail: Mock<(id: string, data: AgentDetailResponse) => boolean>;
+  };
+  setCurrentView: (view: TerminalView) => void;
+  resetAnimationState: () => void;
+}
+const API_BASE = 'http://localhost:3001/api';
+
+export function terminalPauseCases({ ctxState, setCurrentView, resetAnimationState }: Args) {
+  it.each([200, 500])(
+    'optimistically closes the browser and pauses its owner before HTTP %s',
+    async (status) => {
+      mockSession();
+      const agent = makeAgent();
+      ctxState.agent = agent;
+      ctxState.selectedAgentId = agent.agent_id;
+      // Captured production init, before either cleanup/terminal event arrives.
+      ctxState.messages = pauseTranscript.slice(0, 1) as Message[];
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      server.use(
+        http.post(`${API_BASE}/agents/:agentId/pause`, async () => {
+          await gate;
+          return HttpResponse.json({ success: status === 200 }, { status });
+        }),
+        http.get(`${API_BASE}/agents/:agentId`, () =>
+          HttpResponse.json({
+            agent: { ...agent, status: 'PAUSED' },
+            messages: ctxState.messages,
+            pagination: { has_more: false, oldest_timestamp: null },
+          }),
+        ),
+      );
+      ctxState.applyAgentDetail.mockImplementation((_id, data) => {
+        ctxState.agent = data.agent;
+        return true;
+      });
+      const view = renderHook(() => {
+        const agents = useTerminalAgents('agents', setCurrentView, resetAnimationState);
+        return { agents, derived: useTerminalDerivedState(agents) };
+      });
+      expect(view.result.current.derived.browserStatusProps?.browsers).toHaveLength(1);
+      let pending = Promise.resolve();
+      act(() => {
+        pending = view.result.current.agents.handlePauseAgent();
+      });
+      try {
+        expect(view.result.current.agents.agentDetail?.status).toBe('PAUSED');
+        expect(view.result.current.derived.browserStatusProps).toBeNull();
+        // Canonical history and server state must remain untouched while pending.
+        expect(ctxState.agent).toBe(agent);
+        expect(ctxState.messages).toHaveLength(1);
+        // Selection changes and canonical terminal events outrank old user intent.
+        ctxState.selectedAgentId = 'other';
+        ctxState.agent = makeAgent({ agent_id: 'other' });
+        view.rerender();
+        expect(view.result.current.agents.isPausing).toBe(false);
+        expect(view.result.current.agents.agentDetail?.status).toBe('ACTIVE');
+        ctxState.selectedAgentId = agent.agent_id;
+        ctxState.agent = { ...agent, status: 'COMPLETED' };
+        view.rerender();
+        expect(view.result.current.agents.agentDetail?.status).toBe('COMPLETED');
+        ctxState.agent = agent;
+        view.rerender();
+        expect(view.result.current.agents.agentDetail?.status).toBe('PAUSED');
+      } finally {
+        release();
+        await act(async () => pending);
+      }
+      expect(view.result.current.agents.agentDetail?.status).toBe(
+        status === 200 ? 'PAUSED' : 'ACTIVE',
+      );
+      expect(view.result.current.derived.browserStatusProps === null).toBe(status === 200);
+      view.unmount();
+      ctxState.messages = [];
+      ctxState.applyAgentDetail.mockImplementation(() => true);
+    },
+  );
+
+  it.each([500, 200])(
+    'keeps an accepted pause when detail refresh is HTTP %s with stale ACTIVE',
+    async (status) => {
+      const agent = makeAgent();
+      ctxState.agent = agent;
+      ctxState.selectedAgentId = agent.agent_id;
+      ctxState.messages = pauseTranscript.slice(0, 1) as Message[];
+      server.use(
+        http.post(`${API_BASE}/agents/:agentId/pause`, () => HttpResponse.json({ success: true })),
+        http.get(`${API_BASE}/agents/:agentId`, () =>
+          HttpResponse.json(
+            {
+              agent,
+              messages: ctxState.messages,
+              pagination: { has_more: false, oldest_timestamp: null },
+            },
+            { status },
+          ),
+        ),
+      );
+      const view = renderHook(() => {
+        const agents = useTerminalAgents('agents', setCurrentView, resetAnimationState);
+        return { agents, derived: useTerminalDerivedState(agents) };
+      });
+      await act(async () => view.result.current.agents.handlePauseAgent());
+      expect(view.result.current.agents.agentDetail?.status).toBe('PAUSED');
+      expect(view.result.current.derived.browserStatusProps).toBeNull();
+      // A later canonical pause reconciles intent; a subsequent resume is visible.
+      ctxState.agent = { ...agent, status: 'PAUSED' };
+      view.rerender();
+      ctxState.agent = agent;
+      view.rerender();
+      expect(view.result.current.agents.agentDetail?.status).toBe('ACTIVE');
+      view.unmount();
+    },
+  );
+
+  it('preserves concurrent pause ownership across A/B/A and out-of-order failure', async () => {
+    const a = makeAgent();
+    const b = makeAgent({ agent_id: 'agent-b' });
+    ctxState.agent = a;
+    ctxState.selectedAgentId = a.agent_id;
+    const releases = new Map<string, () => void>();
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/pause`, async ({ params }) => {
+        await new Promise<void>((resolve) => releases.set(String(params.agentId), resolve));
+        return HttpResponse.json({ error: 'rejected' }, { status: 500 });
+      }),
+    );
+    const view = renderHook(() => useTerminalAgents('agents', setCurrentView, resetAnimationState));
+    let first = Promise.resolve();
+    let second = Promise.resolve();
+    act(() => {
+      first = view.result.current.handlePauseAgent();
+    });
+    await waitFor(() => expect(releases.has(a.agent_id)).toBe(true));
+    ctxState.agent = b;
+    ctxState.selectedAgentId = b.agent_id;
+    view.rerender();
+    act(() => {
+      second = view.result.current.handlePauseAgent();
+    });
+    await waitFor(() => expect(releases.has(b.agent_id)).toBe(true));
+    ctxState.agent = a;
+    ctxState.selectedAgentId = a.agent_id;
+    view.rerender();
+    try {
+      expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+      releases.get(b.agent_id)?.();
+      await act(async () => second);
+      expect(view.result.current.agentDetail?.status).toBe('PAUSED');
+    } finally {
+      releases.get(a.agent_id)?.();
+      releases.get(b.agent_id)?.();
+      await act(async () => Promise.all([first, second]));
+    }
+    expect(view.result.current.agentDetail?.status).toBe('ACTIVE');
+    view.unmount();
+  });
+}
