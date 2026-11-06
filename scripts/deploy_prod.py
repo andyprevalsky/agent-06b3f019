@@ -8,7 +8,9 @@ never cancels another, and its dependents are recorded BLOCKED. Existing tools
 own each check (run_deploy_pipeline.py production / production-render /
 production-semantic, prod-endpoint-smoke.ts, validate-prod-workflow-migration.ts,
 run-bench). The result is <state-dir>/production-lanes.json and one final
-`DEPLOY_PRODUCTION PASS|FAIL` line; exit 0 only when every applicable lane passed.
+`DEPLOY_PRODUCTION PASS|FAIL` line; exit 0 only when every applicable lane passed, was
+elected away (--skip-agentcard), or is the standing AgentCard release stall
+(SKIPPED-stall: satisfied like a pass, recorded loudly, never a PASS).
 """
 from __future__ import annotations
 
@@ -74,12 +76,26 @@ DEPENDS = {'backend-probes': ('render',), 'workflow-migration': ('fly',), 'agent
 FACTORY_LANES = frozenset({'vercel', 'render', 'fly', 'mac-release', 'backend-probes', 'semantic', 'agentcard'})
 PASS, FAIL, BLOCKED, SKIPPED, NOT_SELECTED = 'PASS', 'FAIL', 'BLOCKED', 'SKIPPED-not-applicable', 'NOT-SELECTED'
 ELECTED = 'SKIPPED-elected'  # explicit --skip-agentcard election (deploy.md AgentCard election): not a failure
-SATISFIED = (PASS, ELECTED)
+# The permanent user-approved AgentCard release stall (docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-
+# transfer-never-released.md, deploy.md Skippable tests), proven from the run's own native record: satisfied like a
+# pass, never a PASS. The unreleased allocation and pending Stripe refund are recorded and never called cleaned up.
+STALL = 'SKIPPED-stall'
+SATISFIED = (PASS, ELECTED, STALL)
+STALL_ENV = 'BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL'  # run_benchmark._agentcard_release_skip_enabled: only "1" waives
+AGENTCARD_TASK = 'agent-payment-production-abandonment'
+RUNS_DIR = Path('agents') / 'benchmarks' / 'runs'  # BenchmarkRun.save() writes the native record here
+RECORD_SAVED = re.compile(r'^\s*Results saved:\s*(\S.*?)\s*$')  # run_benchmark prints it after saving
+MAX_RECORD_BYTES = 256 * 1024 * 1024
 SECRET_KEY = re.compile(r'(KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE|CREDENTIAL|AUTH|DATABASE_URL|DIRECT_URL)', re.I)
 
 
 class LaneError(RuntimeError):
     """A lane cannot pass; the message is the operator's next action."""
+
+
+class Stall(str):
+    """The reason of the standing AgentCard release stall. A lane returns (False, Stall(...), code), so a caller that
+    only reads `passed` fails closed; only the scheduler records it as the satisfied-but-never-PASS STALL status."""
 
 
 @dataclass
@@ -251,8 +267,10 @@ class Ctx:
                     handle.write(line + '\n')
 
     def sh(self, lane: str, argv: list[str], *, cwd: Path | None = None, extra: dict | None = None,
-           drop: tuple[str, ...] = (), env_file: str | None = None) -> int:
-        """Stream one lane command, prefixed `[lane]`, and record its display form."""
+           drop: tuple[str, ...] = (), env_file: str | None = None,
+           watch: tuple[re.Pattern, list[str]] | None = None) -> int:
+        """Stream one lane command, prefixed `[lane]`, and record its display form. `watch` = (pattern, hits):
+        the first group of every output line the pattern matches is appended to hits."""
         cwd = cwd or self.root
         loaded = self.dotenv(env_file) if env_file else {}
         display = show(argv, cwd=cwd, root=self.root, extra=extra, drop=drop, env_file=env_file)
@@ -260,7 +278,12 @@ class Ctx:
             record = self.records.setdefault(lane, {})
             record['command'] = ' && '.join(filter(None, [record.get('command'), display]))
         self.emit(lane, f'$ {display}')
-        code = self.io.run(argv, cwd, self.child_env({**loaded, **(extra or {})}, drop), lambda l: self.emit(lane, l))
+        def on_line(line: str) -> None:
+            matched = watch[0].match(line) if watch else None
+            if matched and watch:
+                watch[1].append(matched.group(1))
+            self.emit(lane, line)
+        code = self.io.run(argv, cwd, self.child_env({**loaded, **(extra or {})}, drop), on_line)
         self.emit(lane, f'exit {code}')
         return code
 
@@ -348,7 +371,7 @@ def resume_argv(job_id: str) -> list[str]:
 
 MIGRATION_ARGV = ['npx', 'tsx', 'scripts/validate-prod-workflow-migration.ts', '--execute']
 SMOKE_ARGV = ['npx', 'tsx', 'scripts/prod-endpoint-smoke.ts']
-AGENTCARD_ARGV = ['scripts/run-bench', 'agent-payment-production-abandonment']
+AGENTCARD_ARGV = ['scripts/run-bench', AGENTCARD_TASK]
 WMH_ARGV = ['scripts/run-bench', 'raise-5m-rose-labs-brex', '--sim-on', 'raise-5m-rose-labs-brex']
 WMH_BUILD_ARGV = (['bash', 'scripts/run-bench-cloud', '--build-wmh'], ['bash', 'scripts/run-bench-cloud', '--refresh-wmh'])
 
@@ -563,10 +586,128 @@ def lane_semantic(ctx: Ctx) -> Result:
                          else f'production-semantic exited {code} (run {run})'), code
 
 
+def release_stalled(lifecycle: object, *, livemode: bool) -> bool:
+    """Mirror of agents/benchmarks/run_benchmark.py::_agentcard_release_stalled (that module needs the full agent
+    env to import; scripts/tests/deploy-prod.test.py pins this copy to the runner's own function over every
+    single-field mutation): Rose closed the card and is reclaiming while AgentCard still reports this card's
+    transfer consumed with nothing released, in the expected provider mode."""
+    if not isinstance(lifecycle, dict):
+        return False
+    purchase, funding = lifecycle.get('purchase'), lifecycle.get('walletFunding')
+    card, transfer = lifecycle.get('agentCard'), lifecycle.get('orgTransfer')
+    return (isinstance(purchase, dict) and purchase.get('status') == 'HELD'
+            and isinstance(funding, dict) and funding.get('status') == 'RECLAIMING'
+            and isinstance(card, dict) and card.get('status') == 'CLOSED'
+            and card.get('balanceCents') == 0 and not isinstance(card.get('balanceCents'), bool)
+            and isinstance(card.get('id'), str) and bool(card['id'].strip())
+            and purchase.get('cardId') == card['id']
+            and isinstance(transfer, dict) and isinstance(transfer.get('id'), str) and bool(transfer['id'].strip())
+            and funding.get('providerTransferId') == transfer['id']
+            and transfer.get('cardId') == card['id']
+            and transfer.get('status') == 'consumed'
+            and transfer.get('livemode') is livemode
+            and transfer.get('releasedCents') == 0 and not isinstance(transfer.get('releasedCents'), bool)
+            and 'stripeRefund' in lifecycle and lifecycle['stripeRefund'] is None)
+
+
+@dataclass
+class StallCheck:
+    stall: Stall | None = None  # the lane reason of the exact standing stall
+    why: str = ''  # otherwise: why this execution's record is not that stall (the operator's next fact)
+    claims: bool = False  # the located record itself claims the stall (SKIPPED + the runtime reason prefix)
+
+
+def check_stall(ctx: Ctx, saved: list[str], started: datetime) -> StallCheck:
+    """Prove the standing release stall from THIS execution's native run record, or say why not.
+
+    The record is the one the CLI printed (`Results saved:`), written directly in agents/benchmarks/runs, created
+    after the lane started and holding exactly the production task. It qualifies only when the task is SKIPPED with
+    the runner's own stall reason, nothing else failed (no cleanup failure, no evidence/cleanup error, no failed or
+    extra task), its typed lifecycle is the exact livemode=true stall (release_stalled) and the catalog declares the
+    production waiver (the staged cycle's predicate). Anything else, or BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL
+    other than 1, is not the stall.
+    """
+    import deploy_test_cycle as cycle  # scripts/ is sys.path[0]: the staged cycle owns the stall's reason and amount
+    if ctx.environ.get(STALL_ENV, '1') != '1':
+        return StallCheck(why=f'{STALL_ENV} is not 1, so release diagnostics are strict')
+    paths = sorted(set(saved))
+    if len(paths) != 1:
+        return StallCheck(why='no run record path was printed by this execution' if not paths
+                          else f'{len(paths)} different run records were printed')
+    raw = Path(paths[0])
+    path = (raw if raw.is_absolute() else ctx.root / 'agents' / raw).resolve()
+    if path.parent != (ctx.root / RUNS_DIR).resolve():
+        return StallCheck(why=f'record {raw} is outside {RUNS_DIR}')
+    try:
+        if not path.is_file():
+            return StallCheck(why=f'record {path.name} is not a file')
+        if path.stat().st_size > MAX_RECORD_BYTES:
+            return StallCheck(why=f'record {path.name} exceeds {MAX_RECORD_BYTES} bytes')
+        record = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as error:
+        return StallCheck(why=f'record {path.name} is not a JSON object ({error})')
+    if not isinstance(record, dict):
+        return StallCheck(why=f'record {path.name} is not a JSON object')
+    try:
+        created = datetime.fromisoformat(str(record['timestamp']))
+        if created.tzinfo is None:
+            raise ValueError('no timezone')
+    except (KeyError, ValueError):
+        return StallCheck(why=f'record {path.name} timestamp is missing or not a timezone-aware ISO time')
+    if created < started:
+        return StallCheck(why=f'record {path.name} was created before this lane started ({created.isoformat()})')
+    tasks = record.get('tasks')
+    rows = [row for row in tasks if isinstance(row, dict) and row.get('name') == AGENTCARD_TASK] \
+        if isinstance(tasks, list) else []
+    if len(rows) != 1 or len(tasks) != 1:
+        return StallCheck(why=f'record {path.name} is not exactly one {AGENTCARD_TASK} task')
+    row, summary = rows[0], record.get('summary')
+    reason = row.get('failure_reason')
+    prefixed = isinstance(reason, str) and reason.startswith(cycle.AGENTCARD_RELEASE_STALL_REASON)
+    claims = 'SKIPPED' in (row.get('status'), row.get('benchmark_status')) and prefixed
+    logs = row.get('logs') if isinstance(row.get('logs'), dict) else {}
+    evidence = logs.get('failure_evidence') if isinstance(logs.get('failure_evidence'), dict) else {}
+    lifecycle = logs.get('agentcard_release_stall_lifecycle')
+    for ok, why in (
+            (row.get('status') == 'SKIPPED' and row.get('benchmark_status') == 'SKIPPED' and row.get('passed') is False,
+             'task status/benchmark_status is not SKIPPED'),
+            (prefixed, 'task failure_reason is not the standing release-stall reason'),
+            (not row.get('cleanup_failure'), 'task has a cleanup_failure'),
+            (evidence.get('errors') == [], 'task logs carry evidence/cleanup errors'),
+            (isinstance(summary, dict) and all(type(summary.get(key)) is int and summary[key] == want for key, want in
+                                               {'total': 1, 'skipped': 1, 'passed': 0, 'failed': 0,
+                                                'cleanup_failures': 0}.items()),
+             'run summary is not exactly one skipped task with no failed or cleanup failures'),
+            (release_stalled(lifecycle, livemode=True),
+             'typed lifecycle is not the exact live closed-card / consumed-transfer / zero-release stall'),
+            (cycle.agentcard_release_stall_task(AGENTCARD_TASK, ctx.root, production=True),
+             'the catalog does not declare the production release-stall waiver')):
+        if not ok:
+            return StallCheck(why=f'{why} (record {path.name})', claims=claims)
+    shown = path.relative_to(ctx.root.resolve())
+    return StallCheck(Stall(f'{cycle.unreleased_amount_text(lifecycle["orgTransfer"])}; pending Stripe refund; '
+                            f'followup: unreleased funds stay open (record {shown})'), claims=True)
+
+
 def lane_agentcard(ctx: Ctx) -> Result:
-    code = ctx.sh('agentcard', AGENTCARD_ARGV, extra=venv_env(ctx))
-    return (code == 0), ('agent-payment-production-abandonment passed' if code == 0
-                         else f'run-bench agent-payment-production-abandonment exited {code}'), code
+    """The production abandonment lifecycle. The runner records the standing release stall as a natively SKIPPED
+    task that its own --ci rule permits (exit 0), so an exit code alone would read the stall as PASS (or, were the
+    runner to fail on it, block the deploy). Exit 0 or 1 is therefore judged by this execution's native record:
+    the exact stall is SKIPPED-stall; a record that claims the stall without the exact evidence fails even at
+    exit 0. Every other exit code, and any run without that proof, keeps its exit-code verdict."""
+    started, saved = ctx.io.now(), []
+    code = ctx.sh('agentcard', AGENTCARD_ARGV, extra=venv_env(ctx), watch=(RECORD_SAVED, saved))
+    failed = f'run-bench {AGENTCARD_TASK} exited {code}'
+    if code not in (0, 1):
+        return False, failed, code
+    check = check_stall(ctx, saved, started)
+    if check.stall:
+        return False, check.stall, code
+    if code == 0:
+        if check.claims:
+            return False, f'{failed} but its run record claims the AgentCard release stall: {check.why}', code
+        return True, f'{AGENTCARD_TASK} passed', 0
+    return False, (f'{failed}; AgentCard release stall not qualified: {check.why}' if check.why else failed), code
 
 
 def lane_wmh(ctx: Ctx) -> Result:
@@ -691,11 +832,15 @@ def execute(ctx: Ctx, selected: set[str], meta: dict, lane_funcs: dict | None = 
             passed, reason, code = funcs[name](ctx)
         except Exception as error:  # one lane's crash never takes down the others
             passed, reason, code = False, f'{type(error).__name__}: {ctx.redact(str(error))}', 1
-        if passed and name in FACTORY_LANES:
+        stalled = passed is False and isinstance(reason, Stall)
+        # production-start/finish is a wall-clock pair with no verdict field (factory_diagnostics pairs it as
+        # external-deploy time): a stalled lane's run time is real lane time, so it closes the pair like a pass.
+        # The verdict lives in production-lanes.json and the final line, where the stall is never a PASS.
+        if (passed or stalled) and name in FACTORY_LANES:
             ctx.factory('production-finish', name)
-        ctx.emit(name, f'{PASS if passed else FAIL}: {reason}')
-        finish(name, status=PASS if passed else FAIL, reason=ctx.redact(reason), exit_code=code,
-               finished_at=iso(ctx.io.now()))
+        ctx.emit(name, f'\u26a0\ufe0f\u26a0\ufe0f {STALL}: {reason}' if stalled else f'{PASS if passed else FAIL}: {reason}')
+        finish(name, status=STALL if stalled else PASS if passed else FAIL, reason=ctx.redact(reason),
+               exit_code=code, finished_at=iso(ctx.io.now()))
 
     def guarded(name: str) -> None:
         try:
@@ -849,6 +994,8 @@ def main(argv: list[str] | None = None, *, io: IO | None = None, root: Path = RO
     summary = ','.join(f'{n}:{records[n]["status"]}' for n in applicable)
     summary += ''.join(f' elected={n}:{json.dumps(records[n]["reason"])}' for n in applicable
                        if records[n]['status'] == ELECTED)
+    summary += ''.join(f' stall={n}:{json.dumps(records[n]["reason"])}' for n in applicable
+                       if records[n]['status'] == STALL)
     if passed:
         out(f'DEPLOY_PRODUCTION PASS sha={sha[:12]} lanes={summary} report={state_dir / REPORT}')
         return 0

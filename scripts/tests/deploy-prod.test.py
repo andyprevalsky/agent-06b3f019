@@ -6,10 +6,14 @@ classify-agent-runtime-changes.sh on stdin), HTTP, provider or production call.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
+import copy
+from datetime import datetime, timedelta, timezone
 import importlib
 import io
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -655,6 +659,398 @@ class FlyTest(Base):
         passed, reason, _code = dp.lane_workflow_migration(self.ctx(fake))
         self.assertFalse(passed)
         self.assertIn('no fly.deployment_token', reason)
+
+
+TASK = 'agent-payment-production-abandonment'
+RCA_DOC = 'docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md'
+CARD, TRANSFER = 'card_b2e87905c62c34ba8abff4d4', 'owt_ff135698c18b095f3a40a249'
+
+
+def runner_source() -> ast.Module:
+    return ast.parse((ROOT / 'agents' / 'benchmarks' / 'run_benchmark.py').read_text())
+
+
+def runtime_constant(name: str) -> str:
+    """A module-level string constant of run_benchmark.py, read without importing the 18k-line runner."""
+    for node in runner_source().body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f'{name} not found in run_benchmark.py')
+
+
+def stall_lifecycle(*, livemode: bool = True, **transfer) -> dict:
+    """The production lifecycle of a closed card whose transfer AgentCard left consumed (runner fixtures' shape)."""
+    lifecycle = {
+        'agentId': '00000000-0000-4000-8000-000000000021',
+        'integrity': {'purchaseCount': 1, 'walletFundingCount': 1, 'stripePaymentIntentCount': 1, 'cardCount': 1},
+        'purchase': {'id': '571cab13-0531-4173-85ef-d0709227fcd8', 'status': 'HELD', 'merchant': 'Rose Labs Test Payment',
+                     'totalCents': 100, 'cardId': CARD, 'stripePaymentIntentId': 'pi_test'},
+        'walletFunding': {'status': 'RECLAIMING', 'amountCents': 100, 'providerTransferId': TRANSFER,
+                          'reclaimProviderTransferId': None},
+        'stripeHold': {'status': 'succeeded', 'amountCents': 100, 'livemode': livemode},
+        'stripeRefund': None,
+        'agentCard': {'id': CARD, 'status': 'CLOSED', 'balanceCents': 0},
+        'orgTransfer': {'id': TRANSFER, 'status': 'consumed', 'amountCents': 100, 'transferredCents': 4396,
+                        'releasedCents': 0, 'cardId': CARD, 'livemode': livemode},
+        'attention': {'openKinds': [], 'resolvedKinds': []},
+    }
+    lifecycle['orgTransfer'].update(transfer)
+    return lifecycle
+
+
+def stall_record(lifecycle: dict | None = None, *, name: str = TASK, status: str = 'SKIPPED',
+                 benchmark_status: str | None = None, reason: str | None = None, errors: list | None = None,
+                 cleanup_failure: object = None, summary: dict | None = None, timestamp: datetime | None = None,
+                 more_tasks: tuple = (), logs: dict | None = None) -> dict:
+    """A native run record shaped like BenchmarkRun.to_dict() for one task that hit the standing stall."""
+    skipped = status == 'SKIPPED'
+    task = {'name': name, 'status': status, 'benchmark_status': benchmark_status or status, 'passed': False,
+            'agent_id': 'a1e098ad-02a5-49d6-9b9e-bf8a8163ba6a', 'cleanup_failure': cleanup_failure,
+            'failure_reason': (reason if reason is not None else runtime_constant('AGENTCARD_RELEASE_SKIP_REASON')
+                               + ': Payment lifecycle did not reach the expected terminal state before timeout'),
+            'logs': logs if logs is not None else {
+                'agentcard_release_stall_lifecycle': lifecycle if lifecycle is not None else stall_lifecycle(),
+                'failure_evidence': {'agent_id': 'a1e098ad', 'errors': [] if errors is None else errors}}}
+    tasks = [task, *more_tasks]
+    return {'run_id': 'r-1', 'suite': name, 'timestamp': (timestamp or datetime.now(timezone.utc)).isoformat(),
+            'summary': summary if summary is not None else {
+                'total': len(tasks), 'passed': 0, 'failed': 0 if skipped else 1, 'skipped': 1 if skipped else 0,
+                'cleanup_failures': 0},
+            'tasks': tasks}
+
+
+class AgentCardStallTest(Base):
+    """deploy.md's permanent user-approved exception, for the production lane: a fully observed closed-card /
+    consumed-transfer / zero-release stall is SKIPPED-stall (satisfied, never PASS); every other failure blocks."""
+    CHANGED = ['back-end/src/domains/agentcard/service.ts']
+
+    def setUp(self) -> None:
+        super().setUp()
+        benchmarks = self.root / 'agents' / 'benchmarks'
+        self.runs = benchmarks / 'runs'
+        self.runs.mkdir(parents=True)
+        for name in ('select_predeploy_benches.py', 'tasks.json'):  # the real catalog, bound through ctx.root
+            (benchmarks / name).symlink_to(ROOT / 'agents' / 'benchmarks' / name)
+
+    def execute(self, record, *, code: int = 0, lines=None, environ: dict | None = None, rel: str | None = None):
+        """Run the REAL lane_agentcard through main(); only the CLI process is faked."""
+        def handler(argv, cwd, env, on_line):
+            if TASK not in argv:
+                return 0
+            built = record() if callable(record) else record
+            for index, item in enumerate(built if isinstance(built, list) else [built]):
+                if item is None:
+                    continue
+                path = self.runs / (rel or f'20261106_000000_r{index}_{TASK}.json')
+                if isinstance(item, (dict, list)):
+                    path.write_text(json.dumps(item))
+                else:
+                    path.write_text(item)
+                if lines is None:
+                    on_line(f'\n  Results saved: {path}')
+            for line in lines or ():
+                on_line(line.format(runs=self.runs))
+            return code
+        fake = Fake(self.root, self.CHANGED, handler=handler)
+        lanes = {name: lane for name, lane in fake_lanes({}, [], threading.Lock()).items() if name != 'agentcard'}
+        return fake, self.main(fake, lane_funcs=lanes, environ=environ)
+
+    def lane(self) -> dict:
+        return self.report()['lanes']['agentcard']
+
+    def test_qualifying_stall_is_satisfied_but_never_pass(self) -> None:
+        for code in (0, 1):  # the production runner exits 0 for the permitted skip; a nonzero runner still qualifies
+            with self.subTest(code=code):
+                fake, exit_code = self.execute(lambda: stall_record(), code=code)
+                self.assertEqual(exit_code, 0)
+                lane = self.lane()
+                self.assertEqual((lane['status'], lane['exit_code']), (dp.STALL, code))
+                self.assertEqual(dp.STALL, 'SKIPPED-stall')
+                self.assertTrue(lane['reason'].startswith(
+                    'Unreleased: $43.96 live (transferredCents 4396 / releasedCents 0); pending Stripe refund; '
+                    'followup: unreleased funds stay open'), lane['reason'])
+                self.assertIn('20261106_000000_r0_', lane['reason'])  # the exact native record is cited
+                self.assertRegex(lane['started_at'], ISO)
+                self.assertRegex(lane['finished_at'], ISO)
+                self.assertEqual(self.report()['status'], 'PASS')
+                self.assertEqual(fake.lines[-1], (
+                    'DEPLOY_PRODUCTION PASS sha=1234567890ab lanes=render:PASS,backend-probes:PASS,'
+                    f'agentcard:SKIPPED-stall,semantic:PASS stall=agentcard:{json.dumps(lane["reason"])} '
+                    f'report={self.state / dp.REPORT}'))
+                self.assertTrue(any('SKIPPED-stall' in line and line.startswith('[agentcard] ') and '⚠️⚠️' in line
+                                    for line in fake.lines), fake.lines)
+                self.assertFalse(any(line.startswith('[agentcard] PASS') for line in fake.lines))
+
+    def test_stall_records_timing_only_factory_events_and_verifies_production(self) -> None:
+        fake, exit_code = self.execute(lambda: stall_record())
+        self.assertEqual(exit_code, 0)
+        # production-start/finish is a wall-clock pair with no verdict field (factory_diagnostics pairs it as
+        # external-deploy time): the stall's run time is real lane time, the verdict lives in production-lanes.json.
+        self.assertIn(('production-start', 'agentcard'), fake.factory)
+        self.assertIn(('production-finish', 'agentcard'), fake.factory)
+        self.assertEqual(fake.factory[-1], ('stage-finish', 'production-verify'))
+
+    def test_unrecorded_amount_is_never_zero(self) -> None:
+        for bad in ({'transferredCents': None}, {'transferredCents': True}, {'transferredCents': -5},
+                    {'transferredCents': '4396'}, {'transferredCents': 4396.5}):
+            with self.subTest(bad=bad):
+                self.execute(lambda bad=bad: stall_record(stall_lifecycle(**bad)))
+                self.assertEqual(self.lane()['status'], dp.STALL)
+                self.assertTrue(self.lane()['reason'].startswith('Unreleased: UNRECORDED; pending Stripe refund; '
+                                                                 'followup'), self.lane()['reason'])
+        lifecycle = stall_lifecycle()
+        del lifecycle['orgTransfer']['transferredCents']
+        self.execute(lambda: stall_record(lifecycle))
+        self.assertIn('Unreleased: UNRECORDED', self.lane()['reason'])
+
+    def assert_blocks(self, record, *, why: str | None = None, **kw) -> None:
+        fake, exit_code = self.execute(record, **kw)
+        self.assertEqual(exit_code, 1, fake.lines[-3:])
+        lane = self.lane()
+        self.assertEqual(lane['status'], dp.FAIL, lane)
+        self.assertEqual(self.report()['status'], 'FAIL')
+        self.assertNotIn('SKIPPED-stall', fake.lines[-2])
+        self.assertNotIn(('production-finish', 'agentcard'), fake.factory)
+        if why:
+            self.assertIn(why, lane['reason'])
+
+    def test_any_other_exit_code_stays_a_failure(self) -> None:
+        for code in (2, 127, 130, 137, 143, -9):
+            with self.subTest(code=code):
+                self.assert_blocks(lambda: stall_record(), code=code)
+                self.assertEqual(self.lane()['reason'], f'run-bench agent-payment-production-abandonment exited {code}')
+
+    def test_a_missing_older_or_ambiguous_record_stays_a_failure(self) -> None:
+        old = datetime.now(timezone.utc) - timedelta(hours=1)
+        self.assert_blocks(lambda: stall_record(timestamp=old), code=1, why='before this lane started')
+        self.assert_blocks(lambda: stall_record(), code=1, lines=[], why='no run record path')
+        self.assert_blocks(lambda: stall_record(), code=1, lines=['Results saved: {runs}/not-written.json'],
+                           why='not a file')
+        self.assert_blocks(lambda: [stall_record(), stall_record()], code=1, why='2 different run records')
+        self.assert_blocks(lambda: stall_record(), code=1, lines=['  Results saved: /etc/hostname'],
+                           why='outside agents/benchmarks/runs')
+        self.assert_blocks(lambda: stall_record(), code=1, lines=['  Results saved: {runs}/../escape.json'],
+                           why='outside agents/benchmarks/runs')
+        (self.runs.parent / 'elsewhere.json').write_text(json.dumps(stall_record()))
+        (self.runs / 'link.json').symlink_to(self.runs.parent / 'elsewhere.json')  # a link out of the runs directory
+        self.assert_blocks(lambda: None, code=1, lines=['  Results saved: {runs}/link.json'],
+                           why='outside agents/benchmarks/runs')
+        self.assert_blocks(lambda: 'not json {', code=1, why='not a JSON object')
+        self.assert_blocks(lambda: '[1, 2]', code=1, why='not a JSON object')
+        self.assert_blocks(lambda: {**stall_record(), 'timestamp': 'yesterday'}, code=1, why='timestamp')
+        naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        self.assert_blocks(lambda: stall_record(timestamp=naive), code=1, why='timestamp')
+
+    def test_a_record_for_another_task_or_with_extra_tasks_stays_a_failure(self) -> None:
+        self.assert_blocks(lambda: stall_record(name='agent-payment-abandonment'), code=1, why=f'is not exactly one {TASK} task')
+        extra = stall_record(name='other-task')['tasks'][0]
+        self.assert_blocks(lambda: stall_record(more_tasks=(extra,),
+                                                summary={'total': 2, 'passed': 0, 'failed': 0, 'skipped': 2,
+                                                         'cleanup_failures': 0}), code=1, why=f'is not exactly one {TASK} task')
+
+    def test_other_native_outcomes_stay_failures(self) -> None:
+        for status in ('FAILED', 'ERROR', 'CANCELLED', 'PASSED'):
+            self.assert_blocks(lambda status=status: stall_record(status=status), code=1, why='SKIPPED')
+        self.assert_blocks(lambda: stall_record(benchmark_status='ERROR'), code=1, why='SKIPPED')
+        self.assert_blocks(lambda: stall_record(reason='Cloud cleanup failed: payment: TimeoutError'), code=1,
+                           why='reason')
+        self.assert_blocks(lambda: stall_record(reason=''), code=1, why='reason')
+        self.assert_blocks(lambda: stall_record(errors=['cleanup: TimeoutError']), code=1, why='evidence/cleanup errors')
+        self.assert_blocks(lambda: stall_record(logs={'agentcard_release_stall_lifecycle': stall_lifecycle()}), code=1,
+                           why='evidence/cleanup errors')
+        self.assert_blocks(lambda: stall_record(cleanup_failure='cleanup unverified'), code=1, why='cleanup_failure')
+        for summary in ({'total': 1, 'passed': 0, 'failed': 1, 'skipped': 1, 'cleanup_failures': 0},
+                        {'total': 1, 'passed': 0, 'failed': 0, 'skipped': 1, 'cleanup_failures': 1},
+                        {'total': 1, 'passed': 0, 'failed': 0, 'skipped': 1},
+                        {'total': 1, 'passed': 0, 'failed': 0, 'cleanup_failures': 0}):
+            self.assert_blocks(lambda summary=summary: stall_record(summary=summary), code=1, why='summary')
+
+    def test_strict_release_diagnostics_restore_the_failure(self) -> None:
+        for value in ('0', '', 'true'):
+            self.assert_blocks(lambda: stall_record(), code=1, environ={dp.STALL_ENV: value}, why=dp.STALL_ENV)
+
+    def test_sandbox_or_partial_lifecycle_stays_a_failure(self) -> None:
+        self.assert_blocks(lambda: stall_record(stall_lifecycle(livemode=False)), code=1, why='lifecycle')
+        mutations = {
+            'purchase HELD': lambda l: l['purchase'].update(status='VOIDED'),
+            'funding RECLAIMING': lambda l: l['walletFunding'].update(status='RECLAIMED'),
+            'card CLOSED': lambda l: l['agentCard'].update(status='OPEN'),
+            'balance 0': lambda l: l['agentCard'].update(balanceCents=1),
+            'balance bool': lambda l: l['agentCard'].update(balanceCents=False),
+            'balance missing': lambda l: l['agentCard'].pop('balanceCents'),
+            'card id missing': lambda l: l['agentCard'].pop('id'),
+            'card id blank': lambda l: (l['agentCard'].update(id=' '), l['purchase'].update(cardId=' '),
+                                        l['orgTransfer'].update(cardId=' ')),
+            'purchase card differs': lambda l: l['purchase'].update(cardId='card_other'),
+            'transfer card differs': lambda l: l['orgTransfer'].update(cardId='card_other'),
+            'transfer card missing': lambda l: l['orgTransfer'].pop('cardId'),
+            'transfer id blank': lambda l: (l['orgTransfer'].update(id=''), l['walletFunding'].update(providerTransferId='')),
+            'funding transfer differs': lambda l: l['walletFunding'].update(providerTransferId='owt_other'),
+            'transfer consumed': lambda l: l['orgTransfer'].update(status='reclaimed'),
+            'released 0': lambda l: l['orgTransfer'].update(releasedCents=4396),
+            'released bool': lambda l: l['orgTransfer'].update(releasedCents=False),
+            'released missing': lambda l: l['orgTransfer'].pop('releasedCents'),
+            'live mode': lambda l: l['orgTransfer'].update(livemode=False),
+            'live mode missing': lambda l: l['orgTransfer'].pop('livemode'),
+            'refund present': lambda l: l.update(stripeRefund={'status': 'succeeded', 'amountCents': 100}),
+            'refund missing': lambda l: l.pop('stripeRefund'),
+            'transfer missing': lambda l: l.pop('orgTransfer'),
+            'lifecycle not a dict': None,
+        }
+        for label, mutate in mutations.items():
+            lifecycle = stall_lifecycle()
+            if mutate is None:
+                lifecycle = ['not', 'a', 'lifecycle']
+            else:
+                mutate(lifecycle)
+            with self.subTest(label):
+                self.assert_blocks(lambda lifecycle=lifecycle: stall_record(lifecycle), code=1, why='lifecycle')
+
+    def test_exit_zero_is_pass_unless_the_record_claims_an_unproven_stall(self) -> None:
+        passed = lambda: stall_record(status='PASSED', reason='', logs={})
+        fake, exit_code = self.execute(passed, code=0)
+        self.assertEqual((exit_code, self.lane()['status']), (0, dp.PASS))
+        self.assertEqual(self.lane()['reason'], 'agent-payment-production-abandonment passed')
+        self.assertIn(('production-finish', 'agentcard'), fake.factory)
+        fake, exit_code = self.execute(lambda: None, code=0, lines=[])  # no record printed: unchanged exit-code rule
+        self.assertEqual((exit_code, self.lane()['status']), (0, dp.PASS))
+        # SKIPPED with the stall's runtime reason but not the exact stall: PASS would misreport it.
+        self.assert_blocks(lambda: stall_record(stall_lifecycle(livemode=False)), code=0,
+                           why='claims the AgentCard release stall')
+        self.assert_blocks(lambda: stall_record(errors=['delete: boom']), code=0,
+                           why='claims the AgentCard release stall')
+        self.assertEqual(self.lane()['exit_code'], 0)
+
+    def test_stall_is_carried_forward_and_prior_stall_never_becomes_pass(self) -> None:
+        self.execute(lambda: stall_record())
+        order, lock = [], threading.Lock()
+        fake = Fake(self.root, self.CHANGED)
+        self.assertEqual(self.main(fake, '--lanes', 'semantic', lane_funcs=fake_lanes({}, order, lock)), 0)
+        lane = self.lane()
+        self.assertEqual((lane['status'], lane.get('carried_forward')), (dp.STALL, True))
+        self.assertEqual(order, [('start', 'semantic'), ('end', 'semantic')])
+        self.assertIn('agentcard:SKIPPED-stall', fake.lines[-1])
+        self.assertIn('stall=agentcard:', fake.lines[-1])
+
+    def test_a_stall_does_not_hide_another_failure(self) -> None:
+        def handler(argv, cwd, env, on_line):
+            if TASK in argv:
+                path = self.runs / 'run.json'
+                path.write_text(json.dumps(stall_record()))
+                on_line(f'Results saved: {path}')
+            return 0
+        fake = Fake(self.root, self.CHANGED, handler=handler)
+        lanes = {n: f for n, f in fake_lanes({'semantic': (False, 'red', 1)}, [], threading.Lock()).items() if n != 'agentcard'}
+        self.assertEqual(self.main(fake, lane_funcs=lanes), 1)
+        self.assertEqual(self.lane()['status'], dp.STALL)
+        self.assertRegex(fake.lines[-2], r'^DEPLOY_PRODUCTION FAIL sha=1234567890ab failed=semantic not-run=- '
+                                         r'lanes=.*agentcard:SKIPPED-stall,semantic:FAIL stall=agentcard:')
+
+    def test_election_stays_distinct_from_the_stall(self) -> None:
+        order, lock = [], threading.Lock()
+        fake = Fake(self.root, self.CHANGED)
+        self.assertEqual(self.main(fake, '--skip-agentcard', 'why', lane_funcs=fake_lanes({}, order, lock)), 0)
+        self.assertEqual(self.lane()['status'], dp.ELECTED)
+        self.assertNotEqual(dp.ELECTED, dp.STALL)
+        self.assertEqual(set(dp.SATISFIED), {dp.PASS, dp.ELECTED, dp.STALL})
+        self.assertNotIn('stall=', fake.lines[-1])
+
+    def test_dry_run_is_unchanged_by_the_stall_qualification(self) -> None:
+        fake = Fake(self.root, self.CHANGED)
+        self.assertEqual(self.main(fake, '--dry-run'), 0)
+        text = '\n'.join(fake.lines)
+        self.assertRegex(text, r'agentcard\s+APPLICABLE\s+AgentCard payment path changed')
+        self.assertIn('scripts/run-bench agent-payment-production-abandonment', text)
+        self.assertNotIn('SKIPPED-stall', text)
+        self.assertEqual((fake.runs, fake.factory), ([], []))
+
+    def test_json_report_shape_with_a_stall(self) -> None:
+        self.execute(lambda: stall_record())
+        report = self.report()
+        self.assertEqual({'schema_version', 'sha', 'pr', 'status', 'started_at', 'finished_at', 'changed_files',
+                          'selected', 'lanes'}, set(report))
+        self.assertEqual(list(report['lanes']), list(dp.LANES))
+        lane = report['lanes']['agentcard']
+        self.assertTrue({'status', 'reason', 'started_at', 'finished_at', 'exit_code', 'command', 'log',
+                         'depends_on', 'applicable'} <= set(lane))
+        self.assertTrue(lane['command'].startswith(f'PATH={self.root / "agents" / "venv" / "bin"}:$PATH '), lane['command'])
+        self.assertTrue(lane['command'].endswith(' scripts/run-bench agent-payment-production-abandonment'))
+        self.assertEqual({n for n, row in report['lanes'].items() if row['status'] == dp.STALL}, {'agentcard'})
+
+    def test_lane_result_fails_closed_for_callers_that_only_read_passed(self) -> None:
+        def handler(argv, cwd, env, on_line):
+            path = self.runs / 'run.json'
+            path.write_text(json.dumps(stall_record()))
+            on_line(f'Results saved: {path}')
+            return 0
+        fake = Fake(self.root, self.CHANGED, handler=handler)
+        ctx = self.ctx(fake, self.CHANGED)
+        passed, reason, code = dp.lane_agentcard(ctx)
+        self.assertIs(passed, False)
+        self.assertIsInstance(reason, dp.Stall)
+        self.assertEqual(code, 0)
+
+
+class StallExactnessTest(unittest.TestCase):
+    """The deploy-side predicate and prefix stay bound to the runner that produces the record."""
+
+    def test_reason_prefix_is_the_runtime_reason(self) -> None:
+        cycle = importlib.import_module('deploy_test_cycle')
+        self.assertTrue(runtime_constant('AGENTCARD_RELEASE_SKIP_REASON').startswith(cycle.AGENTCARD_RELEASE_STALL_REASON))
+        self.assertEqual(runtime_constant('AGENTCARD_RELEASE_SKIP_ENV'), dp.STALL_ENV)
+        self.assertIn('2026-10-02-agentcard-abandonment-closed-card-transfer-never-released',
+                      runtime_constant('AGENTCARD_RELEASE_SKIP_REASON'))
+
+    def test_predicate_matches_run_benchmark_for_every_single_field_mutation(self) -> None:
+        source = next(n for n in runner_source().body if isinstance(n, ast.FunctionDef)
+                      and n.name == '_agentcard_release_stalled')
+        namespace: dict = {}
+        exec(compile(ast.Module(body=[source], type_ignores=[]), 'run_benchmark.py', 'exec'), namespace)
+        runner = namespace['_agentcard_release_stalled']
+        base = stall_lifecycle()
+        variants = [base, stall_lifecycle(livemode=False), [], None, 'x', {}]
+        sections = ('purchase', 'walletFunding', 'agentCard', 'orgTransfer')
+        values = (None, '', ' ', 'x', 0, 1, -1, True, False, [], {}, 'HELD', 'RECLAIMING', 'CLOSED', 'consumed',
+                  'reclaimed', 'OPEN', 'VOIDED', 'card_other', 'owt_other', 4396)
+        for section in sections:
+            for field in list(base[section]) + ['missing-field']:
+                for value in values:
+                    row = copy.deepcopy(base)
+                    row[section][field] = value
+                    variants.append(row)
+                row = copy.deepcopy(base)
+                row[section].pop(field, None)
+                variants.append(row)
+            row = copy.deepcopy(base)
+            row.pop(section)
+            variants.append(row)
+            row = copy.deepcopy(base)
+            row[section] = None
+            variants.append(row)
+        for value in (None, {}, {'status': 'succeeded'}, 'refund'):
+            row = copy.deepcopy(base)
+            row['stripeRefund'] = value
+            variants.append(row)
+        row = copy.deepcopy(base)
+        row.pop('stripeRefund')
+        variants.append(row)
+        self.assertGreater(len(variants), 400)
+        stalled = 0
+        for row in variants:
+            for livemode in (True, False):
+                expected = runner(row, livemode=livemode)
+                stalled += expected
+                self.assertEqual(dp.release_stalled(row, livemode=livemode), expected, (livemode, row))
+        self.assertGreater(stalled, 2)  # the good production and sandbox lifecycles both qualify in their own mode
+
+    def test_catalog_predicate_binds_the_production_task_not_the_sandbox_task(self) -> None:
+        cycle = importlib.import_module('deploy_test_cycle')
+        self.assertTrue(cycle.agentcard_release_stall_task(TASK, ROOT, production=True))
+        self.assertFalse(cycle.agentcard_release_stall_task(TASK, ROOT))  # smoke rows stay sandbox-only
+        self.assertFalse(cycle.agentcard_release_stall_task('agent-payment-abandonment', ROOT, production=True))
+        self.assertTrue(cycle.agentcard_release_stall_task('agent-payment-abandonment', ROOT))
+        self.assertFalse(cycle.agentcard_release_stall_task('no-such-task', ROOT, production=True))
+
 
 
 class OtherLanesTest(Base):
