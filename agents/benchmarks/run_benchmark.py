@@ -338,6 +338,9 @@ AMAZON_MX_TAMY_TASK_NAME = "browser-agent-amazon-mx-buy-under-5-usd"
 # Long-horizon fundraise bench: runs as Tamy's account snapshot under the WMH.
 RAISE_5M_BREX_TASK_NAME = "raise-5m-rose-labs-brex"
 DOORDASH_FOOD_PLAN_TASK_NAME = "browser-doordash-food-plan-grocery-order"
+# Catalog `pinned_facts.manifest_source` value that binds a task to the frozen
+# food-plan manifest fixture (grocery-order and its cart-reauth sibling).
+DOORDASH_FOOD_PLAN_MANIFEST_SOURCE = "doordash-food-plan-grocery-fixture.json"
 _DOORDASH_FOOD_PLAN_FIXTURE_CACHE: dict[str, dict] = {}
 # Tasks the parallel scheduler must finish (serially) before ordinary work:
 # - Destructive shared-DB fixtures: a retained failed agent tree must not mutate
@@ -2838,10 +2841,41 @@ def _doordash_food_plan_frozen_fixture() -> dict | None:
 DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER = "do NOT try to login."
 
 
+def _uses_doordash_food_plan_manifest(task: BenchmarkTask) -> bool:
+    """True when the catalog pins the frozen DoorDash food-plan manifest fixture."""
+    pinned = task.pinned_facts if isinstance(task.pinned_facts, dict) else {}
+    return pinned.get("manifest_source") == DOORDASH_FOOD_PLAN_MANIFEST_SOURCE
+
+
+def _prepare_doordash_food_plan_fixture(task: BenchmarkTask, base_url: str) -> None:
+    """Apply the frozen food-plan manifest fixture before any task that pins it."""
+    if not _uses_doordash_food_plan_manifest(task):
+        return
+    if not _is_local_base_url(base_url):
+        raise RuntimeError(f"{task.name} must run against the local benchmark stack")
+    doordash_manifest = _run_doordash_food_plan_fixture("apply")
+    prompt_chars = doordash_manifest.get("execute_prompt_chars", doordash_manifest.get("benchmark_goal_chars", "?"))
+    print(f"    🛒 Applied DoorDash food-plan prod fixture (execute_prompt_chars={prompt_chars})")
+
+
 def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
-    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+    """Resolve the goal for tasks pinning the food-plan manifest.
+
+    The grocery-order task runs the prod-derived execute prompt. Siblings keep
+    their own catalog contract (e.g. cart-reauth: guest cart, stop at auth) and
+    receive the pinned checkout manifest table those prompts refer to.
+    """
+    if not _uses_doordash_food_plan_manifest(task):
         return None
     frozen = _doordash_food_plan_frozen_fixture()
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        checkout_manifest = (frozen or {}).get("checkout_manifest") or ""
+        if not checkout_manifest:
+            raise RuntimeError(
+                f"{task.name} pins {DOORDASH_FOOD_PLAN_MANIFEST_SOURCE} but the frozen fixture has no "
+                "checkout_manifest; re-freeze the DoorDash food-plan fixture"
+            )
+        return f"{task.prompt.rstrip()}\n\nWeekly food-plan manifest:\n{checkout_manifest}"
     if not frozen:
         return None
     prompt = frozen["execute_prompt"]
@@ -2856,7 +2890,7 @@ def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:
 
 
 def _doordash_food_plan_manifest_context_for_judge(task: BenchmarkTask) -> str:
-    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+    if not _uses_doordash_food_plan_manifest(task):
         return ""
     frozen = _doordash_food_plan_frozen_fixture()
     if not frozen:
@@ -12898,9 +12932,7 @@ async def _call_declared_llm_judge(
 
     criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
     task_requirement = (
-        _doordash_food_plan_task_requirement_for_judge(task)
-        if task.name == DOORDASH_FOOD_PLAN_TASK_NAME
-        else task.prompt
+        _doordash_food_plan_task_requirement_for_judge(task) if _uses_doordash_food_plan_manifest(task) else task.prompt
     )
     manifest_context = _doordash_food_plan_manifest_context_for_judge(task)
     manifest_block = (
@@ -12926,7 +12958,7 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     if evidence is None:
         evidence = _declared_evaluator_evidence(data)
-    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
+    if _uses_doordash_food_plan_manifest(task):
         cart_evidence = _doordash_food_plan_supplemental_cart_evidence(data)
         if cart_evidence:
             evidence.append(
@@ -15389,12 +15421,7 @@ async def _run_single_task_as_run_user(
             f"{google_workspace_manifest.get('event_count', '?')} events, "
             f"{google_workspace_manifest.get('file_count', '?')} files"
         )
-    if task.name == DOORDASH_FOOD_PLAN_TASK_NAME:
-        if not _is_local_base_url(base_url):
-            raise RuntimeError(f"{task.name} must run against the local benchmark stack")
-        doordash_manifest = _run_doordash_food_plan_fixture("apply")
-        prompt_chars = doordash_manifest.get("execute_prompt_chars", doordash_manifest.get("benchmark_goal_chars", "?"))
-        print(f"    🛒 Applied DoorDash food-plan prod fixture (execute_prompt_chars={prompt_chars})")
+    _prepare_doordash_food_plan_fixture(task, base_url)
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:

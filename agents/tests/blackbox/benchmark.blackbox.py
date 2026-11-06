@@ -9420,6 +9420,94 @@ def test_doordash_food_plan_grocery_repro_contract():
     assert "Attention request (write_lock)" in supplemental
 
 
+def test_doordash_food_plan_cart_reauth_receives_pinned_manifest():
+    """Every task pinning the food-plan manifest gets it in its goal and judge checklist.
+
+    Regression (descend H-33, 2026-11-06): the manifest fixture, goal and judge
+    checklist were keyed to the grocery-order task name only. The cart-reauth
+    sibling pins the same ``manifest_source`` and asks for "every required
+    Safeway manifest line item", but its agent received no manifest (explore:
+    "manifest does NOT exist in any reachable local data source") and its judge
+    received no canonical checklist. The cart-reauth goal must keep its own
+    guest/stop-at-auth contract rather than the order task's checkout prompt.
+    """
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    cart = get_task_by_name("browser-doordash-food-plan-grocery-cart-reauth")
+    order = get_task_by_name("browser-doordash-food-plan-grocery-order")
+    unrelated = get_task_by_name("browser-doordash-usb-c-cable")
+    assert cart.pinned_facts["manifest_source"] == order.pinned_facts["manifest_source"]
+
+    checkout_manifest = (
+        "Checkout-ready one-week manifest\n### Safeway — main grocery order\n"
+        "| 93/7 lean ground beef | 2.5 lb |\n| Kodiak Power Cakes mix | 1 |"
+    )
+    execute_prompt = "SAFEWAY MANIFEST: 93/7 lean ground beef 2.5 lb. Complete checkout at Safeway."
+    prior_cache = dict(bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE)
+    prior_goal_override = os.environ.pop("BENCHMARK_GOAL_OVERRIDE", None)
+    try:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE["apply"] = {
+            "benchmark_goal": execute_prompt,
+            "checkout_manifest": checkout_manifest,
+        }
+        goal = bench._benchmark_goal_for_task(cart, "http://localhost:3001")
+        # The agent receives the pinned manifest table it is told to fill ...
+        assert checkout_manifest in goal
+        # ... under its own guest / stop-at-auth contract, not the order checkout prompt.
+        assert goal.startswith(cart.prompt.rstrip())
+        assert "Complete checkout at Safeway" not in goal
+        judge_requirement = bench._doordash_food_plan_task_requirement_for_judge(cart)
+        assert judge_requirement == goal
+        judge_manifest = bench._doordash_food_plan_manifest_context_for_judge(cart)
+        assert checkout_manifest in judge_manifest
+        assert "authoritative checkout manifest table" in judge_manifest.lower()
+
+        # The order task keeps its prod execute prompt override unchanged.
+        order_goal = bench._benchmark_goal_for_task(order, "http://localhost:3001")
+        assert order_goal.startswith(execute_prompt)
+        assert checkout_manifest in bench._doordash_food_plan_manifest_context_for_judge(order)
+
+        # Unrelated DoorDash tasks never receive the food-plan manifest.
+        assert bench._doordash_food_plan_manifest_context_for_judge(unrelated) == ""
+        assert checkout_manifest not in bench._benchmark_goal_for_task(unrelated, "http://localhost:3001")
+
+        # A frozen fixture without the checkout table must fail closed for the
+        # sibling rather than silently sending the manifest-less task prompt.
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE["apply"] = {"benchmark_goal": execute_prompt}
+        original_frozen = bench._doordash_food_plan_frozen_fixture
+        bench._doordash_food_plan_frozen_fixture = lambda: {
+            "execute_prompt": execute_prompt,
+            "checkout_manifest": "",
+        }
+        try:
+            try:
+                bench._doordash_food_plan_prompt_override(cart)
+            except RuntimeError as exc:
+                assert "checkout_manifest" in str(exc)
+            else:
+                raise AssertionError("cart-reauth goal resolved without a checkout manifest")
+        finally:
+            bench._doordash_food_plan_frozen_fixture = original_frozen
+    finally:
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.clear()
+        bench._DOORDASH_FOOD_PLAN_FIXTURE_CACHE.update(prior_cache)
+        if prior_goal_override is not None:
+            os.environ["BENCHMARK_GOAL_OVERRIDE"] = prior_goal_override
+
+    # The pre-run fixture apply covers every manifest-pinned task, not one name.
+    applied: list[str] = []
+    original_run = bench._run_doordash_food_plan_fixture
+    bench._run_doordash_food_plan_fixture = lambda action: applied.append(action) or {"execute_prompt_chars": 1}
+    try:
+        for task in (cart, order, unrelated):
+            bench._prepare_doordash_food_plan_fixture(task, "http://localhost:3001")
+    finally:
+        bench._run_doordash_food_plan_fixture = original_run
+    assert applied == ["apply", "apply"]
+
+
 def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement():
     """Guest checkout domains stay scoped without requiring an injectable CookieBundle."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -28581,6 +28669,10 @@ async def run_all_tests():
     r.record(
         "doordash_food_plan_grocery_repro_contract",
         test_doordash_food_plan_grocery_repro_contract,
+    )
+    r.record(
+        "doordash_food_plan_cart_reauth_receives_pinned_manifest",
+        test_doordash_food_plan_cart_reauth_receives_pinned_manifest,
     )
     r.record(
         "live_cookie_scope_separate_from_injectable_cookie_requirement",
