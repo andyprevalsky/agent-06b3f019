@@ -2590,7 +2590,7 @@ def test_real_boot_driver_interrupt_requires_canonical_runner_cleanup_ack(
         repo / ".git",
         repo / "agents/benchmarks",
         repo / "agents/venv/bin",
-        repo / "back-end",
+        repo / "back-end/scripts",
         repo / "scripts",
         data_dir / "world-model/models/test-model",
         data_dir / "cloudbench-cache",
@@ -2643,6 +2643,23 @@ exec "$@"
     )
     write_executable(fake_bin / "curl", "#!/usr/bin/env bash\nexit 0\n")
 
+    for helper in ("blackbox-kernel-proxy-custody.cjs", "verify-kernel-proxy-custody.cjs"):
+        shutil.copyfile(ROOT / "back-end/scripts" / helper, repo / "back-end/scripts" / helper)
+    # Exercise the actual preloader and health verifier, without a provider or DB.
+    (repo / "back-end/fixture-health.cjs").write_text(
+        "const assert = require('node:assert/strict');\n"
+        "const http = require('node:http');\n"
+        "const fs = require('node:fs');\n"
+        "const path = require('node:path');\n"
+        "assert.equal(globalThis[Symbol.for('rose.test.kernelProxyCustody')], true);\n"
+        "http.createServer((_req, res) => {\n"
+        "  res.setHeader('x-rose-kernel-proxy-custody', 'enforced-v1');\n"
+        "  res.end('{}');\n"
+        "}).listen(Number(process.env.CONDUCTOR_PORT), () => {\n"
+        "  fs.writeFileSync(path.join(process.env.BENCHMARK_CONTEXT_DIR, 'services.json'), "
+        "JSON.stringify({status: 'running'}));\n"
+        "});\n"
+    )
     write_executable(
         repo / "scripts/run.sh",
         """#!/usr/bin/env bash
@@ -2654,8 +2671,9 @@ source """
         + shlex.quote(str(ROOT / "scripts/lib/run-process-cleanup.sh"))
         + """
 mkdir -p "$BENCHMARK_CONTEXT_DIR"
-printf '{"status":"running"}\n' > "$BENCHMARK_CONTEXT_DIR/services.json"
-trap 'run_publish_stack_cleanup_status clean; exit 0' TERM INT
+node "$(dirname "$0")/../back-end/fixture-health.cjs" &
+health_pid=$!
+trap 'kill "$health_pid" 2>/dev/null || true; wait "$health_pid" 2>/dev/null || true; run_publish_stack_cleanup_status clean; exit 0' TERM INT
 while :; do sleep 1; done
 """,
     )
@@ -2804,11 +2822,11 @@ exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
         "#!/usr/bin/env python3\nimport sys\nprint('local')\nprint('--port')\nprint(sys.argv[2])\n",
     )
     (controls / "env.sh").write_text(
+        f"source {shlex.quote(str(ENV_HELPER_SCRIPT))}\n"
         """cloudbench_verify_env_file() { return 0; }
 cloudbench_require_guest_temporal_namespace() { return 0; }
 cloudbench_require_agentcard_org_oauth() { return 0; }
 cloudbench_validate_browser_provider_contract() { return 0; }
-cloudbench_env_value() { return 0; }
 cloudbench_apply_compute_token_authority() { return 0; }
 """
     )
@@ -2859,7 +2877,9 @@ cloudbench_apply_compute_token_authority() { return 0; }
             "BENCH_SIMULATE": "1",
             "WMH_MODEL_NAME": "test-model",
             "AGENTS_ENV_B64": base64.b64encode(b"fixture=1\n").decode(),
-            "BACKEND_ENV_B64": base64.b64encode(b"fixture=1\n").decode(),
+            "BACKEND_ENV_B64": base64.b64encode(b"fixture=1\nBACKEND_API_KEY=fixture\n").decode(),
+            "CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL": f"http://127.0.0.1:{base_port}",
+            "CLOUDBENCH_KERNEL_PROXY_CUSTODY": "1",
             "CLOUDBENCH_BROWSER_PROVIDER": "kernel",
         }
     )
