@@ -118,3 +118,11 @@ fi
 step "ready"
 printf 'node %s, python %s, %s, nproc %s, mem %s\n' "$(node --version)" "$(agents/venv/bin/python --version 2>&1)" \
   "$(psql --version)" "$(nproc)" "$(free -g | awk '/Mem:/{print $2 " GB"}')"
+# Host facts the devbox differs on: same-uid processes whose /proc cwd is unreadable and system git config.
+for p in /proc/[0-9]*; do
+  [ "$(stat -c %u "$p" 2>/dev/null)" = "$(id -u)" ] || continue
+  readlink "$p/cwd" >/dev/null 2>&1 && continue
+  [ -d "$p" ] && printf 'unreadable cwd: pid=%s exe=%s cmd=%s\n' "${p#/proc/}" "$(readlink "$p/exe" 2>/dev/null)" \
+    "$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-160)"
+done
+git config --system --list 2>/dev/null | sed 's/^/git system config: /'
