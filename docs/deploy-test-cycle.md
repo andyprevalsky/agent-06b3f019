@@ -56,6 +56,13 @@ checkout, database, ports and teardown. It must validate the requested source
 before executing and return results. The orchestrator launches every selected
 worker concurrently; it does not add dependencies between coverage, semantics,
 smoke, AgentCard, live probes or E2B. Existing worker safety and cleanup remain.
+The native cloud adapter accepts `DEPLOY_CLOUD_CONCURRENCY` as a positive
+integer to reduce campaign fanout when observed shared Fly headroom cannot
+admit the default width. Bind it in the smoke gate's explicit environment and
+record the capacity evidence. It never raises the provider cap or drops tasks,
+runs, assertions, cleanup requirements or timeouts. This controls work within
+the one smoke campaign; independent categories still launch concurrently.
+
 Independent worker roots launch concurrently, including while an unrelated
 failure awaits RCA. There is no host-wide admission queue or capacity-driven
 serial fallback. An active operation on the same isolation root is refused

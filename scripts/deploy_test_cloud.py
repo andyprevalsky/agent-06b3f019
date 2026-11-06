@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import runpy
 from pathlib import Path
 import sys
@@ -85,10 +86,17 @@ def collect_fleet(request, root, fleet, started, native_exit):
 
 
 def campaign_width(checks):
+    """Keep every task while bounding fanout by provider and deployment capacity."""
     capacity = runpy.run_path(str(Path(__file__).with_name('cloudbench-provider-capacity.py')))
     registry = capacity['for_browser_provider'](capacity['load_registry'](),
                                                capacity['resolve_browser_provider']())
-    return min(len(checks), registry['cap'])
+    width = min(len(checks), registry['cap'])
+    limit = os.environ.get('DEPLOY_CLOUD_CONCURRENCY')
+    if limit is not None:
+        if not re.fullmatch(r'[1-9][0-9]*', limit):
+            raise ValueError('DEPLOY_CLOUD_CONCURRENCY must be a positive integer')
+        width = min(width, int(limit))
+    return width
 
 
 def campaign_published(summary, campaign, started, native):
@@ -187,12 +195,12 @@ def execute(request, root):
         raise ValueError('invalid cloud case inventory')
     if source(root) != request['source']:
         raise ValueError('cloud source differs from the requested freeze')
-    directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
-    runs = directory / 'runs'
-    runs.mkdir(parents=True, exist_ok=False)
     width = campaign_width(checks)
     if width < 1:
         raise ValueError('provider capacity cannot admit one smoke task')
+    directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    runs = directory / 'runs'
+    runs.mkdir(parents=True, exist_ok=False)
     campaign = directory / 'campaigns' / ('deploy-' + directory.name)
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,

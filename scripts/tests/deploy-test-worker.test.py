@@ -553,6 +553,37 @@ class Cloud(unittest.TestCase):
         self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
 
+    def test_cloud_admission_limit_preserves_every_selected_case(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1'}), \
+             patch.object(self.cloud, 'source', return_value=self.request['source']), \
+             patch.object(self.cloud, 'run_command', return_value=(0,False,False,False)) as launch, \
+             patch.object(self.cloud, 'collect_campaign', return_value=({'passing':'PASS','failing':'PASS'},{},True,'native-run')):
+            result=self.cloud.execute(self.request,self.root)
+        argv=launch.call_args.args[0]
+        self.assertEqual(['passing','failing'],argv[2:4])
+        self.assertEqual('1',argv[argv.index('--concurrency')+1])
+        self.assertEqual('1',argv[argv.index('--runs')+1])
+        self.assertEqual('0',argv[argv.index('--retry-infra')+1])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases'])
+        self.assertTrue(result['complete'])
+
+    def test_cloud_admission_limit_cannot_raise_provider_capacity(self):
+        checks=[str(i) for i in range(100)]
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1000'}):
+            limited=self.cloud.campaign_width(checks)
+        with patch.dict(os.environ, {}, clear=True):
+            provider_width=self.cloud.campaign_width(checks)
+        self.assertEqual(provider_width,limited)
+
+    def test_invalid_cloud_admission_limit_fails_before_launch(self):
+        for value in ('', '0', '-1', '1.5', ' 2', 'two'):
+            with self.subTest(value=value), patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY':value}), \
+                 patch.object(self.cloud, 'source', return_value=self.request['source']), \
+                 patch.object(self.cloud, 'run_command') as launch:
+                with self.assertRaisesRegex(ValueError,'DEPLOY_CLOUD_CONCURRENCY'):
+                    self.cloud.execute(self.request,self.root)
+                launch.assert_not_called()
+
     def test_cloud_launch_records_selected_standing_skip_eligibility_before_dispatch(self):
         names=['browser-auth-guest-purchase','claude-only','ordinary']
         self.request.update(checks=names,skips={'excluded-payment':{'disposition':'unchanged'}})
