@@ -94,10 +94,12 @@ class Fixture(unittest.TestCase):
         (self.root / '.context/deploy-runs').mkdir(parents=True)
         (self.root / '.context/deploy-runs/current').write_text('run-1\n')  # deploy-v2 step 3
         self.calls, self.calls_lock, self.prepare_hook = [], threading.Lock(), None
+        self.events = []
         self.system_pg = True
         for name, fake in (('run_logged', self.fake_run),
                            ('backend_recipe', lambda root, env, timeout: {'sentinel': timeout}),
                            ('standard_template', standard),
+                           ('factory_event', lambda root, *event: self.events.append(event)),
                            ('check_capacity', lambda root, workers, proc=None: {
                                'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0, 'free_disk_mb': 0})):
             patcher = patch.object(g, name, fake)
@@ -389,6 +391,7 @@ class Run(Fixture):
         self.assertEqual(expected, json.loads((self.state / 'template.json').read_text()))
         self.assertFalse((self.state / 'template.candidate.json').exists())
         self.assertEqual([None] * 4, self.watchers)  # nothing is watched without --sample-memory
+        self.assertEqual([('stage-start', 'runtime-blackbox'), ('stage-finish', 'runtime-blackbox')], self.events)
 
     def test_each_stage_exit_code_propagates_and_stops_later_stages(self):
         for kind, code, expected in (('plan', 2, ['plan']), ('init', 2, ['plan', 'init']),
@@ -401,6 +404,8 @@ class Run(Fixture):
                 self.assertEqual(expected, self.kinds())
                 stage = {'plan': 'plan', 'init': 'init', 'run': 'cycle', 'verify': 'verify'}[kind]
                 self.assertIn(f'DEPLOY_GATES BLOCKED head={self.head[:12]} stage={stage} exit={code}:', out)
+                if kind in ('run', 'verify'):  # a failed round still closes its runtime-blackbox boundary
+                    self.assertEqual(('stage-finish', 'runtime-blackbox'), self.events[-1])
 
     def test_existing_cycle_is_continued_never_reinitialized(self):
         self.state.mkdir(parents=True)

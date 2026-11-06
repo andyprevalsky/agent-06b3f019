@@ -10,7 +10,7 @@ Run every command from the repo root; `scripts/deploy --help` lists the steps.
 
 ## Done
 
-The PR is merged, every applicable production lane is verified or has a recorded exception, the worktree is deletion-ready, and the scorecard is published.
+The PR is merged, every applicable production lane is verified or has a recorded exception, the worktree is deletion-ready, and the scorecard is published as the last message to the user.
 
 ## Process
 
@@ -21,16 +21,21 @@ The PR is merged, every applicable production lane is verified or has a recorded
 | 3 | Start the timing run | `bash scripts/run-deploy-stage --start` |
 | 4 | Format and lint-fix, commit everything, run the approval guards | `scripts/deploy freeze -m "<message>"` |
 | 5 | Push, open the PR, start review cycle 1 | `scripts/deploy open-pr --title "<title>" --body-file <file>` |
-| 6 | Run every selected gate in parallel and verify them | `scripts/deploy gates` |
-| 7 | Wait for the review on the exact HEAD | `scripts/deploy review-wait` |
-| 8 | Prove gates, review and approvals pass, then merge | `scripts/deploy merge` |
-| 9 | Dispatch post-merge repairs, then confirm none are pending | `python3 scripts/deploy_test_cycle.py complete --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline` |
-| 10 | Verify every applicable production lane | `scripts/deploy production` |
-| 11 | Prove deletion readiness | `scripts/deploy deletion-check --manifest <manifest.json>` |
-| 12 | Close the timing run, publish ledger rows, record the outcome, publish telemetry | `scripts/deploy finish` |
-| 13 | Publish the scorecard | see **Scorecard** |
+| 6 | Run every selected gate in parallel, in the background | `scripts/deploy gates` |
+| 7 | Wait for the review on the exact HEAD, in the background beside step 6 | `scripts/deploy review-wait` |
+| 8 | Close the review cycle | `scripts/deploy review-finish --result clean\|findings` |
+| 9 | Commit this deploy's benchmark history rows before the final review cycle | `scripts/deploy ledger` |
+| 10 | Push the stabilization batch and open review cycle 2 or 3, then repeat 6–8 | `scripts/deploy review-next` |
+| 11 | Prove gates, review, ledger and approvals pass, then merge | `scripts/deploy merge` |
+| 12 | Dispatch post-merge repairs, then confirm none are pending | `python3 scripts/deploy_test_cycle.py complete --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline` |
+| 13 | Verify every applicable production lane | `scripts/deploy production` |
+| 14 | Close the timing run, record the outcome, publish telemetry | `scripts/deploy finish` |
+| 15 | Prepare the scorecard, then prove deletion readiness | `scripts/deploy deletion-check --manifest <manifest.json>` |
+| 16 | Send the scorecard as the last message | see **Scorecard** |
 
 ## Guidelines
+
+### Scope
 
 - Ship the whole devbox: every committed, staged, unstaged and untracked non-ignored change relative to `origin/main`, from every thread.
 - Never ask whether a change is yours; whoever runs `/deploy` owns everything in the worktree.
@@ -38,41 +43,87 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - A historical branch or test copy is not a deliverable unless its owner's handoff says so.
 - Never commit secrets, ignored `.env` files, caches, dependencies, research data or generated evidence.
 - Never sync with main during a deploy; GitHub merges the PR. Only a merge conflict reported by `scripts/deploy merge` forces `/sync`, then rerun the affected gates.
+
+### Execution
+
 - Keep going until **Done** or a **Stopping condition**; a blocking result is work to resolve, not a reason to pause.
 - Run independent work in parallel; serialize only real conflicts on a checkout, database, resource or production cutover.
+- Run `gates` and `review-wait` in the background and watch both; start `/RCA` on each failure as soon as it appears, not when `gates` exits.
 - Never fire and forget: every background command has an owner that watches it until exit and cleanup.
 - Every lane owns its own setup, cleanup and teardown; never kill processes you did not start.
-- Smoke runs on the cloud fleet through the benchmark CLI; follow `/benchmark` monitoring through resource release.
-- Never push while a review cycle is open; batch every fix and push once.
-- Never push an unreviewed commit before merge.
-- Never merge an unwaived blocking failure, and never invent a PASS.
-- A skip, waiver, exception or override is never PASS; keep the native result visible.
+- "Pre-existing", "flaky", "resource contention", "doesn't touch agent code" and "agents timing out" are never evidence for an exception or attribution.
 - Never change assertions, timeouts, concurrency, task definitions or coverage thresholds to get green.
 - Never disable a linter or type checker.
-- A human GitHub review is not required; CodeRabbit is the only review gate.
+- Never merge an unwaived blocking failure, and never invent a PASS.
+- A skip, waiver, exception or override is never PASS; keep the native result visible.
+- An override must name the gate explicitly; never infer one, never re-confirm it, keep it narrow, and list its risk in the PR.
+- On any stop, run `scripts/deploy finish --outcome blocked` before ending the turn.
+
+### Approvals
+
 - `scripts/deploy fix` runs the same formatters and lint fixes without committing.
-- When `freeze` flags approval hunks, run one golden-reference review and record it with `deploy_approval_batch.py decide`.
-- A `GROUNDED` review clears the prompt, agent-behavior and trajectory-injection guards; otherwise send one approval packet.
-- Approval packets follow `.claude/shared/approval-format.md` and paste the exact diff inline.
+- Classify every hunk `freeze` flags: code-only hunks pass without review; text an LLM reads, including text built at runtime, is a prompt.
+- Run one golden-reference review over the remaining hunks; a `GROUNDED` verdict clears them: `scripts/deploy approval decide --decision grounded --evidence "<reviewer id>"`.
+- Otherwise run `scripts/deploy approval request` and send one packet in `.claude/shared/approval-format.md` format, pasting the exact diff inline.
+- Send the packet as the turn's last message only after gates run in the background, under a bounded keep-awake cancelled by its `holdId`.
+- Never infer approval from silence or earlier discussion; record the answer with `scripts/deploy approval decide --decision approved|rejected --evidence "<user message>"`.
+- A rejection stays blocked; a re-request from `approval decide` or `merge` means re-freeze and send a packet for only the changed files.
 - Approvals are snapshot-scoped: a later change to an approval-scoped hunk needs a new approval.
 - Deploy-tooling edits to this file (test selection, gate wiring, evidence) are operational, not prompt changes.
+
+### AgentCard
+
+- After a confirmed release stall, stop retrying: never mint another card, keep reclaiming, or ask the user again.
+- When the AgentCard lane fails, finish its payment lifecycle cleanup before tearing down its stack.
+- If a production AgentCard run is force-killed, recover its agent's execution and browser resources before judging the financial exception.
+
+### Production
+
 - Bind every production check to the exact merge commit, never to the latest `main`.
+- An interrupted Fly cutover resumes the same job; never enqueue a replacement, release reservations on a timer, roll the pointer back or force-migrate workflows.
+- Keep automatic worker deploys off for the first managed deployment until the Render protocol is live and old instances have drained for at least 375 s.
+- On a production "column does not exist" error, compare `_prisma_migrations` with the real schema and re-apply the missing DDL idempotently.
+- When migration preflight fails, fix the migration (batched backfill, repaired rows); use its allow directive only for a measured, reasoned risk.
+- Never change production auth to make a rejected credential look healthy, and never work around auth errors in code.
+
+### Mac local acceptance
+
+- Never migrate production, start a new database, replace encryption keys, or reset sign-in or app data.
+- Bind the intended device ID with no E2B or other-device fallback, and record the IDs, `Darwin` and the revision.
+- Prove disconnect, denied-folder and foreign-device rejection; the acceptance stays OPEN until witnessed on that Mac.
+
+### Benchmarks and cleanup
+
+- Smoke runs on the cloud fleet through the benchmark CLI; follow `/benchmark` monitoring through resource release.
+- Larger paid fleet campaigns stay human-requested and are never added to the automatic deploy.
+- A lane teardown that ends `killed` or `failed` needs `scripts/run-bench --local --run-id <run> --reconcile-cleanup` before the next local benchmark lane.
+- Never move a benchmark run directory by hand while a process still carries its run id.
+- Tear stacks down with `scripts/kill-services.sh`; `scripts/teardown.sh` destroys the database container and volume.
+- Treasury skips never reclaim or delete records, and never hide pending or overdue obligations.
+
+### Review and PR
+
+- A human GitHub review is not required; CodeRabbit is the only review gate.
+- Keep a per-step test report (step, status, summary) and put it in the commit message and PR body.
+- The PR body lists every override with its risk and the user's approval, every `GROUNDED` line, and "merged unreviewed" after a quota skip.
+- Never push while a review cycle is open; batch every review and gate fix and push once with `review-next`.
+- Never push an unreviewed commit before merge.
+- Move the related `docs/plans/active/` plan to `docs/plans/completed/` in the stabilization batch before the final review cycle.
+
+### Preservation and reporting
+
 - Preserve every needed local record (commit it, or archive it privately and commit its manifest) before `deletion-check`.
+- Records created after merge go in a reviewed records-only follow-up PR on main, linked from the deployed PR, before the scorecard.
+- `deletion-check` writes `docs/handoffs/pr-<N>-closeout/deletion-readiness.json`; commit it in that follow-up PR and rerun until it reports READY.
+- SHIPPED certifies deletion readiness; any unresolved preservation keeps the deploy incomplete and listed in FOLLOWUPS.
 - Never delete the local or remote branch.
 - Preserve Freedom and protected instructions.
 
 ## Stopping conditions
 
-Stop and ask the user only for:
+Stop and ask the user only for a prompt, agent-behavior or trajectory-injection approval the golden-reference review did not clear; gates keep running, only the merge waits.
 
-1. A prompt, agent-behavior or trajectory-injection approval the golden-reference review did not clear; gates keep running, only the merge waits.
-2. A credential or billing change only the user can make that is not a qualified external exception.
-3. A request for an explicit gate override.
-4. A destructive or irreversible action that needs approval.
-5. A failure that cannot be fixed without the user.
-6. `scripts/deploy gates` reports `CAPACITY`: this box lacks the memory or disk the selected gates need. Show its `NEED` lines and largest processes, and ask the user to free that much before rerunning.
-
-Stop immediately when the user says stop. Review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
+Stop immediately when the user says stop. Credential or billing changes only the user can make, review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
 
 ## Skippable tests
 
@@ -80,7 +131,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 
 | Test | Skip when | Note |
 |------|-----------|------|
-| Any test | A third-party provider is out of credits or storage, with explicit evidence | Never top up or wait |
+| Any test | A third-party provider is out of credits or storage, or needs a credential or billing change only the user can make, with explicit evidence | Never top up or wait; report it at the end of the scorecard |
 | Treasury tests | Always | Never mutate treasury records to pass |
 | AgentCard lifecycle, local or production | The user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy gates` or `scripts/deploy production`), or the exact release stall: closed card, zero balance, transfer `consumed`, `releasedCents=0` | Unreleased funds stay a followup |
 | Claude Code smoke | Preflight proves no synced Claude credential and no pool token | Task failures still block |
@@ -93,7 +144,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 | Unselected categories | The gate planner omitted them | The plan lists every omission |
 | Any gate | The user explicitly overrides that named gate | Record `⚠️ Overridden` |
 
-Never skip for an unexplained failure, an auth rejection outside the warn-only row, local disk exhaustion, or an outage without evidence.
+Never skip for an unexplained failure, an auth failure our own configuration caused, local disk exhaustion, or an outage without evidence.
 
 ## When a gate fails: triage and parallelize
 
@@ -115,7 +166,7 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 ## Review
 
 - Cycle 1 starts when the PR opens; cycle 2 is one batched incremental review; cycle 3 only when cycle 2 found a valid issue; the ledger refuses a 4th.
-- Close each cycle with `deploy_review_cycle.py finish --head "$HEAD" --result clean|findings`; open the next with `next` then `start`.
+- After a clean cycle 2, gate fixes that changed source get a verification cycle: `scripts/deploy review-next --verification-approval <id>`.
 - Read the reviews for the exact HEAD from the reviews, inline comments and issue comments endpoints; a green check is not a review.
 - Fix every valid finding, including pre-existing ones; ignore only pure style nits.
 - Reply to every comment with `[FIXED]`, `[IGNORED]`, `[DELEGATED]` or `[POST-MERGE REPAIR]`.

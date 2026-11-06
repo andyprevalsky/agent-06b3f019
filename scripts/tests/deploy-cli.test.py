@@ -41,7 +41,7 @@ class Repo(unittest.TestCase):
         self.patches = [patch.object(d, name, value) for name, value in (
             ('ROOT', self.root), ('CONTEXT', context), ('PR_FILE', context / 'deploy-pr.json'),
             ('MERGED_FILE', context / 'deploy-merged.json'), ('COLLECT_FILE', context / 'deploy-collect.json'),
-            ('READINESS_FILE', context / 'deletion-readiness.json'))]
+            ('READINESS_FILE', context / 'deletion-readiness.json'), ('PARK_DIR', context / 'deploy-ledger-park'))]
         for item in self.patches:
             item.start()
 
@@ -185,12 +185,112 @@ class OpenPrAndMerge(Repo):
         d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'main', 'head': d.head()})
         sh('git', 'branch', '-q', '--set-upstream-to=origin/main', cwd=self.root)
         with patch.object(d, 'run', return_value=0) as runner, patch.object(d, 'factory') as event, \
-             patch.object(d, 'mergeable', return_value='CONFLICTING'):
+             patch.object(d, 'approvals_clear', return_value=0), patch.object(d, 'mergeable', return_value='CONFLICTING'):
             code, _, err = self.call(d.cmd_merge)
         self.assertEqual(code, 1)
         self.assertIn('run /sync, rerun the affected gates', err)
         self.assertFalse(any('merge' in argv and 'pr' in argv for argv in [c.args[0] for c in runner.call_args_list]))
         event.assert_not_called()
+
+
+class ReviewApprovalLedger(Repo):
+    def opened(self):
+        sh('git', 'checkout', '-qb', 'feature', cwd=self.root)
+        d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'feature', 'head': d.head()})
+
+    def test_open_pr_never_resets_an_open_deploys_review_ledger(self):
+        self.opened()
+        with patch.object(d, 'run') as runner:
+            code, _, err = self.call(d.cmd_open_pr, title='t', body_file=None, restart=False)
+        self.assertEqual(code, 1)
+        self.assertIn('use `scripts/deploy review-next`', err)
+        runner.assert_not_called()
+
+    def test_review_next_requires_a_committed_batch_and_reviewed_ledger_rows(self):
+        self.opened()
+        (self.root / 'app.py').write_text('x = 9\n')
+        code, _, err = self.call(d.cmd_review_next, verification_approval=None)
+        self.assertEqual(code, 1)
+        self.assertIn('commit the stabilization batch first', err)
+        sh('git', 'checkout', '--', 'app.py', cwd=self.root)
+        d.PARK_DIR.mkdir(parents=True)
+        (d.PARK_DIR / 'task_attempts.jsonl').write_text('{}\n')
+        code, _, err = self.call(d.cmd_review_next, verification_approval=None)
+        self.assertEqual(code, 1)
+        self.assertIn('run `scripts/deploy ledger`', err)
+
+    def test_review_next_opens_the_cycle_the_ledger_allows_then_pushes_and_requests(self):
+        self.opened()
+        calls = []
+        nxt = subprocess.CompletedProcess([], 0, stdout='{"kind": "verification"}', stderr='')
+        real = subprocess.run
+        only_next = lambda argv, **kw: nxt if 'next' in argv else real(argv, **kw)
+        with patch.object(d.subprocess, 'run', side_effect=only_next), patch.object(d, 'factory') as event, \
+             patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
+            code, out, _ = self.call(d.cmd_review_next, verification_approval='appr-1')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(calls[0][1:], ['scripts/deploy_review_cycle.py', 'start', '--kind', 'verification',
+                                        '--head', d.head(), '--verification-approval', 'appr-1'])
+        self.assertEqual(calls[1], ['git', 'push', 'origin', 'HEAD'])
+        self.assertEqual(calls[2], ['gh', 'pr', 'comment', '7', '--body', '@coderabbitai review'])
+        event.assert_called_once_with('stage-start', 'code-review')
+
+    def test_review_next_refusal_points_to_deferral_not_a_stop(self):
+        self.opened()
+        refused = subprocess.CompletedProcess([], 1, stdout='', stderr='fourth cycle refused\n')
+        real = subprocess.run
+        only_next = lambda argv, **kw: refused if 'next' in argv else real(argv, **kw)
+        with patch.object(d.subprocess, 'run', side_effect=only_next), patch.object(d, 'run') as runner:
+            code, _, err = self.call(d.cmd_review_next, verification_approval=None)
+        self.assertEqual(code, 1)
+        self.assertIn('defer the remaining non-security findings', err)
+        runner.assert_not_called()
+
+    def test_approval_decisions_record_events_and_rerun_flagged_guards(self):
+        check = subprocess.CompletedProcess([], 0, stdout='{"status": "covered", "guards_to_flag": ["prompt-approval"]}',
+                                            stderr='')
+        calls = []
+        with patch.object(d.subprocess, 'run', return_value=check), patch.object(d, 'factory') as event, \
+             patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
+            code, out, _ = self.call(d.cmd_approval, action='decide', decision='approved', evidence='user: ok')
+        self.assertEqual(code, 0, out)
+        event.assert_called_once_with('approval-decision', 'approved')
+        self.assertEqual(calls[0][1:], ['scripts/deploy_approval_batch.py', 'decide', '--decision', 'approved',
+                                        '--evidence', 'user: ok'])
+        self.assertEqual(calls[1], ['bash', 'scripts/run-deploy-stage', 'prompt-approval', '--', 'bash',
+                                    'scripts/check-prompt-human-approval.sh', 'mandatory-human-approval-retrieved=true'])
+        with patch.object(d, 'factory') as event, patch.object(d, 'run', return_value=0):
+            code, _, _ = self.call(d.cmd_approval, action='decide', decision='rejected', evidence='user: no')
+        self.assertEqual(code, 1)
+        with patch.object(d, 'factory') as event, patch.object(d, 'run', return_value=0), \
+             patch.object(d, 'approvals_clear', return_value=0):
+            self.call(d.cmd_approval, action='decide', decision='grounded', evidence='reviewer r1')
+        event.assert_not_called()
+
+    def test_ledger_commits_only_the_benchmark_history_rows(self):
+        ledger = self.root / 'agents/benchmarks/history'
+        ledger.mkdir(parents=True)
+        (ledger / 'task_attempts.jsonl').write_text('{"task": "x"}\n')
+        (self.root / 'app.py').write_text('x = 7\n')
+        with patch.object(d, 'run', return_value=0):
+            code, out, _ = self.call(d.cmd_ledger)
+        self.assertEqual(code, 0)
+        self.assertIn('committed=1', out)
+        self.assertEqual(sh('git', 'show', '--name-only', '--format=', 'HEAD', cwd=self.root).split(),
+                         ['agents/benchmarks/history/task_attempts.jsonl'])
+        self.assertIn('app.py', sh('git', 'status', '--porcelain', cwd=self.root))
+
+    def test_merge_refuses_unreviewed_parked_ledger_rows(self):
+        d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'main', 'head': d.head()})
+        sh('git', 'branch', '-q', '--set-upstream-to=origin/main', cwd=self.root)
+        d.PARK_DIR.mkdir(parents=True)
+        (d.PARK_DIR / 'span_durations.jsonl').write_text('{}\n')
+        (d.PARK_DIR / 'task_attempts.jsonl.applied-20261106').write_text('{}\n')
+        with patch.object(d, 'run', return_value=0) as runner:
+            code, _, err = self.call(d.cmd_merge)
+        self.assertEqual(code, 1)
+        self.assertIn('parked benchmark-history rows are not in the reviewed batch', err)
+        runner.assert_not_called()
 
 
 class DeletionCheck(Repo):
@@ -200,13 +300,13 @@ class DeletionCheck(Repo):
         (self.root / '.context').mkdir(exist_ok=True)
         (self.root / '.context/run.log').write_text('evidence')
         with patch.object(d, 'live_processes', return_value=[]):
-            code, out, _ = self.call(d.cmd_deletion_check, manifest=None)
+            code, out, _ = self.call(d.cmd_deletion_check, manifest=None, receipt=None)
         self.assertEqual(code, 1)
         self.assertIn('ignored path without a disposition: .context/', out)
         manifest = Path(self.tmp.name) / 'manifest.json'
         manifest.write_text(json.dumps({'.context/': 'archived'}))
         with patch.object(d, 'live_processes', return_value=[]):
-            code, out, _ = self.call(d.cmd_deletion_check, manifest=manifest)
+            code, out, _ = self.call(d.cmd_deletion_check, manifest=manifest, receipt=None)
         self.assertEqual(code, 0, out)
         receipt = json.loads(d.READINESS_FILE.read_text())
         self.assertTrue(receipt['ready'])
@@ -216,11 +316,32 @@ class DeletionCheck(Repo):
         (self.root / 'app.py').write_text('x = 5\n')
         sh('git', 'commit', '-qam', 'local only', cwd=self.root)
         with patch.object(d, 'live_processes', return_value=[{'pid': 42, 'argv': 'worker.py'}]):
-            code, out, _ = self.call(d.cmd_deletion_check, manifest=None)
+            code, out, _ = self.call(d.cmd_deletion_check, manifest=None, receipt=None)
         self.assertEqual(code, 1)
         self.assertIn('1 unpushed commit(s)', out)
         self.assertIn('branch main has 1 commit(s) on no remote', out)
         self.assertIn('live process 42 in this checkout: worker.py', out)
+
+    def test_after_merge_the_receipt_is_a_committed_record_that_reruns_byte_identically(self):
+        d.write_json(d.MERGED_FILE, {'pr': 7, 'merged_sha': 'a' * 40})
+        manifest = Path(self.tmp.name) / 'manifest.json'
+        manifest.write_text(json.dumps({'.context/': 'archived'}))
+        record = self.root / 'docs/handoffs/pr-7-closeout/deletion-readiness.json'
+        with patch.object(d, 'live_processes', return_value=[]):
+            code, out, _ = self.call(d.cmd_deletion_check, manifest=manifest, receipt=None)
+        self.assertEqual(code, 1)
+        self.assertIn('records-only follow-up PR', out)
+        first = record.read_text()
+        self.assertEqual('a' * 40, json.loads(first)['deployed_sha'])
+        self.assertNotIn('"head"', first)
+        sh('git', 'add', str(record), cwd=self.root)
+        sh('git', 'commit', '-qm', 'records', cwd=self.root)
+        sh('git', 'push', '-q', 'origin', 'main', cwd=self.root)
+        with patch.object(d, 'live_processes', return_value=[]):
+            code, out, _ = self.call(d.cmd_deletion_check, manifest=manifest, receipt=None)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(first, record.read_text())
+        self.assertEqual('', sh('git', 'status', '--porcelain', '--', str(record), cwd=self.root))
 
     @unittest.skipUnless(Path('/proc/self/cwd').exists(), 'needs Linux /proc')
     def test_live_processes_finds_a_child_in_the_checkout_but_not_itself(self):

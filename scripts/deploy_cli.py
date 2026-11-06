@@ -19,7 +19,8 @@ CONTEXT = ROOT / '.context'
 PR_FILE = CONTEXT / 'deploy-pr.json'
 MERGED_FILE = CONTEXT / 'deploy-merged.json'
 COLLECT_FILE = CONTEXT / 'deploy-collect.json'
-READINESS_FILE = CONTEXT / 'deletion-readiness.json'
+READINESS_NAME = 'deletion-readiness.json'
+READINESS_FILE = CONTEXT / READINESS_NAME
 STATE_DIR = Path(os.environ.get('DEPLOY_TEST_CYCLE_STATE_DIR', str(CONTEXT / 'deploy-pipeline')))
 LEDGER_DIR = 'agents/benchmarks/history/'
 PARK_DIR = CONTEXT / 'deploy-ledger-park'
@@ -181,6 +182,10 @@ def cmd_open_pr(args: argparse.Namespace) -> int:
               + ', '.join(pending[:10]), file=sys.stderr)
         return 1
     sha = head()
+    if PR_FILE.is_file() and json.loads(PR_FILE.read_text()).get('branch') == branch and not args.restart:
+        print('DEPLOY_OPEN_PR BLOCKED: this deploy already opened its PR; use `scripts/deploy review-next` for the '
+              'next review cycle, or `open-pr --restart` to begin a fresh deploy of it', file=sys.stderr)
+        return 1
     existing = subprocess.run(['gh', 'pr', 'view', '--json', 'number', '--jq', '.number'],
                               cwd=ROOT, capture_output=True, text=True).stdout.strip()
     if run([sys.executable, 'scripts/deploy_review_cycle.py', 'start', '--reset', '--kind', 'initial', '--head', sha]):
@@ -218,6 +223,111 @@ def cmd_review_wait(args: argparse.Namespace) -> int:
                 '--timeout', str(args.timeout), '--poll', '5'])
 
 
+def review_state() -> dict:
+    return json.loads(subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'status'], cwd=ROOT,
+                                     check=True, capture_output=True, text=True).stdout)
+
+
+def cmd_review_finish(args: argparse.Namespace) -> int:
+    review_head = review_state()['cycles'][-1]['head']
+    factory('stage-finish', 'code-review')
+    code = run([sys.executable, 'scripts/deploy_review_cycle.py', 'finish', '--head', review_head,
+                '--result', args.result])
+    print(f'DEPLOY_REVIEW_FINISH head={review_head[:12]} result={args.result} exit={code}')
+    return code
+
+
+def cmd_review_next(args: argparse.Namespace) -> int:
+    opened = read_json(PR_FILE, 'open-pr')
+    if pending := uncommitted():
+        print('DEPLOY_REVIEW_NEXT BLOCKED: commit the stabilization batch first: ' + ', '.join(pending[:10]),
+              file=sys.stderr)
+        return 1
+    if unapplied_ledger_rows():
+        print('DEPLOY_REVIEW_NEXT BLOCKED: parked benchmark-history rows are not committed; run '
+              '`scripts/deploy ledger` so the review covers them', file=sys.stderr)
+        return 1
+    nxt = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'next'], cwd=ROOT,
+                         capture_output=True, text=True)
+    if nxt.returncode:
+        print(nxt.stdout + nxt.stderr, end='')
+        print('DEPLOY_REVIEW_NEXT BLOCKED: the ledger allows no further cycle; defer the remaining non-security '
+              'findings with `deploy_review_cycle.py override` and merge', file=sys.stderr)
+        return 1
+    kind, sha = json.loads(nxt.stdout)['kind'], head()
+    start = ['start', '--kind', kind, '--head', sha]
+    if args.verification_approval:
+        start += ['--verification-approval', args.verification_approval]
+    if run([sys.executable, 'scripts/deploy_review_cycle.py', *start]):
+        return 1
+    factory('stage-start', 'code-review')
+    if run(['git', 'push', 'origin', 'HEAD']) or run(['gh', 'pr', 'comment', str(opened['pr']), '--body',
+                                                    '@coderabbitai review']):
+        return 1
+    write_json(PR_FILE, {**opened, 'head': sha})
+    print(f"DEPLOY_REVIEW_NEXT pr={opened['pr']} head={sha[:12]} review={kind}")
+    return 0
+
+
+# --- approvals -------------------------------------------------------------
+
+GUARD_SCRIPTS = {'prompt-approval': 'scripts/check-prompt-human-approval.sh',
+                 'agent-behavior-approval': 'scripts/check-agent-behavior-approval.sh',
+                 'llm-trajectory-injection-approval': 'scripts/check-llm-trajectory-injection-approval.sh'}
+
+
+def approvals_clear() -> int:
+    """0 when the batch covers HEAD (rerunning each flagged guard with the mandatory flag); 1 re-freeze; 3 pending."""
+    checked = subprocess.run([sys.executable, 'scripts/deploy_approval_batch.py', 'check'], cwd=ROOT,
+                             capture_output=True, text=True)
+    print(checked.stdout + checked.stderr, end='')
+    if checked.returncode == 1:
+        print('APPROVALS re-request: a post-freeze change touched an approval-scoped hunk (or it was rejected); '
+              'run `scripts/deploy freeze` and send a fresh packet for only those files', file=sys.stderr)
+    if checked.returncode:
+        return checked.returncode
+    for guard in json.loads(checked.stdout or '{}').get('guards_to_flag', []):
+        if code := run(['bash', 'scripts/run-deploy-stage', guard, '--', 'bash', GUARD_SCRIPTS[guard],
+                        'mandatory-human-approval-retrieved=true']):
+            return code
+    return 0
+
+
+def cmd_approval(args: argparse.Namespace) -> int:
+    if args.action == 'request':
+        factory('approval-request', 'combined')
+        print(f'DEPLOY_APPROVAL request recorded; paste {CONTEXT / "deploy-approval-batch.diff"} inline in the packet')
+        return 0
+    if args.decision != 'grounded':
+        factory('approval-decision', args.decision)
+    if code := run([sys.executable, 'scripts/deploy_approval_batch.py', 'decide', '--decision', args.decision,
+                    '--evidence', args.evidence]):
+        return code
+    code = 1 if args.decision == 'rejected' else approvals_clear()
+    print(f'DEPLOY_APPROVAL decision={args.decision} {"clear" if code == 0 else "held"}')
+    return code
+
+
+# --- benchmark ledger --------------------------------------------------------
+
+def unapplied_ledger_rows() -> list[Path]:
+    return sorted(p for p in PARK_DIR.glob('*') if p.is_file() and '.applied-' not in p.name) if PARK_DIR.is_dir() else []
+
+
+def cmd_ledger(args: argparse.Namespace) -> int:
+    """Publish this deploy's benchmark-history rows into the reviewed batch (before the final review)."""
+    ledger = [sys.executable, 'scripts/benchmark-history-latest-only.py', '--base', 'origin/main']
+    parked = ['--apply-parked', str(PARK_DIR)] if unapplied_ledger_rows() else []
+    if run([*ledger, *parked, '--write']) or run([*ledger, '--check']):
+        return 1
+    changed = [p for p in git('status', '--porcelain', '--', LEDGER_DIR).splitlines() if p]
+    if changed:
+        git('add', '--', LEDGER_DIR)
+        git('commit', '-m', 'chore(benchmarks): record this deploy\'s latest benchmark history rows')
+    print(f'DEPLOY_LEDGER committed={len(changed)} head={head()[:12]}')
+    return 0
+
+
 # --- merge -----------------------------------------------------------------
 
 def mergeable(pr: int) -> str:
@@ -239,12 +349,18 @@ def cmd_merge(args: argparse.Namespace) -> int:
         [sys.executable, 'scripts/run_deploy_pipeline.py', 'verify', '--require-staged',
          '--state-dir', str(STATE_DIR), '--expect-head', sha],
         [sys.executable, 'scripts/deploy_review_cycle.py', 'require-mergeable', '--head', sha],
-        [sys.executable, 'scripts/deploy_approval_batch.py', 'check'],
     ]
+    if unapplied_ledger_rows():
+        print('DEPLOY_MERGE BLOCKED: parked benchmark-history rows are not in the reviewed batch; run '
+              '`scripts/deploy ledger` and `scripts/deploy review-next`', file=sys.stderr)
+        return 1
     for argv in checks:
         if code := run(argv):
             print(f'DEPLOY_MERGE BLOCKED: {Path(argv[1]).name} exited {code}', file=sys.stderr)
             return 1
+    if code := approvals_clear():
+        print(f'DEPLOY_MERGE BLOCKED: approvals are not clear for this HEAD (exit {code})', file=sys.stderr)
+        return 1
     if (state := mergeable(pr)) != 'MERGEABLE':
         hint = 'run /sync, rerun the affected gates, then merge' if state == 'CONFLICTING' else 'retry shortly'
         print(f'DEPLOY_MERGE BLOCKED: GitHub reports PR {pr} as {state or "unknown"}; {hint}', file=sys.stderr)
@@ -308,13 +424,26 @@ def disposition(path: str, manifest: dict) -> str | None:
     return None
 
 
+def receipt_path(args: argparse.Namespace) -> Path:
+    """Committed closeout record once merged (docs/handoffs/pr-<N>-closeout/); a local rehearsal file before."""
+    if args.receipt:
+        return args.receipt if args.receipt.is_absolute() else ROOT / args.receipt
+    if MERGED_FILE.is_file():
+        return ROOT / 'docs/handoffs' / f"pr-{json.loads(MERGED_FILE.read_text())['pr']}-closeout" / READINESS_NAME
+    return READINESS_FILE
+
+
 def cmd_deletion_check(args: argparse.Namespace) -> int:
     manifest = json.loads(args.manifest.read_text()) if args.manifest else {}
+    target = receipt_path(args)
+    record = str(target.relative_to(ROOT)) if ROOT in target.parents else None
+    merged = json.loads(MERGED_FILE.read_text()) if MERGED_FILE.is_file() else {}
     trees = [describe(entry) for entry in worktrees()]
     open_items = []
     for tree in trees:
-        if tree.get('uncommitted'):
-            open_items.append(f"uncommitted changes in {tree['path']}: {', '.join(tree['uncommitted'][:5])}")
+        pending = [path for path in tree.get('uncommitted', []) if path != record]
+        if pending:
+            open_items.append(f"uncommitted changes in {tree['path']}: {', '.join(pending[:5])}")
         if tree.get('unpushed_commits'):
             open_items.append(f"{tree['unpushed_commits']} unpushed commit(s) in {tree['path']}")
     for ref in git('for-each-ref', '--format=%(refname:short)', 'refs/heads').split():
@@ -326,25 +455,33 @@ def cmd_deletion_check(args: argparse.Namespace) -> int:
     open_items += [f"live process {p['pid']} in this checkout: {p.get('argv') or p.get('reason')}" for p in processes]
     ignored = {path: disposition(path, manifest) for path in ignored_paths(ROOT)}
     open_items += [f'ignored path without a disposition: {path}' for path, value in ignored.items() if value is None]
-    receipt = {'format': 'DEPLOY-DELETION-CHECK-V1', 'head': head(), 'root': str(ROOT),
-               'ready': not open_items, 'open_items': open_items, 'worktrees': trees,
+    # No clock or HEAD fields: rerunning after the record is committed reproduces the same bytes.
+    receipt = {'format': 'DEPLOY-DELETION-CHECK-V2', 'pr': merged.get('pr'), 'deployed_sha': merged.get('merged_sha'),
+               'ready': not open_items, 'open_items': open_items,
+               'worktrees': [{k: v for k, v in tree.items() if k != 'head'} for tree in trees],
                'live_processes': processes, 'ignored': ignored,
                'manifest': str(args.manifest) if args.manifest else None}
-    write_json(READINESS_FILE, receipt)
+    text = json.dumps(receipt, indent=2, sort_keys=True) + '\n'
+    if not target.is_file() or target.read_text() != text:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    if record and merged and receipt['ready']:
+        tracked = subprocess.run(['git', 'ls-files', '--error-unmatch', record], cwd=ROOT, capture_output=True).returncode == 0
+        if not tracked or git('diff', '--name-only', 'HEAD', '--', record).strip():
+            open_items.append(f'commit {record} (with the closeout manifest) in a records-only follow-up PR, '
+                              'merge it, link it from the deployed PR, then rerun')
     for item in open_items:
         print(f'OPEN  {item}')
-    print(f'DEPLOY_DELETION_CHECK {"READY" if receipt["ready"] else "NOT_READY"} open={len(open_items)} '
-          f'receipt={READINESS_FILE.relative_to(ROOT)}')
-    return 0 if receipt['ready'] else 1
+    ready = not open_items
+    shown = target.relative_to(ROOT) if ROOT in target.parents else target
+    print(f'DEPLOY_DELETION_CHECK {"READY" if ready else "NOT_READY"} open={len(open_items)} receipt={shown}')
+    return 0 if ready else 1
 
 
 # --- finish ----------------------------------------------------------------
 
 def cmd_finish(args: argparse.Namespace) -> int:
     status = run(['bash', 'scripts/run-deploy-stage', '--finish'])
-    ledger = [sys.executable, 'scripts/benchmark-history-latest-only.py', '--base', 'origin/main']
-    status |= run([*ledger, *(['--apply-parked', str(PARK_DIR)] if PARK_DIR.is_dir() else []), '--write'])
-    status |= run([*ledger, '--check'])
     factory('outcome', args.outcome)
     status |= run([sys.executable, 'scripts/factory_ledger.py', 'publish'])
     print(f'DEPLOY_FINISH {"PASS" if status == 0 else "FAIL"} outcome={args.outcome}')
@@ -371,29 +508,44 @@ def parser() -> argparse.ArgumentParser:
     opened = sub.add_parser('open-pr', help='start review cycle 1, push, open (or re-request) the PR')
     opened.add_argument('--title')
     opened.add_argument('--body-file', type=Path)
+    opened.add_argument('--restart', action='store_true', help='begin a fresh deploy of an already-opened PR')
     sub.add_parser('gates', help='run every selected gate in parallel (scripts/deploy_gates.py)', add_help=False)
     waited = sub.add_parser('review-wait', help='wait for CodeRabbit on the open cycle head')
     waited.add_argument('--timeout', type=int, default=600)
+    ended = sub.add_parser('review-finish', help='close the open review cycle and its timing boundary')
+    ended.add_argument('--result', choices=['clean', 'findings'], required=True)
+    nxt = sub.add_parser('review-next', help='open the next bounded review cycle on the pushed stabilization batch')
+    nxt.add_argument('--verification-approval', help="user approval id for a verification cycle after a clean cycle 2")
+    approval = sub.add_parser('approval', help='record an approval packet or decision; on approval rerun flagged guards')
+    approval.add_argument('action', choices=['request', 'decide'])
+    approval.add_argument('--decision', choices=['approved', 'grounded', 'rejected'])
+    approval.add_argument('--evidence', help='user message or reviewer verdict id')
+    sub.add_parser('ledger', help="commit this deploy's latest benchmark-history rows before the final review")
     sub.add_parser('merge', help='prove the merge is allowed, then merge and record the merge commit')
     sub.add_parser('production', help='verify every applicable production lane (scripts/deploy_prod.py)',
                    add_help=False)
     checked = sub.add_parser('deletion-check', help='prove nothing needed lives only on this devbox')
     checked.add_argument('--manifest', type=Path, help='JSON {path-glob: disposition} for preserved records')
-    finished = sub.add_parser('finish', help='close timing, publish ledger rows, record the outcome, publish telemetry')
+    checked.add_argument('--receipt', type=Path, help='receipt path (default: docs/handoffs/pr-<N>-closeout/ after merge)')
+    finished = sub.add_parser('finish', help='close timing, record the outcome, publish telemetry')
     finished.add_argument('--outcome', choices=['completed', 'blocked'], default='completed')
     return top
 
 
 COMMANDS = {'collect': cmd_collect, 'fix': cmd_fix, 'freeze': cmd_freeze, 'open-pr': cmd_open_pr,
-            'review-wait': cmd_review_wait, 'merge': cmd_merge, 'deletion-check': cmd_deletion_check,
-            'finish': cmd_finish}
+            'review-wait': cmd_review_wait, 'review-finish': cmd_review_finish, 'review-next': cmd_review_next,
+            'approval': cmd_approval, 'ledger': cmd_ledger, 'merge': cmd_merge,
+            'deletion-check': cmd_deletion_check, 'finish': cmd_finish}
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in {'gates', 'production'}:
         return delegate({'gates': 'deploy_gates', 'production': 'deploy_prod'}[argv[0]], argv[1:])
-    args = parser().parse_args(argv)
+    top = parser()
+    args = top.parse_args(argv)
+    if args.command == 'approval' and args.action == 'decide' and not (args.decision and args.evidence):
+        top.error('approval decide needs --decision and --evidence')
     return COMMANDS[args.command](args)
 
 

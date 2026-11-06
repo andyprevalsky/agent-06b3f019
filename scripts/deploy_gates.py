@@ -393,6 +393,14 @@ def list_selected(root: Path, base: str, skip_agentcard: str | None, template: P
     return selection
 
 
+def factory_event(root: Path, *event: str) -> None:
+    """Factory timing boundaries are a hard collection gate: a failed write stops the run."""
+    code = subprocess.run([sys.executable, str(root / 'scripts/record_factory_event.py'), 'deploy', *event],
+                          cwd=root).returncode
+    if code:
+        raise Blocked('telemetry', f'record_factory_event.py deploy {" ".join(event)} exited {code}', code)
+
+
 def stream(argv: list[str], cwd: Path, on_start=None) -> int:
     """Inherit stdout/stderr; forward TERM/INT so the cycle records `interrupted` itself.
 
@@ -728,7 +736,11 @@ def run(args, root: Path) -> int:
                 raise Blocked('init', f'deploy_test_cycle.py init exited {code}', code)
         if step != 'verify':
             action = 'resume' if step == 'resume' else 'run'
-            code = cycle_stream([*cycle, action, *bound, *launcher])
+            factory_event(root, 'stage-start', 'runtime-blackbox')
+            try:
+                code = cycle_stream([*cycle, action, *bound, *launcher])
+            finally:  # a failed or aborted round still closes its boundary; a rerun opens a new pair
+                factory_event(root, 'stage-finish', 'runtime-blackbox')
             if code:
                 raise Blocked('cycle', f'deploy_test_cycle.py {action} exited {code} (see {state_dir}/cycle.json)', code)
         code = stream(verify, root)
