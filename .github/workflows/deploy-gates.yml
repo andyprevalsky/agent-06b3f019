@@ -115,3 +115,4 @@ jobs:
           path: ${{ runner.temp }}/gate/artifact
           retention-days: 14
           if-no-files-found: error
+          include-hidden-files: true  # the gate's evidence lives under .context/
