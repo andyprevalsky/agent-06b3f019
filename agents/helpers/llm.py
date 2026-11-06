@@ -1951,6 +1951,31 @@ async def resolve_context_attachments(
     return resolved
 
 
+def llm_generation_metadata(usage: Any) -> Optional[Dict[str, Any]]:
+    """A persisted thought's recorded generation, or None.
+
+    ``{"output_tokens", "started_at", "ended_at"}``: the call's provider-reported
+    output tokens over its measured request → stream-end window, so the UI's
+    tok/s is never estimated. Only measured usage qualifies: estimated usage has
+    no window, and a Fast Mode replay's window times the replay, not the model.
+    UI-only: no message builder reads ``metadata.generation``.
+    """
+    if not isinstance(usage, dict) or usage.get("from_fast_cache"):
+        return None
+    tokens = usage.get("completion_tokens")
+    started = usage.get("request_started_at_ms")
+    ended = usage.get("response_ended_at_ms")
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in (tokens, started, ended)):
+        return None
+    if tokens <= 0 or ended <= started:
+        return None
+
+    def _iso(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    return {"output_tokens": tokens, "started_at": _iso(started), "ended_at": _iso(ended)}
+
+
 def convert_context_to_messages(
     context: List[Dict[str, Any]],
     include_system: bool = True,
@@ -3958,6 +3983,11 @@ async def call_llm_structured_streaming(
                 "prompt_tokens": stream_usage.get("prompt_tokens", 0),
                 "completion_tokens": stream_usage.get("completion_tokens", 0),
                 "total_tokens": stream_usage.get("total_tokens", 0),
+                # The measured generation window (request → stream end) for the
+                # persisted thought's tok/s (llm_generation_metadata). Estimates
+                # below carry no window, so they never produce a rate.
+                "request_started_at_ms": int(request_start_time * 1000) if request_start_time else None,
+                "response_ended_at_ms": int(_safe_time() * 1000) or None,
                 "actual_model": actual_model,
                 "pool_name": pool_name,
                 "pool_size": pool_size,

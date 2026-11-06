@@ -158,11 +158,18 @@ function activityMessage(entry: TranscriptEntry, id: string): Message {
   const base = { message_id: id, timestamp: iso(entry.at ?? entry.firstSeenAt) };
   if (entry.type === 'message') return finalAnswer(entry.text, id, entry.at ?? entry.firstSeenAt);
   if (entry.type === 'thinking') {
+    // The shared thought row (metadata.generation is added by the usage samples around it).
+    const live = entry.partial === true;
     return {
       ...base,
       role: 'TOOL',
       text: entry.text,
-      metadata: { toolName: 'thought', toolStatus: 'FINISHED', title: 'Thought', toolCallId: id },
+      metadata: {
+        toolName: 'thought',
+        toolStatus: live ? 'IN_PROGRESS' : 'FINISHED',
+        title: live ? 'Thinking' : 'Thought',
+        toolCallId: id,
+      },
     };
   }
   const running = entry.tool?.status === 'running';
@@ -445,6 +452,45 @@ class SessionBuilder {
       tokensPerSecond: !reset && elapsed > 0 ? (count - previous!.count) / elapsed : undefined,
     };
     open.metricSample = { count, at, scope };
+    // A thought's generation: the producer samples usage at each model call's start and
+    // end, so the samples around a thinking record bracket the call that generated it
+    // (a turn-scoped counter starts at 0 with the turn). A window a tool finished inside
+    // spans a tool run, not generation: no rate rather than a wrong one.
+    const from =
+      !reset && previous
+        ? previous
+        : scope === 'turn' && open.turn.startedAt !== null
+          ? { count: 0, at: open.turn.startedAt }
+          : null;
+    if (!from || from.at === null || at === null || at <= from.at || count <= from.count) return;
+    const inside = (message: Message) => {
+      const time = eventTimeMs(message.timestamp);
+      return time !== null && time > from.at! && time <= at;
+    };
+    const activities = open.turn.activities;
+    const toolRan = activities.some(
+      (message) =>
+        message.metadata?.toolName !== 'thought' &&
+        message.metadata?.toolStatus === 'FINISHED' &&
+        message.role === 'TOOL' &&
+        message.metadata?.a2a === undefined &&
+        message.metadata?.isUserAttentionMessage !== true &&
+        inside(message),
+    );
+    if (toolRan) return;
+    const generation = {
+      output_tokens: count - from.count,
+      started_at: iso(from.at),
+      ended_at: iso(at),
+    };
+    for (let index = activities.length - 1; index >= 0; index -= 1) {
+      const message = activities[index];
+      const time = eventTimeMs(message.timestamp);
+      if (time !== null && time <= from.at) break;
+      if (message.metadata?.toolName !== 'thought' || message.metadata.generation) continue;
+      if (message.metadata.toolStatus !== 'FINISHED' || !inside(message)) continue;
+      activities[index] = { ...message, metadata: { ...message.metadata, generation } };
+    }
   }
 
   end(entry: TranscriptEntry) {

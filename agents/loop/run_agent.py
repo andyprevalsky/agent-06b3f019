@@ -47,6 +47,7 @@ from helpers.llm import (
     call_llm_structured_streaming,
     check_progress,
     fetch_compute_token_activity,
+    llm_generation_metadata,
 )
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
@@ -1904,6 +1905,10 @@ async def run_agent(
         codex_reasoning_items = getattr(result, "codex_reasoning_items", [])
         if codex_reasoning_items:
             assistant_metadata["codex_reasoning_items"] = codex_reasoning_items
+        # The thought row's duration / ↓ tokens / tok/s (UI-only; no message builder reads it).
+        generation = llm_generation_metadata(usage) if response_text else None
+        if generation:
+            assistant_metadata["generation"] = generation
         if not assistant_metadata:
             assistant_metadata = None
         if response_text or assistant_tool_calls:

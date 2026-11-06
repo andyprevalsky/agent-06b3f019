@@ -88,6 +88,7 @@ async def _run_single_iteration(
     build_messages_override=None,
     get_pending_background_status_override=None,
     completion_handoff_override=None,
+    llm_response_text="",
 ):
     from loop.run_agent import run_agent
 
@@ -167,7 +168,7 @@ async def _run_single_iteration(
             else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         )
         return (
-            _DummyLLMResult("", selected_tool_calls),
+            _DummyLLMResult(llm_response_text, selected_tool_calls),
             selected_usage,
             detected_tools_ordered,
         )
@@ -575,6 +576,74 @@ async def test_tool_only_assistant_turn_persists_tool_calls():
 
     assert len(executed) == 1
     assert executed[0]["tool_call_id"] == "tc-web-search-1"
+
+
+_MEASURED_USAGE = {
+    "prompt_tokens": 10,
+    "completion_tokens": 596,
+    "total_tokens": 606,
+    "request_started_at_ms": 1_793_939_000_000,
+    "response_ended_at_ms": 1_793_939_002_400,
+}
+
+
+async def _posted_thought(usage):
+    _result, posted, _executed = await _run_single_iteration(
+        [{"tool": "web_search", "query": "rose repo"}],
+        [("web_search", "tc-web-search-1", 1.0)],
+        llm_usages_sequence=[dict(usage)],
+        llm_response_text="Searching for the repo first.",
+    )
+    return [m for m in posted if m["role"] == "ASSISTANT"][0]
+
+
+async def test_assistant_thought_records_measured_generation():
+    """C6 (Andy 2026-11-06): the root thought row's tok/s comes from the call's
+    measured output tokens over its request -> stream-end window, never an estimate."""
+    assistant = await _posted_thought(_MEASURED_USAGE)
+    assert assistant["metadata"]["generation"] == {
+        "output_tokens": 596,
+        "started_at": "2026-11-06T04:23:20.000Z",
+        "ended_at": "2026-11-06T04:23:22.400Z",
+    }
+    assert assistant["metadata"]["tool_calls"][0]["tool_call_id"] == "tc-web-search-1"
+    estimated = {"prompt_tokens": 10, "completion_tokens": 596, "total_tokens": 606}
+    for usage in (estimated, {**_MEASURED_USAGE, "from_fast_cache": True}):
+        assert "generation" not in ((await _posted_thought(usage))["metadata"] or {})
+
+
+async def test_thought_generation_metadata_is_invisible_to_every_llm_builder():
+    """metadata.generation is UI-only: the main loop, verifier/summary and planner
+    message builders produce identical requests with or without it."""
+    from domains.set_plan.service import build_planner_messages
+    from helpers.llm import build_llm_messages, convert_context_to_messages, llm_generation_metadata
+
+    def context(metadata):
+        return [
+            {"role": "USER", "text": "Whats our rose repo looking like?", "timestamp": "2026-11-06T04:23:00Z"},
+            {
+                "role": "ASSISTANT",
+                "text": "Searching for the repo first.",
+                "timestamp": "2026-11-06T04:23:22Z",
+                "metadata": metadata,
+            },
+            {
+                "role": "TOOL",
+                "text": "Rose-Ai-Labs/rose",
+                "timestamp": "2026-11-06T04:23:24Z",
+                "metadata": {"toolCallId": "tc-1", "toolName": "web_search", "toolStatus": "FINISHED"},
+            },
+        ]
+
+    plain = {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-1", "query": "rose repo"}]}
+    recorded = {**plain, "generation": llm_generation_metadata(_MEASURED_USAGE)}
+    assert recorded["generation"]
+    assert await build_llm_messages(context(plain), "system") == await build_llm_messages(context(recorded), "system")
+    for include_assistant in (False, True):
+        assert convert_context_to_messages(
+            context(plain), include_assistant=include_assistant
+        ) == convert_context_to_messages(context(recorded), include_assistant=include_assistant)
+    assert build_planner_messages(context(plain)) == build_planner_messages(context(recorded))
 
 
 async def test_rejected_completion_continues_with_stable_schema():
@@ -4737,6 +4806,11 @@ async def run_all_tests():
     await r.record_async(
         "attempt_completion_result_reaches_the_verifier_as_authored_work",
         test_attempt_completion_result_reaches_the_verifier_as_authored_work,
+    )
+    await r.record_async("assistant_thought_records_measured_generation", test_assistant_thought_records_measured_generation)
+    await r.record_async(
+        "thought_generation_metadata_is_invisible_to_every_llm_builder",
+        test_thought_generation_metadata_is_invisible_to_every_llm_builder,
     )
     await flush_realtime_broadcasts_for_tests()
     teardown_mock()

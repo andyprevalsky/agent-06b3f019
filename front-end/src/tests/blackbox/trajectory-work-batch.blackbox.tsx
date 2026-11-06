@@ -4,7 +4,6 @@ import { TrajectoryWorkGroup } from '@/features/terminal-component-group/compone
 import { groupTrajectoryWork } from '@/features/terminal-component-group/components/trajectoryWorkGroups';
 import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
-import { ThinkingIndicator } from '@/features/terminal-component-group/components/ThinkingIndicator';
 import { makeCtx } from './browser-agent-chip.fixtures';
 import { msg } from './code-agent-steering.fixtures';
 import { renderWithProviders } from './test-wrapper';
@@ -183,28 +182,16 @@ describe('current work batch elapsed time and ring semantics', () => {
       'data-agent-start-phase',
     );
   });
-  it('thinking always shows the ↓ token counter, live before the first byte or persisted', () => {
+  it('thinking is a stock activity row and never shows a token count estimated from text', () => {
     const live = msg(
       { toolName: 'thought', title: 'Thinking', toolStatus: 'IN_PROGRESS', ephemeral: true },
       { message_id: 'streaming:thinking', timestamp: '' },
     );
-    render(
-      <TrajectoryWorkGroup
-        group={group([live])}
-        renderMessage={() => null}
-        indicator={
-          <ThinkingIndicator
-            compact
-            isClaudeStreaming={false}
-            streamingTokenCount={0}
-            animatedTokenCount={0}
-          />
-        }
-      />,
-    );
+    render(<TrajectoryWorkGroup group={group([live])} renderMessage={() => null} />);
     const line = () => screen.getByTestId('trajectory-activity-line');
-    expect(line()).toHaveTextContent(/^Thinking0 tokens$/);
-    expect(line().querySelector('.lucide-arrow-down')).not.toBeNull();
+    expect(line()).toHaveTextContent(/^Thinking$/);
+    expect(screen.getByTestId('trajectory-activity-icon')).toHaveClass('lucide-lightbulb');
+    expect(screen.queryByTestId('thinking-indicator')).toBeNull();
     cleanup();
     const thought = msg(
       {},
@@ -216,11 +203,9 @@ describe('current work batch elapsed time and ring semantics', () => {
       },
     );
     render(<TrajectoryWorkGroup group={group([thought])} renderMessage={() => null} />);
-    expect(line()).toHaveTextContent(/^Thinking100 tokens$/);
-    expect(line().querySelector('.lucide-arrow-down')).not.toBeNull();
-    expect(
-      screen.getByTestId('trajectory-work-group').querySelector('.lucide-lightbulb'),
-    ).not.toBeNull();
+    expect(line()).toHaveTextContent(/^Thinking$/);
+    expect(line().querySelector('.lucide-arrow-down')).toBeNull();
+    expect(screen.getByTestId('trajectory-activity-icon')).toHaveClass('lucide-lightbulb');
   });
   it('does not invent elapsed time for a missing timestamp', () => {
     const untimed = { ...activity('read_file'), timestamp: '' };
