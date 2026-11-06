@@ -621,6 +621,26 @@ def test_format_user_context_integration_no_creds():
     assert "## Connected Integrations" in result
 
 
+def test_format_user_context_lists_sync_failed_data_integrations():
+    """A failed latest sync keeps a data integration listed (its synced data is
+    still grep-searchable); an expired grant does not."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=[
+            {"name": "granola", "status": "SYNC_FAILED", "emailCredentials": []},
+            {"name": "plaid", "status": "EXPIRED", "emailCredentials": []},
+        ],
+    )
+    assert "- granola" in result
+    assert "plaid" not in result
+    assert "searchable through an explore agent's grep" in result
+
+
 def test_format_user_context_snapshot():
     """_format_user_context includes distilled snapshot content and latest update."""
     from helpers.get_user_context import _format_user_context
