@@ -1,0 +1,282 @@
+### RCA-WEBDECOY-POINTER-1 · Browser agent gets a hover tool, humanized drag start and truthful pointer descriptions
+
+````text
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 🔐 APPROVAL RCA-WEBDECOY-POINTER-1 · ⏳ AWAITING DECISION
+ Browser hover tool; humanized drag start; truthful pointer text
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Before:
+  Asked to "move to and click" a control like a person, the browser
+  agent (moonshotai/kimi-k3, pool rose-1-oss) says "there's no pure
+  mouse-move tool" and uses `drag` (press-hold-release) to fake pointer
+  movement. The raw-CDP drag presses at a teleported pointer, which FCaptcha
+  reports as "Click injected with no pointer trajectory (1 teleport clicks)".
+  Later, moving toward the submit button, it sends drag({"end_x":480,
+  "end_y":408,"steps":20}), which is rejected, and repeats that call
+  177 times until the 420 s task timeout.
+────────────────────────────────────────────────────────────────
+After:
+  Same page and task: the agent calls `hover` to move the pointer without
+  pressing, then `click`; it makes no drag, the task completes in about
+  140 s, and FCaptcha returns no vision_ai/teleport detection. Any drag that
+  is still needed (sliders) presses only after the humanizer has moved the
+  pointer to its start. Unchanged: the task, evaluator, timeout and ratchet.
+────────────────────────────────────────────────────────────────
+How:
+  Adds a `hover` tool schema and description, edits the click,
+  click_coordinates, drag and evaluate tool descriptions to match the
+  runtime, and routes drag through the existing humanizer.drag_between.
+────────────────────────────────────────────────────────────────
+TL;DR:
+  Approving gives every browser agent a native pointer-only `hover` tool
+  and accurate click/drag text, which stops the drag-as-movement misuse
+  behind both webdecoy failure modes.
+────────────────────────────────────────────────────────────────
+Evidence:
+  What failed: When the browser agent spawned to complete the WebDecoy
+    FCaptcha demo like a person reached the checkbox and the submit
+    button, the LLM called `drag` to move the mouse pointer, and the raw
+    drag registered as 1 teleport click (risk 0.164 > 0.163 on dc306296)
+    or, sent with only end_x/end_y, was rejected 147 times (cloud
+    98fac0b3) / 177 times (local 1eeef95c) until "Timeout after 425s".
+  FE link: verified rendered (buggy 1eeef95c, fixed 7ab20ea6) — see Links
+  LLM dump: last call `browser_use_step_17` on
+    `1eeef95c-a0ae-4516-a6b5-df03a9d1fa0d` (the 177 later rejected calls were
+    not dumped on the buggy code; this change adds that dump) — see Links
+  Local repro (4m 47s: step 2 24.4 s, step 3 262.4 s; step 4 ~140 s):
+    Tests: an end-only drag stays rejected while the same pointer-move
+      intent is accepted as `hover` and executes humanizer.hover without
+      pressing; drag dispatch calls humanizer.drag_between instead of raw
+      CDP; pointer tool descriptions state the runtime behaviour.
+    1. cd agents && source venv/bin/activate
+    2. env -u FLY_APP_NAME python scripts/run_blackbox_tests.py rose-browser-use
+    3. env -u FLY_APP_NAME python scripts/run_blackbox_tests.py spawn-browser-agent-v3
+    4. cd .. && scripts/run-bench --local browser-biometrics-webdecoy
+    Pre-fix: on 24b862375 the 4 new tests fail ("Unknown action: hover",
+      missing description text, no dump of the rejected call); the
+      benchmark fails "Timeout after 425s (task timeout=420s) | Agent
+      status: PAUSED" with 177 rejected drags and FCaptcha detection
+      "vision_ai: Click injected with no pointer trajectory (1 teleport
+      clicks)".
+    Post-fix: on 584cf4076 rose-browser-use PASS (122) and
+      spawn-browser-agent-v3 PASS. Benchmark on the approved bytes
+      (15f2ef6cf = 584cf4076 code): PASS 1/1, run 7ab20ea6 138 s, captured API
+      score 0.057, no vision_ai detection, 2 hover, 0 drag. Earlier text
+      (cce696e9d era): PASS 2/2 (d920016a 142 s, e04e7558 138 s).
+  Golden reference:
+    claude-code-src/cli.js:1830 — computer use exposes `mouse_move` "Move
+      the mouse cursor without clicking" next to `left_click_drag` "Press,
+      move to target, and release."; this change converges on it.
+    claude-code-src/cli.js:66 — Claude in Chrome `computer` has a `hover`
+      action "Move the mouse cursor to the specified coordinates or element
+      without clicking"; this change converges on it (element or x/y).
+    claude-code-src/src/utils/computerUse/executor.ts:103-120 — the executor
+      moves the pointer before click/drag-from (instantly, undescribed to
+      the model); Rose's click already moves the pointer (humanized), and the
+      new text states that; converges on the behaviour.
+    openclaw/extensions/browser/src/browser-tool.schema.ts:19 — `hover` act
+      kind beside `drag`; agent.act.normalize.ts:228-237 drag requires a
+      start and an end; this change converges on both.
+    hermes-agent/tools/drive_preview_tool.py:81-83 — "Input is real
+      (pointer travels, hover menus open)" with a `hover` action that parks
+      the pointer; hermes-agent/tools/computer_use/schema.py:117-131 — drag
+      takes from/to (both ends); this change converges on both.
+    codex/, prime-agent/, kimi-code/ — Not applicable: searched for
+      mouse_move, hover and left_click_drag; no browser or computer pointer
+      tool exists in those repos.
+  Golden review: pending third review @ 584cf4076 — NOT_GROUNDED by
+    ph748phfmxpfraa1ddq59b20zh8hqjcf @ cce696e9d and by
+    ph7ab9n505n0bky7mb5ar1gsx18hq0yc @ 584cf4076, both on packet format only
+    (mechanism grounding passed both times); B1-B3 now fixed.
+  Environment:
+    Evaluators: `_evaluate_webdecoy_biometrics_result` — exact string:
+      demo visited, checkbox interaction and invisible-form interaction
+      markers present; regex: FCaptcha risk score (captured API, then
+      structured output, then visible text) must be <= 0.163; status: agent
+      COMPLETED within 420 s. Catalog: `run_benchmark.py` built-in evaluator
+      / static check.
+    Fixtures: base `base:victoria-prod-sync-v1`; db none; live overlay none
+      (live third-party page webdecoy.com)
+    Task prompt:
+      Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.
+────────────────────────────────────────────────────────────────
+Detail:
+  First-bad boundary: the browser tool surface (BROWSER_TOOL_MODELS /
+  BROWSER_USE_TOOLS) had no pointer-only move and described click without
+  its pointer travel, so a "move to X" intent became `drag`. The v3 drag
+  dispatcher then pressed at a teleported pointer (raw CDP) instead of
+  humanizer.drag_between. Unchanged failing command: scripts/run-bench
+  --local browser-biometrics-webdecoy (FAIL timeout 425 s on 24b862375;
+  PASS 1/1 on the approved bytes, 2/2 on earlier text). Task, evaluator,
+  timeout and ratchet unchanged.
+  Snapshot: 584cf4076
+  Scope: agents/browser_tools/schemas.py:289 — new HoverTool schema
+  Scope: agents/browser_tools/schemas.py:996 — "hover" registry entry
+  Scope: agents/providers/rose/browser_use.py:77 — click description
+  Scope: agents/providers/rose/browser_use.py:84 — click_coordinates description
+  Scope: agents/providers/rose/browser_use.py:95 — drag description
+  Scope: agents/providers/rose/browser_use.py:124 — new hover description
+  Scope: agents/providers/rose/browser_use.py:194 — evaluate description
+  Scope: agents/providers/rose/browser_use.py:1301 — _VALID_ACTIONS hover
+  Scope: agents/providers/rose/browser_use.py:1428 — normalize hover branch
+  Exact diff of every LLM-visible hunk (git diff -U2 origin/main):
+  diff --git a/agents/browser_tools/schemas.py b/agents/browser_tools/schemas.py
+  index 3ac6ab533..84b92cda1 100644
+  --- a/agents/browser_tools/schemas.py
+  +++ b/agents/browser_tools/schemas.py
+  @@ -287,4 +287,30 @@ class DragTool(BaseModel):
+   
+   
+  +class HoverTool(BaseModel):
+  +    """Move the mouse pointer to an element or viewport point without clicking."""
+  +
+  +    tool: Literal["hover"]
+  +    index: Optional[int] = Field(
+  +        default=None,
+  +        description="DOM index of the element to move the pointer to",
+  +    )
+  +    x: Optional[int] = Field(
+  +        default=None,
+  +        description="Viewport X to move the pointer to (pixels from left; matches screenshot)",
+  +    )
+  +    y: Optional[int] = Field(
+  +        default=None,
+  +        description="Viewport Y to move the pointer to (pixels from top; matches screenshot)",
+  +    )
+  +
+  +    @model_validator(mode="after")
+  +    def require_target(self) -> "HoverTool":
+  +        if (self.x is None) ^ (self.y is None):
+  +            raise ValueError("hover x and y must be provided together")
+  +        if self.index is None and self.x is None:
+  +            raise ValueError("hover requires index or both x and y")
+  +        return self
+  +
+  +
+   # ============================================================================
+   # DROPDOWN TOOLS (browser-use additions)
+  @@ -968,4 +994,5 @@ BROWSER_TOOL_MODELS = {
+       "click_coordinates": ClickAtCoordinatesTool,
+       "drag": DragTool,
+  +    "hover": HoverTool,
+       # Dropdown handling
+       "dropdown_options": DropdownOptionsTool,
+  diff --git a/agents/providers/rose/browser_use.py b/agents/providers/rose/browser_use.py
+  index 2710b737b..5d4feef79 100644
+  --- a/agents/providers/rose/browser_use.py
+  +++ b/agents/providers/rose/browser_use.py
+  @@ -76,5 +76,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
+       },
+       "click": {
+  -        "description": "Click element by index",
+  +        "description": (
+  +            "Click element by index. The click itself moves the mouse pointer to the element before "
+  +            "pressing, so no separate pointer movement is needed."
+  +        ),
+           "params": {"index": {"type": "integer", "description": "Element index from browser_state", "required": True}},
+       },
+  @@ -82,5 +85,6 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
+           "description": (
+               "Fallback only: click at specific coordinates when the target has no numeric DOM index. "
+  -            "Do not use when the current browser state lists a relevant [index]."
+  +            "Do not use when the current browser state lists a relevant [index]. Like click, it moves "
+  +            "the mouse pointer to the target itself before pressing."
+           ),
+           "params": {
+  @@ -93,7 +97,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
+               "Drag from a start point to an end point with a real mouse press → move → release "
+               "(CDP Input.dispatchMouseEvent, same path browser-use uses for Element.drag_to). "
+  -            "Use for sliders, CAPTCHA / 'Bot or Not' slide-to-verify widgets, scrubbers, and "
+  -            "drag-and-drop. Prefer source_index/target_index when those nodes are indexed; "
+  -            "otherwise use start_x/start_y and end_x/end_y from the screenshot viewport."
+  +            "The mouse button stays held for the whole movement. Use only for sliders, CAPTCHA / "
+  +            "'Bot or Not' slide-to-verify widgets, scrubbers, and drag-and-drop; never to move the "
+  +            "pointer, because click and click_coordinates already move it. Both ends are "
+  +            "required: source_index or start_x/start_y, and target_index or end_x/end_y. Prefer "
+  +            "indexes when those nodes are indexed; otherwise use screenshot viewport coordinates."
+           ),
+           "params": {
+  @@ -116,4 +122,16 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
+           },
+       },
+  +    "hover": {
+  +        "description": (
+  +            "Move the mouse pointer to an element by index, or to viewport coordinates x/y, without "
+  +            "clicking, using the same pointer movement as click. Useful for triggering hover states "
+  +            "such as menus and tooltips."
+  +        ),
+  +        "params": {
+  +            "index": {"type": "integer", "description": "Element index from browser_state"},
+  +            "x": {"type": "integer", "description": "Viewport X"},
+  +            "y": {"type": "integer", "description": "Viewport Y"},
+  +        },
+  +    },
+       "input_text": {
+           "description": "Input text into element by index",
+  @@ -177,5 +195,5 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
+           "description": (
+               "Execute JavaScript in the live browser page context. Use for ACTIONS or LIVE DOM STATE QUERIES "
+  -            "that page markdown cannot answer: hover, drag, custom selectors, shadow DOM traversal, reading "
+  +            "that page markdown cannot answer: custom selectors, shadow DOM traversal, reading "
+               "computed styles, dispatching events, querying iframe contents, or reading visible product/cart "
+               "facts before navigating away. Wrap in IIFE with try-catch. Prefer evaluate over inventing "
+  @@ -1281,4 +1299,5 @@ _VALID_ACTIONS = frozenset(
+           "click_coordinates",
+           "drag",
+  +        "hover",
+           "scroll",
+           "wait",
+  @@ -1407,4 +1426,17 @@ def normalize_browser_use_response(
+           }
+   
+  +    if normalized_action == "hover":
+  +        hover_params = {
+  +            key: params[key] for key in ("index", "x", "y") if params.get(key) is not None
+  +        }
+  +        return {
+  +            "action": "hover",
+  +            "thinking": thinking,
+  +            "index": hover_params.get("index"),
+  +            "coordinates": None,
+  +            "element_description": None,
+  +            "params": hover_params,
+  +        }
+  +
+       if normalized_action == "click" and index is None:
+           raise ValueError(
+────────────────────────────────────────────────────────────────
+Downstream:
+  Severity: 🟡 MODERATE — every browser-agent request gains one tool and
+    longer click/click_coordinates/drag/evaluate descriptions.
+  Future prod trajectories affected: — unknown: the share of production
+    trajectories that spawn a browser agent and want pointer movement or a
+    drag was not measured; it needs a read-only prod query of root
+    trajectories with spawn_browser_agent tool calls over a recent window.
+  Risk: 🟢 LOW — hover never presses; drag keeps the same endpoints but
+    gains a humanized approach; system-prompt and message bytes are
+    unchanged (pinned hashes re-pinned for tools only).
+  One-time prompt-cache prefix change for browser requests. When
+  BROWSER_AGENT_HUMANIZER_ENABLED=false, hover and click fall back to a
+  plain CDP pointer move (the text stays true). One exception to the click
+  text: browser-use's occluded-element JavaScript click fallback does not
+  move the pointer. 10k agents: per-session
+  pointer input, no shared state. Rollback: revert the commits.
+────────────────────────────────────────────────────────────────
+Approve: RCA-WEBDECOY-POINTER-1 approve
+Reject:  RCA-WEBDECOY-POINTER-1 reject: <reason>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+````
+
+- **FE link (buggy):** [Open agent 1eeef95c](https://www.roselabs.ai/?agent-id=1eeef95c-a0ae-4516-a6b5-df03a9d1fa0d#benchmark-share=b8168458-8a69-4a79-bf35-b5dd181006a6.1796519814.b6ed49ad057d463298c47c61426e976b47bc77c57e61251354fc542e9f5166e1) — verified rendered
+- **FE link (fixed):** [Open agent 7ab20ea6](https://www.roselabs.ai/?agent-id=7ab20ea6-40bf-412e-9322-069425bbed4e#benchmark-share=345f01b2-6426-4dfa-8542-67775e3bfb92.1796520662.75fe0e718dd0d66d683474f5818f1db3877e97d90e506777dc77dfd05484cdcf) — verified rendered
+- **LLM dump:** [Open rendered <presigned R2 URL redacted> — last call `browser_use_step_17` on `1eeef95c-a0ae-4516-a6b5-df03a9d1fa0d`
+- **LLM dump (fixed):** [Open rendered <presigned R2 URL redacted> — last call `completion_summary` on `7ab20ea6-40bf-412e-9322-069425bbed4e`
+- **Scope:** [`agents/browser_tools/schemas.py:289`](agents/browser_tools/schemas.py#L289) — HoverTool
+- **Scope:** [`agents/browser_tools/schemas.py:996`](agents/browser_tools/schemas.py#L996) — registry
+- **Scope:** [`agents/providers/rose/browser_use.py:77`](agents/providers/rose/browser_use.py#L77) — click
+- **Scope:** [`agents/providers/rose/browser_use.py:84`](agents/providers/rose/browser_use.py#L84) — click_coordinates
+- **Scope:** [`agents/providers/rose/browser_use.py:95`](agents/providers/rose/browser_use.py#L95) — drag
+- **Scope:** [`agents/providers/rose/browser_use.py:124`](agents/providers/rose/browser_use.py#L124) — hover
+- **Scope:** [`agents/providers/rose/browser_use.py:194`](agents/providers/rose/browser_use.py#L194) — evaluate
+- **Scope:** [`agents/providers/rose/browser_use.py:1301`](agents/providers/rose/browser_use.py#L1301) — _VALID_ACTIONS
+- **Scope:** [`agents/providers/rose/browser_use.py:1428`](agents/providers/rose/browser_use.py#L1428) — normalize hover
