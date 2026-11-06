@@ -301,9 +301,15 @@ def unlaunched_relay_retired(campaign, bound, document):
          'original startup custody')
     native = runpy.run_path(str(Path(__file__).with_name('cloudbench-shared-relay.py')))
     native['physical'](directory, True)
+    prefix = 'proc-start:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':'
+    def local_birth(value):
+        """Require the producer's native identity on this exact machine boot."""
+        return (isinstance(value, str) and value.startswith(prefix)
+                and value[len(prefix):].isdigit() and int(value[len(prefix):]) > 0)
     need(type(authority.get('parent_pid')) is int and authority['parent_pid'] > 1
-         and isinstance(authority.get('parent_start'), str) and bool(authority['parent_start'])
-         and native['birth'](authority['parent_pid']) != authority['parent_start'], 'startup parent still live')
+         and local_birth(authority.get('parent_start'))
+         and native['birth'](authority['parent_pid']) != authority['parent_start'],
+         'startup parent identity not retired on this host')
     for role in ('bootstrap', 'broker'):
         path = directory / (role + '-owner.json')
         if not path.exists():
@@ -315,7 +321,7 @@ def unlaunched_relay_retired(campaign, bound, document):
         need(owner.get('parent_pid') == authority['parent_pid']
              and owner.get('parent_start') == authority['parent_start']
              and type(owner.get('pid')) is int and owner['pid'] > 1
-             and isinstance(owner.get('birth'), str) and bool(owner['birth'])
+             and local_birth(owner.get('birth'))
              and cleanup.get(role + '_joined') is True
              and native['birth'](owner['pid']) != owner['birth'], 'startup producer still live')
     need(not socket.exists() and not socket.is_symlink()

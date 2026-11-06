@@ -2312,13 +2312,14 @@ class Cycle(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix='cb-relay-')
         self.addCleanup(temporary.cleanup)
         directory = Path(temporary.name)
-        authority = dict(parent_pid=2147483000, parent_start='retired-parent',
+        prefix = 'proc-start:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':'
+        authority = dict(parent_pid=2147483000, parent_start=prefix + '1',
             agent_socket=str(directory / 'fly-agent.sock'), inventory_directory=str(campaign / 'shared-inventory'))
         c.write(directory / 'authority.private.json', authority)
         c.write(directory / 'startup-cleanup.json', dict(bootstrap_joined=True, broker_joined=True,
             agent_shutdown_verified=False, agent_retirement_pending=True))
         for role in ('bootstrap', 'broker'):
-            c.write(directory / (role + '-owner.json'), dict(pid=2147483001, birth='retired-child',
+            c.write(directory / (role + '-owner.json'), dict(pid=2147483001, birth=prefix + '2',
                 parent_pid=authority['parent_pid'], parent_start=authority['parent_start']))
             (directory / (role + '.private.log')).write_text('unsupported Fly agent version\n')
         archive = campaign / 'shared-relay'
@@ -2352,6 +2353,20 @@ class Cycle(unittest.TestCase):
         finally:
             child.stdin.close();child.wait(timeout=10);child.stdout.close()
         c.reconcile(state, occurrence['id'], proof)
+
+    def test_unlaunched_relay_refuses_wrong_host_or_live_parent(self):
+        import runpy
+        state, occurrence, proof, directory = self.unlaunched_relay_state()
+        source = directory / 'authority.private.json'
+        archive = Path(proof['campaign']) / 'shared-relay' / source.name
+        original = c.read(source)
+        native = runpy.run_path(str(ROOT / 'scripts/cloudbench-shared-relay.py'))
+        for fields in [dict(parent_start='proc-start:foreign-host:1'),
+                       dict(parent_pid=os.getpid(), parent_start=native['birth'](os.getpid()))]:
+            for path in (source, archive):
+                c.write(path, {**original, **fields});proof['files'][str(path)] = c.sha_file(path)
+            with self.subTest(fields=fields), self.assertRaisesRegex(ValueError, 'parent identity not retired'):
+                c.reconcile(state, occurrence['id'], proof)
 
     def isolated_campaign_state(self):
         import time
