@@ -25,11 +25,11 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from benchmarks.code_agent_checks import external, one_session_per_spawn, startup_time
+from benchmarks.code_agent_checks import checkpoint_stored, external, one_session_per_spawn, startup_time
 
 CheckFn = Callable[[dict, dict], "tuple[bool, str]"]
 
-_MODULES = (startup_time, one_session_per_spawn)
+_MODULES = (startup_time, one_session_per_spawn, checkpoint_stored)
 
 CHECKS: dict[str, CheckFn] = {module.CHECK_TYPE: module.check for module in _MODULES}
 

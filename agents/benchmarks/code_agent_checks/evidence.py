@@ -57,6 +57,9 @@ BACKEND_NEEDLES = (
     "Rose-in-Rose preview",
     "Session ready: ",
     "Session attached to the live CLI: ",
+    # The close checkpoint of each code session (back-end/src/providers/codeSessions/{checkpoint,lifecycle}.ts).
+    "Checkpoint stored",
+    "Code session checkpoint failed",
     # The model route of each create (back-end/src/providers/e2b.ts credential and gateway lines).
     "Claude Code credentials for agent",
     "funded fallback for agent",
@@ -215,6 +218,48 @@ def route_of_creates(lines: Iterable[str], agent_ids: Iterable[str]) -> list[dic
         elif window is not None and component == "ClaudeCredentials":
             window.append(message)
     return routes
+
+
+_CHECKPOINT_CAP = re.compile(r"Checkpoint worktree is (?P<size>\d+) bytes \(cap (?P<cap>\d+)\)")
+
+
+def checkpoints(lines: Iterable[str]) -> dict:
+    """Close checkpoints the backend stored or failed to store (isolated backend: all are the run's)."""
+    stored: list[dict] = []
+    failed: list[dict] = []
+    for line in lines:
+        parsed = parse_backend_line(line)
+        if parsed is None:
+            continue
+        at, component, message, fields = parsed
+        if component == "CodeSessionCheckpoint" and "Checkpoint stored" in message:
+            try:
+                size = int(str(fields.get("bytes")))
+            except ValueError:
+                continue
+            stored.append(
+                {
+                    "at": at.isoformat(),
+                    "codeSessionId": fields.get("codeSessionId"),
+                    "seq": fields.get("seq"),
+                    "reason": fields.get("reason"),
+                    "bytes": size,
+                }
+            )
+        elif component == "CodeSessionLifecycle" and "Code session checkpoint failed" in message:
+            text = f"{message} {fields.get('error') or ''}"
+            sized = _CHECKPOINT_CAP.search(text)
+            failed.append(
+                {
+                    "at": at.isoformat(),
+                    "codeSessionId": fields.get("codeSessionId"),
+                    "reason": fields.get("reason"),
+                    "error": text[:300],
+                    "worktree_bytes": int(sized.group("size")) if sized else None,
+                    "cap_bytes": int(sized.group("cap")) if sized else None,
+                }
+            )
+    return {"stored": stored, "failed": failed}
 
 
 def _finish_create(create: dict) -> dict:
@@ -382,6 +427,7 @@ async def collect(data: dict, *, benchmark: str, base_url: Optional[str]) -> dic
     backend_lines = fetch_local_backend_log_lines(BACKEND_NEEDLES)
     creates = backend_creates(backend_lines, agent_ids)
     routes = route_of_creates(backend_lines, agent_ids)
+    checkpoint_evidence = checkpoints(backend_lines)
     spawns = build_spawns(_worker_entries(worker_lines), creates)
     recorded = record_startup_spans(benchmark, spawns, environment=_environment(base_url))
     await _hydrate_claude_code_sessions(data)
@@ -404,12 +450,14 @@ async def collect(data: dict, *, benchmark: str, base_url: Optional[str]) -> dic
         "backend_creates": creates,
         "route": routes[0] if routes else {"kind": "unknown"},
         "routes": routes,
+        "checkpoints": checkpoint_evidence,
         "spawn_calls_by_agent": spawn_calls_by_agent(data, agent_ids),
         "sessions_by_agent": sessions_by_agent(state.get("claude_code_sessions") or []),
         "sources": {
             "worker_lines": len(worker_lines),
             "backend_lines": len(backend_lines),
             "backend_creates": len(creates),
+            "checkpoint_lines": len(checkpoint_evidence["stored"]) + len(checkpoint_evidence["failed"]),
             "span_observations_recorded": recorded,
             "session_evidence_error": state.get("claude_code_session_evidence_error"),
         },

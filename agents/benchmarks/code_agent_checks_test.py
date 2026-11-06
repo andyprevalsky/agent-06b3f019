@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from benchmarks import code_agent_checks
 from benchmarks.code_agent_checks import evidence as ev
 from benchmarks.code_agent_checks import external
-from benchmarks.code_agent_checks import one_session_per_spawn, startup_time
+from benchmarks.code_agent_checks import checkpoint_stored, one_session_per_spawn, startup_time
 from benchmarks.long_horizon import RUNTIME_STATIC_CHECK_TYPES
 from benchmarks.run_benchmark import _run_declared_static_check
 from benchmarks.select_predeploy_benches import DEFAULT_CATALOG, load_tasks, select_predeploy_benches
@@ -619,3 +619,59 @@ def test_collect_records_the_route_beside_the_startup_phases(monkeypatch):
     assert evidence["route"]["kind"] == "funded_gateway" and evidence["routes"][0]["gateway_host"] == "openrouter.ai"
     assert evidence["startup_phases"][0]["route"] == "funded_gateway"
     json.dumps(evidence)
+
+
+# Real backend lines: the benchmark run on integrate/code-agent-fixes that stored 208 MB checkpoints
+# (2026-11-06 14:32Z), and the same task once the Rose checkout crossed the cap (20:41Z).
+DEV_CHECKPOINT_STORED = (
+    "\x1b[36m[2026-11-06T14:32:53.027Z] INFO [CodeSessionCheckpoint] Checkpoint stored "
+    "codeSessionId=1a853632-e725-493e-988d-f3e41097d038 seq=1 reason=close "
+    "artifacts=worktree.tar.gz,repo-0.bundle,cli-log.jsonl bytes=208218496\x1b[0m"
+)
+DEV_CHECKPOINT_FAILED = (
+    "\x1b[31m[2026-11-06T20:41:51.179Z] ERROR [CodeSessionLifecycle] Code session checkpoint failed "
+    "codeSessionId=158b5aa5-496e-456f-b757-2df23dcfcc74 reason=close "
+    "error=Checkpoint worktree is 210456698 bytes (cap 209715200); refusing to store\x1b[0m"
+)
+PROD_CHECKPOINT_STORED = (
+    '{"timestamp":"2026-11-06T04:26:09.704Z","level":"info","component":"CodeSessionCheckpoint",'
+    '"message":"Checkpoint stored","codeSessionId":"9d1f3c52-1f0e-4b0a-8a54-0f2d6a2c11aa","seq":"2",'
+    '"reason":"close","artifacts":"worktree.tar.gz,repo-0.bundle","bytes":"207297224"}'
+)
+SMALL_STORED = DEV_CHECKPOINT_STORED.replace("bytes=208218496", "bytes=4194304")
+
+
+def test_checkpoints_parse_dev_and_prod_lines():
+    parsed = ev.checkpoints([DEV_CHECKPOINT_STORED, PROD_CHECKPOINT_STORED, DEV_CHECKPOINT_FAILED, "not a log line"])
+    assert [item["bytes"] for item in parsed["stored"]] == [208218496, 207297224]
+    assert parsed["stored"][0]["codeSessionId"] == "1a853632-e725-493e-988d-f3e41097d038"
+    assert parsed["stored"][1]["seq"] == "2"
+    failure = parsed["failed"][0]
+    assert failure["codeSessionId"] == "158b5aa5-496e-456f-b757-2df23dcfcc74"
+    assert (failure["worktree_bytes"], failure["cap_bytes"]) == (210456698, 209715200)
+
+
+def test_checkpoint_check_fails_on_the_cap_failure_the_run_swallowed():
+    evidence = {"checkpoints": ev.checkpoints([DEV_CHECKPOINT_FAILED])}
+    ok, detail = checkpoint_stored.check(evidence, {"max_fraction_of_cap": 0.5})
+    assert not ok
+    assert "failed (200.7 MiB against a 200.0 MiB cap)" in detail and "0 checkpoint(s) stored" in detail
+
+
+def test_checkpoint_check_fails_a_full_tree_checkpoint_and_passes_a_small_one():
+    full = {"checkpoints": ev.checkpoints([DEV_CHECKPOINT_STORED])}
+    ok, detail = checkpoint_stored.check(full, {"max_fraction_of_cap": 0.5})
+    assert not ok and "over the 100.0 MiB budget (50% of the 200.0 MiB cap)" in detail
+    small = {"checkpoints": ev.checkpoints([SMALL_STORED])}
+    ok, detail = checkpoint_stored.check(small, {"max_fraction_of_cap": 0.5})
+    assert ok and "4.0 MiB" in detail
+
+
+def test_checkpoint_check_fails_closed_without_evidence_a_checkpoint_or_a_fraction():
+    assert not checkpoint_stored.check({}, {"max_fraction_of_cap": 0.5})[0]
+    assert not checkpoint_stored.check({"checkpoints": {"stored": [], "failed": []}}, {"max_fraction_of_cap": 0.5})[0]
+    small = {"checkpoints": ev.checkpoints([SMALL_STORED])}
+    assert not checkpoint_stored.check(small, {})[0]
+    assert not checkpoint_stored.check(small, {"max_fraction_of_cap": 0.5, "min_checkpoints": 2})[0]
+    one_failed = {"checkpoints": ev.checkpoints([SMALL_STORED, DEV_CHECKPOINT_FAILED])}
+    assert not checkpoint_stored.check(one_failed, {"max_fraction_of_cap": 0.5})[0]
