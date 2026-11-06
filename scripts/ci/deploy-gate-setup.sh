@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Prepare a fresh Blacksmith Ubuntu 24.04 runner for one /deploy gate
 # (.github/workflows/deploy-gates.yml). Mirrors the devbox toolchain: Node 22,
-# Python 3.11.9 agents/venv, system PostgreSQL 16 + pgvector, Playwright Chromium,
+# uv-managed Python 3.11.9 agents/venv, system PostgreSQL 16 + pgvector, Playwright Chromium,
 # uv, flyctl, ruby and rsync. Private env files come from one secret bundle.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 step() { printf '\n== %s (%ss)\n' "$1" "$SECONDS"; }
 DEPS="${DEPLOY_GATE_DEPS:-/home/runner/rose-deps}"
+export UV_PYTHON_INSTALL_DIR="$DEPS/uv-python"
 # Dependency directories bind-mounted from the sticky disk at their devbox paths.
 MOUNTS=(node_modules back-end/node_modules front-end/node_modules agents/venv)
 BROWSERS="$HOME/.cache/ms-playwright"
@@ -106,7 +107,10 @@ else
     -exec rm -rf {} +
   npm install --include=dev --no-audit --no-fund --legacy-peer-deps
   step "agents venv"
-  python -m venv agents/venv
+  # uv's managed CPython, as on the devbox (its build lacks os.pidfd_open and has a different
+  # address-space baseline than the runner image's Python). It lives on the disk so a warm VM keeps it.
+  uv python install --quiet "$PYTHON_VERSION"
+  uv venv --quiet --allow-existing --python "$PYTHON_VERSION" --python-preference only-managed agents/venv
   uv pip install --quiet --python agents/venv/bin/python -r agents/requirements.txt
   step "playwright"
   agents/venv/bin/python -m playwright install chromium >/dev/null
