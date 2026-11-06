@@ -79,6 +79,13 @@ export function parseBackgroundTasks(raw: unknown): TreeBackgroundTask[] | undef
   return tasks;
 }
 
+/** The later of two ISO timestamps (either may be absent). */
+function laterTimestamp(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Date.parse(b) > Date.parse(a) ? b : a;
+}
+
 function isoOrUndefined(value: unknown): string | undefined {
   if (typeof value === 'string' && value) return value;
   if (value instanceof Date) return value.toISOString();
@@ -264,7 +271,8 @@ function fetchInitialTree(
         nodes.set(agentId, {
           ...node,
           createdAt: node.createdAt ?? snapshot?.createdAt,
-          lastUserMessageAt: node.lastUserMessageAt ?? snapshot?.lastUserMessageAt,
+          // A person may have messaged from elsewhere: keep the later stamp.
+          lastUserMessageAt: laterTimestamp(node.lastUserMessageAt, snapshot?.lastUserMessageAt),
           taskPath: node.taskPath ?? snapshot?.taskPath,
           backgroundTasks: node.backgroundTasks ?? snapshot?.backgroundTasks,
           progressEstimate: mergeProgressEstimate(
