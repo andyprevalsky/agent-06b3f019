@@ -1568,8 +1568,9 @@ class Cycle(unittest.TestCase):
             'api': {'command': self.plan['gates'][1]['command'], 'checks': ['a']}}})
         self.assertEqual(['api'], [g['name'] for g in c.records(self.plan, self.state)])
 
-    def skipped_row(self, sha='c' * 64, reason='Compute token pool exhausted or cooling down', status='SKIPPED', passed=False):
-        return {'native_task': {'name': 'a', 'status': status, 'benchmark_status': status, 'passed': passed,
+    def skipped_row(self, sha='c' * 64, reason='Compute token pool exhausted or cooling down', status='SKIPPED', passed=False,
+                    name='a'):
+        return {'native_task': {'name': name, 'status': status, 'benchmark_status': status, 'passed': passed,
                                 'failure_reason': reason, 'agent_id': 'agent-1'}, 'path': 'native/a/cloudbench-run.json', 'sha256': sha}
 
     def resource_failure(self, **row):
@@ -1673,6 +1674,52 @@ class Cycle(unittest.TestCase):
         self.assertIn('- api/a — openai-compute-tokens: Compute token pool exhausted or cooling down [compute_quota_exhausted]'
                       ' · Evidence: native/a/cloudbench-run.json#failure_reason · Confirmed at: 1001.0 · Receipt: ' + 'c' * 64, text)
         self.assertNotIn('PASS', text.split('RESOURCE WARNINGS', 1)[1])
+
+    # The native row the 2026-11-06 cloud smoke proof recorded (agent 4f8c38c0, transfer owt_208688aafd52934f33699e9c).
+    STALL_REASON = ("AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped "
+                    "under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-"
+                    "abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected "
+                    "terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', "
+                    "got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING'")
+
+    def stall_confirmation(self, **changes):
+        return self.confirmation(**{'receipt_reason': self.STALL_REASON, 'reason_code': 'agentcard_release_stall',
+                                    'provider': 'agentcard-sandbox',
+                                    'evidence': 'native/agent-payment-abandonment/cloudbench-run.json#failure_reason',
+                                    **changes})
+
+    def test_standing_agentcard_release_stall_in_cloud_smoke_is_a_warning_not_a_pass(self):
+        # The AgentCard lifecycle tasks are smoke tasks: their standing release stall arrives as a natively SKIPPED
+        # cloud row (FAIL case) and is qualified through the same typed warning path, never PASS or pass credit.
+        runtime = (ROOT / 'agents/benchmarks/run_benchmark.py').read_text()
+        self.assertIn('"AgentCard never released the closed card\'s org transfer (consumed, releasedCents=0); "\n'
+                      '    "skipped under the standing user-approved warning policy', runtime)
+        failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment')
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.stall_confirmation()))
+        self.assertEqual('ready', self.state['phase']); self.assertTrue(self.state['ready'])
+        kept = next(f for f in self.state['failures'] if f['id'] == failure['id'])
+        self.assertEqual(('SKIPPED_WITH_WARNING', 'FAIL', 'SKIPPED'),
+                         (kept['disposition'], kept['native_result'], kept['worker_evidence']['native_task']['benchmark_status']))
+        self.assertEqual({}, self.state['skips'])  # no pass credit
+        self.assertEqual('agentcard_release_stall', self.state['resource_warnings'][0]['confirmation']['reason_code'])
+
+    def test_agentcard_release_stall_qualification_binds_the_exact_sandbox_row(self):
+        pristine = copy.deepcopy(self.state)
+        for label, row in {'production task': dict(name='agent-payment-production-abandonment'),
+                           'not an AgentCard lifecycle task': dict(name='chat-mode'),
+                           'other AgentCard failure': dict(name='agent-payment-abandonment',
+                                                           reason='AgentCard create_card failed: Cardholder not found'),
+                           'assertion FAIL with the stall text': dict(name='agent-payment-abandonment', status='FAILED')
+                           }.items():
+            with self.subTest(label):
+                self.state = copy.deepcopy(pristine)
+                row.setdefault('reason', self.STALL_REASON)
+                failure = self.resource_failure(**row)
+                before = copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):
+                    c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED',
+                                                         resource_skip=self.stall_confirmation(receipt_reason=row['reason'])))
+                self.assertEqual(before, self.state)
 
     def test_resource_skip_refusals_are_atomic(self):
         failure = self.resource_failure()

@@ -647,6 +647,22 @@ def validate_assigned_repair(entry: dict, disposition: str) -> None:
 
 RESOURCE_SKIP = "SKIPPED_WITH_WARNING"
 RESOURCE_EXCLUSIVE = ("repair_agent", "external_provider", "post_merge", "execute_unverified", "assigned_repair")
+# Standing AgentCard release stall (docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-
+# released.md): the exact runtime reason prefix of run_benchmark.AGENTCARD_RELEASE_SKIP_REASON, which records the
+# native SKIPPED row only for a catalog sandbox lifecycle task whose stall matched _agentcard_release_stalled.
+AGENTCARD_RELEASE_STALL_CODE = "agentcard_release_stall"
+AGENTCARD_RELEASE_STALL_REASON = ("AgentCard never released the closed card's org transfer (consumed, "
+                                  "releasedCents=0); skipped under the standing user-approved warning policy")
+
+
+def agentcard_release_stall_task(name: object, root: Path = ROOT) -> bool:
+    """The same literal catalog predicate the selector prints for this standing warning (sandbox only)."""
+    import runpy
+    selector = runpy.run_path(str(root / 'agents/benchmarks/select_predeploy_benches.py'))
+    tasks = [task for task in selector['load_tasks'](root / 'agents/benchmarks/tasks.json')
+             if task.name == name and not task.production_only]
+    rules = selector['standing_skip_eligibility'](tasks, [name]).get(name, []) if tasks else []
+    return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
 
 
 def sidecar_finished_at(failure: dict):
@@ -744,10 +760,11 @@ def revalidate_standing_skips(state: dict) -> None:
 
 
 def validate_resource_skip(entry: dict, failure: dict) -> None:
-    """Third-party compute-token exhaustion: the native SKIPPED row stays FAIL in the record and is
-    projected as a warning, never a pass. The confirmation must bind the exact row the same way
-    scripts/validate_predeploy_receipts.py does (its receipt predicate, lines 141-152), restricted to
-    reason_code compute_quota_exhausted for now.
+    """Third-party compute-token exhaustion, or the standing AgentCard release stall of a sandbox lifecycle
+    smoke task: the native SKIPPED row stays FAIL in the record and is projected as a warning, never a pass.
+    The confirmation must bind the exact row the same way scripts/validate_predeploy_receipts.py does (its
+    receipt predicate, lines 141-152), restricted to reason_code compute_quota_exhausted or
+    agentcard_release_stall.
     """
     from validate_predeploy_receipts import RESOURCE_CODES, finite
     proof = entry.get("resource_skip")
@@ -768,18 +785,24 @@ def validate_resource_skip(entry: dict, failure: dict) -> None:
     finished = failure.get("finished_at")
     if finished is None:
         finished = sidecar_finished_at(failure)
+    if proof.get("reason_code") == AGENTCARD_RELEASE_STALL_CODE:
+        # A sandbox AgentCard lifecycle smoke task's exact standing release stall: same warning projection.
+        cause = (isinstance(reason, str) and reason.startswith(AGENTCARD_RELEASE_STALL_REASON)
+                 and agentcard_release_stall_task(row.get("name")))
+    else:
+        cause = (proof.get("reason_code") in RESOURCE_CODES and proof.get("reason_code") == "compute_quota_exhausted")
     allowed = (isinstance(sha, str) and bool(sha) and proof.get("receipt_sha256") == sha
                and isinstance(reason, str) and bool(reason.strip()) and proof.get("receipt_reason") == reason
-               and proof.get("resource_scope") == "third_party"
-               and proof.get("reason_code") in RESOURCE_CODES and proof.get("reason_code") == "compute_quota_exhausted"
+               and proof.get("resource_scope") == "third_party" and cause
                and proof.get("exclusive_cause") is True
                and isinstance(proof.get("provider"), str) and bool(proof["provider"].strip())
                and isinstance(proof.get("evidence"), str) and bool(proof["evidence"].strip())
                and finite(proof.get("confirmed_at")) and finite(finished) and proof["confirmed_at"] >= finished)
     if not allowed:
         raise ValueError("resource confirmation does not bind the exact native SKIPPED row "
-                         "(receipt sha, exact reason, third_party compute_quota_exhausted, exclusive cause, "
-                         "provider, evidence, confirmed_at after the row finished)")
+                         "(receipt sha, exact reason, third_party compute_quota_exhausted or the sandbox "
+                         "agentcard_release_stall, exclusive cause, provider, evidence, confirmed_at after the row "
+                         "finished)")
 
 
 def adjudicate(state: dict, report: dict) -> None:

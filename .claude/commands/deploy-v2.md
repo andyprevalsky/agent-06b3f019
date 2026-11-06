@@ -135,7 +135,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 |------|-----------|------|
 | Any test | A third-party provider is out of credits or storage, or needs a credential or billing change only the user can make, with explicit evidence | Never top up or wait; report it at the end of the scorecard |
 | Treasury tests | Always | Never mutate treasury records to pass |
-| AgentCard | Production lane: the user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy production`); any lifecycle task, smoke included: the exact release stall (closed card, zero balance, transfer `consumed`, `releasedCents=0`) | The stall is a task-level SKIP, never PASS; unreleased funds stay a followup |
+| AgentCard | Production lane: the user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy production`); any lifecycle task, smoke included: the exact release stall (closed card, zero balance, transfer `consumed`, `releasedCents=0`) | Triage the native SKIPPED smoke row as `resource_skip` with `reason_code: agentcard_release_stall`; never PASS; unreleased funds stay a followup |
 | Claude Code smoke | Preflight proves no synced Claude credential and no pool token | Task failures still block |
 | Codex E2B smoke | Every Codex credential path is out of credits (the test skips itself) | Never use `BLACKBOX_TEST_SKIP_DOMAINS` |
 | Benchmark judge | Confirmed third-party compute quota | |
