@@ -66,6 +66,7 @@ async def save_claude_code_message(
     tool_name: Optional[str] = None,
     agent_type: Optional[str] = None,
     steps_taken: Optional[int] = None,
+    sdk_event_range: Optional[tuple[int, int]] = None,
     code_session: Optional[dict[str, Any]] = None,
     code_agent: Optional[dict[str, Any]] = None,
 ) -> None:
@@ -115,6 +116,11 @@ async def save_claude_code_message(
 
     if steps_taken is not None:
         metadata["steps_taken"] = max(0, int(steps_taken))
+
+    # Judge-evidence pages: [start, end) of the session's evidence events this
+    # row holds, so a reader can tell a complete set of rows from a missing one.
+    if sdk_event_range is not None:
+        metadata["sdk_event_range"] = [int(sdk_event_range[0]), int(sdk_event_range[1])]
 
     if code_session:
         metadata["code_session"] = code_session

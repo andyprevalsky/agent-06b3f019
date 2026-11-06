@@ -136,7 +136,10 @@ def _sdk_streams(data: dict) -> list[list[dict]]:
             messages.extend(node.get("messages") or [])
     for node in ((data.get("_benchmark") or {}).get("tree") or {}).values():
         messages.extend(node.get("messages") or [])
-    streams = {}
+    # One session's evidence may span bounded rows; each row states the
+    # [start, end) slice it holds (a row without one holds the whole session).
+    pages: dict[str, dict[int, list]] = {}
+    totals: dict[str, int] = {}
     for row in messages:
         metadata = row.get("metadata") or {}
         if row.get("role", "").upper() != "TOOL" or metadata.get("toolName") != "code_agent_sdk_events":
@@ -148,13 +151,26 @@ def _sdk_streams(data: dict) -> list[list[dict]]:
         events = json.loads(text[len(prefix):])["code_agent_events"]
         _require(isinstance(events, list), "missing SDK event list")
         count = metadata.get("steps_taken")
-        _require(type(count) is int and count == len(events), "missing/truncated SDK evidence count")
+        span = metadata.get("sdk_event_range", [0, len(events)])
+        _require(type(count) is int and count >= 0 and isinstance(span, list) and len(span) == 2
+                 and all(type(v) is int for v in span) and 0 <= span[0] and span[1] - span[0] == len(events),
+                 "missing/truncated SDK evidence count")
         identity = metadata.get("task_id")
         _require(isinstance(identity, str) and bool(identity), "missing code session identity")
-        if identity in streams:
-            _require(streams[identity] == events, "conflicting code evidence copies")
-        streams[identity] = events
-    return list(streams.values())
+        _require(totals.setdefault(identity, count) == count, "conflicting code evidence copies")
+        stream = pages.setdefault(identity, {})
+        if span[0] in stream:
+            _require(stream[span[0]] == events, "conflicting code evidence copies")
+        stream[span[0]] = events
+    streams = []
+    for identity, stream in pages.items():
+        events = []
+        for start in sorted(stream):
+            _require(start == len(events), "missing/truncated SDK evidence count")
+            events.extend(stream[start])
+        _require(len(events) == totals[identity], "missing/truncated SDK evidence count")
+        streams.append(events)
+    return streams
 
 
 def process_evidence(data: dict) -> list[dict]:
