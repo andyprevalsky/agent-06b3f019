@@ -167,6 +167,101 @@ class Selection(unittest.TestCase):
                         with self.assertRaises(subprocess.TimeoutExpired):
                             p.standard_template()
 
+    def test_e2b_smoke_is_selected_on_every_deploy_with_recorded_reason(self):
+        # Original /deploy 6c (deploy.md L2226): the Claude Code E2B smoke runs on every deploy.
+        self.template['gates'].append({'name':'e2b-smoke','category':'e2b-smoke','command':['true'],
+                                      'checks':['e2b-smoke']})
+        self.bindings['e2b-smoke']={'id':'e2b-worker','command':['true'],'transport':'local-isolated',
+            'cwd':str(Path(self.workers.name)/'e2b'),
+            'env':{'CONDUCTOR_WORKSPACE_NAME':'e2b','CONDUCTOR_PORT':'36000'}}
+        self.result['lanes']['backend-unit']=[]
+        for changed in (['docs/guide.md'],['mac-app/main/index.ts'],['agents/benchmarks/history/task_attempts.jsonl'],[]):
+            for binding in (self.bindings, None):
+                with self.subTest(changed=changed, bound=binding is not None):
+                    plan=p.select(self.template,changed,self.result,binding)
+                    gate=next((g for g in plan['gates'] if g['name']=='e2b-smoke'),None)
+                    self.assertIsNotNone(gate,plan['omitted'])
+                    self.assertFalse(gate['quick'])
+                    self.assertIn(p.ALWAYS['e2b-smoke'],gate['selection_evidence'])
+        self.assertIn('every deploy',p.ALWAYS['e2b-smoke'])
+
+    def test_agentcard_restores_the_original_path_rule_without_history_ledgers(self):
+        # Original /deploy CHANGED_AGENTCARD_PAYMENT (deploy.md L516).
+        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
+                                      'command':['true'],'checks':['card']})
+        self.result['lanes']['backend-unit']=[]
+        triggers=['back-end/scripts/setup-benchmark-payment.ts',
+                  'back-end/src/domains/agentcard/service.ts','back-end/src/domains/purchases/router.ts',
+                  'back-end/src/domains/test-payment/router.ts',
+                  'back-end/src/providers/agentcard/client.ts','back-end/src/providers/card-provider/index.ts',
+                  'back-end/src/providers/purchaseCleanup.ts','back-end/src/providers/purchase-wallet-funding.ts',
+                  'back-end/src/providers/purchase-wallet-funding-retry.ts','back-end/src/providers/wallet-funding.ts',
+                  'agents/benchmarks/run_benchmark.py','agents/benchmarks/tasks.json',
+                  'agents/domains/request_payment_card/flow.py','agents/tools/request_payment_card.py',
+                  'front-end/src/features/test-payment/Page.tsx',
+                  'scripts/run.sh','scripts/run-agentcard-lifecycle-task.sh']
+        for path in triggers:
+            with self.subTest(path=path):
+                plan=p.select(self.template,[path],self.result,None)
+                self.assertIn('payment',[g['name'] for g in plan['gates']],path)
+        for changed in (['agents/benchmarks/history/task_attempts.jsonl'],
+                        ['agents/benchmarks/history/task_durations.jsonl',
+                         'agents/benchmarks/history/span_durations.jsonl'],['docs/guide.md']):
+            with self.subTest(changed=changed):
+                plan=p.select(self.template,changed,self.result,None)
+                self.assertNotIn('payment',[g['name'] for g in plan['gates']])
+                self.assertIn('payment',[o['gate'] for o in plan['omitted']])
+        mixed=p.select(self.template,['agents/benchmarks/history/task_attempts.jsonl','agents/tools/request_payment_card.py'],
+                       self.result,None)
+        self.assertIn('payment',[g['name'] for g in mixed['gates']])
+
+    def test_mac_app_static_is_a_conditional_quick_check_never_a_platform_pass(self):
+        # Original /deploy Step 4m-lint (deploy.md L1380-1388): run when mac-app/ changed.
+        gate = p.MAC_APP_STATIC
+        self.assertEqual(['bash','-c','npm run format:check && npm run lint && npm run type-check'],gate['command'])
+        self.assertEqual(('mac-app','darwin','mac-app-static'),(gate['cwd'],gate['platform'],gate['category']))
+        import deploy_test_cycle
+        self.assertIn('mac-app-static',deploy_test_cycle.QUICK)
+        self.assertNotIn('mac-app-static',deploy_test_cycle.REQUIRED_QUICK)
+        self.assertEqual({'mac-app-static'},p.CONDITIONAL_QUICK)
+        self.template['gates'].append(copy.deepcopy(gate))
+        self.result['lanes']['backend-unit']=[]
+        for platform in ('darwin','linux'):
+            with self.subTest(platform=platform), patch.object(p.sys,'platform',platform):
+                for binding in (self.bindings, None):
+                    untouched=p.select(self.template,['docs/guide.md'],self.result,binding)
+                    self.assertNotIn('mac-app-static',[g['name'] for g in untouched['gates']])
+                    entry=next(o for o in untouched['omitted'] if o['gate']=='mac-app-static')
+                    self.assertEqual('no dependency or runtime-path trigger',entry['reason'])
+                    changed=p.select(self.template,['mac-app/main/index.ts'],self.result,binding)
+                    names=[g['name'] for g in changed['gates']]
+                    if platform=='darwin':
+                        static=next(g for g in changed['gates'] if g['name']=='mac-app-static')
+                        self.assertTrue(static['quick'])
+                        self.assertNotIn('worker',static)
+                        self.assertIn('runtime/contract path trigger',static['selection_evidence'])
+                        self.assertNotIn('mandatory quick check',static['selection_evidence'])
+                        self.assertEqual(600,static['timeout_seconds'])
+                    else:
+                        self.assertNotIn('mac-app-static',names)
+                        entry=next(o for o in changed['omitted'] if o['gate']=='mac-app-static')
+                        self.assertEqual({'disposition':'PLATFORM_OMITTED','executed':False,
+                                          'reason':'platform not available; not a test pass'},
+                                         {k:entry[k] for k in ('disposition','executed','reason')})
+                        self.assertIn('runtime/contract path trigger',entry['selection_evidence'])
+                    # The required quick set is unchanged either way.
+                    self.assertTrue({'lint','format','typescript','backend-structural'} <= set(names))
+                self.result.update(all=True,reasons=['unmapped source'])
+                every=p.select(self.template,['new-language/source'],self.result,None)
+                self.assertEqual(platform=='darwin','mac-app-static' in [g['name'] for g in every['gates']])
+                self.result.update(all=False,reasons=[])
+
+    def test_standard_template_registers_the_mac_app_static_gate(self):
+        with patch.object(p.subprocess,'run') as execute:
+            execute.side_effect=[SimpleNamespace(stdout=json.dumps({'lanes':[]})),SimpleNamespace(stdout='task-a\n')]
+            gates={g['name']:g for g in p.standard_template()['gates']}
+        self.assertEqual(p.MAC_APP_STATIC,gates['mac-app-static'])
+
     def test_documentation_only_keeps_quick_phase(self):
         self.result['lanes']['backend-unit']=[]
         plan=p.select(self.template,['docs/guide.md'],self.result,self.bindings)

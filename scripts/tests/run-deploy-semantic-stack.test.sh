@@ -163,4 +163,82 @@ expect_exit 2 env CONDUCTOR_PORT="$closed_base" bash scripts/run-deploy-semantic
 expect_output "E2B smoke: Postgres is not ready on localhost:65534" "a running stack manifest supplies the database port"
 [ ! -e "$SWEEP_MARKER" ] || fail "E2B-only mode must never sweep the worktree"
 
+# 5. The E2B gate's own verdict (deploy.md 6c L2133-2148). PASS needs exit 0, the summary line
+#    `PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox)` and an observed CLAUDE_E2B_DONE from
+#    a real sandbox. A credential/billing block only the user can fix is a loud SKIPPED with its
+#    evidence (exit 1, never PASS); every other no-sandbox path is FAIL.
+# The blackbox prints these through its outcome module (structural claude-code-smoke-outcome.test.ts
+# pins that claude-code.blackbox.ts uses it).
+OUTCOME="$ROOT_DIR/back-end/src/tests/blackbox/claude-code-smoke-outcome.support.ts"
+require_text "$OUTCOME" "SANDBOX_PROOF = 'CLAUDE_E2B_DONE observed from real E2B sandbox'" "the blackbox must print the sandbox proof the gate requires"
+require_text "$OUTCOME" '-- USER ACTION REQUIRED (${result.skipped.kind}): ' "the blackbox must print the user-action SKIP line the gate classifies"
+require_text "$OUTCOME" "SMOKE_SKIP_BANNER = 'CLAUDE-CODE SMOKE SKIPPED -- USER ACTION REQUIRED (NOT A PASS)'" "the blackbox must end a skip with its not-a-pass banner"
+require_text "$OUTCOME" '${result.skipped.evidence} (${result.duration}ms)' "the SKIP line keeps its evidence"
+SHIMS="$FIXTURE/.context/shims"
+mkdir -p "$SHIMS"
+for tool in pg_isready psql; do printf '#!/usr/bin/env bash\nexit 0\n' > "$SHIMS/$tool"; chmod +x "$SHIMS/$tool"; done
+cat > "$FIXTURE/scripts/run-deploy-stage" <<'STAGE'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FAKE_E2B_ARGS"
+mkdir -p "$BLACKBOX_TEST_ARTIFACT_DIR"
+[ -z "$FAKE_E2B_LOG" ] || cp "$FAKE_E2B_LOG" "$BLACKBOX_TEST_ARTIFACT_DIR/claude-code.log"
+exit "$FAKE_E2B_EXIT"
+STAGE
+chmod +x "$FIXTURE/scripts/run-deploy-stage"
+SMOKE_NAME='smoke -- Claude Code answers 2+2 (real E2B sandbox)'
+fake_log() {  # <name> <lines...>
+    local file="$FIXTURE/.context/fake-$1.log"
+    shift
+    printf '%s\n' "$@" > "$file"
+    printf '%s' "$file"
+}
+PASS_LOG=$(fake_log pass "  PASS  boundary -- health (3ms)" "    ↳ CLAUDE_E2B_DONE observed from real E2B sandbox sbx-123" \
+    "  PASS  $SMOKE_NAME (90000ms)" "Results: 40 passed, 0 failed, 0 skipped, 40 total" "ALL CLAUDE-CODE BLACK-BOX TESTS PASSED")
+LEGACY_SKIP_LOG=$(fake_log legacy "    [skip] Claude E2B smoke reached the SDK server, but the configured Claude credential is invalid (401)" \
+    "  PASS  $SMOKE_NAME (900ms)" "Results: 40 passed, 0 failed, 40 total" "ALL CLAUDE-CODE BLACK-BOX TESTS PASSED")
+NO_SMOKE_LOG=$(fake_log nosmoke "Skipping Claude Code smoke tests (BLACKBOX_SMOKE!=1)" \
+    "Results: 39 passed, 0 failed, 0 skipped, 39 total" "ALL CLAUDE-CODE BLACK-BOX TESTS PASSED")
+CREDENTIAL_LOG=$(fake_log credential \
+    "  SKIP  $SMOKE_NAME -- USER ACTION REQUIRED (credential): SDK server returned 401 Invalid authentication credentials (900ms)" \
+    "Results: 39 passed, 0 failed, 1 skipped, 40 total" "CLAUDE-CODE SMOKE SKIPPED -- USER ACTION REQUIRED (NOT A PASS)")
+BILLING_LOG=$(fake_log billing \
+    "  SKIP  $SMOKE_NAME -- USER ACTION REQUIRED (billing): create 403: team is blocked: missing payment method (40ms)" \
+    "Results: 39 passed, 0 failed, 1 skipped, 40 total" "CLAUDE-CODE SMOKE SKIPPED -- USER ACTION REQUIRED (NOT A PASS)")
+MIXED_LOG=$(fake_log mixed "  FAIL  boundary -- health -- boom (3ms)" \
+    "  SKIP  $SMOKE_NAME -- USER ACTION REQUIRED (credential): 401 (900ms)" \
+    "Results: 38 passed, 1 failed, 1 skipped, 40 total" "FAILURES:")
+run_e2b_case() {  # <expected exit> <log or ''> <fake exit>
+    local expected="$1" log="$2" code="$3"
+    expect_exit "$expected" env CONDUCTOR_PORT=40000 DEPLOY_E2B_DB_PORT=55432 PATH="$SHIMS:$PATH" \
+        FAKE_E2B_LOG="$log" FAKE_E2B_EXIT="$code" FAKE_E2B_ARGS="$FIXTURE/.context/fake-args" \
+        bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only
+}
+run_e2b_case 0 "$PASS_LOG" 0
+expect_output "E2B_SMOKE_VERDICT PASS" "a real-sandbox pass is the only PASS"
+grep -Fxq 'claude-code-e2b-smoke -- bash scripts/run-blackbox-tests.sh claude-code' "$FIXTURE/.context/fake-args" \
+    || fail "the gate must run the unchanged Step 6c stage command"
+run_e2b_case 1 "$LEGACY_SKIP_LOG" 0
+expect_output "E2B_SMOKE_VERDICT FAIL" "a [skip] that printed PASS without a sandbox proof must FAIL"
+run_e2b_case 1 "$NO_SMOKE_LOG" 0
+expect_output "E2B_SMOKE_VERDICT FAIL" "a run that never executed the smoke must FAIL"
+run_e2b_case 1 "" 0
+expect_output "E2B_SMOKE_VERDICT FAIL" "a missing domain log must FAIL"
+run_e2b_case 1 "$PASS_LOG" 1
+expect_output "E2B_SMOKE_VERDICT FAIL" "a non-zero runner exit is never PASS"
+run_e2b_case 1 "$CREDENTIAL_LOG" 1
+expect_output "E2B_SMOKE_VERDICT SKIPPED class=credential" "a credential block is a loud SKIPPED"
+expect_output "SDK server returned 401 Invalid authentication credentials" "SKIPPED keeps its evidence"
+expect_output "NOT A PASS" "SKIPPED says it is not a pass"
+if grep -Fq 'E2B_SMOKE_VERDICT PASS' <<<"$OUTPUT"; then fail "a SKIPPED smoke must never report PASS"; fi
+run_e2b_case 1 "$BILLING_LOG" 1
+expect_output "E2B_SMOKE_VERDICT SKIPPED class=billing" "a billing block is a loud SKIPPED"
+expect_output "team is blocked: missing payment method" "SKIPPED keeps its billing evidence"
+run_e2b_case 1 "$CREDENTIAL_LOG" 0
+expect_output "E2B_SMOKE_VERDICT FAIL" "a skip with a zero runner exit is inconsistent and FAILS"
+run_e2b_case 1 "$MIXED_LOG" 1
+expect_output "E2B_SMOKE_VERDICT FAIL" "any other failing case keeps the gate FAIL"
+run_e2b_case 143 "$CREDENTIAL_LOG" 143
+expect_output "E2B_SMOKE_VERDICT FAIL" "an interrupted runner is not a SKIPPED and keeps its native exit"
+[ ! -e "$SWEEP_MARKER" ] || fail "E2B-only mode must never sweep the worktree"
+
 echo "run-deploy-semantic-stack: all checks passed"

@@ -534,7 +534,8 @@ def route_cache_floor(task_name: str, routes: list[str]) -> Optional[float]:
     )
 
 
-CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV = "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY"
+# deploy.md L1831: Claude Code task correctness stays hard-gated, but its repeatable prompt-cache
+# telemetry floor is warn-only wherever the benchmark runs (local or cloud) and every miss is a risk.
 CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS = {"claude-code-agent"}
 GATE_FIXTURE_TASK_MODES = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
@@ -17043,33 +17044,30 @@ def cache_ratchet_failures(
     return failures
 
 
-def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
-    """Fail the benchmark when prompt-cache share regresses or its telemetry is absent."""
+def enforce_cache_ratchets(task_results: list[TaskResult]) -> list[tuple[str, str, float, float]]:
+    """Fail the benchmark when prompt-cache share regresses or its telemetry is absent.
+
+    Claude Code's floor miss is built-in warn-only: it is reported as a RISK and returned, never a
+    failure, whatever the environment. Every other task's miss exits 1.
+    """
     failures = cache_ratchet_failures(task_results)
-    if not failures:
-        return
-    warn_only_enabled = os.environ.get(CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
     hard_failures = []
     warn_only_failures = []
     for failure in failures:
         name, _agent_id, _hit_pct, _floor = failure
-        if warn_only_enabled and name in CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS:
+        if name in CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS:
             warn_only_failures.append(failure)
         else:
             hard_failures.append(failure)
 
     if warn_only_failures:
-        print("\n  ⚠ CACHE RATCHET WARN-ONLY (deploy-approved Claude Code cache telemetry floor):")
-        for name, _agent_id, hit_pct, floor in warn_only_failures:
-            print(f"    - {name}: {hit_pct}% < {floor}% ratchet")
+        print("\n  ⚠ RISK: CACHE RATCHET WARN-ONLY (deploy-approved Claude Code cache telemetry floor missed):")
+        for name, agent_id, hit_pct, floor in warn_only_failures:
+            print(f"    - {name}: {hit_pct}% < {floor}% ratchet (not a pass of the floor; task outcome unchanged)")
+            print(f"      cd agents && source venv/bin/activate && python benchmarks/agent_cache.py {agent_id}")
 
     if not hard_failures:
-        return
+        return warn_only_failures
 
     print("\n  ❌ CACHE RATCHET FAILED (per-task prompt-cache share floor):")
     for name, _agent_id, hit_pct, floor in hard_failures:

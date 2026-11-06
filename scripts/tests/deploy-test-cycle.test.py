@@ -456,7 +456,9 @@ class Cycle(unittest.TestCase):
                 'source': failure['source'], 'description': 'real failure', 'evidence': 'RCA evidence',
                 'native_result': failure['native_result'], 'command': failure.get('command'), 'attribution': attribution, **fields}]}
 
-    def triage_quick_fixture(self):
+    MAC_STATIC = ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check']
+
+    def triage_quick_fixture(self, mac=None):
         import contextlib, io
         (self.root / 'back-end').mkdir()
         (self.root / 'scripts').mkdir()
@@ -479,6 +481,11 @@ class Cycle(unittest.TestCase):
                           '--tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo']),
             dict(name='backend-structural', category='backend-structural', quick=True,
                  checks=['backend-structural'], cwd='back-end', command=['npm', 'run', 'test:structural'])]
+        if mac is not None:  # the darwin plan's conditional fifth quick gate (deploy_test_plan.MAC_APP_STATIC)
+            gate = {'name': 'mac-app-static', 'category': 'mac-app-static', 'quick': True,
+                    'checks': ['mac-app-static'], 'cwd': 'mac-app', 'command': self.MAC_STATIC, **mac}
+            (self.root / gate['cwd']).mkdir(exist_ok=True)
+            self.plan['gates'].append(gate)
         self.plan['source'] = c.source(self.root)
         self.state = c.initialize(self.plan, self.root); self.failure()
         receipt = self.state['attempts'][-1]['results'][0]
@@ -533,6 +540,32 @@ class Cycle(unittest.TestCase):
             c.write(path, value); owned = path.read_bytes()
             self.assertEqual(2, call()); self.assertEqual(owned, path.read_bytes())
             self.assertFalse((self.root / '.context/observed').exists())
+
+    def test_triage_quick_accepts_the_conditional_mac_app_static_fifth_gate(self):
+        with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
+            new, plan, path, bins, call = self.triage_quick_fixture(mac={})
+            before = c.read(path)
+            self.assertEqual(0, call())
+            after = c.read(path); observations = after['attempts'].pop()
+            self.assertEqual(before, after)
+            self.assertEqual({'eslint','format','typescript','backend-structural','mac-app-static'},
+                             {r['gate'] for r in observations['results']})
+            self.assertTrue(all(r['executed'] and r['complete'] and r['native_exit'] == 0 for r in observations['results']))
+            # 2 static checks + tsc + structural npm + the three mac-app npm scripts.
+            self.assertEqual(7, len((self.root / '.context/observed').read_text().splitlines()))
+
+    def test_triage_quick_refuses_a_substituted_mac_app_static_recipe(self):
+        variants = [dict(command=['bash', '-c', 'npm run lint']), dict(cwd='.'), dict(env={'X': '1'}),
+                    dict(checks=['mac-app-static', 'extra']), dict(command=['npm', 'run', 'test:structural'])]
+        for index, variant in enumerate(variants):
+            with self.subTest(variant=variant):
+                if index:
+                    self.tearDown(); self.setUp()
+                with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
+                    new, plan, path, bins, call = self.triage_quick_fixture(mac=variant)
+                    original = path.read_bytes()
+                    self.assertEqual(2, call()); self.assertEqual(original, path.read_bytes())
+                    self.assertFalse((self.root / '.context/observed').exists())
 
     def test_triage_quick_failure_and_changed_pending_do_not_commit(self):
         with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):

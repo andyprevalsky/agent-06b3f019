@@ -52,6 +52,29 @@ class Quick(unittest.TestCase):
             self.assertEqual(0,self.invoke('lint',['back-end/tsconfig.json']))
             self.assertEqual({'src/a.ts','src/b.tsx'},set(execute.call_args.args[0][2:]))
 
+    def test_original_backend_lint_inputs_lint_all_backend_sources(self):
+        # Original /deploy CHANGED_BACKEND_LINT_INPUTS (deploy.md L500-506).
+        self.write('back-end/src/a.ts');self.write('back-end/src/deep/b.tsx');self.write('back-end/src/c.js')
+        inputs=['package.json','package-lock.json','back-end/package.json','back-end/package-lock.json',
+                'back-end/tsconfig.json','back-end/tsconfig.build.json','back-end/eslint.config.mjs',
+                'back-end/eslint.config.js','back-end/eslint.config.cjs','back-end/eslint.config.ts',
+                'back-end/prisma/schema.prisma']
+        for path in inputs:
+            with self.subTest(path=path):
+                self.assertEqual(['src/a.ts','src/deep/b.tsx'],quick.lint_files([path]))
+                with patch.object(quick.subprocess,'run',return_value=subprocess.CompletedProcess([],0)) as execute:
+                    self.assertEqual(0,self.invoke('lint',[path]))
+                    self.assertEqual(['node','scripts/lint-affected.mjs','src/a.ts','src/deep/b.tsx'],
+                                     execute.call_args.args[0])
+
+    def test_non_lint_inputs_keep_the_affected_scope(self):
+        self.write('back-end/src/a.ts');self.write('back-end/src/b.ts')
+        for changed in (['front-end/package.json'],['back-end/prisma/migrations/1_x/migration.sql'],
+                        ['agents/package.json'],['docs/package.json']):
+            with self.subTest(changed=changed):
+                self.assertEqual([],quick.lint_files(changed))
+        self.assertEqual(['src/a.ts'],quick.lint_files(['back-end/src/a.ts','front-end/package.json']))
+
     def prepare(self, config, package=None):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         self.write('.gitignore'); (self.root / '.gitignore').write_text('**/node_modules/\nselected.json\n')

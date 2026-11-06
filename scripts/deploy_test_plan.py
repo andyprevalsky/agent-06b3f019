@@ -35,13 +35,37 @@ PATHS = {
     'semantic-stack': ['front-end/*', 'back-end/*', 'agents/*', 'scripts/*', '.github/*'],
     'live-probes': ['back-end/*', 'agents/*', 'scripts/*', '.github/*'],
     'e2b-smoke': ['agents/*', 'back-end/*', 'scripts/*', '.github/*'],
-    'agentcard-lifecycle': ['back-end/src/domains/agentcard/*', 'back-end/src/domains/purchases/*',
-                           'back-end/src/providers/*', 'agents/domains/request_payment_card/*',
-                           'front-end/src/features/test-payment/*', 'agents/benchmarks/*',
-                           'scripts/run*', 'back-end/prisma/*'],
+    # Original /deploy CHANGED_AGENTCARD_PAYMENT (deploy.md L516) plus the broader providers/run*/prisma triggers.
+    'agentcard-lifecycle': ['back-end/scripts/setup-benchmark-payment.ts',
+                           'back-end/src/domains/agentcard/*', 'back-end/src/domains/purchases/*',
+                           'back-end/src/domains/test-payment/*', 'back-end/src/providers/agentcard/*',
+                           'back-end/src/providers/card-provider/*', 'back-end/src/providers/purchaseCleanup.ts',
+                           'back-end/src/providers/purchase-wallet-funding*', 'back-end/src/providers/wallet-funding.ts',
+                           'back-end/src/providers/*', 'agents/benchmarks/*', 'agents/domains/request_payment_card/*',
+                           'agents/tools/request_payment_card.py', 'front-end/src/features/test-payment/*',
+                           'scripts/run.sh', 'scripts/run-agentcard-lifecycle-task.sh', 'scripts/run*',
+                           'back-end/prisma/*'],
     'seed-cache-decision': ['back-end/*', 'agents/*', 'scripts/*'],
     'canonical-seed-whatsapp-content': ['back-end/*', 'agents/*', 'scripts/*'],
     'seed-memory-ratchet': ['back-end/*', 'agents/*', 'scripts/*'],
+    'mac-app-static': ['mac-app/*'],
+}
+# Quick static checks that run only when triggered; every other quick category is mandatory.
+CONDITIONAL_QUICK = {'mac-app-static'}
+# Original /deploy Step 4m-lint (deploy.md L1380-1388): the Mac-app verifier when mac-app/ changed.
+# Darwin-only; elsewhere a triggered run is recorded as a platform omission, never a pass.
+MAC_APP_STATIC = {'name': 'mac-app-static', 'category': 'mac-app-static',
+                  'command': ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check'],
+                  'cwd': 'mac-app', 'platform': 'darwin', 'timeout_seconds': 600, 'checks': ['mac-app-static']}
+# Changed paths that never trigger a category's PATHS rule. Append-only benchmark history ledgers are
+# data, not payment lifecycle code; a main sync carries other deploys' rows (deploy.md L514-516).
+PATH_EXCLUDES = {
+    'agentcard-lifecycle': ['agents/benchmarks/history/*'],
+}
+# Categories selected on every deploy regardless of the diff, with the reason recorded as evidence.
+ALWAYS = {
+    'e2b-smoke': ('every deploy: the Claude Code E2B sandbox smoke is never diff-skipped '
+                  '(deploy.md 6c L2226; measured ~106 s, ~840 MB)'),
 }
 
 
@@ -68,11 +92,8 @@ def select(template: dict, changed: list[str], result: dict, binding: dict | Non
                 command.extend(['--base', base])
             gate['command'] = command
         quick = category in QUICK
-        if gate.get("platform") and gate["platform"] != sys.platform and gate["name"] not in (binding or {}):
-            omitted.append({"gate": gate["name"], "reason": "platform not available; not a test pass"})
-            continue
         evidence = []
-        if quick:
+        if quick and category not in CONDITIONAL_QUICK:
             evidence.append('mandatory quick check')
         if result['all']:
             evidence.extend(result['reasons'] or ['dependency graph fallback ALL'])
@@ -81,7 +102,12 @@ def select(template: dict, changed: list[str], result: dict, binding: dict | Non
                 raise ValueError(f"{gate['name']}: graph lane {lane!r} is not defined by select_affected_tests")
             if result['lanes'][lane]:
                 evidence.append(f"dependency graph {lane}: {len(result['lanes'][lane])} affected test units")
-        if any(fnmatchcase(path, pattern) for path in changed for pattern in PATHS.get(category, [])):
+        if category in ALWAYS:
+            evidence.append(ALWAYS[category])
+        excluded = PATH_EXCLUDES.get(category, [])
+        if any(fnmatchcase(path, pattern) for path in changed
+               if not any(fnmatchcase(path, skip) for skip in excluded)
+               for pattern in PATHS.get(category, [])):
             evidence.append('runtime/contract path trigger')
         # A new/unregistered category is not silently dropped.
         if category not in GRAPH_LANES and category not in PATHS and not quick:
@@ -89,6 +115,12 @@ def select(template: dict, changed: list[str], result: dict, binding: dict | Non
         if not evidence:
             omitted.append({'gate': gate['name'], 'reason': 'no dependency or runtime-path trigger',
                             'changed_files': changed})
+            continue
+        if gate.get("platform") and gate["platform"] != sys.platform and gate["name"] not in (binding or {}):
+            omitted.append({"gate": gate["name"], "category": category,
+                            "reason": "platform not available; not a test pass",
+                            "disposition": "PLATFORM_OMITTED", "executed": False,
+                            "platform": gate["platform"], "selection_evidence": evidence})
             continue
         gate.update(category=category, quick=quick, selection_evidence=evidence)
         gate.pop('after', None)  # no sibling gate is a prerequisite
@@ -165,6 +197,7 @@ def standard_template() -> dict:
          "cwd": "back-end", "checks": ["seed-memory-ratchet"]},
         {"name": "mac-app-coverage-blackbox", "command": ["npm", "run", "test:coverage"],
          "cwd": "mac-app", "platform": "darwin", "checks": ["mac-app-coverage-blackbox"]},
+        dict(MAC_APP_STATIC, command=list(MAC_APP_STATIC['command']), checks=list(MAC_APP_STATIC['checks'])),
     ]
     return {"gates": gates}
 

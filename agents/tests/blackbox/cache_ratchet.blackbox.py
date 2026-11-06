@@ -1,6 +1,8 @@
 """Blackbox regressions for benchmark prompt-cache ratchets."""
 
 import asyncio
+import contextlib
+import io
 import json
 import inspect
 import os
@@ -154,8 +156,22 @@ def _call(read: int, write: int, uncached: int, sequence: str | None = "agent:ro
 
 
 def _assert_ratchet_fails(result) -> None:
-    from benchmarks.run_benchmark import enforce_cache_ratchets
+    """The floor miss is always detected. claude-code-agent's miss is a built-in warn-only risk
+    (deploy.md L1831); every other task's miss fails the benchmark."""
+    from benchmarks.run_benchmark import (
+        CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS,
+        cache_ratchet_failures,
+        enforce_cache_ratchets,
+    )
 
+    misses = cache_ratchet_failures([result])
+    assert [miss[0] for miss in misses] == [result.name], misses
+    if result.name in CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS:
+        report = io.StringIO()
+        with contextlib.redirect_stdout(report):
+            assert enforce_cache_ratchets([result]) == misses
+        assert "RISK" in report.getvalue() and result.name in report.getvalue(), report.getvalue()
+        return
     try:
         enforce_cache_ratchets([result])
         raise AssertionError("cache ratchet failed open")
@@ -379,27 +395,52 @@ def test_missing_route_telemetry_fails_closed():
     _assert_ratchet_fails(good_share)
 
 
-def test_claude_code_cache_ratchet_is_deploy_warn_only_when_enabled():
-    """Deploy smoke may warn on Claude Code cache telemetry without weakening other ratchets."""
-    from benchmarks.run_benchmark import CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, enforce_cache_ratchets
+def test_claude_code_cache_floor_miss_is_built_in_warn_only_risk():
+    """Claude Code's prompt-cache floor miss is warn-only and reported as a risk by the test itself
+    wherever it runs (deploy.md L1831), with no environment opt-in; every other floor stays hard."""
+    from benchmarks.run_benchmark import enforce_cache_ratchets
 
     claude_code_low = _share_result("claude-code-agent", [_call(0, 100, 0)])
     parallel_low = _share_result("parallel-tool-calls", [_call(0, 100, 0)])
-
-    previous = os.environ.get(CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV)
+    legacy_env = "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY"
+    previous = os.environ.get(legacy_env)
     try:
-        os.environ[CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV] = "1"
-        enforce_cache_ratchets([claude_code_low])
-        try:
-            enforce_cache_ratchets([parallel_low])
-            raise AssertionError("non-Claude cache ratchet failed open")
-        except SystemExit as exc:
-            assert exc.code == 1
+        for value in (None, "", "0", "1"):
+            if value is None:
+                os.environ.pop(legacy_env, None)
+            else:
+                os.environ[legacy_env] = value
+            report = io.StringIO()
+            with contextlib.redirect_stdout(report):
+                risks = enforce_cache_ratchets([claude_code_low])
+            assert risks == [("claude-code-agent", "agent-fixture", 0.0, 35.0)], (value, risks)
+            text = report.getvalue()
+            assert "RISK" in text and "claude-code-agent: 0.0% < 35.0%" in text, (value, text)
+            assert "agent_cache.py agent-fixture" in text, (value, text)
+            for batch in ([parallel_low], [claude_code_low, parallel_low]):
+                report = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(report):
+                        enforce_cache_ratchets(batch)
+                    raise AssertionError("non-Claude cache ratchet failed open")
+                except SystemExit as exc:
+                    assert exc.code == 1
+                assert "CACHE RATCHET FAILED" in report.getvalue()
+                assert ("RISK" in report.getvalue()) == (claude_code_low in batch), report.getvalue()
     finally:
         if previous is None:
-            os.environ.pop(CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, None)
+            os.environ.pop(legacy_env, None)
         else:
-            os.environ[CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV] = previous
+            os.environ[legacy_env] = previous
+
+
+def test_claude_code_fixtures_still_fail_a_hard_floor():
+    """The warn-only policy is per task, not a weaker detector: the same misses hard-fail elsewhere."""
+    for name in ("spawn-sub-agents", "parallel-tool-calls", "browser-smoke"):
+        _assert_ratchet_fails(_share_result(name, [_call(1000, 19000, 4)]))
+        _assert_ratchet_fails(_share_result(name, [_call(0, 0, 9000), _call(0, 0, 9100)]))
+        _assert_ratchet_fails(_share_result(name, [_call(13768, 5755, 4, sequence=None)]))
+        _assert_ratchet_fails(_task_result(name, cache_read_input_tokens=900, cache_creation_input_tokens=100))
 
 
 async def test_collector_identity_is_authoritative_and_separates_agents():
@@ -547,9 +588,10 @@ async def run_all_tests():
     result.record("direct_cerebras_flash_route_classified", test_direct_cerebras_flash_leg_is_a_classified_route)
     result.record("missing_route_fails_closed", test_missing_route_telemetry_fails_closed)
     result.record(
-        "claude_code_cache_ratchet_deploy_warn_only",
-        test_claude_code_cache_ratchet_is_deploy_warn_only_when_enabled,
+        "claude_code_cache_floor_built_in_warn_only_risk",
+        test_claude_code_cache_floor_miss_is_built_in_warn_only_risk,
     )
+    result.record("claude_code_fixtures_fail_hard_floors", test_claude_code_fixtures_still_fail_a_hard_floor)
     await result.record_async(
         "collector_identity_separates_agents",
         test_collector_identity_is_authoritative_and_separates_agents,

@@ -32,7 +32,7 @@ from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as
 from deploy_test_isolation import validate as validate_isolation
 
 ROOT = Path(__file__).resolve().parents[1]
-QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural"}
+QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural", "mac-app-static"}
 REQUIRED_QUICK = {"format", "eslint", "typescript"}
 TERMINAL_OK = {"PASS", "SKIP"}
 NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -1391,15 +1391,19 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
         preserve_contract(gate, after[name])
         if gate['checks'] != after[name]['checks']:
             raise ValueError('quick refresh must preserve every original check')
-    names = {'eslint', 'format', 'typescript', 'backend-structural'}
+    required = {'eslint', 'format', 'typescript', 'backend-structural'}
     quick = [g for g in plan['gates'] if g.get('quick')]
-    if {g['name'] for g in quick} != names or len(quick) != 4:
-        raise ValueError('only the four fixed non-live quick gates are allowed')
+    names = {g['name'] for g in quick}
+    # A darwin plan whose mac-app/ changed adds the conditional mac-app-static verifier (deploy_test_plan.py).
+    if names not in (required, required | {'mac-app-static'}) or len(quick) != len(names):
+        raise ValueError('only the four fixed non-live quick gates (plus mac-app-static) are allowed')
     typescript = ['bash', '-c', 'mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental '
                   '--tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo']
+    mac_static = ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check']
     for gate in quick:
         name, argv = gate['name'], gate['command']
-        expected = typescript if name == 'typescript' else ['npm', 'run', 'test:structural']
+        expected = (typescript if name == 'typescript' else mac_static if name == 'mac-app-static'
+                    else ['npm', 'run', 'test:structural'])
         if name in {'eslint', 'format'}:
             expected = [argv[0], 'scripts/check_deploy_static.py', 'lint' if name == 'eslint' else 'format']
             if len(argv) == 5 and argv[3:] == ['--base', plan.get('base')]:
@@ -1407,7 +1411,8 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
             if argv[0] not in {sys.executable, '/usr/bin/python3'}:
                 raise ValueError('quick static interpreter changed')
         if (gate.get('category') != name or gate['checks'] != [name] or argv != expected
-                or gate.get('cwd', '.') != ('.' if name in {'eslint', 'format'} else 'back-end')
+                or gate.get('cwd', '.') != ('.' if name in {'eslint', 'format'}
+                                            else 'mac-app' if name == 'mac-app-static' else 'back-end')
                 or gate.get('env', {}) or any(gate.get(k) for k in
                     ('worker', 'worker_transport', 'worker_recipe', 'native_cloud', 'native_backend', 'case_protocol'))):
             raise ValueError('quick recipe is not the fixed non-live command')
@@ -1440,11 +1445,11 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
             or input_fingerprints(plan, root) != working['input_fingerprints']
             or digest(state) != original or (directory / 'cycle.json').read_bytes() != saved):
         raise ValueError('quick observation changed source/environment or original triage')
-    if (len(results) != 4 or {r['gate'] for r in results} != names or any(
+    if (len(results) != len(names) or {r['gate'] for r in results} != names or any(
             r.get('status') != 'PASS' or r.get('complete') is not True or r.get('executed') is not True
             or r.get('source') != plan['source'] or r.get('lingering_group') or r.get('cleanup_owner')
             or r.get('cancelled') or r.get('timed_out') or r.get('cases') != {r['gate']: 'PASS'} for r in results)):
-        raise ValueError('all four quick observations must complete; original triage retained')
+        raise ValueError('every quick observation must complete; original triage retained')
     state['attempts'].append({'phase': 'quick', 'source': plan['source'], 'results': results,
                               'triage_refresh': True, 'plan_digest': digest(plan)})
     # No source/plan/round/pending/owner rebinding and no advance() or readiness credit.
