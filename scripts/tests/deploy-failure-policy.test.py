@@ -203,7 +203,17 @@ class FailurePolicyTest(unittest.TestCase):
         deploy = (ROOT / ".claude/commands/deploy.md").read_text()
         policy = (ROOT / ".claude/shared/deploy-failure-policy.md").read_text()
         self.assertIn("rose-agent-spawn: false", deploy)
-        self.assertIn("Controlling failure policy", deploy)
+        self.assertIn("deploy-failure-policy.md", deploy)
+        triage = deploy.split("## When a gate fails: triage and parallelize", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("Details: `.claude/shared/deploy-failure-policy.md`", triage)
+        for rule in [
+            "`Gate: INTRODUCED` or `Gate: NOT_INTRODUCED`",
+            "UNKNOWN: blocking until attributed",
+            "An assigned repair (the failure your `/goal` targets) stays yours whatever the attribution says",
+            "Provider outage or exhausted credits with evidence: external exception, no handoff",
+            "new devbox in the Bugs folder at high effort and standard speed",
+        ]:
+            self.assertIn(rule, triage)
         self.assertNotIn("report and retry every 10 minutes", deploy)
         self.assertNotIn("spawn ONE `general-purpose` agent", deploy)
         for name in ["CLAUDE.md", ".claude/commands/rca.md", ".claude/commands/push.md", "docs/testing.md", "docs/root-cause-analysis.md", ".claude/shared/report-display-format.md"]:
