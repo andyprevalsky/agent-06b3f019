@@ -1,20 +1,22 @@
 /**
- * CLI for the C6 benchmark check (src/features/terminal-component-group/benchmark/
+ * CLI for the C6/C21 benchmark check (src/features/terminal-component-group/benchmark/
  * thinkingRowsCheck.ts), loaded through Vite's SSR loader so the production modules
  * get the app's aliases and import.meta.env. Usage, from front-end/:
  *
- *   node scripts/check-thinking-rows.mjs <messages.json> <root-agent-id>
+ *   node scripts/check-thinking-rows.mjs <messages.json> <root-agent-id> [evidence.json]
  *
  * <messages.json>: the GET /api/agents/<root-agent-id> response (or its `.messages`
- * array). Prints the JSON report; exits 0 when ok, 1 on check failures, 2 on bad input,
- * 3 on an unexpected error (so a crash is never mistaken for a failed check).
+ * array). [evidence.json]: optional {"<agentId>": {"reasoningTokens": N}} from recorded
+ * usage; an agent with such evidence must show thinking rows. Prints the JSON report
+ * (failures, notes, per-agent verdict detail); exits 0 when ok, 1 on check failures,
+ * 2 on bad input, 3 on an unexpected error (so a crash is never mistaken for a failed check).
  */
 import { readFileSync } from 'node:fs';
 import { createServer } from 'vite';
 
-const [path, rootAgentId] = process.argv.slice(2);
+const [path, rootAgentId, evidencePath] = process.argv.slice(2);
 if (!path || !rootAgentId) {
-  console.error('usage: check-thinking-rows.mjs <messages.json> <root-agent-id>');
+  console.error('usage: check-thinking-rows.mjs <messages.json> <root-agent-id> [evidence.json]');
   process.exit(2);
 }
 const parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -34,7 +36,8 @@ try {
     const { checkThinkingRows } = await server.ssrLoadModule(
       '/src/features/terminal-component-group/benchmark/thinkingRowsCheck.ts',
     );
-    report = checkThinkingRows(messages, rootAgentId);
+    const evidence = evidencePath ? JSON.parse(readFileSync(evidencePath, 'utf8')) : undefined;
+    report = checkThinkingRows(messages, rootAgentId, { evidence });
   } finally {
     await server.close();
   }
