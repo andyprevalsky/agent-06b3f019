@@ -3613,6 +3613,37 @@ class StructuralSupervisorCleanup(unittest.TestCase):
         self.assertEqual([self.gate['name']],c.retained_owners(self.state,[self.gate['name']]))
 
 
+def listening_ports():
+    """TCP ports in LISTEN state on this host, read the way the interrupted proof reads them."""
+    ports = set()
+    for table in ('/proc/net/tcp', '/proc/net/tcp6'):
+        for line in Path(table).read_text().splitlines()[1:]:
+            row = line.split()
+            if row[3] == '0A': ports.add(int(row[1].rsplit(':', 1)[1], 16))
+    return ports
+
+
+def interrupted_root_port():
+    """A root base port no deploy-worktree claim can share, with no listener on its footprint now.
+
+    The interrupted proof refuses while anything on the host listens on the root's
+    LISTENER_OFFSETS footprint. This suite runs beside the other deploy gates, which listen on
+    their claimed footprints, and every claimable footprint starts at FIRST_BASE_PORT: the
+    hard-coded base 15000 shared ports with the live semantic-stack claim 15100 (RCA
+    2026-11-05-interrupted-proof-fixture-port-inside-deploy-claim-range).
+    """
+    import socket
+    from deploy_test_isolation import _ports
+    listening = listening_ports()
+    for base in range(1024, _ports.FIRST_BASE_PORT - _ports.FOOTPRINT_PORTS + 1, _ports.PORTS_PER_WORKTREE):
+        if listening.isdisjoint(base + offset for offset in _ports.LISTENER_OFFSETS):
+            with socket.socket() as probe:
+                try: probe.bind(('127.0.0.1', base))
+                except OSError: continue
+            return base
+    raise AssertionError('no listener-free root footprint lies below the deploy-worktree claim range')
+
+
 class InterruptedLocalRecovery(unittest.TestCase):
     write_native = StructuralSupervisorCleanup.write_native
 
@@ -3625,7 +3656,8 @@ class InterruptedLocalRecovery(unittest.TestCase):
         subprocess.run(['git','-C',str(self.coordinator),'-c','user.name=test','-c','user.email=test@example.com','commit','-qm','old'],check=True)
         self.source=c.source(self.coordinator)
         self.gate.update(worker='independent-interrupted-worker',timeout_seconds=14400)
-        self.gate['env']={'CONDUCTOR_WORKSPACE_NAME':'interrupted-fixture','CONDUCTOR_PORT':'15000'}
+        self.port=interrupted_root_port()
+        self.gate['env']={'CONDUCTOR_WORKSPACE_NAME':'interrupted-fixture','CONDUCTOR_PORT':str(self.port)}
         self.request['source']=self.source
         self.receipt.update(source=self.source,native_exit=-9,cancelled=True,worker_result=None,
                             execution_binding={'contract_digest':c.digest(self.gate),'environment':'env','input_fingerprint':'fp'})
@@ -3648,6 +3680,16 @@ class InterruptedLocalRecovery(unittest.TestCase):
         self.proof=dict(kind=KIND,files={n:c.sha_file(p) for n,p in self.paths.items()},confirmed_at=201,observed_by='native-interrupted-review')
 
     def reconcile(self):c.reconcile(self.state,self.token,self.proof)
+
+    def test_root_footprint_shares_no_port_with_any_claimable_deploy_worktree(self):
+        # Concurrent deploy gates listen on their claims while this suite runs; a shared port makes every proof refuse.
+        from deploy_test_isolation import _ports
+        root=int(self.gate['env']['CONDUCTOR_PORT'])
+        bases=range(_ports.FIRST_BASE_PORT,_ports.LAST_BASE_PORT+1,_ports.PORTS_PER_WORKTREE)
+        shared=sorted(port for port in (root+o for o in _ports.LISTENER_OFFSETS)
+                      if any(port-o in bases for o in _ports.LISTENER_OFFSETS))
+        self.assertEqual([],shared)
+        self.assertTrue(listening_ports().isdisjoint(root+o for o in _ports.LISTENER_OFFSETS))
 
     def test_token_reconcile_and_actual_resume_branch_preserve_interrupted_receipts(self):
         original=copy.deepcopy(self.state['attempts']);raw={n:p.read_bytes() for n,p in self.paths.items()}
@@ -3751,7 +3793,7 @@ class InterruptedLocalRecovery(unittest.TestCase):
             path.unlink()
         import socket,fcntl
         with socket.socket() as listener:
-            listener.bind(('127.0.0.1',15000));listener.listen()
+            listener.bind(('127.0.0.1',self.port));listener.listen()
             with self.assertRaises(ValueError):self.reconcile()
         with (self.worker/'.context/native-worker-admission.lock').open('r') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
