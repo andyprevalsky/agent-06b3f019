@@ -89,17 +89,21 @@ function requireObject(value: unknown, param: string): FilterObject {
 
 export function splitFilters(params: GrepParams): SplitFilters {
   if (params.filters === undefined || params.filters === null) return { flat: {}, nested: {} };
-  const flat: FilterObject = {};
-  const nested: SplitFilters['nested'] = {};
+  // Collected as entries and built with Object.fromEntries, which defines own
+  // keys: `flat[key] = value` with a JSON `__proto__` key would replace the
+  // object's prototype, hiding that key from validation and leaking its
+  // contents in as inherited filters.
+  const flat: [string, unknown][] = [];
+  const nested: [ValidSource, FilterObject][] = [];
   for (const [key, value] of Object.entries(requireObject(params.filters, 'filters'))) {
     if (!isSourceName(key)) {
-      flat[key] = value;
+      flat.push([key, value]);
       continue;
     }
     const block = requireObject(value, `filters.${key}`);
-    if (Object.keys(block).length > 0) nested[key] = block;
+    if (Object.keys(block).length > 0) nested.push([key, block]);
   }
-  return { flat, nested };
+  return { flat: Object.fromEntries(flat), nested: Object.fromEntries(nested) };
 }
 
 /** Every nested block that addresses `source`: the umbrella `messages` block, then its own. */
