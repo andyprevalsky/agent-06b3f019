@@ -7862,6 +7862,20 @@
         ]
       },
       {
+        "id": "checkpoint-stored",
+        "method": "static_check",
+        "criteria": [
+          "Every close checkpoint of the code session was stored and each stays within 25% of the 200 MiB artifact cap"
+        ],
+        "checks": [
+          {
+            "type": "code_agent_checkpoint_stored",
+            "max_fraction_of_cap": 0.25,
+            "min_checkpoints": 1
+          }
+        ]
+      },
+      {
         "id": "single-code-agent",
         "method": "static_check",
         "criteria": [

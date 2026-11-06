@@ -675,3 +675,15 @@ def test_checkpoint_check_fails_closed_without_evidence_a_checkpoint_or_a_fracti
     assert not checkpoint_stored.check(small, {"max_fraction_of_cap": 0.5, "min_checkpoints": 2})[0]
     one_failed = {"checkpoints": ev.checkpoints([SMALL_STORED, DEV_CHECKPOINT_FAILED])}
     assert not checkpoint_stored.check(one_failed, {"max_fraction_of_cap": 0.5})[0]
+
+
+def test_code_agent_task_declares_the_checkpoint_stored_evaluator_after_one_session_per_spawn():
+    """The close checkpoint (200 MiB artifact cap) is a declared evaluator, so a run that swallows a cap refusal fails."""
+    task = {task.name: task for task in load_tasks(DEFAULT_CATALOG)}[TASK]
+    evaluators = task.raw["evaluators"]
+    ids = [evaluator["id"] for evaluator in evaluators]
+    assert len(ids) == 9 and task.raw["run_all_evaluators"] is True
+    assert ids.index("checkpoint-stored") == ids.index("one-session-per-spawn") + 1
+    declared = evaluators[ids.index("checkpoint-stored")]
+    assert declared["method"] == "static_check"
+    assert declared["checks"] == [{"type": checkpoint_stored.CHECK_TYPE, "max_fraction_of_cap": 0.25, "min_checkpoints": 1}]
