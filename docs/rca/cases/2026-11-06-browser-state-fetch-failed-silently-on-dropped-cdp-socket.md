@@ -23,6 +23,8 @@ sources:
   - agent f7900465-cee2-467f-95ce-f54854ebd8be
   - PR #1725
   - commit 2731bfe53f7ace99196021906b423b2a6296766a
+  - PR #1734
+  - commit e8d5f141612103323abb5cbb9dfa329184ab7e4b
 repro: agents/tests/blackbox/browser_tilion.blackbox.py::test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_running
 status: mitigated
 ---
@@ -76,6 +78,20 @@ retries once. If the socket stays down it raises `BrowserCdpConnectionLost`
 carrying the multiplexer's `last_upstream_close` (the missing capture). No
 effect while connected or during an intentional stop. 10k agents: per-agent,
 no shared state, one extra bounded wait only on a dead socket.
+
+Shipped as PR #1734 (merge e8d5f1416); regressions are registered in the
+browser_tilion domain, which the agents coverage gate runs. Deploy-time lessons:
+a regression that awaits browser-use's reconnect must also await the deferred
+reconnect cycle before `DOMService.disconnect()`, otherwise that cycle dispatches
+after `session.stop()` and restarts the stopped event bus; the leaked bus ignores
+cancellation and hangs `asyncio.run` shutdown under `coverage run` (found with
+`py-spy` and an `asyncio.all_tasks` dump; fixed in the test). New blackbox tests
+also have to be listed in the file's `run_all_tests()` or
+`agents-blackbox-registration` fails. Outcome proof: the unchanged cloud smoke task
+passed on the exact gated source (466030ae3e) and earlier heads. Still open:
+why the provider socket dropped in the incident was never observed; the next
+occurrence's `BrowserCdpConnectionLost` message carries the provider close code
+and the session flags.
 
 ## Human feedback
 

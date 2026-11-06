@@ -1,0 +1,26 @@
+{
+ "failures": [
+  {
+   "id": "02e439ccc675402093ee9f752fd888fe",
+   "source": {
+    "head": "466030ae3e5e7addf5752eb4fe3531b355af3e46",
+    "digest": "6882b962516005ee3a4b456959bee5aad507a18a24f217ed3e26bd518708a077"
+   },
+   "check": "backend-coverage-blackbox/blackbox:browser-provider",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/var/tmp/rdw/backend-coverage-blackbox"
+   ],
+   "native_result": "FAIL",
+   "description": "backend blackbox browser-provider: live Kernel/Steel auth persist failed with page.goto net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/ (Steel residential proxy tunnel); every other browser-provider case, including the live Tilion cases in the same run, passed.",
+   "evidence": "Gate: NOT_INTRODUCED. Compared 81a773c5ff (cycle passed this same gate, 249/249, twice) with 466030ae3e: the diff touches no back-end/ path; the failure boundary is the remote browser's proxy tunnel (Chromium net error from the provider), before any Rose code runs. The suite already carries a hold gate for this condition ('Kernel residential proxy unavailable'). Native log: attempts/2/initial/backend-coverage-blackbox + back-end/coverage/blackbox-run-shard2/browser-provider.log line 652.",
+   "attribution": "NOT_INTRODUCED",
+   "external_provider": {
+    "name": "Steel/Kernel residential proxy",
+    "reason": "outage"
+   }
+  }
+ ]
+}
