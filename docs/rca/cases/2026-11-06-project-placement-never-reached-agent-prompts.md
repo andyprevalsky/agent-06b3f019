@@ -23,7 +23,7 @@ tags:
 sources:
   - agent 1a3d495c-826c-4eca-afe0-382fcbf72e82 (root in project "Rose", Rose-Ai-Labs/rose, 2026-11-06 04:13Z)
   - commit 79b959aca2 (main at diagnosis)
-repro: agents/tests/blackbox/prompt_invariants.blackbox.py "project_context_lands_once_in_the_dynamic_user_context_block"
+repro: agents/tests/blackbox/prompt_invariants.blackbox.py "project_context_lands_once_in_the_dynamic_user_context_block"; back-end/src/tests/blackbox/chat-router.blackbox.ts "a chat turn gives the router and the generator its project from one read"
 status: fixed
 ---
 
@@ -60,19 +60,27 @@ and code-session restore only; the agent-prompt contract was never extended to
 it (Step 5a stop: the placement data is correct and indexed, only its consumer
 was missing).
 
-Local replay of the exact prod dumps through `RoseClient` (Claude lease
-unavailable without a local backend, so the waterfall served the calls):
-planner before (`openai/gpt-6.1-sol`, pool rose-1-ultra) planned
-`spawn_explore_agent` "Identify the canonical repository the user ... means by
-'our rose repo'" plus browser follow-ups. With the project section and fixed
-tool text (same dump otherwise), the planner's first task was
-`spawn_code_agent` "Inspect the existing checkout of the user's Rose project,
-GitHub repository Rose-Ai-Labs/rose, default branch main", no
-`github_repo_link`, and its other tasks were told not to search for the repo.
-The plan_loop on its waterfall model (`qwen/qwen3.8-27b`, pool rose-1-flash)
-still spawned an explore repo search in all three variants; its history keeps
-the unfixed router's "I don't know the exact repo URL ... search for it first"
-message. Prod served that call with `claude-opus-5-5`, which was not replayed.
+Local replay of the exact prod dumps through `RoseClient` on Andy's Claude
+subscription (claude_auth, `claude-opus-5-5`, the model prod served). The chat
+router (prod path, `qwen-3.8-27b` on direct Cerebras) with the project section
+no longer claims a lack of repo context: it escalates with "Explore the
+Rose-Ai-Labs/rose GitHub repository (main branch)". plan_loop calls `set_plan`
+both before and after; the decision is the planner's. Planner before:
+`spawn_explore_agent` "We need the exact GitHub URL of the company's main 'rose'
+repository so a browser agent can inspect it", then a browser agent on GitHub.
+Planner after (regenerated router reply, project section, fixed tool text):
+`spawn_code_agent` "You are inside a checkout of the user's GitHub repo
+Rose-Ai-Labs/rose (default branch: main)", no `github_repo_link`; a browser
+agent reads the known URL for PR/issue counts. On the waterfall
+(`openai/gpt-6.1-sol`) the planner flipped the same way, while the flash
+plan_loop on `qwen/qwen3.8-27b` kept an explore repo search.
+
+Replay-tool gap found on the way: `scripts/replicate_llm_dump.py` renames the
+call site to `replicate_<site>`, and `providers/rose/flash_agent.py` grants
+subscription legs only to the literal `plan_loop` / `execute_loop` /
+`explore_agent` call sites, so a flash-agent replay silently skips the
+claude/gpt subscription leg prod used. The replay driver restored the original
+call site for routing; the tool itself is not yet fixed.
 
 ## Solution
 
@@ -89,12 +97,13 @@ message. Prod served that call with `claude-opus-5-5`, which was not replayed.
   byte-identical, and a Home agent's prompts are unchanged.
 - Static text: `github_repo_link` and the stock code line now say the current
   project's repo is used, otherwise a repo created for this agent tree.
-- Chat router: one PK read per chat turn (`loadRouterProjectContext`) appends the
-  project after the router prompt's cache boundary (`markCacheable` dynamic
-  suffix, still one system message).
+- Chat router and response generator: one PK read per chat turn
+  (`loadRouterProjectContext`), shared by both phases, appends the project after
+  each static prompt's cache boundary (`markCacheable` dynamic suffix, still one
+  system message).
 
 10k agents: one extra PK join per agent detail read and one PK read per chat
-turn; no new channel, subscription, shared row or per-tree fan-in; prompt size
+turn (router and generator share it); no new channel, subscription, shared row or per-tree fan-in; prompt size
 grows by about 60 tokens only for project agents.
 
 ## Human feedback
