@@ -72,6 +72,48 @@ require_text "$RUNNER" '"$REPO_DIR/node_modules/.bin/playwright"' "semantic runn
 require_text "$RUNNER" 'run_playwright() {' "semantic runner must centralize Playwright invocation"
 require_text "$RUNNER" 'exec "$PLAYWRIGHT_BIN" "$@"' "semantic runner must exec the frontend-local Playwright binary when present"
 require_count "$RUNNER" 'run_playwright test' "2" "all semantic runner paths must use the shared run_playwright helper"
+
+# Optional native output must preserve argv without expanding an unset array on
+# pre-4.4 Bash. Execute only the actual argument-building tail, never auth or UI.
+python3 - "$RUNNER" <<'PY_SEMANTIC_ARGS'
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+
+source = Path(sys.argv[1]).read_text()
+guarded = '${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"}'
+assert source.count(guarded) == 2, 'both semantic paths must guard empty native-output arrays for older Bash'
+tail = source[source.index('# Optional native evidence output;'):]
+for selected in (False, True):
+    for native in (False, True):
+        with tempfile.TemporaryDirectory(prefix='semantic-args-') as directory:
+            root = Path(directory)
+            (root / 'tests-e2e').mkdir()
+            (root / 'tests-e2e' / 'selected.spec.ts').touch()
+            prefix = str(root / 'native output with spaces')
+            script = root / 'runner.sh'
+            script.write_text('set -euo pipefail\nREPO_DIR=' + shlex.quote(directory) + '\n'
+                              'SEMANTIC_WORKERS=3\n'
+                              'run_playwright() { python3 -c '\
+                              + shlex.quote('import json,sys; print(json.dumps(sys.argv[1:]))')
+                              + ' "$@"; exit; }\n' + tail)
+            env = dict(os.environ, SEMANTIC_GREP_INVERT='deferred')
+            env.pop('SEMANTIC_NATIVE_REPORT_PREFIX', None)
+            if native:
+                env['SEMANTIC_NATIVE_REPORT_PREFIX'] = prefix
+            result = subprocess.run(['bash', str(script), *(['selected'] if selected else [])],
+                                    cwd=root, env=env, check=True, capture_output=True, text=True)
+            expected = ['test', *(['tests-e2e/selected.spec.ts'] if selected else []),
+                        '--reporter=' + ('list,json,' + directory + '/scripts/deploy-semantic-reporter.cjs' if native else 'list'),
+                        '--workers=3', *(['--output=' + prefix + '-artifacts'] if native else []),
+                        *(['--grep-invert=deferred'] if not selected else [])]
+            assert json.loads(result.stdout) == expected, result.stdout
+print('PASS: all/named semantic argv, native output absent/present, spaces preserved (installed Bash)')
+PY_SEMANTIC_ARGS
 require_text "$HELPERS" "HAS_INJECTED_SESSION" "semantic helpers must expose injected-session auth"
 require_text "$HELPERS" "expectInjectedSessionRecognized" "semantic helpers must verify the shared session"
 require_text "$RUN_SH" 'resolve_temporal_task_queue "$CONDUCTOR_WORKSPACE_NAME"' "run.sh must derive its queue through the tested isolation boundary"

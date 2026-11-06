@@ -1905,6 +1905,12 @@ async def test_cloud_message_adapter_requires_backend_sent_receipt_and_stable_bi
             self.calls = []
         async def execute_tool(self, instance, args, call_id):
             self.calls.append((args, call_id))
+            schema = args.get("output_schema")
+            assert schema and schema.get("fields"), "Fresh cloud-message browser task has no required output schema"
+            from helpers.llm import _build_verifier_response_model
+            contract = _build_verifier_response_model(schema).model_json_schema()
+            assert "send_outcome" in contract["$defs"]["VerifierOutput"]["required"]
+
             yield ToolEvent(type=EventType.POST_MESSAGE, message="Synthetic model claims sent", status=MessageStatus.FINISHED, metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete", "success": True})
     browser = Browser()
     backend = {"success": True, "provider": "phone_harness", "queue_id": "queue", "status": "unknown", "sent_at": None, "browser_task_id": _logical_browser_task_id("agent-1")}

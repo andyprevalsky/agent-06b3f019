@@ -145,7 +145,7 @@ it('recovers a lost exact completion response by read, with no secret body or se
   await waitFor(() => expect(complete).toBeEnabled());
   fireEvent.click(complete);
   fireEvent.click(complete);
-  expect(await screen.findByText(/Agent will verify/)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText(/Agent will verify/)).toBeInTheDocument());
   expect(f.calls.filter((c) => c.startsWith('POST') && c.endsWith('/complete'))).toHaveLength(1);
   expect(parent.onResume).not.toHaveBeenCalled();
   expect(screen.getByTitle('Browser')).toBe(browser);
@@ -240,7 +240,7 @@ it('uses a manual verification target without a password form and never claims s
   const complete = screen.getByRole('button', { name: 'Authentication complete' });
   await waitFor(() => expect(complete).toBeEnabled());
   fireEvent.click(complete);
-  expect(await screen.findByText(/Agent will verify/)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByText(/Agent will verify/)).toBeInTheDocument());
   expect(screen.queryByText(/setup ready|iCloud ready/i)).toBeNull();
 });
 

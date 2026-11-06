@@ -443,7 +443,7 @@ if [[ -n "${SEMANTIC_NATIVE_REPORT_PREFIX:-}" ]]; then
 fi
 
 if [[ $# -eq 0 ]]; then
-  PLAYWRIGHT_ARGS=(--reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" "${SEMANTIC_OUTPUT_ARGS[@]}")
+  PLAYWRIGHT_ARGS=(--reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" ${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"})
   if [[ -n "${SEMANTIC_GREP_INVERT:-}" ]]; then
     PLAYWRIGHT_ARGS+=(--grep-invert="$SEMANTIC_GREP_INVERT")
   fi
@@ -462,4 +462,4 @@ if [[ ! -f "$TEST_FILE" ]]; then
   exit 1
 fi
 
-run_playwright test "$TEST_FILE" --reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" "${SEMANTIC_OUTPUT_ARGS[@]}"
+run_playwright test "$TEST_FILE" --reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" ${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"}

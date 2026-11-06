@@ -2150,7 +2150,7 @@ class Cycle(unittest.TestCase):
             files={str(p): c.sha_file(p) for p in files})
         return state, occurrence, paths, proof, hub
 
-    def prelaunch_campaign_state(self):
+    def prelaunch_campaign_state(self, historical_inventory_mismatch=False):
         import hashlib, shutil, time, runpy
         from datetime import datetime, timezone
         state, occurrence, paths, proof, hub = self.native_recon_state()
@@ -2160,8 +2160,18 @@ class Cycle(unittest.TestCase):
         producer = self.root / 'scripts/run-bench-campaign.py'
         producer.parent.mkdir(exist_ok=True)
         shutil.copyfile(ROOT / 'scripts/run-bench-campaign.py', producer)
+        inventory_sources = ('scripts/cloudbench-campaign-inventory.sh', 'scripts/lib/cloudbench-inventory.sh',
+            'scripts/lib/cloudbench-env.sh', 'scripts/cloudbench-machine-readiness.py', 'scripts/cloudbench-campaign-machines.py')
+        for relative in inventory_sources:
+            target = self.root / relative; target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, target)
+        historical = self.root / 'scripts/lib/cloudbench-env.sh'
+        if historical_inventory_mismatch:
+            historical.write_bytes(historical.read_bytes() + b'\n# different receipt-head inventory source\n')
         subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
         subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=t@x','commit','-qm','producer'],check=True)
+        if historical_inventory_mismatch:
+            shutil.copyfile(ROOT / 'scripts/lib/cloudbench-env.sh', historical)
         source = c.source(self.root)
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         campaign.mkdir(parents=True)
@@ -2238,6 +2248,13 @@ class Cycle(unittest.TestCase):
                 snapshot=copy.deepcopy(bad)
                 with self.assertRaises(ValueError):c.reconcile(bad,token,proof)
                 self.assertEqual(snapshot,bad)
+
+    def test_native_prelaunch_inventory_must_match_receipt_head_not_only_checkout(self):
+        state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state(historical_inventory_mismatch=True)
+        snapshot=copy.deepcopy(state)
+        with self.assertRaises(ValueError):
+            c.reconcile(state,occurrence['id'],proof)
+        self.assertEqual(snapshot,state)
 
     def test_native_prelaunch_proof_rejects_started_job_or_missing_positive_failure(self):
         state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()

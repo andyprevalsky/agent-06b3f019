@@ -874,7 +874,16 @@ async def deliver_cloud_message(workflow_instance, *, queue_id, tool_call_id, re
     )
     async for event in get_browser_manager().execute_tool(
         workflow_instance,
-        {"goal": goal, "approvedMessageIntent": queue_id},
+        {
+            "goal": goal,
+            "approvedMessageIntent": queue_id,
+            "output_schema": {"fields": [{
+                "name": "send_outcome",
+                "type": "string",
+                "description": "Observed outcomes of messages.send_approved and messages.verify_sent; a model report does not confirm delivery.",
+                "required": True,
+            }]},
+        },
         child_id,
     ):
         # A child completion is a claim, not delivery evidence. Preserve progress

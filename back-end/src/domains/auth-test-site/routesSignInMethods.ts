@@ -1,4 +1,4 @@
-import { phoneSmsTarget } from './servicePhoneSms';
+import { phoneSmsRetryAfterSeconds, phoneSmsTarget } from './servicePhoneSms';
 /**
  * Sign-in methods other than the password form.
  *
@@ -147,6 +147,16 @@ signInMethodsRouter.post(
     const phone = phoneSmsTarget(site, formField(req, 'phone').trim());
     if (phone === '' || site.behavior.smsSignIn === 'off') {
       res.redirect(303, siteUrl(site, '/login/sms'));
+      return;
+    }
+    const retryAfterSeconds = phoneSmsRetryAfterSeconds(site);
+    if (retryAfterSeconds > 0) {
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      sendPage(
+        res,
+        '<p>Please wait before requesting another sign-in code, then try again.</p>',
+        429
+      );
       return;
     }
     await requestSmsCode(site, phone);

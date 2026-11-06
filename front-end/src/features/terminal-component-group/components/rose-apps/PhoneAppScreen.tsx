@@ -1,5 +1,5 @@
 /** Only the open Phone app mounts an exact selected-agent scoped reader. */
-import { useContext } from 'react';
+import { useCallback, useContext, useEffect, useState } from 'react';
 import { AgentContext } from '../../hooks';
 import { useRoseApps } from './roseAppsState';
 import { phoneAppTarget } from './phoneAppTarget';
@@ -14,13 +14,18 @@ function PhoneSession({
   taskId,
   messages,
   readOnly,
+  onCompleted,
 }: {
   agentId: string;
   taskId: string;
   messages: Message[];
   readOnly: boolean;
+  onCompleted: (agentId: string, taskId: string, requestId: string) => void;
 }) {
   const attention = usePhoneAttention(taskId, agentId, messages, readOnly);
+  useEffect(() => {
+    if (attention.request?.completedAt) onCompleted(agentId, taskId, attention.request.id);
+  }, [agentId, taskId, attention.request, onCompleted]);
   const phone = usePhoneOverlay(
     taskId,
     attention.id ? `auth:${attention.id}` : phoneActivityKey(messages, taskId),
@@ -35,19 +40,37 @@ function PhoneSession({
       data-browser-task-id={taskId}
       className="relative flex h-full min-h-0 w-full flex-col overflow-hidden rounded-[36px] bg-[#0d0d0f]"
     >
-      {!phone.visible && attention.error && (
+      {!phone.visible && (attention.error || attention.request?.completedAt) && (
         <PhoneAttentionNotice attention={attention} lease={phone.snapshot?.lease} />
       )}
       <PhoneOverlay phone={phone} readOnly={readOnly} attention={attention} />
-      {!phone.visible && !phone.error && !phone.queueTimedOut && !attention.error && (
-        <p role="status" className="m-auto px-6 text-center text-sm text-white/70">
-          Checking this agent’s phone connection…
-        </p>
-      )}
+      {!phone.visible &&
+        !phone.error &&
+        !phone.queueTimedOut &&
+        !attention.error &&
+        !attention.request?.completedAt && (
+          <p role="status" className="m-auto px-6 text-center text-sm text-white/70">
+            Checking this agent’s phone connection…
+          </p>
+        )}
     </div>
   );
 }
 export function PhoneAppScreen() {
+  const [completedTask, setCompletedTask] = useState<{
+    agentId: string;
+    taskId: string;
+    requestId: string;
+  } | null>(null);
+  const rememberCompleted = useCallback((agentId: string, taskId: string, requestId: string) => {
+    setCompletedTask((previous) =>
+      previous?.agentId === agentId &&
+      previous.taskId === taskId &&
+      previous.requestId === requestId
+        ? previous
+        : { agentId, taskId, requestId },
+    );
+  }, []);
   const apps = useRoseApps();
   const context = useContext(AgentContext);
   const agent = context?.agent;
@@ -57,8 +80,14 @@ export function PhoneAppScreen() {
     context?.selectedAgentId === selected &&
     agent?.agent_id === selected &&
     !context.isLoadingAgent;
+  useEffect(() => {
+    setCompletedTask(null);
+  }, [selected]);
   const messages = current ? context.messages : [];
-  const taskId = current ? phoneAppTarget(selected, messages, apps.tabs) : null;
+  const completed = completedTask?.agentId === selected ? completedTask : null;
+  const taskId = current
+    ? phoneAppTarget(selected, messages, apps.tabs, completed ?? undefined)
+    : null;
   if (!taskId || !current)
     return (
       <div
@@ -78,6 +107,7 @@ export function PhoneAppScreen() {
   return (
     <PhoneSession
       key={`${selected}:${taskId}`}
+      onCompleted={rememberCompleted}
       agentId={selected}
       taskId={taskId}
       messages={messages}

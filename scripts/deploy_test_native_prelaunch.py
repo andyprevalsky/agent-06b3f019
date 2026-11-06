@@ -66,8 +66,11 @@ def validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bou
         ('cloudbench-env.sh', 'scripts/lib/cloudbench-env.sh'),
         ('cloudbench-machine-readiness.py', 'scripts/cloudbench-machine-readiness.py'),
         ('cloudbench-campaign-machines.py', 'scripts/cloudbench-campaign-machines.py')):
-        need(bound(inventory / 'scripts' / name) == (canonical_root / relative).read_bytes(),
-             'prelaunch inventory source changed')
+        captured = bound(inventory / 'scripts' / name)
+        need(captured == (canonical_root / relative).read_bytes()
+             and captured == subprocess.check_output(['git', '-C', str(root), 'show',
+                                                       receipt['source']['head'] + ':' + relative]),
+             'prelaunch inventory source differs from reviewed checkout or receipt head')
     need(bound(inventory / 'stop') == b'', 'prelaunch publisher stop missing')
     lock = fields(bound(inventory / 'machines-refresh.lock'))
     pid = int(lock.get('pid', '0'))

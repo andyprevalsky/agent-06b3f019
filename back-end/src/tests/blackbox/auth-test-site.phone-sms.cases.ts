@@ -1,6 +1,7 @@
 /** Real routes and issuer state, no outbound transport credentials or live messages. */
 import { prisma } from '../../providers/database';
 import { findSite } from '../../domains/auth-test-site/service';
+import type { AuthTestSite } from '../../domains/auth-test-site/types';
 import {
   assert,
   cleanup,
@@ -12,6 +13,11 @@ import {
   test,
   withLocalSite,
 } from './auth-test-site.testkit';
+/** Only deliberate resend fixtures advance their synthetic issuer timestamp. */
+function allowNextPhoneRequest(site: AuthTestSite) {
+  const challenge = site.codes.at(-1)?.phoneChallenge;
+  if (challenge) challenge.issuedAt = new Date(Date.now() - 60_001).toISOString();
+}
 test('phone_sms_otp uses only owned configured phone, no minted identity or AgentPhone mirror', async () => {
   const userId = await createUser();
   const prior = process.env.CLOUD_IPHONE_ENABLED;
@@ -48,6 +54,7 @@ test('phone_sms_otp uses only owned configured phone, no minted identity or Agen
         (await prisma.agentPhoneMessage.count({ where: { userId } })) === 0,
         'No AgentPhone shortcut'
       );
+      allowNextPhoneRequest(site);
       await postForm(base, pagePath(manifest, '/login/sms'), {});
       assert(first.consumed, 'Resend invalidates previous challenge');
       const newest = site.codes.at(-1)!;
@@ -96,6 +103,7 @@ test('phone_sms_otp uses only owned configured phone, no minted identity or Agen
       assert(final.sessions.length === 1, 'Exactly one authenticated session');
       assert(!JSON.stringify(final).includes(newest.code), 'Final report hides code');
       assert(!JSON.stringify(final).includes('+19729777432'), 'Final report hides destination');
+      allowNextPhoneRequest(site);
       await postForm(base, pagePath(manifest, '/login/sms'), {});
       site.codes.at(-1)!.expiresAtMs = Date.now() - 1;
       const expired = await postForm(base, pagePath(manifest, '/login/sms/verify'), {
@@ -201,11 +209,29 @@ test('phone_sms_otp failed replacement cannot authenticate and cannot revive an 
       const site = findSite(manifest.siteId)!;
       const first = site.codes.at(-1)!;
       assert(first.phoneChallenge?.deliveryAck === true, 'Initial send accepted by fake transport');
+      const suppressed = await postForm(base, pagePath(manifest, '/login/sms'), {});
+      assert(suppressed.status === 429, 'Repeated site request must be rate limited');
+      assert(Number(suppressed.headers.get('Retry-After')) > 0, 'Retry deadline is required');
+      assert(
+        calls === 1 && site.codes.length === 1 && !first.consumed,
+        'Cooldown must precede send and invalidation'
+      );
       rejectSend = true;
+      allowNextPhoneRequest(site);
       await postForm(base, pagePath(manifest, '/login/sms'), {});
       const failed = site.codes.at(-1)!;
       assert(calls === 2, 'Both sends exercised actual provider boundary');
       assert(failed.phoneChallenge?.deliveryAck === false, 'Failed send cannot claim acceptance');
+      const failurePage = await (
+        await fetch(`${base}${pagePath(manifest, '/login/sms/verify')}`)
+      ).text();
+      assert(
+        failurePage.includes('not confirm') && !failurePage.includes('We texted'),
+        'Actual failed send needs truthful notice'
+      );
+      const failureRetry = await postForm(base, pagePath(manifest, '/login/sms'), {});
+      assert(failureRetry.status === 429 && calls === 2, 'Failed send must retain cooldown');
+      assert(site.codes.at(-1) === failed, 'Failed-send cooldown changed challenge');
       assert(
         (await postForm(base, pagePath(manifest, '/login/sms/verify'), { code: failed.code }))
           .status !== 303,
@@ -218,6 +244,7 @@ test('phone_sms_otp failed replacement cannot authenticate and cannot revive an 
       );
       rejectSend = false;
       throwSend = true;
+      allowNextPhoneRequest(site);
       await postForm(base, pagePath(manifest, '/login/sms'), {});
       const thrown = site.codes.at(-1)!;
       assert(
@@ -227,6 +254,7 @@ test('phone_sms_otp failed replacement cannot authenticate and cannot revive an 
       );
       throwSend = false;
       holdSend = true;
+      allowNextPhoneRequest(site);
       const delayed = postForm(base, pagePath(manifest, '/login/sms'), {});
       await held;
       const pending = site.codes.at(-1)!;
@@ -236,7 +264,15 @@ test('phone_sms_otp failed replacement cannot authenticate and cannot revive an 
             .status !== 303,
           'Pending unacknowledged code authenticated'
         );
+        const callsBeforeRetry = calls;
+        const pendingRetry = await postForm(base, pagePath(manifest, '/login/sms'), {});
+        assert(
+          pendingRetry.status === 429 && calls === callsBeforeRetry,
+          'Held send must reserve cooldown before IO'
+        );
+        assert(site.codes.at(-1) === pending, 'Held send cooldown replaced current challenge');
         holdSend = false;
+        allowNextPhoneRequest(site);
         await postForm(base, pagePath(manifest, '/login/sms'), {});
       } finally {
         release();
@@ -266,6 +302,57 @@ test('phone_sms_otp failed replacement cannot authenticate and cannot revive an 
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    await prisma.iPhoneDevice.deleteMany({ where: { userId } });
+    await cleanup(userId);
+  }
+});
+
+test('phone SMS verification page distinguishes missing and unacknowledged sends without exposing secrets', async () => {
+  const userId = await createUser();
+  const prior = process.env.CLOUD_IPHONE_ENABLED;
+  try {
+    process.env.CLOUD_IPHONE_ENABLED = '1';
+    await prisma.user.update({
+      where: { userId },
+      data: { phone: '+19729777432', isAnonymous: false },
+    });
+    await prisma.iPhoneDevice.create({
+      data: { userId, providerDeviceId: `sms-notice-${userId}`, enabled: true },
+    });
+    await withLocalSite(async ({ base }) => {
+      const fixture = await createFixture(base, {
+        userId,
+        scenario: 'phone_sms_otp',
+        publicBaseUrl: base,
+      });
+      assert(fixture.status === 201, 'Configured fixture');
+      const manifest = await fixture.json();
+      const absent = await (
+        await fetch(`${base}${pagePath(manifest, '/login/sms/verify')}`)
+      ).text();
+      await postForm(base, pagePath(manifest, '/login/sms'), {});
+      const issued = findSite(manifest.siteId)!.codes.at(-1)!;
+      issued.phoneChallenge!.deliveryAck = false;
+      const failed = await (
+        await fetch(`${base}${pagePath(manifest, '/login/sms/verify')}`)
+      ).text();
+      assert(!failed.includes('We texted'), 'Unacknowledged send claimed a code was texted');
+      assert(
+        failed.includes('not confirm') && failed.includes('request a new code'),
+        'Unacknowledged send needs truthful retry notice'
+      );
+      assert(
+        absent.includes('No sign-in code has been requested'),
+        'Missing challenge needs distinct notice'
+      );
+      assert(
+        !failed.includes(issued.code) && !failed.includes('+19729777432'),
+        'Notice leaked OTP or full phone'
+      );
+    });
+  } finally {
+    if (prior === undefined) delete process.env.CLOUD_IPHONE_ENABLED;
+    else process.env.CLOUD_IPHONE_ENABLED = prior;
     await prisma.iPhoneDevice.deleteMany({ where: { userId } });
     await cleanup(userId);
   }

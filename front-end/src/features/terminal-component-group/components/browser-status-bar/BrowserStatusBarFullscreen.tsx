@@ -171,7 +171,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
     props.taskId,
     attention.id
       ? `auth:${attention.id}`
-      : props.isWaitingForAuthAssistance
+      : props.isWaitingForAuthAssistance && !attention.request?.completedAt
         ? ''
         : phoneActivityKey(props.messages, props.taskId),
     props.readOnly ?? false,
