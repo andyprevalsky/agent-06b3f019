@@ -504,7 +504,8 @@ class Launcher(unittest.TestCase):
                 self.runs = runs
 
             def json(self, path, conditional=False):
-                return {'workflow_runs': self.runs}
+                wanted = gh.urllib.parse.parse_qs(gh.urllib.parse.urlsplit(path).query).get('branch')
+                return {'workflow_runs': [r for r in self.runs if not wanted or r.get('head_branch') == wanted[0]]}
 
         mine = {'id': 9, 'path': gh.WORKFLOW_PATH, 'head_branch': name}
         other = {'id': 8, 'path': gh.WORKFLOW_PATH, 'head_branch': 'deploy-gates/4vcpu/other'}

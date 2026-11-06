@@ -30,6 +30,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -48,7 +49,8 @@ WORKER_SCRIPTS = ('deploy_test_worker.py', 'deploy_test_backend.py')
 ENVELOPE_VERSION = 1
 API = 'https://api.github.com'
 START_SECONDS = 300.0        # tag push -> run visible (GitHub queueing + Blacksmith pickup)
-POLL_SECONDS = 20.0          # ETag-conditional: unchanged 304 answers do not spend the rate limit
+POLL_SECONDS = 60.0          # ETag-conditional; gates take minutes and the REST quota is shared
+START_POLL_SECONDS = 10.0
 CANCEL_SECONDS = 180.0       # cancel request -> run completed (VM destroyed)
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 MAX_RESULT_BYTES = 64 * 1024 * 1024
@@ -138,6 +140,7 @@ def repository(root: Path) -> str:
 class GitHub:
     def __init__(self, token: str, repo: str):
         self.token, self.repo, self.etags, self.cache = token, repo, {}, {}
+        self.rate_limited_seconds = 0.0  # time spent waiting out the shared REST quota, for the receipt
 
     def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True):
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
@@ -162,7 +165,10 @@ class GitHub:
                     return error.code, error.headers, b''
                 if error.code in (403, 429) and 'rate limit' in error.read().decode(errors='replace').lower():
                     reset = float(error.headers.get('X-RateLimit-Reset') or time.time() + 60)
-                    STOP.wait(min(max(reset - time.time(), 5), 300))
+                    pause = min(max(reset - time.time(), 5), 300)
+                    print(f'DEPLOY_GATE_RATE_LIMITED waiting {pause:.0f}s', flush=True)
+                    self.rate_limited_seconds += pause
+                    STOP.wait(pause)
                     continue
                 if error.code >= 500 and attempt < 4:
                     STOP.wait(2 ** attempt)
@@ -216,21 +222,24 @@ class WorkflowRejected(Exception):
 
 def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict | None:
     # Filter by path, not the by-filename endpoint: that 404s until the workflow is on the default branch.
-    path = f'/actions/runs?event=push&head_sha={head}&per_page=100'
+    # head_branch is the tag for a tag push; the small filtered list rarely changes, so most polls are 304s.
+    path = f'/actions/runs?event=push&head_sha={head}&branch={urllib.parse.quote(name, safe="")}&per_page=20'
+    unnamed = f'/actions/runs?event=push&head_sha={head}&per_page=20'
     rejected_since = None
     while time.time() < deadline and not STOP.is_set():
-        runs = [r for r in gh.json(path, conditional=True).get('workflow_runs', []) if r.get('path') == WORKFLOW_PATH]
-        mine = [r for r in runs if r.get('head_branch') == name]
+        mine = [r for r in gh.json(path, conditional=True).get('workflow_runs', [])
+                if r.get('path') == WORKFLOW_PATH and r.get('head_branch') == name]
         if mine:
             return min(mine, key=lambda r: r['id'])
         # A workflow-file error yields an unnamed failed run (head_branch null) with no jobs.
+        runs = [r for r in gh.json(unnamed, conditional=True).get('workflow_runs', []) if r.get('path') == WORKFLOW_PATH]
         invalid = [r for r in runs if r.get('head_branch') is None and r.get('conclusion') == 'failure'
                    and iso_epoch(r.get('created_at')) >= pushed - 5]
         if invalid:
             rejected_since = rejected_since or time.time()
             if time.time() - rejected_since > 30:
                 raise WorkflowRejected(f"GitHub rejected {WORKFLOW_PATH} at {head}: {invalid[0].get('html_url')}")
-        STOP.wait(5)
+        STOP.wait(START_POLL_SECONDS)
     return None
 
 
@@ -394,6 +403,7 @@ def launch(args) -> int:
     if any(result.get(k) != request.get(k) for k in ('token', 'source', 'gate')):
         return finish(blocked(request, 'remote worker result identity mismatch', receipt=receipt))
     localize_logs(result, artifact)
+    receipt['rate_limited_seconds'] = gh.rate_limited_seconds
     result['remote'] = receipt
     return finish(result)
 
