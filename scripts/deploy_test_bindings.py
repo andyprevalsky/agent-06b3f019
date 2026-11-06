@@ -7,6 +7,22 @@ from deploy_test_isolation import (GITHUB_LAUNCHER, GITHUB_RUNNER, GITHUB_TRANSP
                                    GITHUB_WORKER_SCRIPTS, github_argv)
 
 
+def portable(recipe):
+    """A remote VM has no coordinator paths: its interpreter is `python3` from the runner's agents venv."""
+    def argv(spec):
+        if not spec:
+            return spec
+        command = list(spec['command'])
+        if command and Path(command[0]).is_absolute() and Path(command[0]).name.startswith('python'):
+            command[0] = 'python3'
+        return {**spec, 'command': command}
+    out = {**recipe, 'cases': {name: argv(spec) for name, spec in recipe['cases'].items()}}
+    for key in ('setup', 'cleanup'):
+        if recipe.get(key):
+            out[key] = argv(recipe[key])
+    return out
+
+
 def generate(template, inventory, root):
     bindings = {}
     for gate in template['gates']:
@@ -93,5 +109,6 @@ def generate(template, inventory, root):
             bindings[name].update(result_transport='file', timeout_seconds=timeout, worker_root=checkout,
                                   python=command[command.index('--python') + 1])
         elif mode == GITHUB_TRANSPORT:
-            bindings[name].update(result_transport='file', timeout_seconds=timeout, worker_root=checkout)
+            bindings[name].update(result_transport='file', timeout_seconds=timeout, worker_root=checkout,
+                                  recipe=portable(recipe))
     return bindings

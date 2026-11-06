@@ -125,6 +125,19 @@ class Bindings(unittest.TestCase):
             generate(template(), {'backend-coverage-blackbox': slot('backend-coverage-blackbox')}, ROOT)
 
 
+class Portable(unittest.TestCase):
+    def test_remote_recipes_use_the_runner_interpreter_not_the_coordinator_path(self):
+        from deploy_test_bindings import portable
+        recipe = {'cases': {'c': {'command': [sys.executable, 'scripts/x.py'], 'cwd': '.'},
+                            'd': {'command': ['npm', 'run', 't'], 'cwd': 'back-end'}},
+                  'setup': {'command': ['/opt/py/bin/python3.11', '-V']}}
+        out = portable(recipe)
+        self.assertEqual(out['cases']['c']['command'], ['python3', 'scripts/x.py'])
+        self.assertEqual(out['cases']['d']['command'], ['npm', 'run', 't'])
+        self.assertEqual(out['setup']['command'], ['python3', '-V'])
+        self.assertEqual(recipe['cases']['c']['command'][0], sys.executable)  # input untouched
+
+
 class Isolation(unittest.TestCase):
     def setUp(self):
         self.source = patch.object(p, 'source', return_value={'head': 'fixed', 'digest': 'fixed'})
