@@ -379,6 +379,7 @@ def test_playwright_lane_check_needs_a_real_pass_and_the_root_in_its_env(monkeyp
     monkeypatch.setattr(external, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(external, "FRONT_END", tmp_path / "front-end")
     monkeypatch.setattr(external, "PLAYWRIGHT_CMD", ("bash", str(stub)))
+    monkeypatch.setattr(external, "_approved_session", lambda ctx: "")
     check = {"type": "code_agent_render"}
     assert code_agent_checks.run_check(_external_data(), check) == (True, "code_agent_render: 1 passed")
     assert out.read_text().split() == [AGENT, CTX["frontend_url"]]
@@ -473,3 +474,45 @@ def test_failed_run_still_records_code_agent_evidence_and_never_raises(monkeypat
     monkeypatch.setattr(ev, "collect", fine)
     asyncio.run(code_agent_checks.record_evidence(data, benchmark=TASK, base_url=None))
     assert data["_benchmark"][code_agent_checks.EVIDENCE_KEY] == {"startup_phases": []}
+
+
+def test_playwright_lane_check_runs_as_an_approved_user_on_a_loopback_stack_only(monkeypatch, tmp_path):
+    out = tmp_path / "session.txt"
+    stub = _stub(tmp_path, f'echo "$SEMANTIC_SESSION" > {out}\necho "  1 passed (3s)"\n')
+    (tmp_path / "front-end/tests-e2e").mkdir(parents=True)
+    (tmp_path / "front-end/tests-e2e/code-agent-render-check.spec.ts").write_text("")
+    monkeypatch.setattr(external, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(external, "FRONT_END", tmp_path / "front-end")
+    monkeypatch.setattr(external, "PLAYWRIGHT_CMD", ("bash", str(stub)))
+    redeemed = []
+
+    real_run = external.subprocess.run
+
+    def subprocess_run(cmd, **kwargs):
+        from types import SimpleNamespace
+
+        if cmd[:2] != ["npx", "tsx"]:
+            return real_run(cmd, **kwargs)
+        redeemed.append(("session", cmd[-1], kwargs["env"]["TEST_USER_ID"]))
+        return SimpleNamespace(returncode=0, stdout='{"access_token": "tok", "user": {}}\n', stderr="")
+
+    class Response:
+        def close(self):
+            pass
+
+    def urlopen(request, timeout):
+        redeemed.append(("redeem", request.full_url, request.get_header("Authorization"), request.data))
+        return Response()
+
+    monkeypatch.setattr(external.subprocess, "run", subprocess_run)
+    monkeypatch.setattr(external.urllib.request, "urlopen", urlopen)
+    ok, reason = code_agent_checks.run_check(_external_data(), {"type": "code_agent_render"})
+    assert ok, reason
+    assert redeemed[0] == ("session", "scripts/generate-test-session.ts", "user-1")
+    assert redeemed[1][:3] == ("redeem", f"{CTX['base_url']}/api/invite-codes/use", "Bearer tok")
+    assert b"181818" in redeemed[1][3]
+    assert out.read_text().strip().startswith('{"access_token"')
+    # Off loopback nothing is signed or redeemed: the run's own session is used.
+    redeemed.clear()
+    remote = {**CTX, "base_url": "https://api.example.com"}
+    assert external._approved_session(remote) == "" and redeemed == []

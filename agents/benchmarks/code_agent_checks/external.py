@@ -15,7 +15,11 @@ on the branch FAILS its check closed with an actionable reason: never a crash, n
                                                       [--require-root-reply] [--require-code-reply]; exit 0 = pass,
                                                       1 = findings (JSON on stdout), else not a verdict
     playwright    front-end-relative spec             CODE_AGENT_CHECK_ROOT_ID=<root> FRONTEND_URL=<fe> npx playwright
-                                                      test <spec>; needs "1 passed" (a skipped spec is not a pass)
+                                                      test <spec>; needs "1 passed" (a skipped spec is not a pass).
+                                                      On a loopback stack the run's user gets a signed local session
+                                                      with the documented test master invite redeemed: a bench
+                                                      database has no invited user, and a waitlisted account never
+                                                      gets the Rose Desktop UI the check inspects.
 
 The run's context (base URL, user, root, tree agents, front-end URL) is evidence["context"]; the API key is
 read from the environment at call time and is never stored in the run record.
@@ -30,6 +34,8 @@ import json
 import os
 import re
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +47,10 @@ FRONT_END = REPO_ROOT / "front-end"
 PLAYWRIGHT_CMD = ("npx", "playwright", "test")
 HYDRATE = "hydrate_code_agent_run"
 NOT_CONFIG = {"type", "timeout_s"}
+SESSION_SCRIPT = "scripts/generate-test-session.ts"
+# back-end/src/providers/inviteGate.ts WAITLIST_BYPASS_INVITE_CODE: the documented test master invite (CLAUDE.md "Test OTP").
+MASTER_INVITE_CODE = 181818
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
 @dataclass(frozen=True)
@@ -73,7 +83,11 @@ EXTERNAL: dict[str, External] = {
 }
 
 
-class Absent(Exception):
+class Unavailable(Exception):
+    """The check cannot run: its file is missing or its environment could not be prepared."""
+
+
+class Absent(Unavailable):
     """The lane's module or script is not on this branch."""
 
 
@@ -196,10 +210,43 @@ def _script(spec: External, check: dict, ctx: dict) -> tuple[bool, str]:
     return False, f"{check['type']}: {spec.target} exited {done.returncode}: {done.stderr.strip()[-600:]}"
 
 
+def _approved_session(ctx: dict) -> str:
+    """A signed local session for the run's user, with the test master invite redeemed ("" off loopback)."""
+    base = ctx["base_url"]
+    if (urlparse(base).hostname or "") not in LOOPBACK_HOSTS:
+        return ""
+    made = _subprocess(
+        ["npx", "tsx", SESSION_SCRIPT],
+        cwd=REPO_ROOT / "back-end",
+        env={**os.environ, "TEST_USER_ID": ctx["user_id"]},
+        timeout_s=120,
+        label=SESSION_SCRIPT,
+    )
+    if made is None or made.returncode != 0:
+        raise Unavailable(f"{SESSION_SCRIPT} could not sign a session: {(made.stderr if made else 'timed out')[-300:]}")
+    session = made.stdout.strip()
+    try:
+        token = json.loads(session)["access_token"]
+        request = urllib.request.Request(
+            f"{base}/api/invite-codes/use",
+            data=json.dumps({"inviteCode": MASTER_INVITE_CODE}).encode(),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=30).close()
+    except urllib.error.HTTPError as exc:
+        if exc.code != 400:  # 400 = this account already used an invite code
+            raise Unavailable(f"redeeming the test invite for the run's user failed: HTTP {exc.code}") from exc
+    except (OSError, ValueError, KeyError) as exc:
+        raise Unavailable(f"could not approve the run's user for the render check: {exc}") from exc
+    return session
+
+
 def _playwright(spec: External, check: dict, ctx: dict) -> tuple[bool, str]:
     if not (REPO_ROOT / spec.target).is_file():
         raise Absent(f"{spec.target} is not on this branch; integrate the lane that owns it")
     env = {**os.environ, "CODE_AGENT_CHECK_ROOT_ID": ctx["root_agent_id"], "FRONTEND_URL": ctx["frontend_url"]}
+    if session := _approved_session(ctx):
+        env["SEMANTIC_SESSION"] = session
     cmd = [*PLAYWRIGHT_CMD, spec.target.removeprefix("front-end/"), "--reporter=line"]
     timeout_s = float(check.get("timeout_s", 600))
     done = _subprocess(cmd, cwd=FRONT_END, env=env, timeout_s=timeout_s, label=spec.target)
@@ -223,5 +270,5 @@ def run(check: dict, evidence: dict) -> tuple[bool, str]:
         if spec.kind == "script":
             return _script(spec, check, ctx)
         return _playwright(spec, check, ctx)
-    except Absent as exc:
+    except Unavailable as exc:
         return False, f"{check['type']}: {exc}"
