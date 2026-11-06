@@ -122,7 +122,11 @@ async function testSameProviderLearnedConfigSeedsTheNextSession(): Promise<void>
 
   assert.strictEqual(session.provider, 'kernel');
   assert.strictEqual(kernelCalls.length, 1, 'the selected provider uses its learned proxy');
-  assert.strictEqual(steelCalls, 0, 'a same-provider preference does not allocate another provider');
+  assert.strictEqual(
+    steelCalls,
+    0,
+    'a same-provider preference does not allocate another provider'
+  );
   assert.deepStrictEqual(kernelCalls[0]?.[4], {
     keepValidationConnection: true,
     exactManagedProxy: { type: 'isp', specificity: 'city' },
