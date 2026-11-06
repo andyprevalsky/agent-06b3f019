@@ -26,9 +26,95 @@ import deploy_test_cycle as cycle
 import deploy_test_worker as worker
 
 
+def isolate_fixture_temp(test):
+    """Own temporary environment, without borrowing the enclosing worker's lease."""
+    original_tmp = os.environ.get('TMPDIR')
+    had_tmp = 'TMPDIR' in os.environ
+    original_cache = tempfile.tempdir
+    owner = tempfile.TemporaryDirectory(prefix='deploy-worker-fixture-', dir=Path('/tmp').resolve())
+    test.addCleanup(owner.cleanup)
+    def restore():
+        tempfile.tempdir = original_cache
+        if had_tmp:
+            os.environ['TMPDIR'] = original_tmp
+        else:
+            os.environ.pop('TMPDIR', None)
+    test.addCleanup(restore)
+    temporary = Path(owner.name) / 'tmp'
+    temporary.mkdir(mode=0o700)
+    os.environ['TMPDIR'] = str(temporary)
+    tempfile.tempdir = str(temporary)
+    return Path(owner.name), temporary
+
+
+class FixtureTempIsolation(unittest.TestCase):
+    def test_parent_environment_cache_and_marker_are_restored(self):
+        before = dict(os.environ); cache = tempfile.tempdir
+        marker = Path(before['TMPDIR']) / '.deploy-tmpdir-owner.json' if before.get('TMPDIR') else None
+        original_marker = marker.read_bytes() if marker and marker.is_file() else None
+        observed = {}
+        class Case(unittest.TestCase):
+            def setUp(inner):
+                owner, tmp = isolate_fixture_temp(inner)
+                observed.update(owner=owner, tmp=tmp)
+            def runTest(inner):
+                tmp = observed['tmp']
+                inner.assertEqual(str(tmp), os.environ['TMPDIR'])
+                inner.assertEqual(str(tmp), tempfile.tempdir)
+                inner.assertEqual(tmp, tmp.resolve())
+                inner.assertEqual(0o700, tmp.stat().st_mode & 0o777)
+                inner.assertFalse((tmp / '.deploy-tmpdir-owner.json').exists())
+                with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+                    inner.assertNotIn(Path(a), Path(b).parents)
+                    inner.assertNotIn(Path(b), Path(a).parents)
+        result = unittest.TestResult(); Case().run(result)
+        self.assertEqual([], result.errors); self.assertEqual([], result.failures)
+        self.assertEqual(before, dict(os.environ)); self.assertEqual(cache, tempfile.tempdir)
+        self.assertFalse(observed['owner'].exists())
+        if original_marker is not None:self.assertEqual(original_marker, marker.read_bytes())
+
+    def test_failed_setup_joins_owned_child_before_temp_cleanup(self):
+        before = dict(os.environ); cache = tempfile.tempdir; observed = {}
+        class Case(unittest.TestCase):
+            def setUp(inner):
+                owner, tmp = isolate_fixture_temp(inner); observed['owner'] = owner
+                child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=tmp)
+                observed['child'] = child
+                def finish():
+                    child.terminate(); child.wait(timeout=5)
+                    observed['joined_before_removal'] = owner.exists() and child.poll() is not None
+                inner.addCleanup(finish)
+                raise RuntimeError('intentional setup failure')
+            def runTest(inner):
+                raise AssertionError('failed setup cannot execute its test')
+        result = unittest.TestResult(); Case().run(result)
+        self.assertEqual(1, len(result.errors)); self.assertEqual([], result.failures)
+        self.assertTrue(observed['joined_before_removal']); self.assertFalse(observed['owner'].exists())
+        self.assertIsNotNone(observed['child'].returncode)
+        self.assertEqual(before, dict(os.environ)); self.assertEqual(cache, tempfile.tempdir)
+        print('FIXTURE_OWNED_CHILD_JOINED', observed['child'].pid)
+
+    def test_restoration_does_not_replace_unrelated_environment(self):
+        key = 'DEPLOY_FIXTURE_UNRELATED_CONTROL'; old = os.environ.get(key); observed = {}
+        class Case(unittest.TestCase):
+            def setUp(inner):
+                isolate_fixture_temp(inner)
+            def runTest(inner):
+                os.environ[key] = 'changed-by-test'
+        try:
+            result = unittest.TestResult(); Case().run(result)
+            self.assertEqual([], result.errors); self.assertEqual([], result.failures)
+            self.assertEqual('changed-by-test', os.environ[key])
+        finally:
+            if old is None:os.environ.pop(key, None)
+            else:os.environ[key] = old
+
+
 class Worker(unittest.TestCase):
     def setUp(self):
+        isolate_fixture_temp(self)
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         (self.root/'code').write_text('fixture')
@@ -42,6 +128,7 @@ class Worker(unittest.TestCase):
                         'checks': ['first','second'], 'skips': {}, 'phase': 'initial',
                         'worker_recipe': self.recipe}
         self.coordinator_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.coordinator_temp.cleanup)
         self.coordinator = Path(self.coordinator_temp.name)
         subprocess.run(['git','clone','-q','--shared',str(self.root),str(self.coordinator)],check=True)
         (self.coordinator/'.git/info/exclude').write_text('.context/\n')
@@ -860,9 +947,10 @@ raise SystemExit(reply.get('rc', 0))
 class Boxes(unittest.TestCase):
     """Fake dvb-onbox on PATH; nothing here contacts boxes.dev or runs services."""
     def setUp(self):
+        isolate_fixture_temp(self)
         import deploy_test_boxes as boxes
         self.boxes = boxes
-        self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name) / 'worker'
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup); self.root = Path(self.temp.name) / 'worker'
         self.root.mkdir()
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         (self.root / 'code').write_text('fixture'); (self.root / '.git/info/exclude').write_text('.context/\n')
@@ -885,6 +973,7 @@ class Boxes(unittest.TestCase):
                                            'FAKE_DVB_CONFIG': str(self.config), 'DEPLOY_BOXES_POLL_SECONDS': '0.01',
                                            'DEPLOY_BOXES_ATTACHMENTS_ROOT': str(self.attachments.parents[1])})
         self.env.start()
+        self.addCleanup(self.env.stop)
         native = worker.execute(self.request, self.root)  # the real native worker document
         self.native_bytes = json.dumps(native, indent=2, allow_nan=False) + '\n'
         self.native = native
@@ -1905,9 +1994,10 @@ raise SystemExit(cfg.get('c8_rc', 0))
 class Backend(unittest.TestCase):
     """Case-aware backend coverage adapter over a fake sharded runner; no services, no real c8."""
     def setUp(self):
+        isolate_fixture_temp(self)
         import deploy_test_backend as backend
         self.backend = backend
-        self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name) / 'root'
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup); self.root = Path(self.temp.name) / 'root'
         (self.root / 'back-end/scripts').mkdir(parents=True); (self.root / 'scripts/tests').mkdir(parents=True)
         (self.root / 'back-end/src/tests/blackbox').mkdir(parents=True)
         for d in ('alpha', 'beta', 'gamma'):
@@ -1930,6 +2020,7 @@ class Backend(unittest.TestCase):
                                            'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '0',
                                            'FAKE_RUNNER_CONFIG': str(self.config), 'FAKE_NPX_CALLS': str(self.npx_calls)})
         self.env.start()
+        self.addCleanup(self.env.stop)
         self.request = {'token': 'be-1', 'source': cycle.source(self.root), 'gate': 'backend-coverage-blackbox',
                         'checks': backend.checks_for(['alpha', 'beta', 'gamma']), 'skips': {}, 'phase': 'initial'}
 
