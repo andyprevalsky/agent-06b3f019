@@ -51,6 +51,8 @@ export interface AgentMessageOptions {
 export interface AgentMessageDeliveryResult {
   message_id: string;
   delivered: boolean;
+  /** A code agent still starting accepted the message; it is its next turn once the CLI runs. */
+  queued?: boolean;
   task_running?: boolean;
   /** The target had finished; this message started its next run. */
   woke?: boolean;

@@ -27,6 +27,7 @@ import { getEphemeral, putEphemeral, withSerializedLock } from '../sharedState';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
+import { drainStartupTurns } from './startupTurns';
 import {
   checkpointCodeSession,
   defaultCodeSessionMaintenanceDeps,
@@ -218,7 +219,10 @@ export async function createWithCodeSession<T extends SpawnCreateResult>(
     `${SPAWN_CREATE_NAMESPACE}:${key}`,
     async () => {
       const replayed = await replayedSpawnCreate<T>(key, params.codeProvider);
-      if (replayed !== null) return replayed;
+      if (replayed !== null) {
+        await deliverStartupTurns(key, replayed.session.taskId);
+        return replayed;
+      }
       const created = await createSpawnTask(params, create);
       await putEphemeral(
         SPAWN_CREATE_NAMESPACE,
@@ -233,10 +237,26 @@ export async function createWithCodeSession<T extends SpawnCreateResult>(
           error: error instanceof Error ? error.message : String(error),
         });
       });
+      await deliverStartupTurns(key, created.session.taskId);
       return created;
     },
     { waitMs: SPAWN_CREATE_WAIT_MS }
   );
+}
+
+/**
+ * Messages sent to this spawn before its session existed go to it now (see
+ * startupTurns.ts). The task is running, so a failure here is logged and the
+ * create still succeeds; a replayed create runs the drain again.
+ */
+async function deliverStartupTurns(key: string, taskId: string): Promise<void> {
+  await drainStartupTurns(key, taskId).catch((error: unknown) => {
+    log.error('Delivering the messages queued during startup failed', {
+      taskId,
+      leaseOwner: key,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 /**

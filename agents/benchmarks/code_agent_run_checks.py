@@ -13,12 +13,14 @@ background task at /root/rose_repo_status".
                pure checks on that record (each returns {"passed", "detail", ...evidence}):
                   check_single_code_agent           exactly `expected` code agents under the root,
                                                     one task per code spawn call, no orphan task
-                  check_message_reached_code_agent  a send_message_to_agent addressed to a code spawn
+                  check_message_reached_code_agent  every send_message_to_agent addressed to a code spawn
                                                     succeeded, the backend delivered it as a CLI turn
-                                                    and the CLI's transcript shows it. A send that was
-                                                    refused with the truthful "has not started yet"
-                                                    (sandbox still starting) may be retried; any other
-                                                    failure fails the check.
+                                                    and the CLI's transcript shows it. A send made while
+                                                    the code agent was still starting must have been
+                                                    accepted as queued and then delivered (C20): a
+                                                    refusal ("has not started yet"), a queued message
+                                                    that never reached the CLI, or any other failure
+                                                    fails the check.
                   check_startup_reported            every code agent's "Claude Code Started" row carries
                                                     code_agent.startup {ws_ready_ms, clone_ms}: how long
                                                     its sandbox's ws-server took to serve, and the repo
@@ -35,9 +37,11 @@ from typing import Any, Dict, Iterable, List, Optional
 import httpx
 
 CODE_SPAWN_TOOL = "spawn_claude_code_agent"
-# The backend's truthful answer to a send that arrives while the code agent's sandbox is still
-# starting (back-end agentCodeTurnDelivery.ts): the sender may retry, so it is not a failure.
+# The refusal a send got before the code agent's session existed. Since C20 the backend queues
+# such a message instead (back-end agentCodeTurnDelivery.ts): this text in a result is the bug.
 NOT_STARTED_TEXT = "has not started yet"
+# How the sender's tool result begins for a message the backend queued (agents agent_messaging handler).
+QUEUED_TEXT = "Message queued for "
 # Characters of a sent message that must appear in the code agent's own turn.
 MESSAGE_MATCH_CHARS = 60
 
@@ -150,13 +154,17 @@ def check_message_reached_code_agent(run: Dict[str, Any]) -> Dict[str, Any]:
             "send": outcome,
             "delivered": False,
             "seen": False,
-            "retryable": False,
+            "queued": False,
         }
         if outcome is not None and outcome.get("status") == "ERROR" and NOT_STARTED_TEXT in str(outcome.get("text")):
-            entry["retryable"] = True  # refused truthfully while the sandbox started
+            entry["problem"] = (
+                f"send {call['tool_call_id']} was refused while the code agent started "
+                f"(it must be queued and delivered): {outcome.get('text')}"
+            )
         elif outcome is None or outcome.get("status") != "FINISHED":
             entry["problem"] = f"send {call['tool_call_id']} result: {outcome}"
         else:
+            entry["queued"] = str(outcome.get("text") or "").startswith(QUEUED_TEXT)
             needle = message.strip()[:MESSAGE_MATCH_CHARS]
             entry["delivered"] = _delivery_receipt(rows, spawn, message) is not None
             entry["seen"] = any(
@@ -174,11 +182,11 @@ def check_message_reached_code_agent(run: Dict[str, Any]) -> Dict[str, Any]:
     problems = [entry["problem"] for entry in results if entry.get("problem")]
     delivered = [entry for entry in results if entry["delivered"] and entry["seen"]]
     if not delivered and not problems:
-        problems.append(f"no send was delivered ({len(results)} refused with '{NOT_STARTED_TEXT}')")
+        problems.append(f"no send was delivered ({len(results)} send(s))")
     return {
         "passed": not problems,
         "detail": "; ".join(problems)
-        or f"{len(delivered)} message(s) delivered ({sum(e['retryable'] for e in results)} earlier send(s) retried while starting)",
+        or f"{len(delivered)} message(s) delivered ({sum(e['queued'] for e in delivered)} queued while the code agent started)",
         "sends": results,
     }
 
