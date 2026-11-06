@@ -1,17 +1,18 @@
 ---
 id: 2026-10-15-auth-decline-root-continuation-unproven
 date: 2026-10-15
-title: Root continued public inspection after declined authentication; causal proof remains open
+title: Declined sign-in result omitted that the user's decision stands, so the root retried sign-in by another method
 surface: agents
-component: root-execute-decision
-classification: unresolved
-problem_class: other
-first_bad_boundary: Observed execute_loop output 10bac80a4518 requested another browser; owning cause unproven
+component: spawn-browser-agent-decline-result
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: spawn_browser_agent_v3 decline result text reached the root as 'declined sign-in assistance' with no stop semantics; root execute_loop 98c810c8e0f9 then spawned a browser to sign in by email code
 symptoms:
   - "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2"
   - browser-auth-assistance-declined
-  - User declined to sign in
   - agent status ACTIVE, expected COMPLETED
+  - "The user declined sign-in assistance. The browser task stopped without retrying authentication."
+  - "Retired logical browser cannot resume"
 tags:
   - browser-auth
   - user-decision
@@ -27,7 +28,10 @@ sources:
   - commit 330dbcfe9ed55a0239cac171dc33f9eac144d884
   - benchmark run 1792096645-1208197-84008
   - hub run f5258da3-2dfd-4e69-b858-a019f0d499dc
-repro: none-recorded
+  - agent c8e27e60-ca4e-4ecb-b626-cc782c2bf826
+  - agent 7fe96db7
+  - benchmark run 20261106-115613-1831625
+repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_browser_empty_completion_preserves_verified_denial_for_parent
 status: open
 ---
 
@@ -91,7 +95,7 @@ Use current thread without children; preserve Freedom/devboxes/refs/evidence and
 
 ## Reusable lesson
 
-Correlate captured model call IDs with dispatch spans before blaming replay or changing refusal completion policy.
+Make a user-decision tool result state that the decision stands and what to do instead; a system-prompt rule does not substitute for the result's own semantics.
 
 
 ### 2026-10-17 source2a native recurrence and two non-reproducing request diagnostics
@@ -131,3 +135,33 @@ In instructions, the source-backed body has exactly two trailing newlines plus a
 The same audit found an avoidable panel fixture error: the six synthetic panel render inputs used ordinary JSON Schema properties/required, whereas the native system-prompt formatter expects a custom fields list. Consequently all six actual panel system prompts lacked the Required Output Schema section. The actual actor/verifier constants and native tool schemas were unchanged, but the earlier panel representation claim was too strong. Its six actual explore proposals, pre-result fixture corrections, no demonstrated semantic RED and low-power/UNKNOWN conclusions remain recorded. The panel was not silently rerendered or rerun with a corrected schema, and no candidate, semantic fix or new model budget followed this finding.
 
 A zero-egress audit did invoke actual public RoseClient.complete with the source-backed raw system, actual AgentAction/native projection and captured generation parameters. Its first intercepted request had the exact root agent-flag payload under current canonical dotenv/backend configuration, but did not target the recorded owned localhost56130 URL. A BaseException guard stopped before any HTTP send instead of replaying a local row into a different backend or forcing availability. No Foundry body was emitted by that full-wrapper path; its result is inconclusive, not proof that the original upstream credential routes were absent or that full public-client normalization matches. Audit SHA256 `ad15538d87a2ff62ef28bd8b6d16ef5347b5cea70df79973a0097204b15711c5`; actual original-builder/inverse proof `027d8b55b815161ec69bba60b738ac2ab4fbdf4d8e45b49e07fa8fad31ce560d`; source-only serializer design `c20cf06e2c44f2a0d40522bfb33d4f689e419772220f9b72aa1571ccc152d92e`. These live in `offline-full-client-audit/` under the recurrence evidence directory. There were zero real backend, provider or socket-egress calls and no runtime source change. The native 358.4-second FAIL remains unchanged; both paid same-context results are retained as normalized selected-provider non-reproductions, not exact full-original-request counterfactuals. The case remains OPEN.
+
+
+### 2026-11-06 descend recurrence: semantic RED reproduced, decline result fixed
+
+Archive search (`exceeded its exact root call limit`, `declined sign-in assistance`) matched this case: a recurrence, so it is appended here. `/descend` run `descend-failed-neverrun-20261106`, epoch 4, member r002-j0039 (fleet `20261106-115613-1831625`, root `c8e27e60-ca4e-4ecb-b626-cc782c2bf826`) failed the unchanged task with `spawn_browser_agent` root count 2 (expected 1) and root ACTIVE. Member r001-j0019 (root `7fe96db7`) passed on the same source. Recorded ledger history before this run: 3 passes in 10 attempts.
+
+Observed chain on r002 (UTC): first browser `/root/member_number` tried all three saved passwords, raised one `auth_assistance` request and got `__REJECTED__`. At 12:13:39 its FINAL_ANSWER notification reached the root carrying only the handler result `The user declined sign-in assistance. The browser task stopped without retrying authentication.` The root spawned explore `/root/lookup_status` to read the trace. That report noted the login page's `Email me a sign-in code instead` link and said the user declined "the interactive live-view handoff itself". At 12:14:27, execute_loop dump `98c810c8e0f9` (span `6453123a63cf`) spawned a second browser, `/root/member_code_lookup`, with this goal: "using an authorized automated sign-in method, only if available without user assistance ... Examine whether the existing account has a supported automated email-code method". That browser died at init with `Retired logical browser cannot resume`. The root model read "declined sign-in *assistance*" as "the user will not help", so it kept pursuing sign-in by another route. The task's own outcome evaluator forbids exactly that route (`after_marker` forbids `code_request`).
+
+**Semantic RED, first reproduced.** `scripts/replicate_llm_dump.py`'s `replay_generic` was run on the exact dump with unchanged messages, tools, pool `rose-1-ultra`, effort xhigh and fast mode. The dump had no direct auth, so the replay served `openai/gpt-6.1-sol` (waterfall). That is the same model family as the original `gpt-6.1-sol-foundry` leg but not the same provider deployment. Result: 7/10 replays spawned another browser to sign in by another method; 2/10 messaged the explore agent to look for other credentials; 1/10 displayed the result. The earlier decision point (dump `f8d2a373adf9`, right after the decline) chose explore 10/10, the same detour seen in both r001 and r002.
+
+**Fix and GREEN.** Claude Code's human-rejection tool result (`claude-code-src/src/utils/messages.ts:210-213`, `CANCEL_MESSAGE`/`REJECT_MESSAGE`) says the decision stands: "STOP what you are doing and wait for the user to tell you how to proceed." Its prompt rule (`claude-code-src/src/constants/prompts.ts:189`, "adjust your approach") is the same rule Rose's EXECUTE prompt mirrors. Rose's decline result carried the rule but not the result semantics. The fix is in `agents/domains/spawn_browser_agent_v3/handler.py`. The decline result is now the constant `AUTH_ASSISTANCE_DECLINED_MESSAGE`: "The user declined to sign in. The browser stopped without signing in. Do not try to sign in to this site again by any method. If the task needs this sign-in, stop and report that it is still needed, so the user can tell you how to proceed." The conditional clause keeps public or optional work possible, matching the verifier's existing refusal rubric.
+
+The identical replay was then run with the dump's decline text replaced by the source constant; the two places the history quoted it were replaced too. Results:
+
+| Variant | Browser respawns | Other outcomes |
+| --- | --- | --- |
+| Baseline | 7/10 | — |
+| Source constant | 0/10 | 9 display, 1 text-only report |
+| Same text, pre-commit run | 0/10 | 10 display |
+| Rewording only ("The user declined to sign in. The browser stopped without signing in.") | 4/10 | 2 more explores for an alternative route |
+
+The rewording-only result means the stop semantics, not the wording, flip the decision. At the earlier decision point the fix moved 10/10 explore to 8 text-only reports and 2 display. The text-only reports hit the existing no-tool retry, so they need one extra turn before completion.
+
+**Cement.** `test_browser_empty_completion_preserves_verified_denial_for_parent` now asserts that the parent notification carries `AUTH_ASSISTANCE_DECLINED_MESSAGE` and its stop clauses. Red on the unchanged source (AttributeError, no constant, old text lacks the clauses), green after the fix, five consecutive passes. The paid replay panel is diagnostic evidence, not a deploy gate.
+
+**Outcome proof pending.** No unchanged-task run on the fixed source exists yet. The case stays `open` until the `/descend` outcome reruns (K=3 cloud members of `browser-auth-assistance-declined`) pass on a build containing this change. The N-rate replay loop and decoded dumps are private under `/var/tmp/rca-H-16*`. They contain no credentials but were never published. The dumps are refetchable with `back-end/scripts/fetch-agent-llm-dumps.ts c8e27e60-ca4e-4ecb-b626-cc782c2bf826`.
+
+10k-agent behavior: one constant string per declined sign-in; no new state, polling, channels or queries.
+
+The earlier lesson (correlate captured model call IDs with dispatch spans before blaming replay) still holds; `## Reusable lesson` now carries this recurrence's lesson.

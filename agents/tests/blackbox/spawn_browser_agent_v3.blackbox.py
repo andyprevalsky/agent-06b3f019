@@ -24142,8 +24142,14 @@ async def test_browser_empty_completion_preserves_verified_denial_for_parent():
         recipient="/root", sender="/root/member_number", agent_type="browser",
         status="completed", summary=result["message"], structured_response=result.get("structured_response"),
     )
-    assert "declined sign-in assistance" in result["message"]
-    assert "declined sign-in assistance" in notification
+    # The parent's only evidence is this result. "Declined assistance" alone read as
+    # "the user won't help, try another sign-in method" and the root respawned a
+    # browser for an email code (RCA 2026-10-15-auth-decline-root-continuation-unproven).
+    assert result["message"] == h.AUTH_ASSISTANCE_DECLINED_MESSAGE
+    assert h.AUTH_ASSISTANCE_DECLINED_MESSAGE in notification
+    assert "The user declined to sign in." in notification
+    assert "Do not try to sign in to this site again by any method." in notification
+    assert "stop and report that it is still needed" in notification
 
 
 @_in_browser_activity_context

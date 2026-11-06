@@ -262,6 +262,13 @@ logger = structlog.get_logger()
 
 # Resume marker for a sign-in-help request the user declined.
 AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
+# The parent's whole view of the decline. Like a rejected tool use, it must say
+# the user's decision stands, or the parent retries sign-in by another method.
+AUTH_ASSISTANCE_DECLINED_MESSAGE = (
+    "The user declined to sign in. The browser stopped without signing in. "
+    "Do not try to sign in to this site again by any method. If the task needs this sign-in, "
+    "stop and report that it is still needed, so the user can tell you how to proceed."
+)
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
@@ -8632,7 +8639,7 @@ async def _spawn_browser_agent_activity_v3_real(
                 "status": "auth_assistance_declined",
                 "success": False,
                 "user_declined_auth": True,
-                "message": "The user declined sign-in assistance. The browser task stopped without retrying authentication.",
+                "message": AUTH_ASSISTANCE_DECLINED_MESSAGE,
                 "task_id": task_id,
                 "session_id": session_id,
                 "browser_url": redact_url_secrets(browser_url),
