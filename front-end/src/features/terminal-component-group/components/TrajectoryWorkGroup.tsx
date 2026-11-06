@@ -11,10 +11,11 @@
  *
  * RUNNING header: fixed-height live carousel: disclosure chevron (→ collapsed,
  *   ↓ expanded), then the latest activity icon + label and the live elapsed; no
- *   spinner. Thinking is a stock activity like any tool (lightbulb + "Thinking"),
- *   never an animated indicator; a finished thought appends its recorded
- *   generation (duration · ↓ tokens · tok/s, thoughtGeneration). Nothing is
- *   estimated from text length.
+ *   spinner. An inbound agent message is an ordinary activity ("Message from …",
+ *   mail icon); it never ends or re-keys the batch. Thinking is a stock activity
+ *   like any tool (lightbulb + "Thinking"), never an animated indicator; a
+ *   finished thought appends its recorded generation (duration · ↓ tokens ·
+ *   tok/s, thoughtGeneration). Nothing is estimated from text length.
  *   When the latest activity is a spawned agent, a smaller line beneath rotates
  *   through the tool(s) it is using now (SpawnedAgentToolLine).
  * DONE header: chevron + "Worked for Xs" + activity count.
@@ -34,6 +35,7 @@ import type { TrajectoryWorkGroup as Group } from './trajectoryWorkGroups';
 import type { ExploreStep } from '../types';
 import { SpawnedAgentToolLine } from './SpawnedAgentToolLine';
 import { workLabel } from '../hooks/codeSessionTurns';
+import { AGENT_MESSAGE_TOOL_NAME, isInboundAgentMessage } from './message-bubble/agentToolData';
 const PAGE_SIZE = 20;
 /** Leaf clock: its tick re-renders only this text, never the open history rows. */
 function BatchElapsed({ startedAt }: { startedAt: number | null }) {
@@ -84,7 +86,9 @@ export function TrajectoryWorkGroup({
   const latest = group.activities.at(-1)!;
   const tools = useMemo(() => toolIdentity(group), [group]);
   const comms = tools.comms;
-  const toolName = String(latest.message.metadata?.toolName ?? '');
+  const toolName = isInboundAgentMessage(latest.message)
+    ? AGENT_MESSAGE_TOOL_NAME
+    : String(latest.message.metadata?.toolName ?? '');
   const Icon =
     latest.kind === 'comms'
       ? MessagesSquare
