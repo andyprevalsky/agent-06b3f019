@@ -69,7 +69,7 @@ At 10,000 agents: all agents share one bucket, so the design bounds traffic into
 
 ## Human feedback
 
-Andy: "we need to make sure we handle scenarios were gh is rate limited, for pulls or w/e". Via the orchestrator: the fake GitHub must return exactly what real GitHub returns (verbatim status, headers and bodies, sourced, with a drift test); never rotate or replace any credential; do not edit the false `gh` claim in `web_fetch.py` (a prompt change, listed for approval).
+Andy said we need to make sure we handle scenarios were gh is rate limited, for pulls or w/e. Via the orchestrator: the fake GitHub must return exactly what real GitHub returns (verbatim status, headers and bodies, sourced, with a drift test); never rotate or replace any credential; do not edit the false `gh` claim in `web_fetch.py` (a prompt change, listed for approval); resolved afterwards by installing `gh` in both sandbox images, which makes that claim true.
 
 ## Reusable lesson
 

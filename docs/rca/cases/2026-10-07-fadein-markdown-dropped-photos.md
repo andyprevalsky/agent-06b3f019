@@ -101,7 +101,7 @@ The code-agent chip transcript (`codeAgentChip.steer.tsx` `CodeAgentTranscript`,
 
 ## Human feedback
 
-2026-11-06 (via the orchestrator): "its not a prompt change, we are talking about within the code agent too". C16 is FE rendering only; markdown and tables must render inside the code-agent view as well as the root. The user called the code-agent UI "super jank" and asked that tables display well and that all agent markdown be human-readable. Do not edit the bespoke code-agent transcript; Lane B is replacing it with the shared message list.
+2026-11-06 (via the orchestrator) the user said its not a prompt change, we are talking about within the code agent too. C16 is FE rendering only; markdown and tables must render inside the code-agent view as well as the root. The user called the code-agent UI "super jank" and asked that tables display well and that all agent markdown be human-readable. Do not edit the bespoke code-agent transcript; Lane B is replacing it with the shared message list.
 
 ## Reusable lesson
 
