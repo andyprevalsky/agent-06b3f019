@@ -4,6 +4,7 @@ import {
   BASE_SYSTEM_PROMPT,
   buildCallAssistantConfig,
   isIvrNavigationPrompt,
+  reservedCalleePhoneNumberIds,
   resolveHoldRuntimeConfig,
   type HoldRuntimeConfig,
   type OutboundPhoneNumber,
@@ -67,9 +68,23 @@ function getStoredCallStatus(response: unknown): string {
   return typeof status === 'string' && status !== '' ? status : 'queued';
 }
 
-function getRandomPhoneNumber(): OutboundPhoneNumber {
+/**
+ * Random caller ID from the pool, excluding numbers reserved for inbound
+ * benchmark callees and the destination itself (a call must never dial itself).
+ */
+function selectOutboundPhoneNumber(to: string): OutboundPhoneNumber {
   if (OUTBOUND_PHONE_NUMBER_POOL.length === 0) throw new VapiNotConfiguredError();
-  return OUTBOUND_PHONE_NUMBER_POOL[Math.floor(Math.random() * OUTBOUND_PHONE_NUMBER_POOL.length)];
+  const reserved = reservedCalleePhoneNumberIds();
+  const eligible = OUTBOUND_PHONE_NUMBER_POOL.filter(
+    (phone) => !reserved.has(phone.id) && phone.number !== to
+  );
+  if (eligible.length === 0) {
+    throw new VapiApiError(
+      409,
+      `No outbound caller number other than the destination ${to.substring(0, 4)}**** is available; refusing to place a call to itself.`
+    );
+  }
+  return eligible[Math.floor(Math.random() * eligible.length)];
 }
 
 async function prepareCall(body: CreateCallRequest): Promise<PreparedCall> {
@@ -82,12 +97,13 @@ async function prepareCall(body: CreateCallRequest): Promise<PreparedCall> {
   const { systemName, voiceId } = await lookupUserVoiceAndName(user_id);
   const identityPrefix = `You are ${systemName}.\n\n`;
   getVapiPrivateKey();
+  const normalizedPhone = normalizePhoneNumber(to);
 
   return {
-    phone: getRandomPhoneNumber(),
+    phone: selectOutboundPhoneNumber(normalizedPhone),
     fullSystemPrompt: identityPrefix + BASE_SYSTEM_PROMPT + system_prompt,
     userSystemPrompt: system_prompt,
-    normalizedPhone: normalizePhoneNumber(to),
+    normalizedPhone,
     normalizedSchema: normalizeJsonSchema(output_schema),
     operationKey,
     userId: typeof user_id === 'string' && user_id !== '' ? user_id : undefined,
