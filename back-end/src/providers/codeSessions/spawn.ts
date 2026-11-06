@@ -6,6 +6,7 @@ import { Sandbox } from 'e2b';
 import { rootPreviewPath } from '../codePreview/rootPath';
 import { prisma } from '../database';
 import { E2BSandboxCapacityError } from '../e2bSandboxCreate';
+import { GithubRateLimitedError } from '../githubRateLimit';
 import { createLogger } from '../logger';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
@@ -53,7 +54,7 @@ export { CodeSessionBusyError, CodeSessionNotFoundError } from './store';
 /** HTTP status + body for a code-session error, or null when it is not one. */
 export function codeSessionHttpError(
   error: unknown
-): { status: number; body: { error: string; code: string } } | null {
+): { status: number; body: { error: string; code: string } & Record<string, unknown> } | null {
   if (error instanceof CodeSessionNotFoundError) {
     return {
       status: 404,
@@ -65,6 +66,17 @@ export function codeSessionHttpError(
   }
   if (error instanceof E2BSandboxCapacityError) {
     return { status: error.statusCode, body: { error: error.message, code: error.code } };
+  }
+  if (error instanceof GithubRateLimitedError) {
+    return {
+      status: 429,
+      body: {
+        error: error.message,
+        code: error.code,
+        reset_at: error.resetAt,
+        retry_after_seconds: error.retryAfterSeconds(),
+      },
+    };
   }
   return null;
 }

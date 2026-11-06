@@ -132,6 +132,8 @@ LOCAL_TARGET_UNAVAILABLE_CODE: Final[str] = "LOCAL_TARGET_UNAVAILABLE"
 # Backend code when E2B refuses a sandbox over the plan's concurrent-sandbox limit.
 # Fails the tool immediately with the backend's message: no retry, no soft-fail.
 E2B_CAPACITY_EXHAUSTED_CODE: Final[str] = "E2B_CAPACITY_EXHAUSTED"
+# The backend answers session create 429 with this code when GitHub's rate limit stopped the repo access check.
+GITHUB_RATE_LIMITED_CODE: Final[str] = "GITHUB_RATE_LIMITED"
 # Reason codes shared with back-end/src/providers/localDevices/messages.ts.
 LOCAL_TARGET_NOT_MAC_ORIGIN: Final[str] = "not_mac_origin"
 LOCAL_TARGET_DEVICE_DISCONNECTED: Final[str] = "device_disconnected"
