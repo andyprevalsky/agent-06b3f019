@@ -26743,6 +26743,10 @@ async def run_all_tests():
         test_judge_compute_token_unavailable_is_a_skipped_test_not_infra,
     )
     await r.record_async(
+        "agentic_judge_follows_c15_credential_order",
+        test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_codex_login,
+    )
+    await r.record_async(
         "agentcard_release_skip_execution_cleanup",
         test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup,
     )
