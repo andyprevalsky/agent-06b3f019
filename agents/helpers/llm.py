@@ -1971,7 +1971,8 @@ def llm_generation_metadata(usage: Any) -> Optional[Dict[str, Any]]:
         return None
 
     def _iso(ms: int) -> str:
-        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        moment = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
     return {"output_tokens": tokens, "started_at": _iso(started), "ended_at": _iso(ended)}
 

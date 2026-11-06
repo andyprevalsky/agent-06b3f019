@@ -23,6 +23,7 @@ import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import { MessageListItems } from '@/features/terminal-component-group/components/MessageListItems';
 import { buildCodeSession } from '@/features/terminal-component-group/hooks/codeSessionTurns';
+import { checkThinkingRows } from '@/features/terminal-component-group/benchmark/thinkingRowsCheck';
 import type { Message } from '@/lib/api';
 import { makeCtx } from './browser-agent-chip.fixtures';
 import { msg } from './code-agent-steering.fixtures';
@@ -215,5 +216,37 @@ describe('code agent thinking is the same tool row', () => {
     expect(row).toHaveTextContent('6.0s·817 tokens·135.0 tok/s');
     expect(row.querySelector('.lucide-lightbulb')).not.toBeNull();
     expect(within(history).queryByTestId('thinking-animation')).toBeNull();
+  });
+});
+
+describe('benchmark check: thinking rows with recorded tok/s (root + code agents)', () => {
+  const rootThought = (generation?: Record<string, unknown>) =>
+    msg(generation ? { generation } : {}, {
+      message_id: 'root-thought',
+      role: 'ASSISTANT',
+      text: 'Spawning a Claude Code agent in the repo.',
+      timestamp: '2026-11-06T04:21:13.920Z',
+    });
+  const generation = {
+    output_tokens: 597,
+    started_at: '2026-11-06T04:21:06.500Z',
+    ended_at: '2026-11-06T04:21:13.700Z',
+  };
+
+  it('passes a run whose root and code-agent thoughts carry recorded generations', () => {
+    const report = checkThinkingRows([goal, rootThought(generation), ...prodCarriers()], 'root');
+    expect(report.failures).toEqual([]);
+    expect(report.ok).toBe(true);
+    expect(report.root.measured[0].tokensPerSecond).toBeCloseTo(82.92, 2);
+    expect(report.codeAgents).toHaveLength(1);
+    expect(report.codeAgents[0].measured[0]).toMatchObject({ outputTokens: 817, durationMs: 6050 });
+  });
+
+  it('fails a run whose thoughts carry no recorded generation', () => {
+    const report = checkThinkingRows([goal, rootThought(), ...prodCarriers()], 'root');
+    expect(report.ok).toBe(false);
+    expect(report.failures).toEqual([
+      'root: no thinking row carries a recorded generation (tok/s)',
+    ]);
   });
 });

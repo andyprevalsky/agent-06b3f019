@@ -4807,7 +4807,10 @@ async def run_all_tests():
         "attempt_completion_result_reaches_the_verifier_as_authored_work",
         test_attempt_completion_result_reaches_the_verifier_as_authored_work,
     )
-    await r.record_async("assistant_thought_records_measured_generation", test_assistant_thought_records_measured_generation)
+    await r.record_async(
+        "assistant_thought_records_measured_generation",
+        test_assistant_thought_records_measured_generation,
+    )
     await r.record_async(
         "thought_generation_metadata_is_invisible_to_every_llm_builder",
         test_thought_generation_metadata_is_invisible_to_every_llm_builder,
