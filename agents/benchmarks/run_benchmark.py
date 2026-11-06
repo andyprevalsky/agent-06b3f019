@@ -361,6 +361,8 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     AMAZON_MX_TAMY_TASK_NAME,
     RAISE_5M_BREX_TASK_NAME,
     DOORDASH_FOOD_PLAN_TASK_NAME,
+    # Applies the same food-plan fixture (shared user profile upsert) as the order task.
+    "browser-doordash-food-plan-grocery-cart-reauth",
     BIOMETRICS_WEBDECOY_TASK_NAME,
     "agent-payment-setup-resume",
     "sms-supervisor-fill-form-searches-then-delegates",
@@ -2841,6 +2843,10 @@ def _doordash_food_plan_frozen_fixture() -> dict | None:
 DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER = "do NOT try to login."
 
 
+class DoorDashFoodPlanManifestUnavailable(RuntimeError):
+    """A task pins the food-plan manifest but the frozen fixture has no checkout table."""
+
+
 def _uses_doordash_food_plan_manifest(task: BenchmarkTask) -> bool:
     """True when the catalog pins the frozen DoorDash food-plan manifest fixture."""
     pinned = getattr(task, "pinned_facts", None)
@@ -2872,7 +2878,7 @@ def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
     if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
         checkout_manifest = (frozen or {}).get("checkout_manifest") or ""
         if not checkout_manifest:
-            raise RuntimeError(
+            raise DoorDashFoodPlanManifestUnavailable(
                 f"{task.name} pins {DOORDASH_FOOD_PLAN_MANIFEST_SOURCE} but the frozen fixture has no "
                 "checkout_manifest; re-freeze the DoorDash food-plan fixture"
             )
@@ -2886,7 +2892,12 @@ def _doordash_food_plan_prompt_override(task: BenchmarkTask) -> str | None:
 
 
 def _doordash_food_plan_task_requirement_for_judge(task: BenchmarkTask) -> str:
-    override = _doordash_food_plan_prompt_override(task)
+    try:
+        override = _doordash_food_plan_prompt_override(task)
+    except DoorDashFoodPlanManifestUnavailable:
+        # The goal already failed closed at run time; a judge process without the
+        # frozen fixture judges against the catalog prompt.
+        override = None
     return override if override else task.prompt
 
 
@@ -2897,6 +2908,16 @@ def _doordash_food_plan_manifest_context_for_judge(task: BenchmarkTask) -> str:
     if not frozen:
         return ""
     sections: list[str] = []
+    if task.name != DOORDASH_FOOD_PLAN_TASK_NAME:
+        # Siblings receive only the checkout table (appended to their own prompt),
+        # never the order task's execute prompt.
+        if frozen.get("checkout_manifest"):
+            sections.append(
+                "Authoritative checkout manifest table (prod-derived; the agent received exactly this table "
+                "in its goal; every Safeway and conditional 99 Ranch line must be satisfied or "
+                "manifest-allowed omitted/substituted):\n" + frozen["checkout_manifest"]
+            )
+        return "\n\n".join(sections)
     if frozen.get("checkout_manifest"):
         sections.append(
             "Authoritative checkout manifest table (prod-derived; every Safeway and conditional "

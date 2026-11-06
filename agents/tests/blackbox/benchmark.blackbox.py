@@ -9463,11 +9463,18 @@ def test_doordash_food_plan_cart_reauth_receives_pinned_manifest():
         judge_manifest = bench._doordash_food_plan_manifest_context_for_judge(cart)
         assert checkout_manifest in judge_manifest
         assert "authoritative checkout manifest table" in judge_manifest.lower()
+        # The judge sees only what this agent received: never the order task's
+        # execute prompt / checkout contract.
+        assert execute_prompt not in judge_manifest
+        assert "Complete checkout at Safeway" not in judge_manifest
+        assert "execute manifest text" not in judge_manifest.lower()
 
         # The order task keeps its prod execute prompt override unchanged.
         order_goal = bench._benchmark_goal_for_task(order, "http://localhost:3001")
         assert order_goal.startswith(execute_prompt)
         assert checkout_manifest in bench._doordash_food_plan_manifest_context_for_judge(order)
+
+        assert execute_prompt in bench._doordash_food_plan_manifest_context_for_judge(order)
 
         # Unrelated DoorDash tasks never receive the food-plan manifest.
         assert bench._doordash_food_plan_manifest_context_for_judge(unrelated) == ""
@@ -9488,6 +9495,9 @@ def test_doordash_food_plan_cart_reauth_receives_pinned_manifest():
                 assert "checkout_manifest" in str(exc)
             else:
                 raise AssertionError("cart-reauth goal resolved without a checkout manifest")
+            # The judge falls back to the catalog prompt instead of raising.
+            assert bench._doordash_food_plan_task_requirement_for_judge(cart) == cart.prompt
+            assert bench._doordash_food_plan_manifest_context_for_judge(cart) == ""
         finally:
             bench._doordash_food_plan_frozen_fixture = original_frozen
     finally:
@@ -9506,6 +9516,9 @@ def test_doordash_food_plan_cart_reauth_receives_pinned_manifest():
     finally:
         bench._run_doordash_food_plan_fixture = original_run
     assert applied == ["apply", "apply"]
+    # Both tasks upsert the same shared user profile, so both run exclusively.
+    assert cart.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert order.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
 
 
 def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement():

@@ -72,12 +72,29 @@ manifest checklist and supplemental cart evidence all use it. The grocery-order
 task keeps its prod execute-prompt override unchanged. A sibling keeps its own
 catalog contract (guest cart, stop at auth) and receives the frozen checkout
 manifest table appended as data. A missing checkout table now fails closed
-instead of silently sending the manifest-less prompt. No tasks.json edit.
+(`DoorDashFoodPlanManifestUnavailable`) instead of silently sending the
+manifest-less prompt; the judge path falls back to the catalog prompt. A
+sibling's judge receives only that checkout table, labelled as what the agent
+received, never the order task's execute (checkout) prompt. The prod checkout
+table (agent c27b4f28 message, 9,700 chars) itself carries the allowed omissions
+(under-250-mg wrap, no-salt tomatoes), substitutions (PB2 -> tahini), P0/P1
+labels, prohibited items and 99 Ranch scope, so no execute-prompt rules are
+needed. Cart-reauth joins `EXCLUSIVE_SHARED_DB_TASK_NAMES` because it now runs
+the same shared user-profile upsert. No tasks.json edit.
 The same regression asserts that the unrelated `browser-doordash-usb-c-cable`
 gets nothing.
 
-Post-fix: the identical test passes; the full `benchmark` blackbox domain was
-run. Still open: the agent-visible goal text changed, so this needs prompt
+Post-fix: the identical test passes. Full `benchmark` blackbox domain
+(`python scripts/run_blackbox_tests.py benchmark`): 773 passed, 3 failed. The
+three failures (local launcher proxy, sms runner gate, local start-services
+platform selection) fail identically on the base revision in the lean worktree
+(no `back-end/.env` or `node_modules`). A first run caught duck-typed judge
+doubles without `pinned_facts`; the predicate now uses `getattr`. Golden
+review of that snapshot (NOT_GROUNDED) found the sibling judge was handed the
+order task's execute prompt as "the same source the agent received"; the
+regression now asserts it is absent (red on fddf896140, green after). Final
+full `benchmark` domain with `node_modules` and `back-end/.env` linked: 777
+passed, 0 failed (EXIT=0). Still open: the agent-visible goal text changed, so this needs prompt
 approval or golden-reference review. Outcome proof (`scripts/run-bench --local
 browser-doordash-food-plan-grocery-cart-reauth` failing pre-fix and passing
 post-fix) has not been run.
@@ -87,7 +104,11 @@ per-agent state, queries or fan-in.
 
 ## Human feedback
 
-None recorded.
+Golden-reference review (coordinator relay, 2026-11-06): NOT_GROUNDED because
+the cart-reauth judge context claimed the order task's execute prompt was what
+the agent received. Required: give sibling judges only the checkout table,
+labelled truthfully; judge path falls back to the task prompt; add cart-reauth
+to the exclusive shared-DB set.
 
 ## Reusable lesson
 
