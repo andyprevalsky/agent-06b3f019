@@ -19457,6 +19457,65 @@ def test_fresh_controller_reuses_only_proven_donor_dependencies(tmp_path: Path, 
         assert "SNAP_AFTER=snap-transaction" in result.stdout
 
 
+@pytest.mark.parametrize("listing", ["hydrating-then-listed", "never-listed"])
+def test_pinned_snapshot_preflight_uses_the_retried_inventory_capture(tmp_path: Path, listing: str) -> None:
+    """Descend I-02 (2026-11-06): with CLOUDBENCH_SNAPSHOT_ID pinned, the controller skipped
+    the retried snapshot listing and warm_deps_preflight read the epoch from ONE live listing.
+    Fly briefly returned a valid list without the pinned snapshot, so 7 of 17 concurrent fleets
+    refused with "warm snapshot freshness could not be verified" while 10 forked fine."""
+    node, python = "1" * 64, "2" * 64
+    fleet = fleet_source_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in ("snapshot_created_epoch() {", "snapshot_is_complete_exact() {", "warm_deps_preflight() {")
+    )
+    for optional in ("list_donor_snapshots() {", "warm_deps_recorded_state() {"):
+        if optional in fleet:
+            helpers += _extract_fleet_function(fleet, optional)
+    common = tmp_path / "common"
+    common.mkdir()
+    (common / "cloudbench-warm-deps.fp").write_text(f"{node} {python} 1000 snap-pinned\n")
+    listed = '[{"id":"snap-pinned","created_at":"2026-07-17T00:00:00Z","status":"created","size":9}]'
+    hydrating = '[{"id":"snap-other","created_at":"2026-07-16T00:00:00Z","status":"created","size":9}]'
+    script = f"""set -uo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+APP=bench-app
+WARM_ID=warm-machine
+VOL_ID=vol_warm
+SNAP_ID=snap-pinned
+ROOT_DIR="$COMMON"
+GIT_COMMON_DIR="$COMMON"
+WARM_DEPS_STATE_FILE="$COMMON/cloudbench-warm-deps.fp"
+SNAPSHOT_SELECTOR_SCRIPT=/dev/null
+SNAPSHOTS_JSON=""
+CLOUDBENCH_WARM_DEPS_AUTOREFRESH=0
+sleep() {{ :; }}
+FLY() {{
+  count="$(cat "$COMMON/reads" 2>/dev/null || echo 0)"; count=$((count + 1)); echo "$count" > "$COMMON/reads"
+  if [ {shlex.quote(listing)} = never-listed ] || [ "$count" = 1 ]; then echo {shlex.quote(hydrating)}; else echo {shlex.quote(listed)}; fi
+}}
+cloudbench_node_dependency_fingerprint() {{ echo {node}; }}
+cloudbench_manifest_fingerprint() {{ echo {python}; }}
+CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
+{helpers}
+if declare -F list_donor_snapshots >/dev/null; then
+    list_donor_snapshots "$SNAP_ID" || {{ echo "PINNED_UNLISTED"; exit 3; }}
+fi
+warm_deps_preflight || exit $?
+echo "PREFLIGHT_OK SNAP=$SNAP_ID"
+"""
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
+                            env={"COMMON": str(common), "PATH": os.environ["PATH"]})
+    out = result.stdout + result.stderr
+    if listing == "hydrating-then-listed":
+        assert result.returncode == 0, "pinned fleet refused on one hydrating listing\n" + out
+        assert "PREFLIGHT_OK SNAP=snap-pinned" in out
+        assert (common / "reads").read_text().strip() == "2", "preflight re-read the provider instead of the captured inventory"
+    else:
+        assert result.returncode == 3 and "PINNED_UNLISTED" in out, out
+        assert (common / "reads").read_text().strip() == "12"
+
+
 _IMAGE_NODE, _IMAGE_PY = "1" * 64, "2" * 64
 _DONOR_IMAGE = "registry.fly.io/bench-app:cloudbench-warm-main"
 

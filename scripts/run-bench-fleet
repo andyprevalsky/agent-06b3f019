@@ -1191,8 +1191,11 @@ PYCONFIG
 # retry budget inside that window and take the whole campaign down with its infra stop. Retry for minutes (about four
 # with jitter) before concluding that the donor has no usable snapshot.
 # Sets SNAPSHOTS_JSON (the last valid listing, empty when no read was valid) and SNAPSHOT_LIST_ATTEMPTS_USED.
+# Pinned and unpinned fleets share this read: a pinned fleet passes its snapshot ID and the read retries until that
+# exact snapshot is listed complete (a pinned fleet used to rely on one unretried epoch read in the preflight). If the
+# pin is never listed complete, SNAPSHOTS_JSON is cleared and the helper returns 1, because that proves nothing.
 list_donor_snapshots() {
-    local attempt candidate max_attempts=12 pause
+    local required="${1:-}" attempt candidate max_attempts=12 pause
     SNAPSHOTS_JSON=""
     SNAPSHOT_LIST_ATTEMPTS_USED=0
     for attempt in $(seq 1 "$max_attempts"); do
@@ -1203,7 +1206,17 @@ list_donor_snapshots() {
             # Fly can briefly return a valid but empty/still-hydrating list
             # while older completed snapshots exist. A valid JSON response is
             # not enough to conclude that the donor has no usable snapshot.
-            if [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
+            if [ -n "$required" ]; then
+                if printf '%s' "$SNAPSHOTS_JSON" | SID="$required" python3 -c '
+import json, os, sys
+valid = {"created", "complete", "completed", "ready"}
+match = next((s for s in json.load(sys.stdin) if isinstance(s, dict) and s.get("id") == os.environ["SID"]), None)
+raise SystemExit(0 if match and str(match.get("status") or "").lower() in valid
+                 and int(match.get("size") or 0) > 0 and match.get("created_at") else 1)
+' 2>/dev/null; then
+                    return 0
+                fi
+            elif [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
                 return 0
             fi
         fi
@@ -1213,6 +1226,12 @@ list_donor_snapshots() {
             sleep $(( pause + RANDOM % 4 ))
         fi
     done
+    # Unpinned: a valid listing without a usable snapshot means absence. Pinned:
+    # the exact snapshot was never listed complete, which proves nothing.
+    if [ -n "$required" ]; then
+        SNAPSHOTS_JSON=""
+        return 1
+    fi
     return 0
 }
 # ── Capture an explicit immutable fleet source ─────────────────────────────
@@ -16231,6 +16250,12 @@ fi
 if [ -n "${CLOUDBENCH_SNAPSHOT_ID:-}" ]; then
     SNAP_ID="$CLOUDBENCH_SNAPSHOT_ID"
     echo "📌 pinned snapshot (CLOUDBENCH_SNAPSHOT_ID): $SNAP_ID"
+    if [ -z "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ]; then
+        list_donor_snapshots "$SNAP_ID" || {
+            echo "❌ pinned snapshot $SNAP_ID was not listed complete for $VOL_ID after $SNAPSHOT_LIST_ATTEMPTS_USED reads (provider read failure or wrong pin)" >&2
+            exit 1
+        }
+    fi
     if [ -n "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ]; then
         SNAPSHOTS_JSON="$(configured_warm_snapshot_inventory)" || exit 1
         _proof_node="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || exit 1
@@ -16400,7 +16425,8 @@ warm_deps_preflight() {
         # Hydration already bound this exact completed snapshot and epoch to
         # the donor, volume and manifests. Reuse that captured inventory: an
         # uncertain later provider read is not evidence that proof went stale.
-        if [ -n "${HYDRATED_WARM_DEPS_STATE:-}" ] && [ -n "${SNAPSHOTS_JSON:-}" ]; then
+        # Pinned fleets capture the same retried inventory before the preflight.
+        if [ -n "${SNAPSHOTS_JSON:-}" ]; then
             snap_epoch="$(snapshot_created_epoch "$SNAP_ID" "$SNAPSHOTS_JSON")" || {
                 echo "❌ warm snapshot freshness could not be verified; refusing maintenance" >&2
                 return 1
