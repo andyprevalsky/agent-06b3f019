@@ -370,6 +370,21 @@ test('older history is backfilled across runs', async () => {
   });
 });
 
+test('a free-plan history limit notice does not fail the backfill', async () => {
+  await withUser(async (userId) => {
+    const granola = new FakeGranola();
+    granola.historyStart = daysAgo(30).slice(0, 10);
+    granola.add(meeting('m-recent', daysAgo(2)), meeting('m-hidden', daysAgo(100)));
+    await signIn(userId, granola);
+    const result = await syncGranolaUser(userId, { fetcher: granola.fetcher, now: at(60_000) });
+    equal(result.outcome, 'synced', 'backfill completes past the plan limit');
+    equal(await liveIds(userId), 'm-recent', 'only meetings inside the plan window');
+    const status = await getGranolaStatus(userId);
+    equal(status.status, 'CONNECTED', 'not a sync failure');
+    equal(status.backfillDone, true, 'backfill done');
+  });
+});
+
 test('an expired access token is refreshed and the rotation persisted', async () => {
   await withUser(async (userId) => {
     const granola = new FakeGranola();

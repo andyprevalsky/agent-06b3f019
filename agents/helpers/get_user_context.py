@@ -520,8 +520,14 @@ def _format_user_context(
                 emails = [email for email in readable if isinstance(email, str) and email]
                 if not emails:
                     continue
-            # Include if CONNECTED, or if it has email credentials (Gmail can send even if sync failed)
-            if status == "CONNECTED" or emails:
+            # Include if CONNECTED, if it has email credentials (Gmail can send
+            # even if sync failed), or if a non-Gmail sync failed (its synced
+            # data stays searchable; Gmail is listed only for readable inboxes).
+            if (
+                status == "CONNECTED"
+                or emails
+                or (status == "SYNC_FAILED" and name.lower() != "gmail")
+            ):
                 if emails:
                     integration_lines.append(f"- {name}: {', '.join(emails)}")
                 else:
@@ -529,7 +535,9 @@ def _format_user_context(
         if integration_lines:
             sections.append(
                 "## Connected Integrations\n"
-                "These integrations are connected and available.\n" + "\n".join(integration_lines)
+                "These integrations are connected and available.\n"
+                "Their synced data is searchable through an explore agent's grep.\n"
+                + "\n".join(integration_lines)
             )
 
     # Section: Authenticated Browser Sessions
