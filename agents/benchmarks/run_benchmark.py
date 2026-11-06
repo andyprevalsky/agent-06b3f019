@@ -2843,7 +2843,8 @@ DOORDASH_FOOD_PLAN_NO_LOGIN_CLASSIFIER = "do NOT try to login."
 
 def _uses_doordash_food_plan_manifest(task: BenchmarkTask) -> bool:
     """True when the catalog pins the frozen DoorDash food-plan manifest fixture."""
-    pinned = task.pinned_facts if isinstance(task.pinned_facts, dict) else {}
+    pinned = getattr(task, "pinned_facts", None)
+    pinned = pinned if isinstance(pinned, dict) else {}
     return pinned.get("manifest_source") == DOORDASH_FOOD_PLAN_MANIFEST_SOURCE
 
 
