@@ -26,6 +26,14 @@ import {
 } from './types';
 import { isSourceName } from './validate.normalize';
 
+/** The explore agent's provider aliases (agents/domains/grep/service.py). */
+const DOCUMENT_PROVIDER_ALIASES: Record<string, string> = {
+  chat_gpt: 'chatgpt',
+  chatgpy: 'chatgpt',
+  notes: 'apple_notes',
+  apple: 'apple_notes',
+};
+
 /** Shorthands that apply like flat filter keys (validate.normalize.ts BROADCAST_PARAMS). */
 const SHORTHAND_KEYS = ['person', 'since', 'until'] as const;
 
@@ -85,13 +93,35 @@ function isInvalidRegex(error: unknown): boolean {
   );
 }
 
-/** Sources the call names: `sources`/`source`, else the nested filter blocks it addresses. */
+/** A filter value that says something: strict surfaces spell every absent key as null. */
+function present(value: unknown): boolean {
+  return value !== null && value !== undefined;
+}
+
+/**
+ * Sources the call names: `sources`/`source`, else the nested filter blocks it
+ * fills (a block of only nulls names nothing) and the root of a printed path,
+ * as the backend resolves them (validate.normalize.ts) and the explore agent's
+ * gate reads them (agents/domains/grep/service.py `_sources_named_by_filters`).
+ */
 function namedSources(params: Record<string, unknown>): string[] {
   if (Array.isArray(params.sources) && params.sources.length > 0) return params.sources.map(String);
   if (typeof params.source === 'string') return [params.source];
   const filters = params.filters;
   if (typeof filters !== 'object' || filters === null) return [];
-  return Object.keys(filters).filter((key) => isSourceName(key));
+  const named = Object.entries(filters as Record<string, unknown>)
+    .filter(
+      ([key, block]) =>
+        isSourceName(key) &&
+        typeof block === 'object' &&
+        block !== null &&
+        Object.values(block).some(present)
+    )
+    .map(([key]) => key);
+  const path = (filters as Record<string, unknown>).path;
+  const root = typeof path === 'string' ? path.split('/', 1)[0] : '';
+  if (isSourceName(root) && !named.includes(root)) named.push(root);
+  return named;
 }
 
 /**
@@ -120,9 +150,9 @@ function documentProvider(params: Record<string, unknown>): string | undefined {
   const filters = (params.filters ?? {}) as Record<string, unknown>;
   const nested = filters.documents as Record<string, unknown> | null | undefined;
   const value = nested?.document_source ?? filters.document_source;
-  return typeof value === 'string' && value !== ''
-    ? value.toLowerCase().replace(/[\s-]+/g, '_')
-    : undefined;
+  if (typeof value !== 'string' || value === '') return undefined;
+  const key = value.toLowerCase().replace(/[\s-]+/g, '_');
+  return DOCUMENT_PROVIDER_ALIASES[key] ?? key;
 }
 
 function accepts(sources: ValidSource[], key: string): boolean {

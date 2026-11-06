@@ -6,6 +6,7 @@
 import type { PrismaClient } from '@prisma/client';
 
 import { executeGatelessGrepTool as domainGrepTool } from '../../domains/data/grepTool';
+import { GREP_TOOL_STRICT_PARAMETERS } from '../../providers/grepTool';
 import { executeGrepTool } from '../../providers/smsSupervisor/supervisorTools.grep';
 import { registerUserDataGrepTool } from '../../providers/userDataSearch';
 import {
@@ -134,6 +135,29 @@ export async function testGrep_smsRunsTheSharedGrepTool(prisma: PrismaClient) {
     if (literal.literal_fallback !== true || literal.matches.length !== 1) {
       throw new Error(
         `SMS grep did not retry a broken regex literally: ${JSON.stringify(literal)}`
+      );
+    }
+    // A strict-form call spells every absent key null, including all 12 per-source
+    // filter blocks; null blocks name no source, so this searches the defaults.
+    const strictProps = GREP_TOOL_STRICT_PARAMETERS.properties as Record<string, unknown>;
+    const filterBranch = (strictProps.filters as { anyOf: Array<{ properties?: object }> })
+      .anyOf[0];
+    const strictCall = {
+      ...Object.fromEntries(Object.keys(strictProps).map((key) => [key, null])),
+      pattern: 'Gate code',
+      filters: {
+        ...Object.fromEntries(Object.keys(filterBranch.properties ?? {}).map((key) => [key, null])),
+        since: '30d',
+      },
+    };
+    const strict = parse(await executeGrepTool(strictCall, userId));
+    if (
+      strict.sources.join(',') !== 'messages,network,agent_network' ||
+      strict.matches.length !== 1 ||
+      String(strict.message).includes('not connected')
+    ) {
+      throw new Error(
+        `a strict-form default grep must search the defaults: ${JSON.stringify(strict)}`
       );
     }
     // No Plaid link: a named unconnected source is skipped with a notice, not searched silently.
