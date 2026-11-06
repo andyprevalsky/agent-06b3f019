@@ -40,6 +40,14 @@ step "git identity"
 git config --global user.name "Rose Deploy Gate"
 git config --global user.email "deploy-gates@roselabs.ai"
 
+step "devbox host parity"
+# The runner image trusts every repository (safe.directory=*); the devbox does not, and the
+# controller-export suite asserts git refuses a foreign-owned checkout.
+sudo git config --system --unset-all safe.directory || true
+# The runner user's systemd --user / (sd-pam) are same-uid processes whose /proc cwd is unreadable;
+# the devbox has none, and the local-cleanup scanners fail closed on them. The job runs outside them.
+sudo systemctl stop "user@$(id -u).service" 2>/dev/null || true
+
 step "system packages"
 missing=()
 command -v ruby >/dev/null || missing+=(ruby)
