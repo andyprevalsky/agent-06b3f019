@@ -308,7 +308,8 @@ interface UsageSample {
 }
 
 /**
- * Records the generation that `from`→`to` brackets on the finished thoughts inside it.
+ * Records the generation that `from`→`to` brackets on the finished thoughts (and the
+ * mid-turn narration, rendered as a thought row) inside it.
  * One backward walk over just the window's rows. A finished tool row inside the window
  * means it spans a tool run, not generation: no rate rather than a wrong one. A tool
  * CREATED inside the window (its seq follows `from`) is the call's own: Claude Code runs
@@ -332,6 +333,10 @@ function attachGeneration(
     const metadata = message.metadata;
     if (metadata?.toolName === 'thought') {
       if (metadata.toolStatus === 'FINISHED' && !metadata.generation) thoughts.push(index);
+    } else if (message.role === 'ASSISTANT') {
+      // Mid-turn narration is the same model call's text: the root renders it as a
+      // "Thought" row too, so it carries the call's generation like a thinking row.
+      if (!metadata?.generation) thoughts.push(index);
     } else if (
       message.role === 'TOOL' &&
       metadata?.toolStatus === 'FINISHED' &&
