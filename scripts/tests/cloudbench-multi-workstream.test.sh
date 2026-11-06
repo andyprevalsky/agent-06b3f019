@@ -6005,10 +6005,15 @@ if max(updates[:7]) >= min(starts[:7]):
     raise SystemExit("a fleet machine started before every boot config update completed")
 if any("--skip-start" not in calls[index] for index in updates[:7]):
     raise SystemExit("boot config updates must explicitly keep every machine stopped")
-# Every primary publishes its admission lane so other workstreams' controllers can
-# count it; these fixture tasks are not DEMO-cache tasks, so they are delegating.
-if any("rose_cloudbench_lane=delegating" not in calls[index] for index in updates[:7]):
-    raise SystemExit("boot config updates must label each primary with its admission lane")
+# Every primary's boot-config update publishes its admission lane so other workstreams'
+# controllers can count it; these fixture tasks are not DEMO-cache tasks, so they are
+# delegating. Warm-source sizing updates are not primaries and carry no lane.
+boot_updates = [index for index in updates if "CLOUDBENCH_BOOT=1" in calls[index]]
+if len(boot_updates) < 7:
+    raise SystemExit(f"expected seven boot-config updates, got {len(boot_updates)}")
+unlabelled = [calls[index][:240] for index in boot_updates if "rose_cloudbench_lane=delegating" not in calls[index]]
+if unlabelled:
+    raise SystemExit("boot config updates must label each primary with its admission lane: " + unlabelled[0])
 
 # Once every boot config is applied, all readiness pollers must consume the
 # controller-owned Machines/Volumes snapshots.  Direct provider inventory reads
@@ -6174,7 +6179,7 @@ lane_status=0
 CLOUDBENCH_SHARED_CPU_GOVERNOR=100000 CLOUDBENCH_APP_MACHINE_CEILING=100000 \
 CLOUDBENCH_LANE=demo CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-lane-demo.log" \
-    lane-a lane-b --timeout 120 || lane_status=$?
+    capacity-a capacity-b --timeout 120 || lane_status=$?
 [ "$lane_status" -eq 1 ] || fail "a DEMO burst past the pooler budget must be refused (exit=$lane_status)"
 grep -qF "DEMO guest ceiling reached: 49 live + 2 requested > 50" "$TMP_ROOT/controller-lane-demo.log" ||
     fail "DEMO refusal must count live DEMO guests only (stopped/suspended/workers/infra excluded)"
@@ -6188,7 +6193,7 @@ CLOUDBENCH_SHARED_CPU_GOVERNOR=100000 CLOUDBENCH_APP_MACHINE_CEILING=100000 \
 CLOUDBENCH_LANE=delegating CLOUDBENCH_DELEGATING_PRIMARY_CEILING=67 \
 CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-lane-delegating.log" \
-    lane-a lane-b --timeout 120 || lane_status=$?
+    capacity-a capacity-b --timeout 120 || lane_status=$?
 [ "$lane_status" -eq 1 ] || fail "a delegating burst past its ceiling must be refused (exit=$lane_status)"
 grep -qF "Delegating-guest ceiling reached: 66 live REAL/SIM primaries + 2 requested > 67" \
     "$TMP_ROOT/controller-lane-delegating.log" ||
