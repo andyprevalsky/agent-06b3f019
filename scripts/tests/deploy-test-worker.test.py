@@ -1945,7 +1945,7 @@ class Backend(unittest.TestCase):
         docker.chmod(0o700)
         env = {'CONDUCTOR_WORKSPACE_NAME': 'fixture', 'CONDUCTOR_PORT': '20000',
                'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1', 'FAKE_POSTGRES': str(state),
-               'FAKE_DOCKER_CALLS': str(calls)}
+               'FAKE_DOCKER_CALLS': str(calls), 'BACKEND_COVERAGE_DATABASE_URL': ''}
         # A stopped fixture genuinely prevents the original setup; no fabricated result.
         setup = [sys.executable, '-c', "import json,os; from pathlib import Path; "
                  "assert json.loads(Path(os.environ['FAKE_POSTGRES']).read_text())['row']['running']; "
