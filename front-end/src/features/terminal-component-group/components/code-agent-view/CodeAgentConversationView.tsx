@@ -8,8 +8,9 @@
  *                 messages, every tool / thought row folded into "Worked for …",
  *                 the answer after it. Running: the live work row + thinking.
  *   devbox usage → CodeResourcesIndicator (CPU · memory · disk) while it runs
- *   preview      → OpenAppButton when the session has a dev-server preview_url
- *                  (opens the full-screen app view; moved off the root row)
+ *   preview      → an "Open app" link inside that same devbox usage popover when
+ *                  the session has a dev-server preview_url (opens the full-screen
+ *                  app view); no floating link
  *   failed      → the backend's failure text (FailureBox) · paused → PausedNote
  *   query box   → CodeSessionComposer (QueryInput: model chip, speed toggle, nub
  *                 with the session's context usage, direct delivery)
@@ -34,7 +35,6 @@ import { FailureBox, PausedNote } from '../codeAgentChip.desktop';
 import { PinnedQuestionMount } from '../PinnedQuestion';
 import { useCodeAgentView, type OpenCodeAgent } from './codeAgentViewState';
 import { CodeResourcesIndicator } from '../CodeResourcesIndicator';
-import { OpenAppButton } from '../app-view/OpenAppButton';
 import { CodeAgentContextProvider } from './CodeAgentContext';
 import { useCodeAgentConversation } from './useCodeAgentConversation';
 
@@ -90,15 +90,19 @@ export function CodeAgentConversationView({
         >
           {(running || c.meta?.preview_url) && (
             <div className="flex items-center justify-end gap-3 pb-2">
-              {c.meta?.preview_url && (
-                <OpenAppButton
-                  taskId={taskId}
-                  previewUrl={c.meta.preview_url}
-                  title={c.meta.title ?? null}
-                  provider={c.provider}
-                />
-              )}
-              <CodeResourcesIndicator taskId={taskId} running={running} />
+              <CodeResourcesIndicator
+                taskId={taskId}
+                running={running}
+                preview={
+                  c.meta?.preview_url
+                    ? {
+                        previewUrl: c.meta.preview_url,
+                        title: c.meta.title ?? null,
+                        provider: c.provider,
+                      }
+                    : undefined
+                }
+              />
             </div>
           )}
           {c.meta && c.chipState === 'failed' && (

@@ -21,6 +21,8 @@
  *         C9   no work row without history, no two adjacent identical
  *              "Worked for …" rows
  *         C10/C13 no branch/commit rows, no "Session settings unavailable"
+ *         C5   no floating "Open app" link in the view (it lives only inside the
+ *              devbox usage popover, closed by default)
  *         C11  the query box's model chip names a model; the speed toggle exists
  *         C12  the query box nub carries the context meter
  * C15 (sub-agents in the running-agents drawer) is only visible while a
@@ -89,6 +91,10 @@ async function checkCodeAgent(page: Page, frontendUrl: string, rootAgentId: stri
   for (let i = 1; i < labels.length; i++) {
     expect(labels[i], `C9: duplicate adjacent work rows in ${id}`).not.toBe(labels[i - 1]);
   }
+  await expect(
+    view.getByRole('button', { name: 'Open app' }),
+    `C5: no floating "Open app" in the view of ${id}`,
+  ).toHaveCount(0);
   const box = page.getByTestId('query-input-host');
   await expect(box, 'the code agent query box').toBeVisible();
   for (const scope of [view, box]) {

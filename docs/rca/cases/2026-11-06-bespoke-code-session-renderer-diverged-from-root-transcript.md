@@ -109,6 +109,8 @@ or subscription); the projection is O(owner messages) per render of one open vie
 - **Bare "Thought" rows (item 4).** Mid-turn narration is assistant text, rendered as a synthetic Thought card that carried no generation beside thinking rows that did. Fix (on the integrated code, which owns `attachGeneration`): narration rows take the generation of the call that wrote them. Regression: `code-agent-narration-generation.blackbox.tsx`.
 - **Bottom overlap (item 3).** Not reproducible: at scroll end the transcript clears the composer on both branches (14px gap plus the 128px `pb-32`); the reported screenshot was at scroll position 0, where the floating composer overlays the content below the fold, and the cut-off "Thought" row is the 320px work-history scroll box.
 
+- **'Open app' (item 2, decided by the orchestrator).** The floating pink "Open app" above the user message is header chrome and is gone; the only entry to the full-screen dev preview is now one link inside the existing devbox usage popover (`CodeResourcesIndicator` takes an optional `preview`), shown only for a session with a cross-origin `preview_url`, and kept for an idle session (no measured values, link only). Regressions: `app-view-preview-card` (no "Open app" in the view until the popover opens, the popover link opens the same preview), `code-agent-resources` (4 cases), and the ~30 app-view tests re-entered through the popover.
+
 ## Human feedback
 
 Andy (via the orchestrator): "DON'T make a new display. Use the existing FE we already

@@ -1,6 +1,7 @@
 /**
  * Fixtures for the Rose Desktop app view suites (the root transcript's
- * code-agent row → its code-agent view → "Open app" → the full-screen app view). Wire shapes follow the A1 backend
+ * code-agent row → its code-agent view → the devbox usage popover's "Open app" link → the full-screen
+ * app view). Wire shapes follow the A1 backend
  * (feat/rose-user-ui @ 7826a2a6b) and the L-APPS2 handoff (d0a33fefa):
  *
  *   metadata.code_agent { task_id, provider, preview_url, title, … } on the spawn row
@@ -216,13 +217,20 @@ export async function openCodeAgentViewFromRow(row: HTMLElement): Promise<HTMLEl
   return await screen.findByTestId('code-agent-view');
 }
 
-/** Code-agent view → its top-right "Open app" button → the full-screen app view. */
+/** Open the view's devbox usage popover (CodeResourcesIndicator) and return it. */
+export async function openUsagePopover(view: HTMLElement): Promise<HTMLElement> {
+  fireEvent.click(await within(view).findByTestId('code-resources'));
+  return await screen.findByTestId('code-resources-popover');
+}
+
+/** Code-agent view → its devbox usage popover → the "Open app" link → the full-screen app view. */
 export async function openAppFromCodeAgentView(view: HTMLElement): Promise<HTMLElement> {
-  fireEvent.click(await within(view).findByRole('button', { name: 'Open app' }));
+  const popover = await openUsagePopover(view);
+  fireEvent.click(within(popover).getByRole('button', { name: 'Open app' }));
   return await screen.findByTestId('app-view-screen');
 }
 
-/** Row → code-agent view → "Open app" → the full-screen app view. */
+/** Row → code-agent view → usage popover → "Open app" → the full-screen app view. */
 export async function openAppView(): Promise<HTMLElement> {
   const row = await openAgentWithChip();
   return await openAppFromCodeAgentView(await openCodeAgentViewFromRow(row));
