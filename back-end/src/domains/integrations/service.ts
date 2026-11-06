@@ -21,6 +21,7 @@ import {
   verifyCredentialEnvelopeDecryptable,
 } from '../../providers/claudeCredentials';
 import {
+  classifyReportedLogin,
   fetchComputeTokenForUser,
   getCerebrasApiKeyCooldown,
   heartbeatComputeTokenLineage,
@@ -42,7 +43,7 @@ import {
   markGptPoolTokenRateLimited,
   markGptUserTokenRateLimited,
 } from '../../providers/gptCredentials';
-import { getValidAccessToken } from '../../services/integrations/gmailSync';
+import { getValidAccessToken, gmailMailboxAccess } from '../../services/integrations/gmailSync';
 import { fetchGmailMessagesSince } from '../../services/integrations/gmailParser';
 import { fetchPrimitiveMessagesSince } from '../../providers/primitive';
 import { findReadableInboxes } from '../../providers/authOptionsStore';
@@ -50,6 +51,7 @@ import { archiveJson } from '../../providers/traceArchive';
 import {
   clearConnectionNeedsReconnectFromIntegrationRecovery,
   resolveAccountIdForCredentialRecovery,
+  isIntegrationAuthFailureReason,
 } from '../../providers/integrationConnectionSync';
 import * as repo from './repo';
 import {
@@ -276,7 +278,12 @@ export async function fetchEmailsSince(userId: string, since: Date, limit: numbe
           });
           return [];
         }
-        const emails = await fetchGmailMessagesSince(accessToken, since, perAccountLimit);
+        // Share the mailbox's quota budget with any sync running on it.
+        const emails = await fetchGmailMessagesSince(
+          gmailMailboxAccess(credential, accessToken),
+          since,
+          perAccountLimit
+        );
         return emails.map((email) => ({
           ...email,
           credentialId: credential.id,
@@ -720,12 +727,42 @@ export async function getComputeCodeToken(
     accountId: result.accountId,
     source: result.source,
     poolTokenId: result.poolTokenId,
+    integrationId: result.integrationId,
     lineageKey: result.lineageKey,
     fastCacheAffinityKey: lineage?.fastCacheAffinityKey,
   };
 }
 
 export { heartbeatComputeTokenLineage, releaseComputeTokenLineage };
+
+/**
+ * A worker's auth-failure report disables a login only when it names that login
+ * and the stored credential is still the live token the worker held
+ * (classifyReportedLogin). Null lets the report through; otherwise the reply
+ * for a report that changes nothing.
+ */
+async function unrevokedLoginReply(
+  type: 'claude' | 'gpt',
+  source: 'user' | 'pool',
+  params: {
+    poolTokenId?: string;
+    integrationId?: string;
+    failureReason?: string;
+    credential?: string;
+  }
+) {
+  if (!isIntegrationAuthFailureReason(params.failureReason)) return null;
+  const integrationId = source === 'pool' ? params.poolTokenId : params.integrationId;
+  const rejection = await classifyReportedLogin(type, integrationId, params.credential);
+  if (rejection === 'revoked') return null;
+  log.warn(`Login rejection report not applied: ${rejection}`, {
+    type,
+    source,
+    integrationId: integrationId ?? null,
+    failureReason: params.failureReason,
+  });
+  return { ok: true, source, disabled: false, rejection };
+}
 
 export async function markTokenRateLimited(
   source: string,
@@ -734,12 +771,16 @@ export async function markTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    integrationId?: string;
+    credential?: string;
   }
 ) {
   if (source === 'pool') {
     if (params.poolTokenId === undefined || params.poolTokenId === '') {
       throw new Error('Missing poolTokenId for source=pool');
     }
+    const unrevoked = await unrevokedLoginReply('claude', source, params);
+    if (unrevoked !== null) return unrevoked;
     await markPoolTokenRateLimited(params.poolTokenId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
@@ -756,9 +797,12 @@ export async function markTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
+    const unrevoked = await unrevokedLoginReply('claude', source, params);
+    if (unrevoked !== null) return unrevoked;
     await markUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      integrationId: params.integrationId,
     });
     return {
       ok: true,
@@ -779,6 +823,8 @@ export async function markComputeTokenRateLimited(
     rateLimitedUntil?: string;
     failureReason?: string;
     credentialId?: string;
+    integrationId?: string;
+    credential?: string;
     model?: string;
     region?: string;
     deployment?: string;
@@ -855,12 +901,16 @@ export async function markGptTokenRateLimited(
     userId?: string;
     rateLimitedUntil?: string;
     failureReason?: string;
+    integrationId?: string;
+    credential?: string;
   }
 ) {
   if (source === 'pool') {
     if (params.poolTokenId === undefined || params.poolTokenId === '') {
       throw new Error('Missing poolTokenId for source=pool');
     }
+    const unrevoked = await unrevokedLoginReply('gpt', source, params);
+    if (unrevoked !== null) return unrevoked;
     await markGptPoolTokenRateLimited(params.poolTokenId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
@@ -877,9 +927,12 @@ export async function markGptTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
+    const unrevoked = await unrevokedLoginReply('gpt', source, params);
+    if (unrevoked !== null) return unrevoked;
     await markGptUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      integrationId: params.integrationId,
     });
     return {
       ok: true,

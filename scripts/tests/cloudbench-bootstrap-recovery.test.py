@@ -1344,8 +1344,14 @@ cloudbench_recover_guest_cleanup_receipts {self.registry}
 
 
 
-class PreconfigStartupArchiveTests(unittest.TestCase):
-    """Original admission intent may precede config, lifecycle and guest ACK."""
+class PreconfigStartupArchiveFixture:
+    """Original admission intent may precede config, lifecycle and guest ACK.
+
+    Fixture mixin (setUp + helpers, no cases) shared by PreconfigStartupArchiveTests,
+    AllocatedCurrentColdTests and CrossControllerColdHandoffTests. Subclassing the
+    TestCase instead made unittest collect its 12 cases again under each subclass
+    with this identical setUp (SuiteShapeTests pins the mixin shape).
+    """
     def setUp(self):
         import runpy
         self.helper = runpy.run_path(os.environ.get("ROSE_STARTUP_ARCHIVE_HELPER_UNDER_TEST",
@@ -1386,6 +1392,15 @@ class PreconfigStartupArchiveTests(unittest.TestCase):
         write(self.after, json.dumps(self.native))
         self.archive = self.base / "originals.tar.gz"
 
+    def capture(self):
+        self.helper["capture_preconfig"](self.registry, self.out, MACHINE, TOKEN, self.archive)
+
+    def verify(self, native=True):
+        return self.helper["verify_preconfig"](self.registry, self.out, MACHINE, TOKEN, self.archive,
+                                              self.before if native else None, self.after if native else None)
+
+
+class PreconfigStartupArchiveTests(PreconfigStartupArchiveFixture, unittest.TestCase):
     def test_preconfig_startup_original_tuple_is_eligible_without_synthetic_ack(self):
         # Replay the former identity boundary when the additive phase is absent.
         identity = self.helper.get("preconfig_identity", self.helper["identity"])
@@ -1394,13 +1409,6 @@ class PreconfigStartupArchiveTests(unittest.TestCase):
         self.assertEqual(original["volume_id"], VOLUME)
         self.assertFalse((self.run / "_batch/lifecycle.json").exists())
         self.assertFalse((self.out / "guest-shutdown.confirmed").exists())
-
-    def capture(self):
-        self.helper["capture_preconfig"](self.registry, self.out, MACHINE, TOKEN, self.archive)
-
-    def verify(self, native=True):
-        return self.helper["verify_preconfig"](self.registry, self.out, MACHINE, TOKEN, self.archive,
-                                              self.before if native else None, self.after if native else None)
 
     def test_preconfig_full_original_archive_is_zero_credit_and_preserves_pending(self):
         original = {str(p): p.read_bytes() for p in self.run.rglob("*") if p.is_file()}
@@ -1779,8 +1787,14 @@ class MachineExecDeliveryTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
-class ControllerExportContinuationTests(unittest.TestCase):
-    """Real old-source seal and new launch/export, native-free temporary originals."""
+class ControllerExportContinuationFixture:
+    """Real old-source seal and new launch/export, native-free temporary originals.
+
+    Fixture mixin (setUp + helpers, no cases) shared by ControllerExportContinuationTests
+    and RetainedControllerEndpointTests. Subclassing the TestCase instead made unittest
+    collect its 12 cases again under RetainedControllerEndpointTests with this identical
+    setUp, including a second EXPORT_WRITER_DRAIN_SECONDS (120 s) writer drain.
+    """
     def setUp(self):
         import types
         self.types = types
@@ -1843,6 +1857,8 @@ class ControllerExportContinuationTests(unittest.TestCase):
         self.module.verify(verify)
         return fifo,args,verify
 
+
+class ControllerExportContinuationTests(ControllerExportContinuationFixture, unittest.TestCase):
     def test_original_run_fifo_capture_is_metadata_only_and_truthful_tool(self):
         fifo,args,verify=self.fifo_capture()
         manifest=json.loads(args.manifest.read_bytes());row=manifest['files']['context/native-retirement.pipe']
@@ -1943,7 +1959,15 @@ class ControllerExportContinuationTests(unittest.TestCase):
 
     def test_exact_idle_init_permission_does_not_hide_sleep_child(self):
         self.prepare();self.module.launch(self.launch)
-        with patch.object(self.module,'writers',return_value=[{'pid':1999,'birth':self.birth(1999)}]):
+        # The writer persists, so export must wait out the whole bounded drain
+        # before refusing; a short drain proves the same refusal without 120 s.
+        # Pin the production values first so the patch below can never mask a
+        # change to the real drain bound (twice the 60 s fleet destroy bound).
+        self.assertEqual(self.module.EXPORT_WRITER_DRAIN_SECONDS,120)
+        self.assertEqual(self.module.EXPORT_WRITER_POLL_SECONDS,1)
+        self.assertRegex(Path(self.module.__file__).read_text(),r'writer_deadline = time\.monotonic\(\) \+ EXPORT_WRITER_DRAIN_SECONDS\b')
+        with patch.object(self.module,'writers',return_value=[{'pid':1999,'birth':self.birth(1999)}]),\
+                patch.object(self.module,'EXPORT_WRITER_DRAIN_SECONDS',0.3),patch.object(self.module,'EXPORT_WRITER_POLL_SECONDS',0.01):
             self.assertEqual(self.module.export(self.types.SimpleNamespace(record=self.record,archive=self.base/'refused.tar.gz',manifest=self.base/'refused-manifest.json',pending=self.base/'pending.json')),75)
         self.assertFalse((self.base/'refused.tar.gz').exists())
 
@@ -1980,10 +2004,9 @@ class ControllerExportContinuationTests(unittest.TestCase):
 
 
 
-class RetainedControllerEndpointTests(ControllerExportContinuationTests):
+class RetainedControllerEndpointTests(ControllerExportContinuationFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
-        if self._testMethodName not in RetainedControllerEndpointTests.__dict__:return
         self.prepare();self.module.launch(self.launch)
         self.native=dict(id='abc123',instance_id='native-original',state='started',config=dict(
             init={'cmd':['bash','/tmp/gate.sh']},image='image@sha256:fixture',restart={'policy':'no'},
@@ -2091,12 +2114,10 @@ class SnapshotRepresentationTests(unittest.TestCase):
                 self.select([waiting,dict(self.pending,status=failed),self.complete],self.sid)
 
 
-class AllocatedCurrentColdTests(PreconfigStartupArchiveTests):
+class AllocatedCurrentColdTests(PreconfigStartupArchiveFixture, unittest.TestCase):
     """New current-state custody never fabricates historical rejection evidence."""
     def setUp(self):
         super().setUp()
-        if self._testMethodName not in AllocatedCurrentColdTests.__dict__:
-            return
         self.source = self.base / 'source-common'; self.source.mkdir()
         self.destination = self.base / 'destination-common'; self.destination.mkdir()
         contract = runpy.run_path(str(REPO/'scripts/cloudbench_execution_provenance.py'))
@@ -2798,13 +2819,11 @@ class RetainedTargetSourceSuccessorTests(unittest.TestCase):
         self.assertEqual(completion.read_bytes(),raw);self.assertEqual(completion.stat().st_ino,inode)
 
 
-class CrossControllerColdHandoffTests(PreconfigStartupArchiveTests):
+class CrossControllerColdHandoffTests(PreconfigStartupArchiveFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
-        # Inherited archive tests exercise the original, unconsumed fixture.
-        # Only handoff tests may consume its latches before their assertions.
-        if self._testMethodName not in CrossControllerColdHandoffTests.__dict__:
-            return
+        # The archive cases run once on PreconfigStartupArchiveTests with the original,
+        # unconsumed fixture; only handoff tests consume its latches before asserting.
         self.source = self.base / 'source-common'; self.source.mkdir()
         self.destination = self.base / 'destination-common'; self.destination.mkdir()
         import runpy
@@ -3169,7 +3188,7 @@ second="$(claim_pool_machine)" || exit 95
         self.assertTrue((self.source/'cloudbench-cold-handoffs/outgoing'/MACHINE).exists())
 
 class BillingStopRetainTests(unittest.TestCase):
-    """Real helper/files/locks/timers; only provider transport and PID query mocked."""
+    """Real helper/files/locks/timers; transport/PID mocked, deadline-only fsync isolated."""
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -3497,8 +3516,35 @@ class BillingStopRetainTests(unittest.TestCase):
 
 
     def test_durable_final_pair_and_all_receipt_links_match_actual_bytes(self):
-        result=self.call()['results'][0]
+        synced=[]
+        real_fsync=os.fsync
+        def record_sync(fd):
+            real_fsync(fd)
+            info=os.fstat(fd)
+            synced.append(('sync',info.st_dev,info.st_ino))
+        real_rename=self.ns['rename_noreplace']
+        def record_rename(source,target):
+            info=source.stat()
+            self.assertIn(('sync',info.st_dev,info.st_ino),synced,str(target))
+            real_rename(source,target)
+            synced.append(('rename',info.st_dev,info.st_ino))
+        def require_durable(path):
+            info=path.stat()
+            published=synced.index(('rename',info.st_dev,info.st_ino))
+            parent=path.parent.stat()
+            self.assertIn(('sync',parent.st_dev,parent.st_ino),synced[published+1:],str(path.parent))
+        raw_guest=self.fly.machine_exec_json
+        def durable_guest(*args,**kwargs):
+            for name in ('owner-snapshot.private.json','intent.private.json','native-before.private.json'):
+                require_durable(self.receipts/self.mid/name)
+            return raw_guest(*args,**kwargs)
+        self.fly.machine_exec_json=durable_guest
+        with patch.object(os,'fsync',side_effect=record_sync), patch.dict(
+                self.ns['publish_bytes'].__globals__,rename_noreplace=record_rename):
+            result=self.call()['results'][0]
         folder=self.receipts/self.mid
+        for path in folder.iterdir():
+            require_durable(path)
         saved=json.loads((folder/'result.private.json').read_bytes())
         self.assertEqual(saved,result)
         for filename,key in [('native-final.private.json','native_final_sha256'),
@@ -3641,7 +3687,10 @@ class BillingStopRetainTests(unittest.TestCase):
         signal.setitimer(signal.ITIMER_REAL,1.5)
         started=time.monotonic()
         try:
-            with patch.dict(self.ns['billing_stop_retained_owned'].__globals__,publish_bytes=delayed_publish):
+            # Real writes, renames, locks and alarms exercise deadline accounting.
+            # Disk flush latency has its own real-sync ordering test above; it
+            # must not consume the subsecond dispatch margin in this fixture.
+            with patch.object(os,'fsync',return_value=None), patch.dict(self.ns['billing_stop_retained_owned'].__globals__,publish_bytes=delayed_publish):
                 result=self.call()
             elapsed=time.monotonic()-started
         finally:
@@ -4129,5 +4178,29 @@ gosu(){ shift; python3 -c 'import os,sys;os.setgid(1001);os.setuid(1001);os.exec
         self.assertTrue((self.repo / 'stale-task-output').exists())
 
 
+class SuiteShapeTests(unittest.TestCase):
+    """Every case in this module runs exactly once, under the fixture that defines it.
+
+    unittest collects inherited test_* methods again on every TestCase subclass. Before
+    2026-10-28 three subclasses reused a parent fixture that way and re-ran 36 identical
+    cases (a second 120 s export writer drain among them) on every /deploy. Fixtures that
+    several suites share live in a plain mixin class (no test_* methods) instead.
+    """
+    def test_no_test_case_inherits_another_classes_cases(self):
+        loader = unittest.TestLoader()
+        inherited = []
+        for cls in vars(sys.modules[__name__]).values():
+            if not (isinstance(cls, type) and issubclass(cls, unittest.TestCase)):
+                continue
+            for name in loader.getTestCaseNames(cls):
+                if name not in vars(cls):
+                    owner = next(base.__name__ for base in cls.__mro__ if name in vars(base))
+                    inherited.append(f"{cls.__name__}.{name} (defined on {owner})")
+        self.assertEqual(inherited, [], "share the fixture through a mixin, not a TestCase subclass")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from deploy_gate_shard import run_unittest_module
+
+    run_unittest_module()

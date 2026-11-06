@@ -37,7 +37,7 @@ type InsertSetters = Pick<
 > & { setIsChatMode: React.Dispatch<React.SetStateAction<boolean>> };
 
 export function createInsertHandlers(
-  deps: { dispatchMessage: RealtimeSetters['dispatchMessage'] },
+  deps: { dispatchMessage: RealtimeSetters['dispatchMessage']; signal?: AbortSignal },
   agentId: string,
   active: () => boolean,
   receivedRef: React.MutableRefObject<ReceivedInserts>,
@@ -77,7 +77,10 @@ export function createInsertHandlers(
       metadata: { ...deferred.metadata, liveStreamBlocked: true },
     });
     const hydrate = (attempt: number) => {
+      if (!active() || deps.signal?.aborted) return;
       const controller = new AbortController();
+      const abort = () => controller.abort();
+      deps.signal?.addEventListener('abort', abort, { once: true });
       const timer = setTimeout(() => controller.abort(), DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS);
       void fetchAgentMessage(agentId, deferred.id, controller.signal)
         .then((row) => {
@@ -89,14 +92,20 @@ export function createInsertHandlers(
         .catch((error: unknown) => {
           if (!active()) return;
           if (attempt < DEFERRED_INSERT_HYDRATION_ATTEMPTS) {
-            setTimeout(() => {
+            const cancelRetry = () => clearTimeout(retry);
+            const retry = setTimeout(() => {
+              deps.signal?.removeEventListener('abort', cancelRetry);
               if (active()) hydrate(attempt + 1);
             }, DEFERRED_INSERT_HYDRATION_RETRY_MS * attempt);
+            deps.signal?.addEventListener('abort', cancelRetry, { once: true });
             return;
           }
           console.warn('AgentContext: deferred INSERT hydration failed', error);
         })
-        .finally(() => clearTimeout(timer));
+        .finally(() => {
+          clearTimeout(timer);
+          deps.signal?.removeEventListener('abort', abort);
+        });
     };
     hydrate(1);
   };

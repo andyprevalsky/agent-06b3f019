@@ -19,7 +19,7 @@ import { http, HttpResponse } from 'msw';
 import { expect } from 'vitest';
 import type { User } from '@supabase/supabase-js';
 
-import type { Project, ProjectEnvFile } from '@/lib/api/projects';
+import type { MaintenanceRun, MaintenanceState, Project, ProjectEnvFile } from '@/lib/api/projects';
 
 import { server } from './msw/server';
 
@@ -36,6 +36,16 @@ export function makeProject(overrides: Partial<Project> = {}): Project {
     startupTimeoutS: 120,
     lifecycle: { autoWake: true },
     sync: { revision: 3, lastSyncedAt: '2026-10-20T17:05:00.000Z' },
+    maintenance: {
+      script: null,
+      timeoutS: 480,
+      nightly: false,
+      onGithubChange: false,
+      nextRunAt: null,
+      watchCheckedAt: null,
+      running: false,
+    },
+    snapshot: null,
     envFileCount: 0,
     createdAt: '2026-10-01T00:00:00.000Z',
     updatedAt: '2026-10-20T17:05:00.000Z',
@@ -79,6 +89,7 @@ const PROJECT_WRITE_FIELDS: ReadonlySet<string> = new Set([
   'startupScript',
   'startupTimeoutS',
   'lifecycle',
+  'maintenance',
 ]);
 const ENV_FILE_CREATE_FIELDS: ReadonlySet<string> = new Set([
   'path',
@@ -101,10 +112,43 @@ function dotenvNames(content: string): { name: string }[] {
     .map((name) => ({ name }));
 }
 
+/** Template sync state of one mock project (the strict backend contract for …/maintenance). */
+export interface MockMaintenance {
+  state: MaintenanceState;
+  /** Modes of every accepted POST …/maintenance/runs, in order. */
+  started: string[];
+  logs: Map<string, string>;
+  /** Settle the running run (as the backend would) and publish a snapshot on success. */
+  finish(status: 'SUCCEEDED' | 'FAILED' | 'TIMED_OUT', log?: string): void;
+}
+
 export interface MockProjectsApi {
   projects: Project[];
   envFiles: Map<string, ProjectEnvFile[]>;
+  maintenance: Map<string, MockMaintenance>;
+  /** The (lazily created) template-sync state of a project, for seeding runs. */
+  maintenanceOf(projectId: string): MockMaintenance;
 }
+
+function makeRun(overrides: Partial<MaintenanceRun> = {}): MaintenanceRun {
+  return {
+    id: 'run-1',
+    trigger: 'manual',
+    mode: 'sync',
+    status: 'SUCCEEDED',
+    startedAt: '2026-10-28T10:00:00.000Z',
+    finishedAt: '2026-10-28T10:03:00.000Z',
+    durationMs: 180_000,
+    exitCode: 0,
+    headSha: null,
+    snapshotId: 'snap-1',
+    fromSnapshot: false,
+    error: null,
+    ...overrides,
+  };
+}
+
+export { makeRun };
 
 /**
  * In-memory Projects API; returns the live lists so tests can assert on them.
@@ -120,6 +164,77 @@ export function mockProjectsApi(
   );
   const dto = (p: Project): Project => ({ ...p, envFileCount: files.get(p.id)?.length ?? 0 });
   const filesOf = (id: unknown) => files.get(String(id)) ?? [];
+  const maintenance = new Map<string, MockMaintenance>();
+  const maintenanceOf = (id: unknown): MockMaintenance => {
+    const key = String(id);
+    const existing = maintenance.get(key);
+    if (existing) return existing;
+    const project = projects.find((p) => p.id === key);
+    const created: MockMaintenance = {
+      state: {
+        snapshot: project?.snapshot ?? null,
+        running: false,
+        nextRunAt: null,
+        watchCheckedAt: null,
+        runs: [],
+      },
+      started: [],
+      logs: new Map(),
+      finish(status, log = '') {
+        const run = created.state.runs[0];
+        if (!run) return;
+        run.status = status;
+        run.finishedAt = '2026-10-28T11:00:00.000Z';
+        run.durationMs = 60_000;
+        created.logs.set(run.id, log);
+        created.state.running = false;
+        if (status === 'SUCCEEDED')
+          created.state.snapshot = { takenAt: '2026-10-28T11:00:00.000Z', sha: null };
+      },
+    };
+    maintenance.set(key, created);
+    return created;
+  };
+  server.use(
+    http.get(`${API_BASE}/projects/:id/maintenance`, ({ params }) => {
+      const m = maintenanceOf(params.id);
+      const project = projects.find((p) => p.id === params.id);
+      return HttpResponse.json({
+        ...m.state,
+        nextRunAt: project?.maintenance.nightly ? '2026-10-29T10:00:00.000Z' : null,
+        watchCheckedAt: project?.maintenance.onGithubChange ? '2026-10-28T09:55:00.000Z' : null,
+      });
+    }),
+    http.post(`${API_BASE}/projects/:id/maintenance/runs`, async ({ request, params }) => {
+      const body = (await request.json()) as { mode?: string };
+      const m = maintenanceOf(params.id);
+      if (m.state.running)
+        return HttpResponse.json(
+          { error: 'A sync is already running', code: 'maintenance_running' },
+          { status: 409 },
+        );
+      m.started.push(body.mode ?? 'sync');
+      const run = makeRun({
+        id: `run-${m.state.runs.length + 2}`,
+        trigger: body.mode === 'snapshot' ? 'snapshot' : 'manual',
+        mode: body.mode === 'snapshot' ? 'snapshot' : 'sync',
+        status: 'RUNNING',
+        finishedAt: null,
+        durationMs: null,
+        exitCode: null,
+        snapshotId: null,
+      });
+      m.state.runs.unshift(run);
+      m.state.running = true;
+      return HttpResponse.json(run, { status: 202 });
+    }),
+    http.get(`${API_BASE}/projects/:id/maintenance/runs/:runId`, ({ params }) => {
+      const m = maintenanceOf(params.id);
+      const run = m.state.runs.find((r) => r.id === params.runId);
+      if (!run) return HttpResponse.json({ error: 'Run not found' }, { status: 404 });
+      return HttpResponse.json({ ...run, log: m.logs.get(run.id) ?? '' });
+    }),
+  );
   server.use(
     http.get(`${API_BASE}/projects`, () => HttpResponse.json({ projects: projects.map(dto) })),
     http.post(`${API_BASE}/projects`, async ({ request }) => {
@@ -148,17 +263,57 @@ export function mockProjectsApi(
       const index = projects.findIndex((p) => p.id === params.id);
       const prev = projects[index];
       const lifecycle = body.lifecycle as Partial<Project['lifecycle']> | undefined;
+      const maintenanceBody = body.maintenance as Partial<Project['maintenance']> | undefined;
       projects[index] = {
         ...prev,
         ...(body as Partial<Project>),
         ...(body.startupScript === '' ? { startupScript: null } : {}),
         lifecycle: { ...prev.lifecycle, ...lifecycle },
+        maintenance: { ...prev.maintenance, ...maintenanceBody },
       };
       return HttpResponse.json(dto(projects[index]));
     }),
     http.delete(`${API_BASE}/projects/:id`, ({ params }) => {
       const index = projects.findIndex((p) => p.id === params.id);
       if (index >= 0) projects.splice(index, 1);
+      return new HttpResponse(null, { status: 204 });
+    }),
+    http.post(`${API_BASE}/projects/:id/folders`, async ({ request, params }) => {
+      const project = projects.find((p) => p.id === params.id)!;
+      const { name } = (await request.json()) as { name: string };
+      const folders = project.folders ?? [];
+      if (folders.some((folder) => folder.name === name))
+        return new HttpResponse(null, { status: 409 });
+      const folder = { id: `f-${folders.length + 1}`, name, projectId: project.id };
+      project.folders = [...folders, folder];
+      return HttpResponse.json(folder, { status: 201 });
+    }),
+    http.put(`${API_BASE}/projects/:id/folders/:folderId/position`, async ({ request, params }) => {
+      const project = projects.find((p) => p.id === params.id);
+      if (!project) return new HttpResponse(null, { status: 404 });
+      const { beforeId } = (await request.json()) as { beforeId: string | null };
+      const folder = project.folders?.find((row) => row.id === params.folderId);
+      const next = (project.folders ?? []).filter((row) => row.id !== params.folderId);
+      if (!folder || (beforeId !== null && !next.some((row) => row.id === beforeId)))
+        return new HttpResponse(null, { status: 409 });
+      next.splice(
+        beforeId === null ? next.length : next.findIndex((row) => row.id === beforeId),
+        0,
+        folder,
+      );
+      project.folders = next;
+      return HttpResponse.json({ folders: next });
+    }),
+    http.put(`${API_BASE}/projects/:id/folders/:folderId`, async ({ request, params }) => {
+      const project = projects.find((p) => p.id === params.id)!;
+      const { name } = (await request.json()) as { name: string };
+      const folder = project.folders!.find((f) => f.id === params.folderId)!;
+      folder.name = name;
+      return HttpResponse.json(folder);
+    }),
+    http.delete(`${API_BASE}/projects/:id/folders/:folderId`, ({ params }) => {
+      const project = projects.find((p) => p.id === params.id)!;
+      project.folders = project.folders!.filter((f) => f.id !== params.folderId);
       return new HttpResponse(null, { status: 204 });
     }),
     http.get(`${API_BASE}/projects/:id/env-files`, ({ params }) =>
@@ -189,7 +344,7 @@ export function mockProjectsApi(
       return new HttpResponse(null, { status: 204 });
     }),
   );
-  return { projects, envFiles: files };
+  return { projects, envFiles: files, maintenance, maintenanceOf };
 }
 
 export function signedInUser(name = 'Andy Prevalsky'): User {

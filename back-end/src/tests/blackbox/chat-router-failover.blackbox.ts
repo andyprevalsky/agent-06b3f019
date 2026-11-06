@@ -46,9 +46,12 @@
  * Cerebras-wide outage (direct Cerebras and every other OpenRouter route
  * stalled), and the real OpenRouter GLM failover as the only path that can
  * serve. It runs on the OpenRouter account back-end/.env configures, must
- * serve inside the first router attempt with the corrected address in the
- * re-plan goal, and reports which host served. A miss OpenRouter caused is
- * re-probed once a minute later; any other failure, or a second miss, fails.
+ * serve every router decision inside its first attempt with the corrected
+ * address in the re-plan goal, and reports which host served. The router may
+ * search before it escalates (bcee7f02c); those Parallel POSTs are answered
+ * in-process with no results and close one decision round. A miss OpenRouter
+ * caused is re-probed once a minute later; any other failure, or a second
+ * miss, fails.
  * /deploy runs it in scripts/run_deploy_live_probes.py.
  */
 
@@ -72,10 +75,11 @@ import { OPENROUTER_FAST_CHAT_MODEL } from '../../providers/rose/openrouterFastR
 import {
   assertProbesConfiguredOpenRouterAccount,
   assertServedOnFirstAttempt,
-  describeLiveRequests,
+  describeLiveSample,
   type GoalAnchor,
   goalAnchorFailure,
   type LiveSample,
+  liveSampleOf,
   probeLiveFailover,
   startedWorkflowGoal,
 } from './chat-router-failover.live.support';
@@ -579,7 +583,7 @@ async function runLiveSample(label: string): Promise<LiveSample> {
     undefined,
     evidence
   );
-  recordLiveEvidenceSample(evidence, { outcome, network, goal }, OPENROUTER_FAST_CHAT_MODEL);
+  recordLiveEvidenceSample(evidence, { outcome, network, goal });
   return withEvidenceCleanup(
     async () => {
       assertExactProdRouterContext(network);
@@ -588,15 +592,10 @@ async function runLiveSample(label: string): Promise<LiveSample> {
         network.routerRequests('openrouter', OPENROUTER_CEREBRAS_MODEL).length > 0,
         'the OpenRouter race must still start its Qwen branch (stalled here)'
       );
-      const attempts = network.routerRequests('cerebras').length;
-      const glm = network.routerRequests('openrouter', OPENROUTER_FAST_CHAT_MODEL);
-      assert.equal(glm.length, attempts, 'every router attempt must reach the real GLM failover');
-      process.stdout.write(
-        `  live GLM failover (${label}): ${outcome.kind} at ${outcome.atMs}ms; ` +
-          `${describeLiveRequests(glm)}\n`
-      );
+      const sample = liveSampleOf(network, { outcome, goal });
+      process.stdout.write(describeLiveSample(label, sample) + network.describeSearches());
       if (goal !== undefined) process.stdout.write(`  escalation goal: ${goal}\n`);
-      return { outcome, attempts, glm, alerts: network.alerts, goal };
+      return sample;
     },
     () => cleanup(seeded),
     (sample) => assertServedOnFirstAttempt(sample, CORRECTED_GOAL)

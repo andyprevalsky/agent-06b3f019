@@ -186,14 +186,113 @@ export function describeLiveRequests(requests: LiveObservation[]): string {
     .join('; ');
 }
 
+/** What round grouping reads from a recorded request: its fetch-order position, never its clock. */
+export interface RoundRequest extends LiveObservation {
+  seq: number;
+  schema: string;
+  provider: 'cerebras' | 'openrouter';
+  model: string;
+}
+
+/** One router decision of a chat turn: its attempts and the search batch, if any, that closed it. */
+export interface DecisionRound<R extends LiveObservation = LiveObservation> {
+  /** Router attempts (one direct Cerebras router request each; a regenerate is another). */
+  attempts: number;
+  /** The GLM failover request of each attempt that reached the hedge, in order. */
+  glm: R[];
+  /** Router requests on the other OpenRouter route (the Qwen race branch). */
+  otherRoutes: number;
+  /** Parallel search POSTs that followed this round's decision and closed it. */
+  searchRequests: number;
+}
+
+/**
+ * Groups a turn's requests into decision rounds structurally: only
+ * router_decision requests open attempts, a round closes at the first search
+ * request after its decision, and the next router_decision request opens the
+ * next round. Order is the fetch-order `seq`, so a stalled Cerebras or Qwen
+ * request that is aborted late, or whose clock reads late, stays in the round
+ * that issued it. A search before any decision opens an attempt-less round.
+ */
+export function groupDecisionRounds<R extends RoundRequest>(
+  requests: readonly R[],
+  searches: ReadonlyArray<{ seq: number }>,
+  glmModel: string
+): DecisionRound<R>[] {
+  const events = [
+    ...requests
+      .filter((request) => request.schema === 'router_decision')
+      .map((request) => ({ seq: request.seq, request })),
+    ...searches.map((search) => ({ seq: search.seq, request: undefined })),
+  ].sort((a, b) => a.seq - b.seq);
+  const rounds: DecisionRound<R>[] = [];
+  const open = (): DecisionRound<R> => {
+    const round: DecisionRound<R> = { attempts: 0, glm: [], otherRoutes: 0, searchRequests: 0 };
+    rounds.push(round);
+    return round;
+  };
+  let round: DecisionRound<R> | undefined;
+  for (const event of events) {
+    if (event.request === undefined) {
+      round ??= open();
+      round.searchRequests += 1;
+      continue;
+    }
+    if (round === undefined || round.searchRequests > 0) round = open();
+    if (event.request.provider === 'cerebras') round.attempts += 1;
+    else if (event.request.model === glmModel) round.glm.push(event.request);
+    else round.otherRoutes += 1;
+  }
+  return rounds;
+}
+
+export function describeDecisionRounds(rounds: DecisionRound[]): string {
+  return rounds
+    .map((round, index) => {
+      const closed =
+        round.searchRequests > 0 ? `, then ${round.searchRequests} search POST(s)` : '';
+      const glm = describeLiveRequests(round.glm) || 'no GLM request';
+      return `round ${index + 1} (${round.attempts} attempt(s)${closed}): ${glm}`;
+    })
+    .join(' | ');
+}
+
 export interface LiveSample {
   outcome: { kind: 'escalated' | 'apology' | 'timeout'; atMs: number };
-  /** Router attempts (one Cerebras router request each). */
+  /** Router attempts of the decision round that produced the outcome (one Cerebras router request each). */
   attempts: number;
-  /** The GLM failover request of each router attempt, in order. */
+  /** The GLM failover request of each of that round's attempts, in order. */
   glm: LiveObservation[];
+  /** Every decision round of the turn, in order; a round before the last was closed by a web-search batch. */
+  rounds: DecisionRound[];
   alerts: string[];
   goal?: string;
+}
+
+/** The turn's network observations as a sample; every attempt of every round must have reached GLM. */
+export function liveSampleOf(
+  network: { decisionRounds(): DecisionRound[]; alerts: string[] },
+  turn: Pick<LiveSample, 'outcome' | 'goal'>
+): LiveSample {
+  const rounds = network.decisionRounds();
+  rounds.forEach((round, index) => {
+    assert.equal(
+      round.glm.length,
+      round.attempts,
+      `decision round ${index + 1}: every router attempt must reach the real GLM failover`
+    );
+  });
+  const outcomeRound = rounds.at(-1);
+  assert.ok(outcomeRound, 'the turn must make a router decision');
+  const { attempts, glm } = outcomeRound;
+  return { ...turn, attempts, glm, rounds, alerts: network.alerts };
+}
+
+export function describeLiveSample(label: string, sample: LiveSample): string {
+  return (
+    `  live GLM failover (${label}): ${sample.outcome.kind} at ${sample.outcome.atMs}ms over ` +
+    `${sample.rounds.length} decision round(s); ${describeDecisionRounds(sample.rounds)}\n`
+  );
 }
 
 /** The address the user corrected the run to, and the one they rejected. */
@@ -252,8 +351,18 @@ export function assertServedOnFirstAttempt(sample: LiveSample, goalAnchor: GoalA
     sample.outcome.kind,
     'escalated',
     `live GLM failover must escalate the exact prod follow-up, got ${sample.outcome.kind} after ` +
-      `${sample.outcome.atMs}ms over ${sample.attempts} router attempt(s)`
+      `${sample.outcome.atMs}ms over ${sample.rounds.length} decision round(s) ` +
+      `(${describeDecisionRounds(sample.rounds)})`
   );
+  // Each decision the turn made, searching or escalating, must come from its first attempt.
+  sample.rounds.forEach((round, index) => {
+    assert.equal(
+      round.attempts,
+      1,
+      `decision round ${index + 1} of ${sample.rounds.length} must be served inside its first ` +
+        `router attempt's bounds (${describeLiveRequests(round.glm)})`
+    );
+  });
   assert.equal(
     sample.attempts,
     1,
@@ -264,10 +373,17 @@ export function assertServedOnFirstAttempt(sample: LiveSample, goalAnchor: GoalA
   assert.equal(goalAnchorFailure(sample.goal, goalAnchor), undefined);
 }
 
-/** Every GLM request that did not serve the turn missed on OpenRouter's side. */
+/**
+ * Every GLM request that did not serve a decision missed on OpenRouter's side.
+ * A round closed by a search was served by its last attempt, as was the
+ * escalating round; an apology leaves its round unserved.
+ */
 function missedOnOpenRouterSide(sample: LiveSample, budgetMs: number): boolean {
   if (sample.outcome.kind === 'timeout') return false;
-  const unserved = sample.outcome.kind === 'escalated' ? sample.glm.slice(0, -1) : sample.glm;
+  const unserved = sample.rounds.flatMap((round, index) => {
+    const served = index < sample.rounds.length - 1 || sample.outcome.kind === 'escalated';
+    return served ? round.glm.slice(0, -1) : round.glm;
+  });
   return (
     unserved.length > 0 && unserved.every((request) => isOpenRouterSideMiss(request, budgetMs))
   );

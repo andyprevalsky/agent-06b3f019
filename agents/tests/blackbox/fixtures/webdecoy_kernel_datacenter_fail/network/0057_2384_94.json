@@ -1,0 +1,46 @@
+{
+ "action": "form_submit",
+ "cdata": "",
+ "experimental": {
+  "mode": "observe",
+  "policy": "stealth-corroboration-v1",
+  "score": 0.18676399999999999,
+  "wouldBlock": false,
+  "detections": [],
+  "corroboratingCategories": [
+   "vision_ai"
+  ],
+  "observations": {
+   "animation-consistency-v1": {
+    "mode": "observe",
+    "status": "clear",
+    "detections": []
+   },
+   "identity-coherence-v1": {
+    "mode": "observe",
+    "status": "detected",
+    "detections": [
+     {
+      "id": "font-set-os-mismatch",
+      "reason": "Font set (Windows faces) contradicts claimed OS (Linux)"
+     }
+    ]
+   },
+   "pointer-movement-v1": {
+    "mode": "observe",
+    "status": "detected",
+    "detections": [
+     {
+      "id": "pointer-movement-never-zero",
+      "reason": "Pointer moves always report movement; experimental observation, not proof of automation"
+     }
+    ]
+   }
+  }
+ },
+ "reason": "pow_not_satisfied",
+ "recommendation": "allow",
+ "score": 0.18676399999999999,
+ "success": false,
+ "token": "<redacted>"
+}

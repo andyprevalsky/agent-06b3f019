@@ -6,39 +6,61 @@ BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$SCRIPT_DIR/blackbox-phone-env.sh"
 ROOT_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 
-# Returns 0 when a funded OpenAI key (GPT_API_KEY / OPENAI_API_KEY) fallback is
-# available to the test backend — either already exported into this shell or
-# present and non-empty in back-end/.env (which the backend loads via dotenv at
-# startup). resolveCodexCodeAuthEnvs uses this key to authenticate the Codex Code
-# E2B session when no gpt_code OAuth credential is seeded, so its presence means
-# the codex-code smoke can still run (and self-SKIP when the key is exhausted).
-# Mirrors the identical preflight in scripts/run-coverage.sh so any blackbox
-# entrypoint — including the credential-independent admin-health/Amplitude probe
-# that seeds through this script — is not blocked by a Codex funding state.
+# Prints the effective value of NAME for the test backend: the exported shell
+# value, else the LAST assignment in back-end/.env with the backend's dotenv
+# semantics (last-in-wins; quoted values keep '#' literally; unquoted values drop
+# an inline "# comment"; surrounding whitespace is trimmed). Empty when absent.
+backend_env_value() {
+  local env_name="$1" value
+  if [[ -n "${!env_name:-}" ]]; then
+    printf '%s' "${!env_name}"
+    return 0
+  fi
+  [[ -f "$BACKEND_DIR/.env" ]] || return 0
+  value="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${env_name}=" "$BACKEND_DIR/.env" | tail -1 || true)"
+  [[ -z "$value" ]] && return 0
+  value="${value#*=}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  case "$value" in
+    \"*) value="${value#\"}"; value="${value%%\"*}" ;;
+    \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+    *)   value="${value%%#*}" ;;
+  esac
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+# Returns 0 when the funded Azure Codex deployment is configured for the test
+# backend: an https AZURE_FOUNDRY_ENDPOINT[_n] with its AZURE_FOUNDRY_API_KEY[_n]
+# whose AZURE_FOUNDRY_DEPLOYMENTS[_n] lists CODEX_AZURE_DEPLOYMENT (default
+# gpt-6.1-sol, the codexAzure column of src/providers/codeAgentModels.ts), or
+# whose host is CODEX_AZURE_FOUNDRY_HOST when that pins the resource. Mirrors
+# resolveCodexAzureFunding (src/providers/claudeCodeSandboxAuth.ts):
+# resolveCodexCodeAuthEnvs serves a Codex session from that deployment when no
+# gpt_code login is leasable, so the codex-code smoke can still run (and
+# self-SKIP when it is out of quota). GPT_API_KEY never reaches a Codex
+# sandbox, so it is not a Codex fallback.
 codex_funded_fallback_configured() {
-  local env_name value
-  for value in "${GPT_API_KEY:-}" "${OPENAI_API_KEY:-}"; do
-    [[ -n "$value" ]] && return 0
-  done
-  [[ -f "$BACKEND_DIR/.env" ]] || return 1
-  for env_name in GPT_API_KEY OPENAI_API_KEY; do
-    # Mirror the backend's dotenv semantics rather than trusting the first raw
-    # grep hit: the LAST assignment wins (dotenv is last-in-wins), quoted values
-    # keep '#' literally, unquoted values drop an inline "# comment", and an
-    # empty/whitespace/comment-only effective value counts as absent — so a blank
-    # or commented-out key cannot spuriously satisfy the fallback and skip the
-    # intended no-credential failure path.
-    value="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${env_name}=" "$BACKEND_DIR/.env" | tail -1 || true)"
-    [[ -z "$value" ]] && continue
-    value="${value#*=}"
-    value="${value#"${value%%[![:space:]]*}"}"
-    case "$value" in
-      \"*) value="${value#\"}"; value="${value%%\"*}" ;;
-      \'*) value="${value#\'}"; value="${value%%\'*}" ;;
-      *)   value="${value%%#*}"
-           value="${value%"${value##*[![:space:]]}"}" ;;
-    esac
-    [[ -n "$value" ]] && return 0
+  local host deployment slot endpoint key name
+  local -a names
+  host="$(backend_env_value CODEX_AZURE_FOUNDRY_HOST)"
+  deployment="$(backend_env_value CODEX_AZURE_DEPLOYMENT)"
+  deployment="${deployment:-gpt-6.1-sol}"
+  for slot in "" _2 _3 _4 _5 _6 _7 _8 _9; do
+    endpoint="$(backend_env_value "AZURE_FOUNDRY_ENDPOINT$slot")"
+    key="$(backend_env_value "AZURE_FOUNDRY_API_KEY$slot")"
+    [[ -n "$endpoint" && -n "$key" && "$endpoint" == https://* ]] || continue
+    endpoint="${endpoint#https://}"
+    if [[ -n "$host" ]]; then
+      [[ "${endpoint%%/*}" == "$host" ]] && return 0
+      continue
+    fi
+    IFS=',' read -r -a names <<< "$(backend_env_value "AZURE_FOUNDRY_DEPLOYMENTS$slot")"
+    for name in ${names[@]+"${names[@]}"}; do
+      name="${name#"${name%%[![:space:]]*}"}"
+      name="${name%"${name##*[![:space:]]}"}"
+      [[ "$name" == "$deployment" ]] && return 0
+    done
   done
   return 1
 }
@@ -55,6 +77,10 @@ source "$SCRIPT_DIR/local-db-container.sh"
 RUN_ID="${BLACKBOX_TEST_RUN_ID:-${CONTRACT_TEST_RUN_ID:-$(date +%s)-$$-$RANDOM}}"
 export BLACKBOX_TEST_RUN_ID="$RUN_ID"
 export CONTRACT_TEST_RUN_ID="$RUN_ID"
+# E2B sandboxes this run's backend creates carry this stack tag; cleanup kills
+# exactly them (scripts/kill-stack-sandboxes.ts). Passed only to that backend and
+# to the cleanup, never exported, so no nested stack inherits it.
+SANDBOX_STACK_ID="blackbox:$RUN_ID"
 ARTIFACT_ROOT="${BLACKBOX_TEST_ARTIFACT_ROOT:-${CONTRACT_TEST_ARTIFACT_ROOT:-$ROOT_DIR/.context/test-runs}}"
 ARTIFACT_DIR="${BLACKBOX_TEST_ARTIFACT_DIR:-${CONTRACT_TEST_ARTIFACT_DIR:-$ARTIFACT_ROOT/$RUN_ID}}"
 PORT_LOCK_ROOT="$ARTIFACT_ROOT/.port-locks"
@@ -225,6 +251,16 @@ if ! $STACK_DB_EXPECTED && [[ "$USE_EXISTING_BACKEND" == "1" && -f "$STACK_MANIF
   fi
 fi
 # Try Docker container first
+# An isolated deploy worktree prepared for system Postgres owns no container
+# by design (deploy-worktree-preflight marker .context/deploy-system-pg.db):
+# its tests take this workspace's own victoria_<hint> on the marker's server
+# whatever other workspaces' containers are doing. Follow-up y (2026-10-30):
+# the live probes and the coverage lane's trailing teardown test found no
+# database on such a worktree because the fallback below was refused.
+DEPLOY_WORKTREE_SYSTEM_PG=false
+if ! $STACK_DB_EXPECTED && deploy_worktree_system_pg_prepared "$ROOT_DIR"; then
+  DEPLOY_WORKTREE_SYSTEM_PG=true
+fi
 if ! $STACK_DB_EXPECTED && docker_info_quick; then
   # Prefer the workspace-named container; fall back to the only running
   # victoria-db-* container if there's exactly one (covers cases where the
@@ -232,6 +268,8 @@ if ! $STACK_DB_EXPECTED && docker_info_quick; then
   if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
     DB_CONTAINER="$RESOLVED_CONTAINER"
     ISOLATED_DB_RESOLVED=true
+  elif $DEPLOY_WORKTREE_SYSTEM_PG; then
+    echo "Isolated deploy worktree on system Postgres: using its own victoria_$WORKSPACE_HINT database on localhost:5432"
   else
     if ! system_db_fallback_is_safe; then
       echo "❌ No ready Postgres container owned by this worktree." >&2
@@ -267,10 +305,15 @@ fi
 # port layout are found before the generic 5432 default.
 if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
   SYSTEM_PG_CANDIDATES=()
-  if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
-    SYSTEM_PG_CANDIDATES+=("$((CONDUCTOR_PORT + 5))")
+  if $DEPLOY_WORKTREE_SYSTEM_PG; then
+    # The prepared marker names a database on localhost:5432: same server only.
+    SYSTEM_PG_CANDIDATES+=(5432)
+  else
+    if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
+      SYSTEM_PG_CANDIDATES+=("$((CONDUCTOR_PORT + 5))")
+    fi
+    SYSTEM_PG_CANDIDATES+=(5432)
   fi
-  SYSTEM_PG_CANDIDATES+=(5432)
   for SYSTEM_PG_PORT in "${SYSTEM_PG_CANDIDATES[@]}"; do
     if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
       # Never the shared `victoria`: this workspace's own database only.
@@ -347,7 +390,7 @@ BEGIN
   IF to_regclass('"Integration"') IS NOT NULL THEN
     DELETE FROM "Integration"
     WHERE "userId" = '00000000-0000-0000-0000-000000000000'
-      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown');
+      AND name IN ('gpt_api_key_cooldown', 'anthropic_api_key_cooldown', 'codex_funded_cooldown');
   END IF;
 END $$;
 SQL
@@ -373,19 +416,16 @@ SQL
         if [[ "$SEEDED_CODEX_COUNT" =~ ^[1-9][0-9]*$ ]]; then
           echo "Using the connected gpt_code credential already seeded in the isolated test database."
         elif codex_funded_fallback_configured; then
-          # No seeded gpt_code OAuth credential, but the Codex Code session also
-          # authenticates via the funded OpenAI key (GPT_API_KEY / OPENAI_API_KEY)
-          # fallback that resolveCodexCodeAuthEnvs injects when no OAuth credential
-          # is present (see src/providers/e2b.ts). With that funded key configured,
-          # the codex-code E2B smoke still runs end-to-end — and emits the
-          # deploy-approved out-of-funds SKIP if the key is exhausted — so a missing
-          # seeded credential must NOT hard-fail the seed for every blackbox domain
-          # (e.g. the credential-independent admin-health/Amplitude probe). Only fail
-          # when NO credential path exists at all (handled by the else below).
-          echo "No seeded gpt_code credential; a funded OpenAI key (GPT_API_KEY/OPENAI_API_KEY) fallback is configured, so the Codex smoke will run via that fallback (and SKIP if it is out of credits/quota)."
+          # No seeded gpt_code login, but resolveCodexCodeAuthEnvs serves the
+          # Codex session from the funded Azure deployment (src/providers/e2b.ts),
+          # so the codex-code E2B smoke still runs end-to-end (and emits the
+          # deploy-approved out-of-funds SKIP if it is out of quota): a missing
+          # seeded credential must not hard-fail the run. Only fail when NO
+          # credential path exists at all (handled by the else below).
+          echo "No seeded gpt_code credential; the funded Azure Codex deployment (an AZURE_FOUNDRY_* region listing the Codex deployment) is configured, so the Codex smoke will run on it (and SKIP if it is out of quota)."
         else
-          echo "❌ Codex auth is not ChatGPT mode, the isolated test database has no connected gpt_code credential, and no funded OpenAI key (GPT_API_KEY/OPENAI_API_KEY) fallback is configured." >&2
-          echo "   Run codex login, seed the integration, configure a funded key, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
+          echo "❌ Codex auth is not ChatGPT mode, the isolated test database has no connected gpt_code credential, and no funded Azure Codex deployment (no AZURE_FOUNDRY_* region lists the Codex deployment) is configured." >&2
+          echo "   Run codex login, seed the integration, configure the Azure Codex deployment, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
           exit 1
         fi
       fi
@@ -464,6 +504,11 @@ cleanup() {
   if [[ "$cleaned" == 1 && -n "$PORT_LOCK_DIR" && -d "$PORT_LOCK_DIR" ]]; then
     rmdir "$PORT_LOCK_DIR" >/dev/null 2>&1 || true
   fi
+  # Only a backend this runner launched can have created stack-tagged sandboxes.
+  # Self-contained under set -u: the trap must not depend on later setup.
+  if [[ -n "$BACKEND_PID" && -n "${SANDBOX_STACK_ID:-}" ]]; then
+    (cd "$BACKEND_DIR" && ROSE_SANDBOX_STACK_ID="$SANDBOX_STACK_ID" timeout 60 npx tsx scripts/kill-stack-sandboxes.ts) || true
+  fi
   exit "$result"
 }
 # Bash resumes the script after a signal trap returns, so INT/TERM must exit
@@ -525,7 +570,6 @@ source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # a test of unrelated local Fast Mode infrastructure. Explicit BLACKBOX_*
 # overrides remain available for proxy-specific blackbox runs.
 export FAST_MODE_ANTHROPIC_PROXY_URL="${BLACKBOX_FAST_MODE_ANTHROPIC_PROXY_URL:-}"
-export FAST_MODE_CODEX_PROXY_URL="${BLACKBOX_FAST_MODE_CODEX_PROXY_URL:-}"
 
 launch_backend() {
   cat >"$MANIFEST_PATH" <<EOF
@@ -543,6 +587,7 @@ EOF
 
   PORT="$PORT" \
   DISABLE_GMAIL_SYNC=1 \
+  ROSE_SANDBOX_STACK_ID="${SANDBOX_STACK_ID:-}" \
   npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!
   trap 'exit 130' INT

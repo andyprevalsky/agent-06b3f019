@@ -21,7 +21,7 @@
  *
  * Requires:
  *   - E2B_API_KEY env var
- *   - E2B_CLAUDE_CODE_TEMPLATE_ID env var (defaults to kng6z68u1md05bfdhq47)
+ *   - E2B_CLAUDE_CODE_TEMPLATE_ID env var (defaults to the backend's claude-code-v21305-c2-m4)
  */
 
 import { Sandbox } from 'e2b';
@@ -33,7 +33,7 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ─── Config ──────────────────────────────────────────────
-const TEMPLATE_ID = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID || 'kng6z68u1md05bfdhq47';
+const TEMPLATE_ID = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID || 'claude-code-v21305-c2-m4';
 const E2B_API_KEY = process.env.E2B_API_KEY;
 const WS_PORT = 3000;
 const SANDBOX_TIMEOUT_MS = 120_000; // 2 minutes is plenty for this test

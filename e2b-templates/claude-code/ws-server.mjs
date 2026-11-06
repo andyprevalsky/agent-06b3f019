@@ -6,7 +6,7 @@
 
 import { WebSocketServer } from "ws";
 import { execFileSync, execSync, spawn } from "child_process";
-import { randomUUID, timingSafeEqual } from "crypto";
+import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import {
   appendFileSync,
   copyFileSync,
@@ -50,8 +50,23 @@ const GOAL = process.env.CLAUDE_CODE_GOAL;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const CLAUDE_CODE_CREDENTIALS = process.env.CLAUDE_CODE_CREDENTIALS;
 const CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-const CLAUDE_CODE_FAST_MODE = process.env.CLAUDE_CODE_FAST_MODE === "1";
-const CLAUDE_CODE_MODEL = process.env.CLAUDE_CODE_MODEL || "claude-sonnet-5";
+// Which leased credential this sandbox holds, as a digest (never the token):
+// a rejected login names it so the backend can tell an expired or
+// since-replaced token from a revoked one (back-end codeLoginRejection.ts).
+const CREDENTIAL_FINGERPRINT = CLAUDE_CODE_OAUTH_TOKEN
+  ? createHash("sha256")
+      .update(CLAUDE_CODE_OAUTH_TOKEN)
+      .digest("hex")
+      .slice(0, 16)
+  : null;
+// Provider fast mode is the spawning agent's speed request (CLAUDE_CODE_SPEED);
+// CLAUDE_CODE_FAST_MODE=1 is the legacy spelling. Never a cache switch.
+const CLAUDE_CODE_FAST_MODE =
+  (process.env.CLAUDE_CODE_SPEED ||
+    (process.env.CLAUDE_CODE_FAST_MODE === "1" ? "fast" : "")) === "fast";
+// The backend sets CLAUDE_CODE_MODEL from the parent's tier; this fallback is the
+// flash row of back-end/src/providers/codeAgentModels.ts (codex-code-model.case.ts).
+const CLAUDE_CODE_MODEL = process.env.CLAUDE_CODE_MODEL || "claude-opus-5-5";
 const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || "";
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -119,24 +134,71 @@ function wantsReplay(req) {
   }
 }
 
+// Replay frames stay far below a client's receive limit (aiohttp: 4 MiB). One
+// frame for a long session's whole history exceeded it, and the client then
+// reconnected forever without reading the exit queued behind it.
+const REPLAY_FRAME_BYTES = 1024 * 1024;
+const REPLAY_OUTPUT_CHARS = 256 * 1024;
+
+// The terminal buffer replays as `buffer` (reset) followed by `stdout` (append)
+// chunks, which every client already handles.
+function sendOutputReplay(ws) {
+  for (let start = 0; start < outputBuffer.length;) {
+    let end = Math.min(start + REPLAY_OUTPUT_CHARS, outputBuffer.length);
+    const last = outputBuffer.charCodeAt(end - 1);
+    if (end < outputBuffer.length && last >= 0xd800 && last <= 0xdbff) end--;
+    ws.send(
+      JSON.stringify({
+        type: start === 0 ? "buffer" : "stdout",
+        data: outputBuffer.slice(start, end),
+      }),
+    );
+    start = end;
+  }
+}
+
+// A client that asks for `?replay_chunks=1` gets the event history as bounded
+// `code_agent_events` frames: chunk 0 replaces what it holds, later chunks
+// append, `last` marks the end. Older clients get the single frame they expect.
+function sendEventReplay(ws, events, chunked) {
+  if (!chunked) {
+    ws.send(JSON.stringify({ type: "code_agent_events", data: events }));
+    return;
+  }
+  let parts = [];
+  let bytes = 0;
+  let chunk = 0;
+  const flush = (last) => {
+    ws.send(
+      `{"type":"code_agent_events","chunk":${chunk},"last":${last},"data":[${parts.join(",")}]}`,
+    );
+    chunk++;
+    parts = [];
+    bytes = 0;
+  };
+  for (const event of events) {
+    const part = JSON.stringify(event);
+    const size = Buffer.byteLength(part);
+    if (parts.length > 0 && bytes + size > REPLAY_FRAME_BYTES) flush(false);
+    parts.push(part);
+    bytes += size;
+  }
+  flush(true);
+}
+
 wss.on("connection", (ws, req) => {
   // Send full buffer to new client
   const replay = wantsReplay(req);
-  if (replay && outputBuffer.length > 0) {
-    ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
-  }
+  const params = new URL(req?.url || "/", "http://localhost").searchParams;
+  if (replay && outputBuffer.length > 0) sendOutputReplay(ws);
   if (replay && eventBuffer.length > 0) {
-    const rawCursor = new URL(
-      req?.url || "/",
-      "http://localhost",
-    ).searchParams.get("cursor");
+    const rawCursor = params.get("cursor");
     const cursor =
       rawCursor !== null && /^\d+$/.test(rawCursor) ? Number(rawCursor) : -1;
-    ws.send(
-      JSON.stringify({
-        type: "code_agent_events",
-        data: eventBuffer.filter((event) => event.seq > cursor),
-      }),
+    sendEventReplay(
+      ws,
+      eventBuffer.filter((event) => event.seq > cursor),
+      params.get("replay_chunks") === "1",
     );
   }
   if (exitAnnounced) {
@@ -255,6 +317,27 @@ function appendOutput(type, data) {
 // Startup branch events can be emitted before the native CLI is initialized.
 let activeTurn = null;
 
+// Each partial stream event carries the whole block so far. Once a newer
+// snapshot or the final block of the same item arrives, the stored copy keeps
+// only its delta, so the replay buffer grows with the output, not its square.
+const latestPartialIndex = new Map();
+function supersedePartialSnapshot(event, index) {
+  // An empty final (e.g. redacted thinking) supersedes nothing: the streamed
+  // text is the only copy.
+  if (typeof event.item_id !== "string" || typeof event.text !== "string")
+    return;
+  if (!event.text) return;
+  const key = `${event.type}:${event.turn_id ?? ""}:${event.item_id}`;
+  const previous = latestPartialIndex.get(key);
+  if (previous !== undefined) {
+    const compacted = { ...eventBuffer[previous] };
+    delete compacted.text;
+    eventBuffer[previous] = compacted;
+  }
+  if (event.partial === true) latestPartialIndex.set(key, index);
+  else latestPartialIndex.delete(key);
+}
+
 function appendEvent(event) {
   const normalized = {
     version: 1,
@@ -266,6 +349,7 @@ function appendEvent(event) {
       : {}),
     ...event,
   };
+  supersedePartialSnapshot(normalized, eventBuffer.length);
   eventBuffer.push(normalized);
   broadcast("code_agent_event", normalized);
 }
@@ -798,6 +882,19 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "assistant") {
+    if (typeof message.error === "string" && message.error) {
+      // The SDK's structured API-error kind (billing_error = out of credits,
+      // authentication_failed, rate_limit, ...): the activity acts on this
+      // field, never on the printed banner text (C15).
+      appendEvent({
+        type: "cli_message",
+        raw_type: "assistant.api_error",
+        cli_message: { type: "assistant_api_error", error: message.error },
+        ...(message.error === "authentication_failed" && CREDENTIAL_FINGERPRINT
+          ? { credential: CREDENTIAL_FINGERPRINT }
+          : {}),
+      });
+    }
     const content = message.message?.content || [];
     const messageId = message.message?.id || streamMessageId || randomUUID();
     for (const [partIndex, part] of content.entries()) {
@@ -1087,8 +1184,12 @@ function settleControl(message) {
   return true;
 }
 function nativeModelOption(models, model) {
+  // An alias entry ("opus") names the full model it serves in resolvedModel;
+  // prefer it over "default", which can resolve to the same model.
   return (
     models.find((m) => m.value === model) ||
+    models.find((m) => m.value !== "default" && m.resolvedModel === model) ||
+    models.find((m) => m.resolvedModel === model) ||
     models.find(
       (m) =>
         ["sonnet", "opus", "haiku"].includes(m.value) &&
@@ -1101,22 +1202,18 @@ function nativeDefaultSettings(models, model, env) {
   const effort =
     env.CLAUDE_CODE_EFFORT ||
     (option?.supportedEffortLevels?.includes("medium") ? "medium" : null);
-  // The native speed selection is independent of the opt-in cache proxy.
-  const speed =
+  // The spawning agent's request (CLAUDE_CODE_SPEED, from its Fast Mode
+  // button); never fast by default. Fast only where the catalog offers it.
+  const requested =
     env.CLAUDE_CODE_SPEED ||
-    (env.CLAUDE_CODE_FAST_MODE
-      ? env.CLAUDE_CODE_FAST_MODE === "1"
-        ? "fast"
-        : "standard"
-      : option?.supportsFastMode
-        ? "fast"
-        : "standard");
+    (env.CLAUDE_CODE_FAST_MODE === "1" ? "fast" : "standard");
   if (
-    !["standard", "fast"].includes(speed) ||
-    (speed === "fast" && !option?.supportsFastMode) ||
+    !["standard", "fast"].includes(requested) ||
     (effort && !option?.supportedEffortLevels?.includes(effort))
   )
     throw new Error("unsupported_settings");
+  const speed =
+    requested === "fast" && option?.supportsFastMode ? "fast" : "standard";
   return { ...(effort ? { effort } : {}), speed };
 }
 async function initializeNativeSettings() {
@@ -1236,11 +1333,67 @@ function userMessageLine(text) {
   );
 }
 
-function tokenMatches(candidate) {
-  if (!TURN_TOKEN || typeof candidate !== "string") return false;
-  const expected = Buffer.from(TURN_TOKEN, "utf8");
+function sameToken(expectedToken, candidate) {
+  const expected = Buffer.from(expectedToken, "utf8");
   const actual = Buffer.from(candidate, "utf8");
   return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+function tokenMatches(candidate) {
+  if (typeof candidate !== "string") return false;
+  return [TURN_TOKEN, ...adoptedTokens].some(
+    (token) => token && sameToken(token, candidate),
+  );
+}
+
+// A resumed spawn attaches to this live CLI instead of restarting it (backend
+// attachLiveCodeCli): its goal arrives as an agent turn carrying `attach`.
+// `attach.credential` digests the credential env the spawn leased; a CLI
+// holding another one cannot adopt it, so the turn is refused before anything
+// is written (`credential_changed`) and the backend restarts the CLI. Model,
+// effort and speed ride on the turn's `settings`. `attach.config` digests the
+// spawn's other start-time env per key; a running CLI keeps its own, and the
+// ack names the keys it kept (`ignored_config`). Once the turn reached the
+// CLI, the new task's token addresses this session too, and the ack says
+// `attached: true` (a ws-server without this support never does).
+const adoptedTokens = new Set();
+const MAX_ATTACH_KEYS = 32;
+const ENV_KEY = /^[A-Z0-9_]{1,64}$/;
+function envDigest(value) {
+  return createHash("sha256")
+    .update(JSON.stringify(value ?? null))
+    .digest("hex");
+}
+function credentialDigest(keys) {
+  const names = [...new Set(keys)].sort();
+  return envDigest(names.map((key) => [key, process.env[key] ?? null]));
+}
+function parseAttach(raw) {
+  if (raw === undefined || raw === null) return null;
+  const keys = raw?.credential?.keys;
+  const config = raw.config ?? {};
+  if (
+    typeof raw.token !== "string" ||
+    raw.token.length < 16 ||
+    raw.token.length > 256 ||
+    typeof raw.credential?.digest !== "string" ||
+    !Array.isArray(keys) ||
+    keys.length > MAX_ATTACH_KEYS ||
+    !keys.every((key) => typeof key === "string" && ENV_KEY.test(key)) ||
+    typeof config !== "object" ||
+    Array.isArray(config) ||
+    Object.keys(config).length > MAX_ATTACH_KEYS ||
+    !Object.entries(config).every(
+      ([key, digest]) => ENV_KEY.test(key) && typeof digest === "string",
+    )
+  )
+    return { invalid: true };
+  return { token: raw.token, keys, digest: raw.credential.digest, config };
+}
+function ignoredConfig(config) {
+  return Object.entries(config)
+    .filter(([key, digest]) => envDigest(process.env[key]) !== digest)
+    .map(([key]) => key)
+    .sort();
 }
 
 function clearDirectHoldTimer() {
@@ -1294,6 +1447,20 @@ function turnAck(id, status, reason) {
 async function handleUserTurn(msg) {
   const id = typeof msg.id === "string" ? msg.id : "";
   if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
+  const attach = parseAttach(msg.attach);
+  if (attach?.invalid) return turnAck(id, "rejected", "invalid_attach");
+  if (attach && attach.digest !== credentialDigest(attach.keys))
+    return turnAck(id, "rejected", "credential_changed");
+  const ack = await deliverTurnOnce(id, msg);
+  if (attach && (ack.status === "delivered" || ack.status === "duplicate")) {
+    adoptedTokens.add(attach.token);
+    const ignored = ignoredConfig(attach.config);
+    log("info", "Spawn attached to the live CLI", { id, ignored });
+    return { ...ack, attached: true, ignored_config: ignored };
+  }
+  return ack;
+}
+async function deliverTurnOnce(id, msg) {
   if (deliveredTurnIds.has(id))
     return { ...deliveredTurnIds.get(id), status: "duplicate" };
   if (pendingDeliveries.has(id))
@@ -1348,6 +1515,9 @@ async function deliverNativeTurn(msg) {
     return turnAck(id, "rejected", error.message);
   }
   const mode = activeTurn ? "steer" : "start";
+  // Events before this turn's write belong to earlier turns: a spawn attaching
+  // to this live CLI treats them as history (backend attachLiveCodeCli).
+  const historyEvents = eventBuffer.length;
   const turn = startNativeTurn();
   pendingTurns += 1;
   try {
@@ -1387,6 +1557,7 @@ async function deliverNativeTurn(msg) {
     effective_settings: { ...effectiveSettings },
     delivery_mode: mode,
     turn_id: turn.id,
+    history_events: historyEvents,
   };
   deliveredTurnIds.set(id, ack);
   return ack;

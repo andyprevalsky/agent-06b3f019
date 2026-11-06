@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -8,6 +9,8 @@ import {
 import {
   TRANSFER_PUBLIC_STATUSES,
   deferredUnusedMintVerdict,
+  isFullyReclaimedTransfer,
+  type MintTransferObservation,
   type DeferredUnusedMintVerdict,
   type PendingUnusedMint,
   type TransferStatusPage,
@@ -62,7 +65,9 @@ export function readOpenPendingMints(ledgerPath: string): PendingUnusedMint[] {
       throw new Error(`${ledgerPath}:${index + 1} is not valid JSON`);
     }
     if (line.event === 'resolved') {
-      open.delete(line.cardId);
+      // Older runs incorrectly closed overdue/failed/unobservable entries.
+      // Retain those original obligations until there is actual reclaim proof.
+      if (line.verdict === 'settled') open.delete(line.cardId);
       return;
     }
     const { cardId, transferId, cardholderId, mintCents, mintedAt } = line;
@@ -77,6 +82,29 @@ export function recordPendingMint(
   nowMs = Date.now()
 ): void {
   appendLine(ledgerPath, { event: 'pending', recordedAt: new Date(nowMs).toISOString(), ...entry });
+}
+
+/** Keep an exact closed-card transfer observable when its settlement request fails. */
+export async function observePendingUnusedMint<
+  T extends (MintTransferObservation & { transferredCents: number }) | undefined,
+>(ledgerPath: string, entry: PendingUnusedMint, observe: () => Promise<T>): Promise<T> {
+  recordPendingMint(ledgerPath, entry);
+  const result = await observe();
+  assert.ok(
+    result === undefined ||
+      (result.transferredCents >= 0 && result.transferredCents <= entry.mintCents),
+    `transfer for ${entry.cardId} reported an invalid pool debit ${result?.transferredCents}`
+  );
+  if (isFullyReclaimedTransfer(result, entry.mintCents)) {
+    appendLine(ledgerPath, {
+      event: 'resolved',
+      cardId: entry.cardId,
+      verdict: 'settled',
+      detail: `${result.status} ${result.releasedCents}c`,
+      resolvedAt: new Date().toISOString(),
+    });
+  }
+  return result;
 }
 
 function verdictDetail(verdict: DeferredUnusedMintVerdict): string {
@@ -94,9 +122,9 @@ function verdictDetail(verdict: DeferredUnusedMintVerdict): string {
 export type DeferredMintCheck = { entry: PendingUnusedMint; verdict: DeferredUnusedMintVerdict };
 
 /**
- * Re-check this org's open entries. Every verdict except `waiting` is final and recorded, so a
- * lost mint fails exactly one run instead of every run after it. Entries for cardholders outside
- * this org belong to other credentials and are left for them.
+ * Re-check this org's open entries. Only a verified full reclaim closes an obligation;
+ * overdue, failed, and unobservable transfers remain open for later reconciliation.
+ * Entries for cardholders outside this org belong to other credentials and are left for them.
  */
 export async function checkPendingUnusedMints(options: {
   callOrgTool: AgentCardOrgToolCaller;
@@ -125,7 +153,7 @@ export async function checkPendingUnusedMints(options: {
   const nowMs = options.nowMs ?? Date.now();
   return open.map((entry) => {
     const verdict = deferredUnusedMintVerdict(entry, pages, nowMs);
-    if (verdict.kind !== 'waiting') {
+    if (verdict.kind === 'settled') {
       appendLine(options.ledgerPath, {
         event: 'resolved',
         cardId: entry.cardId,

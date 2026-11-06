@@ -28,7 +28,9 @@ import {
 // Runner
 // ---------------------------------------------------------------------------
 async function runAll(): Promise<void> {
+  await import('./agents-account.cases');
   await import('./agents-list-create.cases');
+  await import('./agents-sidebar-speed.cases');
   await import('./agents-messages.cases');
   await import('./agents-message-storage.cases');
   await import('./agents-message-resume.cases');
@@ -47,6 +49,7 @@ async function runAll(): Promise<void> {
   await import('./agents-cutover-subagent-close.cases');
   await import('./agents-cutover-replace-not-failed.cases');
   await import('./agents-agent-messages.cases');
+  await import('./agents-agent-messages-code.cases');
   await import('./agents-agent-message-guard.cases');
   await import('./agents-agent-tree.cases');
   await import('./agents-agent-address.cases');

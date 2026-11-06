@@ -13,6 +13,7 @@
  */
 import { mkdirSync, readdirSync, writeFileSync } from 'fs';
 import { spawn } from 'child_process';
+import { randomUUID } from 'node:crypto';
 import { resolve, dirname, join } from 'path';
 
 function readEnv(...names: string[]): string | undefined {
@@ -195,13 +196,41 @@ const domainWeights = new Map<string, number>([
   ['codex-code', 28],
   ['proactive-sms', 20],
 ]);
-const lateExclusiveDomains = requested.filter((domain) => lateExclusiveDomainNames.has(domain));
+// Retry scheduling: domains that failed in the previous run go first so their
+// verdict arrives early. Priority never moves a domain out of its phase: a
+// late-exclusive domain that failed AFTER the fixture writers must be retried
+// after them again (it could pass on a pre-writer database), so it only leads
+// the late-exclusive phase, and priority pool domains lead the pool. With
+// BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE=1 a repeated priority failure stops
+// scheduling new domains; otherwise every selected domain still runs, so the
+// gate remains a full sweep.
+const priorityDomainNames = new Set(
+  (readEnv('BLACKBOX_TEST_PRIORITY_DOMAINS') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((domain) => domain && requested.includes(domain))
+);
+const abortOnPriorityFailure = readEnv('BLACKBOX_TEST_ABORT_ON_PRIORITY_FAILURE') === '1';
+const priorityFirst = (left: string, right: string): number =>
+  Number(priorityDomainNames.has(right)) - Number(priorityDomainNames.has(left));
+const lateExclusiveDomains = requested
+  .filter((domain) => lateExclusiveDomainNames.has(domain))
+  .sort((left, right) => priorityFirst(left, right));
 const parallelDomains = requested
   .filter((domain) => !lateExclusiveDomainNames.has(domain))
   .sort(
     (left, right) =>
-      (domainWeights.get(right) ?? 0) - (domainWeights.get(left) ?? 0) || left.localeCompare(right)
+      priorityFirst(left, right) ||
+      (domainWeights.get(right) ?? 0) - (domainWeights.get(left) ?? 0) ||
+      left.localeCompare(right)
   );
+if (priorityDomainNames.size > 0) {
+  process.stdout.write(
+    `Previously failed domains scheduled first: ${[...priorityDomainNames].join(', ')}` +
+      (abortOnPriorityFailure ? ' (abort if any fails again)' : '') +
+      '\n\n'
+  );
+}
 const rawCaseConcurrency = readEnv(
   'BLACKBOX_TEST_CASE_CONCURRENCY',
   'CONTRACT_TEST_CASE_CONCURRENCY'
@@ -233,6 +262,24 @@ interface Result {
   duration: number;
   output: string;
   logPath?: string;
+  aborted?: boolean;
+}
+
+const runnerStartedAt = Date.now();
+let abortScheduling = false;
+async function runScheduledDomain(
+  domain: string,
+  workerIndex: number
+): Promise<Result | undefined> {
+  if (abortScheduling) return undefined;
+  const result = await runDomain(domain, workerIndex);
+  if (!result.passed && priorityDomainNames.has(domain)) {
+    process.stdout.write(
+      `PRIORITY FAILURE: ${domain} failed again ${Date.now() - runnerStartedAt}ms after start\n`
+    );
+    if (abortOnPriorityFailure) abortScheduling = true;
+  }
+  return result;
 }
 
 function runDomain(domain: string, workerIndex: number): Promise<Result> {
@@ -255,10 +302,17 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
     const args = paymentDomain
       ? [resolve(cwd, 'scripts/with-agentcard-lock.py'), process.execPath, '--import', 'tsx', file]
       : ['--import', 'tsx', file];
+    // Stamp every connection at pool creation, including transactions that
+    // predate a probe, so database assertions can attribute their subject.
+    const databaseOwner = `blackbox-${randomUUID()}`;
+    const databaseUrl = process.env.DATABASE_URL ? new URL(process.env.DATABASE_URL) : null;
+    databaseUrl?.searchParams.set('application_name', databaseOwner);
     const child = spawn(command, args, {
       cwd,
       env: {
         ...process.env,
+        ...(databaseUrl ? { DATABASE_URL: databaseUrl.href } : {}),
+        BLACKBOX_TEST_DATABASE_OWNER: databaseOwner,
         FORCE_COLOR: '0',
         NO_COLOR: '1',
         BLACKBOX_TEST_RUN_ID: runId,
@@ -339,7 +393,7 @@ async function runWithConcurrency<T, R>(
   let nextIndex = 0;
 
   async function runWorker(workerIndex: number): Promise<void> {
-    while (true) {
+    while (!abortScheduling) {
       const index = nextIndex++;
       if (index >= items.length) return;
       results[index] = await worker(items[index], workerIndex);
@@ -352,15 +406,36 @@ async function runWithConcurrency<T, R>(
 }
 
 async function main(): Promise<void> {
-  const parallelResults = await runWithConcurrency(parallelDomains, concurrency, runDomain);
-  // Aggregate assertions run after every parallel fixture writer has finished.
+  const parallelResults = await runWithConcurrency(
+    parallelDomains,
+    concurrency,
+    runScheduledDomain
+  );
+  // Aggregate assertions run after every parallel fixture writer has finished,
+  // including a previously failed one being retried (same phase as its failure).
   // This also lets coverage run isolated unit processes during the long
   // provider domains without invalidating admin-health's whole-DB snapshot.
-  const lateExclusiveResults = await runWithConcurrency(lateExclusiveDomains, 1, runDomain);
-  const resultsByDomain = new Map(
-    [...parallelResults, ...lateExclusiveResults].map((result) => [result.domain, result])
+  const lateExclusiveResults = await runWithConcurrency(
+    lateExclusiveDomains,
+    1,
+    runScheduledDomain
   );
-  const results = requested.map((domain) => resultsByDomain.get(domain)!);
+  const resultsByDomain = new Map(
+    [...parallelResults, ...lateExclusiveResults]
+      .filter((result): result is Result => result !== undefined)
+      .map((result) => [result.domain, result])
+  );
+  // An aborted sweep never passes: unscheduled domains are reported as not run.
+  const results = requested.map(
+    (domain) =>
+      resultsByDomain.get(domain) ?? {
+        domain,
+        passed: false,
+        duration: 0,
+        output: 'NOT RUN: aborted after a previously failed domain failed again',
+        aborted: true,
+      }
+  );
   if (artifactDir) {
     for (const result of results) {
       const logPath = join(artifactDir, `${result.domain}.log`);
@@ -370,7 +445,8 @@ async function main(): Promise<void> {
   }
 
   // Print output for failed domains so you can see what went wrong
-  const failures = results.filter((r) => !r.passed);
+  const notRun = results.filter((r) => r.aborted === true);
+  const failures = results.filter((r) => !r.passed && r.aborted !== true);
   for (const r of failures) {
     process.stdout.write(`--- FAIL: ${r.domain} ---\n`);
     process.stdout.write(`${r.output}\n`);
@@ -379,11 +455,14 @@ async function main(): Promise<void> {
   process.stdout.write(`${'='.repeat(60)}\n`);
   process.stdout.write('\nBlack-box Test Summary:\n\n');
   for (const r of results) {
-    process.stdout.write(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.domain} (${r.duration}ms)\n`);
+    const verdict = r.aborted === true ? 'NOT RUN' : r.passed ? 'PASS' : 'FAIL';
+    process.stdout.write(`  ${verdict}  ${r.domain} (${r.duration}ms)\n`);
   }
   const passed = results.filter((r) => r.passed).length;
   const failed = failures.length;
-  process.stdout.write(`\n${passed} passed, ${failed} failed, ${results.length} total\n`);
+  process.stdout.write(
+    `\n${passed} passed, ${failed} failed, ${notRun.length} not run, ${results.length} total\n`
+  );
   if (artifactDir) {
     writeFileSync(
       join(artifactDir, 'summary.json'),
@@ -400,6 +479,7 @@ async function main(): Promise<void> {
           results: results.map((result) => ({
             domain: result.domain,
             passed: result.passed,
+            aborted: result.aborted === true,
             duration: result.duration,
             logPath: result.logPath,
           })),
@@ -411,7 +491,7 @@ async function main(): Promise<void> {
   }
   // process.exit() drops stdout still queued for the `tee` pipe, which cut the
   // failed-domain FAILURES section out of runner.log after the first 64 KB.
-  if (failed > 0) process.exitCode = 1;
+  if (failed > 0 || notRun.length > 0) process.exitCode = 1;
 }
 
 main().catch((error) => {

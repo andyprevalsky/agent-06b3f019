@@ -38,6 +38,11 @@ import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { runBrowserColdImportCases } from './browser-session-cold-import.cases';
+import {
+  testNavigationRouteGuards,
+  testReproducibility_threeSequential,
+} from './browser-session-route-invariants.cases';
 import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect.cases';
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
 import { runBrowserPrivateRestoreCases } from './browser-session-private-restore.cases';
@@ -561,21 +566,11 @@ async function testConcurrency_parallelAuthChecks() {
   }
 }
 
-async function testReproducibility_threeSequential() {
-  const statuses: number[] = [];
-  for (let i = 0; i < 3; i++) {
-    const res = await request(`${BASE_URL}/api/browser-session/task/nonexistent`, {
-      headers: apiKeyHeaders(),
-    });
-    statuses.push(res.status);
-  }
-  if (new Set(statuses).size !== 1) throw new Error(`Three sequential: ${statuses.join(', ')}`);
-}
-
 // ==================== RUN ====================
 
 async function runAll() {
   const focusedCases = [
+    ['--cold-import-only', runBrowserColdImportCases],
     ['--provider-lifecycle-only', runBrowserProviderLifecycleCases],
     ['--approval-e2e-only', runBrowserApprovalE2ECases],
     ['--private-restore-only', runBrowserPrivateRestoreCases],
@@ -599,6 +594,7 @@ async function runAll() {
     );
     return;
   }
+  await runBrowserColdImportCases();
   await runBrowserInitDisconnectCases();
   if (process.argv.includes('--init-disconnect-only')) return;
   await runBrowserPauseCheckpointCases();
@@ -632,6 +628,10 @@ async function runAll() {
       fn: testPrepareAuth_invalidBody,
     },
     { name: 'POST /browser-session/init -- missing start_url', fn: testInit_missingStartUrl },
+    {
+      name: 'POST navigation -- auth, invalid action, missing session',
+      fn: () => testNavigationRouteGuards(BASE_URL, apiKeyHeaders),
+    },
     // auth boundary — POST /close
     { name: 'POST /browser-session/close -- no auth -> 401', fn: testClose_noAuth },
     { name: 'POST /browser-session/close -- invalid body', fn: testClose_invalidBody },
@@ -700,7 +700,7 @@ async function runAll() {
     },
     {
       name: 'reproducibility -- 3 sequential identical status',
-      fn: testReproducibility_threeSequential,
+      fn: () => testReproducibility_threeSequential(BASE_URL, apiKeyHeaders),
     },
   ];
 
@@ -719,7 +719,6 @@ async function runAll() {
   console.log('\n' + '='.repeat(50));
   console.log(`\nResults: ${passed} passed, ${failed} failed, ${results.length} total`);
   if (failed > 0) {
-    console.log('\nFAILURES:');
     results.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
     process.exit(1);
   }

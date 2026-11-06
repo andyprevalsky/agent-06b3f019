@@ -54,6 +54,7 @@ from providers.rose.errors import (
     RoseStallError,
 )
 from providers.rose.pools import PoolSpec
+from providers.rose.speed import anthropic_speed_for
 from providers.rose.streaming import parse_anthropic_sse
 from providers.rose.transforms import (
     _extract_tools_from_response_format,
@@ -286,10 +287,6 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     return effort or DEFAULT_REASONING_EFFORT
 
 
-def _supports_anthropic_fast_mode(model: str) -> bool:
-    return model in {"claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"}
-
-
 def _model_supports_output_config_effort(model: str) -> bool:
     """Return whether Anthropic accepts ``output_config.effort`` for ``model``.
 
@@ -347,7 +344,7 @@ def build_anthropic_body(
     skip_cache_write: bool = False,
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     context_tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Assemble the Anthropic /v1/messages request body for a claudeAuth call.
@@ -374,8 +371,9 @@ def build_anthropic_body(
         "max_tokens": max_tokens or 8192,
         "stream": True,
     }
-    if provider_fast_mode and _supports_anthropic_fast_mode(pool_spec.claude_auth_model):
-        body["speed"] = "fast"
+    anthropic_speed = anthropic_speed_for(speed, pool_spec.claude_auth_model)
+    if anthropic_speed is not None:
+        body["speed"] = anthropic_speed
 
     system_blocks = _build_system_blocks(static_system, dynamic_system)
     body["system"] = [_IDENTITY_BLOCK, _DISCLAIMER_BLOCK, *system_blocks]
@@ -479,7 +477,7 @@ async def claude_auth_complete(
     effort: Optional[str] = None,
     auth: ClaudeAuthContext,
     request_id: str,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
@@ -503,7 +501,7 @@ async def claude_auth_complete(
         skip_cache_write=skip_cache_write,
         thinking=thinking,
         effort=effort,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
     )
     actual_model = f"{pool_spec.claude_auth_model}-claude"
     current_auth = auth
@@ -590,7 +588,7 @@ async def anthropic_api_key_complete(
     thinking: Optional[Dict[str, Any]] = None,
     effort: Optional[str] = None,
     request_id: str,
-    provider_fast_mode: bool = True,
+    speed: Optional[str] = None,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
@@ -612,7 +610,7 @@ async def anthropic_api_key_complete(
         skip_cache_write=skip_cache_write,
         thinking=thinking,
         effort=effort,
-        provider_fast_mode=provider_fast_mode,
+        speed=speed,
     )
     actual_model = f"{pool_spec.claude_auth_model}-anthropic"
 

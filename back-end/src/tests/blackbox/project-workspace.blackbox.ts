@@ -17,16 +17,18 @@
  *     commits as rose-sync/<branch>; uncommitted work as a stash + patch
  *   - startup: runs in the repo before the CLI; ok / failed / timeout are
  *     reported to the CLI prompt and by runProjectStartup(); the timeout is
- *     enforced (the session does not hang)
+ *     enforced (the session does not hang); the runner also runs under the E2B
+ *     templates' HOME, whose package.json declares "type": "module"
  *   - secret-leak scan: the fixture secret never appears in API responses,
  *     CLI output, DB rows, startup log/report or the backend log
  *
  * Usage: bash scripts/run-blackbox-tests.sh project-workspace
  */
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -46,7 +48,13 @@ import {
 } from '../../providers/claudeCodeLocalSession';
 import { prisma } from '../../providers/database';
 import { prepareSessionProject } from '../../providers/projects/session';
-import { restoreWorkspace, runProjectStartup } from '../../providers/projects/workspace';
+import {
+  localWorkspaceExecutor,
+  registerWorkspaceExecutor,
+  restoreWorkspace,
+  runProjectStartup,
+  unregisterWorkspaceExecutor,
+} from '../../providers/projects/workspace';
 import {
   anonymousSession,
   assert,
@@ -115,16 +123,26 @@ function buildFixtureRepo(): { checkout: string; remote: string; outsideEnv: str
   return { checkout, remote, outsideEnv };
 }
 
-function runSync(s: Session, args: string[]) {
-  const out = spawnSync(process.execPath, [ROSE_SYNC, ...args, '--json'], {
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      ROSE_TOKEN: s.token,
-      ROSE_API_URL: BASE_URL,
-      ROSE_API_KEY: '',
-      ROSE_USER_ID: '',
-    },
+// Keep native CLI work from blocking pooled HTTP socket close/expiry events.
+function runChild(file: string, args: string[], env = process.env) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+    execFile(file, args, { encoding: 'utf8', env }, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (typeof error.code === 'number' ? error.code : null) : 0,
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
+async function runSync(s: Session, args: string[]) {
+  const out = await runChild(process.execPath, [ROSE_SYNC, ...args, '--json'], {
+    ...process.env,
+    ROSE_TOKEN: s.token,
+    ROSE_API_URL: BASE_URL,
+    ROSE_API_KEY: '',
+    ROSE_USER_ID: '',
   });
   leakTexts.push(['rose-sync output', out.stdout + out.stderr]);
   assert(out.status === 0, `rose-sync ${args.join(' ')} failed: ${out.stderr}${out.stdout}`);
@@ -254,7 +272,7 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     startupTimeoutS: 60,
   });
 
-  const first = runSync(s, ['push', '--dir', checkout, '--project', project.id]);
+  const first = await runSync(s, ['push', '--dir', checkout, '--project', project.id]);
   assert(first.revision === 1, `first revision ${first.revision}`);
   assert(
     JSON.stringify([...first.written].sort()) === JSON.stringify(['.env', 'app/.env.local']),
@@ -264,7 +282,7 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     first.gitBundle === 'written' && first.uncommittedPatch === 'written',
     'artifacts written'
   );
-  const second = runSync(s, ['push', '--dir', checkout, '--project', project.id]);
+  const second = await runSync(s, ['push', '--dir', checkout, '--project', project.id]);
   assert(
     second.written.length === 0 && second.unchanged.length === 2,
     'no-op re-sync uploads nothing'
@@ -274,7 +292,7 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     'artifacts unchanged'
   );
   writeFileSync(join(checkout, 'app', '.env.local'), 'APP_MODE=staging\n');
-  const third = runSync(s, ['push', '--dir', checkout, '--project', project.id]);
+  const third = await runSync(s, ['push', '--dir', checkout, '--project', project.id]);
   assert(
     JSON.stringify(third.written) === JSON.stringify(['app/.env.local']),
     `only changed file: ${third.written}`
@@ -400,6 +418,11 @@ test('seed-rose: Rose project gets its startup script and six env files (PJ4)', 
   sh(fixture, `git init -q -b main ${repo}`);
   mkdirSync(join(repo, 'agents/benchmarks/fixtures/projects'), { recursive: true });
   writeFileSync(join(repo, 'agents/benchmarks/fixtures/projects/rose-startup.sh'), fixtureScript);
+  const syncScript = readFileSync(
+    join(REPO_ROOT, 'agents/benchmarks/fixtures/projects/rose-sync.sh'),
+    'utf8'
+  );
+  writeFileSync(join(repo, 'agents/benchmarks/fixtures/projects/rose-sync.sh'), syncScript);
   writeFileSync(join(repo, '.gitignore'), '.env\n.env.*\n');
   sh(repo, 'git -c user.name=t -c user.email=t@example.com add -A');
   sh(repo, 'git -c user.name=t -c user.email=t@example.com commit -qm init');
@@ -410,9 +433,11 @@ test('seed-rose: Rose project gets its startup script and six env files (PJ4)', 
     mkdirSync(join(repo, rel, '..'), { recursive: true });
     symlinkSync(real, join(repo, rel));
   }
-  const out = spawnSync(process.execPath, [ROSE_SYNC, 'seed-rose', '--dir', repo, '--json'], {
-    encoding: 'utf8',
-    env: { ...process.env, ROSE_TOKEN: s.token, ROSE_API_URL: BASE_URL, ROSE_API_KEY: '' },
+  const out = await runChild(process.execPath, [ROSE_SYNC, 'seed-rose', '--dir', repo, '--json'], {
+    ...process.env,
+    ROSE_TOKEN: s.token,
+    ROSE_API_URL: BASE_URL,
+    ROSE_API_KEY: '',
   });
   leakTexts.push(['seed-rose output', out.stdout + out.stderr]);
   assert(out.status === 0, `seed-rose failed: ${out.stderr}${out.stdout}`);
@@ -422,7 +447,10 @@ test('seed-rose: Rose project gets its startup script and six env files (PJ4)', 
   );
   assert(rose, 'Rose project created');
   assert(rose.startupScript === fixtureScript, 'startup script is the checked-in fixture');
-  assert(rose.defaultBranch === 'main' && rose.startupTimeoutS === 120, 'Rose defaults');
+  const maintenance = rose.maintenance as { script: string; timeoutS: number };
+  assert(maintenance.script === syncScript, 'sync script is the checked-in fixture');
+  assert(maintenance.timeoutS === 480, `sync timeout ${maintenance.timeoutS}`);
+  assert(rose.defaultBranch === 'main' && rose.startupTimeoutS === 900, 'Rose defaults');
   const files = await call(`/api/projects/${String(rose.id)}/env-files`, { auth: s.token });
   leakTexts.push(['Rose env-files response', files.text]);
   const byPath = new Map(
@@ -494,6 +522,126 @@ test('startup failure and timeout are reported, and the timeout is enforced', as
   );
   assert(Date.now() - t0 < 15_000, 'runProjectStartup enforced the timeout');
   assert(!report.outputTail.includes('never'), 'the script was stopped before finishing');
+});
+
+for (const template of ['claude-code', 'codex-code']) {
+  test(`startup runner runs under the ${template} E2B HOME ("type": "module" package.json)`, async () => {
+    // The E2B templates copy their package.json ("type": "module") into
+    // /home/user; Node then loaded an extensionless CommonJS runner as an ES
+    // module and every E2B project startup failed with "no report".
+    const home = mkdtempSync(join(fixture, `${template}-home-`));
+    copyFileSync(
+      join(REPO_ROOT, 'e2b-templates', template, 'package.json'),
+      join(home, 'package.json')
+    );
+    const sessionId = `e2b-home-${randomUUID()}`;
+    registerWorkspaceExecutor(sessionId, localWorkspaceExecutor(home, process.env));
+    try {
+      await restoreWorkspace(sessionId, {
+        project: {
+          id: `${template}-home`,
+          name: 'PJ-E2B-Home',
+          repoUrl: null,
+          defaultBranch: 'main',
+          startupScript: 'echo started under the module-type home',
+          startupTimeoutS: 30,
+        },
+        revision: 0,
+        manifest: null,
+        files: [],
+        gitBundle: null,
+        uncommittedPatch: null,
+        redactions: [],
+      });
+      const report = await runProjectStartup(sessionId);
+      assert(
+        report.status === 'ok' && report.exitCode === 0,
+        `startup ok under ${template} HOME: ${JSON.stringify(report)}`
+      );
+      assert(report.outputTail.includes('started under the module-type home'), 'script output');
+    } finally {
+      unregisterWorkspaceExecutor(sessionId);
+    }
+  });
+}
+
+test('resume re-points origin at the current clone URL (a rotated GitHub token reaches a paused session)', async () => {
+  // The clone URL carries the backend GITHUB_TOKEN (session.ts withGithubToken).
+  // A resumed workspace keeps its checkout, so its origin must be refreshed from
+  // the URL resolved now; otherwise a rotated token leaves push/fetch failing.
+  const remote = join(fixture, `rotation-${randomUUID()}.git`);
+  sh(fixture, `git init -q --bare -b main ${remote}`);
+  const seed = mkdtempSync(join(fixture, 'rotation-seed-'));
+  sh(
+    seed,
+    `git init -q -b main && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init && git push -q ${remote} main`
+  );
+  const home = mkdtempSync(join(fixture, 'rotation-home-'));
+  const sessionId = `rotation-${randomUUID()}`;
+  const workspace = (cloneUrl: string) => ({
+    project: {
+      id: 'rotation',
+      name: 'PJ-Token-Rotation',
+      repoUrl: remote,
+      defaultBranch: 'main',
+      startupScript: null,
+      startupTimeoutS: 30,
+    },
+    revision: 0,
+    manifest: null,
+    files: [],
+    gitBundle: null,
+    uncommittedPatch: null,
+    redactions: [],
+    cloneUrl,
+  });
+  registerWorkspaceExecutor(sessionId, localWorkspaceExecutor(home, process.env));
+  try {
+    const first = await restoreWorkspace(sessionId, workspace(remote));
+    assert(first.checkout.cloned, `first restore clones: ${JSON.stringify(first.checkout)}`);
+    const repo = join(home, 'workspace');
+    const rotated = `file://${remote}`;
+    const resumed = await restoreWorkspace(sessionId, workspace(rotated));
+    assert(resumed.checkout.source === 'existing', 'resume keeps the checkout');
+    const origin = sh(repo, 'git remote get-url origin').trim();
+    assert(origin === rotated, `origin carries the current credentials: ${origin}`);
+    assert(
+      !JSON.stringify(resumed).includes(rotated),
+      'the credentialed URL never appears in the report'
+    );
+  } finally {
+    unregisterWorkspaceExecutor(sessionId);
+  }
+});
+
+test('project CLI child yields the event loop, drains output and preserves failure status', async () => {
+  let advanced = false;
+  const heartbeat = setImmediate(() => {
+    advanced = true;
+  });
+  try {
+    const out = await runChild(process.execPath, [
+      '-e',
+      'setTimeout(() => { process.stdout.write("fixture stdout"); process.stderr.write("fixture stderr"); }, 25)',
+    ]);
+    assert(advanced, 'the parent event loop must run while the CLI child is pending');
+    assert(
+      out.status === 0 && out.stdout === 'fixture stdout' && out.stderr === 'fixture stderr',
+      'the joined CLI child must preserve both output streams'
+    );
+    const failed = await runChild(process.execPath, [
+      '-e',
+      'process.stdout.write("partial output"); process.stderr.write("fixture failure"); process.exitCode = 7',
+    ]);
+    assert(
+      failed.status === 7 &&
+        failed.stdout === 'partial output' &&
+        failed.stderr === 'fixture failure',
+      'nonzero CLI exit remains a failure with its captured output'
+    );
+  } finally {
+    clearImmediate(heartbeat);
+  }
 });
 
 test('secret-leak scan: fixture secret absent from every surface', async () => {

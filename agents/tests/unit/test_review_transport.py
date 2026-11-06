@@ -72,21 +72,25 @@ def test_foundry_original_body_read_failure_matches_observer_off(monkeypatch):
     monkeypatch.setenv('AZURE_FOUNDRY_ENDPOINT', 'https://offline.invalid')
     monkeypatch.setenv('AZURE_FOUNDRY_API_KEY', 'synthetic')
     monkeypatch.setenv('AZURE_FOUNDRY_DEPLOYMENTS', 'gpt-6-sol')
+    monkeypatch.setattr(foundry, '_shared_scope', lambda: None)
     async def call():
         return [item async for item in foundry.foundry_complete(
             pool_spec=get_pool('rose-1-ultra'),messages=[{'role':'user','content':'synthetic'}],
             response_format=None, tools=None, context_tools=None, tool_choice=None,
-            temperature=None, effort='high', provider_fast_mode=True, request_id='offline',
+            temperature=None, effort='high', speed="fast", request_id='offline',
             route_key='test',agent_id='test',call_site='test',cache_namespace=None,
             ttft_timeout_s=2,idle_timeout_s=2)]
     errors=[]
     for observer in [None, lambda row: None]:
-        foundry._cooldown_until.clear();foundry._auth_cooldown_until.clear()
+        foundry._cooldown_until.clear()
+        foundry._auth_cooldown_until.clear()
         token=FAILURE_OBSERVER.set(observer)
         try:
-            with pytest.raises(Exception) as error: asyncio.run(call())
+            with pytest.raises(Exception) as error:
+                asyncio.run(call())
             errors.append((type(error.value),str(error.value)))
-        finally: FAILURE_OBSERVER.reset(token)
+        finally:
+            FAILURE_OBSERVER.reset(token)
     assert errors[0] == errors[1]
     assert errors[0][1] == 'Foundry transport failed: ReadError'
 
@@ -109,7 +113,8 @@ def test_no_observer_does_not_touch_body():
 ])
 def test_workflow_resolution_preserves_failure_but_honors_empty_success(monkeypatch, payload, expected):
     from workflows import agent_workflow as owner
-    class Observed(BaseException): pass
+    class Observed(BaseException):
+        pass
     def forbidden_patch(_):
         pytest.fail('generation replacement must not call workflow.patched')
     monkeypatch.setattr(owner.workflow, 'patched', forbidden_patch)
@@ -190,9 +195,11 @@ def test_actual_cerebras_status_error_is_unchanged_by_observer(monkeypatch, fail
     for observer in [None,lambda row:None]:
         token=FAILURE_OBSERVER.set(observer)
         try:
-            with pytest.raises(Exception) as error: asyncio.run(call())
+            with pytest.raises(Exception) as error:
+                asyncio.run(call())
             errors.append((type(error.value),str(error.value),getattr(error.value,'status',None)))
-        finally: FAILURE_OBSERVER.reset(token)
+        finally:
+            FAILURE_OBSERVER.reset(token)
     assert errors[0] == errors[1]
     assert errors[0][2] == 400
 
@@ -206,7 +213,8 @@ def test_observer_keeps_quota_and_raw_body_evidence():
         assert rows[-1]['permanent'] is True
         assert rows[-1]['response_body_bytes'] > 0
         assert rows[-1]['response_body_sha256']
-    finally: FAILURE_OBSERVER.reset(token)
+    finally:
+        FAILURE_OBSERVER.reset(token)
 
 
 def test_observer_does_not_swallow_cancellation():
@@ -219,7 +227,8 @@ def test_observer_does_not_swallow_cancellation():
     try:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(observe_http_failure('synthetic',httpx.Response(400,stream=Cancelled())))
-    finally: FAILURE_OBSERVER.reset(token)
+    finally:
+        FAILURE_OBSERVER.reset(token)
 
 
 @pytest.mark.parametrize('status, data, expected',[(503,{},False),(200,{'enabled':False,'goal':'','providerFastMode':False},True)])

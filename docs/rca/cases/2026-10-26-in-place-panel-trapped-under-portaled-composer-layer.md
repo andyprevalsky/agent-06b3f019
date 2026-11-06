@@ -11,8 +11,8 @@ symptoms:
   - query box drawn over the Project settings drawer
   - composer (wrench, sparkle, Enter any goal, rose-flash picker) covers project settings
   - Built-in tools available to all Rose agents popover under the Running 1 agent header
-  - toolset popover hidden behind agents-running banner
   - Biz health panel opens a third of the screen under the query box
+  - account row Settings panel painted under the query box during onboarding
 tags:
   - z-index
   - stacking-context
@@ -23,7 +23,7 @@ sources:
   - commit a70049483
   - commit 8ceb1008c
   - commit d80ff1e4c
-repro: front-end/src/tests/blackbox/rose-chrome-cleanup.blackbox.tsx ("Rose Desktop stacking order and composer continuity"), front-end/src/tests/blackbox/rose-sidebar.blackbox.tsx ("Biz health covers the query box full width like Browser")
+repro: front-end/src/tests/blackbox/rose-chrome-cleanup.blackbox.tsx ("Rose Desktop stacking order and composer continuity", incl. the Settings, Feedback and Benchmarks "stacks above the floating query box" cases), front-end/src/tests/blackbox/rose-sidebar.blackbox.tsx ("Biz health covers the query box full width like Browser")
 status: fixed
 ---
 
@@ -69,3 +69,25 @@ health to show over the query box at full width like Browser.
 ## Reusable lesson
 
 Compare stacking by the outermost z-indexed ancestor: a fixed panel left inside an in-flow z-indexed flex row can never cover a body-portaled layer, so portal it and take its z from the shared scale.
+
+## Recurrence: the account row's Settings panel stayed under the query box (2026-10-28)
+
+Andy, onboarding: "when i click the settings pane (it should be z-indexed above
+querybox)". The scale above put Settings at appPanel (66), described as a right
+panel that sits *beside* the composer. That premise is false: nothing insets
+the chat column when a right panel opens, so the 560px drawer overlaps the
+centered query box (at 1280px roughly its right third) and the composer (100)
+painted over the bottom of the Settings forms; on phones the full-screen
+Settings sheet sat under the mobile query box. The new case in the stacking
+describe block opens Settings from the account row of a just-onboarded account
+(label "Account") and failed on 9974a5ce0 with `expected 66 to be greater than
+100`. Fix: `coversComposer()` includes `settings`, so the panel takes
+coverPanel (102) and the icon row coverIcons (103), above the composer and an
+open project settings drawer, and the same test passes. Feedback and
+Benchmarks are the same right panel with the same overlap; their cases failed
+identically (`expected 66 to be greater than 100`) and pass now that
+`coversComposer()` lists every right panel. appPanel keeps only the floating
+Phone and the full-width Agent Display / validation criteria views.
+
+Lesson: a "beside" tier is only valid when the layout reserves the space; an
+overlay that overlaps the composer without a reserved inset must sit above it.

@@ -1,6 +1,6 @@
 /**
  * Blackbox tests for PlanChip.
- * Covers title rendering, status variants (planning/executing/complete/error),
+ * Covers title rendering, per-task titles (full description hidden), status variants (planning/executing/complete/error),
  * streaming char counter, sequential/parallel/hypothesis headers,
  * execution-order sorting, dependency annotation, formatDeps, tool-name formatting,
  * expand/collapse.
@@ -150,6 +150,34 @@ describe('PlanChip', () => {
     // diamond markers for hypothesis mode
     const diamonds = screen.getAllByText('◇');
     expect(diamonds.length).toBe(2);
+  });
+
+  it('shows each task title instead of its full description', () => {
+    const description =
+      'Search the web for Blue Bottle store hours in Oakland and list every location';
+    render(
+      <PlanChip
+        plan={{
+          title: 'Titled plan',
+          content: '',
+          tasks: [
+            {
+              title: 'Find Blue Bottle hours',
+              goal: description,
+              tool_name: 'spawn_explore_agent',
+            },
+            { goal: 'Legacy untitled task', tool_name: 'reasoning' },
+          ],
+          dependencies: null,
+          join: 'all',
+          status: 'ready',
+        }}
+      />,
+    );
+    expect(screen.getByText('Find Blue Bottle hours')).toBeInTheDocument();
+    expect(screen.queryByText(description)).not.toBeInTheDocument();
+    // Plans made before task titles still show their goal.
+    expect(screen.getByText('Legacy untitled task')).toBeInTheDocument();
   });
 
   it('formats tool names — spawn_browser_agent_v3 → "Browser Agent"', () => {

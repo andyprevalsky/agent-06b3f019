@@ -19,7 +19,6 @@ import { config } from 'dotenv';
 import { execFileSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 import { anthropicSlotKey } from '../../providers/anthropicProxyCore';
-import { codeAgentSlotKey } from '../../providers/codexProxyCore';
 import { rewriteOaiDemoCacheValue } from '../../domains/demo-cache/oaiDemoCacheCleaner';
 import { signProxyTraceSegment } from '../../providers/codeAgentFastModeEnv';
 config();
@@ -456,11 +455,12 @@ async function main(): Promise<void> {
     assert(text === cachedBody, 'expected cached anthropic body');
   });
 
-  await test('Codex proxy replays a cached provider response', async () => {
+  await test('Codex never reaches the DEMO cache: /codex-proxy does not exist (S30)', async () => {
     const traceHash = `${goalHash}:codex`;
     const cachedBody = 'event: response.completed\ndata: {"cached":true}\n\n';
+    // A cache row Codex could have replayed, if any route still served it.
     await post('/api/fast-cache/set', {
-      key: codeAgentSlotKey('codex', traceHash, 0),
+      key: `codex:${traceHash}:0`,
       kind: 'codex',
       goalHash: traceHash,
       value: { status: 200, contentType: 'text/event-stream', body: cachedBody },
@@ -475,9 +475,9 @@ async function main(): Promise<void> {
       }
     );
     const text = await res.text();
-    assert(res.status === 200, `proxy status ${res.status}`);
-    assert(res.headers.get('x-fast-mode-cache') === 'hit', 'expected codex cache hit');
-    assert(text === cachedBody, 'expected cached codex body');
+    assert(res.status === 404, `Codex proxy must not exist, got ${res.status}`);
+    assert(res.headers.get('x-fast-mode-cache') === null, 'no cache header for Codex');
+    assert(!text.includes('"cached":true'), 'Codex must never be served a cached body');
   });
 
   await test('#24 purge by goalHash removes entries', async () => {

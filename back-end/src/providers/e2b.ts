@@ -1,11 +1,7 @@
+import type { CodexServiceSpeed } from './codexSpeed';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import {
-  buildFastModeAnthropicEnv,
-  buildFastModeCodexEnv,
-  fastModeProxySigningAvailable,
-  resolveFastModeWriteEnabled,
-} from './codeAgentFastModeEnv';
+import { buildFastModeAnthropicEnv, resolveFastModeWriteEnabled } from './codeAgentFastModeEnv';
 import type { FilePointer } from './storage';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -13,10 +9,6 @@ import {
   type ClaudeCodeCredentialResult,
 } from './claudeCredentials';
 import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
-import {
-  fetchGptCodeCredentialsWithMeta,
-  type GptCodeCredentialEnvelopeResult,
-} from './gptCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
@@ -24,20 +16,24 @@ import { workDirForGithubRepo } from './e2bWorkDir';
 import {
   fileHash,
   findLocalClaudeCodeWsServer,
-  findLocalCodexCodeWsServer,
   overlayClaudeCodeWsServer,
   overlayCodexCodeWsServer,
 } from './e2bWsServerOverlay';
 import {
   acquireCodeSandbox,
+  attachLiveCodeCli,
+  CLAUDE_CONFIG_ENV_KEYS,
+  CLAUDE_CREDENTIAL_ENV_KEYS,
   codeSessionBranchEnvs,
   codeSessionTaskFields,
   type CodeAgentSessionResult,
   createLocalCodeSessionFallback,
   recordE2bCodeSessionSandbox,
   releaseSandboxAfterFailedStart,
+  stopStaleWsServer,
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
+import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
 import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
@@ -53,8 +49,6 @@ import {
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeSandboxApiKey,
   resolveClaudeCodeTokenSource,
-  resolveCodexAzureFunding,
-  resolveCodexCodeAuthEnvs,
   shouldEnableClaudeCodeFastMode,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldInjectClaudeCodeFastModeProxy,
@@ -87,19 +81,15 @@ export {
   shouldPreferSandboxAnthropicBaseUrlOverFastMode,
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
+import { DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from './claudeCodeTemplate';
 import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from './codexTemplate';
+import { codeAgentCliEnvs } from './codeAgentModels';
 
 const log = createLogger('E2B');
 
 // Validate required environment variables
 if (!process.env.E2B_API_KEY) {
   log.warn('E2B_API_KEY environment variable not set - Claude Code sessions disabled');
-}
-
-if (!process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
-  log.warn(
-    'E2B_CLAUDE_CODE_TEMPLATE_ID environment variable not set - Claude Code sessions disabled'
-  );
 }
 
 const WS_PORT = 3000;
@@ -161,7 +151,7 @@ async function createClaudeCodeSessionUnlocked(
   const codeSession = options.codeSession ?? null;
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
-  if (!process.env.E2B_API_KEY || !process.env.E2B_CLAUDE_CODE_TEMPLATE_ID) {
+  if (!process.env.E2B_API_KEY) {
     throw new Error('E2B environment variables not configured');
   }
 
@@ -179,9 +169,11 @@ async function createClaudeCodeSessionUnlocked(
   ) {
     log.info('OpenRouter configured — skipping Fast Mode tee-proxy/flags for Claude Code session');
   }
-  const model = process.env.CLAUDE_CODE_MODEL || 'claude-sonnet-5';
+  // The spawning agent's tier and Fast Mode button pick model, effort and speed.
+  const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId);
+  const model = cliSettings.CLAUDE_CODE_MODEL;
   const workDir = workDirForGithubRepo(githubRepoUrl);
-  const templateId = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
+  const templateId = DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
   const runtimeFingerprint = [
     `template:${templateId}`,
     `wrapper:${fileHash(findLocalClaudeCodeWsServer())}`,
@@ -201,7 +193,7 @@ async function createClaudeCodeSessionUnlocked(
   // Build environment variables for sandbox
   const envs: Record<string, string> = {
     CLAUDE_CODE_GOAL: goal,
-    CLAUDE_CODE_MODEL: model,
+    ...cliSettings,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     ...codeSessionBranchEnvs(codeSession),
     // Write capability for direct-chat user turns (codeSessionTurns.ts). The
@@ -255,18 +247,14 @@ async function createClaudeCodeSessionUnlocked(
   const preferSandboxBase = shouldPreferSandboxAnthropicBaseUrlOverFastMode(
     sandboxTransport.baseUrl
   );
-  // Fast Mode CLI flags + tee-proxy only when opt-in Fast Mode is active and we
-  // are not already on a funded non-Anthropic gateway. Andy write-through alone
-  // must not inject the proxy (k=5 t5 recurrence, 2026-08-21).
+  // The DEMO-cache tee-proxy only when its opt-in gate is active and we are not
+  // already on a funded non-Anthropic gateway; Andy write-through alone must not
+  // inject it (k=5 t5 recurrence, 2026-08-21). It never sets provider speed:
+  // CLAUDE_CODE_SPEED comes from the agent's speed (cliSettings).
   const injectFastModeProxy = shouldInjectClaudeCodeFastModeProxy({
     codeAgentFastModeActive,
     preferSandboxBase,
   });
-  if (injectFastModeProxy) {
-    envs.CLAUDE_CODE_FAST_MODE = '1';
-    envs.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS = '1';
-    envs.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK = '1';
-  }
   const fastModeEnv: Record<string, string> = injectFastModeProxy
     ? buildFastModeAnthropicEnv(
         goal,
@@ -369,12 +357,12 @@ async function createClaudeCodeSessionUnlocked(
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
   // When E2B team billing blocks creates, fall back to a same-host local
   // Claude Code ws-server so code-agent benches can still make progress.
-  const templateIdForCreate = process.env.E2B_CLAUDE_CODE_TEMPLATE_ID;
+  const templateIdForCreate = DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
   let acquired;
   try {
     acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code', {
       provider: 'claude',
-      projectSize: projectWorkspace?.project.sandboxSize,
+      project: projectWorkspace?.project,
       agentId,
     });
   } catch (err) {
@@ -399,14 +387,63 @@ async function createClaudeCodeSessionUnlocked(
   log.info(`Using sandbox: ${sandbox.sandboxId} (${resumedFrom})`);
   await overlayClaudeCodeWsServer(sandbox);
   await writeUserUiWorkspaceToSandboxSafe(sandbox, userUiWorkspace, agentId);
-  const project = await restoreSandboxProject(taskId, sandbox, projectWorkspace);
-
+  // Before the goal reaches a live CLI, which may read the files it names.
   const uploadedFiles = await uploadAttachmentsToSandbox(sandbox, attachments, 'Claude Code');
 
   // Get WebSocket URL for the frontend to connect to
   const wsHost = sandbox.getHost(WS_PORT);
   const wsUrl = `wss://${wsHost}`;
   const previewUrl = applyPreviewUrlEnv(envs, wsUrl, sandbox.sandboxId);
+  const taskRow = {
+    id: taskId,
+    agentId,
+    sandboxId: sandbox.sandboxId,
+    streamUrl: wsUrl,
+    goal,
+    status: 'ACTIVE' as const,
+    claudeTokenSource,
+    claudeTokenIntegrationId: claudeTaskIntegrationId(credentialMeta),
+    ...codeSessionTaskFields(codeSession, 'claude'),
+    projectId: projectWorkspace?.project.id ?? null,
+  };
+  if (resumedFrom === 'paused_sandbox' && options.freshConversation !== true) {
+    // The paused CLI may still be running in the resumed sandbox: keep it
+    // (its turn, tools and processes continue) and hand it this goal.
+    const live = await attachLiveCodeCli(sandbox, codeSession, {
+      provider: 'claude',
+      wsUrl,
+      taskId,
+      text: `Task:\n${goal.replace(/\0/g, '')}`,
+      envs,
+      credentialKeys: CLAUDE_CREDENTIAL_ENV_KEYS,
+      configKeys: CLAUDE_CONFIG_ENV_KEYS,
+    });
+    if (live.attached) {
+      await prisma.claudeCodeSession.create({ data: taskRow });
+      await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
+      log.info(`Session attached to the live CLI: ${taskId}, WS: ${wsUrl}`);
+      return {
+        wsUrl,
+        taskId,
+        sandboxId: sandbox.sandboxId,
+        uploadedFiles,
+        resumedFrom: 'live_cli',
+        cliSessionId,
+        projectRestore: null,
+        previewUrl,
+        sandboxSize: acquired.size,
+        historyEvents: live.historyEvents ?? 0,
+      };
+    }
+  } else if (resumedFrom === 'paused_sandbox') {
+    await stopStaleWsServer(sandbox);
+  }
+  const project = await restoreSandboxProject(
+    taskId,
+    sandbox,
+    projectWorkspace,
+    acquired.fromSnapshot
+  );
   const sessionEnvs = { ...envs, ...(project.envs ?? {}) };
   const wsLaunchedAt = Date.now();
 
@@ -446,20 +483,7 @@ async function createClaudeCodeSessionUnlocked(
   });
 
   // Create DB record with real values (no placeholders)
-  await prisma.claudeCodeSession.create({
-    data: {
-      id: taskId,
-      agentId,
-      sandboxId: sandbox.sandboxId,
-      streamUrl: wsUrl,
-      goal,
-      status: 'ACTIVE',
-      claudeTokenSource,
-      claudeTokenIntegrationId: claudeTaskIntegrationId(credentialMeta),
-      ...codeSessionTaskFields(codeSession, 'claude'),
-      projectId: projectWorkspace?.project.id ?? null,
-    },
-  });
+  await prisma.claudeCodeSession.create({ data: taskRow });
   await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
 
   log.info(`Session ready: ${taskId}, WS: ${wsUrl}`);
@@ -483,7 +507,7 @@ export async function createCodexCodeSession(
   attachments?: FilePointer[],
   githubRepoUrl?: string,
   userId?: string,
-  fastModeCacheEnabled?: boolean,
+  codexSpeed: CodexServiceSpeed = 'priority',
   harnessOptions?: {
     harnessMode?: 'code' | 'rose';
     roseApiBaseUrl?: string;
@@ -503,15 +527,10 @@ export async function createCodexCodeSession(
 
   const taskId = uuidv4();
   const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
-  const model = process.env.CODEX_CODE_MODEL || 'gpt-5.6-terra';
+  const { settings: agentSettings, envs: cliSettings } = await codeAgentCliEnvs('codex', agentId);
   const harnessMode = harnessOptions?.harnessMode ?? 'code';
   const roseApiBaseUrl = harnessOptions?.roseApiBaseUrl?.replace(/\/$/, '');
   const workDir = workDirForGithubRepo(githubRepoUrl);
-  const runtimeFingerprint = [
-    `template:${templateId}`,
-    `wrapper:${fileHash(findLocalCodexCodeWsServer())}`,
-    `env:${process.env.FAST_MODE_CODE_AGENT_ENV_FINGERPRINT ?? 'default'}`,
-  ].join('|');
   const systemPrompt =
     harnessMode === 'rose' && roseApiBaseUrl
       ? buildCodexHarnessSystemPrompt({
@@ -527,17 +546,19 @@ export async function createCodexCodeSession(
           ...promptFlagsForUser(userId),
         });
 
-  const credentialMeta: GptCodeCredentialEnvelopeResult | null =
-    await fetchGptCodeCredentialsWithMeta(userId);
-  // User OAuth first; the funded fallback is our Azure Codex deployment (the
-  // OpenAI GPT_API_KEY is not funded). Mirrors the Claude Code path.
-  const azureFunding = resolveCodexAzureFunding();
-  const authEnvs = resolveCodexCodeAuthEnvs(credentialMeta, azureFunding);
+  // User OAuth → shared pool → our funded Azure Codex deployment unless it is
+  // backed off (the OpenAI GPT_API_KEY is not funded). Mirrors the Claude Code path.
+  const {
+    credentialMeta,
+    azureFunding,
+    envs: authEnvs,
+    servedBy,
+  } = await resolveCodexSpawnAuth(userId, new Date(), agentSettings.tier);
 
   const envs: Record<string, string> = {
     CODEX_GOAL: goal,
     ...authEnvs,
-    CODEX_MODEL: model,
+    ...cliSettings,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
     CODE_AGENT_HARNESS_MODE: harnessMode,
     ...codeSessionBranchEnvs(codeSession),
@@ -564,52 +585,14 @@ export async function createCodexCodeSession(
     log.info(`Using ${credentialMeta.source} GPT Code credentials for agent ${agentId}`);
   } else {
     log.info(
-      `Using Azure ${azureFunding?.deployment} funded fallback for Codex Code agent ${agentId}`
+      `Using Azure ${azureFunding?.deployment} on ${azureFunding ? new URL(azureFunding.baseUrl).host : 'unconfigured'} funded fallback for Codex Code agent ${agentId}`
     );
   }
 
-  const fastModeWriteEnabled = resolveFastModeWriteEnabled(fastModeCacheEnabled, userId);
-  const fastModeEnv = buildFastModeCodexEnv(
-    goal,
-    fastModeCacheEnabled === true,
-    undefined,
-    fastModeWriteEnabled,
-    {
-      sessionId: taskId,
-      trace: {
-        goal,
-        systemPrompt,
-        model,
-        codeProvider: 'codex',
-        templateId,
-        runtimeFingerprint,
-        workDir,
-        githubRepoUrl,
-      },
-    }
-  );
-  log.info('Fast Mode: Codex code-agent cache config', {
-    agentId,
-    taskId,
-    fastModeCacheEnabled: fastModeCacheEnabled === true,
-    fastModeWriteEnabled,
-    hasCodexProxyUrl: Boolean(process.env.FAST_MODE_CODEX_PROXY_URL),
-    hasAnthropicProxyUrl: Boolean(process.env.FAST_MODE_ANTHROPIC_PROXY_URL),
-    proxyInjected: fastModeEnv.CODEX_FAST_MODE_PROXY_URL !== undefined,
-  });
-  if (fastModeEnv.CODEX_FAST_MODE_PROXY_URL !== undefined) {
-    envs.CODEX_FAST_MODE_PROXY_URL = fastModeEnv.CODEX_FAST_MODE_PROXY_URL;
-    log.info('Fast Mode: routing sandbox Codex calls via the tee-proxy');
-  } else if (fastModeCacheEnabled === true && fastModeProxySigningAvailable()) {
-    throw new Error(
-      'Fast Mode cache is enabled for Codex code agent but no Codex proxy URL is configured. ' +
-        'Set FAST_MODE_CODEX_PROXY_URL or FAST_MODE_ANTHROPIC_PROXY_URL ending in /anthropic-proxy.'
-    );
-  } else if (fastModeWriteEnabled) {
-    log.warn(
-      'Fast Mode cache active but FAST_MODE_CODEX_PROXY_URL unset — Codex code agent not cached'
-    );
-  }
+  // Codex talks to its provider directly (never a Rose proxy or the DEMO cache);
+  // the Fast Mode button only selects its native service tier.
+  envs.CODEX_SPEED = codexSpeed;
+  log.info('Codex code-agent speed', { agentId, taskId, codexSpeed });
 
   if (githubRepoUrl) {
     if (!process.env.GITHUB_TOKEN) {
@@ -643,6 +626,22 @@ export async function createCodexCodeSession(
   const wsHost = sandbox.getHost(WS_PORT);
   const wsUrl = `wss://${wsHost}`;
   const previewUrl = applyPreviewUrlEnv(envs, wsUrl, sandbox.sandboxId);
+  const taskRow = {
+    id: taskId,
+    agentId,
+    sandboxId: sandbox.sandboxId,
+    streamUrl: wsUrl,
+    goal,
+    status: 'ACTIVE' as const,
+    // What serves the run: 'user' | 'pool' login, or 'azure' (the funded deployment alone).
+    claudeTokenSource: servedBy,
+    claudeTokenIntegrationId: credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
+    ...codeSessionTaskFields(codeSession, 'codex'),
+  };
+  // A resumed sandbox may still run the paused Codex CLI: stop it before
+  // starting this spawn's (live attach is Claude Code only: Codex binds the
+  // handoff outputSchema to its first turn).
+  if (resumedFrom === 'paused_sandbox') await stopStaleWsServer(sandbox);
   const wsLaunchedAt = Date.now();
 
   sandbox.commands
@@ -671,20 +670,7 @@ export async function createCodexCodeSession(
   }
   await autostartRosePreview(sandbox, { envs, repoUrl: githubRepoUrl, launchedAt: wsLaunchedAt });
 
-  await prisma.claudeCodeSession.create({
-    data: {
-      id: taskId,
-      agentId,
-      sandboxId: sandbox.sandboxId,
-      streamUrl: wsUrl,
-      goal,
-      status: 'ACTIVE',
-      claudeTokenSource: credentialMeta?.source ?? null,
-      claudeTokenIntegrationId:
-        credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
-      ...codeSessionTaskFields(codeSession, 'codex'),
-    },
-  });
+  await prisma.claudeCodeSession.create({ data: taskRow });
   await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
 
   log.info(`Codex session ready: ${taskId}, WS: ${wsUrl}`);

@@ -25,3 +25,4 @@ export { usePlaidOAuthResume } from './usePlaidOAuthResume';
 // Re-export shared hooks for consumers
 export { useIntegrationHandlers } from '@/features/integration-handlers-context';
 export { useAuth } from '@/features/auth';
+export { useGranola } from './useGranola';

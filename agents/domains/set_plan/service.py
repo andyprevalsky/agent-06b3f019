@@ -23,8 +23,6 @@ from domains.set_plan.config import (
 from domains.set_plan.types import PlanData, TaskObject
 from helpers.attachments import FilePointer
 from helpers.background_agents import model_agent_row_text
-from helpers.context_compaction import is_excluded_from_model
-from helpers.context_scope import is_internal_subagent_message
 from providers.rose.inter_agent_context import inter_agent_message, settle_trailing_inter_agent_messages
 from providers.rose.pools import PLANNER_MODEL
 from tools.prompts import tool_prompts_for
@@ -398,7 +396,10 @@ def build_plan_data(planner_result: dict[str, Any]) -> PlanData:
     Assumes planner_result has already passed validation.
     """
     task_objects = planner_result["tasks"]
-    tasks: list[TaskObject] = [TaskObject(goal=t["goal"], tool_name=t["tool_name"]) for t in task_objects]
+    tasks: list[TaskObject] = [
+        TaskObject(title=str(t.get("title") or "").strip(), goal=t["goal"], tool_name=t["tool_name"])
+        for t in task_objects
+    ]
     deps = dependencies_from_tasks(task_objects)
     title: str = planner_result["title"]
     content: str = planner_result.get("content") or ""
@@ -558,19 +559,25 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
     Returns:
         Tuple of (base_messages for planner, user_messages list).
     """
+    from helpers.llm import (
+        _ensure_tool_result_pairing,
+        collapse_duplicate_tool_results,
+        drop_rows_never_sent_to_model,
+    )
+
+    context = collapse_duplicate_tool_results(drop_rows_never_sent_to_model(context))
     user_messages: list[str] = []
     base_messages: list[dict[str, Any]] = []
     declared_calls: dict[str, str] = {}
 
     for msg in context:
-        if is_internal_subagent_message(msg) or is_excluded_from_model(msg):
-            continue
-
         role = msg.get("role", "").upper()
         text = msg.get("text", "")
         message_id = msg.get("message_id")
         text = _strip_reference_annotation(text, message_id if isinstance(message_id, str) else None)
         metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+        if role == "TOOL" and metadata.get("toolStatus") == "IN_PROGRESS":
+            continue
 
         agent_text = model_agent_row_text(msg) if role == "USER" else None
         if agent_text is not None:
@@ -640,8 +647,6 @@ def build_planner_messages(context: list[dict[str, Any]]) -> tuple[list[dict[str
 
     # Budget trimming can split a native tool-use/result pair. Repair after the
     # trim so provider history contains no orphan or duplicate tool-call IDs.
-    from helpers.llm import _ensure_tool_result_pairing
-
     bounded = _enforce_planner_context_budget(base_messages)
     repaired = _ensure_tool_result_pairing(bounded)
     repaired = [

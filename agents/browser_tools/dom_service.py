@@ -1006,6 +1006,9 @@ class DOMService:
         safe = self.model_visible_value(result)
         if not isinstance(result, dict) or not isinstance(safe, dict):
             return safe
+        from browser_tools.result_projection import preserve_output_protocol, retain_model_preview
+        safe = preserve_output_protocol(result, safe, action_name, self.model_visible_value)
+        safe = retain_model_preview(result, safe, action_name, self.model_visible_value)
         if "credential_ref" in result:
             safe["credential_ref"] = result["credential_ref"]
         if action_name == "request_payment_card":
@@ -1224,9 +1227,15 @@ class DOMService:
             return
 
         async def _loop() -> None:
-            while self._session is not None:
+            owner = asyncio.current_task()
+            while self._session is not None and self._captcha_indicator_task is owner:
                 try:
                     phase = str(await poll_phase() or "idle")
+                    # A completed wait_for can win a simultaneous cancellation.
+                    # Disconnect revokes this task before joining it; ownership
+                    # must fence both another poll and a late browser write.
+                    if self._captcha_indicator_task is not owner:
+                        return
                     await self.set_captcha_indicator_phase(phase)
                 except asyncio.CancelledError:
                     raise

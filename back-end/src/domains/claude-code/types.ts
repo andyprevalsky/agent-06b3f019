@@ -164,4 +164,8 @@ export const credentialAvailabilityQuerySchema = z.object({
   user_id: z.string().min(1).max(200),
   // A local (Mac) run: count only the user's own logins.
   own_only: z.enum(['true', 'false']).optional(),
+  // A retry / resume of this code session: also answer its own provider and the outlook (C15).
+  code_session_id: z.string().uuid().optional(),
+  // The provider the spawn would use when the session names none.
+  prefer: z.enum(['claude', 'codex']).optional(),
 });

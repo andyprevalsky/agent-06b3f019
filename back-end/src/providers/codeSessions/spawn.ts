@@ -10,7 +10,15 @@ import { createLogger } from '../logger';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
 import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
-import { checkpointCodeSession, retireCodeSession, sweepExpiredCodeSessions } from './lifecycle';
+import {
+  checkpointCodeSession,
+  defaultCodeSessionMaintenanceDeps,
+  forgetCodeSessionMaintenance,
+  retireCodeSession,
+  scheduleCodeSessionMaintenance,
+  sweepExpiredCodeSessions,
+  type CodeSessionMaintenanceDeps,
+} from './lifecycle';
 import { e2bSandboxFs, localSandboxFs } from './sandboxFs';
 import {
   CodeSessionBusyError,
@@ -25,7 +33,11 @@ import {
   CODE_SANDBOX_IDLE_TIMEOUT_MS,
   CodeSessionPauseUnconfirmedError,
 } from '../e2bCodeSessionSandbox';
-import { switchCodeSessionProvider } from './usageLimit';
+import {
+  revertCodeSessionProvider,
+  switchCodeSessionProvider,
+  type SpawnCodeSession,
+} from './usageLimit';
 import { pendingResizeForTask, sizeView, type SizeView } from './sandboxResize';
 import type { SandboxSize } from './sandboxSize';
 import {
@@ -82,7 +94,7 @@ export async function resolveSpawnCodeSession(
     agent?.busId !== undefined && agent.busId !== null && agent.busId !== ''
       ? agent.busId
       : params.agentId;
-  sweepExpiredCodeSessions(userId);
+  void sweepExpiredCodeSessions(userId);
   // "New agent in this branch" works in the shared agent's session; every
   // other agent owns its own worktree and branch (plan §1b).
   const ownerAgentId = await effectiveOwnerAgentId(userId, params.agentId);
@@ -125,29 +137,71 @@ export async function createWithCodeSession<
     resumedFrom?: string;
     cliSessionId?: string | null;
     sandboxSize?: SandboxSize | null;
+    historyEvents?: number;
   },
 >(
   params: ResolveSpawnParams,
-  create: (codeSession: CodeSessionRow | null, handoff: string | null) => Promise<T>
+  create: (codeSession: SpawnCodeSession | null, handoff: string | null) => Promise<T>
 ): Promise<{ session: T; fields: CodeSessionSpawnFields }> {
-  let codeSession = await resolveSpawnCodeSession(params);
+  let codeSession: SpawnCodeSession | null = await resolveSpawnCodeSession(params);
   // C15: a retry after a usage limit may run on the other provider. It keeps
-  // the session (branch, commits, files via the checkpoint) and gets a
-  // handoff summary instead of the other CLI's conversation.
+  // the session (branch, commits, files via the checkpoint) and gets a handoff
+  // prompt instead of the other CLI's conversation; the previous CLI's session
+  // log rides on the session handle, and the sandbox acquire writes it into
+  // the new sandbox at the path the prompt names.
   let handoff: string | null = null;
+  let switchedFrom: string | null = null;
   if (codeSession !== null && codeSession.codeProvider !== params.codeProvider) {
+    switchedFrom = codeSession.codeProvider;
+    // A concurrent duplicate loses with CodeSessionBusyError and keeps the
+    // winner's lease (same owner), so exactly one spawn rotates the session.
     const switched = await switchCodeSessionProvider(codeSession, params.codeProvider, (id) =>
       Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
     );
-    codeSession = switched.session;
+    codeSession = {
+      ...switched.session,
+      handoffTrajectory: switched.trajectory,
+      retainFailedStartLease: true,
+    };
     handoff = switched.handoff;
   }
   let session: T;
   try {
     session = await create(codeSession, handoff);
   } catch (error) {
-    if (codeSession !== null && !(error instanceof CodeSessionPauseUnconfirmedError)) {
-      await markPaused(codeSession.id);
+    // A start that failed after the switch hands the session back, so the
+    // retry switches again and gets the handoff and trajectory once more.
+    if (
+      codeSession !== null &&
+      switchedFrom !== null &&
+      !(error instanceof CodeSessionPauseUnconfirmedError)
+    ) {
+      await revertCodeSessionProvider(
+        codeSession.id,
+        params.codeProvider,
+        switchedFrom,
+        codeSession.leaseOwner,
+        (id) => Sandbox.kill(id, { apiKey: process.env.E2B_API_KEY }).then(() => undefined)
+      ).catch((cleanupError: unknown) => {
+        log.error('Provider switch rollback failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          startError: error instanceof Error ? error.message : String(error),
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
+    }
+    if (
+      codeSession !== null &&
+      switchedFrom === null &&
+      !(error instanceof CodeSessionPauseUnconfirmedError)
+    ) {
+      await markPaused(codeSession.id).catch((cleanupError: unknown) => {
+        log.error('Failed-start pause failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          startError: error instanceof Error ? error.message : String(error),
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
     }
     throw error;
   }
@@ -169,6 +223,7 @@ export async function createWithCodeSession<
         session.sandboxSize !== undefined && session.sandboxSize !== null
           ? sizeView(session.sandboxSize)
           : null,
+      history_events: session.historyEvents ?? 0,
     },
   };
 }
@@ -194,6 +249,11 @@ export interface CodeSessionSpawnFields {
   provider_handoff: boolean;
   /** vCPUs / memory of the E2B sandbox (C16); null for a local session. */
   sandbox_size: SizeView | null;
+  /**
+   * resumed_from=live_cli: the ws-server's events before this spawn's goal turn
+   * (the earlier turns of the live CLI); the monitor treats them as history.
+   */
+  history_events: number;
 }
 
 export interface CodeSessionView {
@@ -267,18 +327,22 @@ async function sampleAndPublish(
 
 /**
  * Keepalive from the attached code-agent activity (liveness is heartbeat-only;
- * there is no runtime limit): extend the E2B sandbox's idle window and the
- * session lease. Once keepalives stop, the sandbox pauses after the window.
+ * there is no runtime limit): extend the session lease and the E2B sandbox's
+ * idle window, and save the session periodically (cycling the sandbox before
+ * E2B's continuous-runtime cap; lifecycle.ts). Once keepalives stop, the
+ * sandbox pauses after the window. The lease is extended first: a failed E2B
+ * call must not let it lapse, or another spawn could take the session from
+ * under the running CLI.
  */
 export async function keepAliveCodeTask(
   taskId: string,
   setTimeoutFn: (sandboxId: string, timeoutMs: number) => Promise<void> = (sandboxId, timeoutMs) =>
     Sandbox.setTimeout(sandboxId, timeoutMs, { apiKey: process.env.E2B_API_KEY }),
-  resources: CodeResourceDeps = codeResourceDeps
+  resources: CodeResourceDeps = codeResourceDeps,
+  maintenance: CodeSessionMaintenanceDeps = defaultCodeSessionMaintenanceDeps
 ): Promise<{
   alive: boolean;
   code_session_id: string | null;
-  awaiting_parent: AwaitingParentQuestion | null;
   /** A pending resize the attached activity applies (C16); present only when there is one. */
   resize_requested?: { request_id: string; from: SizeView; to: SizeView };
   /** Latest CPU / memory / disk sample of the sandbox (item 29); present only when sampled. */
@@ -286,7 +350,8 @@ export async function keepAliveCodeTask(
 }> {
   const task = await prisma.claudeCodeSession.findUnique({ where: { id: taskId } });
   if (task === null || task.status === 'CLOSED') {
-    return { alive: false, code_session_id: task?.codeSessionId ?? null, awaiting_parent: null };
+    forgetCodeSessionMaintenance(task?.codeSessionId ?? null);
+    return { alive: false, code_session_id: task?.codeSessionId ?? null };
   }
   // Only an E2B sandbox has an idle window; a Mac session (C14) lives while its
   // CLI runs and the Rose Mac app is connected.
@@ -295,46 +360,21 @@ export async function keepAliveCodeTask(
   // and resize reads so its bounded E2B read never delays them.
   const e2b =
     !isLocalClaudeCodeSandboxId(task.sandboxId) && !isLocalDeviceSandboxId(task.sandboxId);
-  if (e2b) await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
+  if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
+  if (e2b) {
+    await setTimeoutFn(task.sandboxId, CODE_SANDBOX_IDLE_TIMEOUT_MS);
+    scheduleCodeSessionMaintenance(task, maintenance);
+  }
   const [sample, resize] = await Promise.all([
     e2b ? sampleAndPublish(task, resources) : Promise.resolve(null),
-    (async () => {
-      if (task.codeSessionId !== null) await extendLease(task.codeSessionId);
-      return pendingResizeForTask(task.codeSessionId);
-    })(),
+    pendingResizeForTask(task.codeSessionId),
   ]);
   return {
     alive: true,
     code_session_id: task.codeSessionId,
-    awaiting_parent: (task.awaitingParent ?? null) as AwaitingParentQuestion | null,
     ...(resize !== null ? { resize_requested: resize } : {}),
     ...(sample !== null ? { resources: sample } : {}),
   };
-}
-
-/** A question a code agent asked the Rose agent whose spawn it is running in. */
-export interface AwaitingParentQuestion {
-  message_id: string;
-  question: string;
-  at: string;
-}
-
-/**
- * The code agent asked its spawning (non-root) Rose agent a question. That
- * agent is blocked inside this very spawn, so the attached activity sees the
- * mark on its next keepalive, pauses the session (resumable, never failed) and
- * returns the question; the answer resumes the session as a new task.
- */
-export async function markAwaitingParent(
-  taskId: string,
-  question: { message_id: string; question: string }
-): Promise<void> {
-  await prisma.claudeCodeSession.updateMany({
-    where: { id: taskId, status: { not: 'CLOSED' } },
-    data: {
-      awaitingParent: { ...question, at: new Date().toISOString() },
-    },
-  });
 }
 
 /**

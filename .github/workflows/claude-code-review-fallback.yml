@@ -20,13 +20,9 @@ concurrency:
 
 jobs:
   review:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (((github.event.action == 'labeled' && github.event.label.name == 'claude-review-fallback') ||
-      (github.event.action == 'synchronize' &&
-      contains(github.event.pull_request.labels.*.name, 'claude-review-fallback'))) &&
-      github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    # Retired by user decision. Keep inert even if dispatched or labeled.
+    if: ${{ false }}
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
       contents: read
@@ -37,10 +33,11 @@ jobs:
     env:
       PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
-      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Verify pull request HEAD
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -51,12 +48,25 @@ jobs:
           fi
 
       - name: Checkout reviewed commit
-        uses: actions/checkout@v4
+        uses: useblacksmith/checkout@v1 # v4
         with:
           ref: ${{ env.PR_HEAD_SHA }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout trusted diagnostics
+        uses: useblacksmith/checkout@v1 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: .trusted-review
+          persist-credentials: false
+          # Only the diagnostic script: a full default-branch checkout is ~3.3 GB.
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: scripts/claude_review_fallback_diagnose.py
 
       - name: Review with Claude Code
+        id: review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -70,3 +80,14 @@ jobs:
             --model opus
             --effort high
             --max-turns 40
+
+      # The action hides CLI output, so a revoked OAuth token (401) looks
+      # identical to usage exhaustion (1 turn, ~2s, $0). Print the recorded
+      # api_error_status/error text and classify it for /deploy Step 9a.
+      - name: Diagnose Claude failure
+        if: failure() && steps.review.outcome == 'failure'
+        shell: bash
+        env:
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+        run: python3 -I "$GITHUB_WORKSPACE/.trusted-review/scripts/claude_review_fallback_diagnose.py" "$EXECUTION_FILE" "$REVIEW_OUTCOME"

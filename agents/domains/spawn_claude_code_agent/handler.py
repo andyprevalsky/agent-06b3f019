@@ -32,7 +32,9 @@ from domains.spawn_claude_code_agent.config import (
 from domains.spawn_claude_code_agent.service import (
     close_detached_code_session_activity,
     code_session_record,
+    format_code_session_summary,
     iso_utc,
+    local_workspace_place,
     resolve_code_agent_provider_activity,
     spawn_claude_code_activity,
 )
@@ -309,6 +311,50 @@ def _timed_out_code_session(
             if session is not None:
                 return session
     return code_session_record(scheduled_session)
+
+
+def _workflow_tool_usage(result: Dict[str, Any]) -> Dict[str, list]:
+    """The workflow cost-tracking shape of an activity result's ``usage_items``."""
+    tool_usage: Dict[str, list] = {"llm": [], "service": []}
+    for item in result.get("usage_items") or []:
+        if item.get("type") == "llm":
+            tool_usage["llm"].append(
+                {
+                    "tokens_in": item.get("input_tokens", 0),
+                    "tokens_out": item.get("output_tokens", 0),
+                    "model": item.get("model"),
+                    "provider": item.get("provider", ""),
+                }
+            )
+        else:
+            tool_usage["service"].append(
+                {
+                    "cost_cents": item.get("cost_cents", 0),
+                    "provider": item.get("provider", ""),
+                }
+            )
+    return tool_usage
+
+
+def _user_pause_message(metadata: Dict[str, Any]) -> str:
+    """A user pause's tool result: paused (not failed) and how to resume this session.
+
+    Mirrors the idle-pause text (service.py): a Mac session keeps its files in
+    the user's folder and continues with target='local'.
+    """
+    local_place = local_workspace_place(metadata.get("code_agent"))
+    if local_place:
+        return (
+            f"Code session paused by the user (not failed). Its files and commits stay in {local_place}; "
+            "spawn the code agent again with target='local' to continue there."
+        )
+    session = metadata.get("code_session") if isinstance(metadata.get("code_session"), dict) else {}
+    session_id = session.get("code_session_id")
+    resume = f"with code_session_id='{session_id}' " if isinstance(session_id, str) and session_id else ""
+    return (
+        "Code session paused by the user (not failed). Its files, commits and conversation are kept; "
+        f"spawn the code agent again {resume}to resume it."
+    )
 
 
 class SpawnClaudeCodeAgentManager(ToolManager):
@@ -691,6 +737,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         cancel_metadata["task_id"] = result["task_id"]
                     if result.get("code_provider"):
                         cancel_metadata["code_provider"] = result["code_provider"]
+                    if isinstance(result.get("code_session"), dict):
+                        cancel_metadata["code_session"] = result["code_session"]
+                detached_id = (code_session or {}).get("code_session_id")
+                if "code_session" not in cancel_metadata and isinstance(detached_id, str) and detached_id:
+                    # Paused while detached (no activity result): name the session from
+                    # its reattach record, never the record itself (ws_url, cursors).
+                    cancel_metadata["code_session"] = {"code_session_id": detached_id, "state": "paused"}
                 if not cancel_metadata.get("task_id"):
                     # Last resort: still emit task_complete so routing stays on
                     # ClaudeCodeChip, but log — FE recovers task_id from siblings.
@@ -698,35 +751,22 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "[ClaudeCode] Cancel without task_id; chip may need FE sibling recovery",
                         agent_id=agent_id,
                     )
+                # Same facts as an idle pause: which session is paused, so a resume
+                # targets it (not "the latest session for the repo").
+                pause_message = _user_pause_message(cancel_metadata)
+                pause_summary = format_code_session_summary(cancel_metadata.get("code_session"))
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
                     title="Code session paused",
-                    message="User paused the agent",
+                    message=f"{pause_message}\n{pause_summary}" if pause_summary else pause_message,
                     status=MessageStatus.FINISHED,
                     metadata=cancel_metadata,
+                    # The sandbox ran until the pause: its time is billed too.
+                    data={"usage": _workflow_tool_usage(result or {})},
                 )
                 return
 
-            # Build standardized usage for workflow cost tracking
-            tool_usage: Dict[str, list] = {"llm": [], "service": []}
-            if result.get("usage_items"):
-                for item in result["usage_items"]:
-                    if item.get("type") == "llm":
-                        tool_usage["llm"].append(
-                            {
-                                "tokens_in": item.get("input_tokens", 0),
-                                "tokens_out": item.get("output_tokens", 0),
-                                "model": item.get("model"),
-                                "provider": item.get("provider", ""),
-                            }
-                        )
-                    else:
-                        tool_usage["service"].append(
-                            {
-                                "cost_cents": item.get("cost_cents", 0),
-                                "provider": item.get("provider", ""),
-                            }
-                        )
+            tool_usage = _workflow_tool_usage(result)
 
             code_provider = result.get("code_provider") or code_provider
             success = result.get("success") is True

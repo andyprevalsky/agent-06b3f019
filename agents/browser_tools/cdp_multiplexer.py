@@ -220,6 +220,8 @@ class SingleCdpConnectionMultiplexer:
         self.emulation_refused = 0
         self.overrides_reapplied = 0
         self._closed = False
+        self._checkpoint_close: Optional[asyncio.Future] = None
+        self._checkpoint_close_task: Optional[asyncio.Task] = None
         self.upstream_connections_opened = 0
         self._slot_confirm_seconds = slot_confirm_seconds
         self._slot_retry_delays = tuple(slot_retry_delays)
@@ -278,6 +280,25 @@ class SingleCdpConnectionMultiplexer:
             self._server = None
         await self._close_upstream()
 
+    async def disconnect_confirmed(self, disconnect: Callable[[], Awaitable[None]]) -> None:
+        """Fence new dials and confirm the transport actually closed by owner detach."""
+        async with self._upstream_lock:
+            self._closed = True
+            if self._checkpoint_close is None:
+                self._checkpoint_close = asyncio.get_running_loop().create_future()
+                self._checkpoint_close.add_done_callback(
+                    lambda done: done.exception() if not done.cancelled() else None
+                )
+            closed = self._checkpoint_close
+        try:
+            await disconnect()
+            await closed
+        except BaseException:
+            closer = self._checkpoint_close_task
+            if closer is not None and closer is not asyncio.current_task():
+                closer.cancel()
+            raise
+
     # ----- upstream -------------------------------------------------------
 
     async def _dial_upstream(self) -> Any:
@@ -325,6 +346,8 @@ class SingleCdpConnectionMultiplexer:
 
     async def _ensure_upstream(self) -> None:
         async with self._upstream_lock:
+            if self._closed:
+                raise CdpMultiplexerUpstreamClosed(1001, "multiplexer closed")
             if self._upstream is not None:
                 return
             self._upstream = await self._dial_confirmed_upstream()
@@ -357,14 +380,29 @@ class SingleCdpConnectionMultiplexer:
             self._wants_debugger_wait.clear()
             self._browser_user_agent = None
             if upstream is not None:
-                with contextlib.suppress(Exception):
-                    await upstream.close()
+                if self._checkpoint_close is not None:
+                    self._checkpoint_close_task = asyncio.current_task()
+                    try:
+                        await upstream.close()
+                        await upstream.wait_closed()
+                    except BaseException as error:
+                        self._upstream, self._reader = upstream, reader
+                        if not self._checkpoint_close.done():
+                            self._checkpoint_close.set_exception(error)
+                        raise
+                    finally:
+                        self._checkpoint_close_task = None
+                else:
+                    with contextlib.suppress(Exception):
+                        await upstream.close()
             if reader is not None and reader is not asyncio.current_task():
                 reader.cancel()
                 with contextlib.suppress(BaseException):
                     await reader
             if upstream is not None:
                 logger.info("[CdpMux] Upstream CDP socket released (label=%s)", self._label)
+            if self._checkpoint_close is not None and not self._checkpoint_close.done():
+                self._checkpoint_close.set_result(None)
 
     def _fail_internal(self, error: BaseException) -> None:
         for future in self._internal.values():

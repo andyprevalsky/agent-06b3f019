@@ -286,19 +286,7 @@ router.post(
           res.status(400).json({ error: 'credential_feedback must contain at most 3 events' });
           return;
         }
-        const validSources = new Set(['initial', 'oauth', 'funded_api_key']);
-        const valid = rawCredentialFeedback.every((item) => {
-          if (typeof item !== 'object' || item === null) return false;
-          const candidate = item as Record<string, unknown>;
-          return (
-            typeof candidate.source === 'string' &&
-            validSources.has(candidate.source) &&
-            typeof candidate.reason === 'string' &&
-            candidate.reason.length > 0 &&
-            candidate.reason.length <= 2000
-          );
-        });
-        if (!valid) {
+        if (!rawCredentialFeedback.every(service.isCodexCredentialFeedback)) {
           res.status(400).json({ error: 'credential_feedback event is invalid' });
           return;
         }

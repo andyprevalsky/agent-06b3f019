@@ -161,7 +161,7 @@ def main() -> int:
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument(
         "--fixture",
-        choices=("multi-workstream", "status-service-shutdown"),
+        choices=("multi-workstream", "status-service-shutdown", "export-recovery"),
         default="multi-workstream",
     )
     args = parser.parse_args()

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 
 const VAPI_SAMPLE_RATE = 16000;
 const INITIAL_BUFFER_SECONDS = 0.05;
@@ -18,29 +18,37 @@ interface LiveAudioOptions {
  * 1280 bytes (640 samples = 320 stereo frames) arriving every ~40 ms.
  */
 export function useLiveAudio({ status, listenUrl, isMuted }: LiveAudioOptions): void {
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-
   useEffect(() => {
-    if (status !== 'in-progress' || !listenUrl || isMuted) {
-      closeConnection(wsRef, audioContextRef);
-      return;
-    }
+    if (status !== 'in-progress' || !listenUrl || isMuted) return;
+    let ws: WebSocket | null = null;
+    let audioContext: AudioContext | null = null;
+    let closed = false;
+    const closeConnection = () => {
+      closed = true;
+      if (ws) {
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.close();
+        ws = null;
+      }
+      if (audioContext) {
+        void audioContext.close();
+        audioContext = null;
+      }
+    };
 
     try {
-      const ws = new WebSocket(listenUrl);
+      ws = new WebSocket(listenUrl);
       ws.binaryType = 'arraybuffer';
-      wsRef.current = ws;
 
-      const audioContext = new AudioContext();
-      audioContextRef.current = audioContext;
+      audioContext = new AudioContext();
       void audioContext.resume();
 
       let nextPlayTime = 0;
 
       ws.onmessage = (event: MessageEvent) => {
-        const ctx = audioContextRef.current;
-        if (!ctx || ctx.state !== 'running') return;
+        const ctx = audioContext;
+        if (closed || !ctx || ctx.state !== 'running') return;
         try {
           nextPlayTime = playChunk(ctx, event.data as ArrayBuffer, nextPlayTime);
         } catch (err) {
@@ -52,26 +60,13 @@ export function useLiveAudio({ status, listenUrl, isMuted }: LiveAudioOptions): 
         console.error('WebSocket error for live audio:', err);
       };
 
-      return () => closeConnection(wsRef, audioContextRef);
+      return closeConnection;
     } catch (err) {
+      closeConnection();
       console.error('Failed to connect to live audio:', err);
       return undefined;
     }
   }, [status, listenUrl, isMuted]);
-}
-
-function closeConnection(
-  wsRef: React.MutableRefObject<WebSocket | null>,
-  audioContextRef: React.MutableRefObject<AudioContext | null>,
-): void {
-  if (wsRef.current) {
-    wsRef.current.close();
-    wsRef.current = null;
-  }
-  if (audioContextRef.current) {
-    void audioContextRef.current.close();
-    audioContextRef.current = null;
-  }
 }
 
 function playChunk(ctx: AudioContext, data: ArrayBuffer, nextPlayTime: number): number {

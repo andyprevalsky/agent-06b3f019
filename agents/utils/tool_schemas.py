@@ -3,6 +3,7 @@
 import json
 import re
 from enum import Enum
+from functools import lru_cache
 from typing import Annotated, Any, Dict, List, Literal, Optional, Type, Union
 from urllib.parse import urlsplit
 
@@ -26,6 +27,7 @@ from utils.prompts import (
     PLANNER_TASK_DEPENDS_ON_DESCRIPTION,
     PLANNER_TASK_GOAL_DESCRIPTION,
     PLANNER_TASK_IDX_DESCRIPTION,
+    PLANNER_TASK_TITLE_DESCRIPTION,
     PLANNER_TASK_TOOL_NAME_DESCRIPTION,
     SELF_CONTAINED_GOAL_RULE,
 )
@@ -33,6 +35,7 @@ from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
 )
+from utils.tool_output_schema import ReadToolOutputTool
 from utils.user_facing_writing_prompt import user_facing_text_description
 from utils.wait_for_bounds import (
     WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS,
@@ -74,6 +77,7 @@ PLANNER_RUN_IN_BACKGROUND_DESCRIPTION = (
 
 # Tools available during PLAN phase (research + create execution plan)
 PLAN_PHASE_TOOLS = [
+    "read_tool_output",
     "spawn_agent",  # Only type="explore" allowed in PLAN (enforced at runtime)
     "send_message_to_user",
     "set_plan",
@@ -82,6 +86,7 @@ PLAN_PHASE_TOOLS = [
 
 # Tools available during EXECUTE phase (run the plan)
 EXECUTE_PHASE_TOOLS = [
+    "read_tool_output",
     "spawn_agent",  # Unified: type=browser|code|general_purpose|explore
     "wait_for",
     "send_message_to_user_execute_phase",
@@ -167,10 +172,24 @@ assert _plan_tool_values == _expected_tools, (
 # ============================================================================
 
 
-class PlannerTask(BaseModel):
+class _PlannerTaskBase(BaseModel):
+    """Shared validation for planner task models."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _untitled_legacy_task(cls, data: Any) -> Any:
+        # Plans recorded before per-task titles (Fast Mode replays) have no
+        # title; the schema still requires it from live planner calls.
+        if isinstance(data, dict) and "title" not in data:
+            return {**data, "title": ""}
+        return data
+
+
+class PlannerTask(_PlannerTaskBase):
     """A single task in the planner output."""
 
     task_idx: str = Field(description=PLANNER_TASK_IDX_DESCRIPTION)
+    title: str = Field(description=PLANNER_TASK_TITLE_DESCRIPTION)
     goal: str = Field(description=PLANNER_TASK_GOAL_DESCRIPTION)
     tool_name: PlanToolName = Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)
     depends_on: List[str] = Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION)
@@ -368,7 +387,9 @@ class WaitForTool(BaseModel):
         description=(
             f"Maximum seconds to wait for agents (default {WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS}, at most "
             f"{WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS}; values below {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS} are raised "
-            f"to {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS}). Only valid with agents."
+            f"to {WAIT_FOR_AGENTS_MIN_TIMEOUT_SECONDS}). Only valid with agents. For a longer wait use "
+            "until_timestamp: it ends early as soon as one of your background agents finishes or an agent "
+            "messages you."
         ),
     )
     check_interval_seconds: int = Field(
@@ -681,7 +702,8 @@ class GrepTool(BaseModel):
             "Ordinary results include messages and outputs; record_kind=all includes replayed "
             "inputs. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
-            "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
+            "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, Granola meeting notes, "
+            "and generic user documents. "
             "calendar searches the user's Google Calendar events; drive searches Google Drive "
             "file names, folders, and file text. "
             "summary returns a compact, precomputed inventory with message counts, date ranges, "
@@ -736,7 +758,10 @@ class GrepTool(BaseModel):
     )
     order: Optional[Literal["newest_first", "oldest_first"]] = Field(
         default=None,
-        description="Order messages in one agent_trajectories search. Defaults to newest_first.",
+        description=(
+            "Order messages in one agent_trajectories search. Defaults to newest_first. "
+            "Ignored for other sources; display_order reports the order used."
+        ),
     )
     page_after: Optional[str] = Field(
         default=None,
@@ -744,7 +769,10 @@ class GrepTool(BaseModel):
     )
     until: Optional[str] = Field(
         default=None,
-        description="Latest timestamp for agent trajectory results (ISO 8601).",
+        description=(
+            "Latest timestamp (ISO 8601) for each selected source whose filters accept until: "
+            "agent_trajectories, transactions, documents, calendar, drive."
+        ),
     )
     require_source_access: Optional[bool] = Field(
         default=None,
@@ -798,20 +826,26 @@ class GrepTool(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
-            "Nested per-source filters. Each source accepts only its own keys:\n"
+            "Per-source filters. Each source accepts only its own keys:\n"
             "  messages (and email, gmail, imessage, whatsapp): person, since, path\n"
             "  network: path\n"
-            "  agent_network: path\n"
+            "  agent_network: path, role\n"
             "  agent_trajectories: path, since, until, role, surface, record_kind\n"
             "  transactions: since, until, account, min_amount, max_amount, "
             "status ('posted', 'pending', or 'all'), include_pending_in_totals, path\n"
             "  documents: document_source, since, until, tag, path\n"
             "  calendar, drive: since, until, path\n"
+            'A flat key ({"since": "7d"}) applies to every selected source that accepts it. To target one '
+            'source, nest its keys under the source name: {"calendar": {"since": "2026-11-02"}}; a messages '
+            "block covers email, gmail, imessage and whatsapp. "
             "documents is an umbrella corpus, so set document_source to the concrete provider "
-            "(chatgpt, claude, apple_notes, or obsidian). "
+            "(chatgpt, claude, apple_notes, obsidian, or granola). granola covers every Granola "
+            "meeting; granola_note (title, time, attendees, own notes), granola_summary or "
+            "granola_transcript searches just that layer. "
             "`path` takes a path from an earlier result "
             "(e.g. 'network/Andy Prevalsky.contact', 'messages/+15551234567.thread') "
-            "to scope the search to that record or thread. "
+            "to scope that path's own source to the record or thread; for agent_network and agent_trajectories "
+            "it may instead be an agent address such as /root/outreach. "
             "A calendar or drive path may also be a folder of a result path, such as "
             "'calendar/<account>/2026-10-02' or 'drive/<account>/My Drive/Legal'. "
             "Calendar since and until take a date (YYYY-MM-DD) and include that whole day; "
@@ -828,7 +862,7 @@ class GrepTool(BaseModel):
     since: Optional[str] = Field(
         default=None,
         description=(
-            "Messages or agent trajectories at or after this time. "
+            "Results at or after this time, for each selected source whose filters accept since. "
             "ISO 8601 timestamp or a relative form like 7d, 24h, 30m."
         ),
     )
@@ -1096,6 +1130,12 @@ BROWSER_GOAL_PROFILE_NOTE = (
 )
 
 
+def _require_spawn_output_schema_key(schema: Dict[str, Any]) -> None:
+    required = schema.setdefault("required", [])
+    if "output_schema" not in required:
+        required.append("output_schema")
+
+
 class SpawnAgentTool(BaseModel):
     """Spawn an autonomous agent; type selects capabilities and per-type required fields.
 
@@ -1108,6 +1148,8 @@ class SpawnAgentTool(BaseModel):
     general_purpose sub-agents; otherwise it will likely spawn another
     general_purpose to retry the same faulty tool after the first error.
     """
+
+    model_config = ConfigDict(json_schema_extra=_require_spawn_output_schema_key)
 
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "general_purpose", "explore", "for_each"] = Field(
@@ -1307,6 +1349,8 @@ class SpawnAgentToolNoGP(BaseModel):
     narrowing beats a runtime rejection loop the same way SpawnExploreAgentTool
     does for PLAN.
     """
+
+    model_config = ConfigDict(json_schema_extra=_require_spawn_output_schema_key)
 
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "explore"] = Field(
@@ -1594,6 +1638,7 @@ ToolRegistry = Dict[str, Type[BaseModel]]
 
 # Map tool names to their Pydantic models
 TOOL_MODELS: ToolRegistry = {
+    "read_tool_output": ReadToolOutputTool,
     "wait_for": WaitForTool,
     "web_search": WebSearchTool,
     "people_search": PeopleSearchTool,
@@ -1660,6 +1705,7 @@ def _with_rose_desktop_models(registry: ToolRegistry) -> ToolRegistry:
 # Full registry list -  callers that inject tools into an explore agent MUST use
 # `get_explore_agent_tools()` so ROSE_DISABLE_API_REQUEST can strip api_request.
 EXPLORE_AGENT_TOOLS = [
+    "read_tool_output",
     "web_search",
     "people_search",
     "web_fetch",
@@ -1801,13 +1847,14 @@ def get_planner_response_model() -> Type[BaseModel]:
     task_model = create_model(
         "PlannerTaskNoGP",
         task_idx=(str, Field(description=PLANNER_TASK_IDX_DESCRIPTION)),
+        title=(str, Field(description=PLANNER_TASK_TITLE_DESCRIPTION)),
         goal=(str, Field(description=PLANNER_TASK_GOAL_DESCRIPTION)),
         tool_name=(filtered_enum, Field(description=PLANNER_TASK_TOOL_NAME_DESCRIPTION)),
         depends_on=(
             List[str],
             Field(default_factory=list, description=PLANNER_TASK_DEPENDS_ON_DESCRIPTION),
         ),
-        __base__=BaseModel,
+        __base__=_PlannerTaskBase,
     )
     return create_model(
         "PlannerResponseNoGP",
@@ -1852,6 +1899,14 @@ def create_agent_action_model(
         else:
             logger.warning(f"Tool '{name}' not found in registry, skipping")
 
+    # Compiled classes are shared definitions: instantiate them or derive a
+    # JSON schema, but do not mutate their fields or force model rebuilding.
+    return _agent_action_model_for_types(tuple(tool_types))
+
+
+@lru_cache(maxsize=128)
+def _agent_action_model_for_types(tool_types: tuple[Type[BaseModel], ...]) -> Type[BaseModel]:
+    """Compile each ordered tool-model set once, including across workflow replays."""
     # Create union type for tool calls
     if not tool_types:
         # No tools available - agent can only communicate

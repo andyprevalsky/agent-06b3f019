@@ -1,6 +1,7 @@
 import assert from 'node:assert';
 import fs from 'node:fs';
-import { Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import {
   collectFixture,
@@ -200,39 +201,74 @@ export async function testManifestLockHoldsNoConnectionDuringStorageIo(
   seed: RunSeed
 ): Promise<void> {
   const { withArchiveManifestLock } = await import('../../providers/traceArchiveManifest');
-  // Only transactions that hold or last touched the manifest lease count: the
-  // coverage run shares this database with every other concurrent domain, whose
-  // own open transactions are not the lock's connection.
+  const databaseOwner = process.env.BLACKBOX_TEST_DATABASE_OWNER;
+  assert(databaseOwner, 'the native runner must assign the archive database owner');
+  const [session] = await prisma.$queryRaw<Array<{ owner: string }>>`
+    SELECT current_setting('application_name') AS owner
+  `;
+  assert.strictEqual(session.owner, databaseOwner, 'archive pool must carry its owner at connect');
   const heldInTransaction = async (since: Date) =>
-    prisma.$queryRaw<Array<{ pid: number; xactStart: Date }>>`
-      SELECT a.pid, a.xact_start AS "xactStart" FROM pg_stat_activity a
-      WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()
-        AND a.state LIKE 'idle in transaction%' AND a.xact_start <= ${since}
-        AND (
-          a.query ILIKE '%TraceArchiveManifest%'
-          OR EXISTS (
-            SELECT 1 FROM pg_locks l
-            WHERE l.pid = a.pid AND l.relation = to_regclass('"TraceArchiveManifestLease"')
-          )
-        )
+    prisma.$queryRaw<Array<{ pid: number; xactStart: Date; owner: string }>>`
+      SELECT pid, xact_start AS "xactStart", application_name AS owner FROM pg_stat_activity
+      WHERE datname = current_database() AND pid <> pg_backend_pid()
+        AND application_name = ${databaseOwner}
+        AND state LIKE 'idle in transaction%' AND xact_start <= ${since}
     `;
-  await withArchiveManifestLock(seed.rootAgentId, async (ownership) => {
-    const operationStart = new Date();
-    // Stand-in for an R2 round trip performed under the lock.
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    const first = await heldInTransaction(operationStart);
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    const second = await heldInTransaction(operationStart);
-    const pinned = first.filter((row) =>
-      second.some((later) => later.pid === row.pid && +later.xactStart === +row.xactStart)
+  await prisma.$transaction(async (tx) => {
+    const [owned] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    const observed = await heldInTransaction(new Date());
+    assert(
+      observed.some((row) => row.pid === owned.pid),
+      'observer must detect an old owned transaction'
     );
-    assert.deepStrictEqual(
-      pinned,
-      [],
-      `manifest lock held a pooled connection in an open transaction during storage I/O: ${JSON.stringify(pinned)}`
-    );
-    await ownership.assertOwned();
   });
+
+  const foreignUrl = new URL(process.env.DATABASE_URL!);
+  const foreignOwner = `foreign-${randomUUID()}`;
+  foreignUrl.searchParams.set('application_name', foreignOwner);
+  foreignUrl.searchParams.set('connection_limit', '1');
+  const foreign = new PrismaClient({
+    datasources: { db: { url: foreignUrl.href } },
+  });
+  try {
+    // A one-connection foreign pool keeps this explicitly owned control on
+    // one backend until ROLLBACK; it must survive both storage-I/O samples.
+    await foreign.$executeRaw`BEGIN`;
+    const [foreignSession] = await foreign.$queryRaw<
+      Array<{ pid: number }>
+    >`SELECT pg_backend_pid() AS pid`;
+    const assertForeignHeld = async () => {
+      const rows = await prisma.$queryRaw<Array<{ owner: string; state: string }>>`
+        SELECT application_name AS owner, state FROM pg_stat_activity WHERE pid = ${foreignSession.pid}
+      `;
+      assert.deepStrictEqual(rows, [{ owner: foreignOwner, state: 'idle in transaction' }]);
+    };
+    await assertForeignHeld();
+    await withArchiveManifestLock(seed.rootAgentId, async (ownership) => {
+      const operationStart = new Date();
+      // Stand-in for an R2 round trip performed under the lock.
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const first = await heldInTransaction(operationStart);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const second = await heldInTransaction(operationStart);
+      const pinned = first.filter((row) =>
+        second.some((later) => later.pid === row.pid && +later.xactStart === +row.xactStart)
+      );
+      assert.deepStrictEqual(
+        pinned,
+        [],
+        `manifest lock held a pooled connection in an open transaction during storage I/O: ${JSON.stringify(pinned)}`
+      );
+      await ownership.assertOwned();
+    });
+    await assertForeignHeld();
+  } finally {
+    try {
+      await foreign.$executeRaw`ROLLBACK`;
+    } finally {
+      await foreign.$disconnect();
+    }
+  }
 }
 
 /** The fixture's ToolSideEffect read must seek by index, not scan the table. */

@@ -41,6 +41,8 @@ export interface Agent {
   archived_at?: string | null;
   /** Owning project (Rose Desktop groups the sidebar by it); absent/null → Home (root project). */
   project_id?: string | null;
+  /** Folder within the owning project; absent/null means the project root. */
+  folder_id?: string | null;
   model: string;
   source: 'WEB' | 'MAC_APP';
   reasoning_effort: 'off' | 'low' | 'medium' | 'high';
@@ -69,6 +71,7 @@ export interface Agent {
   price_limit_cents: number; // Price limit in cents (100 = $1.00)
   tree_cost_cents: number; // Total tree cost in cents
   fast_mode_cache_enabled?: boolean;
+  speed?: 'standard' | 'fast' | 'ultrafast'; // Provider speed the agent's LLM calls use
   world_model_mode?: 'real' | 'simulate' | 'shadow';
   created_at: string;
   updated_at: string;
@@ -165,6 +168,7 @@ export interface Message {
     browser_url?: string;
     task_id?: string;
     action_type?: import('../realtime-types/message-metadata').MessageMetadata['action_type'];
+    userPause?: import('../realtime-types/message-metadata').MessageMetadata['userPause'];
     auxiliary?: {
       coordinates?: { x: number; y: number };
       [key: string]: unknown;
@@ -194,9 +198,11 @@ export interface CreateAgentPayload {
   price_limit_cents?: number; // Defaults to $10.00
   depth?: number; // Depth >= 1 auto-responds to questions (used for agentic integrations)
   start_phase?: 'plan' | 'execute'; // Skip chat routing: start the cloud agent workflow directly
-  fast_mode_cache_enabled?: boolean; // Fast Mode button → LLM provider speed (DEMO cache is prompt-matched)
+  fast_mode_cache_enabled?: boolean; // Legacy Fast Mode button; `speed` supersedes it
+  speed?: 'standard' | 'fast' | 'ultrafast'; // Forwarded to every LLM provider; never gates a cache
   world_model_mode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
   project_id?: string; // Rose Desktop: create the agent inside this project (omitted = Home)
+  folder_id?: string | null; // Optional folder within the project
 }
 
 // Sub-agent Tree Types

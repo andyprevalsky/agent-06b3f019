@@ -36,7 +36,7 @@ async def _probe(name: str, *, tools=None, tool_choice=None, response_format=Non
                 tool_choice=tool_choice,
                 temperature=None,
                 effort="xhigh",
-                provider_fast_mode=True,
+                speed="fast",
                 request_id=f"foundry-live-{name}",
                 route_key=None,
                 agent_id=None,

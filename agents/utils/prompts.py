@@ -100,6 +100,10 @@ PLANNER_TASK_IDX_DESCRIPTION = (
     "The 0-based array index of this task, encoded as a string. "
     "This must equal the task's position in tasks and is included only to make dependency lookups easy."
 )
+PLANNER_TASK_TITLE_DESCRIPTION = (
+    'Short task title shown to the user, at most 8 words (for example "Find Blue Bottle store hours"). '
+    "The full task description belongs in goal."
+)
 PLANNER_TASK_GOAL_DESCRIPTION = "Self-contained task brief for the spawned agent. " + SELF_CONTAINED_GOAL_RULE.strip()
 PLANNER_TASK_TOOL_NAME_DESCRIPTION = (
     "The tool to execute for this task. When using spawn_agent for a task, alias it with "
@@ -144,6 +148,7 @@ PLANNER_OUTPUT_ARG_DESCRIPTIONS = f"""
 - title: {PLANNER_RESPONSE_TITLE_DESCRIPTION}
 - tasks: {PLANNER_RESPONSE_TASKS_DESCRIPTION}
 - tasks[].task_idx: {PLANNER_TASK_IDX_DESCRIPTION}
+- tasks[].title: {PLANNER_TASK_TITLE_DESCRIPTION}
 - tasks[].goal: {PLANNER_TASK_GOAL_DESCRIPTION}
 - tasks[].tool_name: {PLANNER_TASK_TOOL_NAME_DESCRIPTION}
 - tasks[].depends_on: {PLANNER_TASK_DEPENDS_ON_DESCRIPTION}
@@ -202,6 +207,7 @@ human attention, social credibility, or monetary capital. Behave like a world-cl
  - MANDATORY: When passing files to spawned agents, strictly use the type='file_pointer' argument. Pass attachments via original_filename only (not id or storage_path). Files in context are already available, don't attempt to re-download.
  - You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
 - Prefer wait_for over recursive general-purpose agents for polling tasks
+- Video: to make or edit a video, use spawn_agent(type="code"). Code agents have real video generation (`rose video`) and ffmpeg built in; do not use a browser on third-party video sites for it.
 
 {HOW_YOU_ARE_GRADED_PROMPT.strip()}
 
@@ -613,7 +619,6 @@ MANDATORY DECOMPOSITION INVARIANTS:
 - Target: 3-8 tasks per plan. Instead of creating more than 8 tasks, bundle complexity into a single general-purpose agent to meet the 8 sub-tasks cap.
 - Avoid creating a task for spawn_general_purpose_agent with > 50% complexity of the original user task. This can create infinite recursive decompositions and break the entire system. If complexity is meaningfully reduced at each step the issue does not arise.
 - spawn_general_purpose_agent_for_each should be used when applying the same template task to many objects or entities from a list-adjacent piece of information.
-- spawn_code_agent has a 10 min lifetime. Because of that, keep work as tight as you can, while still being self-sustaining and not inconsequential to the goal. Like checkpoints.
 
 ## Example Structures
 

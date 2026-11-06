@@ -46,6 +46,104 @@ def test_legacy_cached_spawn_names_are_stable_and_scoped():
         live, from_fast_cache=False, cache_sequence_id="turn-1"
     ) == 0
     assert "task_name" not in live["tool_calls"][0]
+async def test_tool_output_preview_and_readback_at_model_boundary():
+    """Main builder retains complete text, structured output and attachment labels."""
+    import copy
+    import re
+    from helpers.llm import build_llm_messages
+    from _test_utils import retained_tool_output_fixture
+
+    tail = "EXACT_TAIL_SENTINEL"
+    raw = "body " * 30000 + tail
+    context = [
+        {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+            {"tool": "grep", "tool_call_id": "tc-1", "pattern": "x"}]}},
+        {"role": "TOOL", "text": raw, "metadata": {
+            "toolCallId": "tc-1", "toolName": "grep", "toolStatus": "ERROR", "error": True,
+            "structured_response": {"success": False, "error": True, "body": raw}}},
+    ]
+    original = copy.deepcopy(context)
+    with retained_tool_output_fixture() as stored:
+        messages = await build_llm_messages(context, "SYSTEM" * 30000, user_id="u", agent_id="a")
+        assert messages[0]["content"] == "SYSTEM" * 30000
+        preview = next(m for m in messages if m["role"] == "tool")
+        assert len(preview["content"]) <= 100000
+        assert tail not in preview["content"]
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', preview["content"])[1]
+        from tools.read_tool_output import read_tool_output_activity
+        page = await read_tool_output_activity("u", "a", "", {"output_id": output_id, "query": tail})
+        assert page["success"] and tail in page["content"]
+        assert page == await read_tool_output_activity("u", "a", "", {"output_id": output_id, "query": tail})
+        for owner in [("other", "a"), ("u", "other")]:
+            try:
+                await read_tool_output_activity(*owner, "", {"output_id": output_id})
+            except (ValueError, KeyError):
+                pass
+            else:
+                raise AssertionError("Cross-owner read succeeded")
+        assert stored
+        # Binary attachment metadata remains attached and is retained in full.
+        attached = copy.deepcopy(context)
+        attached[1]["file_pointer"] = {
+            "id": "binary-1", "storage_path": "u/blob.bin", "original_filename": "blob.bin",
+            "mime_type": "application/octet-stream", "size_bytes": 4096,
+            "created_at": "2024-01-01T00:00:00Z"}
+        attached_messages = await build_llm_messages(attached, "system", user_id="u", agent_id="a")
+        attached_preview = next(m["content"] for m in attached_messages if m["role"] == "tool")
+        assert "blob.bin" in attached_preview
+        attached_id = re.search(r'output_id="([a-f0-9]{32})"', attached_preview)[1]
+        attachment_page = await read_tool_output_activity("u", "a", "", {"output_id": attached_id, "query": "blob.bin"})
+        assert "blob.bin" in attachment_page["content"]
+        assert attached[1]["file_pointer"]["storage_path"] == "u/blob.bin"
+        # A persistence failure never claims a readable preview: the request
+        # keeps a bounded, explicitly stated cut and the original context.
+        failed_context = copy.deepcopy(context)
+        failed_context[1]["text"] += " new uncached content"
+        failed_canonical = copy.deepcopy(failed_context)
+        with patch("helpers.attachments.upload_to_storage", side_effect=OSError("storage failed")):
+            failed_messages = await build_llm_messages(failed_context, "system", user_id="u", agent_id="a")
+        failed_preview = next(m["content"] for m in failed_messages if m["role"] == "tool")
+        assert len(failed_preview) <= 100000 and tail not in failed_preview
+        assert "[Retained tool output:" not in failed_preview, "A lost tail was reported as a successful preview"
+        assert "retained readback unavailable after a storage failure" in failed_preview
+        assert failed_context == failed_canonical
+        small = copy.deepcopy(context)
+        small[1]["text"] = "short result"
+        small[1]["metadata"].pop("structured_response")
+        small_messages = await build_llm_messages(small, "system", user_id="u", agent_id="a")
+        assert "short result" == next(m["content"] for m in small_messages if m["role"] == "tool")
+        read_context = [
+            {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+                {"tool": "read_tool_output", "tool_call_id": "read-1", "output_id": output_id}]}},
+            {"role": "TOOL", "text": json.dumps(page), "metadata": {
+                "toolCallId": "read-1", "toolName": "read_tool_output", "toolStatus": "FINISHED"}},
+        ]
+        read_messages = await build_llm_messages(read_context, "system", user_id="u", agent_id="a")
+        assert tail in next(m["content"] for m in read_messages if m["role"] == "tool")
+    assert context == original, "Canonical evaluator/archive context must remain unchanged"
+
+
+async def test_repeated_main_tool_projection_reuses_artifact():
+    """Parent's real-builder probe: same context, same bytes and one upload."""
+    import copy
+    import re
+    from _test_utils import retained_tool_output_fixture
+    from helpers.llm import build_llm_messages
+    from tools.read_tool_output import read_tool_output_activity
+
+    context = [{"role": "TOOL", "text": "x" * 150000 + "TAIL", "metadata": {
+        "toolName": "web_search", "toolCallId": "same-call", "toolStatus": "FINISHED"}}]
+    original = copy.deepcopy(context)
+    with retained_tool_output_fixture() as objects:
+        first = await build_llm_messages(context, "System", user_id="repeat-user", agent_id="repeat-agent")
+        bytes_before = dict(objects)
+        second = await build_llm_messages(context, "System", user_id="repeat-user", agent_id="repeat-agent")
+        assert first == second, "Repeated unchanged model projection changes the handle/messages"
+        assert len(objects) == 1 and objects == bytes_before, "Repeated projection uploads duplicate artifacts"
+        output_id = re.search(r'output_id="([a-f0-9]{32})"', str(first))[1]
+        page = await read_tool_output_activity("repeat-user", "repeat-agent", "", {"output_id": output_id, "query": "TAIL"})
+        assert page["content"] == "TAIL"
+    assert context == original
 
 
 def test_prepare_schema_for_openai():
@@ -2208,6 +2306,7 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
         "accountId": "acct-1",
         "source": "pool",
         "poolTokenId": "pool-1",
+        "integrationId": "pool-1",
         "lineageKey": "agent:a-1",
         "fastCacheAffinityKey": "affinity-1",
     }
@@ -3619,6 +3718,25 @@ async def test_build_llm_messages_attachment_large_falls_back_to_metadata():
     # Should be plain text with metadata appended (no multimodal array)
     assert isinstance(user["content"], str)
     assert "f.png" in user["content"]
+
+
+async def test_build_llm_messages_inlined_image_has_one_label():
+    """The retained TOOL suffix must use the image's actual inline label."""
+    from helpers.attachments import FilePointer, build_attachment_metadata_text
+    from helpers.llm import build_llm_messages
+
+    fp_data = {
+        "id": "f-inline", "storage_path": "u/inline.png", "original_filename": "inline.png",
+        "mime_type": "image/png", "size_bytes": 100, "created_at": "2024-01-01T00:00:00Z",
+    }
+    inline_label = build_attachment_metadata_text(FilePointer.from_dict(fp_data), inlined=True)
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}}
+    context = [{"role": "TOOL", "text": "image result", "file_pointer": fp_data}]
+    with patch("helpers.llm.resolve_message_attachments", new=AsyncMock(return_value=([image], [inline_label]))):
+        messages = await build_llm_messages(context, "sys")
+    tool_text = str(next(msg for msg in messages if msg["role"] == "user")["content"])
+    assert tool_text.count("Shown inline above") == 1
+    assert "Not inlined for the parent LLM" not in tool_text
 
 
 async def test_build_llm_messages_skips_empty_file_output_assistant():
@@ -6416,6 +6534,9 @@ async def test_call_llm_activity_ignores_pending_context_left_by_an_evicted_work
     turn4_canonical_context: list = []
 
     async def mock_execute_activity(fn, args=None, **_kwargs):
+        from tools.read_tool_output import preview_tool_output_activity
+        if fn is preview_tool_output_activity:
+            return await fn(*(args or []))
         if fn is not llm_mod.call_llm_activity:
             return {}
         scheduled.append(list(args or []))
@@ -9762,6 +9883,28 @@ def test_ensure_tool_result_pairing_pulls_late_result_forward():
     assert sum(1 for m in fixed if m.get("tool_call_id") == call_id) == 1
 
 
+def test_ensure_tool_result_pairing_ignores_results_before_their_declaration():
+    """An earlier orphan must not hide the first real result after a later call."""
+    from helpers.llm import _ensure_tool_result_pairing
+
+    messages = [
+        {"role": "tool", "tool_call_id": "reused", "content": "earlier orphan"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "reused", "type": "function", "function": {"name": "spawn_agent"}}],
+        },
+        {"role": "assistant", "content": "intervening turn"},
+        {"role": "tool", "tool_call_id": "reused", "content": "first real result"},
+        {"role": "tool", "tool_call_id": "reused", "content": "duplicate result"},
+    ]
+    repaired = _ensure_tool_result_pairing(messages)
+    assert repaired[0]["role"] == "assistant"
+    assert repaired[1] == messages[3]
+    assert [message["content"] for message in repaired if message["role"] == "tool"] == ["first real result"]
+    assert _ensure_tool_result_pairing(repaired) == repaired
+
+
 def test_ensure_tool_result_pairing_strips_orphan_tool_result():
     """tool message with tool_call_id not declared by any preceding assistant is dropped."""
     from helpers.llm import _ensure_tool_result_pairing
@@ -9952,11 +10095,16 @@ async def test_structured_validation_retries_exclude_only_repeated_known_candida
 
 
 async def test_structured_validation_exhausted_candidate_preserves_typed_error():
-    """A lone eligible native model may fail schema twice, without losing the typed contract."""
+    """A lone eligible native model may fail schema twice, without losing the typed contract.
+
+    rose-1-oss now carries a rescuer (qwen/qwen3.8-27b); it is excluded here so
+    kimi-k3 stays the lone eligible candidate this case is about.
+    """
     import httpx
     from typing import Literal
     from pydantic import BaseModel, Field
     from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from providers.rose.truncation import model_key
     from utils.tool_schemas import create_agent_action_model
 
     class TypedTool(BaseModel):
@@ -10017,6 +10165,7 @@ async def test_structured_validation_exhausted_candidate_preserves_typed_error()
                 call_site="test_exhausted_structured_candidate",
                 skip_cache_write=True,
                 _exclude_anthropic_family=True,
+                _skip_models=frozenset({model_key("qwen/qwen3.8-27b")}),
             )
         except Exception as error:
             failure = error
@@ -10025,6 +10174,93 @@ async def test_structured_validation_exhausted_candidate_preserves_typed_error()
     assert isinstance(failure, LLMStructuredOutputError), (
         f"Exhausted structured validation lost its typed error: {type(failure).__name__}: {failure}"
     )
+
+
+async def test_structured_validation_second_oss_candidate_rescues_after_two_invalid_replies():
+    """Two unparseable kimi-k3 replies send the third attempt to the pool's qwen rescuer, which serves.
+
+    Before rose-1-oss had a second waterfall model, the exclusion after two
+    invalid replies left no candidate and the pinned biometrics benchmark died
+    with RoseAllFailed while Azure Foundry answered deployment_disabled.
+    """
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming, LLMStructuredOutputError
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    response_model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+        body = json.loads(request.content)
+        requests.append(body)
+        if len(requests) <= 2:
+            assert body["model"] == "moonshotai/kimi-k3"
+            valid = False
+        else:
+            assert body["model"] == "qwen/qwen3.8-27b"
+            valid = True
+        events = [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": f"invalid-{len(requests)}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "typed_lookup",
+                                        "arguments": json.dumps({"labels": ["typed"]} if valid else {"labels": '["invalid-string-array"]'}),
+                                    },
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return httpx.Response(
+            200,
+            text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    setup_mock_fn(handler)
+    failure = None
+    result = None
+    with patch.dict(
+        os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}
+    ):
+        try:
+            result, _, _ = await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "Return typed labels from the existing OSS pool."}],
+                model="rose-labs/rose-1-oss",
+                temperature=1,
+                max_tokens=128,
+                response_model=response_model,
+                on_chunk=AsyncMock(),
+                call_site="test_second_oss_candidate_rescues",
+                skip_cache_write=True,
+                _exclude_anthropic_family=True,
+            )
+        except Exception as error:
+            failure = error
+    assert failure is None, f"the qwen rescuer should have served: {type(failure).__name__}: {failure}"
+    assert [body["model"] for body in requests] == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], (
+        f"expected two kimi attempts then the rescuer: {[body['model'] for body in requests]}"
+    )
+    assert result is not None and result.tool_calls[0].labels == ["typed"]
 
 
 # ---------------------------------------------------------------------------
@@ -10259,19 +10495,375 @@ def test_verifier_keeps_a_childs_whole_final_answer():
     assert all(f"Announced 2026-0{i}-12" in evidence for i in range(1, 9))
 
 
+
+def test_structured_retry_feedback_narrows_to_model_level_branch_error():
+    """A model-level validator error on the matching union branch must lead the retry feedback.
+
+    Deploy 12 (agent 8099ad68): kimi-k3 answered the biometrics task with a
+    browser spawn_agent call that omitted output_schema. Pydantic reported 22
+    errors across all ten tool branches, and the retry feedback opened with
+    ``ReadToolOutputTool.tool: Input should be 'read_tool_output'`` — union noise
+    — while the one actionable line sat third of five with "17 more" dropped.
+    The matching branch's error loc is three parts long
+    (``tool_calls.0.function-after[check_spawn_agent_constraints(), SpawnAgentTool]``)
+    and ``_selected_tool_errors`` skipped it as a non-branch entry.
+    """
+    from pydantic import ValidationError
+    from utils.error_utils import extract_error_message
+    from utils.tool_schemas import create_agent_action_model
+
+    action_model = create_agent_action_model(
+        [
+            "read_tool_output",
+            "spawn_agent",
+            "wait_for",
+            "send_message_to_user_execute_phase",
+            "display",
+            "call_phone_number",
+            "message_person",
+            "send_message_to_agent",
+            "kill_agent",
+            "attempt_completion",
+        ]
+    )
+    # The dumped kimi-k3 arguments (1793477143807-03b5c497ce59-execute_loop.json), schema omitted.
+    emitted = {
+        "tool": "spawn_agent",
+        "type": "browser",
+        "task_name": "fcaptcha_demo",
+        "goal": "Go to https://webdecoy.com/product/fcaptcha-demo/ and interact like a normal user.",
+        "start_url": "https://webdecoy.com/product/fcaptcha-demo/",
+        "run_in_background": False,
+        "depth": "medium",
+    }
+    try:
+        action_model.model_validate({"response": "", "tool_calls": [emitted]})
+    except ValidationError as error:
+        summary = extract_error_message(error)
+    else:
+        raise AssertionError("a browser spawn without output_schema must not validate")
+
+    expected_lead = (
+        "1 validation error(s): tool_calls.0.function-after[check_spawn_agent_constraints(), SpawnAgentTool]: "
+        "Value error, output_schema is required when type='browser'."
+    )
+    assert summary.startswith(expected_lead), f"actionable branch error must lead the feedback: {summary!r}"
+    for noise in ("ReadToolOutputTool", "WaitForTool", "more"):
+        assert noise not in summary, f"union noise {noise!r} must not reach the retry feedback: {summary!r}"
+
+
+async def test_structured_exclusion_carries_into_next_activity_attempt():
+    """A model excluded after two invalid replies stays excluded for the turn's next attempt.
+
+    Deploy 12 (agent 8099ad68, rose-1-oss): each of the three outer
+    ``run_agent.structured_output_retry`` attempts re-tried kimi-k3 twice before
+    reaching qwen, so six of nine calls went to the model that had already
+    failed the same context twice. The activity now reports the excluded set in
+    ``ApplicationError.details`` and accepts it back as ``skip_models`` so the
+    agent loop's next attempt starts on the next candidate.
+    """
+    import httpx
+    from helpers.llm import call_llm_activity
+    from providers.rose.truncation import model_key
+    from temporalio.exceptions import ApplicationError
+
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+        body = json.loads(request.content)
+        requests.append(body["model"])
+        events = [
+            {
+                "model": body["model"],
+                "actual_model": body["model"],
+                "choices": [
+                    {
+                        "delta": {
+                            "content": json.dumps(
+                                {
+                                    "response": "Sending the message now.",
+                                    "tool_calls": [{"tool": "send_message_to_agent", "intent": "hello"}],
+                                }
+                            )
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+            {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        ]
+        return httpx.Response(
+            200,
+            text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    setup_mock_fn(handler)
+
+    async def attempt(skip_models):
+        try:
+            await call_llm_activity(
+                messages_or_agent_id=[{"role": "user", "content": "Message the agent from the OSS pool."}],
+                model="rose-labs/rose-1-oss",
+                tool_names=["message_person"],
+                reasoning_max_tokens=0,
+                call_site="test_structured_exclusion_carry_over",
+                **({"skip_models": skip_models} if skip_models is not None else {}),
+            )
+        except ApplicationError as error:
+            return error
+        raise AssertionError("an invalid structured reply on every candidate must surface a typed error")
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch.dict(
+            os.environ,
+            {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""},
+        ),
+    ):
+        first = await attempt(None)
+        assert first.type == "LLMStructuredOutputError" and first.non_retryable is True
+        assert requests == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], requests
+        excluded = [detail for detail in first.details if isinstance(detail, dict) and "excluded_models" in detail]
+        assert excluded and excluded[0]["excluded_models"] == [model_key("moonshotai/kimi-k3")], (
+            f"the activity must report the excluded candidate: details={list(first.details)!r}"
+        )
+
+        requests.clear()
+        second = await attempt(excluded[0]["excluded_models"])
+
+    assert second.type == "LLMStructuredOutputError"
+    assert requests == ["qwen/qwen3.8-27b", "qwen/qwen3.8-27b"], (
+        f"the next attempt must not re-select the excluded candidate: {requests}"
+    )
+    excluded_after = [d for d in second.details if isinstance(d, dict) and "excluded_models" in d][0]["excluded_models"]
+    assert excluded_after == sorted({model_key("moonshotai/kimi-k3"), model_key("qwen/qwen3.8-27b")})
+
+
+
+async def test_structured_exclusion_counts_no_json_and_non_object_replies():
+    """Reasoning-only and non-object JSON replies count toward excluding the candidate.
+
+    CodeRabbit on PR #1660: the failed-model bookkeeping only recognised
+    ``json.JSONDecodeError`` / ``ValidationError``. A model answering with
+    reasoning but no JSON (``No JSON content received``) or with a JSON array
+    raised a plain ``ValueError`` / ``AttributeError`` instead, so two such
+    replies never excluded it and the third regeneration went back to the same
+    model instead of the pool's next candidate.
+    """
+    import httpx
+    from typing import Literal
+    from pydantic import BaseModel, Field
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    class TypedTool(BaseModel):
+        tool: Literal["typed_lookup"]
+        labels: list[str] = Field(min_length=1)
+
+    response_model = create_agent_action_model(["typed_lookup"], tool_registry={"typed_lookup": TypedTool})
+    shapes = {
+        "reasoning_without_json": {"reasoning": "I will look the labels up now."},
+        "json_array": {"content": json.dumps(["typed"])},
+    }
+
+    for shape_name, invalid_delta in shapes.items():
+        requests = []
+
+        def handler(request, invalid_delta=invalid_delta, requests=requests):
+            if request.url.host != "openrouter.ai":
+                raise AssertionError(f"Unexpected route outside the existing OSS pool: {request.url.host}")
+            body = json.loads(request.content)
+            requests.append(body["model"])
+            if body["model"] == "moonshotai/kimi-k3":
+                delta = invalid_delta
+            else:
+                delta = {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": f"valid-{len(requests)}",
+                            "type": "function",
+                            "function": {"name": "typed_lookup", "arguments": json.dumps({"labels": ["typed"]})},
+                        }
+                    ]
+                }
+            events = [
+                {"choices": [{"delta": delta, "finish_reason": "tool_calls" if "tool_calls" in delta else "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+            return httpx.Response(
+                200,
+                text="\n".join("data: " + json.dumps(event) for event in events) + "\ndata: [DONE]\n",
+                headers={"content-type": "text/event-stream"},
+            )
+
+        setup_mock_fn(handler)
+        failure = None
+        result = None
+        with patch.dict(
+            os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}
+        ):
+            try:
+                result, _, _ = await call_llm_structured_streaming(
+                    messages=[{"role": "user", "content": f"Return typed labels ({shape_name})."}],
+                    model="rose-labs/rose-1-oss",
+                    temperature=1,
+                    max_tokens=128,
+                    response_model=response_model,
+                    on_chunk=AsyncMock(),
+                    call_site=f"test_exclusion_{shape_name}",
+                    skip_cache_write=True,
+                    _exclude_anthropic_family=True,
+                )
+            except Exception as error:
+                failure = error
+        assert requests == ["moonshotai/kimi-k3", "moonshotai/kimi-k3", "qwen/qwen3.8-27b"], (
+            f"{shape_name}: two invalid replies must exclude the model and route the third attempt onward: {requests}"
+        )
+        assert failure is None, f"{shape_name}: the rescuer should have served: {type(failure).__name__}: {failure}"
+        assert result is not None and result.tool_calls[0].labels == ["typed"]
+
+
+async def test_flash_anthropic_exclusion_covers_initial_and_rotation_leases():
+    from helpers.llm import _flash_agent_auth_contexts
+    from providers.rose.types import ClaudeAuthContext, GptAuthContext
+
+    calls = []
+
+    async def broker(_user_id, **kwargs):
+        calls.append(kwargs["token_type"])
+        return None
+
+    kwargs = dict(user_id="fixture-user", lineage_key=None, agent_id="fixture-agent",
+                  demo_cache_affinity_key=None, exclude_anthropic_family=True)
+    with patch("helpers.llm.fetch_compute_token_activity", broker):
+        assert await _flash_agent_auth_contexts(None, None, **kwargs) == (None, None)
+        assert calls == ["gpt"]
+        calls.clear()
+        claude = ClaudeAuthContext("fixture-claude", "pool", "fixture-user")
+        assert await _flash_agent_auth_contexts(claude, None, **kwargs) == (None, None)
+        assert calls == ["gpt"]
+        calls.clear()
+        gpt = GptAuthContext("fixture-gpt", "pool", "fixture-user")
+        assert await _flash_agent_auth_contexts(None, gpt, **kwargs) == (None, gpt)
+        assert gpt.fetch_fresh is not None
+        assert await gpt.fetch_fresh("fixture-user") is None
+        assert calls == ["gpt"]
+
+
+async def test_flash_call_llm_process_exclusion_reaches_collect():
+    from helpers.llm import call_llm
+    from providers.rose.types import RoseResponse
+
+    for excluded in (False, True):
+        kinds = []
+        requests = []
+
+        async def broker(_user_id, **kwargs):
+            kinds.append(kwargs["token_type"])
+            if kwargs["token_type"] == "claude":
+                return {"type": "claude", "accessToken": "fixture-claude", "source": "pool",
+                        "userId": "fixture-user", "poolTokenId": "fixture-pool"}
+            return None
+
+        class Client:
+            async def collect(self, **kwargs):
+                requests.append(kwargs)
+                return RoseResponse(content="fixture collected", actual_model="fixture-model",
+                                    usage={"finish_reason": "stop"})
+
+        with patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1" if excluded else "0"}), \
+             patch("helpers.llm.fetch_compute_token_activity", broker), \
+             patch("helpers.llm.RoseClient", Client), patch("helpers.llm._safe_heartbeat"):
+            result = await call_llm(messages=[{"role": "user", "content": "fixture"}],
+                                    model="rose-labs/rose-1-flash", call_site="plan_loop",
+                                    gpt_token_user_id="fixture-user", skip_cache_write=True)
+        assert result["content"] == "fixture collected"
+        assert len(requests) == 1, "actual call_llm must reach the collect boundary without NameError"
+        assert kinds == (["gpt"] if excluded else ["gpt", "claude"])
+        assert (requests[0]["claude_auth"] is None) == excluded
+
+
+async def test_flash_stream_process_and_call_exclusion_reach_stream():
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    Action = create_agent_action_model([])
+    for process_excluded, call_excluded in ((True, False), (False, True), (True, True), (False, False)):
+        kinds = []
+        requests = []
+
+        async def broker(_user_id, **kwargs):
+            kinds.append(kwargs["token_type"])
+            if kwargs["token_type"] == "claude":
+                return {"type": "claude", "accessToken": "fixture-claude", "source": "pool",
+                        "userId": "fixture-user", "poolTokenId": "fixture-pool"}
+            return None
+
+        async def complete(_client, **kwargs):
+            requests.append(kwargs)
+            yield StreamChunk("metadata", {"actual_model": "fixture-model", "pool_name": "rose-1-flash"})
+            yield StreamChunk("content", {"text": '{"response":"fixture streamed","tool_calls":[]}'})
+            yield StreamChunk("usage", {"finish_reason": "stop", "total_tokens": 1})
+            yield StreamChunk("done")
+
+        async def on_chunk(_text, _tokens):
+            pass
+
+        with patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1" if process_excluded else "0"}), \
+             patch("helpers.llm.fetch_compute_token_activity", broker), \
+             patch("helpers.llm.RoseClient"), patch("helpers.llm._safe_heartbeat"), \
+             patch("providers.demo_cache.rose_cache.cached_complete", complete):
+            result, _usage, _detected = await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "fixture"}], model="rose-labs/rose-1-flash",
+                temperature=0, max_tokens=128, response_model=Action, on_chunk=on_chunk,
+                call_site="plan_loop", gpt_token_user_id="fixture-user", skip_cache_write=True,
+                _exclude_anthropic_family=call_excluded)
+        assert result.response == "fixture streamed"
+        excluded = process_excluded or call_excluded
+        assert kinds == (["gpt"] if excluded else ["gpt", "claude"])
+        assert len(requests) == 1, "actual streaming entry point must reach the stream boundary"
+        assert (requests[0]["claude_auth"] is None) == excluded
+
+
 async def run_all_tests():
     print("llm blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("flash_call_llm_process_exclusion", test_flash_call_llm_process_exclusion_reaches_collect)
+    await r.record_async("flash_stream_process_and_call_exclusion", test_flash_stream_process_and_call_exclusion_reach_stream)
+    await r.record_async("flash_anthropic_exclusion_initial_and_rotation", test_flash_anthropic_exclusion_covers_initial_and_rotation_leases)
     await r.record_async("captured_desktop_display_native_json_array", test_captured_desktop_display_native_json_array_reaches_typed_action)
     await r.record_async(
         "structured_validation_exhausted_candidate_typed_error",
         test_structured_validation_exhausted_candidate_preserves_typed_error,
     )
     await r.record_async(
+        "structured_validation_second_oss_candidate_rescues",
+        test_structured_validation_second_oss_candidate_rescues_after_two_invalid_replies,
+    )
+    await r.record_async(
         "structured_validation_candidate_eligibility",
         test_structured_validation_retries_exclude_only_repeated_known_candidate,
     )
+    r.record(
+        "structured_retry_feedback_narrows_to_branch_error",
+        test_structured_retry_feedback_narrows_to_model_level_branch_error,
+    )
+    await r.record_async(
+        "structured_exclusion_carries_into_next_activity_attempt",
+        test_structured_exclusion_carries_into_next_activity_attempt,
+    )
+    await r.record_async(
+        "structured_exclusion_counts_no_json_and_non_object_replies",
+        test_structured_exclusion_counts_no_json_and_non_object_replies,
+    )
     r.record("legacy_cached_spawn_names_are_stable_and_scoped", test_legacy_cached_spawn_names_are_stable_and_scoped)
+    await r.record_async("tool_output_preview_readback", test_tool_output_preview_and_readback_at_model_boundary)
+    await r.record_async("repeated_main_tool_projection", test_repeated_main_tool_projection_reuses_artifact)
     r.record("prepare_schema_for_openai", test_prepare_schema_for_openai)
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)
@@ -10547,6 +11139,7 @@ async def run_all_tests():
         "build_llm_messages_attachment_large_falls_back_to_metadata",
         test_build_llm_messages_attachment_large_falls_back_to_metadata,
     )
+    await r.record_async("build_llm_messages_inlined_image_has_one_label", test_build_llm_messages_inlined_image_has_one_label)
     await r.record_async(
         "build_llm_messages_skips_empty_file_output_assistant",
         test_build_llm_messages_skips_empty_file_output_assistant,
@@ -10933,6 +11526,10 @@ async def run_all_tests():
     r.record(
         "ensure_tool_result_pairing_strips_orphan_tool_result",
         test_ensure_tool_result_pairing_strips_orphan_tool_result,
+    )
+    r.record(
+        "ensure_tool_result_pairing_ignores_earlier_orphan",
+        test_ensure_tool_result_pairing_ignores_results_before_their_declaration,
     )
     r.record(
         "ensure_tool_result_pairing_dedupes_cross_message_ids",

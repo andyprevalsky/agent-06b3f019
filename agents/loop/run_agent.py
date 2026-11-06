@@ -20,12 +20,13 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Tuple, Type
 
-import structlog
 from pydantic import BaseModel
 
 # All imports at module level - no inline imports to avoid workflow sandbox issues
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
+from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
 from helpers.attachment_context import attachment_request_overhead
 from helpers.attachments import extract_file_pointer_dicts, resolve_attachments_activity
@@ -34,6 +35,7 @@ from helpers.context_compaction import is_excluded_from_model
 from helpers.context_limits import AUTOCOMPACT_BUFFER_TOKENS, EFFECTIVE_OUTPUT_RESERVATION
 from helpers.context_pointers import annotate_with_pointer
 from helpers.handle_tool_event import handle_tool_event
+from helpers.jev_progress import JEVSession, prefix_events, with_jev_session
 from helpers.llm import (
     LLMStructuredOutputError,
     _completed_child_handoff_identity,
@@ -46,17 +48,18 @@ from helpers.llm import (
     check_progress,
     fetch_compute_token_activity,
 )
-from helpers.jev_progress import JEVSession, prefix_events, with_jev_session
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
 from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
 from helpers.summarize import (
+    TOOL_RESULT_HARD_CAP_CHARS,
     compaction_saved_ratio,
     compress_context,
     estimate_context_tokens,
-    hard_cap_tool_result_text,
 )
+from helpers.tool_output import RetentionError, preview_tool_text, stated_cut
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
+from helpers.workflow_safe import context_logger
 from helpers.workflow_safe import safe_now as _safe_now
 from helpers.workflow_safe import safe_uuid4 as _safe_uuid4
 from loop.activity_helper import call_temporal_activity_from_activity
@@ -64,7 +67,7 @@ from loop.context_utils import poll_and_update_context
 from providers.rose.errors import RoseRefusalError
 from tools.base import EventType, MessageStatus, ToolEvent
 from tools.knowledge_base import query_blueprints
-from utils.error_utils import error_chain_has_type, extract_error_message
+from utils.error_utils import error_chain_has_type, excluded_models_from_error, extract_error_message
 from utils.llm_timeouts import (
     STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS,
     VERIFIER_ACTIVITY_TIMEOUT_SECONDS,
@@ -73,7 +76,7 @@ from utils.rose_desktop import is_rose_desktop_user
 from utils.tool_schemas import create_agent_action_model, get_tool_models
 from utils.user_tool_models import build_user_tool_registry, llm_declarations
 
-logger = structlog.get_logger()
+logger = context_logger()
 
 
 class RequiredTurnToolError(LLMStructuredOutputError):
@@ -199,6 +202,8 @@ async def run_agent(
     is_inside_temporal_activity: bool = False,
     # Callbacks - abstract workflow vs activity differences
     check_paused: Optional[Callable[[], bool]] = None,
+    check_paused_before_turn: Optional[Callable[[], Awaitable[bool]]] = None,
+    on_unaccepted_turn_retry: Optional[Callable[[], None]] = None,
     check_aborted: Optional[Callable[[], Awaitable[bool]]] = None,
     wait_for_messages: Optional[Callable[[], Awaitable[bool]]] = None,
     on_context_overflow: Optional[Callable[[List[Dict]], Awaitable[None]]] = None,
@@ -211,6 +216,7 @@ async def run_agent(
     # agent-to-agent context rows to append before each LLM call.
     poll_inbox: Optional[Callable[[], Awaitable[List[Dict]]]] = None,
     execute_tool: Optional[Callable[[str, Dict, str], Awaitable[Dict]]] = None,
+    completion_handoff: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
     # Factual status of this agent's still-running background agents, appended
     # to the completion verifier's evidence (None when nothing is pending).
     get_pending_background_status: Optional[Callable[[], Optional[str]]] = None,
@@ -352,6 +358,14 @@ async def run_agent(
     # resumable transport retry. Replaying the same Fast Mode entry would
     # deterministically return the same rejected tool/schema again.
     bypass_fast_mode_cache_on_llm_retry = False
+    # Models the structured-output retry excluded after two invalid replies in a
+    # previous attempt of the SAME turn. Carried into the next attempt's
+    # `_skip_models` so the remaining attempts go to the next candidate instead
+    # of handing the same context back to the model that just failed it twice.
+    # Reset together with the other retry flags once a response is accepted:
+    # the exclusion answers this context's sampling pathology, not the model's
+    # fitness for later turns (browser steps, summaries) on the same pool.
+    skip_models_on_llm_retry: frozenset[str] = frozenset()
     consecutive_verifier_errors = 0  # Track consecutive verifier failures for early exit
     compactor_failures = 0  # Circuit-breaker: skip compaction after 3 consecutive failures
     ineffective_compactions = 0  # Circuit-breaker for repeated low-value compactions
@@ -392,6 +406,32 @@ async def run_agent(
     execute_activity = (
         call_temporal_activity_from_activity if is_inside_temporal_activity else workflow.execute_activity
     )
+
+    async def preview_result(text: str) -> str:
+        try:
+            # Retention and marker verification both touch storage; neither may
+            # run in deterministic workflow code.
+            if not is_inside_temporal_activity:
+                from tools.read_tool_output import preview_tool_output_activity
+
+                return await execute_activity(
+                    preview_tool_output_activity,
+                    args=[user_id, agent_id, task_id or "", text, TOOL_RESULT_HARD_CAP_CHARS],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            return await preview_tool_text(
+                text, user_id=user_id, agent_id=agent_id, session_id=task_id or "", limit=TOOL_RESULT_HARD_CAP_CHARS,
+            )
+        except (RetentionError, ActivityError) as error:
+            preview_timeout = isinstance(error, ActivityError) and isinstance(error.cause, TemporalTimeoutError)
+            if isinstance(error, ActivityError) and not preview_timeout and getattr(error.cause, "type", None) != RetentionError.__name__:
+                raise
+            # A storage failure must not turn a tool result into a loop error.
+            logger.warning("[run_agent] Tool output retention failed; keeping a stated cut", agent_id=agent_id, error=str(error))
+            return stated_cut(text, limit=TOOL_RESULT_HARD_CAP_CHARS,
+                              reason=("retained readback unavailable after a preview timeout" if preview_timeout
+                                      else "retained readback unavailable after a storage failure"))
 
     # Handle tool event wrapper - used by all tools
     async def _handle_tool_event(event, tool_call_id: str, tool_name: str):
@@ -1091,6 +1131,12 @@ async def run_agent(
                     limit=MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES,
                 )
 
+        # Admit a browser completion turn only after handoff and compaction
+        # boundaries. A continue-as-new before a model call must preserve it.
+        if check_paused_before_turn and await check_paused_before_turn():
+            iteration -= 1
+            continue
+
         # Schema and message preparation share the existing pre-acceptance
         # retry owner; no provider response or productive turn exists yet.
         llm_response_accepted = False
@@ -1216,6 +1262,8 @@ async def run_agent(
                         llm_context,
                         current_system_prompt,
                         user_id=user_id,
+                        agent_id=agent_id,
+                        session_id=task_id or "",
                         max_context_tokens=max_context_tokens,
                         request_overhead=attachment_request_overhead(AgentAction, completion_instruction),
                         require_inline_attachments=require_inline_attachments,
@@ -1437,6 +1485,7 @@ async def run_agent(
                                     cache_sequence_id=resolved_cache_sequence_id,
                                     call_site=cache_call_site,
                                     _exclude_anthropic_family=exclude_anthropic_family_on_llm_retry,
+                                    _skip_models=skip_models_on_llm_retry,
                                 )
                                 attempt_usage = usage
                                 _validate_required_turn_tool(pydantic_result, required_turn_tool)
@@ -1457,9 +1506,11 @@ async def run_agent(
                                     logger.info("Agent paused after rejected-attempt cost check")
                                     return _paused_after_cost_result()
                             if llm_attempt < max_llm_attempts and retryable_structured_result:
+                                skip_models_on_llm_retry = skip_models_on_llm_retry | excluded_models_from_error(e)
                                 logger.warning(
                                     f"[run_agent] LLM structured result rejected (attempt {llm_attempt}/{max_llm_attempts}), retrying",
                                     error=error_message,
+                                    skip_models=sorted(skip_models_on_llm_retry),
                                 )
                                 if required_tool_rejected:
                                     # The live response was structurally valid
@@ -1582,6 +1633,7 @@ async def run_agent(
                         max_context_tokens,
                         require_inline_attachments,
                         user_tool_decls or None,
+                        sorted(skip_models_on_llm_retry) or None,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -1617,6 +1669,7 @@ async def run_agent(
             # so it must not emit a synthetic zero-token billing event.
             exclude_anthropic_family_on_llm_retry = False
             bypass_fast_mode_cache_on_llm_retry = False
+            skip_models_on_llm_retry = frozenset()
             paused_after_provider_cost = completed_child_output is None and await _account_llm_usage(
                 usage,
                 label="accepted attempt",
@@ -1748,6 +1801,8 @@ async def run_agent(
             # so a later accounting/broadcast error must not refund it.
             if not llm_response_accepted:
                 iteration -= 1
+                if on_unaccepted_turn_retry:
+                    on_unaccepted_turn_retry()
             if error_chain_has_type(e, "LLMStructuredOutputError"):
                 # call_llm_activity marks schema/required-tool violations
                 # non-retryable so Temporal does not multiply requests. The
@@ -1755,11 +1810,13 @@ async def run_agent(
                 # retry must generate a fresh response rather than resume a
                 # cached response that already violated the contract.
                 bypass_fast_mode_cache_on_llm_retry = True
+                skip_models_on_llm_retry = skip_models_on_llm_retry | excluded_models_from_error(e)
                 logger.info(
                     "run_agent.structured_output_retry",
                     agent_id=agent_id,
                     iteration=iteration,
                     consecutive_failures=consecutive_llm_failures,
+                    skip_models=sorted(skip_models_on_llm_retry),
                 )
             if _is_refusal_error(e):
                 exclude_anthropic_family_on_llm_retry = True
@@ -1977,7 +2034,7 @@ async def run_agent(
                             context.append(
                                 {
                                     "role": "TOOL",
-                                    "text": hard_cap_tool_result_text(f"Error: {error}"),
+                                    "text": await preview_result(f"Error: {error}"),
                                     "timestamp": _safe_now().isoformat(),
                                     "metadata": {
                                         "toolCallId": tool_call_id,
@@ -2033,7 +2090,7 @@ async def run_agent(
                     # push the protected compaction tail past the overflow
                     # trigger (prod a890a362: 228k→210k still above 167k).
                     if not poll_messages:
-                        result_message = hard_cap_tool_result_text(result_message or "")
+                        result_message = await preview_result(result_message or "")
                     if is_error:
                         new_msg = {
                             "role": "TOOL",
@@ -2188,6 +2245,9 @@ async def run_agent(
                         completion_tool_result.get("message") or "Completion was rejected by the tool executor"
                     )
 
+                if skip_verification and completion_handoff and not completion_tool_error:
+                    completion_tool_error = await completion_handoff()
+
                 # Completion is a normal tool boundary. If its executor rejects
                 # the call, show that error to the same model and continue the
                 # loop instead of treating the rejected call as terminal.
@@ -2204,7 +2264,7 @@ async def run_agent(
                     if post_message:
                         try:
                             await post_message(
-                                hard_cap_tool_result_text(completion_tool_error),
+                                await preview_result(completion_tool_error),
                                 "TOOL",
                                 error_metadata,
                             )
@@ -2220,7 +2280,7 @@ async def run_agent(
                         context.append(
                             {
                                 "role": "TOOL",
-                                "text": hard_cap_tool_result_text(f"Error: {completion_tool_error}"),
+                                "text": await preview_result(f"Error: {completion_tool_error}"),
                                 "timestamp": _safe_now().isoformat(),
                                 "metadata": {
                                     key: value for key, value in error_metadata.items() if key != "subAgentId"

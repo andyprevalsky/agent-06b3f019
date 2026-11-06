@@ -24,6 +24,7 @@ from helpers.tracing import backend_api_headers, current_root_agent_id, current_
 from . import normalize
 from .context import demo_recording_enabled
 from .env import demo_cache_env
+from providers.rose.speed import normalize_agent_speed
 
 logger = structlog.get_logger(__name__)
 
@@ -665,6 +666,9 @@ async def trajectory_prior_exists(
 # keyed by agent_id, so auto-resolution costs at most one backend lookup per agent
 # per worker process.
 _AGENT_FASTMODE: dict[str, tuple[bool, Optional[str], bool, Optional[str], Optional[str], bool]] = {}
+# Per-process memo of the agent's provider speed (Agent.speed), filled by the
+# same one lookup. Speed never gates a cache; it only reaches provider legs.
+_AGENT_SPEED: dict[str, str] = {}
 
 
 async def resolve_agent_fast_mode(
@@ -685,6 +689,7 @@ async def resolve_agent_fast_mode(
     """
     if refresh:
         _AGENT_FASTMODE.pop(agent_id, None)
+        _AGENT_SPEED.pop(agent_id, None)
     elif agent_id in _AGENT_FASTMODE:
         return _AGENT_FASTMODE[agent_id]
     enabled, goal, write_enabled, root_agent_id, root_goal = False, None, False, None, None
@@ -712,6 +717,8 @@ async def resolve_agent_fast_mode(
             else:
                 # Legacy responses: button lived on the same flag as cache.
                 provider_fast_mode = bool(data.get("enabled", True))
+            # A backend that predates Agent.speed sends only the legacy button.
+            _AGENT_SPEED[agent_id] = normalize_agent_speed(data.get("speed", provider_fast_mode))
         else:
             logger.warning("demo_cache.resolve_agent_failed", agent_id=agent_id, status=resp.status_code)
     except Exception as exc:
@@ -845,6 +852,23 @@ async def ensure_position_context(agent_id: Optional[str], step: int):
         set_context(ctx)
         return ctx
     return None
+
+
+async def resolve_agent_speed(agent_id: Optional[str]) -> str:
+    """Provider speed for an agent's LLM calls; standard without an agent or on error.
+
+    One memoized backend read per agent per process (the agent-flag lookup that
+    already resolves the DEMO cache context), never one per LLM call.
+    """
+    if not agent_id:
+        return "standard"
+    if agent_id in _AGENT_SPEED:
+        return _AGENT_SPEED[agent_id]
+    try:
+        await resolve_agent_fast_mode(agent_id)
+    except Exception:
+        return "standard"
+    return _AGENT_SPEED.get(agent_id, "standard")
 
 
 async def resolve_provider_fast_mode(agent_id: Optional[str]) -> bool:

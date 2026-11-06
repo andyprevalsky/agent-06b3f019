@@ -47,8 +47,10 @@ Return the verified merged commit and shared branch, PR URL, checks and deploy
 result. Keep `merged`, `deployed`, and `adopted by running agents` separate.
 Tell the parent which revision is available. Running agents synchronize at safe
 boundaries, preserving local changes; do not reset their active worktrees or
-restart unrelated sessions. Failed checks or missing credentials are explicit
-blockers, not a successful publication.
+restart unrelated sessions. Apply the repository's explicit failure policy to failed checks and external
+provider availability. A recorded waiver never becomes PASS; independent
+repair handoffs do not keep the originating deploy waiting. Unhandled required
+checks remain blockers, not a successful publication.
 
 ## Required publication gate
 
@@ -61,6 +63,6 @@ Return a completion receipt naming the skill used, source commit, target branch,
 resulting commit, and check results with their evidence. Include the deployment
 outcome for deploy, or the verified parent update for branch-join. Do not claim
 publication until the applicable skill has completed and those facts are
-verified. A failed or unrun requirement leaves publication pending. The parent
+verified. A failed or unrun requirement without a qualified repository exception leaves publication pending. The parent
 must verify the receipt against GitHub/check evidence instead of accepting a
 child's success statement alone.

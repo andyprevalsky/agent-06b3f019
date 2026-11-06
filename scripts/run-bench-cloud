@@ -1603,10 +1603,7 @@ resolve_prod_backend_browser_provider() {
 
 resolve_prod_worker_browser_provider() {
     local machines err
-    # Bench-scoped Fly tokens (Cursor Cloud) can list [REDACTED]-bench but not
-    # the production worker app. Fall back to the local contract provider so
-    # --refresh-secrets can still stage AgentCard OAuth into BACKEND_ENV_B64
-    # (epoch-3 daily: stale B64 missing ORG_OAUTH blocked payment tasks).
+    # The worker fallback marker must come from production, never local source files.
     err="$(mktemp)"
     if machines="$(FLY machines list -a "$PROD_APP" --json 2>"$err")"; then
         rm -f "$err"
@@ -1626,20 +1623,6 @@ print(next(iter(providers)))
 '
         return
     fi
-    # Only authorization failures (bench-scoped tokens) may fall back to local.
-    # App-not-found / wrong PROD_APP must stay fatal — never treat local .env as prod.
-    if grep -Eiq 'unauthorized|403|401' "$err" 2>/dev/null; then
-        local fallback
-        fallback="$(cloudbench_env_value back-end/.env BROWSER_PROVIDER)"
-        case "$fallback" in
-            tilion|kernel|steel|browser-use)
-                echo "⚠️  production Fly worker list unauthorized for $PROD_APP; using local back-end/.env BROWSER_PROVIDER=$fallback" >&2
-                rm -f "$err"
-                printf '%s\n' "$fallback"
-                return 0
-                ;;
-        esac
-    fi
     cat "$err" >&2 || true
     rm -f "$err"
     echo "FATAL: could not read production Fly worker configuration" >&2
@@ -1655,7 +1638,8 @@ validate_environment_contract() {
     # Refuse to stage a BACKEND_ENV_B64 that cannot run AgentCard payment tasks.
     cloudbench_require_agentcard_org_oauth back-end/.env || exit 1
     CLOUDBENCH_PROD_BROWSER_PROVIDER="$prod_backend"
-    export CLOUDBENCH_PROD_BROWSER_PROVIDER
+    CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER="$prod_worker"
+    export CLOUDBENCH_PROD_BROWSER_PROVIDER CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER
 }
 
 machine_state_for_activation() {  # machine_state_for_activation <machine_id>: 0=present, 1=absent, 2=invalid
@@ -1883,7 +1867,7 @@ _inject_secrets_locked() {
     # Fly secrets need a durable token (gh auth expires). resolve_durable_*
     # already Contents-validates candidates in priority order.
     gh_token="$(resolve_durable_github_token)" || gh_token=""
-    echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
+    echo "   env provenance: Render backend + Fly workers → backend=$CLOUDBENCH_PROD_BROWSER_PROVIDER worker=$CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER"
     echo "   agents/.env sha256=${agents_sha:0:12} ($agents_lines lines)"
     echo "   back-end/.env sha256=${backend_sha:0:12} ($backend_lines lines)"
     local -a set_args=(
@@ -1892,6 +1876,7 @@ _inject_secrets_locked() {
         "AGENTS_ENV_SHA256=$agents_sha"
         "BACKEND_ENV_SHA256=$backend_sha"
         "CLOUDBENCH_BROWSER_PROVIDER=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
+        "CLOUDBENCH_WORKER_BROWSER_PROVIDER=$CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER"
     )
     # Always stage GITHUB_TOKEN= so a missing/invalid durable candidate clears any
     # previously staged stale credential while preserving the required secret name.
@@ -1921,9 +1906,10 @@ _inject_secrets_locked() {
     done <<< "$activation_targets"
     mkdir -p "$ROOT_DIR/.context"
     python3 - "$ROOT_DIR/.context/cloudbench-env-manifest.json" \
-        "$agents_sha" "$backend_sha" "$CLOUDBENCH_PROD_BROWSER_PROVIDER" "$guest_temporal_namespace" <<'PY'
+        "$agents_sha" "$backend_sha" "$CLOUDBENCH_PROD_BROWSER_PROVIDER" \
+        "$CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER" "$guest_temporal_namespace" <<'PY'
 import json, sys
-path, agents_sha, backend_sha, provider, guest_namespace = sys.argv[1:]
+path, agents_sha, backend_sha, provider, worker_provider, guest_namespace = sys.argv[1:]
 overrides = ["DATABASE_URL", "DIRECT_URL", "BACKEND_API_URL", "TEMPORAL_TASK_QUEUE", "ports", "workspace"]
 if guest_namespace:
     overrides += ["TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"]
@@ -1932,6 +1918,7 @@ with open(path, "w") as handle:
         "agents_env_sha256": agents_sha,
         "backend_env_sha256": backend_sha,
         "browser_provider": provider,
+        "worker_browser_provider": worker_provider,
         "guest_temporal_namespace": guest_namespace or None,
         "production_sources": {
             "backend": "render:Navi",
@@ -1988,7 +1975,7 @@ inject_secrets() {
 # it injects a controller-resolved token (gh auth / DISPATCH) into the sync
 # command — because Fly Status=Staged can persist on Machines-only apps even
 # after machine update, and a stale GITHUB_TOKEN secret may be empty or 401.
-REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"
+REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER CLOUDBENCH_WORKER_BROWSER_PROVIDER GITHUB_TOKEN"
 verify_app_environment() {
     local listing missing read_status
     listing="$(FLY secrets list -a "$APP" --json)" || {
@@ -5399,6 +5386,8 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}"
         # Explicit (also when empty) so a pooled Machine never keeps an older run's value.
         --env "CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}"
+        # One shared compute-token authority for every guest (empty = opted out).
+        --env "CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(cloudbench_compute_token_authority_url)"
     )
     _boot_command="bash /cloudbench-boot.sh"
     if [ -n "$CLOUDBENCH_ARCHIVED_PROOF_B64" ]; then
@@ -5883,6 +5872,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_INFRA_PROBE=$(printf '%q' "${CLOUDBENCH_INFRA_PROBE:-0}")"
     echo "export CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS=$(printf '%q' "${CLOUDBENCH_GUEST_AUTOSCALER_POLL_SECONDS:-}")"
     echo "export CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE=$(printf '%q' "${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-}")"
+    echo "export CLOUDBENCH_COMPUTE_TOKEN_AUTHORITY_URL=$(printf '%q' "$(cloudbench_compute_token_authority_url)")"
     echo "unset BENCHMARK_FRONTEND_URL"
     if [ "$DASHBOARD" = "1" ]; then
         # Persistent FE deep links for report cards / RCA evidence. The local
@@ -6737,6 +6727,11 @@ case "$BENCH_LOG_TERMINAL_WAIT_SECONDS" in ''|*[!0-9]*|0) BENCH_LOG_TERMINAL_WAI
 [ "$BENCH_LOG_TERMINAL_WAIT_SECONDS" -le 30 ] || BENCH_LOG_TERMINAL_WAIT_SECONDS=30
 driver_absent=0
 DRIVER_DIED="0"
+# Set when the poll loop declares infrastructure failure while the driver may
+# still be running (lost or unusable data plane, or a Machine that is gone).
+# No guest will seal runtime evidence unprompted, so the post-loop collector
+# must not wait the whole wall-clock backstop for that seal.
+PRETERMINAL_INFRA_FAILURE="0"
 # The detached on-box driver occasionally dies at launch (an early kill/crash
 # before its first STEP — seen at fleet width when the Fly API is rate-limited).
 # It then never writes the DONE marker, so a poll loop that only watches for DONE
@@ -6827,12 +6822,12 @@ while :; do
             "$RUN_LOG_TOKEN" "$WATCHDOG_TASK" "$WATCHDOG_BUDGET" \
             "$BENCH_LOG_RESET" 2>/dev/null)"; then
             echo "❌ validated bench.log delta could not update bounded progress state -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
         fi
         if ! cloudbench_apply_progress_update "$progress_update" "$now"; then
             echo "❌ bounded progress state returned an invalid update -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
         fi
     fi
@@ -6865,12 +6860,12 @@ while :; do
             ;;
         exceeded)
             echo "❌ bench.log backlog exceeded ${BENCH_LOG_BACKLOG_MAX_BYTES} bytes before EOF -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
             ;;
         stuck)
             echo "❌ bench.log backlog could not advance after ${BENCH_LOG_BACKLOG_MAX_FAILURES} bounded retries -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
             ;;
     esac
@@ -6891,12 +6886,12 @@ while :; do
             ;;
         20)
             echo "❌ bench.log could not be read after ${BENCH_LOG_READ_MAX_FAILURES} bounded retries -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
             ;;
         *)
             echo "❌ invalid bench.log read-gate state -- infrastructure failure" >&2
-            DRIVER_DIED="1"; BENCH_EXIT="1"
+            DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
             break
             ;;
     esac
@@ -7003,7 +6998,7 @@ while :; do
             probe_machine_liveness; machine_rc=$?
             if [ "$machine_rc" = "10" ]; then
                 echo "❌ Fly machine is explicitly no longer running after ${DRIVER_STALL_SECONDS}s without progress -- infrastructure failure; stopping this box so the fleet can abort promptly."
-                DRIVER_DIED="1"; BENCH_EXIT="1"
+                DRIVER_DIED="1"; PRETERMINAL_INFRA_FAILURE="1"; BENCH_EXIT="1"
                 break
             fi
         fi
@@ -7027,11 +7022,15 @@ done
 # cleanup window before extracting artifacts, then drain the sealed log once.
 # Keep TIMED_OUT set: a recovered cancellation record is still infrastructure
 # failure. The EXIT trap reuses this result instead of granting another window.
-if [ "$TIMED_OUT" = "1" ] && [ -n "${FLEET_MACHINE_ID:-}" ]; then
+# A pre-terminal infrastructure failure is the same situation: the driver may
+# still be running, so request the bounded authenticated shutdown before
+# waiting for a seal. Its verdict stays infrastructure failure either way.
+if { [ "$TIMED_OUT" = "1" ] || [ "${PRETERMINAL_INFRA_FAILURE:-0}" = "1" ]; } \
+    && [ -n "${FLEET_MACHINE_ID:-}" ]; then
     GUEST_SHUTDOWN_RESULT=1
     if confirm_guest_shutdown; then
         GUEST_SHUTDOWN_RESULT=0
-        if cloudbench_collect_terminal_log; then
+        if [ "$TIMED_OUT" = "1" ] && cloudbench_collect_terminal_log; then
             FINISHED=1
             BENCH_EXIT="$CURRENT_TERMINAL_EXIT"
         fi
@@ -7042,6 +7041,13 @@ cp -f "$SSH_LOG" "$OUT_DIR/remote-logs/cloudbench-driver.log" 2>/dev/null || tru
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ] && ! cloudbench_skip_held_driver_teardown_race; then
     if [ "$TIMED_OUT" = "1" ] && [ "${GUEST_SHUTDOWN_RESULT:-1}" != "0" ]; then
         echo "❌ timed-out guest shutdown unconfirmed; retaining runtime evidence owner -- infrastructure failure" >&2
+        exit 70
+    fi
+    # Without a delivered shutdown nothing will seal the runtime evidence; do
+    # not hold the job "running" for the wall-clock backstop. The EXIT trap
+    # reuses GUEST_SHUTDOWN_RESULT and the fleet natively stops the guest.
+    if [ "${PRETERMINAL_INFRA_FAILURE:-0}" = "1" ] && [ "${GUEST_SHUTDOWN_RESULT:-1}" != "0" ]; then
+        echo "❌ guest shutdown unconfirmed after a pre-terminal infrastructure failure; retaining runtime evidence owner -- infrastructure failure" >&2
         exit 70
     fi
     # The driver waits for run.sh's stopped/clean receipt before ACK; the boot

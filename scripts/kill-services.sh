@@ -298,6 +298,110 @@ is_protected_isolated_stack_tree() {
     done
 }
 
+# Every process an isolated run launches carries its BENCHMARK_RUN_ID (local.py
+# exports it to run.sh, whose services, tunnels and reparented children inherit
+# it). The owner-record walk above protects only processes that still descend
+# from the recorded run.sh; a service that lost that ancestry (a detached tunnel,
+# a child whose wrapper exited) was reaped by the argv/cwd sweeps when the
+# semantic lane's non-isolated run.sh started or stopped beside a live smoke run
+# in the same worktree. A run is live while its owner record still names the
+# recorded process instance, its manifest is starting/running with a live
+# run.sh, or it has not published a manifest yet and is younger than the
+# startup grace (same BENCHMARK_STARTUP_GRACE_SECONDS as run.sh, default 90).
+# Finished, dead or unknown runs grant nothing: their leftovers stay reapable.
+# Mirrors run.sh's pid_belongs_to_active_isolated_benchmark run-identity check.
+LIVE_ISOLATED_RUNS=""
+load_live_isolated_runs() {
+    local status=0
+    LIVE_ISOLATED_RUNS=$(python3 - "$WORKTREE_DIR/.context/benchmarks" "$PROCESS_IDENTITY_HELPER" \
+        "${BENCHMARK_STARTUP_GRACE_SECONDS:-90}" <<'PYRUNS'
+import json
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+root, helper, grace = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+grace_seconds = int(grace) if re.fullmatch(r"0|[1-9][0-9]{0,4}", grace) else 90
+
+
+def read_json(path):
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def valid_pid(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def identity_of(pid):
+    result = subprocess.run([sys.executable, helper, str(pid)], capture_output=True, text=True, check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def command_of(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, check=False)
+    return result.stdout.strip()
+
+
+for run_dir in sorted(path for path in root.glob("*") if path.is_dir() and not path.is_symlink()):
+    run_id = run_dir.name
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id) or run_id in {".", ".."}:
+        continue
+    owner = read_json(run_dir / "local-stack-owner.json")
+    if owner and valid_pid(owner.get("pid")) and isinstance(owner.get("native_identity"), str) \
+            and owner["native_identity"] and identity_of(owner["pid"]) == owner["native_identity"]:
+        print(run_id)
+        continue
+    manifest_path = run_dir / "services.json"
+    if manifest_path.exists() or manifest_path.is_symlink():
+        manifest = read_json(manifest_path)
+        if manifest and str(manifest.get("status", "")).strip().lower() in {"starting", "running"} \
+                and valid_pid(manifest.get("run_sh_pid")) and "run.sh" in command_of(manifest["run_sh_pid"]):
+            print(run_id)
+        continue
+    try:
+        age = time.time() - run_dir.stat().st_mtime
+    except OSError:
+        continue
+    if age < grace_seconds:
+        print(run_id)
+PYRUNS
+) || status=$?
+    [ "$status" -eq 0 ] && return 0
+    # Fail closed, never open: an empty list would silently restore the kill of
+    # every reparented child of a live isolated run. With an owner record on
+    # disk a live stack may exist, so the sweep is refused (run.sh startup
+    # propagates the failure); without one there is nothing to protect.
+    LIVE_ISOLATED_RUNS=""
+    if compgen -G "$WORKTREE_DIR/.context/benchmarks/*/local-stack-owner.json" > /dev/null; then
+        echo "⚠️  Could not determine the live isolated benchmark runs (loader exit $status) while isolated stack owner records exist under $WORKTREE_DIR/.context/benchmarks; refusing to sweep" >&2
+        return 1
+    fi
+    echo "⚠️  Could not determine the live isolated benchmark runs (loader exit $status); no isolated stack owner record exists, sweeping without run-identity protection" >&2
+    return 0
+}
+
+# run_process_env_value reads /proc/<pid>/environ and falls back to `ps eww`,
+# which can surface a stale or duplicate token: that fallback can only
+# over-protect (keep a process alive), never reap one that the run owns.
+is_live_isolated_run_process() {
+    local pid=$1 run_id live
+    [ -n "$LIVE_ISOLATED_RUNS" ] || return 1
+    run_id=$(run_process_env_value "$pid" BENCHMARK_RUN_ID)
+    [ -n "$run_id" ] || return 1
+    while IFS= read -r live; do
+        [ "$live" = "$run_id" ] && return 0
+    done <<< "$LIVE_ISOLATED_RUNS"
+    return 1
+}
+
 # The tmux server is a same-cwd ancestor of every pane started in this
 # worktree. Walking ancestors from Step 5 services and signalling it
 # destroys every session — including an isolated smoke supervisor that
@@ -345,7 +449,7 @@ recorded_wrapper_child() {
 
 is_protected_process() {
     is_self_or_parent "$1" || is_self_ancestor "$1" || is_protected_benchmark_tree "$1" \
-        || is_protected_isolated_stack_tree "$1" || is_tmux_process "$1"
+        || is_protected_isolated_stack_tree "$1" || is_live_isolated_run_process "$1" || is_tmux_process "$1"
 }
 
 service_like_process() {
@@ -488,6 +592,7 @@ WRAPPERS_FILE=$(mktemp)
 SKIPPED_FILE=$(mktemp)
 trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$TARGETS_FILE" "$KEPT_FILE" "$SCRATCH_FILE" "$SURVIVORS_FILE" "$WRAPPERS_FILE" "$SKIPPED_FILE"' EXIT
 load_isolated_stack_owners
+load_live_isolated_runs || exit 1
 
 # Manifest PIDs are authoritative when present. They catch wrappers whose argv
 # is generic after cd'ing into a service directory. Capture identity at the
@@ -562,10 +667,11 @@ done < "$ROOTS_FILE"
 # `IDENTITY_CONFLICT` during the walk.
 reduce_stable_identities "$ALL_FILE" > "$TARGETS_FILE"
 
-# Final backstop: drop any PID in a foreign benchmark-controller tree or an
-# owner-recorded isolated stack that entered the set as a descendant. `pid_tree` walks downward and does not
-# consult `is_protected_process`, so the ancestor guard alone cannot catch
-# this path — and a shared-stack EXIT sweep must not harvest isolated smoke.
+# Final backstop: drop any PID in a foreign benchmark-controller tree, an
+# owner-recorded isolated stack or a live isolated run that entered the set as
+# a descendant. `pid_tree` walks downward and does not consult
+# `is_protected_process`, so the ancestor guard alone cannot catch this path —
+# and a shared-stack startup/EXIT sweep must not harvest isolated smoke.
 while IFS=$'\t' read -r pid start_time; do
     [[ -n "$pid" ]] || continue
     identity_matches "$pid" "$start_time" || continue
@@ -575,6 +681,10 @@ while IFS=$'\t' read -r pid start_time; do
     fi
     if is_protected_isolated_stack_tree "$pid"; then
         echo "🛡️  Refusing to kill owner-recorded isolated stack PID $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+        continue
+    fi
+    if is_live_isolated_run_process "$pid"; then
+        echo "🛡️  Refusing to kill live isolated run process PID $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
         continue
     fi
     printf '%s\t%s\n' "$pid" "$start_time" >> "$KEPT_FILE"

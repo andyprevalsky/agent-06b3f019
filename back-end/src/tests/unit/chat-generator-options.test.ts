@@ -17,13 +17,13 @@ async function run(): Promise<void> {
       { role: 'user', content: 'answer this' },
     ],
     providerRoute: phases.generatorProviderRoute,
-    providerFastMode: true,
+    speed: 'fast',
     abortSignal: abortController.signal,
   });
 
   assert.strictEqual(options.model, 'rose-labs/rose-1-flash');
   assert.strictEqual(options.provider_route, 'direct-cerebras');
-  assert.strictEqual(options.provider_fast_mode, true);
+  assert.strictEqual(options.speed, 'fast');
   assert.strictEqual(options.abort_signal, abortController.signal);
   assert.strictEqual(options.temperature, 0.7);
   assert.strictEqual(options.max_tokens, 4_096);
@@ -31,7 +31,7 @@ async function run(): Promise<void> {
     buildGeneratorCompletionOptions({
       model: phases.generator,
       messages: options.messages,
-      providerFastMode: true,
+      speed: 'fast',
     }).max_tokens,
     undefined,
     'other provider routes retain their existing output budget'

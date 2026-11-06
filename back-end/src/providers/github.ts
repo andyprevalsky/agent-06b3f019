@@ -88,6 +88,46 @@ export async function fetchGithubRepoVisibility(
   }
 }
 
+/**
+ * Head commit sha of a branch (one authenticated GitHub API read), or null
+ * when the branch or repo is missing or GitHub could not be reached. Used by
+ * the project template sync to notice that a default branch moved.
+ */
+export async function fetchGithubBranchHeadSha(
+  owner: string,
+  repo: string,
+  branch: string
+): Promise<string | null> {
+  try {
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/commits/${encodeURIComponent(branch)}`,
+      {
+        headers: { ...githubApiAuthHeaders(), Accept: 'application/vnd.github.sha' },
+        signal: AbortSignal.timeout(10_000),
+      }
+    );
+    if (!response.ok) {
+      log.warn('GitHub branch head lookup failed', {
+        owner,
+        repo,
+        branch,
+        status: response.status,
+      });
+      return null;
+    }
+    const sha = (await response.text()).trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch (error) {
+    log.warn('GitHub branch head lookup errored', {
+      owner,
+      repo,
+      branch,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 async function grantGithubRepoAccess(userId: string, repoUrl: string): Promise<void> {
   try {
     await prisma.githubRepoAccess.create({

@@ -602,6 +602,35 @@ def test_campaign_inventory_keeps_existing_production_only_mode_free_of_shared_f
 
 # The owning campaign uses the actual seed client against a loopback object store.
 # No paid provider, Hub upload, credentials, or guest restore is used by these controls.
+def _seed_private_cleanup_ledger(root, monkeypatch):
+    """Isolate only the offline workspace's device-keyed native ledger."""
+    device = (1 << 56) | int.from_bytes(os.urandom(7), "big")
+    transport = root.parent / "seed-cleanup-ledger-python"
+    transport.mkdir()
+    (transport / "sitecustomize.py").write_text(f"""import os, stat
+from pathlib import Path
+scope = Path({str(root)!r})
+device = {device}
+real_lstat, real_stat = Path.lstat, Path.stat
+
+def scoped(value, path):
+    if path.absolute().is_relative_to(scope) and stat.S_ISDIR(value.st_mode):
+        fields = list(value); fields[2] = device
+        return os.stat_result(fields)
+    return value
+
+def observed_lstat(self, *args, **kwargs):
+    return scoped(real_lstat(self, *args, **kwargs), self)
+
+def observed_stat(self, *args, **kwargs):
+    return scoped(real_stat(self, *args, **kwargs), self)
+
+Path.lstat, Path.stat = observed_lstat, observed_stat
+""")
+    monkeypatch.setenv("PYTHONPATH", str(transport) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    return device
+
+
 def seed_fixture(tmp_path, monkeypatch):
     import importlib.util
     import threading
@@ -610,6 +639,7 @@ def seed_fixture(tmp_path, monkeypatch):
     candidate = Path(os.environ.get("CLOUDBENCH_SEED_CANDIDATE_ROOT_UNDER_TEST", ROOT))
     root = tmp_path / "workspace"
     root.mkdir()
+    _seed_private_cleanup_ledger(root, monkeypatch)
     for relative in (
         "scripts/run-bench-campaign.py",
         # The campaign's fixed-total infra stop runs its sibling coordinator (K11).
@@ -1221,6 +1251,75 @@ printf '[]\n'
         thread.join()
 
 
+def test_campaign_inventory_seed_preflight_private_ledger_preserves_foreign_debt_and_native_floor(tmp_path, monkeypatch):
+    """Foreign ledger debt cannot suppress seed GET; private debt still refuses."""
+    import hashlib
+
+    def fingerprint(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+    def debt(ledger, path):
+        # Keep the actual native df and 1/1/0 policy; fill only our test ledger
+        # with declared legacy headroom greater than the physical device total.
+        capacity = int(subprocess.check_output(["df", "-Pk", str(path)], text=True).splitlines()[-1].split()[1]) * 1024
+        pending_mb = capacity // 1048576 + 64
+        groups = {}
+        while pending_mb:
+            headroom = min(16384, pending_mb)
+            groups[str(len(groups))] = {"directory": None, "members": ["r001-j0001"],
+                                       "consumed": {}, "minimum": 1, "headroom": headroom}
+            pending_mb -= headroom
+        ledger.mkdir(mode=0o700, parents=True, exist_ok=False)
+        (ledger / "state.json").write_text(json.dumps({"version": 2, "groups": groups, "inflight": {}}))
+
+    global_parent = Path("/tmp") / ("rose-cloudbench-cleanup-admission-" + str(os.getuid()))
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    with monkeypatch.context() as patch:
+        device = _seed_private_cleanup_ledger(foreign, patch)
+        ledger = global_parent / str(device)
+        debt(ledger, foreign)
+        original = fingerprint(ledger / "state.json")
+        try:
+            # The original owning command and every original assertion run here.
+            test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller(foreign, patch)
+            assert fingerprint(ledger / "state.json") == original
+            budget = json.loads((foreign / "workspace/campaigns/local-proof-write-failure/startup-cohorts/c001/cleanup-budget/budget.json").read_text())
+            assert budget["device"] not in (device, tmp_path.stat().st_dev)
+            assert (budget["preferred"], budget["minimum"], budget["headroom"], budget["amount"]) == (1, 1, 0, 1)
+            assert budget["job_count"] == 50
+        finally:
+            shutil.rmtree(ledger)
+
+    low = tmp_path / "private-low-capacity"
+    low.mkdir()
+    original_seed = seed_fixture
+    captured = {}
+    with monkeypatch.context() as patch:
+        def constrained(*args, **kwargs):
+            values = original_seed(*args, **kwargs)
+            root = values[0]
+            device = int(subprocess.check_output([sys.executable, "-c", "from pathlib import Path; import sys; print(Path(sys.argv[1]).stat().st_dev)", str(root)], text=True))
+            assert device != root.stat().st_dev
+            ledger = global_parent / str(device)
+            debt(ledger, root)
+            captured.update(root=root, ledger=ledger, calls=values[4], before=fingerprint(ledger / "state.json"))
+            return values
+        patch.setitem(globals(), "seed_fixture", constrained)
+        try:
+            with pytest.raises(AssertionError) as rejected:
+                test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller(low, patch)
+            assert rejected.traceback[-1].name == "test_campaign_inventory_seed_preflight_failed_proof_publication_never_admits_controller"
+            assert str(rejected.traceback[-1].statement).strip().startswith("assert len(calls) == 1")
+            summary = json.loads((captured["root"] / "campaigns/local-proof-write-failure/summary.json").read_text())
+            assert summary["cleanup_ticket_failure"] == "prepare" and summary["peak_concurrency"] == 0
+            assert captured["calls"] == [] and not (captured["root"] / "unexpected-child").exists()
+            assert fingerprint(captured["ledger"] / "state.json") == captured["before"]
+        finally:
+            if "ledger" in captured:
+                shutil.rmtree(captured["ledger"])
+
+
 def test_campaign_inventory_seed_preflight_native_linux_owner_tick_and_legacy_formats(tmp_path):
     if not Path("/proc/self/stat").exists():
         import pytest
@@ -1394,12 +1493,117 @@ def _assert_publication_process_retired(pid, birth):
     except ProcessLookupError:
         return {"pid": pid, "birth": birth, "state": "absent"}
     observed = subprocess.run(["ps", "-p", str(pid), "-o", "stat=,ppid=,pgid="], capture_output=True, text=True)
+    if observed.returncode != 0 or not observed.stdout.strip():
+        # Native probes are separate observations: the owned process may have
+        # been reaped since kill(0). Only confirmed absence permits retirement.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return {"pid": pid, "birth": birth, "state": "absent"}
     assert observed.returncode == 0 and observed.stdout.strip(), f"unknown publication state for {pid}"
     identity = subprocess.run([sys.executable, str(ROOT / "scripts/process-identity.py"), str(pid)], capture_output=True, text=True)
+    if identity.returncode != 0 or not identity.stdout.strip():
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return {"pid": pid, "birth": birth, "state": "absent"}
     assert identity.returncode == 0 and identity.stdout.strip() == birth, f"publication birth changed or unreadable for {pid}"
     assert observed.stdout.strip().startswith("Z"), f"owned publication process {pid} remains executing: {observed.stdout.strip()}"
     state, ppid, pgid = observed.stdout.split()
     return {"pid": pid, "birth": birth, "state": state, "ppid": int(ppid), "pgid": int(pgid)}
+
+
+@pytest.mark.parametrize("boundary", ["ps", "identity"])
+def test_campaign_inventory_publication_retirement_rechecks_reaped_process(monkeypatch, boundary):
+    """A real child can disappear between separate native observations."""
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    native_run = subprocess.run
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        reached = []
+        def reap_at_boundary(command, *args, **kwargs):
+            target = command[0] == "ps" if boundary == "ps" else str(identity) in command
+            if target and not reached:
+                reached.append(boundary)
+                child.stdin.close()
+                child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+            return native_run(command, *args, **kwargs)
+        monkeypatch.setattr(subprocess, "run", reap_at_boundary)
+        result = _assert_publication_process_retired(child.pid, birth)
+        assert reached == [boundary]
+        assert result == {"pid": child.pid, "birth": birth, "state": "absent"}
+    finally:
+        if child.stdin is not None and not child.stdin.closed:
+            child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+@pytest.mark.parametrize("boundary", ["ps", "identity"])
+def test_campaign_inventory_publication_retirement_rejects_unreadable_live_process(monkeypatch, boundary):
+    """Observer failure must never turn a live owned process into retirement."""
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    native_run = subprocess.run
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        def unreadable_at_boundary(command, *args, **kwargs):
+            target = command[0] == "ps" if boundary == "ps" else str(identity) in command
+            if target:
+                return subprocess.CompletedProcess(command, 1, "", "")
+            return native_run(command, *args, **kwargs)
+        monkeypatch.setattr(subprocess, "run", unreadable_at_boundary)
+        message = "unknown publication state" if boundary == "ps" else "birth changed or unreadable"
+        with pytest.raises(AssertionError, match=message):
+            _assert_publication_process_retired(child.pid, birth)
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+def test_campaign_inventory_publication_retirement_rejects_changed_live_birth():
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    try:
+        identity = ROOT / "scripts/process-identity.py"
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        with pytest.raises(AssertionError, match="birth changed or unreadable"):
+            _assert_publication_process_retired(child.pid, birth + "-foreign")
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+
+
+@pytest.mark.parametrize("boundary", ["ps", "identity"])
+def test_campaign_inventory_publication_retirement_rejects_permission_denied_recheck(monkeypatch, boundary):
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    native_run, native_kill = subprocess.run, os.kill
+    identity = ROOT / "scripts/process-identity.py"
+    try:
+        birth = subprocess.check_output([sys.executable, str(identity), str(child.pid)], text=True).strip()
+        observed = []
+        def unreadable_at_boundary(command, *args, **kwargs):
+            target = command[0] == "ps" if boundary == "ps" else str(identity) in command
+            if target:
+                observed.append(boundary)
+                return subprocess.CompletedProcess(command, 1, "", "")
+            return native_run(command, *args, **kwargs)
+        def denied_recheck(pid, sig):
+            if pid == child.pid and sig == 0 and observed:
+                raise PermissionError("controlled unreadable owner")
+            return native_kill(pid, sig)
+        monkeypatch.setattr(subprocess, "run", unreadable_at_boundary)
+        monkeypatch.setattr(os, "kill", denied_recheck)
+        # Both an explicit unknown observation (old helper) and permission
+        # denial (recheck) are failures; neither may report retirement.
+        with pytest.raises((AssertionError, PermissionError)):
+            _assert_publication_process_retired(child.pid, birth)
+        assert observed == [boundary]
+        assert child.poll() is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
 
 
 def test_campaign_inventory_publication_retirement_distinguishes_owned_zombie():

@@ -113,3 +113,30 @@ verification workload, and wants ordinary CLI operation to remain reliable.
 ## Reusable lesson
 
 Keep controlled worker inputs aligned with the current native prerequisites and assert the intended lifecycle branch rather than the first matching source token.
+
+
+## 2026-11-04 extracted worker fixture dependency recurrence
+
+The b9 controller selected-pytest owner recorded1FAIL/517PASS. The failing
+`test_autoscaled_worker_failure_publishes_durable_failure_marker` timed out10s
+in upload-and-reap-failure; captured stderr first showed unbound
+WMH_MODEL_NAME/WMH_EXECUTION_POLICY and missing
+fleet_current_disposable_registry. The extracted fixture omitted their actual
+production initializer/helper. This proves missing fixture prerequisites,
+not that those warnings caused the original10s timeout.
+
+The existing owning test gains two strict missing-dependency assertions. It
+fails before on the exact captured diagnostics in5.09s, then passes all eight
+original modes in6.68s after extracting the real WMH defaults and registry
+predicate into the explicit ordinary test-app fixture. Every original assert,
+10s bound, provider-failure sentinel and retained-worker cleanup expectation
+is preserved. Production helpers are byte-identical. A missing worker source
+file in the first lean private export was copied unchanged for the final
+source-order assertion; that setup error is separately retained.
+
+Private evidence: `/var/tmp/pr1662-b9-worker-dependency-fixture/report.json`;
+fixture-only patch SHA256
+`29a4c47fc19cf3d8ad5cab1f53c098b9147148e7026c0d10020cc516ec6d96ea`.
+The dependency-error RED/GREEN does not reproduce or close the full-cohort
+10s timeout and grants no full-controller/benchmark PASS. Parent owns the
+unchanged affected gate rerun; no deadline/concurrency relaxation was proposed.

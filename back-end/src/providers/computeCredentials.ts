@@ -1,16 +1,12 @@
 import { prisma } from './database';
-import {
-  decryptCredentialEnvelope,
-  markPoolTokenRateLimited,
-  markUserTokenRateLimited,
-} from './claudeCredentials';
+import { decryptCredentialEnvelope } from './claudeCredentials';
 import {
   claudeEnvelopeExpiredAt,
   isUsableClaudePoolEnvelope,
   parseClaudeEnvelope,
 } from './claudeOauthEnvelope';
-import { markGptPoolTokenRateLimited, markGptUserTokenRateLimited } from './gptCredentials';
 import { createLogger } from './logger';
+export { classifyReportedLogin, markComputeTokenUnavailable } from './computeLoginFailure';
 export {
   __clearGptApiKeyCooldownCache,
   __resetGptApiKeyCooldown,
@@ -29,6 +25,8 @@ export interface ComputeCodeCredentialResult {
   source: 'user' | 'pool';
   userId: string;
   poolTokenId?: string;
+  /** The exact Integration row served; failure reports name it (S33). */
+  integrationId?: string;
   lineageKey?: string;
 }
 
@@ -88,24 +86,6 @@ function decryptIntegrationCredentials(integration: IntegrationRow, decryptionKe
   return decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
 }
 
-/** Retire exactly this row: EXPIRED + needs-reconnect, never its sibling accounts. */
-async function retireExpiredClaudeIntegration(
-  integration: IntegrationRow,
-  source: 'user' | 'pool',
-  expiresAt: number
-): Promise<void> {
-  log.warn('Skipping Claude credential past its own expiresAt', {
-    integrationId: integration.id,
-    userId: integration.userId,
-    source,
-    expiredAt: new Date(expiresAt).toISOString(),
-  });
-  await markUserTokenRateLimited(integration.userId, {
-    failureReason: 'auth_error',
-    integrationId: integration.id,
-  });
-}
-
 function parseGptEnvelope(credentialsJson: string) {
   try {
     const parsed = JSON.parse(credentialsJson) as Record<string, unknown>;
@@ -147,7 +127,20 @@ async function rowToCredential(
     if (!envelope) return null;
     const expired = claudeEnvelopeExpiredAt(envelope, Date.now());
     if (expired !== null) {
-      await retireExpiredClaudeIntegration(integration, source, expired);
+      // An expired access token is not a revoked login: its device's next sync
+      // replaces it (codeLoginRejection.ts), so it is skipped, never disabled.
+      // Stamping it moves it behind every live row in least-recently-used order,
+      // so each lease does not decrypt it first again.
+      await prisma.integration.update({
+        where: { id: integration.id },
+        data: { lastUsedAt: new Date() },
+      });
+      log.info('Skipping Claude credential past its own expiresAt', {
+        integrationId: integration.id,
+        userId: integration.userId,
+        source,
+        expiredAt: new Date(expired).toISOString(),
+      });
       return null;
     }
     if (source === 'pool' && !isUsableClaudePoolEnvelope(envelope)) return null;
@@ -157,6 +150,7 @@ async function rowToCredential(
       source,
       userId: integration.userId,
       poolTokenId: source === 'pool' ? integration.id : undefined,
+      integrationId: integration.id,
     };
   }
 
@@ -169,6 +163,7 @@ async function rowToCredential(
     source,
     userId: integration.userId,
     poolTokenId: source === 'pool' ? integration.id : undefined,
+    integrationId: integration.id,
   };
 }
 
@@ -541,56 +536,6 @@ export async function releaseComputeTokenLineage(lineageKey: string) {
   return { ok: result.count > 0, updated: result.count };
 }
 
-/**
- * Back a compute token off after a failure.
- *
- * `rateLimitedUntil` is the PROVIDER's own reset time (from
- * `anthropic-ratelimit-*-reset` / `retry-after` / the error body). Pass it
- * whenever the provider supplied one: omitting it makes the cooldown fall back
- * to a synthetic 5-minute default, which is exactly how a real usage window got
- * destroyed in prod on 2026-07-28 — a header-derived `2026-07-30T22:00Z` was
- * overwritten 15s later by an uninformed `+5m` from this path. The synthetic
- * default is only correct when the provider genuinely told us nothing.
- */
-export async function markComputeTokenUnavailable(
-  token: ComputeCodeCredentialResult,
-  reason: 'auth_error' | 'rate_limit',
-  rateLimitedUntil?: string
-): Promise<void> {
-  const failureReason = reason === 'auth_error' ? 'auth_error' : undefined;
-  const options = { failureReason, rateLimitedUntil };
-
-  if (token.source === 'pool') {
-    if (!token.poolTokenId) {
-      log.warn('Cannot mark pool compute token unavailable without poolTokenId', {
-        type: token.type,
-        reason,
-        userId: token.userId,
-      });
-      return;
-    }
-    if (token.type === 'claude') {
-      await markPoolTokenRateLimited(token.poolTokenId, options);
-      return;
-    }
-    await markGptPoolTokenRateLimited(token.poolTokenId, options);
-    return;
-  }
-
-  // Pool branch returned above; remaining tokens are user-owned.
-  if (token.type === 'claude') {
-    await markUserTokenRateLimited(token.userId, {
-      ...options,
-      accountId: token.accountId,
-    });
-    return;
-  }
-  await markGptUserTokenRateLimited(token.userId, {
-    ...options,
-    accountId: token.accountId,
-  });
-}
-
 // ── Shared Anthropic API-key cooldown ──────────────────────────────────────
 //
 // The funded ANTHROPIC_API_KEY (a global default for any user) is a single
@@ -609,6 +554,11 @@ const ANTHROPIC_API_KEY_COOLDOWN_DB_RECHECK_MS = 15 * 1000;
 // ['claude_code','gpt_code'] set, so this row is never handed out as a token.
 const ANTHROPIC_API_KEY_COOLDOWN_USER_ID = '00000000-0000-0000-0000-000000000000';
 const ANTHROPIC_API_KEY_COOLDOWN_NAME = 'anthropic_api_key_cooldown';
+const ANTHROPIC_API_KEY_COOLDOWN_KEY = {
+  userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
+  name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
+  accountId: '',
+};
 
 let cachedCooldownUntilMs = 0;
 let lastCooldownDbCheckMs = 0;
@@ -623,13 +573,7 @@ export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
   lastCooldownDbCheckMs = now;
   const cacheRevision = cooldownCacheRevision;
   const row = await prisma.integration.findUnique({
-    where: {
-      userId_name_accountId: {
-        userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
-        name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
-        accountId: '',
-      },
-    },
+    where: { userId_name_accountId: ANTHROPIC_API_KEY_COOLDOWN_KEY },
     select: { rateLimitedUntil: true },
   });
   if (cacheRevision !== cooldownCacheRevision) {
@@ -637,6 +581,16 @@ export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
   }
   cachedCooldownUntilMs = row?.rateLimitedUntil ? row.rateLimitedUntil.getTime() : 0;
   return Date.now() < cachedCooldownUntilMs;
+}
+
+/** When the shared Anthropic API key's backoff ends; null when it is not backed off. */
+export async function anthropicApiKeyCooldownUntil(now = new Date()): Promise<Date | null> {
+  const row = await prisma.integration.findUnique({
+    where: { userId_name_accountId: ANTHROPIC_API_KEY_COOLDOWN_KEY },
+    select: { rateLimitedUntil: true },
+  });
+  const until = row?.rateLimitedUntil ?? null;
+  return until !== null && until > now ? until : null;
 }
 
 /** Back the shared Anthropic API key off for the cooldown window (DB + cache). */
@@ -647,13 +601,7 @@ export async function markAnthropicApiKeyOnCooldown(reason: string): Promise<voi
   // A read issued before the upsert below commits would drop this mark.
   lastCooldownDbCheckMs = Date.now();
   await prisma.integration.upsert({
-    where: {
-      userId_name_accountId: {
-        userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
-        name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
-        accountId: '',
-      },
-    },
+    where: { userId_name_accountId: ANTHROPIC_API_KEY_COOLDOWN_KEY },
     create: {
       userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
       name: ANTHROPIC_API_KEY_COOLDOWN_NAME,

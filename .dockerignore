@@ -3,6 +3,10 @@
 # excluded so the remote build context upload stays small and no secrets leak
 # into image layers.
 
+# Generated workspace lock is not a stable image dependency input.
+# Keep the committed backend/frontend lockfiles in the context.
+/package-lock.json
+
 # Dependencies (reinstalled in-image)
 node_modules
 **/node_modules

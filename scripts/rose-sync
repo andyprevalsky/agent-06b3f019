@@ -3,7 +3,7 @@
 // symlinked ones, toolchain, setup hints), encrypt it client-side and upload
 // it to a Rose Project. Run `scripts/rose-sync help` for usage.
 import('./lib/rose-sync/cli.mjs')
-  .then(({ main }) => main(process.argv.slice(2)))
+  .then(({ main }) => main(process.argv.slice(2), { cli: process.argv[1] }))
   .then((code) => process.exit(code))
   .catch((err) => {
     process.stderr.write(`rose-sync: ${err && err.message ? err.message : String(err)}\n`);

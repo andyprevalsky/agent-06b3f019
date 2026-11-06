@@ -471,7 +471,7 @@ class ContainerOwnership(unittest.TestCase):
             launch.assert_not_called()
 
     def test_registered_fixture_selector_preserves_exact_dispatch_owner(self):
-        for fixture in ("multi-workstream", "status-service-shutdown"):
+        for fixture in ("multi-workstream", "status-service-shutdown", "export-recovery"):
             with self.subTest(fixture=fixture):
                 self.assertEqual(
                     self.check_dispatch(fixture=fixture), ["join", "retire"]

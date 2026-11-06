@@ -101,6 +101,7 @@ RUN mkdir -p back-end/prisma front-end agents
 COPY --chown=rose:rose package*.json /app/
 COPY --chown=rose:rose back-end/package.json back-end/package-lock.json /app/back-end/
 COPY --chown=rose:rose front-end/package.json front-end/package-lock.json /app/front-end/
+COPY --chown=rose:rose front-end/scripts /app/front-end/scripts
 COPY --chown=rose:rose back-end/prisma /app/back-end/prisma
 COPY --chown=rose:rose agents/requirements.txt /app/agents/requirements.txt
 COPY --chown=rose:rose agents/vendor /app/agents/vendor

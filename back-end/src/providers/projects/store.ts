@@ -8,7 +8,7 @@
  * shared row, counter or channel is touched by more than one user.
  */
 import { Prisma } from '@prisma/client';
-import { prisma } from '../database';
+import { prisma, runTransactionWithRetry } from '../database';
 import { normalizeGithubUrl } from '../github';
 import { randomBytes } from '../crypto';
 import { decryptProjectBinary, decryptProjectSecret } from './secrets';
@@ -17,13 +17,33 @@ import type {
   ProjectEnvFileKind,
   ProjectEnvFileSource,
   ProjectSyncManifest,
+  ProjectTemplateSnapshot,
   ProjectWorkspace,
 } from './types';
 
 export const PROJECT_LIST_LIMIT = 200;
 export const MAX_ENV_FILES = 200;
 
+export interface ProjectFolderRecord {
+  id: string;
+  name: string;
+  projectId: string;
+  sortOrder: number;
+}
+
+export const folderOrderBy = [
+  { sortOrder: 'asc' as const },
+  { name: 'asc' as const },
+  { id: 'asc' as const },
+];
+
+const folderSelection = {
+  select: { id: true, name: true, projectId: true, sortOrder: true },
+  orderBy: folderOrderBy,
+};
+
 export interface ProjectRecord {
+  folders?: ProjectFolderRecord[];
   id: string;
   userId: string;
   name: string;
@@ -34,6 +54,18 @@ export interface ProjectRecord {
   autoWake: boolean;
   /** Default code-sandbox size `{cpu, memoryGb}` (C16); null = deployment default. */
   sandboxSize: unknown;
+  maintenanceScript: string | null;
+  maintenanceTimeoutS: number;
+  maintenanceNightly: boolean;
+  maintenanceOnGithubChange: boolean;
+  maintenanceWatchedSha: string | null;
+  maintenanceWatchCheckedAt: Date | null;
+  maintenanceRunId: string | null;
+  maintenanceLeaseUntil: Date | null;
+  templateSnapshotId: string | null;
+  templateSnapshotAt: Date | null;
+  templateSnapshotSha: string | null;
+  templateSnapshotSize: unknown;
   syncSalt: string;
   syncRevision: number;
   lastSyncedAt: Date | null;
@@ -73,7 +105,7 @@ export async function listProjects(userId: string): Promise<ProjectWithCount[]> 
     where: { userId },
     orderBy: { createdAt: 'asc' },
     take: PROJECT_LIST_LIMIT,
-    include: { _count: { select: { envFiles: true } } },
+    include: { _count: { select: { envFiles: true } }, folders: folderSelection },
   });
 }
 
@@ -101,7 +133,7 @@ export async function findGithubConnectedRepoUrls(
 }
 
 export async function findProject(userId: string, id: string): Promise<ProjectRecord | null> {
-  return prisma.project.findFirst({ where: { id, userId } });
+  return prisma.project.findFirst({ where: { id, userId }, include: { folders: folderSelection } });
 }
 
 export async function countEnvFiles(projectId: string): Promise<number> {
@@ -137,13 +169,19 @@ export async function findProjectByName(
   userId: string,
   name: string
 ): Promise<ProjectRecord | null> {
-  return prisma.project.findUnique({ where: { userId_name: { userId, name } } });
+  return prisma.project.findUnique({
+    where: { userId_name: { userId, name } },
+    include: { folders: folderSelection },
+  });
 }
 
 export async function createProject(
   data: Omit<Prisma.ProjectUncheckedCreateInput, 'syncSalt'>
 ): Promise<ProjectRecord> {
-  return prisma.project.create({ data: { ...data, syncSalt: newSyncSalt() } });
+  return prisma.project.create({
+    data: { ...data, syncSalt: newSyncSalt() },
+    include: { folders: folderSelection },
+  });
 }
 
 /** Column value for a project's default sandbox size; null clears it (SQL NULL, C16). */
@@ -153,15 +191,52 @@ export function sandboxSizeColumn(
   return size === null ? Prisma.DbNull : size;
 }
 
+export class ProjectRepositoryBusyError extends Error {}
+
 export async function updateProject(
   id: string,
   data: Prisma.ProjectUncheckedUpdateInput
 ): Promise<ProjectRecord> {
-  return prisma.project.update({ where: { id }, data });
+  if (data.repoUrl === undefined) {
+    return prisma.project.update({ where: { id }, data, include: { folders: folderSelection } });
+  }
+  return runTransactionWithRetry(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Project" WHERE "id" = ${id} FOR UPDATE`;
+    const current = await tx.project.findUniqueOrThrow({ where: { id } });
+    if (data.repoUrl === current.repoUrl) {
+      return tx.project.update({ where: { id }, data, include: { folders: folderSelection } });
+    }
+    if (current.maintenanceRunId !== null) throw new ProjectRepositoryBusyError();
+    return tx.project.update({
+      where: { id },
+      data: {
+        ...data,
+        syncRevision: { increment: 1 },
+        // Retain both IDs for the existing publication cleanup, but make the
+        // current snapshot unusable immediately for this different repository.
+        templateSnapshotAt: null,
+        templateSnapshotSha: null,
+        templateSnapshotRunId: null,
+        templateSnapshotSize: Prisma.DbNull,
+        maintenanceWatchedSha: null,
+        maintenanceWatchCheckedAt: null,
+      },
+      include: { folders: folderSelection },
+    });
+  });
 }
 
+/** Works with both immediate db-push FKs and deferred migration FKs. */
 export async function deleteProject(id: string): Promise<void> {
-  await prisma.project.delete({ where: { id } });
+  await runTransactionWithRetry(async (tx) => {
+    // Match folder writes' lock order before touching agents or cascading folders.
+    await tx.$queryRaw`SELECT "id" FROM "Project" WHERE "id" = ${id} FOR UPDATE`;
+    await tx.agent.updateMany({
+      where: { projectId: id, folderId: { not: null } },
+      data: { folderId: null },
+    });
+    await tx.project.delete({ where: { id } });
+  });
 }
 
 export async function listEnvFiles(projectId: string): Promise<ProjectEnvFileRecord[]> {
@@ -200,7 +275,8 @@ export interface EnvFileWrite {
 
 export async function upsertEnvFile(
   projectId: string,
-  write: EnvFileWrite
+  write: EnvFileWrite,
+  client: Prisma.TransactionClient = prisma
 ): Promise<ProjectEnvFileRecord> {
   const data = {
     description: write.description ?? null,
@@ -212,7 +288,7 @@ export async function upsertEnvFile(
     linkTarget: write.linkTarget ?? null,
     sizeBytes: write.sizeBytes,
   };
-  return prisma.projectEnvFile.upsert({
+  return client.projectEnvFile.upsert({
     where: { projectId_path: { projectId, path: write.path } },
     create: { projectId, path: write.path, ...data },
     update: data,
@@ -223,9 +299,13 @@ export async function deleteEnvFile(id: string): Promise<void> {
   await prisma.projectEnvFile.delete({ where: { id } });
 }
 
-export async function deleteEnvFilesByPath(projectId: string, paths: string[]): Promise<void> {
+export async function deleteEnvFilesByPath(
+  projectId: string,
+  paths: string[],
+  client: Prisma.TransactionClient = prisma
+): Promise<void> {
   if (paths.length === 0) return;
-  await prisma.projectEnvFile.deleteMany({ where: { projectId, path: { in: paths } } });
+  await client.projectEnvFile.deleteMany({ where: { projectId, path: { in: paths } } });
 }
 
 export async function findSyncSnapshot(projectId: string) {
@@ -239,10 +319,16 @@ export async function findSyncSnapshot(projectId: string) {
 export async function claimSyncRevision(
   projectId: string,
   baseRevision: number,
-  extra: { repoUrl?: string } = {}
+  extra: { repoUrl?: string } = {},
+  expectedRepoUrl?: string | null,
+  client: Prisma.TransactionClient = prisma
 ): Promise<number | null> {
-  const claimed = await prisma.project.updateMany({
-    where: { id: projectId, syncRevision: baseRevision },
+  const claimed = await client.project.updateMany({
+    where: {
+      id: projectId,
+      syncRevision: baseRevision,
+      ...(expectedRepoUrl !== undefined ? { repoUrl: expectedRepoUrl } : {}),
+    },
     data: { syncRevision: baseRevision + 1, lastSyncedAt: new Date(), ...extra },
   });
   return claimed.count === 1 ? baseRevision + 1 : null;
@@ -257,7 +343,8 @@ export async function writeSyncSnapshot(
     gitBundleFingerprint: string | null;
     encryptedUncommittedPatch: string | null;
     patchFingerprint: string | null;
-  }
+  },
+  client: Prisma.TransactionClient = prisma
 ): Promise<void> {
   const row = {
     revision,
@@ -267,14 +354,77 @@ export async function writeSyncSnapshot(
     encryptedUncommittedPatch: data.encryptedUncommittedPatch,
     patchFingerprint: data.patchFingerprint,
   };
-  await prisma.projectSyncSnapshot.upsert({
+  await client.projectSyncSnapshot.upsert({
     where: { projectId },
     create: { projectId, ...row },
     update: row,
   });
 }
 
+/** Commit a planned sync only while its original repository/revision still owns the row. */
+export async function commitSyncPush(
+  projectId: string,
+  baseRevision: number,
+  expectedRepoUrl: string | null,
+  extra: { repoUrl?: string },
+  writes: EnvFileWrite[],
+  pruned: string[],
+  snapshot: Parameters<typeof writeSyncSnapshot>[2]
+): Promise<number | null> {
+  return runTransactionWithRetry(async (tx) => {
+    const revision = await claimSyncRevision(projectId, baseRevision, extra, expectedRepoUrl, tx);
+    if (revision === null) return null;
+    for (const write of writes) await upsertEnvFile(projectId, write, tx);
+    await deleteEnvFilesByPath(projectId, pruned, tx);
+    await writeSyncSnapshot(projectId, revision, snapshot, tx);
+    return revision;
+  });
+}
+
 export class ProjectWorkspaceError extends Error {}
+
+/** The project's published template snapshot as a session start needs it, or null. */
+export function templateSnapshotOf(project: {
+  templateSnapshotId: string | null;
+  templateSnapshotAt: Date | null;
+  templateSnapshotSize: unknown;
+}): ProjectTemplateSnapshot | null {
+  if (project.templateSnapshotId === null || project.templateSnapshotAt === null) return null;
+  const { cpu, memoryGb } = (project.templateSnapshotSize ?? {}) as {
+    cpu?: unknown;
+    memoryGb?: unknown;
+  };
+  return {
+    id: project.templateSnapshotId,
+    size:
+      Number.isInteger(cpu) && Number.isInteger(memoryGb)
+        ? { cpu: cpu as number, memoryGb: memoryGb as number }
+        : null,
+  };
+}
+
+/** Same GitHub SSH aliases accepted by onboarding; local paths remain case-sensitive. */
+export function projectRepositoryKey(value: string): string {
+  const trimmed = value.trim();
+  const github =
+    /^(?:(?:https?:\/\/)?github\.com\/|(?:ssh:\/\/)?git@github\.com[:/])([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(
+      trimmed
+    );
+  return github
+    ? `https://github.com/${github[1]}/${github[2]}`.toLowerCase()
+    : trimmed.replace(/\/$/, '');
+}
+
+/** A synced checkout is reusable only for the repository recorded by its manifest. */
+export function syncSnapshotMatchesRepo(
+  repoUrl: string | null,
+  manifest: ProjectSyncManifest | null
+): boolean {
+  const remote = manifest?.git?.remoteUrl;
+  if (repoUrl === null) return remote === null;
+  if (typeof remote !== 'string') return false;
+  return projectRepositoryKey(repoUrl) === projectRepositoryKey(remote);
+}
 
 /**
  * Decrypt everything a code session needs for one project. Throws on any
@@ -290,6 +440,13 @@ export async function prepareProjectWorkspace(
     listEnvFiles(project.id),
     findSyncSnapshot(project.id),
   ]);
+  // Keep stale encrypted data stored, but never restore it into a different repository.
+  const boundSnapshot = syncSnapshotMatchesRepo(
+    project.repoUrl,
+    (snapshot?.manifest as unknown as ProjectSyncManifest | undefined) ?? null
+  )
+    ? snapshot
+    : null;
   const files: ProjectWorkspace['files'] = [];
   const redactions: string[] = [];
   for (const file of envFiles) {
@@ -321,12 +478,16 @@ export async function prepareProjectWorkspace(
       startupScript: project.startupScript,
       startupTimeoutS: project.startupTimeoutS,
       sandboxSize: project.sandboxSize ?? null,
+      templateSnapshot: templateSnapshotOf(project),
     },
     revision: project.syncRevision,
-    manifest: (snapshot?.manifest as unknown as ProjectSyncManifest | undefined) ?? null,
+    manifest: (boundSnapshot?.manifest as unknown as ProjectSyncManifest | undefined) ?? null,
     files,
-    gitBundle: decryptOptional(snapshot?.encryptedGitBundle, 'Git bundle'),
-    uncommittedPatch: decryptOptional(snapshot?.encryptedUncommittedPatch, 'Uncommitted patch'),
+    gitBundle: decryptOptional(boundSnapshot?.encryptedGitBundle, 'Git bundle'),
+    uncommittedPatch: decryptOptional(
+      boundSnapshot?.encryptedUncommittedPatch,
+      'Uncommitted patch'
+    ),
     redactions,
   };
 }

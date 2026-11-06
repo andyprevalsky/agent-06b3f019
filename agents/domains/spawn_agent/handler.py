@@ -34,6 +34,7 @@ from domains.spawn_agent.config import (
     should_skip_oai_demo_browser_spawn,
 )
 from domains.spawn_agent.service import (
+    EXPLORE_FALLBACK_PAYLOAD_BUDGET,
     build_for_each_goal,
     coerce_for_each_items,
     compile_explore_grep_evidence,
@@ -58,6 +59,7 @@ from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from helpers.world_model_runtime import world_model_specialized_agent_activity
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from tools.grep import fetch_local_data_summary
+from tools.read_tool_output import preview_tool_output_activity
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
@@ -249,6 +251,7 @@ def _explore_chip_text(result: Dict[str, Any]) -> str:
         compile_explore_wrap_up(
             result.get("result") or result.get("final_response") or result.get("summary") or "",
             result.get("tool_call_results") or [],
+            budget=None,
         )
     )
 
@@ -331,6 +334,9 @@ def _explore_result_after_activity_failure(exc: BaseException, *, user_paused: b
         return {
             "status": "completed",
             "result": recovered_text,
+            "evidence_fallback": bool(recovered.get("evidence_fallback")) or not bool(
+                recovered.get("result") or recovered.get("final_response") or recovered.get("summary")
+            ),
             "tool_call_results": recovered.get("tool_call_results") or [],
             "accumulated_usage": recovered.get("accumulated_usage") or [],
             "llm_iteration_usage": recovered.get("llm_iteration_usage") or [],
@@ -1010,6 +1016,7 @@ class SpawnAgentManager(ToolManager):
                     result = {
                         "status": "completed",
                         "result": recovered_text,
+                        "evidence_fallback": True,
                         "tool_call_results": persisted_results,
                         "accumulated_usage": [],
                         "llm_iteration_usage": [],
@@ -1028,6 +1035,9 @@ class SpawnAgentManager(ToolManager):
 
             explore_result = _explore_chip_text(result)
             explore_tool_call_results = result.get("tool_call_results") or []
+            evidence_fallback = bool(result.get("evidence_fallback")) or not bool(
+                result.get("result") or result.get("final_response") or result.get("summary")
+            )
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])
             # Data sources the explore tried to grep but whose connector isn't
@@ -1047,10 +1057,28 @@ class SpawnAgentManager(ToolManager):
             # Fast Mode may soft-complete a malformed cached LLM turn only
             # when prior tool calls produced evidence to pass to the parent.
             if explore_failed and fast_mode:
-                cached_evidence = compile_explore_wrap_up("", explore_tool_call_results)
+                cached_evidence = compile_explore_wrap_up("", explore_tool_call_results, budget=None)
                 if cached_evidence and explore_error_reason != _EXPLORE_NO_EVIDENCE:
                     explore_result = cached_evidence
                     explore_failed = False
+                    evidence_fallback = True
+
+            if evidence_fallback and explore_result:
+                if explore_failed and explore_error_reason:
+                    explore_result = f"{explore_error_reason}\n\n{explore_result}"
+                if len(explore_result) > EXPLORE_FALLBACK_PAYLOAD_BUDGET:
+                    # Timeout/heartbeat recovery still has complete raw evidence
+                    # here. Retain it before the normal parent ToolEvent is cut.
+                    readback = await workflow.execute_activity(
+                        preview_tool_output_activity,
+                        args=[workflow_instance.user_id, workflow_instance.agent_id, "", explore_result, 512],
+                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
+                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
+                    )
+                    presentation = compile_explore_wrap_up(
+                        "", [explore_result], budget=EXPLORE_FALLBACK_PAYLOAD_BUDGET - len(readback) - 2,
+                    )
+                    explore_result = f"{presentation}\n\n{readback}"
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted
@@ -1084,13 +1112,16 @@ class SpawnAgentManager(ToolManager):
             # User-visible message is the explore result (including any
             # not-connected notice). Only genuine explore failures swap in
             # error_reason / ERROR status.
-            event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
-            grep_evidence = compile_explore_grep_evidence(explore_tool_call_results)
+            event_message = explore_error_reason if explore_failed and explore_error_reason and not (evidence_fallback and explore_result) else explore_result
+            # Fallback already contains this evidence (and its full readback);
+            # appending another hard-cut copy would exceed its presentation cap.
+            grep_evidence = "" if evidence_fallback else compile_explore_grep_evidence(explore_tool_call_results)
             if not explore_failed and grep_evidence and grep_evidence not in explore_result:
                 event_message = f"{event_message}\n\nOriginal grep results:\n{grep_evidence}"
             if (
                 not oai_demo
                 and not explore_failed
+                and not evidence_fallback
                 and _grounded_explore_text(explore_result, explore_tool_call_results)
                 and not getattr(workflow_instance, "_explore_synthesis_checkpoint_sent", False)
                 and _has_prior_grounded_explore_batch(getattr(workflow_instance, "context", None), tool_call_id)
@@ -1671,7 +1702,13 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
             # Track usage from events
             if isinstance(event, ToolEvent) and event.data and event.data.get("usage"):
                 await workflow_instance._track_usage(
-                    event.data["usage"], tool_name="spawn_agent", call_site="explore_agent"
+                    event.data["usage"], tool_name="spawn_agent", call_site="explore_agent",
+                    browser_completed=(
+                        agent_type == "browser"
+                        and event.status == MessageStatus.FINISHED
+                        and (event.metadata or {}).get("action_type") == "task_complete"
+                        and (event.metadata or {}).get("success") is True
+                    ),
                 )
     except GenerationHandoffRequested as exc:
         # A parked tool keeps its chip open for the next generation to finish.

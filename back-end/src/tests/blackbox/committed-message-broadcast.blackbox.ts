@@ -3,7 +3,13 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { blockedRecord, decodeEncoded } from './committed-message-broadcast.fixtures';
+import {
+  blockedRecord,
+  decodeEncoded,
+  bodyMessages,
+  message,
+  type WireMessage,
+} from './committed-message-broadcast.fixtures';
 
 import { config as loadEnv } from 'dotenv';
 
@@ -31,20 +37,6 @@ async function main() {
   const publisher = await import('../../providers/chat/supabaseBroadcast');
   const originalFetch = globalThis.fetch;
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-  type WireMessage = {
-    topic: string;
-    event: string;
-    payload: { record: Record<string, unknown> & { id?: string } };
-  };
-  const bodyMessages = (init?: RequestInit): WireMessage[] =>
-    (JSON.parse(String(init?.body)) as { messages: WireMessage[] }).messages;
-  const message = (id: string) => ({
-    id,
-    timestamp: new Date('2026-10-13T01:34:15.736Z'),
-    text: 'Opening browser',
-    role: 'TOOL',
-    metadata: { toolName: 'spawn_browser_agent', toolStatus: 'IN_PROGRESS', toolCallId: id },
-  });
 
   let failed = 0;
   let total = 0;
@@ -602,13 +594,8 @@ async function main() {
       for (const [index, chunk] of chunks.entries()) {
         await publisher.broadcastAssistantStream(agentId, 'burst-stream', chunk, false, index + 1);
       }
-      await publisher.broadcastAssistantStream(
-        agentId,
-        'burst-stream',
-        '',
-        true,
-        chunks.length + 1
-      );
+      const finalSequence = chunks.length + 1;
+      await publisher.broadcastAssistantStream(agentId, 'burst-stream', '', true, finalSequence);
       await publisher.broadcastMessageInsert(agentId, message('burst-final'));
       await publisher.__flushBroadcastQueueForTests();
 

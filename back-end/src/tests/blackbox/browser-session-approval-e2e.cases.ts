@@ -54,7 +54,9 @@ export async function runBrowserApprovalE2ECases(): Promise<void> {
         maxRetries: 1200,
         initialBackoffMs: 100,
         fixedDelays: Array.from({ length: 1199 }, () => 100),
-        isRetryable: (error) => (error as NodeJS.ErrnoException).code === 'ENOENT',
+        // Not written yet (ENOENT), or read mid-write by the server (truncated JSON).
+        isRetryable: (error) =>
+          (error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError,
         component: 'BrowserPauseE2EReady',
       }
     );

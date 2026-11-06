@@ -320,6 +320,63 @@ async def test_execute_reasoning_activity_happy():
     assert out["content"] == "ok"
 
 
+async def test_execute_reasoning_activity_keeps_oversized_dag_tool_result():
+    """test-mass-agent-run-0 ecb2790c: DAG reasoning task 7 raised
+    "Retained output requires trusted user and agent identity" on an oversized
+    for_each result, so the plan fell through to off-script recovery.
+
+    The reasoning node has no read_tool_output tool; it must receive the
+    complete result, as before retained previews, and never upload an artifact.
+    """
+    from activities.reasoning import ReasoningResponse
+    from domains.reasoning import service as rservice
+    from domains.reasoning.handler import execute_reasoning_activity
+    from helpers import attachments
+    from helpers.tool_output import DEFAULT_INLINE_CHARS
+
+    items = [{"creator": f"creator-{i}", "analysis": f"finding-{i} " + "x" * 4_000} for i in range(50)]
+    context = [
+        {"role": "USER", "text": "Analyze the top 50 creators", "timestamp": "2026-10-27T03:20:20.764Z"},
+        {
+            "role": "TOOL",
+            "text": "Completed for_each delegation for 50 items. See structured_response.items for per-child results.",
+            "timestamp": "2026-10-27T03:25:34.839Z",
+            "metadata": {
+                "toolStatus": "FINISHED",
+                "toolCallId": "dag-for-each-task-3",
+                "toolName": "spawn_general_purpose_agent_for_each",
+                "title": "for_each complete",
+                "structured_response": {"items": items},
+            },
+        },
+    ]
+    captured: list[dict] = []
+
+    async def fake_llm(messages, **kwargs):
+        captured.extend(messages)
+        return (ReasoningResponse(response="assembled"), {}, [])
+
+    async def forbidden_upload(*args, **kwargs):
+        raise AssertionError("reasoning context must not create retained-output artifacts")
+
+    with (
+        patch.object(rservice, "call_llm_structured_streaming", fake_llm),
+        patch.object(attachments, "upload_to_storage", forbidden_upload),
+    ):
+        # Positional order and identity values match dag_executor's reasoning_args.
+        out = await execute_reasoning_activity(
+            "Final assembly", context, "m", "agent-1", None,
+            None, None, None, "user-1", None, None, None, None, "user-1",
+        )
+    assert out["content"] == "assembled"
+    tool_rows = [m for m in captured if "for_each complete" in str(m.get("content"))]
+    assert len(tool_rows) == 1, captured
+    content = tool_rows[0]["content"]
+    assert len(content) > DEFAULT_INLINE_CHARS
+    assert "finding-0 " in content and "finding-49 " in content
+    assert "[Retained tool output:" not in content
+
+
 async def run_all_tests():
     print("reasoning blackbox tests:")
     r = BlackboxResult()
@@ -343,6 +400,10 @@ async def run_all_tests():
     await r.record_async("execute_reasoning_no_stream", test_execute_reasoning_no_stream_no_agent)
     await r.record_async("execute_reasoning_activity_wraps_errors", test_execute_reasoning_activity_wraps_errors)
     await r.record_async("execute_reasoning_activity_happy", test_execute_reasoning_activity_happy)
+    await r.record_async(
+        "execute_reasoning_activity_keeps_oversized_dag_tool_result",
+        test_execute_reasoning_activity_keeps_oversized_dag_tool_result,
+    )
     teardown_mock()
     return r.all_passed
 

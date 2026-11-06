@@ -40,3 +40,16 @@ export const PLAID_OAUTH_CONTEXT_STORAGE_KEY = 'rose:plaid:oauth:context';
  * relevant environment.
  */
 export const PLAID_OAUTH_REDIRECT_PATH = '/plaid-oauth-redirect';
+
+/**
+ * Rose page Granola returns the browser to after sign-in. It posts the code to
+ * the backend with the signed-in user's own session (never an unauthenticated
+ * callback). The Mac app opens sign-in in the system browser, so it returns to
+ * the public site.
+ */
+export const GRANOLA_CALLBACK_PATH = '/integrations/granola/callback';
+export const GRANOLA_RETURN_KEY = 'rose.granola.returnPath';
+export const GRANOLA_PUBLIC_ORIGIN = 'https://www.roselabs.ai';
+
+/** The backend redirects here after Google's consent, reopening the desktop app. */
+export const DESKTOP_OAUTH_RETURN_URL = 'roselabs://oauth-complete';
