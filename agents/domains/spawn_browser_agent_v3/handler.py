@@ -265,16 +265,14 @@ AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
 
 
 def auth_assistance_declined_message(auth_realm: Optional[str]) -> str:
-    """The parent's whole view of a declined sign-in: facts only, no instructions.
+    """Facts only: the exact request the user declined, then what the browser did.
 
-    "Declined sign-in assistance" alone read as "the user won't help", and the
-    parent retried the site through another sign-in method.
+    The quoted question is the one the backend showed the user
+    (back-end/src/domains/auth-assistance/repo.ts, repo.nativeWrite.ts).
     """
-    realm = auth_realm or "the site"
-    return (
-        f"The user declined to sign in to {realm}. Their decline applies to every way of signing in "
-        f"to {realm}, including other sign-in methods. The browser stopped without signing in."
-    )
+    if auth_realm == "iphone":
+        return 'The user declined the request "Complete the protected step on your iPhone". The browser task stopped.'
+    return f'The user declined the request "Sign in to {auth_realm or "the site"}". The browser task stopped.'
 
 
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"

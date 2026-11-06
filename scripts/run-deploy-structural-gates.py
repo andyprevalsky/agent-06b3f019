@@ -379,6 +379,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-disposable-lifecycle.test.py"),
     ),
     Gate(
+        "replicate-llm-dump-panel",
+        ("python3", "scripts/tests/replicate-llm-dump-panel.test.py"),
+    ),
+    Gate(
         "cloudbench-full-selection",
         ("python3", "scripts/tests/cloudbench-full-selection.test.py"),
     ),

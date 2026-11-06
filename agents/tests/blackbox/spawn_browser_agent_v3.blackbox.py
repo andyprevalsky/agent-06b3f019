@@ -24143,17 +24143,20 @@ async def test_browser_empty_completion_preserves_verified_denial_for_parent():
         recipient="/root", sender="/root/member_number", agent_type="browser",
         status="completed", summary=result["message"], structured_response=result.get("structured_response"),
     )
-    # The parent's only evidence is this result. "Declined assistance" alone read as
-    # "the user won't help, try another sign-in method" and the root respawned a
-    # browser for an email code (RCA 2026-10-15-auth-decline-root-continuation-unproven).
-    # It names the realm and states the decline's scope as fact; it never instructs
-    # the parent (review of 4b12ac96d1: steering text was removed from this result).
+    # The parent's only evidence is this result. "Declined sign-in assistance" read as
+    # "the user won't help" and the root respawned a browser for an email code
+    # (RCA 2026-10-15-auth-decline-root-continuation-unproven). The result quotes the
+    # exact request the backend showed the user and adds no scope or instruction
+    # (review of 4b12ac96d1: facts only; the policy lives in the EXECUTE prompt).
     assert result["message"] == h.auth_assistance_declined_message("rose-shop-test")
     assert result["message"] in notification
-    assert "The user declined to sign in to rose-shop-test." in notification
-    assert "applies to every way of signing in to rose-shop-test, including other sign-in methods" in notification
-    assert "Do not" not in result["message"] and "stop and report" not in result["message"]
-    assert h.auth_assistance_declined_message(None).startswith("The user declined to sign in to the site.")
+    assert 'The user declined the request "Sign in to rose-shop-test". The browser task stopped.' in notification
+    assert h.auth_assistance_declined_message("iphone") == (
+        'The user declined the request "Complete the protected step on your iPhone". The browser task stopped.'
+    )
+    backend = Path(__file__).resolve().parents[3] / "back-end/src/domains/auth-assistance"
+    assert "question: `Sign in to ${input.authRealm}`," in (backend / "repo.ts").read_text()
+    assert "question: 'Complete the protected step on your iPhone'," in (backend / "repo.nativeWrite.ts").read_text()
 
 
 @_in_browser_activity_context

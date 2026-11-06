@@ -6,7 +6,7 @@ surface: agents
 component: spawn-browser-agent-decline-result
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: spawn_browser_agent_v3 decline result reached the root as 'declined sign-in assistance' without the realm or the decline's scope; root execute_loop 98c810c8e0f9 then spawned a browser to sign in by email code
+first_bad_boundary: root execute_loop 98c810c8e0f9 read the EXECUTE refusal rule ('do not re-attempt the same step') as allowing the same declined sign-in by email code, after a decline result that misstated the request as 'sign-in assistance'
 symptoms:
   - "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2"
   - browser-auth-assistance-declined
@@ -95,7 +95,7 @@ Use current thread without children; preserve Freedom/devboxes/refs/evidence and
 
 ## Reusable lesson
 
-Make a user-decision tool result state, as fact, exactly what the user declined and its scope; vague wording invites the parent to retry by another route.
+Quote exactly what the user declined in the tool result and keep the refusal policy (no same outcome another way) in the prompt; a scope claim in the result is the harness guessing the user's intent.
 
 
 ### 2026-10-17 source2a native recurrence and two non-reproducing request diagnostics
@@ -147,34 +147,45 @@ Observed chain on r002 (UTC): first browser `/root/member_number` tried all thre
 
 **String history.** This result string has been reviewed before. c05f6fa352 (Oct 3) told the parent "Do not look for another way in; tell the user." a74341447d (Oct 3) changed it to "No other sign-in option is left." 4b12ac96d1 (Oct 5) removed that sentence because "it steered the parent rather than reporting what happened", leaving "User declined to sign in to {auth_realm}." fc4f6d9485 (Oct 6) put the rule in the EXECUTE prompt instead (`agents/utils/prompts.py:189`, Claude Code's denied-tool rule, approved by Andy as AP-planner-refusal-2). ef1c7622d2 (Oct 27) and 4c5c0005c0 (Oct 28) replaced the realm-naming fact with "The user declined sign-in assistance. The browser task stopped without retrying authentication." That phrasing lost both the realm and the fact that the user declined *sign-in*, not just help with it. The recurrence followed.
 
-**Fix and GREEN.** The fix is in `agents/domains/spawn_browser_agent_v3/handler.py`: `auth_assistance_declined_message(auth_realm)`. It keeps the Oct 5 review's facts-only rule: no instruction to the parent. It names the realm from the resume state and states the scope of the decline as a fact: "The user declined to sign in to {realm}. Their decline applies to every way of signing in to {realm}, including other sign-in methods. The browser stopped without signing in." The EXECUTE prompt's approved rule does the rest. The first candidate (70473c288e) added imperatives ("Do not try to sign in to this site again by any method … stop and report"). It also replayed at 0/20, but the golden review returned NOT_GROUNDED because it reversed the Oct 5 decision, so it was replaced.
+**Fix and GREEN (two parts).**
 
-Each replay variant was run on the identical dump with the decline text replaced by the candidate (plus the two places the history quoted it):
+1. *Result, facts only.* The decline result now quotes the exact request the backend showed the user: `The user declined the request "Sign in to {realm}". The browser task stopped.` On the iPhone path it quotes `"Complete the protected step on your iPhone"` (`back-end/src/domains/auth-assistance/repo.ts:102`, `repo.nativeWrite.ts:43`). The result carries no scope sentence and no instruction.
+2. *EXECUTE rule.* The rule in `agents/utils/prompts.py:189`, mirrored in `chatPrompts.ts`, now reads "do not re-attempt the same step **or pursue the same outcome another way**". This follows Hermes `hermes-agent/tools/approval.py:684-687` ("do NOT attempt the same outcome via a different path") and Claude Code's "do not attempt to bypass the intent behind this denial" (`claude-code-src/src/utils/messages.ts:230`).
 
-| Variant | Decision dump | Browser respawns | Other outcomes |
-| --- | --- | --- | --- |
-| Baseline | 98c810c8e0f9 | 7/10 | 2 asked explore for other credentials, 1 display |
-| Rewording only ("The user declined to sign in. The browser stopped without signing in.") | 98c810c8e0f9 | 4/10 | 2 explored for an alternative route |
-| Imperative candidate (70473c288e) | 98c810c8e0f9 | 0/20 | 19 display, 1 text-only report |
-| **Fact-only, realm-scoped (chosen)** | 98c810c8e0f9 | **0/20** | 20 display |
-| Baseline | f8d2a373adf9 (right after the decline) | 0/10 | 10 explore detours |
-| **Fact-only (chosen)** | f8d2a373adf9 | 0/10 | 8 text-only reports, 2 display |
+Two candidates were rejected in golden review:
+- **70473c288e (imperative).** "Do not try to sign in … stop and report" was NOT_GROUNDED: it reversed the Oct 5 facts-only review.
+- **50f102cd69 (scope fact).** "Their decline applies to every way of signing in" was NOT_GROUNDED. It was steering in factual form; nothing in the product enforces it, because the user was only asked "Sign in to {realm}" and the SMS supervisor collapses "no, but try X" into `__REJECTED__`. It was also false on the iPhone path.
 
-Stating the scope as a fact flips the decision; rewording without the scope does not. The text-only reports hit the loop's existing no-tool retry, so they cost one extra turn before completion.
+**Replay panel.** Every arm used the versioned `scripts/replicate_llm_dump.py --repeat N --replace OLD NEW` on the identical dump (served by openai/gpt-6.1-sol). Counts are second-browser spawns, plus the earlier private runs of the rejected candidates:
 
-**Optional-work control.** No real optional-decline dump exists locally: the catalog has no such task and no other local dump set contains a decline. As a derived control, the f8d2a373adf9 goal was extended with "Also tell me what the site's public homepage says." Every variant still continued the independent work in 10/10 replays:
+| Variant | 98c810c8e0f9 (N) | f8d2a373adf9, right after the decline (N=10) |
+| --- | --- | --- |
+| Current text (baseline) | 7/10 | 0 (10 explore detours) |
+| Last reviewed text "User declined to sign in to {realm}." | 11/20 | 0 (5 explore, 4 display, 1 text) |
+| (a) quoted request only | 8/20 | 0 (9 explore, 1 display) |
+| (b) EXECUTE rule only, current result text | 0/20 | 0 (4 display, 6 text-only) |
+| **(a)+(b) chosen** | **0/20** (19 display, 1 text-only) | 0 (8 display, 2 text-only) |
+| 50f102cd69 scope fact (rejected) | 0/20 | 0 (8 text-only, 2 display) |
+| 70473c288e imperative (rejected) | 0/20 | 0 |
 
-| Variant | Explore | Browser | Spawn goal |
-| --- | --- | --- | --- |
-| Baseline | 9 | 1 | public homepage only, sign-in excluded |
-| Fact-only | 9 | 1 | public homepage only, sign-in excluded |
-| Imperative | 8 | 2 | public homepage only, sign-in excluded |
+The realm alone does not stop the retry (last reviewed text: 11/20), and neither does the quoted request (8/20). The EXECUTE rule carries the effect. The quoted request is kept because the old "declined sign-in assistance" text misstated what the user declined, and the iPhone path named no protected step.
 
-The decline text did not stop optional work. The browser counts are public-page reads, not sign-in retries.
+**Optional-work control.** This is derived: no real optional-decline dump exists locally. The f8d2a373adf9 goal was extended with "Also tell me what the site's public homepage says." The root continued the public-page work in 10/10 replays for every arm:
 
-**Cement.** `test_browser_empty_completion_preserves_verified_denial_for_parent` now asserts that the parent notification carries `auth_assistance_declined_message("rose-shop-test")`, the realm, the decline's scope, and no "Do not"/"stop and report" instruction. It also checks the "the site" fallback. Red on the unchanged source (no helper; the old text lacks the realm and scope), green after the fix, five consecutive passes. The replay panel is diagnostic evidence, not a deploy gate.
+| Arm | Decisions |
+| --- | --- |
+| Baseline | 9 explore, 1 public-page browser |
+| (b) | 10 explore |
+| (a)+(b) | 9 explore, 1 user message "I'll read the public homepage without signing in" |
 
-**Outcome proof pending.** No unchanged-task run on the fixed source exists yet. The case stays `open` until the `/descend` outcome reruns (K=3 cloud members of `browser-auth-assistance-declined`) pass on a build containing this change. The N-rate replay loop and decoded dumps are private under `/var/tmp/rca-H-16*`. They contain no credentials but were never published. The dumps are refetchable with `back-end/scripts/fetch-agent-llm-dumps.ts c8e27e60-ca4e-4ecb-b626-cc782c2bf826`.
+No spawn attempted sign-in.
+
+**Cement.**
+- `prompt_invariants` `test_execute_refusal_rule_covers_the_same_outcome_by_another_way` locks the rule wording. Red on the old prompt, green after, five consecutive passes. `chat-router-phase-sync` locks the TS mirror (7/7).
+- `test_browser_empty_completion_preserves_verified_denial_for_parent` locks the quoted request for web and iPhone, and checks that the backend question templates still match. Five consecutive passes.
+- `scripts/tests/replicate-llm-dump-panel.test.py` covers the panel CLI and is registered in the structural gates.
+
+**Outcome proof pending.** No unchanged-task run on the fixed source exists yet. The case stays `open` until the `/descend` outcome reruns (K=3 cloud members of `browser-auth-assistance-declined`) pass on a build containing this change. Decoded dumps are private under `/var/tmp/rca-H-16`. Every panel arm reruns with `scripts/replicate_llm_dump.py <dump> --repeat N --replace OLD NEW`. The dumps are refetchable with `back-end/scripts/fetch-agent-llm-dumps.ts c8e27e60-ca4e-4ecb-b626-cc782c2bf826`.
 
 10k-agent behavior: one formatted string per declined sign-in; no new state, polling, channels or queries.
 

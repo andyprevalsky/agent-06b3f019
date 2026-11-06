@@ -11,6 +11,12 @@ Modes:
   --mode rebuild-system  For planner dumps: rebuild system prompt via
                          build_planner_system_prompt() while keeping non-system
                          messages from the dump (post-edit check)
+
+Decision panels (generic dumps such as execute_loop):
+  --repeat N [--concurrency C]  replay the same call N times and count each
+                                replay's first tool call (spawn_agent by type)
+  --replace OLD NEW             counterfactual: swap exact text everywhere in the
+                                dump (message bodies and tool-call arguments)
 """
 
 from __future__ import annotations
@@ -570,10 +576,100 @@ async def replay_generic(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def apply_replacements(data: dict[str, Any], pairs: list[list[str]]) -> int:
+    """Replace exact text in every message body and tool-call argument string.
+
+    Tool-call arguments are JSON, so the text is matched in its JSON-escaped
+    form. A pair that matches nothing is an error: a silent no-op would replay
+    the baseline under the counterfactual's name.
+    """
+    hits = 0
+    for old, new in pairs:
+        old_json, new_json = json.dumps(old)[1:-1], json.dumps(new)[1:-1]
+        pair_hits = 0
+        for message in data.get("messages") or []:
+            content = message.get("content")
+            if isinstance(content, str) and old in content:
+                message["content"] = content.replace(old, new)
+                pair_hits += 1
+            for call in message.get("tool_calls") or []:
+                function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                arguments = function.get("arguments")
+                if isinstance(arguments, str) and old_json in arguments:
+                    function["arguments"] = arguments.replace(old_json, new_json)
+                    pair_hits += 1
+        if not pair_hits:
+            raise SystemExit(f"--replace text not found in dump: {old[:80]!r}")
+        hits += pair_hits
+    return hits
+
+
+def first_tool_decision(result: dict[str, Any]) -> str:
+    """The replay's decision: first tool name, spawn_agent qualified by agent type."""
+    calls = result.get("tool_calls") or []
+    if not calls:
+        return "no_tool_call"
+    call = calls[0]
+    function = call.get("function") if isinstance(call.get("function"), dict) else call
+    name = str(function.get("name") or call.get("name") or "unknown")
+    if name != "spawn_agent":
+        return name
+    raw = function.get("arguments") or call.get("arguments") or "{}"
+    try:
+        arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    except (TypeError, ValueError):
+        arguments = {}
+    return f"spawn_agent:{arguments.get('type') or 'unknown'}"
+
+
+async def replay_panel(data: dict[str, Any], repeat: int, concurrency: int) -> dict[str, Any]:
+    """Replay one generic call `repeat` times; count first-tool decisions.
+
+    Transport failures are counted separately and never as a decision.
+    """
+    gate = asyncio.Semaphore(max(1, concurrency))
+
+    async def one(index: int) -> dict[str, Any]:
+        async with gate:
+            try:
+                result = await replay_generic(json.loads(json.dumps(data)))
+            except Exception as exc:  # reported per replay, never counted as a decision
+                return {"replay": index, "decision": "replay_error", "error": f"{type(exc).__name__}: {exc}"[:300]}
+            return {
+                "replay": index,
+                "decision": first_tool_decision(result),
+                "actual_model": result.get("actual_model"),
+                "tool_calls": result.get("tool_calls"),
+                "content": (result.get("content") or "")[:2000],
+            }
+
+    rows = await asyncio.gather(*(one(index) for index in range(repeat)))
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row["decision"]] = counts.get(row["decision"], 0) + 1
+    return {
+        "call_site": data.get("call_site"),
+        "repeat": repeat,
+        "decisions": dict(sorted(counts.items())),
+        "actual_models": sorted({str(row.get("actual_model")) for row in rows if row.get("actual_model")}),
+        "replays": rows,
+    }
+
+
 async def main_async(args: argparse.Namespace) -> int:
     data = load_dump(args.dump)
     remove_goal_text(data, args.remove_goal_text or [])
+    if args.replace:
+        apply_replacements(data, args.replace)
     call_site = str(data.get("call_site") or "")
+
+    if args.repeat:
+        if "browser_use" in call_site or call_site == "planner" or args.mode != "exact":
+            raise SystemExit("--repeat replays generic dumps (e.g. execute_loop) in --mode exact only")
+        panel = await replay_panel(data, args.repeat, args.concurrency)
+        print(json.dumps(panel, indent=2, default=str))
+        print("DECISIONS " + json.dumps(panel["decisions"]) + " models " + json.dumps(panel["actual_models"]))
+        return 0
 
     if "browser_use" in call_site:
         result = await replay_browser_use(data, exact=args.mode == "exact")
@@ -633,6 +729,21 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Remove this exact text from the # Current Goal user message before replaying. Can be repeated.",
     )
+    parser.add_argument(
+        "--replace",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("OLD", "NEW"),
+        help="Counterfactual: replace exact text in every message and tool-call argument. Can be repeated.",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=0,
+        help="Replay a generic dump N times and count each replay's first tool call.",
+    )
+    parser.add_argument("--concurrency", type=int, default=4, help="Parallel replays for --repeat (default 4).")
     args = parser.parse_args()
     if args.exact:
         args.mode = "exact"
