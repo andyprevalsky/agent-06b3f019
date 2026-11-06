@@ -3,6 +3,7 @@ temporalio[grpc]>=1.18.1
 markdown-it-py>=4.0.0
 
 # HTTP and async support
+certifi>=2026.10.19
 aiohttp>=3.9.0
 httpx>=0.25.0
 boto3>=1.34.0

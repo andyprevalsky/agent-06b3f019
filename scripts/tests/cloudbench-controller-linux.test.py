@@ -40,7 +40,7 @@ class ContainerOwnership(unittest.TestCase):
             ):
                 binary = Path(temporary)
                 versions = {
-                    "node": "v22.13.0",
+                    "node": "v22.23.4",
                     "bash": "GNU bash, version 5.2.0",
                     "npm": "10.9.2",
                     "npx": "10.9.2",

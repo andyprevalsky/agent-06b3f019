@@ -88,7 +88,7 @@ if $BENCHMARK_MODE; then
 fi
 # End people credential authority.
 
-# mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
+# mac-app is Electron + requires the repository's pinned Node; only runs on macOS.
 IS_MAC=false
 [ "$(uname)" = "Darwin" ] && IS_MAC=true
 
@@ -2986,7 +2986,7 @@ fi
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
-    run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
+    run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 22.23.4 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
     PIDS+=($!); NAMES+=("mac-app")
 fi
 

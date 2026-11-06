@@ -3,6 +3,9 @@
   "version": "1.0.1",
   "private": true,
   "description": "Rose AI Agent Platform",
+  "engines": {
+    "node": "22.23.4"
+  },
   "scripts": {
     "prepare": "node -e \"if (process.env.CI !== 'true') { try { require('husky').install() } catch (e) {} }\""
   },

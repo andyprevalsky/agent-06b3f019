@@ -57,7 +57,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
           cache-dependency-path: back-end/package-lock.json
 
@@ -130,7 +130,7 @@ jobs:
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.23.4"
           cache: npm
           cache-dependency-path: back-end/package-lock.json
       - name: Resume the saved FIFO head without rebuilding or enqueuing
