@@ -68,15 +68,22 @@ feedback -> no card request -> no approval.
 ## Solution
 
 Candidate on branch `rca/h-22-20261106` (approval pending for the LLM-visible error
-text; outcome proof pending): `validate_product_rating` parses a score plus the scale the
-page shows (`/N`, `out of N`, `of N`, `%`), requires `0 <= score <= scale`, and
-normalizes deterministically — five-point ratings keep `"<score> stars"` (existing
-fingerprints and fixtures unchanged), other scales become `"<score>/<scale>"` or
-`"<score>%"`. A score with an explicit scale is preferred over an unrelated bare number.
-Bare scores above 5 and scores above their scale are still rejected, with an error that
-names the expected form ("'4.8 stars' or '9.2 out of 10'"). Placeholder and review-count
-rejection are unchanged. Tool descriptions are unchanged (they already say "rating shown on
-the product page"), so browser tool bytes and the phone-off golden hashes are stable.
+text; outcome proof pending): `validate_product_rating` treats as rating candidates
+either a score with the scale the page shows (`/N`, `out of N`, `%`) or a bare
+single-digit score read as out of 5 stars. Ranks (`#1`) and multi-digit numbers without a
+scale (`Top 10`, `250 guests`) are never candidates, and bare `of N` is not a scale (a
+rank like `#1 of 25` is not a rating). Each candidate is normalized deterministically —
+five-point ratings keep `"<score> stars"` (existing fingerprints and fixtures unchanged),
+other scales become `"<score>/<scale>"` or `"<score>%"`. The first candidate is used; when
+other candidates disagree (`4.5 stars, 98% recommend`, `4.5 stars · 20% off`) the rating
+is ambiguous and rejected rather than guessed. Out-of-range scores (`9.2` with no scale,
+`12 out of 10`, `150%`) are rejected; every rejection names the expected form
+("'4.8 stars' or '9.2 out of 10'"). Placeholder and review-count rejection are unchanged.
+Tool descriptions are unchanged (they already say "rating shown on the product page"), so
+browser tool bytes and the phone-off golden hashes are stable. The first candidate
+(e99a9f0506) preferred any scaled match and widened bare scores to three digits; golden
+review returned NOT_GROUNDED because that misread `4.5 stars, 98% recommend` as `98%` and
+rejected `#12 in Hotels · 4.5 stars`. Those inputs are now regression cases.
 Sibling failures prevented: 10-point hotel/booking sites (Booking.com, Expedia,
 hotels.com), 100-point/percent ratings (Metacritic, Tomatometer, seller feedback), and the
 `generate_write_lock_notification` purchase item, which shares the validator.

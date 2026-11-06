@@ -377,35 +377,65 @@ def test_rating_keeps_the_merchant_scale_shown_on_the_page():
     assert "4.6 stars" not in question
 
     # 3) Every scale form normalizes deterministically (stable fingerprints); 5-point
-    #    ratings keep their existing "<score> stars" form.
+    #    ratings keep their existing "<score> stars" form, and ranks ("#1") or
+    #    multi-digit numbers with no scale ("Top 10") never displace the star score.
     valid_item = _sample_tool_call()["line_items"][0]
     expected = {
         "4.8 stars": "4.8 stars",
         "4.8 out of 5 stars": "4.8 stars",
         "4.5/5": "4.5 stars",
         "0 stars": "0 stars",
+        "5.0 stars": "5.0 stars",
+        "4.8 (2,345)": "4.8 stars",
+        "4.8 stars (4.8 out of 5)": "4.8 stars",
+        "#12 in Hotels · 4.5 stars": "4.5 stars",
+        "Top 10 · 4.6 stars": "4.6 stars",
+        "250 guests · 4.5 stars": "4.5 stars",
+        "4.5 – #1 of 25": "4.5 stars",
         "9.2 out of 10": "9.2/10",
         "9.2/10 Wonderful": "9.2/10",
-        "Rated 8.7 of 10": "8.7/10",
         "10/10": "10/10",
         "85 out of 100": "85/100",
         "94%": "94%",
     }
-    for submitted, normalized in expected.items():
-        for model in (PaymentLineItem, WriteLockPurchaseItem):
+    rejected = (
+        # Several scores that disagree: ambiguous, so rejected rather than guessed.
+        "4.5 stars, 98% recommend",
+        "4.5 stars · 20% off",
+        "4.7★ · Top 5%",
+        "4.8 stars · 1 of 3 left",
+        # A rank is neither a score nor a scale.
+        "#1 of 25",
+        # Out of range for the stated or implied scale.
+        "9.2",
+        "Rated 8.7 of 10",
+        "12 out of 10",
+        "150%",
+        # Placeholders and review counts.
+        "N/A",
+        "312 reviews",
+    )
+    for model in (PaymentLineItem, WriteLockPurchaseItem):
+        for submitted, normalized in expected.items():
             item = {**valid_item, "title": valid_item["name"], "rating": submitted}
             assert model.model_validate(item).rating == normalized, (model.__name__, submitted)
+        for submitted in rejected:
+            item = {**valid_item, "title": valid_item["name"], "rating": submitted}
+            try:
+                parsed_item = model.model_validate(item)
+            except ValueError:
+                continue
+            raise AssertionError(f"{model.__name__} accepted {submitted!r} as {parsed_item.rating!r}")
 
-    # 4) Unscaled or impossible scores are still rejected, with an error that names
-    #    the scale requirement so the model can fix the call truthfully.
-    for submitted in ("9.2", "12 out of 10", "120%", "N/A", "312 reviews"):
+    # 4) Through the production browser-tool boundary, every rejected score names the
+    #    expected form so the model can fix the call truthfully.
+    for submitted in rejected[:-2]:
         request = json.loads(json.dumps(_HOTELS_COM_KABUKI_REQUEST))
         request["line_items"][0]["rating"] = submitted
         try:
             validate_browser_tool_args("request_payment_card", request)
         except BrowserToolArgsValidationError as error:
-            if submitted in ("9.2", "12 out of 10", "120%"):
-                assert "9.2 out of 10" in error.detail, error.detail
+            assert "'4.8 stars' or '9.2 out of 10'" in error.detail, (submitted, error.detail)
             continue
         raise AssertionError(f"request_payment_card accepted rating {submitted!r}")
 
