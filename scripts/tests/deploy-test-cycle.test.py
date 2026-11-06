@@ -2211,6 +2211,160 @@ class Cycle(unittest.TestCase):
         proof.pop('controller_log')
         return state,occurrence,paths,proof,campaign
 
+    def ref_preflight_campaign_state(self):
+        import hashlib, shutil, time, runpy
+        from datetime import datetime, timezone
+        state, occurrence, paths, proof, campaign = self.prelaunch_campaign_state()
+        sources = ['scripts/run-bench', 'scripts/run-bench-fleet', 'scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-env.sh']
+        for relative in sources:
+            shutil.copyfile(ROOT / relative, self.root / relative)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-qm', 'ref-producer'], check=True)
+        source = c.source(self.root)
+        receipt = state['attempts'][-1]['results'][0]
+        checks = [occurrence['gate']] + ['task-' + str(i) for i in range(1, 10)]
+        cases = dict.fromkeys(checks, 'UNVERIFIED')
+        start, finish = receipt['started_at'], receipt['finished_at']
+        iso = lambda value: datetime.fromtimestamp(value, timezone.utc).isoformat()
+        jobs = []
+        marker = f"FATAL: requested benchmark commit {source['head']} is not fetchable from origin and local patch shipping is disabled"
+        for index, check in enumerate(checks, 1):
+            log = campaign / f'r001-j{index:04d}.log'
+            log.write_text(marker + '\n')
+            jobs.append(dict(job_id=f'r001-j{index:04d}', task=check, run=1, attempt=1, attempts=[], status='failed',
+                             controller_exit_code=1, controller_pid=2147483100 + index,
+                             started_at=iso(start + .1), finished_at=iso(finish - .1), log=str(log)))
+        summary = dict(campaign_id=campaign.name, runs=1, retry_infra=0, task_count=10, total_jobs=10,
+                       concurrency=10, peak_concurrency=10, status='failed', jobs=jobs,
+                       started_at=iso(start), finished_at=iso(finish))
+        c.write(campaign/'summary.json', summary)
+        native = runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'))
+        group = native['campaign_group_record'](summary)
+        c.write(campaign/'hub-group.json', group)
+        c.write(campaign/'hub-group-publication-ack.private.json', dict(pid=2147483000, token='d'*32,
+                record_sha256=hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest()))
+        live = Path(c.read(campaign/'shared-relay-location.json')['directory'])
+        archive = campaign/'shared-relay'; archive.mkdir()
+        stamp = 'proc-start:00000000-0000-0000-0000-000000000000:123'
+        owner = dict(pid='2147483003', pid_start=stamp, parent_pid='2147483002', parent_start=stamp,
+                     token='synthetic-publisher', app='synthetic-app')
+        authority = dict(schema='shared-relay-authority-v1', app='synthetic-app', org_slug='fixture', network='',
+                         parent_pid=2147483002, parent_start=stamp,
+                         source_sha256=c.sha_file(self.root/'scripts/cloudbench-shared-relay.py'),
+                         agent_socket=str(live/'fly-agent.sock'), inventory_directory=str(campaign/'shared-inventory'),
+                         inventory_owner=owner, allowed_remote_ports=[8000], deadline=1000.0)
+        c.write(archive/'authority.private.json', authority)
+        digest = c.sha_file(archive/'authority.private.json')
+        ready = dict(pid=2147483005, birth=stamp, authority_sha256=digest,
+                     agent=dict(pid=2147483004, birth=stamp, version='fixture', socket_identity=[1, 2]),
+                     socket=str(live/'control.sock'), fd_limit=1000)
+        c.write(archive/'ready.json', ready)
+        c.write(archive/'serve.once.json', dict(pid=ready['pid'], birth=stamp, authority_sha256=digest))
+        for name, pid in [('bootstrap-owner.json',2147483006), ('broker-owner.json',ready['pid'])]:
+            c.write(archive/name, dict(pid=pid, birth=stamp, parent_pid=authority['parent_pid'], parent_start=stamp))
+        (archive/'broker.private.log').write_text('{"stopped": true}\n')
+        (archive/'bootstrap.private.log').write_text('synthetic isolated bootstrap\n')
+        for path in archive.iterdir(): shutil.copyfile(path, live/path.name)
+        (campaign/'shared-inventory/machines-refresh.lock').unlink()
+        (campaign.parent.parent/'cli.log').write_text(f'summary={campaign}/summary.json\n')
+        request_path = paths['receipt'].parent/'request.json'
+        request = c.read(request_path); request.update(source=source, checks=checks); c.write(request_path, request)
+        adapter = c.read(paths['adapter']); adapter.update(source=source, cases=cases); c.write(paths['adapter'], adapter)
+        receipt.update(source=source, cases=cases)
+        receipt['native_cleanup_reference']['result_sha256'] = c.sha_file(paths['adapter'])
+        receipt['cleanup_owner']['native_cleanup_reference'] = receipt['native_cleanup_reference']
+        c.write(paths['receipt'], receipt)
+        files = [request_path, campaign.parent.parent/'cli.log', *campaign.rglob('*'), *live.rglob('*'),
+                 self.root/'scripts/run-bench-campaign.py', *(self.root/p for p in sources)]
+        proof.update(layout='campaign-ref-preflight-v1', source=source, owner=copy.deepcopy(receipt['cleanup_owner']),
+                     receipt_sha256=c.sha_file(paths['receipt']), worker_result_sha256=c.sha_file(paths['adapter']),
+                     confirmed_at=time.time(), files={str(p):c.sha_file(p) for p in files if p.is_file()})
+        return state, occurrence, paths, proof, campaign, live
+
+    def test_ref_preflight_started_controllers_have_no_native_allocation_credit(self):
+        state, occurrence, paths, proof, campaign, live = self.ref_preflight_campaign_state()
+        before = copy.deepcopy(state)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertEqual(before['failures'], state['failures'])
+        entry = next(iter(state['reconciled_owners'].values()))
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual([], entry['participants'])
+        self.assertEqual([], entry['retained_services'])
+        self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
+
+    def test_ref_preflight_rejects_forged_lifecycle_source_and_prefix_without_state_mutation(self):
+        import shutil
+        state, occurrence, paths, proof, campaign, live = self.ref_preflight_campaign_state()
+        originals = {Path(p):Path(p).read_bytes() for p in proof['files']}
+        log = campaign/'r001-j0001.log'
+        for mutation in ('purpose', 'prefix', 'wrong-ref', 'native-handle', 'attempt', 'nonterminal', 'boolean-exit',
+                         'source', 'no-shutdown', 'numeric-shutdown', 'live-agent', 'live-bootstrap', 'live-publisher',
+                         'inventory-owner', 'no-stop', 'unacknowledged', 'foreign-hash'):
+            with self.subTest(mutation=mutation):
+                candidate = copy.deepcopy(proof)
+                try:
+                    if mutation=='purpose': candidate['purpose']='isolated-validation'
+                    if mutation=='prefix': log.write_text('forged-prefix '+originals[log].decode())
+                    if mutation=='wrong-ref': log.write_text(originals[log].decode().replace(proof['source']['head'],'a'*40))
+                    if mutation=='native-handle': log.write_text(f'{self.root}/scripts/run-bench monitor /tmp/foreign\n'+originals[log].decode())
+                    if mutation in ('attempt','nonterminal','boolean-exit'):
+                        value=c.read(campaign/'summary.json')
+                        if mutation=='attempt': value['jobs'][0]['attempts']=[{'run_dir':'foreign'}]
+                        elif mutation=='nonterminal': value['jobs'][0]['controller_exit_code']=None
+                        else: value['jobs'][0]['controller_exit_code']=True
+                        c.write(campaign/'summary.json',value)
+                    if mutation=='source': (self.root/'scripts/run-bench-fleet').write_text('changed producer')
+                    if mutation in ('no-shutdown', 'numeric-shutdown'):
+                        response='{}\n' if mutation=='no-shutdown' else '{"stopped": 1}\n'
+                        (campaign/'shared-relay/broker.private.log').write_text(response)
+                        (live/'broker.private.log').write_text(response)
+                    if mutation.startswith('live-'):
+                        from deploy_test_native_ref_preflight import process_birth
+                        ready=c.read(campaign/'shared-relay/ready.json')
+                        if mutation=='live-agent': ready['agent'].update(pid=os.getpid(),birth=process_birth(os.getpid()))
+                        if mutation=='live-bootstrap':
+                            value=c.read(campaign/'shared-relay/bootstrap-owner.json');value.update(pid=os.getpid(),birth=process_birth(os.getpid()))
+                            c.write(campaign/'shared-relay/bootstrap-owner.json',value)
+                        if mutation=='live-publisher':
+                            authority=c.read(campaign/'shared-relay/authority.private.json')
+                            authority['inventory_owner'].update(pid=str(os.getpid()),pid_start=process_birth(os.getpid()))
+                            c.write(campaign/'shared-relay/authority.private.json',authority)
+                            digest=c.sha_file(campaign/'shared-relay/authority.private.json')
+                            ready['authority_sha256']=digest
+                            once=c.read(campaign/'shared-relay/serve.once.json');once['authority_sha256']=digest
+                            c.write(campaign/'shared-relay/serve.once.json',once)
+                        c.write(campaign/'shared-relay/ready.json',ready)
+                        for p in (campaign/'shared-relay').iterdir(): shutil.copyfile(p,live/p.name)
+                    if mutation=='inventory-owner': (campaign/'shared-inventory/owner').write_text('live owner')
+                    if mutation=='no-stop': (campaign/'shared-inventory/stop').unlink()
+                    if mutation=='unacknowledged': (campaign/'hub-group-publication-ack.private.json').unlink()
+                    candidate['files']={str(p):c.sha_file(p) for p in originals if p.exists()}
+                    if mutation=='foreign-hash': candidate['files'][str(log)]='0'*64
+                    snapshot=copy.deepcopy(state)
+                    with self.assertRaises(ValueError): c.reconcile(state,occurrence['id'],candidate)
+                    self.assertEqual(snapshot,state)
+                finally:
+                    (campaign/'shared-inventory/owner').unlink(missing_ok=True)
+                    for path,data in originals.items(): path.write_bytes(data)
+
+    def test_ref_preflight_rejects_unreviewed_source_order_even_with_matching_receipts(self):
+        import deploy_test_native_ref_preflight as ref
+        state, occurrence, paths, proof, campaign, live = self.ref_preflight_campaign_state()
+        before = copy.deepcopy(state)
+        with patch.dict(ref.REVIEWED_SOURCES, {'scripts/run-bench-fleet': '0'*64}):
+            with self.assertRaisesRegex(ValueError, 'producer source changed'):
+                c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state)
+
+    def test_ref_preflight_requires_full_head_before_io(self):
+        from deploy_test_native_ref_preflight import validate_ref_preflight
+        for head in ('HEAD','a'*39,'--output=foreign',None):
+            with self.subTest(head=head), patch('subprocess.check_output') as process:
+                with self.assertRaisesRegex(ValueError,'ref preflight receipt head invalid'):
+                    validate_ref_preflight({'source':{'head':head}},None,{},None,None,None,None,None,None)
+                process.assert_not_called()
+
     def test_native_prelaunch_reconciliation_preserves_failure_and_grants_only_retry(self):
         state,occurrence,paths,proof,campaign=self.prelaunch_campaign_state()
         before=copy.deepcopy(state['attempts'])

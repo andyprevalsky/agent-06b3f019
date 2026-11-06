@@ -337,6 +337,11 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links = {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-ref-preflight-v1':
+        from deploy_test_native_ref_preflight import validate_ref_preflight
+        result = validate_ref_preflight(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
+        need(used == set(bindings), 'proof file closure')
+        return result
     if layout == 'campaign-prelaunch-v1':
         from deploy_test_native_prelaunch import validate_prelaunch
         result = validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)

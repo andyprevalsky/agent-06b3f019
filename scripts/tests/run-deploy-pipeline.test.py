@@ -4531,17 +4531,28 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
     plan = tmp / "declared-phase-plan.json"
     state = tmp / "declared-phase"
+    semantic_started = tmp / "declared-phase-semantic-started"
+    # Preserve the original smoke duration, then synchronize overlap with semantic
+    # admission instead of assuming child startup/reaping fits inside 1.2 seconds.
+    smoke_command = [sys.executable, "-c",
+                     "import pathlib, time; "
+                     f"marker = pathlib.Path({str(semantic_started)!r}); "
+                     "time.sleep(1.2); deadline = time.monotonic() + 10\n"
+                     "while not marker.exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
+                     "assert marker.exists(), 'semantic start was serialized behind smoke'"]
     # Budget 100: smoke (50) beside big (80) cannot fit; cov (30) beside smoke can.
     write_plan(plan, [
         {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
         {"name": "big", "command": ["sleep", "0.4"], "reuse_passed": False, "group": "3", "exclusive": True,
          "memory_mb": 80},
         {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 30},
-        {"name": "smoke", "command": ["sleep", "1.2"], "reuse_passed": False, "group": "4", "memory_mb": 50,
+        {"name": "smoke", "command": smoke_command, "reuse_passed": False, "group": "4", "memory_mb": 50,
          "phase": "coverage"},
         {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10,
          "after": ["big", "cov"]},
-        {"name": "semantic", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10,
+        {"name": "semantic", "command": [sys.executable, "-c",
+                                          f"import pathlib, time; pathlib.Path({str(semantic_started)!r}).touch(); "
+                                          "time.sleep(0.2)"], "reuse_passed": False, "group": "4", "memory_mb": 10,
          "after": ["big", "cov", "probe"]},
         {"name": "g4-free", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10},
     ], schedule={"policy": "phased"})
