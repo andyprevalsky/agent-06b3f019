@@ -1,7 +1,8 @@
 #!/usr/bin/env tsx
 /**
- * Black-box HTTP gates for POST /api/agents/:id/report-bug and its
- * POST /api/agents/:id/report-bug/screenshots image upload.
+ * Black-box HTTP gates for POST /api/agents/:id/report-bug, its
+ * POST /api/agents/:id/report-bug/screenshots image upload and the root agent
+ * report_bug tool's POST /api/agents/:id/report-bug/by-agent.
  *
  * Happy-path boxes.dev launch is covered by unit tests with a mocked boxes.dev API.
  * This suite cements auth + validation surfaces against a live backend.
@@ -77,12 +78,19 @@ function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T 
   return parsed.data;
 }
 
-async function createAnonymousUser(): Promise<string> {
+async function createAnonymousSession(): Promise<{ userId: string; accessToken: string }> {
   const res = await request(`${BASE_URL}/api/auth/anonymous`, { method: 'POST', body: '{}' });
   assertStatus(res.status, 200, res.data);
-  const body = res.data as { user?: { id?: string } };
+  const body = res.data as { user?: { id?: string }; session?: { access_token?: string } };
   if (typeof body.user?.id !== 'string') throw new Error('anonymous user missing id');
-  return body.user.id;
+  if (typeof body.session?.access_token !== 'string') {
+    throw new Error('anonymous session missing access_token');
+  }
+  return { userId: body.user.id, accessToken: body.session.access_token };
+}
+
+async function createAnonymousUser(): Promise<string> {
+  return (await createAnonymousSession()).userId;
 }
 
 async function createAgent(userId: string): Promise<string> {
@@ -179,6 +187,72 @@ async function testMissingAgent(): Promise<void> {
   );
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'missing-agent');
+}
+
+function postByAgent(
+  agentId: string,
+  headers: Record<string, string>,
+  body: unknown
+): Promise<{ status: number; data: unknown }> {
+  return request(`${BASE_URL}/api/agents/${agentId}/report-bug/by-agent`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+}
+
+async function testByAgentNoAuth(): Promise<void> {
+  const res = await postByAgent(FAKE_UUID, {}, { description: 'x' });
+  assertStatus(res.status, 401, res.data);
+  assertSchema(ErrorResponse, res.data, 'by-agent-no-auth');
+}
+
+/** A user session cannot file as the agent, even on its own agent. */
+async function testByAgentRequiresInternalKey(): Promise<void> {
+  const session = await createAnonymousSession();
+  const agentId = await createAgent(session.userId);
+  try {
+    const res = await postByAgent(
+      agentId,
+      { Authorization: `Bearer ${session.accessToken}` },
+      { description: 'only the worker files agent bug reports' }
+    );
+    assertStatus(res.status, 403, res.data);
+    assertSchema(ErrorResponse, res.data, 'by-agent-user-session');
+  } finally {
+    await deleteAgent(agentId, session.userId);
+  }
+}
+
+async function testByAgentNonAdminForbidden(): Promise<void> {
+  const userId = await createAnonymousUser();
+  const agentId = await createAgent(userId);
+  try {
+    const res = await postByAgent(agentId, apiKeyHeaders(userId), {
+      description: 'non-admin agents do not launch bug report threads',
+    });
+    assertStatus(res.status, 403, res.data);
+    assertSchema(ErrorResponse, res.data, 'by-agent-non-admin');
+  } finally {
+    await deleteAgent(agentId, userId);
+  }
+}
+
+/** The test backend is not production, so even a valid admin report is refused. */
+async function testByAgentRefusedOutsideProduction(): Promise<void> {
+  const agentId = await createAgent(ANDY_USER_ID);
+  try {
+    const res = await postByAgent(agentId, apiKeyHeaders(ANDY_USER_ID), {
+      description: 'a dev or benchmark stack never launches a bug report thread',
+    });
+    assertStatus(res.status, 403, res.data);
+    const body = assertSchema(ErrorResponse, res.data, 'by-agent-not-production');
+    if (body.error !== 'Agent bug reports are filed only in production') {
+      throw new Error(`expected the production-only refusal, got ${body.error}`);
+    }
+  } finally {
+    await deleteAgent(agentId, ANDY_USER_ID);
+  }
 }
 
 async function postScreenshot(
@@ -288,6 +362,13 @@ async function main(): Promise<void> {
     runTest('POST /report-bug -- non-admin -> 403', testNonAdminForbidden),
     runTest('POST /report-bug -- empty description -> 400', testEmptyDescription),
     runTest('POST /report-bug -- missing agent -> 404', testMissingAgent),
+    runTest('POST /report-bug/by-agent -- no auth -> 401', testByAgentNoAuth),
+    runTest('POST /report-bug/by-agent -- user session -> 403', testByAgentRequiresInternalKey),
+    runTest('POST /report-bug/by-agent -- non-admin owner -> 403', testByAgentNonAdminForbidden),
+    runTest(
+      'POST /report-bug/by-agent -- non-production backend -> 403',
+      testByAgentRefusedOutsideProduction
+    ),
     runTest('POST /report-bug/screenshots -- no auth -> 401', testScreenshotNoAuth),
     runTest('POST /report-bug/screenshots -- non-admin -> 403', testScreenshotNonAdminForbidden),
     runTest('POST /report-bug/screenshots -- non-image -> 400', testScreenshotRejectsNonImage),

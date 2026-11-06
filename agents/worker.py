@@ -45,6 +45,7 @@ from domains.agent_messaging.service import (
     send_agent_message_activity,
     send_agent_message_to_address_activity,
 )
+from domains.report_bug.service import report_bug_activity
 from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
 from domains.display.repo import display_media_activity
@@ -1577,6 +1578,7 @@ async def main():
         send_agent_message_activity,
         send_agent_message_to_address_activity,
         kill_agent_activity,
+        report_bug_activity,
         spawn_sub_agent_activity,
         spawn_sub_agents_batch_activity,
         fetch_parent_attachments_activity,

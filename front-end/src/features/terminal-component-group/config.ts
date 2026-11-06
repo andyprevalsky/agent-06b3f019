@@ -124,4 +124,5 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   send_message_to_agent: 'Agent Messages Sent',
   list_agents: 'Agent Tree Listings',
   kill_agent: 'Agents Killed',
+  report_bug: 'Bugs Reported',
 };
