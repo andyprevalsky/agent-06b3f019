@@ -18,6 +18,7 @@
  *     inside the window" guard read that as a tool run.
  */
 import { describe, expect, it } from 'vitest';
+import { checkThinkingRows } from '@/features/terminal-component-group/benchmark/thinkingRowsCheck';
 import { buildCodeSession } from '@/features/terminal-component-group/hooks/codeSessionTurns';
 import type { Message } from '@/lib/api';
 import { msg } from './code-agent-steering.fixtures';
@@ -85,4 +86,32 @@ describe('replaying the integrated runs through the production projection', () =
     );
     expect(streaming?.[1]).toMatchObject({ output_tokens: 148 }); // 561 -> 709; the Run finished 1 ms before the delta
   });
+
+  it.each(Object.keys(runs))(
+    'the benchmark check passes run %s: every thought recorded, none merely reported',
+    (run) => {
+      const messages = Object.entries(runs[run].tasks).flatMap(([taskId, carriers]) =>
+        carriers.map((carrier) =>
+          msg(
+            {
+              toolName: 'spawn_claude_code_agent',
+              task_id: taskId,
+              subAgentId: taskId,
+              action_type: 'code_transcript',
+              hidden: true,
+              code_agent_events: carrier.events,
+            },
+            { message_id: carrier.message_id, timestamp: carrier.timestamp },
+          ),
+        ),
+      );
+      const report = checkThinkingRows(messages, runs[run].agent_id);
+      expect(report.failures).toEqual([]);
+      for (const agent of report.codeAgents) {
+        expect(agent.verdict).toBe('checked');
+        expect(agent.unmeasured).toEqual([]);
+        expect(agent.measured).toHaveLength(Object.keys(expected[run][agent.taskId]).length);
+      }
+    },
+  );
 });

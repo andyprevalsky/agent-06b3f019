@@ -119,6 +119,29 @@ FE function (`thoughtGeneration`); tok/s = recorded tokens / recorded window.
   One small JSON object on each persisted ASSISTANT row. `metrics()` walks back
   only over activities newer than the previous sample.
 
+### C22 recurrence (same day): the code-agent projection missed recordable windows
+
+Replaying the integrated benchmark runs be1c90da and 9f709385 (four Claude Code
+tasks) showed 10 of 18 thoughts without a generation although usage samples
+bracketed all 18 (windows 1.1-3.3 s, 105-155 tok/s). Two causes, found by
+instrumenting `buildCodeSession`:
+
+1. The CLI upserts its lifecycle record, so a later "turn ended" revision keeps the
+   "started" revision's low `seq`. The turn closed before any activity, the call's
+   first usage sample (message_start) arrived with no open turn and was dropped, and
+   the first thought of each turn had no baseline. The sample chain is now the
+   builder's, independent of an open turn (same native turn and scope required).
+2. Claude Code runs a tool as soon as its tool_use block completes, so a tool created
+   inside a call's window can finish before its message_delta. The tool-in-window
+   guard read that as a tool run. It now disqualifies a window only for a tool created
+   before it (seq order), which is how Codex's per-response samples behave.
+
+The benchmark check's rule "turn-scoped samples exist, so recordable" was too blunt.
+It now derives recordability from the raw folded records (`thoughtWindow`), reports
+"not measurable (reason)" for the rest, and fails only a recordable thought with no
+generation; a regression test stubs the projection to drop generations and requires
+the check to fail. Lane B's rewrite does not change either cause (verified on a merge).
+
 ### Open gaps (not fixed here)
 
 - Rose Desktop root and code-agent views only. Non-desktop web, browser and

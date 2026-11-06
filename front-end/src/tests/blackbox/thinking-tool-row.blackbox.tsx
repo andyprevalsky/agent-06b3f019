@@ -340,8 +340,8 @@ describe('benchmark check (C21): rows are checked when they exist, required only
       expect(report.failures).toEqual([]);
       expect(report.root.unmeasured.map((row) => row.messageId)).toEqual(['router', 'dag']);
       expect(report.notes).toEqual([
-        'root: thought router carries no recorded generation (chat router/generator row: its producer records no per-call usage)',
-        'root: thought dag carries no recorded generation (DAG reasoning row: its producer records no per-call usage)',
+        'root: thought router not measurable (chat router/generator row: its producer records no per-call usage)',
+        'root: thought dag not measurable (DAG reasoning row: its producer records no per-call usage)',
       ]);
     });
 
@@ -352,8 +352,7 @@ describe('benchmark check (C21): rows are checked when they exist, required only
       expect(report.root.verdict).toBe('n/a');
     });
 
-    it('fails a Claude Code thought that carries no generation although usage was recorded', () => {
-      // The thought precedes the session's first usage sample: nothing to bracket it with.
+    it('reports, never fails, a thought no usage sample precedes (nothing can bracket it)', () => {
       const report = run([
         carrier('T', [
           start,
@@ -362,10 +361,51 @@ describe('benchmark check (C21): rows are checked when they exist, required only
           usage('u2', 3, 4, 410),
         ]),
       ]);
-      expect(report.failures).toEqual([
-        'code agent T: thought code:T:th carries no recorded generation (turn-scoped usage samples exist, so the window was recordable)',
+      expect(report.failures).toEqual([]);
+      expect(report.notes).toEqual([
+        'no thinking recorded for root (N/A)',
+        'code agent T: thought code:T:th not measurable (no usage sample precedes it)',
       ]);
-      expect(report.codeAgents[0].verdict).toBe('failed');
+      expect(report.codeAgents[0].unmeasured[0]).toMatchObject({ failing: false });
+    });
+
+    it('reports, never fails, a thought cut off before its call finished (no sample follows)', () => {
+      const report = run([carrier('T', [start, usage('u1', 1, 1, 10), thinking('th', 2, 2)])]);
+      expect(report.failures).toEqual([]);
+      expect(report.notes).toEqual([
+        'no thinking recorded for root (N/A)',
+        'code agent T: thought code:T:th not measurable (no usage sample follows it (the session ended or was interrupted before the call finished))',
+      ]);
+    });
+
+    it("does not call a call's own streaming tool a tool run: a tool created inside the window is fine", () => {
+      // The tool is created (seq 3) after the window's first sample (seq 1) and finishes before the last.
+      const streaming = [
+        start,
+        usage('u1', 1, 1, 10),
+        thinking('th', 2, 2),
+        tool('run', 3, 3),
+        usage('u2', 4, 4, 410),
+      ];
+      const report = run([carrier('T', streaming)]);
+      expect(report.failures).toEqual([]);
+      expect(report.codeAgents[0].measured[0]).toMatchObject({ outputTokens: 400 });
+    });
+
+    it('reports, never fails, a window a tool created before it finished inside', () => {
+      const spanning = [
+        start,
+        tool('run', 1, 2), // created before u1, finishes inside the window
+        usage('u1', 2, 1, 10),
+        thinking('th', 3, 2.5),
+        usage('u2', 4, 4, 410),
+      ];
+      const report = run([carrier('T', spanning)]);
+      expect(report.failures).toEqual([]);
+      expect(report.notes).toEqual([
+        'no thinking recorded for root (N/A)',
+        'code agent T: thought code:T:th not measurable (a tool created before the window finished inside it)',
+      ]);
     });
 
     it('fails a code agent that has thinking rows and no usage samples at all', () => {
@@ -389,7 +429,7 @@ describe('benchmark check (C21): rows are checked when they exist, required only
       expect(report.codeAgents[0].unmeasured).toEqual([
         {
           messageId: 'code:T:th',
-          reason: 'session-scoped usage (Codex): successive samples span tool runs',
+          reason: 'a tool created before the window finished inside it',
           failing: false,
         },
       ]);
