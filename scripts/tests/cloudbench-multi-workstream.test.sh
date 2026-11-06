@@ -761,6 +761,16 @@ cp "$ROOT_DIR/agents/benchmarks/outcome_publication.py" \
     "$SANDBOX/agents/benchmarks/outcome_publication.py"
 cp "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
     "$SANDBOX/agents/benchmarks/agent_link_server.py"
+# The disposable outer CLI (`run-bench`) resolves the selected batch's execution
+# window through scripts/cloudbench-timeout-policy.py, which imports the real
+# task-policy modules. Ship that stdlib-only import closure so the policy runs
+# against this synthetic catalog instead of failing to import (or resolving a
+# caller's PYTHONPATH checkout). Like the production catalog, the tasks driven
+# through `run-bench` declare timeout_seconds; 240s is below the default fleet
+# budget, so the fleet's own execution window is unchanged.
+for policy_module in benchmark_tasks fixtures live_fixtures polar_catalog timeout_history; do
+    cp "$ROOT_DIR/agents/benchmarks/$policy_module.py" "$SANDBOX/agents/benchmarks/$policy_module.py"
+done
 # Cloud routing resolves the same two-shard task namespace as the real runner.
 # Keep the synthetic Fleet tasks explicit so an unknown name or absent shard
 # remains a hard failure instead of being silently coerced to real mode.
