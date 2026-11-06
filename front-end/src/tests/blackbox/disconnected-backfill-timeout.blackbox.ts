@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/features/agent-context/api', () => ({
   fetchAgentDetail: vi.fn(),
+  // The read registry lives beside fetchAgentDetail; with it mocked no other
+  // read is ever in flight or fresh, so every tick is decided by cadence alone.
+  hasRecentAgentDetailRead: vi.fn(() => false),
+  agentDetailSucceededAt: vi.fn(() => null),
 }));
 
 import { fetchAgentDetail } from '@/features/agent-context/api';

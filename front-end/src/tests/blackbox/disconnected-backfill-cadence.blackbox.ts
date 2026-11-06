@@ -3,9 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/features/agent-context/api', () => ({
   fetchAgentDetail: vi.fn(),
+  // The read registry lives beside fetchAgentDetail; with it mocked no other
+  // read is ever in flight or fresh, so every tick is decided by cadence alone.
+  hasRecentAgentDetailRead: vi.fn(() => false),
+  agentDetailSucceededAt: vi.fn(() => null),
 }));
 
-import { fetchAgentDetail } from '@/features/agent-context/api';
+import { agentDetailSucceededAt, fetchAgentDetail } from '@/features/agent-context/api';
 import {
   DISCONNECTED_BACKFILL_FAST_POLL_MS,
   DISCONNECTED_BACKFILL_FAST_WINDOW_MS,
@@ -38,6 +42,8 @@ describe('disconnected agent backfill cadence', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.mocked(fetchAgentDetail).mockReset();
+    vi.mocked(agentDetailSucceededAt).mockReset();
+    vi.mocked(agentDetailSucceededAt).mockReturnValue(null);
   });
 
   it('polls every 300ms for the first 3s after selection, then every 2s', async () => {
@@ -105,6 +111,28 @@ describe('disconnected agent backfill cadence', () => {
     await advance(DISCONNECTED_BACKFILL_FAST_WINDOW_MS + DISCONNECTED_BACKFILL_POLL_MS);
 
     expect(fetchAgentDetail).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('skips a tick right after another read of the agent succeeded, then polls on the next', async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetchAgentDetail).mockResolvedValue({
+      agent: { agent_id: 'agent-a', temporal_workflow_id: null },
+      messages: [],
+    } as unknown as Awaited<ReturnType<typeof fetchAgentDetail>>);
+    const deps = disconnectedDeps();
+    const { unmount } = renderHook(() => useDisconnectedAgentBackfill(deps));
+
+    // The selection's own detail read lands just before the first fast tick.
+    await advance(DISCONNECTED_BACKFILL_FAST_POLL_MS - 50);
+    vi.mocked(agentDetailSucceededAt).mockReturnValue(Date.now());
+    await advance(50);
+    expect(fetchAgentDetail).not.toHaveBeenCalled();
+
+    // One fast tick later those rows are no longer fresh: poll as before.
+    await advance(DISCONNECTED_BACKFILL_FAST_POLL_MS);
+    expect(fetchAgentDetail).toHaveBeenCalledTimes(1);
+    expect(deps.setMessages).toHaveBeenCalledTimes(1);
     unmount();
   });
 });

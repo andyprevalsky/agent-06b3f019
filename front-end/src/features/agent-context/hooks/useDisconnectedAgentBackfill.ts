@@ -6,8 +6,7 @@ import {
   DISCONNECTED_BACKFILL_POLL_MS,
   DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS,
 } from '../config';
-import { fetchAgentDetail } from '../api';
-import { hasRecentAgentDetailRead } from '../detailReads';
+import { agentDetailSucceededAt, fetchAgentDetail, hasRecentAgentDetailRead } from '../api';
 import { applyAgentBackfill } from './agentBackfill';
 import type { RealtimeSubscriptionDeps } from './useRealtimeSubscription';
 
@@ -20,6 +19,8 @@ import type { RealtimeSubscriptionDeps } from './useRealtimeSubscription';
  *   [POLLING] --tick, another read of this agent in flight
  *               and younger than the request timeout----------> no-op (that
  *               read's owner applies the same rows; next tick polls again)
+ *   [POLLING] --tick, another read of this agent succeeded
+ *               less than one fast tick ago-------------------> no-op (same)
  *   [POLLING] --tick, otherwise------------------------------> GET detail -> merge
  *   cadence: 300ms for the first 3s after selection, then 2s; cleared on
  *   deselect/unmount (timers + in-flight read aborted).
@@ -33,6 +34,8 @@ export function useDisconnectedAgentBackfill(deps: RealtimeSubscriptionDeps): vo
     let requestController: AbortController | null = null;
     let requestTimeout: number | null = null;
     let pollTimer: number | null = null;
+    // When this poll's own last read settled: a success at or before it is ours.
+    let ownSettledAt = Number.NEGATIVE_INFINITY;
     const selectedAt = Date.now();
     const isActive = () => !cancelled && deps.selectedAgentIdRef.current === agentId;
     const poll = () => {
@@ -40,6 +43,14 @@ export function useDisconnectedAgentBackfill(deps: RealtimeSubscriptionDeps): vo
       // The selection's own detail load (or another reconcile) is already
       // reading this trajectory; a second full read would duplicate it.
       if (hasRecentAgentDetailRead(agentId, DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS)) return;
+      const otherReadAt = agentDetailSucceededAt(agentId);
+      if (
+        otherReadAt !== null &&
+        otherReadAt > ownSettledAt &&
+        Date.now() - otherReadAt < DISCONNECTED_BACKFILL_FAST_POLL_MS
+      ) {
+        return;
+      }
       inFlight = true;
       const controller = new AbortController();
       requestController = controller;
@@ -59,6 +70,7 @@ export function useDisconnectedAgentBackfill(deps: RealtimeSubscriptionDeps): vo
           if (isActive()) console.error('Disconnected backfill poll failed:', error);
         })
         .finally(() => {
+          ownSettledAt = Date.now();
           if (requestTimeout !== null) window.clearTimeout(requestTimeout);
           requestTimeout = null;
           if (requestController === controller) requestController = null;

@@ -3,7 +3,8 @@
  * while the realtime join is pending. The disconnected backfill's fast poll
  * must not start a second identical full-trajectory read beside it (on a
  * 600 KB trajectory that is another download, JSON parse and message merge on
- * a phone). Once that read settles, the poll resumes as before.
+ * a phone), nor repeat it on the tick right after it lands. Afterwards the
+ * poll resumes as before.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
@@ -12,7 +13,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { mockTerminalHookSession } from './terminal-hooks.fixtures';
 import { API_BASE_WITH_PATH } from '@/lib/api/client';
-import { fetchAgentDetail } from '@/features/agent-context/api';
+import { agentDetailSucceededAt, fetchAgentDetail } from '@/features/agent-context/api';
 import { DISCONNECTED_BACKFILL_FAST_POLL_MS } from '@/features/agent-context/config';
 import { useDisconnectedAgentBackfill } from '@/features/agent-context/hooks/useDisconnectedAgentBackfill';
 import type { RealtimeSubscriptionDeps } from '@/features/agent-context/hooks/useRealtimeSubscription';
@@ -73,8 +74,12 @@ describe('disconnected backfill does not duplicate the selection detail read', (
 
     release();
     await selectionRead;
-    // Still disconnected: the next tick reconciles from the API as before.
+    const landedAt = agentDetailSucceededAt(AGENT);
+    expect(landedAt).not.toBeNull();
+    // Still disconnected: a later tick reconciles from the API as before, but
+    // not one that falls within a fast tick of the read that just landed.
     await waitFor(() => expect(requests).toBe(2), { timeout: 2000 });
+    expect(Date.now() - (landedAt ?? 0)).toBeGreaterThanOrEqual(DISCONNECTED_BACKFILL_FAST_POLL_MS);
     await waitFor(() => expect(deps.setMessages).toHaveBeenCalled());
     unmount();
   });
