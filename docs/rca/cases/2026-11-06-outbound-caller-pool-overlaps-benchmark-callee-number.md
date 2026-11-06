@@ -12,7 +12,7 @@ symptoms:
   - "inboundPhoneCall caller=+14159416744 on phone number 2fe93786 exceeded-max-duration"
   - "phone-call-payment caller ID equals the benchmark callee number"
   - "outbound call used benchmark callee number +14159416744 as its caller ID"
-  - "No outbound caller number other than the destination"
+  - "No eligible outbound caller number"
 tags:
   - vapi
   - phone-callee

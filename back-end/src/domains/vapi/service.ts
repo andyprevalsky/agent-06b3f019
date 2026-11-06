@@ -81,7 +81,7 @@ function selectOutboundPhoneNumber(to: string): OutboundPhoneNumber {
   if (eligible.length === 0) {
     throw new VapiApiError(
       409,
-      `No outbound caller number other than the destination ${to.substring(0, 4)}**** is available; refusing to place a call to itself.`
+      `No eligible outbound caller number for ${to.substring(0, 4)}****: every pool number is a reserved benchmark callee or the destination itself. Refusing to place the call.`
     );
   }
   return eligible[Math.floor(Math.random() * eligible.length)];
