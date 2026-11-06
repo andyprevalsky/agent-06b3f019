@@ -13,7 +13,8 @@
 //                       each size is verified as soon as it is built. A failed size (e.g. over
 //                       the team's memory limit) is recorded and the remaining sizes still run.
 //          verify     Sandbox.create(name): nproc == cpu, MemTotal within 15% of memory, the
-//                       provider CLI (claude / codex) runs, ws-server + ws are installed; kill.
+//                       provider CLI (claude / codex) and the GitHub CLI (gh) run, ws-server + ws
+//                       are installed; kill.
 //
 // Only CPU and memory differ between sizes, so they cannot drift. The ws-server
 // and Rose tools are overlaid at session start, so a rebuild is needed only when
@@ -166,6 +167,7 @@ export function sizeProblems(entry, observed) {
   }
   if (!observed.cliPath) problems.push(`${CLI_BINARY[entry.provider]} is not on PATH`);
   if (!observed.cliVersion) problems.push(`${CLI_BINARY[entry.provider]} --version failed`);
+  if (!observed.ghVersion) problems.push('gh --version failed (the GitHub CLI is not installed)');
   if (!observed.wsServer) problems.push('ws-server.mjs or its ws dependency is missing');
   return problems;
 }
@@ -194,6 +196,7 @@ async function verifyWithSdk(sdk, entry) {
       memTotalKb: Number(/MemTotal:\s+(\d+)/.exec(await run('cat /proc/meminfo'))?.[1] ?? 0),
       cliPath: await run(`command -v ${cli}`),
       cliVersion: await run(`${cli} --version`),
+      ghVersion: (await run('gh --version')).split('\n')[0],
       wsServer:
         (await run(
           'test -f /home/user/ws-server.mjs && test -d /home/user/node_modules/ws && echo ok'
@@ -250,7 +253,7 @@ async function runSdk(plan, { verifyOnly, missingOnly, receiptPath }) {
         console.log(
           `${record.verified ? 'verified' : 'NOT verified'}: ${record.name}` +
             (record.verified
-              ? ` (nproc ${record.nproc}, MemTotal ${record.memTotalKb} kB, ${record.cliVersion})`
+              ? ` (nproc ${record.nproc}, MemTotal ${record.memTotalKb} kB, ${record.cliVersion}, ${record.ghVersion})`
               : ` — ${record.problems.join('; ')}`)
         );
         save();

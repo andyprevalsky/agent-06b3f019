@@ -4,6 +4,11 @@ FROM ubuntu:22.04
 # Opus 5.5 requires CLI >= 2.1.280; pin every template size reproducibly.
 ARG CLAUDE_CODE_VERSION=2.1.305
 
+# gh (GitHub CLI) comes from GitHub's own signed apt repository so code agents can run
+# `gh pr list` / `gh api` against the attached repo. The repository publishes only the
+# latest release, so the version is not pinned here; the sized-template verify step
+# records the installed version. No credential is baked into the image: gh reads
+# GITHUB_TOKEN / GH_TOKEN from the session environment at run time.
 # Install Node.js, Python, build tools, Claude Code
 RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com/ubuntu|g' /etc/apt/sources.list \
     && apt-get update && apt-get install -y --no-install-recommends \
@@ -18,6 +23,12 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com
     g++ \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
+    && install -d -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && gh --version \
     && npm install -g "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" \
     && rm -rf /var/lib/apt/lists/*
 
