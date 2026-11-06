@@ -863,6 +863,45 @@ async def test_wait_for_parent_wakes_on_the_parents_message():
         await asyncio.wait_for(waiter, 2)
 
 
+async def test_queued_send_to_a_starting_code_agent_reaches_the_tool_result():
+    """C20: the backend queued the message for a code agent whose session does not exist yet. The
+    `queued` flag must survive the HTTP helper and the sender's result must say it was queued (a live
+    run answered "Message sent" because the helper dropped the flag)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.agent_messaging import repo
+    from domains.agent_messaging.handler import send_message_to_agent
+
+    body = {
+        "message_id": "msg-q",
+        "delivered": False,
+        "queued": True,
+        "task_running": True,
+        "to": {"agent_id": "agent-mid", "path": "/root/coder", "recipient_task_id": "toolu_code"},
+    }
+    response = MagicMock(status_code=201)
+    response.json.return_value = body
+    client = MagicMock(post=AsyncMock(return_value=response))
+    with patch.object(repo, "get_http_client", return_value=client), patch.object(repo, "_headers", return_value={}):
+        result = await repo.post_agent_message_to_address("agent-mid", {"to": "/root/coder"}, "user-1")
+    assert result["queued"] is True and result["delivered"] is False and result["task_running"] is True, result
+    # A delivered send carries no queued flag.
+    response.json.return_value = {**body, "delivered": True, "queued": None}
+    with patch.object(repo, "get_http_client", return_value=client), patch.object(repo, "_headers", return_value={}):
+        assert "queued" not in await repo.post_agent_message_to_address("agent-mid", {"to": "/root/coder"}, "user-1")
+
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        harness.activity_results["send_agent_message_to_address_activity"] = result
+        status, text = await send_message_to_agent(wf, {"to": "/root/coder", "message": "Also add a test."}, "toolu_q")
+        assert status.value == "FINISHED", status
+        assert text == (
+            "Message queued for /root/coder: its code agent is still starting. It will receive this as its next "
+            "turn as soon as its CLI runs, in the order you sent it; do not send it again."
+        ), text
+
+
 async def test_message_guard_refusals_reach_the_tool_result():
     """Backend 429s (Prime guard: rate / unread cap) come back as actionable tool errors, never raised."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -1167,6 +1206,10 @@ async def run_all_tests():
     )
     await r.record_async("send_wakes_finished_explore_task", test_send_to_finished_explore_task_wakes_its_next_run)
     await r.record_async("message_guard_refusals_reach_tool_result", test_message_guard_refusals_reach_the_tool_result)
+    await r.record_async(
+        "queued_send_to_a_starting_code_agent_reaches_tool_result",
+        test_queued_send_to_a_starting_code_agent_reaches_the_tool_result,
+    )
     r.record("prompts_schemas_registration", test_prompts_schemas_and_registration)
     await r.record_async("wait_for_parent_wakes_on_parent_message", test_wait_for_parent_wakes_on_the_parents_message)
     await r.record_async("control_tools_decode_in_real_sandbox", test_control_tools_decode_results_in_real_sandbox)
