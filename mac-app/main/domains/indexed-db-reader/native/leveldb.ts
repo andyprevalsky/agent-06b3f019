@@ -410,16 +410,18 @@ export class RawLevelDb {
 
       const stem = path.parse(name).name;
       const fileNo = parseInt(stem, 16);
-      const data = new Uint8Array(fs.readFileSync(filePath));
       const suffix = match[1].toLowerCase();
-
-      if (suffix === 'log') {
-        const log = new LogFile(data, name);
-        this.sources.push({ fileNo, records: () => log.records() });
-      } else {
-        const ldb = new LdbFile(data, name);
-        this.sources.push({ fileNo, records: () => ldb.records() });
-      }
+      // Read each file only when iteration reaches it, so a time-sliced caller
+      // never reads and parses the whole database in one synchronous step.
+      this.sources.push({
+        fileNo,
+        records: function* (): Generator<LdbRecord> {
+          const data = new Uint8Array(fs.readFileSync(filePath));
+          yield* suffix === 'log'
+            ? new LogFile(data, name).records()
+            : new LdbFile(data, name).records();
+        },
+      });
     }
   }
 

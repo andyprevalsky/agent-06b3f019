@@ -1,0 +1,94 @@
+{
+ "failures": [
+  {
+   "id": "8ac1570bdcfd4c3d8c23d1e19ec509f7",
+   "check": "backend-coverage-blackbox/blackbox:browser-provider",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/home/boxes/deploy-workers/backend"
+   ],
+   "source": {
+    "head": "5436ce3d120356eeb0437b751043a73fc51f68b3",
+    "digest": "43f9eb52d45983cc273c5746ede44c2cb555bce19360fc86ed57882b76d8797a"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "backend blackbox browser-provider: live Tilion provider parity case failed with a network-level \"fetch failed\" during a real third-party Tilion call.",
+   "evidence": "This PR changes only front-end/ files plus one RCA doc (git diff --name-only origin/main...HEAD); no back-end, browser-provider or Tilion code. The identical browser-provider domain passed in this deploy's two earlier full backend runs on 06d234984 and c5ceba14c (247/247 and 246/247 with a different, fixed case). Failure is the live external call itself: log /home/boxes/deploy-workers/backend/.context/test-runs/backend-coverage-failed-20261106-004932-284387/browser-provider.log line 676 \"FAIL live Tilion provider parity: fetch failed\" after the vendor contract case passed (Tilion DELETE 204s).",
+   "post_merge": {
+    "test": "backend-coverage-blackbox/blackbox:browser-provider",
+    "command": [
+     "/usr/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_backend.py",
+     "--root",
+     "/home/boxes/deploy-workers/backend"
+    ],
+    "scope": "back-end/src/tests/blackbox/browser-provider.blackbox.ts live Tilion provider parity case (BLACKBOX live browser-provider parity); preserve the live assertion and provider behavior.",
+    "error": "FAIL live Tilion provider parity: fetch failed",
+    "source": {
+     "head": "5436ce3d120356eeb0437b751043a73fc51f68b3",
+     "digest": "43f9eb52d45983cc273c5746ede44c2cb555bce19360fc86ed57882b76d8797a"
+    },
+    "evidence": "/home/boxes/deploy-workers/backend/.context/test-runs/backend-coverage-failed-20261106-004932-284387/browser-provider.log (backend worker run backend-coverage-failed-20261106-004932-284387) and .context/deploy-pipeline/attempts/2/initial/backend-coverage-blackbox/result.json on PR #1695"
+   }
+  },
+  {
+   "id": "bbaa449b6e3340678c73899f51b1dc06",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "5436ce3d120356eeb0437b751043a73fc51f68b3",
+    "digest": "43f9eb52d45983cc273c5746ede44c2cb555bce19360fc86ed57882b76d8797a"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke browser-biometrics-webdecoy: FCaptcha risk score 0.164 exceeded the down-only ratchet 0.163.",
+   "evidence": "Front-end-only diff cannot change a cloud browser agent's fingerprint on an external FCaptcha page; detections listed are provider-side (Tilion datacenter IP, headless voices, teleport clicks, missing Segoe UI). Native row: {\"name\": \"browser-biometrics-webdecoy\", \"status\": \"COMPLETED\", \"benchmark_status\": \"FAILED\", \"passed\": false, \"failure_reason\": \"FCaptcha captured API risk score 0.164 exceeds ratchet 0.163 (lower = more human; this gate only ratchets down, never up) [FCaptcha engine v1.46.2; a version change here means the third-party detector was recalibrated \\u2014 compare against the version on the last passing run before treating this as an anti-detection regression] [detections: vision_ai: Click injected with no pointer trajectory (2 teleport clicks); datacenter: Request from known datacenter IP range; headless: Very few speech voices available (3); bot: Windows UA but Segoe UI font not detected; browser tilion/tilion_direct_country]\", \"agent_id\": \"6f08f91c-d244-4ca5-ac19-63b2c0e9156b\"} receipt sha256 57ba12d40f32844366fc409d1a17e60171ff28866e7d629c41af6b6d54a7f6a6",
+   "post_merge": {
+    "test": "smoke/browser-biometrics-webdecoy",
+    "command": [
+     "/usr/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "agents benchmark task browser-biometrics-webdecoy (Tilion browser anti-detection biometrics vs FCaptcha ratchet); keep the ratchet and assertions unchanged.",
+    "error": "FCaptcha captured API risk score 0.164 exceeds ratchet 0.163 (lower = more human; this gate only ratchets down, never up) [FCaptcha engine v1.46.2; a version change here means the third-party detector was recalibrated \u2014 compare against the version on the last passing run before treating this as an anti-detection regression] [detections: vision_ai: Click injected with no pointer trajectory (2 teleport clicks); datacenter: Request from known datacenter IP range; headless: Very few speech voices available (3); bot: Windows UA but Segoe UI font not detected; browser tilion/tilion_direct_country]",
+    "source": {
+     "head": "5436ce3d120356eeb0437b751043a73fc51f68b3",
+     "digest": "43f9eb52d45983cc273c5746ede44c2cb555bce19360fc86ed57882b76d8797a"
+    },
+    "evidence": "/home/boxes/rose/.context/deploy-cloud/195f125b8073caf4fb472aed25d623551f3d63308b22f59231d2b7a9dfbe05ed/runs/20261106-003224-306883/browser-biometrics-webdecoy/cloudbench-run.json (sha256 57ba12d40f32844366fc409d1a17e60171ff28866e7d629c41af6b6d54a7f6a6), PR #1695 deploy smoke run"
+   }
+  },
+  {
+   "id": "4fe709ca580544e4a1417faa60ddebcd",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "5436ce3d120356eeb0437b751043a73fc51f68b3",
+    "digest": "43f9eb52d45983cc273c5746ede44c2cb555bce19360fc86ed57882b76d8797a"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke test-mass-agent-run-0: natively SKIPPED because the declared agentic judge could not lease a Codex compute token (pool exhausted or cooling down).",
+   "evidence": "Native row status/benchmark_status SKIPPED with runner classification \"Compute token pool exhausted or cooling down\"; the task agents themselves ran and produced structured output, only the judge lacked a compute token. Standing user instruction (Andy 2026-10-25): a bench or its judge that cannot get a compute token because the pool is exhausted or cooled down is SKIPPED, not a fix target. Front-end-only diff.",
+   "resource_skip": {
+    "receipt_sha256": "adf141fa8ef171fef0935157dd03354c158533b551fe655ab43c84ecb98aa8ad",
+    "receipt_reason": "Compute token pool exhausted or cooling down: Declared evaluator t7-schema-task-complete execution failed: Codex compute token unavailable for agentic benchmark judge | Investigate: python agents/benchmarks/agent_latency.py ac11ae04-39f2-48a7-9357-7a46359b5b63 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "reason_code": "compute_quota_exhausted",
+    "exclusive_cause": true,
+    "provider": "Codex compute-token pool (OpenAI subscription quota) for the agentic benchmark judge",
+    "evidence": "native SKIPPED receipt /home/boxes/rose/.context/deploy-cloud/195f125b8073caf4fb472aed25d623551f3d63308b22f59231d2b7a9dfbe05ed/runs/20261106-003224-306842/test-mass-agent-run-0/cloudbench-run.json failure_reason: Compute token pool exhausted or cooling down: Declared evaluator t7-schema-task-complete execution failed: Codex compute token unavailable for agentic benchmark judge | Investigate: python agents/benchmarks/agent_latency.py ac11ae04-39f2-48a7-9357-7a46359b5b63 | Cache/cost: python agents/benchmarks/",
+    "confirmed_at": 1793927310.021902
+   }
+  }
+ ]
+}
