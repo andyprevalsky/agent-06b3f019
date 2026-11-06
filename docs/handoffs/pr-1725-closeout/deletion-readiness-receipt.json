@@ -1,0 +1,23 @@
+{
+ "schema_version": 1,
+ "deployed_pr": 1725,
+ "deployed_merge_commit": "d5d852e5b0c8beb12e1d215c2c8bfa88fe416046",
+ "gated_source": "2731bfe53f7ace99196021906b423b2a6296766a",
+ "closeout": "this records-only PR; its merged commit is the one that adds this file (git history is the durable receipt; no further self-archiving receipt is created)",
+ "final_inventory": "closeout-manifest.json (every path has an explicit disposition)",
+ "archive_verification": "No private archive was used. Large run bundles live in the Benchmark Hub (ids in evidence/smoke-campaign-inventory.json); nothing here depends on an archive decryption key.",
+ "independent_key_recovery": "not applicable - no encrypted archive and no key exist for this deploy",
+ "configuration_recovery": "repo-local .env files are managed project environment (dvb-onbox env); this deploy added no key. back-end/.env changed at 2026-11-06T06:19:10Z by the managed-env sync (E2B template variable rename); recovery is the managed project env, not this disk.",
+ "resource_disposition": {
+  "fly": "no machine or volume owned by this deploy remains; shared warm donor stopped",
+  "github": "PR #1725 merged; branch retained (not deleted); records branch merged by the closeout PR",
+  "boxes": "3 repair threads (1 matched existing owner + 2 new, Bugs folder) are independent and keep running",
+  "processes": "owned helper processes (cycle runner, donor watcher, link servers) terminated at retirement; Freedom and protected/shared resources untouched"
+ },
+ "local_only_state_check": "intended source: none only-local (PR merged; closeout in git). Inherited legacy branches: see inventory, retained in the Template box. Ignored/untracked files: .context evidence summarised in evidence/, rest reproducible.",
+ "open_items": [
+  "user device confirmation of the display/heat changes",
+  "3 independent smoke repair goals",
+  "shared warm-donor contention / GitHub quota (infra follow-up, no failing test to delegate)"
+ ]
+}
