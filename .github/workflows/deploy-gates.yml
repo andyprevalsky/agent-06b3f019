@@ -58,7 +58,7 @@ jobs:
             back-end/node_modules
             front-end/node_modules
             agents/node_modules
-          key: deploy-gate-node-${{ env.NODE_VERSION }}-${{ hashFiles('package-lock.json', 'back-end/package-lock.json', 'front-end/package-lock.json') }}
+          key: deploy-gate-node-${{ env.NODE_VERSION }}-${{ hashFiles('package.json', 'back-end/package-lock.json', 'front-end/package-lock.json') }}
 
       - name: Restore agents venv
         id: venv-cache
@@ -72,7 +72,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ms-playwright
-          key: deploy-gate-browsers-${{ hashFiles('package-lock.json', 'front-end/package-lock.json', 'agents/requirements.txt') }}
+          key: deploy-gate-browsers-${{ hashFiles('back-end/package-lock.json', 'front-end/package-lock.json', 'agents/requirements.txt') }}
 
       - name: Prepare runner
         env:

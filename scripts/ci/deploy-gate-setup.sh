@@ -46,7 +46,11 @@ echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
 step "node_modules (cache hit: ${NODE_CACHE_HIT:-false})"
 if [ "${NODE_CACHE_HIT:-}" != "true" ]; then
-  npm ci --include=dev --no-audit --no-fund --legacy-peer-deps
+  # No root lockfile is committed (.gitignore), so a workspace-wide install would re-resolve the
+  # registry. Install each package from its committed lockfile, then only the root's own deps.
+  (cd back-end && npm ci --workspaces=false --include=dev --no-audit --no-fund)
+  (cd front-end && npm ci --workspaces=false --include=dev --no-audit --no-fund)
+  npm install --workspaces=false --include=dev --no-audit --no-fund --legacy-peer-deps --no-package-lock
 fi
 (cd back-end && npx prisma generate >/dev/null)
 
