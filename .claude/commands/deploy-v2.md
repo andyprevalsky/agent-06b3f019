@@ -97,6 +97,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 ### Benchmarks and cleanup
 
 - Smoke runs on the cloud fleet through the benchmark CLI; follow `/benchmark` monitoring through resource release.
+- Paid cloud smoke waits for the `cloudbench-controller` gate when that gate is selected; every other gate runs unordered.
 - Larger paid fleet campaigns stay human-requested and are never added to the automatic deploy.
 - A lane teardown that ends `killed` or `failed` needs `scripts/run-bench --local --run-id <run> --reconcile-cleanup` before the next local benchmark lane.
 - Never move a benchmark run directory by hand while a process still carries its run id.
