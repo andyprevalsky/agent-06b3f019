@@ -255,12 +255,16 @@ def env_file_values(root: Path) -> dict:
 
 # ---------------------------------------------------------------- coordinator side
 
+def git_env(token: str) -> dict:
+    return {**os.environ, 'DEPLOY_GATE_GIT_TOKEN': token, 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '2',
+            'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': '',
+            'GIT_CONFIG_KEY_1': 'credential.helper',
+            'GIT_CONFIG_VALUE_1': '!f(){ echo username=x-access-token; echo "password=$DEPLOY_GATE_GIT_TOKEN"; }; f'}
+
+
 def push_tag(root: Path, token: str, repo: str, name: str, raw: bytes) -> str:
     sha = git(root, 'hash-object', '-t', 'tag', '-w', '--stdin', input_bytes=raw)
-    env = {**os.environ, 'DEPLOY_GATE_GIT_TOKEN': token, 'GIT_TERMINAL_PROMPT': '0', 'GIT_CONFIG_COUNT': '2',
-           'GIT_CONFIG_KEY_0': 'credential.helper', 'GIT_CONFIG_VALUE_0': '',
-           'GIT_CONFIG_KEY_1': 'credential.helper',
-           'GIT_CONFIG_VALUE_1': '!f(){ echo username=x-access-token; echo "password=$DEPLOY_GATE_GIT_TOKEN"; }; f'}
+    env = git_env(token)
     url = f'https://github.com/{repo}.git'
     existing = git(root, 'ls-remote', url, f'refs/tags/{name}', env=env).split()
     if existing and existing[0] != sha:
@@ -271,11 +275,12 @@ def push_tag(root: Path, token: str, repo: str, name: str, raw: bytes) -> str:
 
 
 def delete_tag(root: Path, token: str, repo: str, name: str) -> None:
-    gh = GitHub(token, repo)
+    """Best effort over git (no REST quota); the run, its logs and artifacts do not depend on the tag."""
     try:
-        gh.request('DELETE', f'/git/refs/tags/{name}')
-    except urllib.error.HTTPError:
-        pass  # Retention only; the run, its logs and artifacts are independent of the tag.
+        subprocess.run(['git', 'push', '--quiet', '--no-verify', f'https://github.com/{repo}.git',
+                        f':refs/tags/{name}'], cwd=root, env=git_env(token), capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 class WorkflowRejected(Exception):
