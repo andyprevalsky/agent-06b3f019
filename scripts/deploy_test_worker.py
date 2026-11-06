@@ -20,6 +20,7 @@ import sys
 import time
 
 from deploy_test_cycle import ROOT, command, digest, read, source, write
+from deploy_test_isolation import validate_tmpdir_request
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
@@ -74,6 +75,7 @@ def read_request(timeout: float) -> dict:
 
 
 def execute(request: dict, root: Path) -> dict:
+    validate_tmpdir_request(request, root)
     recipe = request['worker_recipe']
     cases = recipe['cases']
     selected, skipped = request['checks'], request.get('skips', {})

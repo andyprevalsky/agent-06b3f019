@@ -30,7 +30,7 @@ from urllib.parse import urlsplit, unquote
 
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
-from deploy_test_isolation import validate as validate_isolation
+from deploy_test_isolation import validate as validate_isolation, external_tmpdir
 
 ROOT = Path(__file__).resolve().parents[1]
 QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural"}
@@ -458,6 +458,12 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     if 'worker_recipe' in gate:
         request['worker_recipe'] = gate['worker_recipe']
         request['worker_root'] = gate.get('worker_root', str((root / gate.get('cwd', '.')).resolve()))
+    if gate.get('worker_transport') == 'local-isolated' and 'TMPDIR' in gate.get('env', {}):
+        temp = Path(gate['env']['TMPDIR'])
+        worker = Path(gate.get('worker_root', gate.get('cwd', root)))
+        if worker not in temp.parents:
+            request['external_tmpdir'] = external_tmpdir(str(temp), worker, root, name, state['source'])
+            request['external_tmpdir_path'] = str(temp)
     write(folder / "request.json", request)
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
@@ -1650,42 +1656,15 @@ def _prepared_private_directory(value: str, worker: Path) -> None:
             break
 
 
-def _prepared_workers_idle(workers: list[Path], proc: Path = Path('/proc')) -> None:
-    """Fail closed on live or unreadable local process ownership; never signal it."""
-    if not proc.is_dir():
-        raise ValueError('prepared binding ownership inspection requires /proc')
-    for entry in proc.glob('[0-9]*'):
-        if int(entry.name) == os.getpid():
-            continue
-        paths = []
-        for field in ('cwd', 'fd', 'maps'):
-            try:
-                if field == 'cwd':
-                    paths.append(Path(os.readlink(entry / field).removesuffix(' (deleted)')))
-                elif field == 'fd':
-                    for fd in (entry / field).iterdir():
-                        try:
-                            paths.append(Path(os.readlink(fd).removesuffix(' (deleted)')))
-                        except (FileNotFoundError, ProcessLookupError):
-                            # A closed descriptor cannot suppress other descriptors or maps.
-                            continue
-                else:
-                    for line in (entry / field).read_text().splitlines():
-                        fields = line.split(maxsplit=5)
-                        if len(fields) == 6 and fields[5].startswith('/'):
-                            paths.append(Path(fields[5].removesuffix(' (deleted)')))
-            except (FileNotFoundError, ProcessLookupError):
-                if entry.exists():
-                    raise ValueError('local process ownership is unreadable')
-            except PermissionError as error:
-                if entry.exists():
-                    raise ValueError('local process ownership is unreadable') from error
-            if any(path == worker or worker in path.parents for path in paths for worker in workers):
-                raise ValueError('prepared worker has an active local consumer')
+def _prepared_workers_idle(workers: list[Path], proc: Path = Path('/proc'), *, birth_guard=False):
+    from deploy_test_process_scan import prepared_workers_idle
+    return prepared_workers_idle(workers, proc, birth_guard=birth_guard)
 
 
-def prepare_bindings(state: dict, old: dict, new: dict, root: Path, directory: Path) -> None:
-    """Add only prepared private runtime locations before the first full attempt."""
+def prepare_bindings(state: dict, old: dict, new: dict, root: Path, directory: Path, *, tmpdir_replacement=None) -> None:
+    """Admit prepared runtime locations, or an explicit failed-cycle temp correction."""
+    if tmpdir_replacement is not None:
+        return replace_prepared_tmpdirs(state, old, new, root, directory, tmpdir_replacement)
     if (CANCEL.is_set() or state.get('phase') not in {'quick', 'initial'} or state.get('ready')
             or state.get('pending') or state.get('failures') or state.get('skips')
             or state.get('carried_passes') or state.get('resource_warnings') or state.get('pending_post_merge')
@@ -1785,7 +1764,104 @@ def prepare_bindings(state: dict, old: dict, new: dict, root: Path, directory: P
                      input_fingerprints=fingerprints, phase='quick', next_after_quick='initial', ready=False)
 
 
-def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | None = None) -> None:
+def replace_prepared_tmpdirs(state, old, new, root, directory, proof):
+    """Same-source, post-failure correction only; retain the native failure history."""
+    if (state.get('phase') != 'triage' or not state.get('failures') or not state.get('pending')
+            or CANCEL.is_set() or state.get('ready')
+            or any(k in state for k in ('running', 'live_failures', 'resume_phase'))):
+        raise ValueError('TMPDIR correction requires quiescent failed triage')
+    if (old != state['plan'] or digest(old) != state['plan_digest']
+            or old['source'] != state['source'] or new.get('source') != state['source']
+            or source(root) != state['source'] or environment_digest() != state['environment']
+            or input_fingerprints(old, root) != state['input_fingerprints']):
+        raise ValueError('TMPDIR correction source/plan/environment changed')
+    if (not isinstance(proof, dict) or set(proof) != {'kind','source','from_plan_digest','paths'}
+            or proof['kind'] != 'replace-owned-tmpdir-v1' or proof['source'] != state['source']
+            or proof['from_plan_digest'] != digest(old) or not isinstance(proof['paths'], dict)):
+        raise ValueError('explicit exact TMPDIR correction proof required')
+    if ({k:v for k,v in old.items() if k != 'gates'} != {k:v for k,v in new.items() if k != 'gates'}
+            or len(old['gates']) != len(new.get('gates', []))):
+        raise ValueError('TMPDIR correction must preserve the complete plan')
+    changed, workers, paths, leases = [], [], [], {}
+    for before, after in zip(old['gates'], new['gates']):
+        worker = Path(before.get('worker_root', before.get('cwd', root)))
+        if before.get('worker_transport') == 'local-isolated':
+            workers.append(worker)
+        if before == after:
+            continue
+        prior, env = before.get('env', {}), after.get('env', {})
+        allowed = copy.deepcopy(before)
+        allowed.setdefault('env', {})['TMPDIR'] = env.get('TMPDIR')
+        if (allowed != after or before.get('quick') or before.get('worker_transport') != 'local-isolated'
+                or 'TMPDIR' not in prior or prior['TMPDIR'] == env.get('TMPDIR')
+                or not isinstance(env.get('TMPDIR'), str)):
+            raise ValueError('only existing local full-worker TMPDIR may change')
+        path = Path(env['TMPDIR'])
+        lease = external_tmpdir(str(path), worker, root, before['name'], state['source'])
+        if any(path == p or path in p.parents or p in path.parents for p in paths):
+            raise ValueError('workers cannot share external TMPDIR custody')
+        if set(p.name for p in path.iterdir()) != {'.deploy-tmpdir-owner.json'}:
+            raise ValueError('new external TMPDIR must contain only its custody marker')
+        paths.append(path); paths.append(Path(prior['TMPDIR']))
+        changed.append(before['name']); leases[before['name']] = lease
+    if not changed or proof['paths'] != {g['name']:g['env']['TMPDIR'] for g in new['gates'] if g['name'] in changed}:
+        raise ValueError('TMPDIR correction paths must match every changed worker')
+    validate_plan(old, root); validate_plan(new, root)
+    all_roots = [root, *workers]
+    for path in paths:
+        if path in [Path(g['env']['TMPDIR']) for g in new['gates'] if g['name'] in changed]:
+            if any(path == r or r in path.parents or path in r.parents for r in all_roots):
+                raise ValueError('external TMPDIR overlaps a checkout')
+    if retained_owners(state, [g['name'] for g in old['gates']]):
+        raise ValueError('TMPDIR correction has retained ownership')
+    records = {r.get('token'):r for a in state['attempts'] for r in a.get('results', []) if r.get('token')}
+    native_failure = False
+    for request_path in (directory / 'attempts').glob('**/request.json'):
+        request = bounded_read(request_path, 'existing request')
+        receipt_path = request_path.parent / 'receipt.json'
+        if not receipt_path.is_file():
+            raise ValueError('TMPDIR correction has unknown request ownership')
+        receipt = bounded_read(receipt_path, 'existing receipt')
+        recorded = records.get(request.get('token'))
+        if (recorded != receipt or any(request.get(k) != receipt.get(k) for k in ('token','gate','source'))
+                or receipt.get('lingering_group') or receipt.get('cleanup_owner')):
+            raise ValueError('TMPDIR correction has unknown or active request ownership')
+        native_failure |= (request.get('phase') in {'initial','final','failed-gates'}
+                           and receipt.get('status') == 'FAIL' and receipt.get('executed') is True)
+    if not native_failure:
+        raise ValueError('TMPDIR correction requires a retained actual full failure receipt')
+    with ExitStack() as stack:
+        for worker in workers:
+            if source(worker) != state['source']:
+                raise ValueError('TMPDIR worker source changed')
+            for rel in ('.env', 'env.sh', 'back-end/.env', 'agents/.env',
+                        'agents/.env.benchmark-temporal', 'front-end/.env', 'front-end/.env.local'):
+                origin, target = root / rel, worker / rel
+                if (origin.is_file() != target.is_file() or target.is_symlink()
+                        or origin.is_file() and (sha_file(origin) != sha_file(target)
+                            or stat.S_IMODE(target.stat().st_mode) != 0o600)):
+                    raise ValueError('TMPDIR worker private configuration differs')
+            stack.enter_context(exclusive(worker / '.context/deploy-worker'))
+            stack.enter_context(exclusive(worker / '.context/deploy-backend'))
+            lock = stack.enter_context((worker / '.context/native-worker-admission.lock').open('a'))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _prepared_workers_idle([*workers, *paths], birth_guard=True)
+        for gate in new['gates']:
+            if gate['name'] in changed:
+                if external_tmpdir(gate['env']['TMPDIR'], Path(gate['worker_root']), root,
+                                   gate['name'], state['source']) != leases[gate['name']]:
+                    raise ValueError('TMPDIR lease changed during admission')
+        candidate = copy.deepcopy(state)
+        refresh(candidate, old, new, root, directory=directory, _tmpdir_gates=set(changed))
+        candidate.setdefault('prepared_binding_history', []).append(dict(
+            kind='replace-owned-tmpdir-v1', from_plan=copy.deepcopy(old),
+            from_source=copy.deepcopy(state['source']), to_source=new['source'],
+            gates=changed, leases=leases, at=time.time(), credit_granted=False))
+        _prepared_workers_idle([*workers, *paths], birth_guard=True)
+        state.clear(); state.update(candidate)
+
+
+def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | None = None, _tmpdir_gates=frozenset()) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
@@ -1820,7 +1896,12 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | 
     if not old_gates.keys() <= new_gates.keys():
         raise ValueError("repair cannot silently remove originally selected gates")
     for name, gate in old_gates.items():
-        preserve_contract(gate, new_gates[name])
+        if name in _tmpdir_gates:
+            comparison = copy.deepcopy(new_gates[name])
+            comparison['env']['TMPDIR'] = gate['env']['TMPDIR']
+            preserve_contract(gate, comparison)
+        else:
+            preserve_contract(gate, new_gates[name])
         if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
             raise ValueError("repair cannot silently remove originally selected checks")
     fingerprints = input_fingerprints(new, root)
@@ -2054,7 +2135,8 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "prepare-bindings":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
-                prepare_bindings(state, read(args.input), plan, args.root, directory)
+                prepare_bindings(state, read(args.input), plan, args.root, directory,
+                                 tmpdir_replacement=read(args.proof) if args.proof else None)
             elif args.action == "rca":
                 requests = rca_requests(state, directory)
                 if state["phase"] != "triage" or not requests or not args.rca_launcher:

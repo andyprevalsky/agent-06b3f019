@@ -413,3 +413,56 @@ older legacy receipt says PASS. Exit5 means source/configuration changed;
 exit1 means not ready, and exit2 means missing or malformed evidence. The staged
 runner requests `/RCA` immediately for every failure, rather than waiting for
 the legacy pipeline's repeated-round cap.
+
+
+### Correcting an owned temporary directory after a full failure
+
+`prepare-bindings --proof tmpdir-proof.json` additionally supports a quiescent
+`triage` cycle with actual pending native failures. This is a same-source
+correction of **existing TMPDIR values only**, not a general environment rebind.
+Refresh committed source and prepared workers through the ordinary source
+refresh first if needed. All prior attempts, failures and pending RCA obligations
+remain; changed inputs receive no carried credit, and all quick checks run again.
+
+The proof has exactly `kind: "replace-owned-tmpdir-v1"`, `source` (the exact
+source object), `from_plan_digest`, and `paths` (changed gate name to new absolute
+TMPDIR). The plan must otherwise be identical. Each new directory must be unique,
+mode0700, owned by the executing uid, outside all checkouts, symlink-free and
+short enough for Chromium's107-byte Unix socket path. Before admission it contains
+only a mode0600 `.deploy-tmpdir-owner.json` with exactly these fields:
+`schema: "deploy-external-tmpdir-v1"`, `coordinator_root`, `worker_root`, `gate`,
+`uid`, `device` and `inode`. These are actual directory stat values,
+not placeholders. Native workers revalidate the lease before executing recipes;
+a recipe cannot substitute another TMPDIR. Cache paths and database bindings
+remain unchanged.
+
+Every saved request must match its recorded terminal receipt; unknown or retained
+owners block correction. Existing native admission locks and process cwd/FD/maps
+checks, including process birth identity, cover all local worker roots and old/new
+temporary roots. Unreadable ownership fails closed. Admission requires private
+worker configuration and exact source equality. No directory is created or
+cleaned by this action. The caller owns reviewed preparation and must wait for
+all original consumers to finish; do not hand-edit cycle state or reuse old PASS
+credit for a changed binding.
+
+The custody marker binds a directory to its worker, not permanently to one source
+revision. Exact source remains mandatory in the admission proof and each native
+request; ordinary source refresh still invalidates credit and the worker checks
+its current source before any test. Thus a later legitimate source refresh does
+not require rewriting a directory's ownership history. Non-sticky writable
+shared parent directories are rejected.
+
+
+If the original nonroot coordinator cannot read a live `/proc` entry, the strict
+birth-guarded scan delegates only the fixed read-only scanner through
+`sudo -n /usr/bin/python3 -I -S -B -c ...`. The worker and directory owner stay
+nonroot. Bounded JSON carries the exact root list, caller uid/pid/birth and a
+nonce; the helper verifies sudo uid and caller ancestry, rejects unowned or
+noncanonical roots, and returns only a request-bound quiescence receipt. It
+reads all processes using the same scanner and excludes only its verified
+caller and itself. Root execution has a25-second alarm; delegation has a30-second
+timeout. No shell, imported workspace code, root filesystem writes, worker
+execution or permission changes are involved. Missing sudo access or any
+unreadable/active ownership still blocks admission. Both generic and backend
+native adapters validate the shared lease and all recipe TMPDIR overrides before
+directory creation, fixture restore or child execution.

@@ -1,6 +1,9 @@
 """Validate execution bindings before removing cross-suite ordering edges."""
 from pathlib import Path
 import importlib.util
+import json
+import os
+import stat
 
 _spec = importlib.util.spec_from_file_location('deploy_worker_ports', Path(__file__).with_name('deploy-worktree-port.py'))
 _ports = importlib.util.module_from_spec(_spec)
@@ -78,3 +81,64 @@ def validate(plan, root):
         if overlapping_root or (host, workspace) in workspaces or footprint & ports:
             raise ValueError('workers must not share a checkout, database/workspace, or port')
         roots.add((host, location));workspaces.add((host, workspace));ports.update(footprint)
+    for gate in plan['gates']:
+        value = gate.get('env', {}).get('TMPDIR')
+        if gate.get('worker_transport') != 'local-isolated' or not value:
+            continue
+        worker = Path(gate.get('worker_root', gate.get('cwd', root)))
+        if worker not in Path(value).parents:
+            external_tmpdir(value, worker, root, gate['name'], plan['source'])
+            if any(Path(value) == Path(p) or Path(p) in Path(value).parents
+                   or Path(value) in Path(p).parents for host,p in roots if host == 'local'):
+                raise ValueError('external TMPDIR overlaps another worker checkout')
+
+
+
+def external_tmpdir(value, worker, coordinator, gate, source):
+    """Validate an explicit, inode-bound private temp lease; never create or repair it."""
+    path, worker, coordinator = Path(value), Path(worker), Path(coordinator)
+    if (not path.is_absolute() or str(path) != value or '..' in path.parts
+            or path.resolve() != path or not path.is_dir()
+            or len(os.fsencode(str(path / 'org.chromium.Chromium.XXXXXX/SingletonSocket'))) > 107):
+        raise ValueError('external TMPDIR must be a short real absolute directory')
+    for ancestor in (path, *path.parents):
+        if ancestor.is_symlink() or (ancestor / '.git').exists():
+            raise ValueError('external TMPDIR cannot traverse symlinks or a checkout')
+        info = ancestor.stat()
+        if info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+            raise ValueError('external TMPDIR cannot traverse a mutable shared parent')
+    if any(path == root or root in path.parents or path in root.parents for root in (worker, coordinator)):
+        raise ValueError('external TMPDIR must be outside checkouts')
+    info = path.stat()
+    marker = path / '.deploy-tmpdir-owner.json'
+    if (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700
+            or marker.is_symlink() or not marker.is_file()):
+        raise ValueError('external TMPDIR requires private current-owner custody')
+    meta = marker.stat()
+    if (meta.st_uid != info.st_uid or stat.S_IMODE(meta.st_mode) != 0o600
+            or meta.st_nlink != 1 or meta.st_size > 65536):
+        raise ValueError('external TMPDIR custody marker is not private')
+    expected = dict(schema='deploy-external-tmpdir-v1', coordinator_root=str(coordinator),
+                    worker_root=str(worker), gate=gate, uid=info.st_uid,
+                    device=info.st_dev, inode=info.st_ino)
+    if json.loads(marker.read_text()) != expected:
+        raise ValueError('external TMPDIR custody identity differs')
+    return expected
+
+
+def validate_tmpdir_request(request, root):
+    """Shared point-of-use check for both native worker adapters, before effects."""
+    lease, value = request.get('external_tmpdir'), request.get('external_tmpdir_path')
+    actual = os.environ.get('TMPDIR')
+    marked = bool(actual and (Path(actual) / '.deploy-tmpdir-owner.json').exists())
+    if lease is None and value is None and not marked:
+        return
+    if (not isinstance(lease, dict) or not isinstance(value, str) or actual != value
+            or not isinstance(lease.get('coordinator_root'), str)):
+        raise ValueError('native worker external TMPDIR lease/env is missing or mismatched')
+    if external_tmpdir(value, root, Path(lease['coordinator_root']), request['gate'], request['source']) != lease:
+        raise ValueError('native worker external TMPDIR custody differs')
+    recipe = request.get('worker_recipe') or {}
+    for spec in [*recipe.get('cases', {}).values(), recipe.get('setup'), recipe.get('cleanup')]:
+        if spec and 'TMPDIR' in spec.get('env', {}) and spec['env']['TMPDIR'] != value:
+            raise ValueError('recipe cannot override owned external TMPDIR')

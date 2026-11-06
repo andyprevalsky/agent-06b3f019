@@ -56,6 +56,31 @@ class Worker(unittest.TestCase):
         self.coordinator_temp.cleanup()
         self.temp.cleanup()
 
+    def test_owned_external_tmpdir_native_worker_contract(self):
+        with tempfile.TemporaryDirectory(prefix='dpt-') as value:
+            path=Path(value);path.chmod(0o700)
+            lease=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(self.coordinator),
+                       worker_root=str(self.root),gate='gate',
+                       uid=os.geteuid(),device=path.stat().st_dev,inode=path.stat().st_ino)
+            marker=path/'.deploy-tmpdir-owner.json'
+            marker.write_text(json.dumps(lease));marker.chmod(0o600)
+            request=copy.deepcopy(self.request)
+            request.update(external_tmpdir=lease,external_tmpdir_path=value)
+            # A valid lease reaches real native cases, preserving both their outcomes.
+            with patch.dict(os.environ,{'TMPDIR':value}):
+                result=worker.execute(request,self.root)
+            self.assertEqual({'first':'FAIL','second':'PASS'},result['cases'])
+            for failure in ('env','marker','recipe'):
+                bad=copy.deepcopy(request);bad['token']='rejected-'+failure
+                env=value
+                if failure=='env':env=str(self.root)
+                if failure=='marker':marker.chmod(0o644)
+                if failure=='recipe':bad['worker_recipe']['cases']['first']['env']={'TMPDIR':str(self.root)}
+                with patch.dict(os.environ,{'TMPDIR':env}),self.assertRaises(ValueError):
+                    worker.execute(bad,self.root)
+                marker.chmod(0o600)
+                self.assertFalse((self.root/'.context/deploy-worker'/worker.hashlib.sha256(bad['token'].encode()).hexdigest()).exists())
+
     def test_remote_cleanup_owner_in_an_otherwise_passing_result_is_unverified_and_blocks_resume(self):
         # CodeRabbit 4449994487: a boxes-thread (native-backend) gate is not a native producer; the adapter's
         # cleanup_owner must survive validate_result's rejection and mark the occurrence lingering.
@@ -1957,6 +1982,42 @@ class Backend(unittest.TestCase):
             'execution_timeout_seconds': 10}
         self.request['source'] = cycle.source(self.root)
         return state, calls, env
+
+    def test_backend_rejects_external_tmpdir_before_effects(self):
+        self.request.update(external_tmpdir={'invalid':True},external_tmpdir_path='/not-owned')
+        with patch.object(self.backend,'restore_workspace_postgres',side_effect=AssertionError('effect reached')) as restore:
+            with self.assertRaises(ValueError):
+                self.backend.execute(self.request,self.root)
+        restore.assert_not_called()
+        self.assertFalse((self.root/'.context/deploy-backend').exists())
+
+    def test_backend_external_tmpdir_valid_and_denials(self):
+        with tempfile.TemporaryDirectory(prefix='dpt-') as value:
+            path=Path(value);path.chmod(0o700)
+            lease=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(Path(self.temp.name)/'coordinator'),
+                       worker_root=str(self.root),gate=self.request['gate'],uid=os.geteuid(),
+                       device=path.stat().st_dev,inode=path.stat().st_ino)
+            marker=path/'.deploy-tmpdir-owner.json';marker.write_text(json.dumps(lease));marker.chmod(0o600)
+            base=copy.deepcopy(self.request);base.update(external_tmpdir=lease,external_tmpdir_path=value)
+            for mode in ('missing-lease','missing-path','both-missing','wrong-lease','env','setup','cleanup','case'):
+                request=copy.deepcopy(base);env=value
+                if mode=='missing-lease':request.pop('external_tmpdir')
+                elif mode=='missing-path':request.pop('external_tmpdir_path')
+                elif mode=='both-missing':request.pop('external_tmpdir');request.pop('external_tmpdir_path')
+                elif mode=='wrong-lease':request['external_tmpdir']={**lease,'inode':lease['inode']+1}
+                elif mode=='env':env=str(self.root)
+                else:
+                    spec={'command':['true'],'env':{'TMPDIR':str(self.root)}}
+                    request['worker_recipe']={mode:spec} if mode!='case' else {'cases':{'x':spec}}
+                with patch.dict(os.environ,{'TMPDIR':env}),patch.object(self.backend,'restore_workspace_postgres') as restore:
+                    with self.assertRaises(ValueError):self.backend._execute(request,self.root)
+                    restore.assert_not_called()
+                self.assertFalse((self.root/'.context/deploy-backend').exists())
+            self.configure(0,self.rows(alpha=True,beta=True,gamma=True))
+            with patch.dict(os.environ,{'TMPDIR':value}):
+                result=self.backend.execute(base,self.root)
+            self.assertEqual('PASS',result['cases']['blackbox:alpha'])
+            self.assertTrue(result['cleanup_complete'])
 
     def test_qualified_treasury_exclusion_keeps_full_native_peer_outcomes(self):
         # Actual43: the unchanged full shards include an already-qualified treasury FAIL.

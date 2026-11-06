@@ -20,6 +20,7 @@ import sys
 import time
 
 from deploy_test_cycle import ROOT, exclusive, read, source, write
+from deploy_test_isolation import validate_tmpdir_request
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 
 RUNNER = ['npm', 'run', 'test:coverage:sharded']
@@ -362,12 +363,14 @@ def cleanup_cancellation():
 
 
 def execute(request, root, failed_first=False):
+    validate_tmpdir_request(request, root)
     # Keep signal ownership through the report and teardown tails too.
     with cancellation_handlers(), exclusive(root / '.context/deploy-backend'):
         return _execute(request, root, failed_first)
 
 
 def _execute(request, root, failed_first=False):
+    validate_tmpdir_request(request, root)
     checks, skipped = request['checks'], request.get('skips', {})
     proof, domains = selection(root)
     expected = set(checks_for(domains))

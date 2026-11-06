@@ -218,6 +218,234 @@ class Cycle(unittest.TestCase):
         with self.assertRaises(ValueError):
             c.prepare_bindings(copy.deepcopy(base), old, new, self.root, self.directory)
 
+    def external_tmpdir_fixture(self):
+        _, old, _ = self.prepared_bindings_fixture()
+        old['gates'][1]['command'] = ['false']
+        state = c.initialize(old, self.root)
+        c.run_phase(old, state, self.directory, self.root)
+        c.run_phase(old, state, self.directory, self.root)
+        self.assertEqual('triage', state['phase'])
+        new = copy.deepcopy(old)
+        outside = tempfile.TemporaryDirectory(prefix='dpt-')
+        self.addCleanup(outside.cleanup)
+        for gate in new['gates']:
+            if gate.get('quick'):
+                continue
+            path = Path(outside.name) / gate['name']
+            path.mkdir(mode=0o700)
+            owner = dict(schema='deploy-external-tmpdir-v1', coordinator_root=str(self.root),
+                         worker_root=gate['worker_root'], gate=gate['name'],
+                         uid=os.geteuid(), device=path.stat().st_dev, inode=path.stat().st_ino)
+            marker = path / '.deploy-tmpdir-owner.json'
+            marker.write_text(json.dumps(owner)); marker.chmod(0o600)
+            gate['env']['TMPDIR'] = str(path)
+        proof = dict(kind='replace-owned-tmpdir-v1', source=old['source'],
+                     from_plan_digest=c.digest(old),
+                     paths={g['name']:g['env']['TMPDIR'] for g in new['gates'] if not g.get('quick')})
+        return old, new, state, proof
+
+    def test_replace_external_tmpdir_cli_after_native_failure(self):
+        import contextlib, io
+        old, new, state, proof = self.external_tmpdir_fixture()
+        historical = copy.deepcopy(state)
+        for name, value in [('old',old),('new',new),('proof',proof),('cycle',state)]:
+            c.write(self.directory / (name+'.json'),value)
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(c, '_prepared_workers_idle'):
+            code=c.main(['prepare-bindings','--input',str(self.directory/'old.json'),
+                         '--plan',str(self.directory/'new.json'),'--proof',str(self.directory/'proof.json'),
+                         '--state-dir',str(self.directory),'--root',str(self.root)])
+        self.assertEqual(0,code)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('quick',after['phase']); self.assertFalse(after['ready'])
+        for key in ('attempts','failures','pending'):
+            self.assertEqual(historical[key],after[key])
+        self.assertEqual(new,after['plan'])
+        self.assertEqual('triage',after['next_after_quick'])
+        self.assertFalse(after['prepared_binding_history'][-1]['credit_granted'])
+        self.assertNotEqual(historical['input_fingerprints']['api'],after['input_fingerprints']['api'])
+        with self.assertRaises(ValueError):
+            c.prepare_bindings(after,new,new,self.root,self.directory,tmpdir_replacement=proof)
+
+    def test_replace_external_tmpdir_rejects_unsafe_admission_atomically(self):
+        old, new, base, proof = self.external_tmpdir_fixture()
+        mutations = [
+            lambda n,s,p: n['gates'][1]['env'].update(XDG_CACHE_HOME='/different'),
+            lambda n,s,p: n['gates'][1]['command'].append('different'),
+            lambda n,s,p: n['gates'][1]['checks'].pop(),
+            lambda n,s,p: n['gates'][1]['env'].update(TMPDIR=n['gates'][2]['env']['TMPDIR']),
+            lambda n,s,p: p.update(unknown=True),
+            lambda n,s,p: p.update(source={'changed':True}),
+            lambda n,s,p: s.update(running=['api']),
+            lambda n,s,p: s.update(phase='initial'),
+            lambda n,s,p: s.update(pending=[]),
+        ]
+        for mutate in mutations:
+            candidate,state,attest=copy.deepcopy(new),copy.deepcopy(base),copy.deepcopy(proof)
+            mutate(candidate,state,attest); before=copy.deepcopy(state)
+            with patch.object(c,'_prepared_workers_idle'), self.assertRaises(ValueError):
+                c.prepare_bindings(state,old,candidate,self.root,self.directory,tmpdir_replacement=attest)
+            self.assertEqual(before,state)
+        path=Path(new['gates'][1]['env']['TMPDIR']); marker=path/'.deploy-tmpdir-owner.json'
+        original=marker.read_text()
+        for mode in ('public','wrong-owner','wrong-source','symlink'):
+            if mode=='public':path.chmod(0o755)
+            if mode in ('wrong-owner','wrong-source'):
+                value=json.loads(original)
+                value['uid' if mode=='wrong-owner' else 'source']=999999 if mode=='wrong-owner' else {}
+                marker.write_text(json.dumps(value))
+            if mode=='symlink':
+                marker.rename(path/'saved');marker.symlink_to(path/'saved')
+            state=copy.deepcopy(base)
+            with patch.object(c,'_prepared_workers_idle'),self.assertRaises(ValueError):
+                c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+            self.assertEqual(base,state)
+            if mode=='symlink':marker.unlink();(path/'saved').rename(marker)
+            path.chmod(0o700);marker.write_text(original)
+        request=self.directory/'attempts/unknown/final/api/request.json'
+        c.write(request,{'token':'unknown','gate':'api'})
+        with patch.object(c,'_prepared_workers_idle'),self.assertRaisesRegex(ValueError,'unknown request'):
+            c.prepare_bindings(copy.deepcopy(base),old,new,self.root,self.directory,tmpdir_replacement=proof)
+
+    def test_replace_external_tmpdir_active_process_and_birth_guards(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        before=copy.deepcopy(state)
+        with patch.object(c,'_prepared_workers_idle',side_effect=ValueError('active local consumer')):
+            with self.assertRaisesRegex(ValueError,'active local consumer'):
+                c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(before,state)
+        proc=self.root/'proc';proc.mkdir();entry=proc/'99999999';entry.mkdir()
+        (entry/'fd').mkdir();(entry/'maps').write_text('')
+        (entry/'cwd').symlink_to(Path(new['gates'][1]['worker_root']))
+        (entry/'stat').write_text('99999999 (fixture) S '+'0 '*18+'123 0')
+        with self.assertRaisesRegex(ValueError,'active local consumer'):
+            c._prepared_workers_idle([Path(new['gates'][1]['worker_root'])],proc,birth_guard=True)
+        (entry/'cwd').unlink();(entry/'cwd').symlink_to(self.root)
+        original=Path.read_text; calls=[]
+        def replaced_birth(path,*args,**kwargs):
+            value=original(path,*args,**kwargs)
+            if path==entry/'stat':
+                calls.append(1)
+                if len(calls)>1:return value.replace('123','124')
+            return value
+        with patch.object(Path,'read_text',replaced_birth),self.assertRaisesRegex(ValueError,'birth identity changed'):
+            c._prepared_workers_idle([Path(new['gates'][1]['worker_root'])],proc,birth_guard=True)
+
+    def test_replace_external_tmpdir_rejects_source_and_directory_changes(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        target=Path(new['gates'][1]['env']['TMPDIR']);before=copy.deepcopy(state)
+        # A path alias is not an inode-bound lease, even when its target is valid.
+        alias=target.parent/'alias';alias.symlink_to(target,target_is_directory=True)
+        candidate=copy.deepcopy(new);candidate['gates'][1]['env']['TMPDIR']=str(alias)
+        with self.assertRaises(ValueError),patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,candidate,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(before,state)
+        # Exact source comparison catches an uncommitted producer change.
+        (self.root/'code').write_text('changed')
+        with self.assertRaisesRegex(ValueError,'source/plan/environment'),patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(before,state)
+
+    def test_external_tmpdir_custody_survives_normal_source_refresh(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        with patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        state['phase']='triage'  # pending original failure, no invented execution
+        markers={g['name']:(Path(g['env']['TMPDIR'])/'.deploy-tmpdir-owner.json').read_bytes()
+                 for g in new['gates'] if not g.get('quick')}
+        (self.root/'code').write_text('later legitimate repair')
+        subprocess.run(['git','-C',str(self.root),'add','code'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c',
+                        'user.email=test@example.com','commit','-qm','later repair'],check=True)
+        updated=copy.deepcopy(new);updated['source']=c.source(self.root)
+        for gate in updated['gates']:
+            if not gate.get('quick'):
+                subprocess.run(['git','-C',gate['worker_root'],'fetch','-q','origin'],check=True)
+                subprocess.run(['git','-C',gate['worker_root'],'checkout','-q','--detach','FETCH_HEAD'],check=True)
+        failures=copy.deepcopy(state['failures'])
+        c.refresh(state,new,updated,self.root,directory=self.directory)
+        self.assertEqual(failures,state['failures'])
+        self.assertEqual(updated['source'],state['source'])
+        self.assertEqual({},state['carried_passes'])
+        for gate in updated['gates']:
+            if not gate.get('quick'):
+                self.assertEqual(markers[gate['name']],(Path(gate['env']['TMPDIR'])/'.deploy-tmpdir-owner.json').read_bytes())
+
+    def test_external_tmpdir_real_child_ownership_and_shared_parent(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        worker=Path(new['gates'][1]['worker_root'])
+        proc=self.root/'real-proc-view';proc.mkdir()
+        child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],cwd=worker)
+        try:
+            (proc/str(child.pid)).symlink_to(Path('/proc')/str(child.pid),target_is_directory=True)
+            with self.assertRaisesRegex(ValueError,'active local consumer'):
+                c._prepared_workers_idle([worker],proc,birth_guard=True)
+        finally:
+            child.terminate();child.wait(timeout=5)
+        value=Path(new['gates'][1]['env']['TMPDIR'])
+        parent=value.parent;parent.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(ValueError,'mutable shared parent'):
+                c.external_tmpdir(str(value),worker,self.root,'api',state['source'])
+        finally:
+            parent.chmod(0o700)
+
+    def test_external_tmpdir_pending_state_requires_actual_failure_receipt(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        for path in (self.directory/'attempts').glob('**/request.json'):
+            path.unlink()  # isolated fixture simulates missing native provenance
+        original=copy.deepcopy(state)
+        with patch.object(c,'_prepared_workers_idle'),self.assertRaisesRegex(ValueError,'actual full failure receipt'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(original,state)
+
+    def test_privileged_scan_preserves_nonroot_lease(self):
+        self.assertNotEqual(0, os.geteuid())
+        old,new,state,proof=self.external_tmpdir_fixture()
+        roots=[Path(g['worker_root']) for g in new['gates'] if not g.get('quick')]
+        roots += [Path(g['env']['TMPDIR']) for g in new['gates'] if not g.get('quick')]
+        # Real host /proc: inaccessible processes must be inspected, never omitted.
+        import deploy_test_process_scan as scan
+        with patch.object(scan,'privileged_scan',wraps=scan.privileged_scan) as actual_scan:
+            c._prepared_workers_idle(roots,birth_guard=True)
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertGreaterEqual(actual_scan.call_count,1)
+        self.assertEqual('quick',state['phase'])
+        print('ACTUAL_NONROOT_PRIVILEGED_SCAN',json.dumps(scan.privileged_scan(roots),sort_keys=True))
+        for gate in new['gates']:
+            if not gate.get('quick'):
+                lease=c.external_tmpdir(gate['env']['TMPDIR'],Path(gate['worker_root']),self.root,
+                                        gate['name'],state['source'])
+                self.assertEqual(os.geteuid(),lease['uid'])
+
+    def test_privileged_scan_rejects_active_and_unbound_input(self):
+        import deploy_test_process_scan as scan
+        old,new,state,proof=self.external_tmpdir_fixture()
+        root=Path(new['gates'][1]['worker_root'])
+        child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],cwd=root)
+        try:
+            with self.assertRaisesRegex(ValueError,'refused or unavailable'):
+                scan.privileged_scan([root])
+        finally:
+            child.terminate();child.wait(timeout=5)
+        for roots in ([Path('/')],[Path('/proc')],[root]*65):
+            with self.assertRaises(ValueError):
+                scan.privileged_scan(roots)
+        # The root helper itself rejects a forged uid/pid/birth and unknown fields.
+        calls=[]; native=scan.subprocess.run
+        def capture(*args,**kwargs):
+            calls.append((args,kwargs));return native(*args,**kwargs)
+        with patch.object(scan.subprocess,'run',side_effect=capture):
+            scan.privileged_scan([root])
+        args,kwargs=calls[0]
+        self.assertFalse(kwargs.get('shell',False))
+        self.assertEqual(['/usr/bin/sudo','-n','/usr/bin/python3','-I','-S','-B','-c'],args[0][:7])
+        for field,value in [('uid',os.geteuid()+1),('pid',1),('birth','wrong'),('unknown','field')]:
+            request=json.loads(kwargs['input']);request[field]=value
+            result=native(args[0],input=json.dumps(request).encode(),capture_output=True,
+                          timeout=30,env=kwargs['env'],close_fds=True)
+            self.assertNotEqual(0,result.returncode)
+            self.assertEqual({'kind':'deploy-process-scan-v1','quiescent':False},json.loads(result.stdout))
+
     def local_rebind_fixture(self):
         import contextlib, io
         old = copy.deepcopy(self.plan)
