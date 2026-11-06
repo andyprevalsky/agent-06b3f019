@@ -153,6 +153,7 @@ def observation(app, warm_id, *, native_pid=None):
     before = machine(get(app, 'machines/' + warm_id))
     inventory = get(app, 'machines')
     need(isinstance(inventory, list) and len({m['id'] for m in inventory}) == len(inventory), 'inventory unreadable')
+    need(any(machine(item)==before for item in inventory), 'warm missing/changed in global inventory')
     volumes = {}
     for mount in before['mounts']:
         vid = mount['volume']; volume = get(app, 'volumes/' + vid)
@@ -263,6 +264,89 @@ def pool_binding(root):
     return hashlib.sha256(value).hexdigest()
 
 
+def historical_debt_audit(state, gate):
+    """No source/admission coverage: exact static scopes plus full native audits."""
+    from deploy_test_cycle import bound_isolated_owner_roots
+    from deploy_test_native_cleanup import inherited_native_sources
+    bound_isolated_owner_roots(state, gate)
+    entries=debts(state,gate['name'])
+    need(inherited_native_sources(state,entries,_historical_only=True)=={}, 'historical audit grants no launch credit')
+    return entries
+
+
+def original_owned_baseline(state, root, entries):
+    """An original failed intent/result can bind scope without becoming success."""
+    candidates=[]
+    for record in state.get('native_maintenance',[]):
+        directory=Path(record['directory'])
+        need(directory==common(root)/'cloudbench-maintenance'/record['nonce']
+             and directory.resolve()==directory and not directory.is_symlink(),'original custody operation path')
+        intent=read(directory/'intent.json');result=read(directory/'result.json')
+        need(record.get('intent_sha256')==digest(intent) and record.get('result_sha256')==digest(result)
+             and result['intent_sha256']==digest(intent) and result['producer']==record['producer']==intent['producer']
+             and result['nonce']==record['nonce']==intent['nonce'] and record['source']==intent['source']
+             and result['native_exit']==record['native_exit'] and result['qualified']==record['qualified']
+             and result['cleanup_complete'] is False and result['credit_granted'] is False,
+             'original custody native seals')
+        # The original state hash/digest was captured before original mutation;
+        # its source/script hashes and native producer evidence remain immutable.
+        need(intent['root']==str(root) and intent['producer']['start'], 'original custody producer/root')
+        anchor,_=anchor_for(entries)
+        pin=anchor['proof']['guest_observation']['warm']
+        if all(intent['before']['warm'][k]==pin[k] for k in ('id','instance_id','name','state','config_sha256')):
+            candidates.append((record,intent,result))
+    need(candidates,'original owned maintenance custody missing')
+    # Failed attempts are never filtered out or modified, nor does this test
+    # certify their complete transition. Only original scope is reused.
+    record,intent,result=candidates[0]
+    need(intent['targets']==[['warm',intent['before']['warm']['id']]],'original custody singleton')
+    return intent['before']['warm'], {'nonce':record['nonce'],'intent_sha256':digest(intent),'result_sha256':digest(result)}
+
+
+def owned_scope(warm, original):
+    # The existing native cycle owns this exact resource scope. The previous
+    # image is never executed: setup replaces it with the qualified new build
+    # while stopped, then records a second native GET before the first start.
+    need(all(warm[k]==original[k] for k in ('id','name','mounts','stable_sha256'))
+         and warm['state']=='stopped' and warm['instance_id']
+         and warm['command']==['sleep','infinity'], 'prospective original owned resource scope')
+
+
+def prestart(args):
+    pointer=read(args.pointer);directory=Path(pointer['directory']);intent=read(directory/'intent.json')
+    if 'prospective_origin' not in intent:
+        return  # Preserve the existing pinned-generation setup contract.
+    root=Path(intent['root'])
+    need(directory==common(root)/'cloudbench-maintenance'/intent['nonce']
+         and pointer['intent_sha256']==digest(intent),'prestart original intent')
+    need(native_owner(root,args.pid,Path(intent['state_path']),intent['state_fd'])==intent['producer'],
+         'prestart native producer')
+    from deploy_test_cycle import source
+    state=read(intent['state_path'])
+    need(state['native_maintenance'][-1]==pointer and source(root)==intent['source']
+         and script_hashes(root,intent['source']['head'])==intent['scripts'], 'prestart source/state anchor')
+    previous=copy.deepcopy(state);previous['native_maintenance'].pop()
+    if not previous['native_maintenance'] and not intent['previous_native_maintenance_present']:
+        previous.pop('native_maintenance')
+    need(digest(previous)==intent['state_sha256'], 'prestart cycle changed during native maintenance')
+    need(digest(read(intent['build_path']))==intent['build_sha256'], 'prestart original build receipt')
+    image_build(Path(intent['build_path']),intent['image'],root,intent['source'])
+    current=observation(intent['app'],intent['targets'][0][1],native_pid=args.pid)
+    owned_scope(current['warm'],intent['before']['warm'])
+    need(current['warm']['image']==intent['image'] and current['warm']['image_digest']==intent['image_digest'],
+         'prestart desired immutable image')
+    need(current['volumes']==intent['before']['volumes']
+         and {k:v for k,v in current['inventory'].items() if k!=current['warm']['id']}==
+             {k:v for k,v in intent['before']['inventory'].items() if k!=current['warm']['id']}, 'prestart foreign inventory/volume changed')
+    record=dict(schema=SCHEMA,nonce=intent['nonce'],intent_sha256=digest(intent),producer=intent['producer'],observation=current)
+    write_once(directory/'prestart.json',record)
+    # Anchor the in-memory capture before this child authorizes guest start.
+    # A read-only file alone is replaceable through its parent directory.
+    from deploy_test_cycle import write
+    state['native_maintenance'][-1]={**pointer,'prestart_sha256':digest(record)}
+    write(Path(intent['state_path']),state)
+
+
 def begin(args):
     from deploy_test_cycle import source, isolated_admissions
     root = args.root.resolve(); state = read(args.state)
@@ -279,7 +363,6 @@ def begin(args):
     need(state.get('ready') is False and state.get('phase') == 'needs-focused-plan', 'quiescent failed cycle required')
     quiescent(native_pid=args.pid)
     entries = debts(state, args.gate)
-    need(sorted(isolated_admissions(state, args.gate), key=lambda e: e['token']) == entries, 'original debt authority')
     anchor, _ = anchor_for(entries)
     expected = anchor['proof']['guest_observation']['warm']
     targets = [line.split('\t') for line in args.targets.splitlines()]
@@ -287,8 +370,14 @@ def begin(args):
     pool = pool_binding(root)
     build = image_build(args.build, args.image, root, current)
     started = time.time(); before = observation(args.app, expected['id'], native_pid=args.pid)
-    need(all(before['warm'][key] == expected[key] for key in ('id', 'instance_id', 'name', 'state', 'config_sha256')),
-         'original warm pin changed before mutation')
+    prospective=not all(before['warm'][key] == expected[key] for key in ('id','instance_id','name','state','config_sha256'))
+    predecessor=None
+    if prospective:
+        need(historical_debt_audit(state,gate)==entries,'original historical debt authority')
+        original,predecessor=original_owned_baseline(state,root,entries)
+        owned_scope(before['warm'],original)
+    else:
+        need(sorted(isolated_admissions(state, args.gate), key=lambda e: e['token']) == entries, 'original debt authority')
     registry = common(root)/'cloudbench-maintenance'
     need(not registry.is_symlink() and registry.resolve() == registry, 'unsafe native registry parent')
     need(args.pointer.resolve() == args.pointer, 'unsafe native output parent')
@@ -302,6 +391,8 @@ def begin(args):
                   image=args.image, image_digest=build['published_digest'], build_path=str(args.build),
                   build_sha256=digest(build), image_input_equivalence=image_inputs(root,build['source_sha'],current['head']),
                   before=before, started_at=started)
+    if prospective:
+        intent['prospective_origin']={'predecessor':predecessor}
     write_once(directory/'intent.json', intent)
     pointer = {'schema': SCHEMA, 'directory': str(directory), 'intent_sha256': digest(intent),
                'nonce': nonce, 'producer': producer, 'source': current, 'debt_sha256': digest(entries)}
@@ -313,6 +404,18 @@ def begin(args):
     write(args.state, state)
 
 
+def validate_prestart(intent,result,record):
+    need(record['schema']==SCHEMA and record['nonce']==intent['nonce']
+         and record['intent_sha256']==digest(intent) and record['producer']==intent['producer'], 'prestart native seal')
+    current=record['observation'];owned_scope(current['warm'],intent['before']['warm'])
+    need(current['warm']['image']==intent['image'] and current['warm']['image_digest']==intent['image_digest']
+         and intent['started_at']<=current['observed_at']<=result['finished_at'], 'prestart image/time binding')
+    need(current['volumes']==intent['before']['volumes'] and
+         {k:v for k,v in current['inventory'].items() if k!=current['warm']['id']}==
+         {k:v for k,v in intent['before']['inventory'].items() if k!=current['warm']['id']}, 'prestart original resource inventory')
+    need(result.get('prestart_sha256')==digest(record),'prestart result seal')
+
+
 def finish(args):
     from deploy_test_cycle import source
     pointer = read(args.pointer); directory = Path(pointer['directory']); intent = read(directory/'intent.json')
@@ -321,7 +424,8 @@ def finish(args):
          and pointer['intent_sha256'] == digest(intent), 'original operation path/seal')
     state_path = Path(intent['state_path']); state = read(state_path)
     records = state.get('native_maintenance', [])
-    need(records and records[-1] == pointer, 'original pre-mutation cycle anchor')
+    need(records and {k:v for k,v in records[-1].items() if k!='prestart_sha256'} == pointer, 'original pre-mutation cycle anchor')
+    pointer=records[-1]
     previous = copy.deepcopy(state); previous['native_maintenance'].pop()
     if not previous['native_maintenance'] and not intent['previous_native_maintenance_present']:
         previous.pop('native_maintenance')
@@ -338,6 +442,11 @@ def finish(args):
         if args.native_exit == 0:
             complete['after'] = observation(intent['app'], intent['targets'][0][1], native_pid=args.pid)
         complete['finished_at'] = time.time()
+        if 'prospective_origin' in intent:
+            record=read(directory/'prestart.json')
+            need(pointer.get('prestart_sha256')==digest(record),'original prestart cycle anchor')
+            complete['prestart_sha256']=pointer['prestart_sha256']
+            validate_prestart(intent,complete,record)
         verify_transition(intent, complete)
     except (OSError, ValueError, KeyError, TypeError) as error:
         complete['qualified'] = False
@@ -396,8 +505,19 @@ def validate_current(state, entries, anchor, operation):
          'original build receipt/input equivalence changed')
     need(pool_binding(root) == intent['pool_sha256'], 'declared targets changed after maintenance')
     expected = anchor['proof']['guest_observation']['warm']
-    need(all(intent['before']['warm'][k] == expected[k] for k in ('id','instance_id','name','state','config_sha256')),
-         'original pinned before authority')
+    if 'prospective_origin' in intent:
+        gate=next(g for g in state['plan']['gates'] if g['name']==intent['gate'])
+        historical_debt_audit(state,gate)
+        original,predecessor=original_owned_baseline(state,root,entries)
+        need(intent['prospective_origin']=={'predecessor':predecessor},'original prospective scope seal')
+        owned_scope(intent['before']['warm'],original)
+    else:
+        need(all(intent['before']['warm'][k] == expected[k] for k in ('id','instance_id','name','state','config_sha256')),
+             'original pinned before authority')
+    if 'prospective_origin' in intent:
+        need(record.get('prestart_sha256')==result.get('prestart_sha256') and record.get('prestart_sha256'),
+             'original prestart result/cycle anchor')
+        validate_prestart(intent,result,read(directory/'prestart.json'))
     verify_transition(intent, result)
     current = observation(intent['app'], intent['targets'][0][1])
     need(current['warm'] == result['after']['warm'] and current['volumes'] == result['after']['volumes']
@@ -430,13 +550,13 @@ def validate_current(state, entries, anchor, operation):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('operation', choices=('begin','finish')); p.add_argument('--pointer',type=Path,required=True)
+    p.add_argument('operation', choices=('begin','prestart','finish')); p.add_argument('--pointer',type=Path,required=True)
     p.add_argument('--pid',type=int,required=True); p.add_argument('--root',type=Path)
     p.add_argument('--state',type=Path); p.add_argument('--gate'); p.add_argument('--build',type=Path)
     p.add_argument('--requested-ref'); p.add_argument('--image'); p.add_argument('--targets'); p.add_argument('--app')
     p.add_argument('--native-exit',type=int,default=1); p.add_argument('--state-fd',type=int)
     args = p.parse_args()
-    begin(args) if args.operation == 'begin' else finish(args)
+    {'begin':begin,'prestart':prestart,'finish':finish}[args.operation](args)
 
 if __name__ == '__main__':
     main()

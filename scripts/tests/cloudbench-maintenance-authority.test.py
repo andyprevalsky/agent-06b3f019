@@ -83,7 +83,7 @@ m.get=get
 c.isolated_admissions=lambda state,gate:list(state['reconciled_owners'].values())
 r16.hub_socket=lambda **kw:{'pid':777,'port':1777,'inodes':['88']}
 ''')
-        functions='\n'.join(function(n) for n in ('maintenance_begin','maintenance_targets','setup_release'))
+        functions='\n'.join(function(n) for n in ('maintenance_begin','maintenance_targets','maintenance_prestart','setup_release'))
         script='''#!/usr/bin/env bash
 set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -108,6 +108,8 @@ maintenance_begin || exit 1
 maintenance_targets "$(environment_activation_targets)" || exit 1
 # Mutation is synthetic; only the original shell can proceed past intent.
 printf after > "$ROOT_DIR/.context/phase"
+maintenance_prestart || exit 1
+printf started > "$ROOT_DIR/.context/start-marker"
 exit "${FIXTURE_NATIVE_EXIT:-0}"
 '''
         (self.root/'scripts/run-bench-cloud').write_text(script)
@@ -145,6 +147,85 @@ exit "${FIXTURE_NATIVE_EXIT:-0}"
         with patch.object(m,'get',side_effect=get),patch.object(r16,'hub_socket',return_value={'pid':777,'port':1777,'inodes':['88']}), \
              patch.object(m,'quiescent',return_value={'boot':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'uid':os.getuid(),'observed_at':time.time(),'scanned':0}):
             return m.validate_current(state,[self.entry],self.entry,r19)
+
+    def prospective_fixture(self):
+        failed=self.run_native(17);self.assertEqual(failed.returncode,17,failed.stderr)
+        saved=c.read(self.context/'cycle.json')['native_maintenance'][0]
+        self.phase.write_text('before');(self.context/'output/cloudbench-maintenance.json').unlink()
+        (self.context/'start-marker').unlink()
+        self.provider['before']['instance_id']='legitimate-current-peer-instance'
+        self.provider['before']['config']['guest']={'cpu_kind':'shared','cpus':4,'memory_mb':8192}
+        c.write(self.context/'provider.json',self.provider)
+        site=self.fixture/'sitecustomize.py'
+        site.write_text(site.read_text()+"\nimport deploy_test_native_cleanup as n\nc.bound_isolated_owner_roots=lambda *a:([],[])\nn.inherited_native_sources=lambda *a,**kw:{} if kw.get('_historical_only') else (_ for _ in ()).throw(ValueError('old guest pin'))\n")
+        return saved
+
+    def test_prospective_changed_guest_uses_real_native_capture_not_old_pin(self):
+        saved=self.prospective_fixture()
+        completed=self.run_native();self.assertEqual(completed.returncode,0,completed.stderr)
+        with patch.object(m,'historical_debt_audit',return_value=[self.entry]):
+            self.assertTrue(self.consumer())
+        state=c.read(self.context/'cycle.json')
+        self.assertEqual(state['native_maintenance'][0],saved)
+        self.assertEqual(state['reconciled_owners'],self.state['reconciled_owners'])
+        self.assertFalse(saved['qualified']);self.assertTrue(state['native_maintenance'][1]['qualified'])
+        prestart=Path(state['native_maintenance'][1]['directory'])/'prestart.json'
+        self.assertEqual(m.read(prestart)['producer'],state['native_maintenance'][1]['producer'])
+        original_read=m.read
+        def tampered(path):return {} if Path(path)==prestart else original_read(path)
+        with patch.object(m,'read',side_effect=tampered),patch.object(m,'historical_debt_audit',return_value=[self.entry]),self.assertRaises((ValueError,KeyError)):
+            self.consumer()
+
+    def test_prospective_fresh_scope_fail_closed_before_mutation(self):
+        saved=self.prospective_fixture();provider=copy.deepcopy(self.provider)
+        original_state=(self.context/'cycle.json').read_bytes()
+        for label,change in (
+            ('live guest',lambda: self.provider['before'].update(state='started')),
+            ('private machine',lambda: self.provider['before'].update(id='private')),
+            ('foreign volume',lambda: self.provider['before']['config']['mounts'][0].update(volume='private')),
+            ('foreign env',lambda: self.provider['before']['config']['env'].update(PRESENT='foreign')),
+            ('foreign command',lambda: self.provider['before']['config']['init'].update(cmd=['unowned'])),
+        ):
+            with self.subTest(label=label):
+                self.provider=copy.deepcopy(provider);change();c.write(self.context/'provider.json',self.provider)
+                denied=self.run_native();self.assertNotEqual(denied.returncode,0,denied.stderr)
+                self.assertEqual(self.phase.read_text(),'before')
+                self.assertEqual((self.context/'cycle.json').read_bytes(),original_state)
+        self.assertEqual(c.read(self.context/'cycle.json')['native_maintenance'][0],saved)
+
+    def test_prestart_replacement_cannot_become_new_native_authority(self):
+        saved=self.prospective_fixture()
+        script=self.root/'scripts/run-bench-cloud'
+        attack="""python3 - "$ROOT_DIR" <<'PY_TAMPER'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]);pointer=json.loads((root/'.context/output/cloudbench-maintenance.json').read_text())
+path=pathlib.Path(pointer['directory'])/'prestart.json';value=json.loads(path.read_text())
+value['observation']['warm']['instance_id']='forged-after-capture'
+value['observation']['inventory']['warm']['instance_id']='forged-after-capture'
+replacement=path.with_name('replacement.json');replacement.write_text(json.dumps(value));replacement.replace(path)
+PY_TAMPER
+"""
+        script.write_text(script.read_text().replace('maintenance_prestart || exit 1\n','maintenance_prestart || exit 1\n'+attack))
+        subprocess.run(['git','-C',str(self.root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=fixture','-c','user.email=fixture@example.com','commit','-qm','synthetic replacement control'],check=True)
+        state=c.read(self.context/'cycle.json');state['source']=state['plan']['source']=c.source(self.root)
+        c.write(self.context/'cycle.json',state)
+        result=self.run_native();self.assertNotEqual(result.returncode,0,result.stderr)
+        state=c.read(self.context/'cycle.json');record=state['native_maintenance'][-1]
+        self.assertEqual(record['native_exit'],0);self.assertFalse(record['qualified'])
+        self.assertNotEqual(record['prestart_sha256'],m.digest(m.read(Path(record['directory'])/'prestart.json')))
+        self.assertEqual(state['native_maintenance'][0],saved)
+        with patch.object(m,'historical_debt_audit',return_value=[self.entry]),self.assertRaises(ValueError):self.consumer()
+
+    def test_prospective_cli_zero_stale_image_rejected_before_first_start(self):
+        self.prospective_fixture()
+        self.provider['after']['config']['image']=self.provider['before']['config']['image']
+        self.provider['after']['image_ref']=self.provider['before']['image_ref']
+        c.write(self.context/'provider.json',self.provider)
+        denied=self.run_native();self.assertNotEqual(denied.returncode,0,denied.stderr)
+        self.assertIn('prestart desired immutable image',denied.stderr)
+        self.assertFalse((self.context/'start-marker').exists())
+        self.assertFalse(c.read(self.context/'cycle.json')['native_maintenance'][-1]['qualified'])
 
     def test_original_pin_rejects_then_native_transition_qualifies(self):
         # The exact original match body rejects the new config/incarnation.

@@ -942,7 +942,7 @@ def still_bound(entry, receipt, owner):
         return False
 
 
-def inherited_native_sources(state, entries):
+def inherited_native_sources(state, entries, *, _historical_only=False):
     """Compose original debt proofs with a fully verified generic native successor.
 
     This supplies future source admission only. It never edits an old proof or
@@ -973,20 +973,29 @@ def inherited_native_sources(state, entries):
     need(generic, 'generic native successor missing')
     candidate = max(generic, key=lambda e: receipts[e['token']]['finished_at'])
     latest = latest_receipts(state).get(candidate['gate'])
-    need(latest is not None and candidate['validation_source'] == state['source'] == state['plan']['source'],
+    need(latest is not None and (_historical_only or state['source']==state['plan']['source']),
          'native successor current source')
     clean = latest['token'] != candidate['token']
     if clean:
-        need(latest['source'] == state['source'] and len(latest.get('isolated_validation', [])) == len(entries),
+        need((_historical_only or latest['source'] == state['source']) and len(latest.get('isolated_validation', [])) == len(entries),
              'clean successor complete debt set')
         for token, entry in by_token.items():
             clean_isolated_successor(state, entry, receipts[token], latest)
-    else:
+    elif not clean:
         need(still_bound(candidate, latest, receipt_owner(candidate['gate'], latest)), 'current native successor changed')
     known = {m.MODE: m for m in (r12, r14, r16, r19)}
     anchors = [e for e in entries if e['proof'].get('compatibility') in {r16.MODE, r19.MODE}]
     need(anchors, 'current shared partition authority missing')
-    if not clean:
+    native_source_covered=False
+    if not clean and not _historical_only and candidate['validation_source']!=state['source']:
+        from cloudbench_maintenance import validate_current, anchor_for
+        maintenance_anchor,operation=anchor_for(entries)
+        try:
+            need(validate_current(state,entries,maintenance_anchor,operation),'native maintenance current source required')
+        except (OSError,ValueError,KeyError,TypeError) as error:
+            raise ValueError('native maintenance current source required: '+str(error)) from error
+        native_source_covered=True
+    if not clean and not _historical_only and not native_source_covered:
         anchor = max(anchors, key=lambda e: receipts[e['token']]['finished_at'])
         if not still_bound(anchor, receipts[anchor['token']], receipt_owner(anchor['gate'], receipts[anchor['token']])):
             from cloudbench_maintenance import validate_current, anchor_for
@@ -1027,4 +1036,4 @@ def inherited_native_sources(state, entries):
                  and old['finished_at'] <= receipt['started_at'], 'original native ancestry edge changed')
         if entry is candidate:
             need({a['original_request_token'] for a in links} == set(by_token)-{token}, 'complete native ancestor set')
-    return dict.fromkeys(by_token, candidate['validation_source'])
+    return {} if _historical_only else dict.fromkeys(by_token, state['source'] if clean or native_source_covered else candidate['validation_source'])

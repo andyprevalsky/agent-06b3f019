@@ -1977,6 +1977,11 @@ if [line.split('\t') for line in sys.argv[2].splitlines()] != intent['targets']:
 PY_MAINTENANCE_TARGETS
 }
 
+maintenance_prestart() {
+    [ -n "$MAINTENANCE_POINTER" ] || return 0
+    python3 "$ROOT_DIR/scripts/cloudbench_maintenance.py" prestart --pid "$$" --pointer "$MAINTENANCE_POINTER"
+}
+
 setup_release() {
     local native_status="$1" capture_status=0
     if [ -n "$MAINTENANCE_POINTER" ] && [ -f "$MAINTENANCE_POINTER" ]; then
@@ -2971,6 +2976,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     write_state "$mid"
 
     prepare_warm_source "$mid" || exit 1
+    maintenance_prestart || exit 1
     require_machine_ready "$mid" || exit 1
 
     # ── git clone the repo into /data/repo (auth via validated controller token) ─

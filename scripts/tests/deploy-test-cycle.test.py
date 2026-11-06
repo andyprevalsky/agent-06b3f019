@@ -5467,6 +5467,47 @@ class GenericNativeInheritedAdmission(unittest.TestCase):
         with patch.object(self.n,'still_bound',side_effect=changed):
             with self.assertRaisesRegex(ValueError,'shared partition changed'):c.isolated_admissions(self.state,'smoke')
 
+    def test_historical_only_audit_has_no_guest_or_future_admission_authority(self):
+        previous=self.n.still_bound
+        def changed(entry,*args):
+            return False if entry['token']==self.entries[-2]['token'] else previous(entry,*args)
+        state=copy.deepcopy(self.state)
+        state['source']=state['plan']['source']={'head':'future-harness','digest':'future'}
+        with patch.object(self.n,'still_bound',side_effect=changed):
+            self.assertEqual(self.n.inherited_native_sources(state,self.entries,_historical_only=True),{})
+            with self.assertRaises(ValueError):self.n.inherited_native_sources(state,self.entries)
+        for entry in self.entries:
+            remaining=[e for e in self.entries if e is not entry]
+            with self.subTest(missing=entry['token']),self.assertRaises((ValueError,KeyError)):
+                self.n.inherited_native_sources(state,remaining,_historical_only=True)
+        self.assertEqual(self.entries,self.baseline)
+
+    def test_native_maintenance_source_coverage_preserves_original_labels(self):
+        import cloudbench_maintenance as maintenance
+        old=copy.deepcopy(self.entries)
+        self.state['source']=self.state['plan']['source']={'head':'new-harness','digest':'new-harness'}
+        with patch.object(maintenance,'validate_current',return_value=True) as verified:
+            entries,coverage=c.isolated_admissions(self.state,'smoke',_with_sources=True)
+            self.assertEqual(len(entries),7)
+            self.assertEqual(coverage,dict.fromkeys((e['token'] for e in self.entries),self.state['source']))
+            verified.assert_called_once()
+        self.assertEqual(self.entries,old)
+        with patch.object(maintenance,'validate_current',side_effect=ValueError('unqualified native transition')):
+            with self.assertRaises(ValueError):c.isolated_admissions(self.state,'smoke')
+        # A real clean successor supersedes guest observation, never old debt.
+        self.src=self.state['source']
+        for status in ('PASS','FAIL'):
+            with patch.object(maintenance,'validate_current',return_value=True):
+                gate,request,successor,folder=self.clean_successor_fixture(status)
+            successor['started_at']=91;successor['finished_at']=92;c.write(folder/'receipt.json',successor)
+            with patch.object(maintenance,'validate_current',side_effect=AssertionError('clean successor uses native cleanup')):
+                self.assertEqual(len(c.isolated_admissions(self.state,'smoke')),7)
+                self.assertEqual(len(c.isolated_request(self.state,gate,{**request,'token':'next'},self.root,{})),7)
+            for key,value in [('complete',False),('cleanup_owner',{'live':True}),('cancelled',True)]:
+                bad=copy.deepcopy(self.state);bad['attempts'][-1]['results'][0][key]=value
+                with self.subTest(status=status,key=key),self.assertRaises(ValueError):c.isolated_admissions(bad,'smoke')
+            self.state['attempts'].pop()
+
     def test_qualified_native_maintenance_covers_changed_partition_only(self):
         import cloudbench_maintenance as maintenance
         previous=self.n.still_bound
