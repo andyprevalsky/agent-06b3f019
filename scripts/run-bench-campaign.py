@@ -621,8 +621,8 @@ def stress_default_environment(requirements: dict[str, object], environment: dic
     if requirements["local_shared_cpu_governor_minimum"] is None or requirements["local_machine_ceiling_minimum"] is None:
         raise ValueError("unknown native baseline cannot admit stress defaults")
     result = dict(environment)
-    result.setdefault("CLOUDBENCH_SHARED_CPU_GOVERNOR", str(max(160, int(requirements["local_shared_cpu_governor_minimum"]))))
-    result.setdefault("CLOUDBENCH_APP_MACHINE_CEILING", str(max(56, int(requirements["local_machine_ceiling_minimum"]))))
+    result.setdefault("CLOUDBENCH_SHARED_CPU_GOVERNOR", str(max(1000, int(requirements["local_shared_cpu_governor_minimum"]))))
+    result.setdefault("CLOUDBENCH_APP_MACHINE_CEILING", str(max(300, int(requirements["local_machine_ceiling_minimum"]))))
     result.setdefault("CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION", "1")
     return result
 
