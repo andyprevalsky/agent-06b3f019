@@ -5,16 +5,17 @@ import { MarkdownText } from '@/features/terminal-component-group/components/Mar
 
 const callbacks = vi.hoisted(() => [] as Array<() => void>);
 vi.mock(
-  '@/features/terminal-component-group/components/markdown-text/renderWords',
+  '@/features/terminal-component-group/components/markdown-text/fadeWords',
   async (original) => {
     const source =
       await original<
-        typeof import('@/features/terminal-component-group/components/markdown-text/renderWords')
+        typeof import('@/features/terminal-component-group/components/markdown-text/fadeWords')
       >();
     return {
-      renderWords: (...args: Parameters<typeof source.renderWords>) => {
-        callbacks.push(args[4]);
-        return source.renderWords(...args);
+      ...source,
+      createFadeWordSpan: (onLastWordComplete: () => void) => {
+        callbacks.push(onLastWordComplete);
+        return source.createFadeWordSpan(onLastWordComplete);
       },
     };
   },
@@ -83,7 +84,7 @@ describe('large markdown output', () => {
     expect(container.querySelector('p')?.textContent).toBe('Previous output with bold');
     rerender(<MarkdownText text={newOutput} shouldAnimate />);
     expect(container.querySelector('h1')).toHaveTextContent('Updated output');
-    expect(container.querySelector('pre')?.textContent).toBe(newCode.trimEnd());
+    expect(container.querySelector('pre')?.textContent).toBe(newCode);
     expect(container.textContent).not.toContain('Previous output');
     unmount();
   });

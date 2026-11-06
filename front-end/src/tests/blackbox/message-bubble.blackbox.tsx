@@ -378,20 +378,21 @@ describe('MessageBubble', () => {
     });
   });
 
-  it('renders streaming attention message using StreamingText (isStreaming=true)', async () => {
+  it('renders a streaming attention message as markdown (isStreaming=true)', async () => {
     const msg = baseMessage({
       role: 'TOOL',
-      text: 'streaming body',
+      text: 'streaming **body**',
       metadata: {
         toolCallId: 'tc-19',
         toolName: 'send_message_to_user',
         isUserAttentionMessage: true,
         toolStatus: 'IN_PROGRESS',
-        attentionMessage: 'streaming body',
+        attentionMessage: 'streaming **body**',
       },
     });
     const { container } = renderBubble(<MessageBubble message={msg} isStreaming={true} />);
-    await waitFor(() => expect(container.textContent).toContain('streaming body'));
+    await waitFor(() => expect(container.querySelector('strong')).toHaveTextContent('body'));
+    expect(container.textContent).not.toContain('**');
   });
 
   it('renders USER message with image file_pointer showing loading placeholder', async () => {
