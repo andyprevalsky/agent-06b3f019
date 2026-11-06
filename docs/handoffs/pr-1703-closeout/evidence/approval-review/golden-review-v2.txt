@@ -1,0 +1,115 @@
+# Golden-reference adversarial re-review: RCA-WEBDECOY-POINTER-1 @ 584cf4076
+
+I am a fresh read-only reviewer and did not author this change. I compared the in-scope diff `origin/main...584cf4076` against `/var/tmp/webdecoy-rca/llm-visible-v2.diff`: the content is identical (that file uses -U2 context). I also read `git diff cce696e9d 584cf4076`. Commit 584cf4076 itself changes only the RCA doc. All code changes come from 15f2ef6cf.
+
+## A. Mechanism grounding: PASSES for every in-scope hunk
+
+These are the references I opened in this session:
+
+1. `claude-code-src/cli.js:1830`
+   - `mouse_move` says "Move the mouse cursor without clicking. Useful for triggering hover states."
+   - `left_click_drag` says "Press, move to target, and release."
+   - `left_mouse_down` says "Use mouse_move first to position the cursor."
+   - The dispatcher has `case"mouse_move":return gjz(_,K,z,Y)`.
+2. `claude-code-src/cli.js:66` (Claude in Chrome `computer`)
+   - "`hover`: Move the mouse cursor to the specified coordinates or element without clicking. Useful for revealing tooltips, dropdown menus, or triggering hover states."
+   - "`left_click_drag`: Drag from start_coordinate to coordinate."
+3. `claude-code-src/cli.js:63` (`javascript_tool`)
+   - The description is generic: "Execute JavaScript code in the context of the current page … interact with the DOM, window object, and page variables".
+   - It names no hover or drag uses. Pointer actions live in the separate `computer` tool.
+4. `claude-code-src/src/utils/computerUse/executor.ts:103-120`
+   - `moveAndSettle` does an instant move and then waits 50 ms before click, scroll and drag-from.
+   - `animatedMove` is used only for drag-to.
+5. OpenClaw browser tool
+   - `openclaw/extensions/browser/src/browser-tool.schema.ts:19-26`: `hover`, `drag` and `evaluate` are separate act kinds.
+   - `routes/agent.act.normalize.ts:222-226`: hover requires an element target.
+   - `routes/agent.act.normalize.ts:228-237`: drag requires a start and an end ("drag requires startRef or startSelector" / "drag requires endRef or endSelector").
+   - `pw-tools-core.interactions.actions.ts:159-161`: `hoverViaPlaywright` calls `locator.hover`.
+6. OpenClaw computer tool
+   - `openclaw/src/agents/tools/computer-tool-schema.ts:204-210`: `pointerAction` enum starts with `"hover"`.
+   - `openclaw/src/agents/tools/computer-tool-guidance.ts:30`: `"mouse_move"`.
+7. Hermes
+   - `hermes-agent/tools/computer_use/schema.py:18-35`: the action enum has `drag` and no hover.
+   - `hermes-agent/tools/computer_use/schema.py:117-131`: drag takes `from_*` and `to_*`.
+   - `hermes-agent/tools/computer_use/tool.py:425-428`: "drag requires from_coordinate/to_coordinate or from_element/to_element".
+   - `hermes-agent/tools/drive_preview_tool.py:81-83`: "Input is real (pointer travels, hover menus open). Actions: elements, click, hover (park the pointer — opens dropdowns before clicking in)".
+8. Neutral repos: I grepped `codex/`, `prime-agent/` and `/var/tmp/webdecoy-rca/kimi-code` for `mouse_move|"hover"|left_click_drag`. None of them has a pointer tool.
+
+I also checked that each tool description matches what the runtime does at the snapshot:
+
+- **click / click_coordinates**
+  - With the humanizer, clicks go through `humanizer.click_at_coords`, which runs the Bezier `_move_to_unlocked` (`service_actions.py` ~3603 and ~3657).
+  - Without the humanizer, browser-use `ClickElementEvent` / `ClickCoordinateEvent` send `mouseMoved` before `mousePressed` (`agents/venv/.../default_action_watchdog.py:905-916` and `:1083-1093`).
+  - So "moves the mouse pointer … before pressing" is true in both input modes, with one exception: browser-use's JS click fallback for occluded elements (just above :905) does not move the pointer.
+- **hover**: `_execute_hover` calls `humanizer.hover` (`_move_to` plus a dwell) or sends a single CDP `mouseMoved`. It never presses. "Same pointer movement as click" holds in both modes.
+- **drag**: `_execute_drag` now calls `humanizer.drag_between` (humanizer.py:704-760). That function moves to the start, then presses, moves with `buttons:1` and releases, so "button stays held for the whole movement" is true. Without a humanizer the raw CDP path is unchanged.
+  - The existing parenthetical "(CDP Input.dispatchMouseEvent …)" is still true for the main path. The humanizer can fall back to the Playwright mouse.
+
+Each hunk against its reference behaviour:
+
+| Hunk | Reference | Verdict |
+|---|---|---|
+| `HoverTool` (index, or x and y together; validator) + `BROWSER_TOOL_MODELS["hover"]` (schemas.py:289, :996) | CC Chrome `hover` takes "coordinates or element" (cli.js:66). CC `mouse_move` takes coordinates (cli.js:1830). OpenClaw `hover` needs an element target (normalize.ts:222-226). Hermes preview `hover` (drive_preview_tool.py:82). | Converges. Same shape, no broader. |
+| `hover` description (browser_use.py:124) | Near-verbatim CC cli.js:1830 / cli.js:66. Hermes "park the pointer". | Converges. |
+| `click` / `click_coordinates` descriptions (:77, :84) | The CC executor moves before click (executor.ts:103-120). CC `left_click` needs no prior move, while `left_mouse_down` does (cli.js:1830). Hermes "pointer travels" (drive_preview_tool.py:81). | Converges. The wording is now mode-neutral and true. |
+| `drag` description (:95): held button, never for pointer movement, both ends required | CC "Press, move to target, and release" keeps positioning (`mouse_move`) separate from pressing. OpenClaw normalize.ts:228-237 and Hermes tool.py:425-428 require both ends. | Converges with OpenClaw and Hermes. CC desktop's optional start is a minority shape and predates this change (Rose's existing `DragTool` validator). |
+| `evaluate` description (:194): drops "hover, drag" | CC `javascript_tool` (cli.js:63) does not advertise pointer gestures, which live in `computer` (cli.js:66). OpenClaw keeps `evaluate` as a kind separate from `hover`/`drag` (browser-tool.schema.ts:19-26). | Converges. It narrows the text now that native tools exist. It is general (JS-dispatched pointer events are untrusted), not tied to this task. |
+| `_VALID_ACTIONS += "hover"` (:1301) + normalize hover branch (:1428) | Dispatch on the action name: CC `case"mouse_move"` (cli.js:1830), OpenClaw `case "hover"` (normalize.ts:222). | Converges. It dispatches on the declared tool name, not on a classifier. |
+
+**Contrary practice.** Hermes `computer_use` has no hover. That is an omission, not a contrary practice: Hermes ships hover with pointer travel in its preview tool. No reference uses drag to move the pointer, and none advertises JS for hover or drag next to native pointer tools. The change is one tool on the existing humanizer, with no new parameters beyond index/x/y, so it is no broader than the references.
+
+**CLAUDE.md hard rules**
+
+- **Rule 25: PASS.** The change does not touch tasks.json, the evaluator, the timeout, concurrency or the ratchet (`git diff --stat origin/main...584cf4076`). The capability is general.
+- **Rule 25a: PASS.** It edits static tool text only and injects no synthetic messages. The RCA explicitly declines a repeat-breaker. The `client.py` change dumps rejected args and is not visible to the LLM.
+- **Rule 25b: PASS.** It dispatches on structured names.
+- **Rule 28: PASS.** Pointer input stays per-session and there is no shared state. It adds one tool schema per browser request and causes a one-time cache-prefix change.
+
+**Notes (non-blocking)**
+
+- `tool_executor_v2.execute_tool` has no `hover` branch. It is not on the live path: service_actions.py:1234 imports only `_execute_drag`, and hover is routed at service_actions.py:1242.
+- `drag_between` already existed on main (humanizer.py:704) but was unused. It is now wired in.
+
+## B. Packet validity (packet-v2.md): FAILS with 3 blocking findings
+
+Status of the 8 findings from the prior review:
+
+1. Links list: **fixed**.
+2. Concrete FE links and HTTPS rendered last-call dumps: **fixed** (publish-baseline2.log and publish-run3.log URLs match). The buggy dump explains why the later rejected calls were never dumped.
+3. Downstream Severity / Future / Risk labels: **present**, but see B3.
+4. Scope `path:line` and clickable links: **fixed**. I checked every line at 584cf4076: schemas.py:289 `class HoverTool`, :996 `"hover": HoverTool`, browser_use.py:77 click, :84 click_coordinates, :95 drag, :124 hover, :194 evaluate, :1301 `"hover"`, :1428 normalize branch.
+5. Task-framed `What failed:` with the tool name backticked: **fixed**.
+6. Pre-fix/Post-fix lines: **fixed**, but the wall-clock is not a measurement (B1).
+7. `Approve:` / `Reject:` lines: **fixed**.
+8. Hermes line and the `Not applicable` line for codex/prime-agent/kimi-code: **fixed** (see the precision note below).
+
+Packet citations I opened all exist and say what is claimed: cli.js:1830, cli.js:66, executor.ts:103-120, browser-tool.schema.ts:19, agent.act.normalize.ts:228-237, and hermes computer_use/schema.py:117-131.
+
+**Blocking findings**
+
+- **B1. The local repro wall-clock "(15.4 s)" is not a measurement of the repro.**
+  - The only 15.4 s in the evidence is a report-card render line: `[report-card] … elapsed=15.4s` at baseline-run1.log:348 and fix-run2.log:348.
+  - The spawn-browser-agent-v3 domain alone logged "Results: 1 passed, 0 failed (223.1s)" at the end of sbav3-domain.log.
+  - Step 4's benchmark takes 138–142 s.
+  - approval-format.md requires "the actual time you measured running this owning-boundary repro … not an estimate". Measure the listed steps, or split the times per step.
+- **B2. Post-fix "benchmark PASS 3/3" mixes snapshots.**
+  - The RCA doc names the first two passes as d920016a (142 s) and e04e7558 (138 s).
+  - fix-run1.log finished 01:09:52, before cce696e9d was committed at 01:11:35; that run was applied from fix-run1.patch. fix-run2.log finished 01:15:08.
+  - Both ran the earlier LLM-visible text: "natural, human-like path", evaluate still listing hover and drag, and raw-CDP drag.
+  - Only 7ab20ea6 ran the approved bytes: fix-run3.log finished 01:30:18, after 15f2ef6cf at 01:25:34. Its run JSON shows 0.057 and no vision_ai/teleport.
+  - Detail ("PASS 3/3 on the fix") and Local repro must say "1/1 on 15f2ef6cf/584cf4076 bytes, plus 2/2 on the cce696e9d-era text", or rerun on the snapshot. CLAUDE.md: "Earlier passing checks do not cover later changes automatically."
+- **B3. `Future prod trajectories affected:` uses the wrong denominator and a forbidden basis.**
+  - It says "100% of browser-agent trajectories" and "under 10% of browser steps (basis: … webdecoy runs only)".
+  - approval-format.md requires "all future product trajectories as the denominator; exclude benchmarks", and forbids inventing or inferring the figure from benchmark evidence.
+  - Give the share of production trajectories that spawn a browser agent, with its window and source, or write `— unknown: <reason and measurement needed>`.
+
+**Non-blocking (fix while editing)**
+
+- The Hermes line says "the tool has no hover". That is true only of `computer_use`. Hermes `drive_preview_tool.py:81-83` exposes `hover` with real pointer travel, which is further convergence. Cite it rather than imply Hermes lacks hover.
+- The `FE link:` status reads "verified in fresh browser (…)" (publisher wording) instead of `verified rendered`. That line also exceeds the ~80-column hard-wrap.
+- Downstream could mention that the click text's one exception is browser-use's occluded-element JS click fallback, which does not move the pointer.
+- I did not re-replay the counts 177, 147 and dc306296 0.164. They match the RCA doc (lines 26, 41, 50, 74).
+
+All three blocking findings are packet-only. No in-scope code bytes need to change. Section A's grounding stands for snapshot 584cf4076 as long as the in-scope hunks stay unchanged.
+
+VERDICT RCA-WEBDECOY-POINTER-1: NOT_GROUNDED
