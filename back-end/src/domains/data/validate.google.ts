@@ -5,19 +5,13 @@
 
 import { InvalidGrepParamError } from './errors';
 import { parseGrepPath } from './path';
-import {
-  isGoogleGrepSource,
-  type GoogleGrepSource,
-  type GoogleSourceGrepFilters,
-  type GrepParams,
-  type ValidSource,
-} from './types';
+import { isGoogleGrepSource, type GoogleSourceGrepFilters, type ValidSource } from './types';
 import {
   parseFilterDate,
   parseFilterSince,
   parseFilterString,
-  rejectUnsupportedFilters,
-  requireFilterObject,
+  printedPathHint,
+  type FilterObject,
 } from './validate.filters';
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -35,10 +29,16 @@ function pathFilter(
 ): Pick<GoogleSourceGrepFilters, 'pathSource' | 'pathPrefix'> {
   if (rawPath === undefined) return {};
   const parsed = parseGrepPath(rawPath);
+  const google = sources.find(isGoogleGrepSource) ?? 'calendar';
   if (parsed === null || (parsed.source !== 'calendar' && parsed.source !== 'drive')) {
-    throw new InvalidGrepParamError('filters.path');
+    throw new InvalidGrepParamError('filters.path', printedPathHint(google));
   }
-  if (!sources.includes(parsed.source)) throw new InvalidGrepParamError('filters.path');
+  if (!sources.includes(parsed.source)) {
+    throw new InvalidGrepParamError(
+      'filters.path',
+      `It is a ${parsed.source} path; add ${parsed.source} to sources.`
+    );
+  }
   return {
     pathSource: parsed.source,
     ...(parsed.rest === undefined ? {} : { pathPrefix: parsed.rest }),
@@ -46,12 +46,10 @@ function pathFilter(
 }
 
 export function parseGoogleSourceFilters(
-  params: GrepParams,
+  raw: FilterObject,
   sources: ValidSource[]
 ): GoogleSourceGrepFilters | undefined {
-  const raw = requireFilterObject(params);
   if (Object.keys(raw).length === 0) return undefined;
-  for (const source of sources.filter(isGoogleGrepSource)) rejectUnsupportedFilters(source, raw);
   const sinceDate = dateOnly(raw, 'since');
   const untilDate = dateOnly(raw, 'until');
   const until = parseFilterDate(raw, 'until');
@@ -66,12 +64,4 @@ export function parseGoogleSourceFilters(
     ...(untilDate === undefined ? {} : { untilDate }),
     ...pathFilter(parseFilterString(raw, 'path'), sources),
   };
-}
-
-/** The Google source a printed path belongs to, when it is one. */
-export function googleSourceOfPath(path: unknown): GoogleGrepSource | undefined {
-  if (typeof path !== 'string') return undefined;
-  if (path === 'calendar' || path.startsWith('calendar/')) return 'calendar';
-  if (path === 'drive' || path.startsWith('drive/')) return 'drive';
-  return undefined;
 }

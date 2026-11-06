@@ -24,3 +24,32 @@ ACTIVITY_MAX_ATTEMPTS = 2
 ACTIVITY_BACKOFF_COEFFICIENT = 2.0
 ACTIVITY_INITIAL_INTERVAL_SECONDS = 1
 ACTIVITY_MAX_INTERVAL_SECONDS = 5
+
+# Filter keys each grep source accepts. Mirrors back-end DATA_SOURCE_CONFIGS
+# (src/domains/data/types.ts); grep.blackbox.py fails if they differ.
+SOURCE_FILTER_KEYS = {
+    "messages": ("person", "since", "path"),
+    "gmail": ("person", "since", "path"),
+    "email": ("person", "since", "path"),
+    "imessage": ("person", "since", "path"),
+    "whatsapp": ("person", "since", "path"),
+    "network": ("path",),
+    "agent_network": ("path", "role"),
+    "agent_trajectories": ("path", "since", "until", "role", "surface", "record_kind"),
+    "transactions": (
+        "path",
+        "since",
+        "until",
+        "account",
+        "min_amount",
+        "max_amount",
+        "status",
+        "include_pending_in_totals",
+    ),
+    "documents": ("document_source", "since", "until", "path", "tag"),
+    "calendar": ("since", "until", "path"),
+    "drive": ("since", "until", "path"),
+}
+
+# Top-level shorthands that apply like flat filter keys.
+BROADCAST_GREP_PARAMS = ("person", "since", "until")

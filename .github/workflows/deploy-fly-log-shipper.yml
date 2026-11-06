@@ -12,9 +12,9 @@ on:
 jobs:
   deploy:
     name: Deploy Fly log shipper to ClickHouse
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 

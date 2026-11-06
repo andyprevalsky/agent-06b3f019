@@ -22,8 +22,12 @@ export class SourceNotFoundError extends Error {
 }
 
 export class InvalidGrepParamError extends Error {
-  constructor(param: string) {
-    super(`Unsupported grep parameter: '${param}'.`);
+  /** `param` names what the caller sent; `hint` says what to send instead. */
+  constructor(
+    public readonly param: string,
+    public readonly hint?: string
+  ) {
+    super(`Unsupported grep parameter: '${param}'.${hint === undefined ? '' : ` ${hint}`}`);
     this.name = 'InvalidGrepParamError';
   }
 }

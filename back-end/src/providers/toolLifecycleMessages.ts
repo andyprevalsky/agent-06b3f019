@@ -92,6 +92,32 @@ export async function lockToolCallLifecycle(
   `;
 }
 
+/**
+ * The lifecycle rows of one tool call, oldest first: its rows that carry a
+ * `toolStatus`. Child-scoped rows under the same toolCallId without one (a
+ * code agent's transcript batches: one per flush, for days) are never
+ * lifecycle candidates and carry large metadata, so SQL excludes them instead
+ * of every write loading them. Served by `Message_toolCallLifecycle_idx`.
+ */
+async function findToolLifecycleRows(
+  tx: Prisma.TransactionClient,
+  agentId: string,
+  toolCallId: string
+): Promise<Message[]> {
+  const ids = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM "Message"
+    WHERE "agentId" = ${agentId}
+      AND role = 'TOOL'
+      AND (metadata #> ARRAY['toolCallId']::text[]) = to_jsonb(${toolCallId}::text)
+      AND (metadata #> ARRAY['toolStatus']::text[]) IS NOT NULL
+  `;
+  if (ids.length === 0) return [];
+  return tx.message.findMany({
+    where: { id: { in: ids.map((row) => row.id) } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+}
+
 function isDeploymentFencedMessage(message: Message): boolean {
   const metadata = messageMetadata(message);
   return metadata?.deploymentFenced === true || metadata?.errorCode === 'DEPLOY_INTERRUPTED';
@@ -103,14 +129,9 @@ export async function findDeploymentFencedToolMessage(
   workflowGeneration: string,
   toolCallId: string
 ): Promise<Message | null> {
-  const messages = await tx.message.findMany({
-    where: {
-      agentId,
-      role: 'TOOL',
-      metadata: { path: ['toolCallId'], equals: toolCallId },
-    },
-    orderBy: { timestamp: 'desc' },
-  });
+  const messages = (await findToolLifecycleRows(tx, agentId, toolCallId)).sort(
+    (left, right) => right.timestamp.getTime() - left.timestamp.getTime()
+  );
   return (
     messages.find(
       (message) =>
@@ -256,14 +277,11 @@ export async function persistLockedToolLifecycleMessage(
     identity.workflowGeneration,
     identity.toolCallId
   );
-  const allCandidates = await tx.message.findMany({
-    where: {
-      agentId: incomingParams.agentId,
-      role: 'TOOL',
-      metadata: { path: ['toolCallId'], equals: identity.toolCallId },
-    },
-    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-  });
+  const allCandidates = await findToolLifecycleRows(
+    tx,
+    incomingParams.agentId,
+    identity.toolCallId
+  );
   const params = withBackgroundExecutionStamp(incomingParams, allCandidates);
   const candidates = allCandidates.filter(
     (candidate) => messageWorkflowGeneration(candidate) === identity.workflowGeneration

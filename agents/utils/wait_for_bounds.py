@@ -13,7 +13,8 @@ WAIT_FOR_AGENTS_DEFAULT_TIMEOUT_SECONDS = 600
 
 WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR = (
     f"timeout_seconds must be at most {WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS} (1 hour). "
-    "To wait longer, call wait_for again when it returns."
+    "To wait longer, wait once with until_timestamp (up to 31 days): it ends early as soon as one of "
+    "your background agents finishes or an agent messages you."
 )
 WAIT_FOR_AGENTS_TIMEOUT_TYPE_ERROR = "timeout_seconds must be a number of seconds."
 

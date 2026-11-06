@@ -1,5 +1,6 @@
 """Sealed bridge from actual backend signal producers to the workflow and manager."""
 import asyncio
+import contextlib
 import json
 import socket
 import sys
@@ -12,8 +13,25 @@ sys.path[:0] = [str(ROOT / "agents"), str(Path(__file__).parent)]
 
 def forbid(*args, **kwargs):
     raise AssertionError("provider/network calls prohibited in pause provenance fixture")
-socket.socket.connect = forbid
-socket.socket.connect_ex = forbid
+
+
+@contextlib.contextmanager
+def forbid_network():
+    """No provider/network call while a proof runs; the process socket is restored after."""
+    saved = (socket.socket.connect, socket.socket.connect_ex)
+    socket.socket.connect = forbid
+    socket.socket.connect_ex = forbid
+    try:
+        yield
+    finally:
+        socket.socket.connect, socket.socket.connect_ex = saved
+
+
+if __name__ == "__main__":
+    # Run as a script (backend unit tests): sealed for the whole process,
+    # including the imports below. An in-process import seals only its proofs.
+    socket.socket.connect = forbid
+    socket.socket.connect_ex = forbid
 import _test_utils  # Owns the repository's offline Temporal clock and HTTP capture.
 from workflows.agent_workflow import AgentWorkflow
 from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
@@ -56,6 +74,11 @@ async def prove_signals(cases):
 
 async def prove_pause_episode_ordering():
     """Exercise the real pause owner, child signals and cancellation consumer."""
+    with forbid_network():
+        await _prove_pause_episode_ordering()
+
+
+async def _prove_pause_episode_ordering():
     sequences = [
         ("user", "subscription"),
         ("user", "unknown"),

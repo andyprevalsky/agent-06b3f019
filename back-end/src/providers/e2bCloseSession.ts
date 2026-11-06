@@ -218,6 +218,20 @@ export async function closeClaudeCodeSession(
     return await closeLocalDeviceCodeSession(taskId, session.sandboxId);
   }
 
+  if (codeSession !== null && codeSession.sandboxId !== session.sandboxId) {
+    // The session moved to another sandbox (resize, lost-sandbox restore). Connecting
+    // would resume this superseded one and leave it running unowned; leave it paused.
+    unregisterWorkspaceExecutor(taskId);
+    await prisma.claudeCodeSession.update({
+      where: { id: taskId },
+      data: { status: 'CLOSED', closedAt: new Date() },
+    });
+    return {
+      outputFiles: [],
+      codeSession: await closeFacts(codeSession, null, codeSession.state),
+    };
+  }
+
   const outputFiles: FilePointer[] = [];
   let usage: ClaudeCodeUsage | undefined;
   let codeSessionFacts: CodeSessionCloseFacts | undefined;

@@ -465,12 +465,15 @@ cleanup() {
   run_ignore_repeated_teardown_signals
   echo started >> "\$STEPS"
   for step in 1 2 3 4 5; do sleep 0.4; echo "step\$step" >> "\$STEPS"; done
+  # Stop the stand-in service like run.sh stops its services; never orphan it.
+  kill "\$SERVICE_PID" 2>/dev/null || true
   echo done >> "\$STEPS"
 }
 trap cleanup EXIT
 run_install_teardown_signal_traps
 echo ready >> "\$STEPS"
 sleep 60 &
+SERVICE_PID=\$!
 wait
 FIXTURE
 chmod +x "$signal_fixture"

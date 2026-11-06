@@ -604,6 +604,7 @@ def _build_claude_auth_context(
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
+            credential=credential_fingerprint(ctx.token),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
@@ -677,6 +678,7 @@ def _build_gpt_auth_context(
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
+            credential=credential_fingerprint(ctx.token),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
@@ -7596,6 +7598,14 @@ async def mark_claude_token_rate_limited_activity(
     return False
 
 
+def credential_fingerprint(access_token: Optional[str]) -> Optional[str]:
+    """The digest a failure report carries for the token it held, never the token
+    itself (backend codeLoginRejection.ts ``credentialFingerprint``)."""
+    if not access_token:
+        return None
+    return hashlib.sha256(access_token.encode()).hexdigest()[:16]
+
+
 @activity.defn
 async def mark_compute_token_rate_limited_activity(
     token_type: str,
@@ -7606,8 +7616,14 @@ async def mark_compute_token_rate_limited_activity(
     cooldown_seconds: int = 5 * 60,
     rate_limited_until: Optional[str] = None,
     failure_reason: Optional[str] = None,
+    credential: Optional[str] = None,
 ) -> bool:
-    """Mark the selected provider-typed compute token rate-limited in backend."""
+    """Mark the selected provider-typed compute token rate-limited in backend.
+
+    ``integration_id`` and ``credential`` (the held token's fingerprint) name the
+    exact leased login: the backend disables a login only when the report names
+    it and the stored token is still the live one held (T7).
+    """
     config = load_config()
     effective_rate_limited_until = rate_limited_until or (
         datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
@@ -7628,6 +7644,8 @@ async def mark_compute_token_rate_limited_activity(
         # user's other subscriptions (S33).
         if integration_id:
             body["integrationId"] = integration_id
+    if credential:
+        body["credential"] = credential
 
     try:
         async with httpx.AsyncClient() as client:
