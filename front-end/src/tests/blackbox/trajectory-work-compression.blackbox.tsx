@@ -219,6 +219,76 @@ describe('one ordered live trajectory carousel', () => {
     },
   );
 
+  /** Rose's own inbound agent message row (`metadata.agentMessage`). */
+  const fromRoot = (id: string, role: 'USER' | 'ASSISTANT' = 'USER') =>
+    msg(
+      {
+        agentMessage: true,
+        messageType: 'MESSAGE',
+        fromAgentId: 'root-agent',
+        fromAgentPath: '/root/outreach',
+      },
+      {
+        message_id: id,
+        role,
+        text: `Message Type: MESSAGE\nTask name: worker\nSender: /root/outreach\nPayload:\nNote ${id}`,
+        timestamp: stamp(3),
+      },
+    );
+  const historyIds = (history: HTMLElement) =>
+    [...history.querySelectorAll('[data-message-id]')].map((el) =>
+      el.getAttribute('data-message-id'),
+    );
+  it.each(['USER', 'ASSISTANT'] as const)(
+    'folds a %s inbound agent message into the batch and keeps its Message from row in history',
+    (role) => {
+      renderWithProviders(
+        view(
+          [work('before-message'), fromRoot('from-root', role), work('after-message')],
+          'COMPLETED',
+        ),
+      );
+      expect(screen.getAllByTestId('trajectory-work-group')).toHaveLength(1);
+      const group = screen.getByTestId('trajectory-work-group');
+      expect(group).toHaveTextContent('3 activities');
+      expect(group).not.toHaveTextContent('exchanges');
+      expect(screen.queryByTestId('inbound-agent-row')).toBeNull();
+      fireEvent.click(within(group).getByRole('button'));
+      const history = screen.getByTestId('trajectory-work-history');
+      expect(historyIds(history)).toEqual(['before-message', 'from-root', 'after-message']);
+      const row = within(history).getByTestId('inbound-agent-row');
+      expect(row).toHaveTextContent('Message from /root/outreach');
+      expect(screen.queryByText('Thought')).toBeNull();
+      fireEvent.click(within(row).getByRole('button'));
+      expect(within(history).getByText('Note from-root')).toBeVisible();
+    },
+  );
+  it('keeps an opened running batch open, with the same key, when an agent message joins it', () => {
+    const human = msg({}, { message_id: 'human', role: 'USER', text: 'Research March' });
+    const messages = [human, work('first-check')];
+    const v = renderWithProviders(view(messages));
+    const row = screen.getByTestId('trajectory-work-group');
+    const key = row.getAttribute('data-group-key');
+    const toggle = within(row).getByRole('button');
+    fireEvent.click(toggle);
+    for (const next of [fromRoot('mid-batch'), work('second-check')]) {
+      messages.push(next);
+      v.rerender(view([...messages]));
+      expect(screen.getAllByTestId('trajectory-work-group')).toHaveLength(1);
+      expect(screen.getByTestId('trajectory-work-group')).toBe(row);
+      expect(row).toHaveAttribute('data-group-key', key);
+      expect(row).toHaveAttribute('data-state', 'running');
+      expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    }
+    expect(historyIds(screen.getByTestId('trajectory-work-history'))).toEqual([
+      'first-check',
+      'mid-batch',
+      'second-check',
+    ]);
+    expect(
+      screen.getByText('Research March').closest('[data-testid="trajectory-work-group"]'),
+    ).toBeNull();
+  });
   it('folds the actual assistant Thought → work → Thought → work rows into four activities', () => {
     const messages = [
       msg(

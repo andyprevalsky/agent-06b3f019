@@ -3,10 +3,10 @@
  * message to the correct sub-component. Kept separate so the dispatcher can
  * stay small and the logic is testable in isolation.
  */
-import { isAgentMessageMetadata, isAgentNotificationMetadata } from '@/lib/realtime-types';
+import { isAgentNotificationMetadata } from '@/lib/realtime-types';
 import type { Message } from '../../hooks';
 import { isBrowserAgentResult } from '../browserAgentResult';
-import { isAgentWait } from './agentToolData';
+import { isAgentWait, isInboundAgentMessage } from './agentToolData';
 
 const GENERAL_PURPOSE_AGENT_TOOLS = new Set([
   'spawn_general_purpose_agent',
@@ -69,8 +69,7 @@ export function useMessageRouting(message: Message): MessageRouting {
   // Agent-origin rows may arrive as USER or ASSISTANT; both render as tool cards.
   const isAgentOriginRole = isUser || isAssistant;
   const isAgentNotification = isAgentOriginRole && isAgentNotificationMetadata(metadata);
-  const isAgentMessage =
-    isAgentOriginRole && !isAgentNotification && isAgentMessageMetadata(metadata);
+  const isAgentMessage = isInboundAgentMessage(message);
 
   const isClaudeCodeInProgress = isClaudeCodeToolMessage && metadata?.toolStatus === 'IN_PROGRESS';
   const isClaudeCodeStarted =
