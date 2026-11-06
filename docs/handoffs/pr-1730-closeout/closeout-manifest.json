@@ -1,0 +1,114 @@
+{
+ "schema_version": 1,
+ "pr": 1730,
+ "title": "test(deploy-pipeline): credit fixture waits for the holder's allocation",
+ "assignment": "post-merge repair goal from PR #1724 deploy: scripts/tests/run-deploy-pipeline.test.py::check_materialized_reservation_credit (inherited-flag) KeyError 'tree_peak_anon_mb' under host contention (originating merge 0ee70b27c, originating devbox b2fce81e-aeaa-470a-a8d8-e357c322fe90); repair devbox 80412093-97ba-491d-ade5-b2df24f7ef5b, Bugs folder z57k17gzz4egv17ag6qqtasexs8h273j revision 1",
+ "merge_commit": "db5b15de93d794acb623555fc505c83bbb461d50",
+ "gated_source": "f25d7c06405db10990b226e1ccf8de547b4120ec",
+ "branch_commits": [
+  "5d57dd83da test(deploy-pipeline): credit fixture waits for the holder's allocation",
+  "f25d7c0640 test(cloudbench): github-token test reaps its mock server before exiting"
+ ],
+ "assigned_test_proof": {
+  "repro": "evidence/repro-failures.txt (unfixed fixture + 1.5 s holder delay: 2/2 KeyError tree_peak_anon_mb; receipt joiner headroom 300, no deferral)",
+  "contention": "evidence/contention-5x-pass.txt: python3 scripts/tests/run-deploy-pipeline.test.py 5/5 consecutive at load 17.9-33.6 on final bytes",
+  "deploy_gate": "deploy-command-structural PASS in both staged cycles beside 9 concurrent gates",
+  "regression": "inherited-flag call runs with holder_start_delay_s=1.5 (fails on the old 0.3 s gate)"
+ },
+ "review": {
+  "cycles": "5d57dd8 initial: CodeRabbit substantive, no actionable comments; f25d7c0 incremental: path-filtered skip, then '@coderabbitai full review' up to f25d7c0: no actionable comments; Graphide: free reviews exhausted (advisory, skipped)",
+  "ledger": "evidence/review-ledger.json"
+ },
+ "staged_cycle": {
+  "final": "ready on f25d7c0 (evidence/final-plan-f25d7c0.json.gz, evidence/final-cycle-f25d7c0.json.gz); PIPELINE_VERIFY status=bound-staged exit=0",
+  "superseded": "cycle 1 on 5d57dd8 archived (evidence/cycle1-5d57dd8-archived.json.gz): 8/10 PASS; cloudbench-controller UNVERIFIED (github-token test orphan, fixed in f25d7c0, RCA 2026-11-06-github-token-test-trap-killed-mock-server-without-reaping); smoke 9 jobs UNVERIFIED: Fly app navi-whisper-lux-bench at its 56-Machine ceiling (51-57 used by other campaigns) for 300 s, capacity admission refused, campaign cancelled; all 8 owned Machines verified destroyed",
+  "rca_reports": [
+   "evidence/rca-report-f25d7c0.json"
+  ],
+  "gate_logs": "evidence/worker-gate-logs-f25d7c0.tar.gz (native deploy-worker logs, hashes bound in final-cycle)",
+  "agentcard": "SKIPPED by deploy-operator election: no payment/AgentCard path changed (selected only by scripts/run* pattern via scripts/run_deploy_pipeline.py)"
+ },
+ "production": {
+  "fly": "not required (no agents runtime change)",
+  "render": "not required (no back-end change)",
+  "vercel": "not required (no front-end change)",
+  "mac_release": "not required (no mac-app change)",
+  "semantic": "chat-lifecycle-ratchet run 42208005829 source_sha=db5b15de9 attempt 1: all 5 jobs success (11:08:33Z-11:14:28Z)",
+  "agentcard": "SKIPPED by deploy-operator election (see staged_cycle.agentcard)",
+  "mac_local_acceptance": "SKIPPED - no Mac available: owner-scoped GET https://api.roselabs.ai/api/local-devices returned HTTP 200 devices=0 at 2026-11-06T11:11:29Z (in-memory owner session, never persisted)"
+ },
+ "repair_handoffs": [
+  {
+   "test": "smoke/browser-biometrics-webdecoy",
+   "error": "FCaptcha captured API risk score 0.164 exceeds ratchet 0.163 (agent 3c057de1-d449-49b9-b76c-a5c72ca3d140, Hub bundle 20261106-103815-953003-m7cf1c7ff9d3f)",
+   "attribution": "NOT_INTRODUCED (no agents/back-end/browser path in PR #1730)",
+   "thread": "https://boxes.dev/thread/thr_628caaa496d742d198f643e4b885bfc0",
+   "devbox": "42e8c626-9a15-4b3c-8da7-13f386ee4546",
+   "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1; evidence/repair-folder-receipt-webdecoy.json)",
+   "goal": "evidence/repair-goal-webdecoy.txt",
+   "requested": "claude-opus-5-5, reasoning high, speed standard (evidence/repair-start-receipt-webdecoy.json)",
+   "related": "open PR #1703 / thread ph748rvfxv8j1zba79brna917s8hqvc8 (webdecoy drag loop) - repair told to reconcile first"
+  }
+ ],
+ "followups": [
+  "back-end/scripts/prisma-local-push.test.sh: a later EXIT trap (owner-backfill section) replaces the one that drops PUSH_DB, so every backend-structural run leaks prisma_local_push_ddl_test_<pid> (13 MB). Not a failed test (no delegation); two leaked DBs from this deploy were dropped.",
+  "#1706 (fix/deploy-structural-timing-flakes, idle/conflicting) - its run-deploy-pipeline.test.py and run_deploy_pipeline.py bytes landed unchanged here; its other files remain its owner's. Coordination message not delivered (owner thread waiting on its user)."
+ ],
+ "records": [
+  {
+   "path": "/home/boxes/rose/.context/deploy-pipeline (final cycle), .context/deploy-pipeline-archive/cycle1-5d57dd83d",
+   "disposition": "committed (compressed cycle/plan JSON in evidence/)"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-cloud/* (native smoke campaign dirs, 47 MB run JSON)",
+   "disposition": "reproducible and unneeded; outcome + sha256 committed (evidence/smoke-webdecoy-summary-f25d7c0.json), run bundle on prod Benchmark Hub 20261106-103815-953003-m7cf1c7ff9d3f"
+  },
+  {
+   "path": "/var/tmp/rdw/<9 worker checkouts>",
+   "disposition": "destroyed after preserving gate logs (evidence/worker-gate-logs-f25d7c0.tar.gz); clean clones of committed source"
+  },
+  {
+   "path": "/var/tmp/rdp-repro (repro harness, load generator, run logs)",
+   "disposition": "committed (evidence/repro-* (scripts stored as .txt), contention-5x-pass.txt)"
+  },
+  {
+   "path": "local Postgres victoria_e2b-smoke, victoria_live-probes, victoria_stack_semantic_stack, prisma_local_push_ddl_test_{3974847,931644}",
+   "disposition": "destroyed (gate-owned scratch DBs)"
+  },
+  {
+   "path": "Fly Machines created by smoke fleets",
+   "disposition": "destroyed by fleet teardown; cycle-1 ids verified GONE via flyctl at 10:31Z"
+  },
+  {
+   "path": "repo-local secrets (agents/.env, back-end/.env, front-end/.env)",
+   "disposition": "unchanged; nothing minted or rotated (one in-memory owner session for the device check, never written)"
+  }
+ ],
+ "files": {
+  "evidence/contention-5x-pass.txt": "72bb4891d07a9da4b4ed40eab6ae8b9b0ffa7f78dd810519837cf70bfaab6acd",
+  "evidence/cycle1-5d57dd8-archived.json.gz": "490c9a0154e879e9873833fcac85cffe6d797ef8577750c244adde9b3e16a7c1",
+  "evidence/final-cycle-f25d7c0.json.gz": "556da8694aa12deb4d1013d78d2711e329549d5ffe1d95e5b3f1ca4967a80fc5",
+  "evidence/final-plan-f25d7c0.json.gz": "89e378c5a7e823f3c96658ff9d65fa8d4a4e67b78f9efc101d790d367d301b3a",
+  "evidence/rca-report-f25d7c0.json": "6e8b700080e91aee87fa07a12331aa50fb2399592988ca8791f41c18078e3ed5",
+  "evidence/repair-folder-receipt-webdecoy.json": "9295bf3add3d6bfb951b275734c15f87e4e0c939c1620a9f214d92203801fe24",
+  "evidence/repair-goal-webdecoy.txt": "5796c86112237a4cb550185b6a6899aa2df43b6fb1a2eba2fef7e89d846d360a",
+  "evidence/repair-start-receipt-webdecoy.json": "08619a3d579a42901876df9b2475cffb0b76b90d3d03e2482ee6b4bf669ef97f",
+  "evidence/repro-failures.txt": "e80a987425199f81ef2febc1a2a20436fe515962d1c9aefc5677fb0e97e98d75",
+  "evidence/repro-harness-keep.py.txt": "64cd5584de38a1746e21f20858f56745fb712a8aca3eb0068aa36d61f8ed5154",
+  "evidence/repro-load.sh.txt": "24c8b0a88011d01e974c7912bee7a7ea9a7734fa7aede37b9105f8a93bf624af",
+  "evidence/repro-receipt-margin.py.txt": "3848cc5db59279e709ab07b9b3654ef2d6fcddd45f87dec15ec8c6a6a8da112e",
+  "evidence/review-ledger.json": "5f3563617cedb45e51e3141c0bf1f9b5168b21f6c4dcc803f1e53e3b77e85eff",
+  "evidence/smoke-webdecoy-summary-f25d7c0.json": "54d27b09a7fc430bf3abf0c34fafb047b79a70ab6cc8db2ef38740c2ab3ecc59",
+  "evidence/worker-gate-logs-f25d7c0.tar.gz": "8944867ae0dc60125265ba5859106e1122cf3304c1f0e3d460108acc54583bbd"
+ },
+ "factory_publication": "c1837b772936768b46a9808662a9f506dc3750c4 (factory ledger publish, 15 rows, deploy outcome completed)",
+ "deletion_readiness": {
+  "deployed_sha": "db5b15de93d794acb623555fc505c83bbb461d50",
+  "intended_source_only_local": "none: fix/deploy-pipeline-credit-holder-race fully merged (5d57dd83da, f25d7c0640 in db5b15de9); coordinator checkout clean",
+  "owned_processes": "none running (cycle coordinator, workers, smoke controllers and semantic dispatcher all exited)",
+  "owned_resources": "worker checkouts and scratch DBs destroyed; Fly Machines destroyed by fleet teardown; no keep-awake holds",
+  "configuration": "managed project env (agents/.env, back-end/.env, front-end/.env) restored by boxes.dev on new devboxes; nothing devbox-unique",
+  "secrets_in_records": "none (evidence scanned for token/key patterns before commit)",
+  "independent_repair": "webdecoy repair goal runs on devbox 42e8c626 and does not depend on this devbox"
+ }
+}

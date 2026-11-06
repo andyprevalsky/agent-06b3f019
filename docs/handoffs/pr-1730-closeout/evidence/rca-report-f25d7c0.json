@@ -1,0 +1,34 @@
+{
+ "failures": [
+  {
+   "id": "232e983b98b94b48855afb2dd331c913",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "f25d7c06405db10990b226e1ccf8de547b4120ec",
+    "digest": "70a7e2b4a03efd3c8652651c3b85adb8514977c99f757a5fa2eadff92c50875c"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "browser-biometrics-webdecoy cloud smoke task completed but failed its FCaptcha behavioral-biometrics risk ratchet (0.164 > 0.163). PR #1730 changes only scripts/tests/run-deploy-pipeline.test.py, scripts/tests/cloudbench-github-token.test.sh, scripts/run_deploy_pipeline.py (reconcile_owner_runs waited_s reporting) and docs/rca; none is on the agents/back-end/browser runtime the guest executed (git diff origin/main...HEAD touches no agents/, back-end/ or front-end/ path). The ratchet comment (agents/benchmarks/run_benchmark.py WEBDECOY_RISK_RATCHET) records ~0.003 run-to-run variance and an external proxy-reputation floor; detections cite datacenter IP, teleport clicks, headless voices and missing Segoe UI font on the tilion browser provider.",
+   "evidence": "cloud smoke run 20261106-103815-953003 (Hub bundle 20261106-103815-953003-m7cf1c7ff9d3f), agent 3c057de1-d449-49b9-b76c-a5c72ca3d140, native cloudbench-run.json sha256 b898ff4002485cd14fdbb902f2ed3dad51fed7758942e1148a3f017f06ebf927; /home/boxes/rose/.context/deploy-cloud/be4601409378e7be2f14686acbaf486b39988bf67cd36a2259e6d7685c15168a/runs/20261106-103815-953003/browser-biometrics-webdecoy/cloudbench-run.json",
+   "post_merge": {
+    "test": "smoke/browser-biometrics-webdecoy",
+    "command": [
+     "/usr/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "agents browser anti-detection / FCaptcha ratchet for task browser-biometrics-webdecoy (cloud smoke, tilion provider); preserve WEBDECOY_RISK_RATCHET=0.163 and the task definition",
+    "error": "FCaptcha captured API risk score 0.164 exceeds ratchet 0.163 (lower = more human; this gate only ratchets down, never up) [FCaptcha engine v1.46.2; a version change here means the third-party detector was recalibrated \u2014 compare against the version on the last passing run before treating this as an anti-detection regression] [detections: vision_ai: Click injected with no pointer trajectory (3 teleport clicks); datacenter: Request from known datacenter IP range; headless: Very few speech voices available (3); bot: Windows UA but Segoe UI font not detected; browser tilion/tilion_direct_country]",
+    "source": {
+     "head": "f25d7c06405db10990b226e1ccf8de547b4120ec",
+     "digest": "70a7e2b4a03efd3c8652651c3b85adb8514977c99f757a5fa2eadff92c50875c"
+    },
+    "evidence": "cloud smoke run 20261106-103815-953003 (Hub bundle 20261106-103815-953003-m7cf1c7ff9d3f), agent 3c057de1-d449-49b9-b76c-a5c72ca3d140, native cloudbench-run.json sha256 b898ff4002485cd14fdbb902f2ed3dad51fed7758942e1148a3f017f06ebf927; /home/boxes/rose/.context/deploy-cloud/be4601409378e7be2f14686acbaf486b39988bf67cd36a2259e6d7685c15168a/runs/20261106-103815-953003/browser-biometrics-webdecoy/cloudbench-run.json"
+   }
+  }
+ ]
+}

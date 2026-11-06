@@ -2414,6 +2414,7 @@ class RoseClient:
         from browser_tools.schemas import BrowserToolArgsValidationError
 
         output_validation_error = None
+        tool_args_validation_error = None
         action = None
         try:
             available_tool_names = [tool["name"] for tool in tools]
@@ -2431,8 +2432,10 @@ class RoseClient:
                 action = normalize_browser_use_response(
                     response.content, available_actions=available_tool_names,
                 )
-        except BrowserToolArgsValidationError:
-            raise
+        except BrowserToolArgsValidationError as rejected_args:
+            # Still a completed model decision: dump it before the loop feeds the
+            # rejection back, so the exact rejected arguments stay replayable.
+            tool_args_validation_error = rejected_args
         except ValueError as normalization_error:
             output_validation_error = BrowserModelOutputValidationError(
                 str(normalization_error), response=response,
@@ -2469,6 +2472,7 @@ class RoseClient:
                 output={
                     "action": action,
                     **({"output_validation_error": str(output_validation_error), "private_output_validation_detail": output_validation_error.private_detail} if output_validation_error else {}),
+                    **({"tool_args_validation_error": str(tool_args_validation_error)} if tool_args_validation_error else {}),
                     "content": response.content,
                     "reasoning": response.reasoning,
                     "tool_calls": response.tool_calls,
@@ -2486,6 +2490,8 @@ class RoseClient:
         except Exception:
             logger.debug("rose.browser_use.dump_output_failed", call_site=call_site, exc_info=True)
 
+        if tool_args_validation_error is not None:
+            raise tool_args_validation_error
         if output_validation_error is not None:
             raise output_validation_error
 

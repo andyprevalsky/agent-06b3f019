@@ -1,0 +1,33 @@
+Blocking findings (read-only review of the diff against browser-use in `agents/venv`):
+
+1. **The fix covers only the state fetch, so the same dead-socket silent skip can still fail other actions.**
+   - `watchdog_base.py:~98` returns None for every non-lifecycle event while the socket is down and nothing is reconnecting. That includes the Click, TypeText, Navigate, Scroll, SendKeys, SwitchTab and GoBack dispatches in `tool_executor_v2.py:132-770` and `service_actions.py:1218-3732`.
+   - Scenario: the socket drops between the state fetch and the next action. The action's event gets no handler result, so it fails the same way, or reports a false success if those callers don't check results. I only checked the dispatch sites, not what each caller does with a None result.
+   - Fix suggestion: restore at a single choke point instead of in the three `get_browser_state_summary` call sites (`dom_service.py:2546`, `2684`, `2810`).
+
+2. **`dom_service.py:~2511` raises `BrowserCdpConnectionLost` after a failed wait, and `_restore_cdp_connection` can fall through to a raw timeout.**
+   - `_auto_reconnect` swallows its own failures. It runs 3 attempts of up to 15s each plus 7s of backoff, so a dead provider blocks one fetch for about 52s plus the 1s grace.
+   - `asyncio.wait_for(_reconnect_event.wait(), 54s)` raises a bare `TimeoutError` when it expires. That is not the typed error, and it is raised after the original `ValueError` was discarded.
+   - Scenario: an unreachable provider stalls the planner call for 50–55s per state fetch, and the supervisor's 8 recoveries each stall again.
+   - Fix suggestion: catch the timeout and raise the typed error, and make the retry budget explicit.
+
+3. **A concurrent caller can raise a false `BrowserCdpConnectionLost`.**
+   - If caller B calls `_auto_reconnect()` while caller A's reconnect is running, it returns immediately. B then sees `is_cdp_connected` False and raises, even though A is about to succeed.
+   - The `is_reconnecting` check just above narrows the window, but the pending-reconnect task created at `session.py:2312` can still hit it.
+
+4. **Restore resets only `_selector_map`; other DOMService state may be stale after the socket changes.**
+   - I did not audit `DOMService` for cached CDP session or target ids, `_runtime_current_url`, or rendered-image state. Check this before merge.
+   - `reconnect()` re-attaches browser-use's own sessions, but anything `DOMService` keeps itself would be stale.
+
+5. **The tests do not prove the failure signature, and the `_intentional_stop` hack is the exact path the fix does not take in production.**
+   - Neither test asserts that the unfixed code raises `Expected at least one handler to return a non-None result`. There is no pre-fix fail evidence in the diff. Run test 1 against `git stash`-free `HEAD` (via `git diff` and apply) and record the failure.
+   - Test 1 sets `_intentional_stop = True` to suppress browser-use's drop callback. That produces "disconnected and not reconnecting", but only by a synthetic route. Two real routes are plausible and untested: a reconnect that exhausted its 3 attempts and left the flag clear, and a callback that fired while `_reconnecting` was True and only set `_reconnect_pending`.
+   - Test 1 also doesn't check that the `BrowserStateRequestEvent` handlers actually skipped, such as `is_reconnecting` being False at the moment of failure, so it could pass for a different reason.
+   - Test 2 closes `gateway._server`, which is a private attribute of the fake gateway, and takes about 55s. The 120s bound is fine, but the test is slow. It also never checks that the second call raises `BrowserCdpConnectionLost` rather than a `ValueError` from the retry path.
+
+6. **The claim "cause identified" is overstated.**
+   - What is established is the mechanism: `unique_handler` returns None on a dead socket with no reconnect running, which produces this exact ValueError. A fix that restores the connection is well supported.
+   - What is not established is why the socket dropped, and why no reconnect was running. The worker log is gone, and you cannot tell whether the drop callback never fired, a reconnect had already exhausted its attempts, or `_intentional_stop` was set by the pause/resume lifecycle (`session.py:633`, `736`, `761`).
+   - If `_intentional_stop` was True at the time, this fix returns False and the original `ValueError` still surfaces. Label it "mechanism confirmed, trigger unobserved", and log the session flags (`_intentional_stop`, `_reconnecting`, `_reconnect_pending`) when the state fetch fails, so the next occurrence is diagnosable.
+
+Non-blocking: reliance on private attributes (`_auto_reconnect`, `_reconnect_event`, `_intentional_stop`) ties the fix to this browser-use pin. All of them exist in the installed version, but add a test that fails if any is renamed.

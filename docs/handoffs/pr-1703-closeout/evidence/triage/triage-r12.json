@@ -1,0 +1,23 @@
+{
+ "failures": [
+  {
+   "id": "b06105105c394830ab8b5fc5a7162e9a",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+    "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke member failed: benchmark judge could not lease a Codex compute token (lease timeouts)",
+   "evidence": "Member test-mass-agent-run-0 (agent c7f8ba72, campaign ead67fb9, 11:28Z): failure_reason 'Compute token pool exhausted or cooling down: Declared evaluator t7-schema-task-complete execution failed: Codex compute token unavailable for agentic benchmark judge'. Worker log shows many 'Failed to fetch compute token: Activity task timed out' across the run's agents, i.e. the compute-token lease path timed out under load before the judge ran. The other 11 members passed, including both browser members that failed in the previous round and browser-biometrics-webdecoy. The diff touches no token leasing, judge or mass-agent code (run_benchmark.py judge fetch is unchanged from main at the merge base; main's later PR #1702 reworked it). Passed in 4 earlier rounds on the same agent code.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Member test-mass-agent-run-0 (agent c7f8ba72, campaign ead67fb9, 11:28Z): failure_reason 'Compute token pool exhausted or cooling down: Declared evaluator t7-schema-task-complete execution failed: Codex compute token unavailable for agentic benchmark judge'. Worker log shows many 'Failed to fetch compute token: Activity task timed out' across the run's agents, i.e. the compute-token lease path timed out under load before the judge ran. The other 11 members passed, including both browser members that failed in the previous round and browser-biometrics-webdecoy. The diff touches no token leasing, judge or mass-agent code (run_benchmark.py judge fetch is unchanged from main at the merge base; main's later PR #1702 reworked it). Passed in 4 earlier rounds on the same agent code."
+  }
+ ]
+}

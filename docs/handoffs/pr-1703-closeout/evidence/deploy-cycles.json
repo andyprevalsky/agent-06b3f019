@@ -1,0 +1,364 @@
+[
+ {
+  "state": "deploy-pipeline-aside-20261106T022808Z",
+  "head": "4b79be50e644aab2aceb399c1f106b97708f5a2e",
+  "digest": "8186aeab3ffb2ab6609024dcfc7f97007845d2057134912221a78129b712bb58",
+  "phase": "focused",
+  "ready": false,
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "eslint": "PASS",
+     "format": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": "PASS",
+     "seed-cache-decision": "PASS",
+     "e2b-smoke": "PASS",
+     "live-probes": "PASS",
+     "seed-memory-ratchet": "PASS",
+     "deploy-command-structural": "FAIL",
+     "smoke": "FAIL",
+     "agents-coverage-blackbox": "FAIL",
+     "cloudbench-controller": "PASS",
+     "backend-coverage-blackbox": "PASS",
+     "semantic-stack": "PASS"
+    }
+   },
+   {
+    "phase": "quick",
+    "results": {
+     "eslint": "PASS",
+     "format": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   }
+  ]
+ },
+ {
+  "state": "deploy-pipeline-aside-20261106T023912Z",
+  "head": "4b79be50e644aab2aceb399c1f106b97708f5a2e",
+  "digest": "8186aeab3ffb2ab6609024dcfc7f97007845d2057134912221a78129b712bb58",
+  "phase": "interrupted",
+  "ready": false,
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "eslint": "PASS",
+     "format": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": "PASS",
+     "seed-cache-decision": "PASS",
+     "deploy-command-structural": "FAIL",
+     "e2b-smoke": "PASS",
+     "live-probes": "PASS",
+     "seed-memory-ratchet": "PASS",
+     "smoke": "FAIL",
+     "agents-coverage-blackbox": "FAIL",
+     "semantic-stack": "FAIL",
+     "cloudbench-controller": "FAIL",
+     "backend-coverage-blackbox": "FAIL"
+    }
+   }
+  ]
+ },
+ {
+  "state": "deploy-pipeline-aside-20261106T044410Z",
+  "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+  "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0",
+  "phase": "triage",
+  "ready": false,
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "eslint": "PASS",
+     "format": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": "PASS",
+     "seed-cache-decision": "PASS",
+     "deploy-command-structural": "FAIL",
+     "e2b-smoke": "PASS",
+     "live-probes": "PASS",
+     "seed-memory-ratchet": "PASS",
+     "cloudbench-controller": "FAIL",
+     "agents-coverage-blackbox": "PASS",
+     "backend-coverage-blackbox": "PASS",
+     "smoke": "PASS",
+     "semantic-stack": "PASS"
+    }
+   },
+   {
+    "phase": "focused",
+    "results": {
+     "deploy-command-structural": "PASS",
+     "cloudbench-controller": "FAIL"
+    }
+   },
+   {
+    "phase": "focused",
+    "results": {
+     "cloudbench-controller": "FAIL"
+    }
+   },
+   {
+    "phase": "quick",
+    "results": {
+     "format": "PASS",
+     "eslint": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "focused",
+    "results": {
+     "deploy-command-structural": "FAIL",
+     "cloudbench-controller": "PASS"
+    }
+   }
+  ]
+ },
+ {
+  "state": "deploy-pipeline-aside-20261106T084344Z",
+  "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+  "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0",
+  "phase": "focused",
+  "ready": false,
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "format": "PASS",
+     "eslint": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": "PASS",
+     "seed-cache-decision": "PASS",
+     "e2b-smoke": "PASS",
+     "live-probes": "PASS",
+     "seed-memory-ratchet": "PASS",
+     "deploy-command-structural": "FAIL",
+     "agents-coverage-blackbox": "PASS",
+     "backend-coverage-blackbox": "PASS",
+     "cloudbench-controller": "FAIL",
+     "semantic-stack": "PASS",
+     "smoke": "PASS"
+    }
+   },
+   {
+    "phase": "quick",
+    "results": {
+     "eslint": "PASS",
+     "format": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "focused",
+    "results": {
+     "deploy-command-structural": "FAIL",
+     "cloudbench-controller": "PASS"
+    }
+   }
+  ]
+ },
+ {
+  "state": "deploy-pipeline-aside-20261106T093037Z",
+  "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+  "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0",
+  "phase": "focused",
+  "ready": false,
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "eslint": "PASS",
+     "format": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": "PASS",
+     "seed-cache-decision": "PASS",
+     "e2b-smoke": "PASS",
+     "live-probes": "PASS",
+     "seed-memory-ratchet": "PASS",
+     "agents-coverage-blackbox": "PASS",
+     "deploy-command-structural": "FAIL",
+     "cloudbench-controller": "PASS",
+     "backend-coverage-blackbox": "PASS",
+     "semantic-stack": "PASS",
+     "smoke": "FAIL"
+    }
+   }
+  ]
+ },
+ {
+  "state": "deploy-pipeline-aside-20261106T100155Z",
+  "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+  "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0",
+  "phase": "triage",
+  "ready": false,
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "format": "PASS",
+     "eslint": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": "PASS",
+     "seed-cache-decision": "PASS",
+     "e2b-smoke": "PASS",
+     "deploy-command-structural": "FAIL",
+     "live-probes": "PASS",
+     "seed-memory-ratchet": "PASS",
+     "smoke": "FAIL",
+     "agents-coverage-blackbox": "PASS",
+     "backend-coverage-blackbox": "PASS",
+     "cloudbench-controller": "PASS",
+     "semantic-stack": "PASS"
+    }
+   }
+  ]
+ },
+ {
+  "state": "deploy-pipeline-aside-20261106T122244Z",
+  "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+  "digest": "cc80e3039b8d35af116ab661ab8785d853727c136652dad091d1f85bb9ef7dc0",
+  "phase": "triage",
+  "ready": false,
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "format": "PASS",
+     "eslint": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": "PASS",
+     "seed-cache-decision": "PASS",
+     "e2b-smoke": "PASS",
+     "live-probes": "PASS",
+     "seed-memory-ratchet": "PASS",
+     "deploy-command-structural": "FAIL",
+     "agents-coverage-blackbox": "PASS",
+     "backend-coverage-blackbox": "PASS",
+     "cloudbench-controller": "PASS",
+     "semantic-stack": "PASS",
+     "smoke": "FAIL"
+    }
+   },
+   {
+    "phase": "focused",
+    "results": {
+     "deploy-command-structural": "PASS",
+     "smoke": "FAIL"
+    }
+   },
+   {
+    "phase": "focused",
+    "results": {
+     "smoke": "FAIL"
+    }
+   }
+  ]
+ },
+ {
+  "state": "deploy-pipeline",
+  "head": "b02d32ef957b124614ca7a7b62fb5bc58f48c6e9",
+  "digest": "3aa2c2137f9d601f2fe999c2c8b072110c66408166f86447fbde0907d5a386c4",
+  "phase": "ready",
+  "ready": true,
+  "attempts": [
+   {
+    "phase": "quick",
+    "results": {
+     "eslint": "PASS",
+     "format": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "initial",
+    "results": {
+     "canonical-seed-whatsapp-content": "PASS",
+     "seed-cache-decision": "PASS",
+     "e2b-smoke": "PASS",
+     "live-probes": "PASS",
+     "seed-memory-ratchet": "FAIL",
+     "agents-coverage-blackbox": "PASS",
+     "deploy-command-structural": "PASS",
+     "backend-coverage-blackbox": "PASS",
+     "cloudbench-controller": "PASS",
+     "semantic-stack": "PASS",
+     "smoke": "PASS"
+    }
+   },
+   {
+    "phase": "focused",
+    "results": {
+     "seed-memory-ratchet": "PASS"
+    }
+   },
+   {
+    "phase": "failed-gates",
+    "results": {}
+   },
+   {
+    "phase": "quick",
+    "results": {
+     "format": "PASS",
+     "eslint": "PASS",
+     "typescript": "PASS",
+     "backend-structural": "PASS"
+    }
+   },
+   {
+    "phase": "final",
+    "results": {}
+   }
+  ]
+ }
+]

@@ -131,10 +131,10 @@ async def test_browser_activity_timeout_fence_survives_continuation():
 
     carrier = AgentWorkflow()
     carrier.max_iterations, carrier.context_gates = None, {}
-    state = carrier._continuation_resume_state([])
+    state = carrier._continuation_resume_state()
     assert "browser_activity_cleanup_unknown" not in state["runtime_state"]
     carrier._browser_activity_cleanup_unknown = True
-    state = carrier._continuation_resume_state([])
+    state = carrier._continuation_resume_state()
     restored = AgentWorkflow()
     restored._restore_deployment_state(state)
     assert restored._browser_activity_cleanup_unknown is True
