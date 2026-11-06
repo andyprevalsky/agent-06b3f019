@@ -528,7 +528,10 @@ if (projectMode) {
     writeFileSync(settingsPath, JSON.stringify(settings));
     console.log(`[Setup] Resuming existing repo at ${workDir}`);
   } catch (err) {
-    console.error(`[Setup] Failed to refresh resumed repo:`, err.message);
+    console.error(
+      `[Setup] Failed to refresh resumed repo:`,
+      redactCredentials(err.message),
+    );
   }
 } else if (GITHUB_REPO_URL) {
   console.log(`[Setup] Cloning GitHub repo: ${GITHUB_REPO_URL}`);
@@ -572,7 +575,10 @@ if (projectMode) {
 
     console.log(`[Setup] Repo cloned to ${workDir}`);
   } catch (err) {
-    console.error(`[Setup] Failed to clone repo:`, err.message);
+    console.error(
+      `[Setup] Failed to clone repo:`,
+      redactCredentials(err.message),
+    );
     // Continue without clone - Claude will see the error in goal context
   }
 }
@@ -588,6 +594,14 @@ if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
 // pushed branch, else cut it from CODE_AGENT_BASE_BRANCH (the parent agent's
 // branch for sub-agents) or, when that is empty, the repo's default branch.
 // A base that is not on the remote is reported, never silently replaced.
+// Credentials never leave the server in text: a URL's userinfo and the token
+// itself are masked in every error that reaches a log, an event or the output.
+function redactCredentials(text) {
+  let out = String(text ?? "").replace(/(https?:\/\/)[^@\s/]+@/g, "$1***@");
+  if (GITHUB_TOKEN) out = out.split(GITHUB_TOKEN).join("***");
+  return out;
+}
+
 function gitRun(args, cwd) {
   try {
     const stdout = execFileSync("git", args, {
@@ -599,8 +613,26 @@ function gitRun(args, cwd) {
     });
     return { ok: true, out: String(stdout).trim() };
   } catch (err) {
-    return { ok: false, out: String(err?.stderr || err?.message || "").trim() };
+    return {
+      ok: false,
+      status: err?.status ?? null,
+      out: redactCredentials(String(err?.stderr || err?.message || "").trim()),
+    };
   }
+}
+
+// A base that cannot be fetched is "not on the remote" only when the remote
+// answers that no such branch exists (`git ls-remote --exit-code` exits 2). Any
+// other failure (GitHub refusing with a rate limit, an outage, no network) is
+// reported with git's own output, so the agent is not told to fix a branch that
+// is fine. git exposes no reset time for a refusal.
+function baseFetchError(base, repoDir, fetched) {
+  const probe = gitRun(
+    ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${base}`],
+    repoDir,
+  );
+  if (probe.status === 2) return `base branch ${base} is not on the remote`;
+  return `could not fetch base branch ${base}: ${(fetched.out || probe.out).slice(0, 300)}`;
 }
 
 function prepareCodeSessionBranch(repoDir) {
@@ -654,7 +686,7 @@ function prepareCodeSessionBranch(repoDir) {
         start = `origin/${base}`;
         result.source = "base";
       } else {
-        result.error = `base branch ${base} is not on the remote`;
+        result.error = baseFetchError(base, repoDir, fetched);
       }
     } else {
       gitRun(["remote", "set-head", "origin", "-a"], repoDir);
