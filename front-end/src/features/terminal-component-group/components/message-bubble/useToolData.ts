@@ -17,6 +17,13 @@ interface UseToolDataArgs {
   isTool: boolean;
 }
 
+/** The row's text for the user; a code agent's own output (verbatimText) is never scrubbed. */
+function visibleText(message: Message): string {
+  return message.metadata?.verbatimText === true
+    ? message.text
+    : userFacingMessageText(message.text);
+}
+
 export function useToolData({
   message,
   isStreaming,
@@ -44,7 +51,7 @@ export function useToolData({
         toolName: 'thought',
         title: 'Thought',
         status: 'FINISHED',
-        message: userFacingMessageText(message.text),
+        message: visibleText(message),
       };
     }
 
@@ -77,7 +84,7 @@ export function useToolData({
       toolName,
       title,
       status: toolStatus,
-      message: hideToolMessage ? '' : userFacingMessageText(message.text),
+      message: hideToolMessage ? '' : visibleText(message),
       error: Boolean(metadata.error),
       progressComplete: metadata.progressComplete as number | undefined,
       actionMetadata,

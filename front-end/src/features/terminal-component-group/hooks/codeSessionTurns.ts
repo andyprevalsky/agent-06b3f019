@@ -156,7 +156,9 @@ function toolTitle(entry: TranscriptEntry): string {
 
 function activityMessage(entry: TranscriptEntry, id: string): Message {
   const base = { message_id: id, timestamp: iso(entry.at ?? entry.firstSeenAt) };
-  if (entry.type === 'message') return finalAnswer(entry.text, id, entry.at ?? entry.firstSeenAt);
+  // Narration mid-turn is assistant text, as in a Rose agent's history (the
+  // work rows show it as a thought); only the turn's answer is user-facing.
+  if (entry.type === 'message') return { ...base, role: 'ASSISTANT', text: entry.text };
   if (entry.type === 'thinking') {
     return {
       ...base,
@@ -331,7 +333,19 @@ class SessionBuilder {
     const direction =
       a2a.from.id === taskId ? 'sent' : a2a.to.id === taskId ? 'received' : a2a.direction;
     const raw = message.metadata?.a2a as Record<string, unknown>;
-    return { ...message, metadata: { ...message.metadata, a2a: { ...raw, direction } } };
+    // The backend tags these rows with the code session's `subAgentId` and the chip's
+    // `toolCallId`. The root MessageList drops sub-agent rows and merges rows sharing a
+    // toolCallId (a sent and a received row would collapse), so the row is its own
+    // main-chat row here: no sub-agent scope, its message id as its tool call id.
+    return {
+      ...message,
+      metadata: {
+        ...message.metadata,
+        subAgentId: undefined,
+        toolCallId: message.message_id,
+        a2a: { ...raw, direction },
+      },
+    };
   }
 
   private finish(outcome: TurnOutcome, endedAt: number | null) {
@@ -525,6 +539,7 @@ function roseMessage(input: CodeSessionInput, id: string, entry: TranscriptEntry
     text: entry.text,
     metadata: {
       code_provider: input.provider,
+      toolCallId: id,
       a2a: {
         kind: 'message',
         message_id: entry.key,
@@ -603,4 +618,27 @@ export function buildCodeSession(input: CodeSessionInput): CodeSessionEntry[] {
   builder.flushComms();
   builder.close();
   return builder.out;
+}
+
+/**
+ * The code session as ONE ordered main-chat message list, the shape the root
+ * transcript renders: the turn slots dissolve into their activity rows, so the
+ * root's work grouping (groupTrajectoryWork) folds them into "Worked for …"
+ * between the user-facing rows exactly as it does for a Rose agent. A slot with
+ * no activity contributes nothing (never an empty "Worked for" row).
+ */
+export function codeSessionMessages(input: CodeSessionInput): Message[] {
+  return buildCodeSession(input)
+    .flatMap((entry) => (entry.kind === 'work' ? entry.turn.activities : [entry.message]))
+    .map(verbatim);
+}
+
+/**
+ * A code agent's text is its own output on the user's repo (a grep, a file, its
+ * thinking), never Rose's plumbing copy: the trajectory's Fast Mode / DEMO-cache
+ * scrub (userFacingMessageText) must not blank "FastModeToggle" out of it.
+ */
+function verbatim(message: Message): Message {
+  if (message.role === 'USER' || message.role === 'SYSTEM') return message;
+  return { ...message, metadata: { ...message.metadata, verbatimText: true } };
 }
