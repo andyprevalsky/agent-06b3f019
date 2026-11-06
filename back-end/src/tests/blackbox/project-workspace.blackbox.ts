@@ -47,6 +47,7 @@ import {
   createLocalClaudeCodeSession,
 } from '../../providers/claudeCodeLocalSession';
 import { prisma } from '../../providers/database';
+import { registerCodexProjectWorkspaceCases } from './project-workspace-codex.cases';
 import { prepareSessionProject } from '../../providers/projects/session';
 import {
   localWorkspaceExecutor,
@@ -644,13 +645,21 @@ test('project CLI child yields the event loop, drains output and preserves failu
   }
 });
 
+registerCodexProjectWorkspaceCases({
+  fixture,
+  secret: SECRET,
+  remote: () => join(fixture, 'remote.git'),
+  leakTexts,
+  createProject,
+});
+
 test('secret-leak scan: fixture secret absent from every surface', async () => {
   const artifactDir = process.env.BLACKBOX_TEST_ARTIFACT_DIR;
   const backendLog =
     process.env.BLACKBOX_TEST_BACKEND_LOG ?? (artifactDir ? join(artifactDir, 'backend.log') : '');
   if (backendLog && existsSync(backendLog))
     leakTexts.push(['backend log', readFileSync(backendLog, 'utf8')]);
-  assert(leakTexts.length >= 8, `expected every surface to be captured, got ${leakTexts.length}`);
+  assert(leakTexts.length >= 12, `expected every surface to be captured, got ${leakTexts.length}`);
   for (const [label, text] of leakTexts) {
     assert(!text.includes(SECRET), `fixture secret leaked into ${label}`);
   }
