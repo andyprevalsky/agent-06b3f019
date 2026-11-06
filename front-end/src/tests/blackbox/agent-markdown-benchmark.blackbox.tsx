@@ -83,7 +83,9 @@ describe('agent markdown benchmark check', () => {
       writeFileSync(process.env.AGENT_MARKDOWN_REPORT, `${JSON.stringify(report, null, 2)}\n`);
     }
     expect(report.violations).toEqual([]);
-    if (!external) expect(report.checked).toEqual({ root: 2, code: 2, output: 3 });
+    // Code replies: mid-turn narration is a work-row thought, not a user-facing reply
+    // (codeSessionTurns activityMessage), so the fixture's turn answer is the one reply.
+    if (!external) expect(report.checked).toEqual({ root: 2, code: 1, output: 3 });
   });
 
   it('reports a missing code-agent reply and refuses paginated agent bodies', () => {
