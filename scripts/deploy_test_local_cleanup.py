@@ -561,6 +561,53 @@ def reconcile(state, occurrence_id, proof):
         'execution_gate': copy.deepcopy(gate)}
 
 
+def tmpdir_transition_gate(state, execution, current):
+    """Follow only recorded, same-source, lease-validated TMPDIR replacements."""
+    from deploy_test_result import preserve_contract
+    from deploy_test_isolation import external_tmpdir
+    try:
+        preserve_contract(execution, current)
+        return  # No runtime transition is needed for this original receipt.
+    except ValueError:
+        pass
+    cursor = execution
+    for item in state.get('prepared_binding_history', []):
+        if item.get('kind') != 'replace-owned-tmpdir-v1' or execution['name'] not in item.get('gates', []):
+            continue
+        before_plan, after_plan = item.get('from_plan', {}), item.get('to_plan', {})
+        before = [g for g in before_plan.get('gates', []) if g['name'] == execution['name']]
+        after = [g for g in after_plan.get('gates', []) if g['name'] == execution['name']]
+        need(len(before) == 1, 'TMPDIR transition origin missing')
+        before = before[0]
+        # Unrelated historical transitions are not authority for this execution.
+        if cursor.get('env', {}).get('TMPDIR') != before.get('env', {}).get('TMPDIR'):
+            continue
+        need(len(after) == 1, 'TMPDIR transition destination missing')
+        after = after[0]
+        preserve_contract(cursor, before)
+        need(item.get('credit_granted') is False
+             and before_plan.get('source') == item.get('from_source')
+             == item.get('to_source') == after_plan.get('source'), 'TMPDIR transition source changed')
+        expected = copy.deepcopy(before_plan)
+        names = item['gates']
+        need(len(names) == len(set(names)) and set(item.get('leases', {})) == set(names),
+             'TMPDIR transition lease inventory')
+        for name in names:
+            old, = [g for g in expected['gates'] if g['name'] == name]
+            new, = [g for g in after_plan['gates'] if g['name'] == name]
+            value = new.get('env', {}).get('TMPDIR')
+            need(old.get('worker_transport') == 'local-isolated' and not old.get('quick')
+                 and isinstance(value, str) and old.get('env', {}).get('TMPDIR') != value,
+                 'TMPDIR transition did not replace a local binding')
+            lease = item['leases'][name]
+            need(external_tmpdir(value, Path(old['worker_root']), Path(lease['coordinator_root']),
+                                 name, item['to_source']) == lease, 'TMPDIR transition custody changed')
+            old['env']['TMPDIR'] = value
+        need(expected == after_plan, 'TMPDIR transition changed another contract')
+        cursor = after
+    preserve_contract(cursor, current)
+
+
 def still_bound(state, receipt, entry):
     need(entry.get('kind') == KIND and entry.get('gate') == receipt['gate']
          and entry.get('token') == receipt['token'] and entry.get('credit_granted') is False, 'reconciliation changed')
@@ -572,7 +619,7 @@ def still_bound(state, receipt, entry):
         if gate is not None:
             from deploy_test_result import preserve_contract
             current, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
-            preserve_contract(gate, current)
+            tmpdir_transition_gate(state, gate, current)
             need(set(gate['checks']) <= set(current['checks']), 'original checks removed')
         validate(original, receipt, entry['proof'])
     except (OSError, KeyError, TypeError) as error:

@@ -244,6 +244,152 @@ class Cycle(unittest.TestCase):
                      paths={g['name']:g['env']['TMPDIR'] for g in new['gates'] if not g.get('quick')})
         return old, new, state, proof
 
+    def reconciled_tmpdir_fixture(self):
+        old, _, _ = self.prepared_bindings_fixture()
+        fixtures = [StructuralSupervisorCleanup(), InterruptedLocalRecovery()]
+        for fixture in fixtures:
+            fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        structural, backend = fixtures
+        structural.file_adapter()
+        backend.gate.update(name='backend-coverage-blackbox', native_backend=True,
+            result_transport='file', command=[sys.executable,str(ROOT/'scripts/deploy_test_backend.py'),
+                                             '--root',str(backend.worker)])
+        backend.token='interrupted-backend'
+        backend.request.update(token=backend.token,gate=backend.gate['name'], phase='final')
+        backend.receipt['token']=backend.token
+        backend.receipt.update(gate=backend.gate['name'],command=backend.gate['command'])
+        for index, fixture in enumerate(fixtures):
+            subprocess.run(['git','init','-q',str(fixture.worker)],check=True)
+            subprocess.run(['git','-C',str(fixture.worker),'fetch','-q',str(self.root),'HEAD'],check=True)
+            subprocess.run(['git','-C',str(fixture.worker),'checkout','-q','--detach','FETCH_HEAD'],check=True)
+            (fixture.worker/'.git/info/exclude').write_text('.context/\n')
+            tmp=fixture.worker/'.context/tmp';tmp.mkdir()
+            fixture.gate.update(worker='fixture-'+str(index),timeout_seconds=14400,
+                env={'TMPDIR':str(tmp),'CONDUCTOR_WORKSPACE_NAME':'fixture-'+str(index),
+                     'CONDUCTOR_PORT':str(39000-index*24000)})
+            fixture.request.update(source=old['source'],phase='final')
+            fixture.receipt['source']=old['source']
+            fixture.result['source']=old['source']
+            fixture.receipt['execution_binding']['contract_digest']=c.digest(fixture.gate)
+            if fixture is structural: fixture.write_native()
+            else: fixture.seal()
+        # Two separately sealed structural invocations: only the latter is
+        # latest, but both historical request proofs must remain admissible.
+        second=copy.copy(structural)
+        for key in ('request','result','receipt','process','failure'):
+            setattr(second,key,copy.deepcopy(getattr(structural,key)))
+        second.token='second-structural'
+        second.folder=structural.root/'cycle/attempts/36/final'/structural.gate['name']
+        second.folder.mkdir(parents=True)
+        import hashlib
+        native=second.worker/'.context/deploy-worker'/hashlib.sha256(second.token.encode()).hexdigest()
+        native.mkdir(parents=True)
+        case=second.result['evidence'][second.gate['name']]
+        log=native/Path(case['log']).name;log.write_bytes(Path(case['log']).read_bytes())
+        case['log']=str(log);case['sha256']=c.sha_file(log)
+        second.request['token']=second.result['token']=second.receipt['token']=second.token
+        second.receipt.update(log=str(second.folder/'output.log'),worker_result=str(second.folder/'result.json'))
+        second.paths={name:second.folder/name for name in structural.paths}
+        second.write_native()
+        fixtures.insert(1,second)
+        old['gates']=[g for g in old['gates'] if g.get('quick')]+[structural.gate,backend.gate]
+        state=c.initialize(old,self.root)
+        state.update(phase='triage',ready=False,pending=[])
+        for i, fixture in enumerate(fixtures):
+            failure=copy.deepcopy(fixture.failure)
+            failure.update(id='native-'+str(i),gate=fixture.gate['name'],source=old['source'],
+                check=fixture.gate['name']+'/'+fixture.gate['checks'][0],evidence=fixture.receipt['log'],
+                worker_result=fixture.receipt['worker_result'])
+            state['failures'].append(failure);state['pending'].append(failure['id'])
+            state['attempts'].append({'phase':'final','results':[fixture.receipt]})
+            c.reconcile(state,failure['id'],fixture.proof)
+            folder=self.directory/'attempts'/str(i)/'final'/fixture.gate['name']
+            for name,path in fixture.paths.items():
+                c.write(folder/name,c.read(path))
+        new=copy.deepcopy(old)
+        outside=Path(tempfile.mkdtemp(prefix='dpt-'));self.addCleanup(__import__('shutil').rmtree,outside)
+        for gate in new['gates']:
+            if gate.get('quick'):continue
+            path=outside/gate['name'];path.mkdir(mode=0o700)
+            info=path.stat()
+            marker=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(self.root),
+                worker_root=gate['worker_root'],gate=gate['name'],uid=os.geteuid(),device=info.st_dev,inode=info.st_ino)
+            c.write(path/'.deploy-tmpdir-owner.json',marker);(path/'.deploy-tmpdir-owner.json').chmod(0o600)
+            gate['env']['TMPDIR']=str(path)
+        proof=dict(kind='replace-owned-tmpdir-v1',source=old['source'],from_plan_digest=c.digest(old),
+            paths={g['name']:g['env']['TMPDIR'] for g in new['gates'] if not g.get('quick')})
+        return old,new,state,proof,fixtures
+
+    def test_reconciled_native_history_tmpdir_cli_and_revalidation(self):
+        import contextlib,io
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        before=copy.deepcopy(state)
+        for name,value in [('old',old),('new',new),('proof',proof),('cycle',state)]:
+            c.write(self.directory/(name+'.json'),value)
+        with contextlib.redirect_stdout(io.StringIO()),patch.object(c,'_prepared_workers_idle'):
+            code=c.main(['prepare-bindings','--input',str(self.directory/'old.json'),'--plan',
+                str(self.directory/'new.json'),'--proof',str(self.directory/'proof.json'),
+                '--state-dir',str(self.directory),'--root',str(self.root)])
+        self.assertEqual(0,code)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('quick',after['phase']);self.assertFalse(after['ready'])
+        for key in ('attempts','failures','pending','reconciled_owners'):
+            self.assertEqual(before[key],after[key])
+        self.assertEqual([],c.retained_owners(after,[f.gate['name'] for f in fixtures]))
+        for fixture in fixtures:
+            self.assertTrue(c.local_reconciliation_bound(after,fixture.receipt))
+            self.assertEqual(fixture.proof['files'],{n:c.sha_file(p) for n,p in fixture.paths.items()})
+        for mutate in [lambda x:x.pop('prepared_binding_history'),
+                       lambda x:x['plan']['gates'][-1]['env'].update(OTHER='changed'),
+                       lambda x:x['prepared_binding_history'][-1]['leases'].clear()]:
+            bad=copy.deepcopy(after);mutate(bad)
+            with self.assertRaises(ValueError):c.retained_owners(bad,[fixtures[-1].gate['name']])
+
+    def test_older_binding_history_is_not_new_transition_authority(self):
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        prior=copy.deepcopy(old)
+        prior['gates'][-2]['env']['TMPDIR']='/retired/original/tmp'
+        legacy=dict(kind='replace-owned-tmpdir-v1',from_plan=prior,
+            from_source=old['source'],to_source=old['source'],
+            gates=[fixtures[0].gate['name']],leases={},credit_granted=False)
+        state['prepared_binding_history']=[legacy]
+        self.assertEqual([],c.retained_owners(state,[f.gate['name'] for f in fixtures]))
+        with patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual([],c.retained_owners(state,[f.gate['name'] for f in fixtures]))
+        self.assertEqual(legacy,state['prepared_binding_history'][0])
+
+    def test_cleanup_proof_after_recorded_tmpdir_transition(self):
+        from deploy_test_isolation import external_tmpdir
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        state['prepared_binding_history']=[dict(kind='replace-owned-tmpdir-v1',
+            from_plan=old,to_plan=new,from_source=old['source'],to_source=new['source'],
+            gates=list(proof['paths']),credit_granted=False,
+            leases={g['name']:external_tmpdir(g['env']['TMPDIR'],Path(g['worker_root']),
+                self.root,g['name'],new['source']) for g in new['gates'] if not g.get('quick')})]
+        state['plan']=new
+        for fixture in fixtures:self.assertTrue(c.local_reconciliation_bound(state,fixture.receipt))
+        for alter in [lambda h:h['to_plan']['gates'][-1]['env'].update(OTHER='bad'),
+                      lambda h:h.update(to_source={'head':'bad','digest':'bad'}),
+                      lambda h:h['leases'][fixtures[-1].gate['name']].update(inode=0),
+                      lambda h:h['to_plan']['gates'][-1].update(command=['false'])]:
+            bad=copy.deepcopy(state);alter(bad['prepared_binding_history'][0])
+            with self.assertRaises(ValueError):c.local_reconciliation_bound(bad,fixtures[-1].receipt)
+
+    def test_reconciled_native_history_rejects_invalid_proofs_atomically(self):
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        key=fixtures[0].proof['files']['receipt.json']
+        changes=[lambda x:x['reconciled_owners'].pop(key),
+                 lambda x:x['reconciled_owners'][key]['proof']['files'].update({'receipt.json':'0'*64}),
+                 lambda x:x['reconciled_owners'][key].update(token='foreign'),
+                 lambda x:x['reconciled_owners'].update(duplicate=copy.deepcopy(x['reconciled_owners'][key])),
+                 lambda x:x['reconciled_owners'].update(wrong=x['reconciled_owners'].pop(key))]
+        for mutate in changes:
+            bad=copy.deepcopy(state);mutate(bad);before=copy.deepcopy(bad)
+            with self.assertRaises(ValueError),patch.object(c,'_prepared_workers_idle'):
+                c.prepare_bindings(bad,old,new,self.root,self.directory,tmpdir_replacement=proof)
+            self.assertEqual(before,bad)
+
     def test_replace_external_tmpdir_cli_after_native_failure(self):
         import contextlib, io
         old, new, state, proof = self.external_tmpdir_fixture()

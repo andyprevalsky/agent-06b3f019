@@ -1019,6 +1019,25 @@ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: di
     return bindings
 
 
+def local_reconciliation_bound(state, receipt):
+    """Recheck a unique exact-receipt local proof, never just its presence."""
+    entries = state.get('reconciled_owners', {})
+    matches = [(key, entry) for key, entry in entries.items()
+               if entry.get('kind') == 'local-supervisor-cleanup-v1'
+               and entry.get('gate') == receipt.get('gate')
+               and entry.get('token') == receipt.get('token')]
+    if not matches:
+        return False
+    from deploy_test_local_cleanup import still_bound
+    key, entry = matches[0]
+    path = Path(receipt['log']).parent / 'receipt.json'
+    if (len(matches) != 1 or bounded_read(path, 'reconciled receipt') != receipt
+            or key != sha_file(path) or entry.get('proof', {}).get('files', {}).get('receipt.json') != key):
+        raise ValueError('ambiguous or changed local cleanup reconciliation')
+    still_bound(state, receipt, entry)
+    return True
+
+
 def retained_owners(state: dict, gates) -> list[str]:
     latest = latest_receipts(state)
     owned = []
@@ -1028,14 +1047,7 @@ def retained_owners(state: dict, gates) -> list[str]:
         receipt = latest.get(gate)
         if not receipt:
             continue
-        local = [e for e in state.get('reconciled_owners', {}).values()
-                 if e.get('kind') == 'local-supervisor-cleanup-v1'
-                 and e.get('gate') == gate and e.get('token') == receipt.get('token')]
-        if local:
-            from deploy_test_local_cleanup import still_bound
-            if len(local) != 1:
-                raise ValueError('ambiguous local cleanup reconciliation')
-            still_bound(state, receipt, local[0])
+        if local_reconciliation_bound(state, receipt):
             continue  # launch eligibility only; original incomplete cases stay immutable
         owner = receipt_owner(gate, receipt)
         if owner and not _reconciled(state, receipt, owner):
@@ -1823,8 +1835,10 @@ def replace_prepared_tmpdirs(state, old, new, root, directory, proof):
             raise ValueError('TMPDIR correction has unknown request ownership')
         receipt = bounded_read(receipt_path, 'existing receipt')
         recorded = records.get(request.get('token'))
-        if (recorded != receipt or any(request.get(k) != receipt.get(k) for k in ('token','gate','source'))
-                or receipt.get('lingering_group') or receipt.get('cleanup_owner')):
+        if (recorded != receipt or any(request.get(k) != receipt.get(k) for k in ('token','gate','source'))):
+            raise ValueError('TMPDIR correction has unknown or active request ownership')
+        if ((receipt.get('lingering_group') or receipt.get('cleanup_owner'))
+                and not local_reconciliation_bound(state, receipt)):
             raise ValueError('TMPDIR correction has unknown or active request ownership')
         native_failure |= (request.get('phase') in {'initial','final','failed-gates'}
                            and receipt.get('status') == 'FAIL' and receipt.get('executed') is True)
@@ -1854,7 +1868,7 @@ def replace_prepared_tmpdirs(state, old, new, root, directory, proof):
         candidate = copy.deepcopy(state)
         refresh(candidate, old, new, root, directory=directory, _tmpdir_gates=set(changed))
         candidate.setdefault('prepared_binding_history', []).append(dict(
-            kind='replace-owned-tmpdir-v1', from_plan=copy.deepcopy(old),
+            kind='replace-owned-tmpdir-v1', from_plan=copy.deepcopy(old), to_plan=copy.deepcopy(new),
             from_source=copy.deepcopy(state['source']), to_source=new['source'],
             gates=changed, leases=leases, at=time.time(), credit_granted=False))
         _prepared_workers_idle([*workers, *paths], birth_guard=True)
