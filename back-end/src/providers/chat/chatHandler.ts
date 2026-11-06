@@ -15,6 +15,7 @@ import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
  * System context / state flow:
  *
  *   startInitialChatContext ──┬─ messages ──> Router (GLM) ──> Cerebras
+ *   loadRouterProjectContext ─┤  (project section after the router prompt's cache boundary)
  *                             │                 │                 (fail closed)
  *                             │                 ├─ escalation ──> Temporal (router only)
  *                             │                 v
@@ -52,6 +53,7 @@ import { broadcastAgentModeStarted } from './supabaseBroadcast';
 import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentLifecycleTool';
 import { withChatEscalationDeadline } from './chatEscalationDeadline';
 import { createLogger } from '../logger';
+import { loadRouterProjectContext } from './projectContext';
 import { followUpRunStateUpdate, shouldSnapshotPreviousGoal } from '../derivedRunState';
 import {
   createEarlyDirectGeneratorCoordinator,
@@ -88,7 +90,10 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     requestedModel: config.model,
   });
-  const messages = await initialContext.messages;
+  const [messages, projectContext] = await Promise.all([
+    initialContext.messages,
+    loadRouterProjectContext(config.agentId),
+  ]);
   const chatContextConfig = { agentId: config.agentId, requestedModel: config.model };
 
   const runGenerator = async (
@@ -121,6 +126,7 @@ export async function handleChatMessage(config: {
       messages,
       model: phaseModels.router,
       providerRoute: phaseModels.routerProviderRoute,
+      projectContext,
       onRouterStarted: shouldSpeculateDirectAnswer ? speculativeGenerator.start : undefined,
       onActionDetected: (action) => {
         if (action !== 'direct_answer') void speculativeGenerator.discard();
@@ -286,6 +292,7 @@ export async function handleChatMessage(config: {
         userId: config.userId,
         messages: generatorMessages,
         phaseModels,
+        projectContext,
         runGenerator,
         stage: round < MAX_CHAT_SEARCH_ROUNDS ? 'after_search' : 'search_budget_spent',
       });
@@ -374,6 +381,7 @@ async function routeAfterSearch(params: {
   userId: string;
   messages: ChatMessage[];
   phaseModels: ChatPhaseModels;
+  projectContext: string;
   stage: Exclude<RouterStage, 'initial'>;
   runGenerator: (
     messages: ChatMessage[],
@@ -395,6 +403,7 @@ async function routeAfterSearch(params: {
       messages: params.messages,
       model: params.phaseModels.router,
       providerRoute: params.phaseModels.routerProviderRoute,
+      projectContext: params.projectContext,
       stage: params.stage,
       onRouterStarted: speculativeGenerator.start,
       onActionDetected: (action) => {

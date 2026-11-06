@@ -3,7 +3,13 @@
  * Black-box tests for chat router stream-derived UI metadata.
  */
 
-import { getWebSearchStreamTitleFromPartialRouterJson } from '../../providers/chat/routerLlm';
+import {
+  buildRouterSystemMessage,
+  getWebSearchStreamTitleFromPartialRouterJson,
+} from '../../providers/chat/routerLlm';
+import { ROUTER_SYSTEM_PROMPT } from '../../providers/chat/chatPrompts';
+import { renderRouterProjectContext } from '../../providers/chat/projectContext';
+import { markCacheable } from '../../providers/rose/cache';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
 import {
   createClosedRouterActionDetector,
@@ -143,6 +149,34 @@ const tests: Array<[string, () => Promise<void> | void]> = [
         '{"reasoning":"answer directly","action":"direct_answer","queries":[],"goal":"","mode":"plan"}';
 
       assertEqual(getWebSearchStreamTitleFromPartialRouterJson(direct), null, 'direct answer');
+    },
+  ],
+  [
+    'project chats carry the project section after the cached router prompt (RCA 2026-11-06)',
+    () => {
+      // Root 1a3d495c (project "Rose") routed with "a specific repository I don't have context for".
+      const home = buildRouterSystemMessage('initial');
+      assertEqual(home.content, markCacheable(ROUTER_SYSTEM_PROMPT).content, 'Home router prompt');
+      const section = renderRouterProjectContext({
+        name: 'Rose',
+        repoUrl: 'https://github.com/Rose-Ai-Labs/rose.git',
+        defaultBranch: 'main',
+      });
+      assertEqual(section.startsWith('## Project\n'), true, 'section heading');
+      for (const stage of ['initial', 'after_search', 'search_budget_spent'] as const) {
+        const staticOnly = buildRouterSystemMessage(stage);
+        const placed = buildRouterSystemMessage(stage, section);
+        assertEqual(placed.role, 'system', `${stage}: one system message`);
+        assertEqual(placed.content, staticOnly.content + section, `${stage}: static prefix kept`);
+        assertEqual(placed.content.split('Rose-Ai-Labs/rose').length, 2, `${stage}: repo once`);
+        assertEqual(placed.content.includes('default branch main'), true, `${stage}: branch`);
+      }
+      assertEqual(renderRouterProjectContext(null), '', 'Home chats get no section');
+      assertEqual(
+        renderRouterProjectContext({ name: 'Scratch', repoUrl: null, defaultBranch: 'main' }),
+        '## Project\nThis chat is in the user\'s project "Scratch", which has no GitHub repo.',
+        'repo-less project'
+      );
     },
   ],
 ];
