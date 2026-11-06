@@ -1,7 +1,7 @@
 /**
  * Blackbox: the full-screen app view through the real Terminal (Rose Desktop
  * flag on, UI ledger rows 10/39), opened from a code-agent session: the root
- * transcript's code-agent row → its code-agent view → "Open app".
+ * transcript's code-agent row → its code-agent view → the devbox usage popover's "Open app" link.
  *
  *   Open app → the chat column is replaced by that code session's preview:
  *     GET /claude-code-session/:taskId/preview (open view only) →

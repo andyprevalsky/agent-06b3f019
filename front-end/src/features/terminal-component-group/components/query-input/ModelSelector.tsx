@@ -72,7 +72,11 @@ export function ModelSelector({
   const selectedInfo = availableModels.find((m) => m.id === selectedModel);
   const selectedName =
     shortRoseName(roseDesktop, selectedModel) ??
-    (selectedInfo ? `${selectedInfo.provider}/${selectedInfo.name}` : selectedModel);
+    (selectedInfo
+      ? selectedInfo.provider
+        ? `${selectedInfo.provider}/${selectedInfo.name}`
+        : selectedInfo.name
+      : selectedModel);
   const isRoseModel =
     selectedModel === ROSE_MODEL_IDS.flash ||
     selectedModel === ROSE_MODEL_IDS.ultra ||

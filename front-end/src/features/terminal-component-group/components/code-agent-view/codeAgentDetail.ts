@@ -3,8 +3,8 @@
  * read it like any selected agent (CodeAgentContext.tsx):
  *   spinning_up / live / verifying → ACTIVE · completed → COMPLETED
  *   failed → FAILED · paused → PAUSED
- *   model / speed / context_size ← the session's own records (codeSessionSettings);
- *   unknown stays empty.
+ *   model / speed / context_size / tokens / cost ← the session's own records
+ *   (codeSessionSettings); unknown stays empty.
  */
 
 import type { AgentDetail } from '@/lib/api/types';
@@ -34,6 +34,7 @@ export function codeAgentDetail(
   c: CodeAgentConversation,
   settings: CodeSessionSettings,
   firstAt: string,
+  messageCount = 0,
 ): AgentDetail {
   const startedAt = iso(c.meta?.started_at, firstAt);
   const speed = settings.speed;
@@ -48,16 +49,16 @@ export function codeAgentDetail(
     status: STATUS[c.chipState],
     status_message: c.meta?.failure_message ?? null,
     temporal_workflow_id: null,
-    token_count: 0,
-    tokens_in: 0,
-    tokens_out: 0,
+    token_count: (settings.tokensIn ?? 0) + (settings.tokensOut ?? 0),
+    tokens_in: settings.tokensIn ?? 0,
+    tokens_out: settings.tokensOut ?? 0,
     tool_tokens_in: 0,
     tool_tokens_out: 0,
     tool_cost_cents: 0,
     context_size: settings.contextTokens ?? 0,
-    message_count: 0,
+    message_count: messageCount,
     price_limit_cents: 0,
-    tree_cost_cents: 0,
+    tree_cost_cents: settings.costCents ?? 0,
     speed: speed === 'standard' || speed === 'fast' || speed === 'ultrafast' ? speed : undefined,
     created_at: startedAt,
     updated_at: iso(c.meta?.ended_at, startedAt),

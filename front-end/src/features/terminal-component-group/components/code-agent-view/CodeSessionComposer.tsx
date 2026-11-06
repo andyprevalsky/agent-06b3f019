@@ -3,13 +3,16 @@
  *
  * The existing QueryInput as the session's direct channel, with its existing
  * controls fed by the code agent's own data:
- *   model chip   (ModelSelector) → the model the session runs: the live
- *                  session's effective setting, else its recorded CLI model.
+ *   model chip   (ModelSelector) → the model the session runs, with its effort
+ *                  ("claude-opus-5-5 · xhigh"): the live session's effective
+ *                  setting, else its recorded CLI model.
  *                  [LIVE + catalog] pick the next turn's model · [ENDED] read-only
  *   speed toggle (SpeedToggle)   → the session's speed (fast ⇄ standard); live
  *                  sessions change the next turn's speed, ended ones read only
- *   nub          (ContextMeter)  → the session's context window used: the
- *                  latest model call's prompt over the model's window
+ *   nub          (never an empty strip) → ContextMeter: the latest model call's
+ *                  prompt over the model's window (the tokens when the window is
+ *                  not known yet) + the existing Agent settings gear, fed by this
+ *                  code agent's own data (messages, tokens, sandbox cost, context)
  *   agents drawer (BackgroundAgentsBannerView, on top of the box) → the code
  *                  agent's own sub-agents (Claude's Task / Agent tool)
  * Unknown values render nothing (no "unavailable" placeholder). A delivery ACK's
@@ -23,9 +26,11 @@ import { getCodeDraft, setCodeDraft } from '../../hooks/codeAgentLocalState';
 import type { DirectTurn } from '../../hooks/codeAgentDirectTurn';
 import type { CodeSessionSettings } from '../../hooks/codeSessionSettings';
 import QueryInput from '../QueryInput';
+import AgentSettingsDialog from '../AgentSettingsDialog';
 import { ContextMeter } from '../query-input/ContextMeter';
 import { QueryInfoMenu } from '../query-input/QueryInfoMenu';
 import { BackgroundAgentsBannerView } from '../background-agents/BackgroundAgentsBanner';
+import { codeAgentDetail } from './codeAgentDetail';
 import { buildCodeSubAgentPanelModel, type CodeSessionState } from './codeSubAgents';
 import type { CodeAgentConversation } from './useCodeAgentConversation';
 
@@ -99,14 +104,34 @@ export function CodeSessionComposer({
   const model = draft.options.model ?? current.model;
   const speed = draft.options.speed ?? current.speed;
   const choices = capabilities?.models.find((item) => item.model === model);
-  const models: Model[] = (
-    capabilities?.models.map((item) => ({ id: item.model, name: item.label })) ??
-    (model ? [{ id: model, name: model }] : [])
-  ).map((item) => ({ ...item, provider: c.provider }));
+  const effort =
+    effective?.reasoning_effort ?? capabilities?.effective_settings.effort ?? settings.effort;
+  // The chip names the model and its effort; the provider is the code agent's own.
+  const named = (id: string, label: string) => ({
+    id,
+    name: id === model && effort ? `${label} · ${effort}` : label,
+    provider: '',
+  });
+  const models: Model[] =
+    capabilities?.models.map((item) => named(item.model, item.label)) ??
+    (model ? [named(model, model)] : []);
   const canChangeSpeed = !!choices && choices.speeds.includes('fast') && !sending;
   const contextWindow = settings.contextWindow;
   const contextSize = settings.contextTokens ?? 0;
   const contextPercentage = contextWindow ? Math.min(100, (contextSize / contextWindow) * 100) : 0;
+  const owner = useAgentContext();
+  const agentDetail = useMemo(
+    () =>
+      codeAgentDetail(
+        taskId,
+        owner.selectedAgentId ?? '',
+        c,
+        { ...settings, model, speed },
+        new Date(0).toISOString(),
+        messages.filter((message) => message.metadata?.task_id === taskId).length,
+      ),
+    [taskId, owner.selectedAgentId, c, settings, model, speed, messages],
+  );
   const submit = async (attachments?: FilePointer[]) => {
     const delivered = await send(draft.text, {
       ...draft.options,
@@ -150,14 +175,15 @@ export function CodeSessionComposer({
         }
         nub={
           <>
-            {contextWindow !== undefined && (
+            {settings.contextTokens !== undefined && (
               <ContextMeter
                 variant="nub"
                 contextPercentage={contextPercentage}
                 contextSize={contextSize}
-                restartThreshold={contextWindow}
+                restartThreshold={contextWindow ?? 0}
               />
             )}
+            <AgentSettingsDialog variant="nub" agent={agentDetail} contextWindow={contextWindow} />
             <QueryInfoMenu />
           </>
         }
