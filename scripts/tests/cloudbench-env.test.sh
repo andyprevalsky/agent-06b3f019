@@ -2576,9 +2576,14 @@ require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
 require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
   'bash "$ROOT_DIR/scripts/tests/cloudbench-acceptance-autoscale.test.sh"' \
   "pre-deploy cloud gate must reject every autoscale off-state"
-require_text "$ROOT_DIR/.claude/commands/deploy.md" \
-  'bash scripts/tests/cloudbench-acceptance-autoscale.test.sh' \
+# deploy.md carries no test list: the deploy plan's cloudbench-controller gate
+# (scripts/run-cloudbench-controller-local.py) executes the regression.
+require_text "$ROOT_DIR/scripts/run-cloudbench-controller-local.py" \
+  "('autoscale', 'bash scripts/tests/cloudbench-acceptance-autoscale.test.sh')," \
   "deploy must execute the permanent mandatory-autoscale regression"
+require_text "$ROOT_DIR/scripts/deploy_test_plan.py" \
+  '{"name": "cloudbench-controller", "command": [sys.executable, "scripts/run-cloudbench-controller-local.py"],' \
+  "the deploy plan must run the cloudbench-controller gate that executes the autoscale regression"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_VERIFIED=1' \
   "fleet children must receive proof that the controller verified the environment"
