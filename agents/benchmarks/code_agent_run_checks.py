@@ -145,7 +145,13 @@ def check_message_reached_code_agent(run: Dict[str, Any]) -> Dict[str, Any]:
         spawn = by_address[call["to"]]
         message = str(call.get("message") or "")
         outcome = _send_outcome(rows, call["tool_call_id"])
-        entry: Dict[str, Any] = {"to": call["to"], "send": outcome, "delivered": False, "seen": False, "retryable": False}
+        entry: Dict[str, Any] = {
+            "to": call["to"],
+            "send": outcome,
+            "delivered": False,
+            "seen": False,
+            "retryable": False,
+        }
         if outcome is not None and outcome.get("status") == "ERROR" and NOT_STARTED_TEXT in str(outcome.get("text")):
             entry["retryable"] = True  # refused truthfully while the sandbox started
         elif outcome is None or outcome.get("status") != "FINISHED":
@@ -210,7 +216,9 @@ def check_startup_reported(run: Dict[str, Any], max_ws_ready_ms: Optional[int] =
         if not isinstance(phase["ws_ready_ms"], int):
             problems.append(f"task {phase['task_id']} has no ws_ready_ms")
         elif max_ws_ready_ms is not None and phase["ws_ready_ms"] > max_ws_ready_ms:
-            problems.append(f"task {phase['task_id']} took {phase['ws_ready_ms']}ms to serve (bound {max_ws_ready_ms}ms)")
+            problems.append(
+                f"task {phase['task_id']} took {phase['ws_ready_ms']}ms to serve (bound {max_ws_ready_ms}ms)"
+            )
     return {
         "passed": not problems,
         "detail": "; ".join(problems)

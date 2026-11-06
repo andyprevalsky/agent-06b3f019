@@ -857,6 +857,23 @@ async def test_foreground_spawns_are_addressable_and_answer_truthfully_once_fini
             assert "send_agent_message_activity" not in activities, "nothing is stored or woken"
             assert not wf._background_tasks, "a finished foreground spawn never starts another run"
 
+    # PLAN has no send_message_to_agent: its foreground explores are not addressable and
+    # must not reserve their task_name for the plan's own tasks (execute phase).
+    harness = _Harness()
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+    ):
+        wf = _workflow(harness)
+        wf.current_phase = "PLAN"
+        plan_args = {**FOREGROUND_SPAWNS["explore"], "run_in_background": False}
+        seen_while_running.clear()
+        await wf._execute_tool("spawn_agent", plan_args, "toolu_plan_explore")
+        assert seen_while_running["tree"] == [], "a PLAN foreground explore is not registered"
+        assert not wf._background_tasks and not wf._background_finished
+        assert not any(wf._retired_task_names), "its task_name stays free for the plan's tasks"
+
 
 def test_tool_schemas_and_prompts_register_agent_messaging():
     from tools.prompts import TOOL_PROMPTS

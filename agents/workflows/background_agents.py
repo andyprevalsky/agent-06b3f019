@@ -87,9 +87,9 @@ from helpers.background_agents import (
     PAUSED_TASK_STATUS,
     RESUMABLE_TASK_TYPES,
     RESUME_CONVERSATION_KEYS,
-    background_message_refusal,
     agent_notification_metadata,
     background_execution_metadata,
+    background_message_refusal,
     build_agent_notification_text,
     build_background_wake_goal,
     build_background_wake_result,
@@ -515,6 +515,8 @@ class BackgroundAgentsMixin:
         """
         if tool_name != "spawn_agent" or tool_args.get("type") not in WAKEABLE_TASK_TYPES:
             return None
+        if getattr(self, "current_phase", None) == "PLAN":
+            return None  # no send_message_to_agent in PLAN: nothing could address it, and its name stays free
         if self._spawn_runs_in_background(tool_name, tool_args):
             return None
         if tool_call_id in self._background_tasks or tool_call_id in self._background_finished:
@@ -536,7 +538,9 @@ class BackgroundAgentsMixin:
                 f"task_name '{task_name}' is already used by another agent you spawned; choose a different task_name."
             )
             await self._handle_tool_event(
-                ToolEvent(type=EventType.POST_MESSAGE, title="spawn_agent failed", message=error, status=MessageStatus.ERROR),
+                ToolEvent(
+                    type=EventType.POST_MESSAGE, title="spawn_agent failed", message=error, status=MessageStatus.ERROR
+                ),
                 tool_call_id,
                 "spawn_agent",
             )

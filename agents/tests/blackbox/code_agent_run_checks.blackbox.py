@@ -42,7 +42,9 @@ def _send(call_id, to):
     return {
         "role": "ASSISTANT",
         "text": "",
-        "metadata": {"tool_calls": [{"tool": "send_message_to_agent", "to": to, "message": MESSAGE, "tool_call_id": call_id}]},
+        "metadata": {
+            "tool_calls": [{"tool": "send_message_to_agent", "to": to, "message": MESSAGE, "tool_call_id": call_id}]
+        },
     }
 
 
@@ -155,16 +157,23 @@ def test_retried_sends_while_starting_are_tolerated_but_other_failures_are_not()
     assert ok["passed"] is True and "2 earlier send(s) retried while starting" in ok["detail"], ok
 
     # Only pre-start refusals: nothing was ever delivered.
-    only_refused = {"root_agent_id": ROOT, "messages": [_spawn(SPAWN, "rose_repo_status"), _code_row(SPAWN, TASK)] + early}
+    only_refused = {
+        "root_agent_id": ROOT,
+        "messages": [_spawn(SPAWN, "rose_repo_status"), _code_row(SPAWN, TASK)] + early,
+    }
     refused = check_message_reached_code_agent(only_refused)
     assert refused["passed"] is False and "no send was delivered" in refused["detail"], refused
 
     # A different failure is never tolerated, even next to a delivered send.
     run = _healthy_run()
-    run["messages"] = run["messages"][:2] + [
-        _send("toolu_bad", "/root/rose_repo_status"),
-        _send_result("toolu_bad", "ERROR", "Message delivery failed: Activity task failed"),
-    ] + run["messages"][2:]
+    run["messages"] = (
+        run["messages"][:2]
+        + [
+            _send("toolu_bad", "/root/rose_repo_status"),
+            _send_result("toolu_bad", "ERROR", "Message delivery failed: Activity task failed"),
+        ]
+        + run["messages"][2:]
+    )
     bad = check_message_reached_code_agent(run)
     assert bad["passed"] is False and "Activity task failed" in bad["detail"], bad
 

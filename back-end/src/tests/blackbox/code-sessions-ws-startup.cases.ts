@@ -305,6 +305,32 @@ export function registerWsStartupCases(ctx: Pick<CodeSessionLifecycleContext, 'f
       stopServer(second);
     }
 
+    // The Codex ws-server has no state endpoint: a plain `ws` server answers HTTP with 426, and
+    // any answer means its event loop serves.
+    const plainPort = await freePort();
+    const plain = spawn(
+      'node',
+      [
+        '-e',
+        `const { WebSocketServer } = require(${JSON.stringify(join(repoRoot, 'node_modules', 'ws'))}); new WebSocketServer({ port: ${plainPort} });`,
+      ],
+      { detached: true, stdio: 'ignore' }
+    );
+    try {
+      const plainReady = await waitForSandboxWsServer(sandbox, {
+        port: plainPort,
+        timeoutMs: 5_000,
+        pollMs: 50,
+        startupBudgetMs: 60_000,
+      });
+      assert.deepEqual(
+        [plainReady.ready, plainReady.state, plainReady.cloneMs],
+        [true, 'ready', null]
+      );
+    } finally {
+      stopServer(plain);
+    }
+
     // Nothing ever binds: the old fail-fast bound applies, typed as down.
     const deadPort = await freePort();
     const dead = await waitForSandboxWsServer(sandbox, {
