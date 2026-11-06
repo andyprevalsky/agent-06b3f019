@@ -1,0 +1,32 @@
+{
+ "schema_version": 1,
+ "pr": 1734,
+ "deployed_sha": "e8d5f141612103323abb5cbb9dfa329184ab7e4b",
+ "gated_source": "466030ae3e5e7addf5752eb4fe3531b355af3e46",
+ "devbox": "558c0f16-794b-449c-9b6d-f941f8ece79c (Bugs folder revision 1)",
+ "staged_cycle": {
+  "result": "ready, 0 failures",
+  "verify": "run_deploy_pipeline.py verify --require-staged bound-staged exit 0; deploy_test_cycle.py complete ready"
+ },
+ "production": {
+  "fly": "deploy-agents run 42249499327 success; job 3550d925... SUCCEEDED; monitor --verify exit 0",
+  "semantic": "run 42251590295 attempt 2 all jobs success",
+  "migration_validation": "45/45 PASS",
+  "mac_local_acceptance": "SKIPPED - no Mac: read-only query 2026-11-06T16:21:52Z returned 0 LocalDevice rows for owner 1f85ff25-6e29-4c1b-8739-f917bd101a30",
+  "agentcard": "SKIPPED by election"
+ },
+ "resources_retired": {
+  "worker_clones": "/var/tmp/rdw (10 git clones of the gated source) removed",
+  "coverage_scratch": "/var/tmp/rdw-archive (~190 MB raw coverage) removed; reproducible by rerunning the gates",
+  "databases": "13 owned scratch Postgres databases dropped (victoria_<worker>*, prisma_local_push_ddl_test_*); base victoria kept",
+  "decrypted_private_artifacts": "decrypted trace-archive copies removed from /var/tmp; originals stay encrypted in R2 trace-archive/f7900465-cee2-467f-95ce-f54854ebd8be/",
+  "cloud": "smoke campaigns released their Machines (cancelled/passed controllers exited through their own cleanup; no owned Fly Machines retained by this deploy)"
+ },
+ "local_state_not_needed": [
+  "agents/venv and node_modules are pinned reproducible installs",
+  "agents/.env and back-end/.env credentials are the user's, untouched and not committed"
+ ],
+ "recovery": "All evidence is committed under docs/handoffs/pr-1734-closeout; the fix and regressions are on main (e8d5f1416). Nothing on this devbox is the only copy of a needed record.",
+ "protected": "Freedom and other threads' resources untouched; the idle review thread ph72593g4c49bgrayx6jv0pb9x8hpfks keeps its history",
+ "known_loss": "The incident's guest worker log was never retained before this repair."
+}
