@@ -76,7 +76,21 @@ interface GithubAppConfig {
   privateKey: string;
 }
 
+/**
+ * The app member is minted only in production unless GITHUB_APP_POOL says
+ * otherwise (same rule as agent repo creation): local, test and benchmark
+ * stacks carry copies of the production env and must not mint, or record,
+ * production app tokens.
+ */
+export function githubAppPoolEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const flag = (env.GITHUB_APP_POOL ?? '').trim().toLowerCase();
+  if (flag === 'on' || flag === 'true') return true;
+  if (flag === 'off' || flag === 'false') return false;
+  return env.RENDER === 'true';
+}
+
 function githubAppConfig(env: NodeJS.ProcessEnv): GithubAppConfig | null {
+  if (!githubAppPoolEnabled(env)) return null;
   const appId = (env.GITHUB_APP_ID ?? '').trim();
   const installationId = (env.GITHUB_APP_INSTALLATION_ID ?? '').trim();
   const keyB64 = (env.GITHUB_APP_PRIVATE_KEY_B64 ?? '').trim();

@@ -19,8 +19,9 @@ next; exhausted members rank last, soonest reset first.
   python3 scripts/github_token_pool.py pick [--resource core|graphql|both] [--repo-root DIR]
   python3 scripts/github_token_pool.py status [--repo-root DIR]
 
-`pick` prints only the chosen token (for `GH_TOKEN=$(...) gh ...`); `status`
-prints one line per member and never a token value.
+`pick` prints only the chosen token, for READ-ONLY calls (REST/curl or the real
+`gh` binary); writes that act as Andy (pushes, PRs, repo creation) must use
+GITHUB_TOKEN directly. `status` prints one line per member and never a token.
 """
 
 from __future__ import annotations

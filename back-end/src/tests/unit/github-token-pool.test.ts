@@ -14,6 +14,18 @@
 
 import assert from 'node:assert';
 
+// back-end/.env is loaded by dotenv on import and never overrides a defined variable, so
+// blank every pool input here: a real member in the env file must not leak into the cases.
+for (const key of ['GITHUB_TOKEN_4', 'GITHUB_TOKEN_5', 'GITHUB_TOKEN_6', 'GITHUB_TOKEN_7']) {
+  process.env[key] = '';
+}
+for (const key of ['GITHUB_TOKEN_8', 'GITHUB_TOKEN_9', 'GITHUB_APP_ID', 'GITHUB_APP_POOL']) {
+  process.env[key] = '';
+}
+process.env.GITHUB_APP_INSTALLATION_ID = '';
+process.env.GITHUB_APP_PRIVATE_KEY_B64 = '';
+delete process.env.GITHUB_API_BASE_URL;
+process.env.RENDER = '';
 process.env.GITHUB_TOKEN = 'primary';
 process.env.GITHUB_TOKEN_2 = 'bot2';
 process.env.GITHUB_TOKEN_3 = 'bot3';
@@ -209,10 +221,28 @@ async function main(): Promise<void> {
   const { generateKeyPairSync, createVerify } = await import('node:crypto');
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   process.env.GITHUB_APP_ID = '424242';
+  process.env.GITHUB_APP_POOL = 'on';
   process.env.GITHUB_APP_INSTALLATION_ID = '777';
   process.env.GITHUB_APP_PRIVATE_KEY_B64 = Buffer.from(
     privateKey.export({ type: 'pkcs8', format: 'pem' }) as string
   ).toString('base64');
+  // Local/test stacks (no RENDER, no GITHUB_APP_POOL=on) never mint, even with app credentials.
+  process.env.GITHUB_APP_POOL = '';
+  assert.strictEqual(pool.githubAppPoolEnabled(), false, 'disabled off Render by default');
+  process.env.RENDER = 'true';
+  assert.strictEqual(pool.githubAppPoolEnabled(), true, 'enabled on Render by default');
+  process.env.GITHUB_APP_POOL = 'off';
+  assert.strictEqual(pool.githubAppPoolEnabled(), false, 'GITHUB_APP_POOL=off wins on Render');
+  process.env.RENDER = '';
+  respond = () => limited(100);
+  reset();
+  await githubFetch('https://api.github.com/repos/o/r', {}, { fetchImpl: fakeFetch });
+  assert.deepStrictEqual(
+    calls.filter((c) => c.url.includes('/app/')),
+    [],
+    'no mint request is sent while the app member is disabled'
+  );
+  process.env.GITHUB_APP_POOL = 'on';
   let mints = 0;
   let mintStatus = 201;
   let expiresInMs = 3_600_000;
