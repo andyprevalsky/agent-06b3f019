@@ -16,6 +16,9 @@ import {
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import { scheduleMessageGmvCapture } from './messageGmvCapture';
 import { type CreateMessageParams, storableMessageParams, withoutNulJson } from './messageParams';
+import { recordPersonMessage } from './personMessageStamp';
+
+export { recordPersonMessage };
 
 const log = createLogger('Messages');
 
@@ -157,9 +160,11 @@ export async function createUserMessageInTransaction(
   tx: Prisma.TransactionClient,
   params: Pick<CreateMessageParams, 'agentId' | 'text' | 'metadata'>
 ): Promise<Message> {
-  return (
+  const message = (
     await persistOrdinaryMessage(storableMessageParams({ ...params, role: 'USER' }), null, tx)
   ).message;
+  await recordPersonMessage(message, tx);
+  return message;
 }
 
 /** Create, deduplicate, fence, persist, and broadcast one message. */

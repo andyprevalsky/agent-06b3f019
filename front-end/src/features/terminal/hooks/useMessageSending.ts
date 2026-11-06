@@ -321,6 +321,8 @@ export function useMessageSending({
             description: 'The agent will continue with your response',
           });
           setMessageInput('');
+          // The sidebar orders by the newest user message; re-read it now.
+          void loadAgents();
           return;
         }
 
@@ -329,6 +331,7 @@ export function useMessageSending({
         // A Browser-composer target goes straight to that browser task.
         await postMessage(selectedAgentId, messageInput, attachments, target);
         setMessageInput('');
+        void loadAgents();
         // Only a message to the agent itself lifts its pause.
         if (target === undefined && agentDetail?.status === 'PAUSED') {
           toast({

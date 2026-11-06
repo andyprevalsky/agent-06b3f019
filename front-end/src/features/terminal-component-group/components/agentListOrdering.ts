@@ -13,18 +13,35 @@ export function isPinned(agent: Agent): boolean {
 }
 
 /**
- * Ordering weight per run state: what is blocked on YOU outranks what is running
- * on its own, which outranks what is already over. A needs-help row that sorted
- * below thirty active runs is a row you never see.
+ * Ordering weight per run state: what is running comes first, then what is
+ * blocked on you, then what is already over (Andy, 2026-11-06).
  */
 const RUN_STATE_RANK: Record<AgentRunState, number> = {
-  'needs-help': 0,
-  active: 1,
+  active: 0,
+  'needs-help': 1,
   done: 2,
 };
 
+/** Rank of a run state in every sidebar list (roots, folders, sub-agents). */
+export function runStateRank(state: AgentRunState): number {
+  return RUN_STATE_RANK[state];
+}
+
 /**
- * Pinned first, then by run state (needs-help, active, done), then newest.
+ * Recency key inside a run-state tier: the newest message a person sent the
+ * agent, or its creation (the goal is the first user message) when none since.
+ */
+export function lastUserMessageTime(
+  lastUserMessageAt: string | null | undefined,
+  createdAt: string | undefined,
+): number {
+  const at = Date.parse(lastUserMessageAt ?? createdAt ?? '');
+  return Number.isNaN(at) ? 0 : at;
+}
+
+/**
+ * Pinned first, then by run state (active, needs-help, done), then the most
+ * recent user message.
  *
  * The backend orders pinned-then-recent; re-sorting here adds the run-state tier
  * (which depends on client-only attention data) and keeps the list correct
@@ -36,16 +53,17 @@ export function sortAgents(
   isArchived: boolean,
 ): Agent[] {
   const rank = (a: Agent) =>
-    RUN_STATE_RANK[
+    runStateRank(
       agentRunStatus(a, { hasAttentionRequest: attentionAgentIds.has(a.agent_id), isArchived })
-        .state
-    ];
+        .state,
+    );
+  const recency = (a: Agent) => lastUserMessageTime(a.last_user_message_at, a.created_at);
 
   return [...agents].sort((a, b) => {
     if (isPinned(a) !== isPinned(b)) return isPinned(a) ? -1 : 1;
     const byState = rank(a) - rank(b);
     if (byState !== 0) return byState;
-    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    return recency(b) - recency(a);
   });
 }
 

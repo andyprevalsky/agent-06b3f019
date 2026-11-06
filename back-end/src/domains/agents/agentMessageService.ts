@@ -11,6 +11,7 @@ import {
   createMessageOnce,
   createUserMessageInTransaction,
   createWorkflowMessageGroup,
+  recordPersonMessage,
 } from '../../providers/messages';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import type { PostMessageBody } from './types';
@@ -325,6 +326,7 @@ export async function postMessage(
     message = result.message;
   } else {
     message = await createMessage(messageParams);
+    await recordPersonMessage(message);
     // User attachment rows are external writes and deliberately remain outside
     // the worker-generation fence.
     if (body.attachments !== undefined && body.attachments.length > 0) {

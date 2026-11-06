@@ -37,6 +37,8 @@ export interface TreeNode {
   createdAt?: string;
   /** ISO last lifecycle update (REST snapshot, or the realtime event's own timestamp). */
   updatedAt?: string;
+  /** ISO newest person-authored message (REST snapshot only; realtime updates preserve it). */
+  lastUserMessageAt?: string;
   /** In-activity background tasks (explore/browser/code) owned by this agent. */
   backgroundTasks?: TreeBackgroundTask[];
   /** Codex-style tree address, e.g. `/root/outreach/draft_a` (absent on older rows). */
@@ -126,6 +128,7 @@ function apiToTreeNode(node: AgentTreeNode): TreeNode {
     failureContext: node.failure_context,
     createdAt: isoOrUndefined(node.created_at),
     updatedAt: isoOrUndefined(node.updated_at),
+    lastUserMessageAt: isoOrUndefined(node.last_user_message_at),
     backgroundTasks: parseBackgroundTasks(node.background_tasks),
     taskPath: typeof node.task_path === 'string' && node.task_path ? node.task_path : undefined,
   };
@@ -154,6 +157,7 @@ function realtimeToTreeNode(data: AgentStateChangedPayload, previous?: TreeNode)
     structuredOutput: data.structuredOutput,
     failureContext: data.failureContext,
     createdAt: previous?.createdAt,
+    lastUserMessageAt: previous?.lastUserMessageAt,
     backgroundTasks: parseBackgroundTasks(data.backgroundTasks) ?? previous?.backgroundTasks,
     taskPath:
       typeof data.taskPath === 'string' && data.taskPath ? data.taskPath : previous?.taskPath,
@@ -260,6 +264,7 @@ function fetchInitialTree(
         nodes.set(agentId, {
           ...node,
           createdAt: node.createdAt ?? snapshot?.createdAt,
+          lastUserMessageAt: node.lastUserMessageAt ?? snapshot?.lastUserMessageAt,
           taskPath: node.taskPath ?? snapshot?.taskPath,
           backgroundTasks: node.backgroundTasks ?? snapshot?.backgroundTasks,
           progressEstimate: mergeProgressEstimate(

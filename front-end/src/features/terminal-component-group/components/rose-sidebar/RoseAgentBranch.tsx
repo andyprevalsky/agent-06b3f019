@@ -1,8 +1,14 @@
-/** Each disclosure opens direct children only; off-screen roots do not subscribe. */
+/**
+ * Each disclosure opens direct children only; off-screen roots do not subscribe.
+ * Children (sub-agents and code agents together) sort like every sidebar list:
+ * running first, then the most recent user message (or creation).
+ */
 import { useEffect, useMemo, useState } from 'react';
+import type { CodeAgentListItem } from '@/lib/api/tree';
 import { mergeProgressEstimate } from '@/lib/progressEstimate';
 import { useAgentTree, type TreeNode } from '@/hooks/useAgentTree';
 import type { Agent } from '../../hooks';
+import { lastUserMessageTime, runStateRank } from '../agentListOrdering';
 import { agentRunStatus, type AgentRunStatus } from '../agentRunState';
 import RoseAgentRow from './RoseAgentRow';
 import RoseCodeAgentRow from './RoseCodeAgentRow';
@@ -35,6 +41,8 @@ function childAgent(root: Agent, node: TreeNode): Agent {
     status: node.status,
     temporal_workflow_id: null,
     pinned_at: null,
+    created_at: node.createdAt ?? root.created_at,
+    last_user_message_at: node.lastUserMessageAt ?? null,
   };
 }
 function childStatus(agent: Agent): AgentRunStatus {
@@ -42,6 +50,40 @@ function childStatus(agent: Agent): AgentRunStatus {
   return agent.status === 'ACTIVE' || agent.status === 'STARTING_UP'
     ? { state: 'active', label: 'Working' }
     : agentRunStatus(agent);
+}
+
+type ChildEntry =
+  | { kind: 'agent'; id: string; rank: number; at: number }
+  | { kind: 'code'; code: CodeAgentListItem; rank: number; at: number };
+
+/** One parent's children in display order: run state, then newest user message. */
+function orderedChildren(
+  childIds: readonly string[],
+  codes: readonly CodeAgentListItem[],
+  agents: ReadonlyMap<string, Agent>,
+  attention: ReadonlySet<string>,
+): ChildEntry[] {
+  const entries: ChildEntry[] = [];
+  for (const id of childIds) {
+    const row = agents.get(id);
+    if (!row) continue;
+    const state = attention.has(id) ? 'needs-help' : childStatus(row).state;
+    entries.push({
+      kind: 'agent',
+      id,
+      rank: runStateRank(state),
+      at: lastUserMessageTime(row.last_user_message_at, row.created_at),
+    });
+  }
+  for (const code of codes) {
+    entries.push({
+      kind: 'code',
+      code,
+      rank: runStateRank(code.status === 'ACTIVE' ? 'active' : 'done'),
+      at: lastUserMessageTime(null, code.created_at),
+    });
+  }
+  return entries.sort((a, b) => a.rank - b.rank || b.at - a.at);
 }
 
 export default function RoseAgentBranch({
@@ -162,18 +204,21 @@ export default function RoseAgentBranch({
         />
         {open && (
           <div data-testid={`rose-agent-children-${id}`}>
-            {childIds.map((child) => render(child, depth + 1, new Set(path).add(id)))}
-            {ownedCodes.map((code) => (
-              <RoseCodeAgentRow
-                key={code.code_agent_id}
-                codeAgent={code}
-                isExpanded
-                parentIndented={indented}
-                depth={depth + 1}
-                isSelected={s.selectedCodeAgentId === code.code_agent_id}
-                onOpen={() => s.onOpenCodeAgent(code)}
-              />
-            ))}
+            {orderedChildren(childIds, ownedCodes, agents, s.attentionAgentIds).map((entry) =>
+              entry.kind === 'agent' ? (
+                render(entry.id, depth + 1, new Set(path).add(id))
+              ) : (
+                <RoseCodeAgentRow
+                  key={entry.code.code_agent_id}
+                  codeAgent={entry.code}
+                  isExpanded
+                  parentIndented={indented}
+                  depth={depth + 1}
+                  isSelected={s.selectedCodeAgentId === entry.code.code_agent_id}
+                  onOpen={() => s.onOpenCodeAgent(entry.code)}
+                />
+              ),
+            )}
           </div>
         )}
       </div>

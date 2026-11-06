@@ -147,6 +147,92 @@ describe('sidebar agent hierarchy', () => {
       'false',
     );
   });
+  it('orders sub-agents and code agents running first, then by the most recent user message', async () => {
+    mockSession();
+    mockProjectsApi([]);
+    const child = (agent_id: string, status: string, created_at: string, last?: string) => ({
+      agent_id,
+      parent_agent_id: 'root',
+      goal: agent_id,
+      status,
+      progress: 0,
+      tools_in_use: [],
+      message_count: 1,
+      tree_cost_cents: 0,
+      created_at,
+      ...(last ? { last_user_message_at: last } : {}),
+    });
+    server.use(
+      http.get(`${API}/agents/tree`, () =>
+        HttpResponse.json({
+          agents: [
+            {
+              ...child('root', 'ACTIVE', '2026-10-21T00:00:00Z'),
+              parent_agent_id: null,
+              goal: 'Launch report',
+              temporal_workflow_id: 'root-wf',
+            },
+            child('done-messaged', 'COMPLETED', '2026-10-21T00:01:00Z', '2026-10-21T00:09:00Z'),
+            child('run-old', 'ACTIVE', '2026-10-21T00:02:00Z'),
+            child('run-messaged', 'ACTIVE', '2026-10-21T00:01:30Z', '2026-10-21T00:08:00Z'),
+            child('paused', 'PAUSED', '2026-10-21T00:07:00Z'),
+          ],
+        }),
+      ),
+      http.get(`${API}/agents/code-agents`, () =>
+        HttpResponse.json({
+          code_agents: [
+            {
+              code_agent_id: 'code-done',
+              owner_agent_id: 'root',
+              root_agent_id: 'root',
+              provider: 'codex',
+              title: 'Old charts',
+              status: 'COMPLETED',
+              created_at: '2026-10-21T00:06:00Z',
+            },
+            {
+              code_agent_id: 'code-run',
+              owner_agent_id: 'root',
+              root_agent_id: 'root',
+              provider: 'claude',
+              title: 'Build charts',
+              status: 'ACTIVE',
+              created_at: '2026-10-21T00:03:00Z',
+            },
+          ],
+        }),
+      ),
+    );
+    renderWithProviders(
+      <AppSidebar
+        {...defaultProps({
+          agents: [
+            makeAgent({
+              agent_id: 'root',
+              goal: 'Launch report',
+              status: 'ACTIVE',
+              temporal_workflow_id: 'root-wf',
+            }),
+          ],
+          user: signedInUser(),
+          selectedAgentId: 'root',
+        })}
+      />,
+    );
+    await screen.findByTestId('rose-agent-count-root');
+    expandBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Launch report' }));
+    await screen.findByTestId('rose-code-agent-row-code-run');
+    const rows = screen
+      .getByTestId('rose-agent-children-root')
+      .querySelectorAll<HTMLElement>(
+        '[data-testid^="rose-agent-row-"], [data-testid^="rose-code-agent-row-"]',
+      );
+    expect(
+      [...rows].map((el) => el.dataset.testid!.replace(/^rose-(code-)?agent-row-/, '')),
+    ).toEqual(['run-messaged', 'code-run', 'run-old', 'paused', 'done-messaged', 'code-done']);
+  });
   it('minimized: shows the actual active subtree count >1 on the robot, hiding child rows', async () => {
     setup();
     const badge = await screen.findByTestId('rose-agent-count-root');

@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 
 import { prisma } from '../database';
 import { getTemporalClient } from '../temporal';
-import { createMessage } from '../messages';
+import { createMessage, recordPersonMessage } from '../messages';
 import { createLogger } from '../logger';
 import { deleteAgentRecursive } from '../agentKill';
 import { deliverUserMessageToWorkflow } from '../agentResume';
@@ -498,7 +498,7 @@ async function commitReplyToAgent(
       text: message,
       role: 'USER',
       metadata: { source: 'sms_supervisor' },
-    });
+    }).then((posted) => recordPersonMessage(posted));
 
     log.info('Posted USER message', {
       phase: 'reply',
