@@ -136,7 +136,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 |------|-----------|------|
 | Any test | A third-party provider is out of credits or storage, or needs a credential or billing change only the user can make, with explicit evidence | Never top up or wait; report it at the end of the scorecard |
 | Treasury tests | Always | Never mutate treasury records to pass |
-| AgentCard | Production lane: the user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy production`); any lifecycle task, smoke included: the exact release stall (closed card, zero balance, transfer `consumed`, `releasedCents=0`) | Triage the native SKIPPED smoke row as `resource_skip` with `reason_code: agentcard_release_stall`; never PASS; unreleased funds stay a followup |
+| AgentCard | Production lane: the user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy production`); any lifecycle task, smoke included: the exact release stall (closed card, zero balance, transfer `consumed`, `releasedCents=0`) | Triage the native SKIPPED smoke row as `resource_skip` with `reason_code: agentcard_release_stall`; never PASS; unreleased funds stay a followup. Production lane: the exact stall proven from the run's native record is recorded `SKIPPED-stall` (satisfied, never PASS, unreleased amount stated); any other outcome fails |
 | Claude Code smoke | Preflight proves no synced Claude credential and no pool token | Task failures still block |
 | Codex E2B smoke | Every Codex credential path is out of credits (the test skips itself) | Never use `BLACKBOX_TEST_SKIP_DOMAINS` |
 | Benchmark judge | Confirmed third-party compute quota | |
@@ -189,7 +189,7 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 | Fly worker cutover, then the workflow migration matrix | agent runtime or `deploy-agents.yml` changed |
 | Vercel live on the merged SHA | `front-end/` changed |
 | Production semantics | always, after the Render, Vercel and Fly lanes it exercises |
-| AgentCard production lifecycle | AgentCard or payment paths changed |
+| AgentCard production lifecycle (PASS, `SKIPPED-elected`, or `SKIPPED-stall` for the exact release stall) | AgentCard or payment paths changed |
 | WMH SIM smoke | World Model Harness paths changed |
 | Mac release | `scripts/mac-app-release-decision` ships (shipped Mac surface changed, or the `MAC-APP-RELEASE` label) |
 | Mac local execution + computer use (manual) | a connected Mac exists: cloud-origin `spawn_agent(type="code", target="local")`, one visible computer-use action, native app build |
