@@ -204,14 +204,33 @@ def delete_tag(root: Path, token: str, repo: str, name: str) -> None:
         pass  # Retention only; the run, its logs and artifacts are independent of the tag.
 
 
-def find_run(gh: GitHub, head: str, name: str, deadline: float) -> dict | None:
-    path = f'/actions/workflows/{WORKFLOW}/runs?event=push&head_sha={head}&per_page=100'
+class WorkflowRejected(Exception):
+    """GitHub refused the workflow file at this commit; the run never owned a VM."""
+
+
+def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict | None:
+    # Filter by path, not the by-filename endpoint: that 404s until the workflow is on the default branch.
+    path = f'/actions/runs?event=push&head_sha={head}&per_page=100'
+    rejected_since = None
     while time.time() < deadline and not STOP.is_set():
-        runs = [r for r in gh.json(path, conditional=True).get('workflow_runs', []) if r.get('head_branch') == name]
-        if runs:
-            return min(runs, key=lambda r: r['id'])
+        runs = [r for r in gh.json(path, conditional=True).get('workflow_runs', []) if r.get('path') == WORKFLOW_PATH]
+        mine = [r for r in runs if r.get('head_branch') == name]
+        if mine:
+            return min(mine, key=lambda r: r['id'])
+        # A workflow-file error yields an unnamed failed run (head_branch null) with no jobs.
+        invalid = [r for r in runs if r.get('head_branch') is None and r.get('conclusion') == 'failure'
+                   and iso_epoch(r.get('created_at')) >= pushed - 5]
+        if invalid:
+            rejected_since = rejected_since or time.time()
+            if time.time() - rejected_since > 30:
+                raise WorkflowRejected(f"GitHub rejected {WORKFLOW_PATH} at {head}: {invalid[0].get('html_url')}")
         STOP.wait(5)
     return None
+
+
+def iso_epoch(value: str | None) -> float:
+    from datetime import datetime
+    return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp() if value else 0.0
 
 
 def wait_run(gh: GitHub, run_id: int, deadline: float) -> dict:
@@ -330,7 +349,11 @@ def launch(args) -> int:
         detail = error.stderr.decode(errors='replace')[-2000:] if isinstance(error, subprocess.CalledProcessError) else ''
         return finish(blocked(request, f'remote gate launch failed: {error} {detail}'.strip()))
     gh = GitHub(token, repo)
-    run = find_run(gh, head, name, min(deadline, time.time() + START_SECONDS))
+    try:
+        run = find_run(gh, head, name, min(deadline, time.time() + START_SECONDS), started)
+    except (WorkflowRejected, urllib.error.URLError) as error:
+        delete_tag(root, token, repo, name)
+        return finish(blocked(request, str(error), receipt={'transport': TRANSPORT, 'tag': name}))
     if run is None:
         reason = 'cancelled before the remote run started' if STOP.is_set() else 'deploy-gates workflow run never started'
         # Nothing started that we can name; the tag alone owns no VM.
