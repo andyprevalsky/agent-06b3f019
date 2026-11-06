@@ -1,0 +1,122 @@
+{
+ "format": "PR1694-DELETION-READINESS-MANIFEST-V1",
+ "generated_at": "2026-11-06T03:06:19Z",
+ "status": "PRESERVATION_VERIFIED",
+ "deletion_ready": true,
+ "deployment_pr": 1694,
+ "deployed_merge_sha": "7b15b3e06b77b57529cc868b2da50450f933180b",
+ "validated_source": {
+  "head": "77984e14b81802677b0e9a626af4266f2776d239",
+  "digest": "3b3d3007f5b20066961a9a20d018e7e1137a54aeb3eac7a79acb5df3cf1ec6fe"
+ },
+ "factory_ledger_commit": "a3a81bf1c1",
+ "production_verification": {
+  "fly": "deploy-agents run 42149026278 attempt 1 success; durable job 48e5a45ed166af354c3fc47c6554cb7939e2d75087228eda18cbb0393fca23a2 SUCCEEDED; live pointer hash 66be0af2f77e == expected",
+  "workflow_migration_13ac": "45/45 PASS",
+  "vercel": "production deployment dpl_H68gopvgfXGo8C39H3rnZCTAkQzj READY for 7b15b3e06b77",
+  "mac_release": "release-mac-app.yml run 42149071738 success (v1.1.274)",
+  "production_semantics": "chat-lifecycle-ratchet run 42153471486 passed, source_sha 7b15b3e06b77",
+  "render_backend_probes": "not applicable: no back-end/ changes",
+  "agentcard_production": "not selected: no payment-path trigger",
+  "mac_execution_acceptance": "SKIPPED - no Mac available: read-only prod LocalDevice query for user 1f85ff25 returned 0 rows at 2026-11-06T02:35:16Z"
+ },
+ "archives": [
+  {
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1694-7b15b3e0/20261106T030252Z.tar.aesgcm",
+   "encryption": "aes-256-gcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "key_source": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (managed production secret: Render/Fly/agents .env; same key as live trace archive)",
+   "nonce_b64": "89/kr1Ls0uI052uY",
+   "aad": "devbox-closeout-private/pr1694-7b15b3e0/20261106T030252Z.tar.aesgcm",
+   "compression": "gzip",
+   "plaintext_sha256": "637449474a58c77c1e114afd6503b7262200e3ae3ecc2fa6367615bef8b2cdd6",
+   "ciphertext_sha256": "c91c9a0978b3d92e26ee9d852b0891cc49538d9993e5f4d7465758acec3d6a0c",
+   "plaintext_bytes": 691404800,
+   "ciphertext_bytes": 153569022,
+   "member_count": 1141,
+   "members_sha256": "b653614b6394ddd913f6de731acbcf9a355a2a64070fb9fc923bb66b7d52bd66",
+   "verified_at": "2026-11-06T03:03:51Z",
+   "full_readback_verified": true,
+   "authenticated_decryption_verified": true,
+   "all_tar_members_hash_verified": true,
+   "contents": "cycle v1/v2/v3 state + receipts, deploy timing run, worker gate logs, smoke campaign summaries/job logs/batch records, review+approval ledgers, A/B mass-agent run records, stress logs, deploy tooling (inventory, triage, focus, cleanup proof)"
+  },
+  {
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1694-7b15b3e0/20261106T030551Z-preexisting-stash-rose-run-copy.tar.aesgcm",
+   "encryption": "aes-256-gcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "key_source": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (managed production secret: Render/Fly/agents .env; same key as live trace archive)",
+   "nonce_b64": "rbeckcXu3FWx3VAf",
+   "aad": "devbox-closeout-private/pr1694-7b15b3e0/20261106T030551Z-preexisting-stash-rose-run-copy.tar.aesgcm",
+   "compression": "gzip",
+   "plaintext_sha256": "1fc93034e23e93e4fb39f36c564db9828b9ce35dd9d3c780a0a035ea08e42747",
+   "ciphertext_sha256": "cde6f89eea431a50a89b9a640daf008cdb20c94bd94020ce164e112565fdfe3a",
+   "plaintext_bytes": 2877440,
+   "ciphertext_bytes": 91621,
+   "member_count": 2,
+   "members_sha256": "bd1211dc01b5781b87688f83c54210bd3566cb9db9b8976777307708ca0b493e",
+   "verified_at": "2026-11-06T03:05:51Z",
+   "full_readback_verified": true,
+   "authenticated_decryption_verified": true,
+   "all_tar_members_hash_verified": true,
+   "contents": "pre-existing local stash@{0} 0e2ffe95ba (On andyprevalsky/rose-run-copy: pre-sync deploy retry and explore recovery work) as git bundle refs/stash --not origin/main + full patch; not authored by this deploy, left untouched locally"
+  }
+ ],
+ "key_recovery": {
+  "variable": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+  "key_id": "trace-archive-prod-2026-07-03",
+  "recovery": "managed production secret (same key as the live trace archive; Render/Fly/agents env). Decrypt: AESGCM(key).decrypt(nonce, object_bytes, aad=object key), gunzip, untar; verify plaintext_sha256 and members.",
+  "never_commit": true
+ },
+ "inventory": [
+  {
+   "path": "source: feat/planner-task-titles 6d332ab52, fb904a513, 77984e14b",
+   "disposition": "committed (merged in 7b15b3e06)"
+  },
+  {
+   "path": "docs/plans/active",
+   "disposition": "no related plan; nothing to archive"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-pipeline{,.v1-6d332ab52,.v2-fb904a513}, .context/deploy-runs/20261105-224217-2075841, review/approval ledgers",
+   "disposition": "durably archived and verified (archives[0])"
+  },
+  {
+   "path": "/var/tmp/rose-dw/* (11 worker checkouts, 62 GiB)",
+   "disposition": "reproducible and unneeded: source 77984e14b on origin; gate logs archived; regenerate with scripts/deploy_test_worker.py --prepare-checkout; removed 2026-11-06"
+  },
+  {
+   "path": "system PG worker databases (victoria_stack_semantic_stack, victoria_backend-coverage-blackbox{,_s0,_s1,_s2}, victoria_live-probes, victoria_e2b-smoke, prisma_local_push_ddl_test_x4)",
+   "disposition": "reproducible test fixtures; dropped"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-cloud raw guest logs (~2.6 GB)",
+   "disposition": "summaries/job logs/batch records archived; raw per-bench guest logs reproducible by rerunning smoke at 77984e14b; unneeded"
+  },
+  {
+   "path": ".git/cloudbench-fleet-ownership/115cd528ad4d4729aa50e7e939a0bd34",
+   "disposition": "archived; its Machines 814394b9231538/8edd729b7643d8 and volumes natively destroyed/absent (runtime evidence never sealed)"
+  },
+  {
+   "path": "stash@{0} (andyprevalsky/rose-run-copy)",
+   "disposition": "durably archived and verified (archives[1]); owner follow-up"
+  },
+  {
+   "path": "agents/.env, back-end/.env, front-end/.env",
+   "disposition": "not committed; recoverable from managed project env / production secret surfaces"
+  }
+ ],
+ "resource_disposition": {
+  "fly_bench": "24 owned machine ids and 5 volume ids across the three smoke campaigns verified absent/destroyed",
+  "local_processes": "none in retired workers",
+  "local_stacks": "A/B local mass-agent stacks torn down by run-bench --local"
+ },
+ "followups": [
+  "stash@{0} (andyprevalsky/rose-run-copy) owner to decide integration or discard",
+  "structural suite leaks a prisma_local_push_ddl_test_<pid> database per run",
+  "controller data-plane runtime-evidence download / guest cleanup requests time out under host load (mass-agent exit 70, parallel-tool-calls HTTP 000)",
+  "staged cycle has no tooling to build native-cloud-cleanup proofs; interrupting a cycle strands worker timing runs"
+ ]
+}

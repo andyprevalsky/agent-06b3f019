@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "deploy-closeouts/pr1700/core-20261106T0435Z.rpgt",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "3dec5b06714c93a00505c8b29c359fea77d71d8d51cb909d9fac263a56166923",
+  "gzip_sha256": "526195c66940df8aaa14dbb6ec984c6d9d0ed5c12b4876c24cdf4fb8cb49ac39",
+  "stored_bytes": 1632489356,
+  "frames": 195,
+  "files": 8508,
+  "original_bytes": 5112453748,
+  "manifest_sha256": "802b858e23ba97cb407b08a5b2831533b56f3fe688977de1c13ae223e4a5f0a9",
+  "full_readback_verified": true
+}

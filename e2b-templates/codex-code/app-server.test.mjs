@@ -1221,8 +1221,11 @@ for (const [speed, expectedTier] of [
   test(`a ${speed} session funded by Azure alone starts GPT-6.1 Sol at ${expectedTier ?? "standard"}`, async () => {
     const { seen, calls, logs } = await runOAuthFailureFixture(
       {},
+      // The fake turn can end before the server emits "ready" (after turn/start returns).
       (events) =>
-        events.some((e) => e.type === "turn_ended" && e.status === "completed"),
+        events.some(
+          (e) => e.type === "turn_ended" && e.status === "completed",
+        ) && events.some((e) => e.type === "session" && e.status === "ready"),
       {
         oauth: false,
         model: "gpt-6.1-sol",
