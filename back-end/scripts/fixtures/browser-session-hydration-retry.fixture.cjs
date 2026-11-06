@@ -33,7 +33,8 @@ let prisma,
   storageWrites = 0,
   inspectMode = 'exact',
   failGoto = true,
-  pendingGoto;
+  pendingGoto,
+  onPendingGoto;
 const nativeIds = new Set(),
   receipts = [],
   releases = [];
@@ -90,7 +91,10 @@ const browser = (id) => {
           assert.deepEqual(opts, { waitUntil: 'domcontentloaded', timeout: 30000 });
           gotocalls++;
           if (!failGoto || !failGotoBeforeCommit) url = next;
-          if (pendingGoto) await pendingGoto;
+          if (pendingGoto) {
+            onPendingGoto?.();
+            await pendingGoto;
+          }
           if (failGoto) {
             failGoto = false;
             throw Object.assign(new Error('page.goto: Timeout 30000ms exceeded'), {
@@ -527,22 +531,20 @@ async function run() {
   // Live hydration has no completion acknowledgement; a second caller must not adopt.
   const active = await fixture();
   failGoto = false;
-  let release, entered;
+  let release;
   pendingGoto = new Promise((r) => (release = r));
-  const enteredPromise = new Promise((r) => (entered = r));
-  const origUpdate = prisma.toolSideEffect.updateMany.bind(prisma.toolSideEffect);
-  prisma.toolSideEffect.updateMany = async (args) => {
-    const result = await origUpdate(args);
-    if (args.data.request?.phase === 'hydrating') entered();
-    return result;
-  };
+  // The hydrating phase is written before target provenance. Wait for the
+  // actual held RPC so the owner cannot overwrite expiry during test setup.
+  const enteredPromise = new Promise((r) => (onPendingGoto = r));
   const work = resumeBrowserSession(active.id);
   await enteredPromise;
+  onPendingGoto = undefined;
   const held = await prisma.toolSideEffect.findUniqueOrThrow({
     where: { operationKey: key(active.id) },
   });
   assert.equal(held.response, null);
   assert.equal(held.request.phase, 'hydrating');
+  assert(held.request.hydrationTargets?.length > 0, 'Held goto must have durable provenance');
   const before = creates; // expiry is fixture setup; active owner still has its original immutable request.
   await prisma.toolSideEffect.update({
     where: { id: held.id },
@@ -553,7 +555,6 @@ async function run() {
   release();
   pendingGoto = undefined;
   await work;
-  prisma.toolSideEffect.updateMany = origUpdate;
   receipts.push({ kind: 'no-ack-inflight', passed: true }); // Carried state is outside the encrypted checkpoint receipt: do not acknowledge it.
   const carried = { cookies: [], origins: [{ origin: 'https://carry.invalid', localStorage: [] }] };
   const carryPending = await fixture();
