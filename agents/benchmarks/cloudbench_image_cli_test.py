@@ -1352,3 +1352,54 @@ activate_machine_environment warm warm desired
     assert result.returncode != 0, result.stdout
     assert len((tmp_path / "updates").read_text().splitlines()) == 1
     assert int((tmp_path / "reads").read_text()) == 3
+
+
+@pytest.mark.parametrize("purpose", ["maintenance", "idle-capacity"])
+@pytest.mark.parametrize("settle", ["stopped", "started", "wrong-shape", "absent", "foreign", "replacing", "lost-lock"])
+def test_acknowledged_resize_completes_before_native_prestart_or_finish(tmp_path, purpose, settle):
+    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
+    start = cloud.index("wait_for_warm_resize() {") if "wait_for_warm_resize() {" in cloud else cloud.index("resize_stopped_warm_source() {")
+    last = cloud.index("resize_stopped_warm_source() {", start)
+    functions = cloud[start:cloud.index("\n}\n", last)+3]
+    (tmp_path / "state").write_text("stopped");(tmp_path / "polls").write_text("0")
+    (tmp_path / "updates").write_text("")
+    script = functions + r"""
+APP=fixture
+assert_app_environment_lock_ownership() {
+    [ "$SETTLE" != lost-lock ] || [ ! -s "$DIR/updates" ]
+}
+machine_state() { cat "$DIR/state"; }
+stop_machine_strict() { echo 'unexpected stop' >&2; return 91; }
+FLY() {
+    if [ "$1 $2" = 'machines list' ]; then
+        n=$(( $(cat "$DIR/polls") + 1 )); echo "$n" > "$DIR/polls"
+        state=replacing; cpus=99
+        if [ "$n" -gt 1 ]; then
+            state="$SETTLE"; cpus="$EXPECTED_CPUS"
+            [ "$SETTLE" != wrong-shape ] || { state=stopped; cpus=99; }
+            [ "$SETTLE" != lost-lock ] || state=stopped
+        fi
+        echo "$state" > "$DIR/state"
+        [ "$state" != absent ] || { echo '[]'; return 0; }
+        id=warm; [ "$state" != foreign ] || { id=foreign; state=stopped; }
+        printf '[{"id":"%s","state":"%s","config":{"guest":{"cpu_kind":"shared","cpus":%s,"memory_mb":%s}}}]\n' "$id" "$state" "$cpus" "$EXPECTED_MEMORY"
+        return 0
+    fi
+    [ "$1 $2 $3" = 'machine update warm' ] || return 92
+    echo "$*" >> "$DIR/updates"; echo replacing > "$DIR/state"; return 0
+}
+resize_stopped_warm_source warm "shared-cpu-${EXPECTED_CPUS}x" "$EXPECTED_MEMORY" "$PURPOSE" || exit 31
+# The next native prestart/finish observation requires stopped, not CLI0.
+[ "$(machine_state warm)" = stopped ] || exit 32
+"""
+    result = subprocess.run([BASH,"-c",script],env={**os.environ,"DIR":str(tmp_path),"SETTLE":settle,"PURPOSE":purpose,
+        "EXPECTED_CPUS":"4" if purpose == "maintenance" else "1",
+        "EXPECTED_MEMORY":"8192" if purpose == "maintenance" else "2048",
+        "CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS":"3","CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY":"0"},
+        capture_output=True,text=True,timeout=15)
+    assert (result.returncode == 0) == (settle == "stopped"), result.stdout + result.stderr
+    updates = (tmp_path / "updates").read_text().splitlines()
+    assert len(updates) == 1
+    assert "--skip-start --yes" in updates[0]
+    if settle == "replacing":
+        assert (tmp_path / "polls").read_text().strip() == "3"

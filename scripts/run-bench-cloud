@@ -2410,6 +2410,40 @@ stop_machine_strict() {  # stop_machine_strict <id>
     return 1
 }
 
+wait_for_warm_resize() {  # acknowledged own skip-start update only
+    local id="$1" size="$2" memory="$3" attempt=1 verdict inventory
+    local attempts="${CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS:-15}"
+    local retry_delay="${CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY:-2}"
+    while [ "$attempt" -le "$attempts" ]; do
+        assert_app_environment_lock_ownership || return 1
+        inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+        verdict="$(printf '%s' "$inventory" | MACHINE_ID="$id" VM_SIZE="$size" VM_MEMORY="$memory" python3 -c '
+import json,os,re,sys
+try:
+    rows=json.load(sys.stdin)
+    if not isinstance(rows,list) or any(not isinstance(m,dict) for m in rows):raise ValueError()
+    matches=[m for m in rows if m.get("id")==os.environ["MACHINE_ID"]]
+    if len(matches)!=1:raise ValueError()
+    machine=matches[0];state=machine.get("state")
+    shape=re.fullmatch(r"(shared-cpu|performance)-([1-9][0-9]*)x",os.environ["VM_SIZE"])
+    if not shape:raise ValueError()
+    expected={"cpu_kind":"shared" if shape[1]=="shared-cpu" else "performance",
+              "cpus":int(shape[2]),"memory_mb":int(os.environ["VM_MEMORY"])}
+    if state=="stopped" and machine.get("config",{}).get("guest")==expected:print("ready")
+    elif state in ("stopped","created","pending","replacing","stopping"):print("pending")
+    else:raise ValueError()
+except (ValueError,TypeError,KeyError,AttributeError):raise SystemExit(1)
+')" || return 1
+        if [ "$verdict" = ready ]; then
+            assert_app_environment_lock_ownership || return 1
+            return 0
+        fi
+        [ "$attempt" -lt "$attempts" ] && sleep "$retry_delay"
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory> <purpose>
     local id="$1" size="$2" memory="$3" purpose="$4" state
     local attempt=1 max_attempts retry_delay this_delay cap update_out update_rc
@@ -2453,7 +2487,9 @@ resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory
         update_out="$(FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
             --command "sleep infinity" --skip-start --yes 2>&1)" || update_rc=$?
         if [ "$update_rc" -eq 0 ]; then
-            return 0
+            wait_for_warm_resize "$id" "$size" "$memory" && return 0
+            echo "❌ acknowledged warm resize did not settle on stopped requested shape" >&2
+            return 1
         fi
         if printf '%s' "$update_out" | grep -Eqi 'lease currently held|failed to (obtain|get) lease'; then
             if [ "$attempt" -ge "$lease_attempts" ]; then
