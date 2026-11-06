@@ -98,7 +98,7 @@ jobs:
 
       - name: Bundle evidence
         if: always()
-        run: python3 scripts/deploy_test_github.py remote-bundle --out "$RUNNER_TEMP/gate"
+        run: uv run --quiet --no-project --with boto3 --with python-dotenv python3 scripts/deploy_test_github.py remote-bundle --out "$RUNNER_TEMP/gate"
 
       - name: Release dependency mounts
         if: always()

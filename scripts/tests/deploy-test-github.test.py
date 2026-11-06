@@ -518,5 +518,89 @@ class Launcher(unittest.TestCase):
                 gh.find_run(Fake([rejected]), head, name, 100, 0)
 
 
+class FakeS3:
+    """In-memory stand-in for the boto3 S3 client the result channel uses."""
+
+    class Missing(Exception):
+        response = {'Error': {'Code': 'NoSuchKey'}}
+
+    def __init__(self):
+        self.objects = {}
+
+    def put_object(self, Bucket, Key, Body):
+        self.objects[(Bucket, Key)] = Body
+
+    def get_object(self, Bucket, Key):
+        if (Bucket, Key) not in self.objects:
+            raise self.Missing()
+        return {'Body': io.BytesIO(self.objects[(Bucket, Key)])}
+
+    def list_objects_v2(self, Bucket, Prefix):
+        return {'Contents': [{'Key': k} for b, k in self.objects if b == Bucket and k.startswith(Prefix)]}
+
+    def delete_objects(self, Bucket, Delete):
+        for item in Delete['Objects']:
+            self.objects.pop((Bucket, item['Key']), None)
+
+
+class ResultChannel(unittest.TestCase):
+    def channel(self):
+        return gh.Channel({'R2_BUCKET_TRACE_ARCHIVE': 'b'}, client=FakeS3())
+
+    def test_objects_round_trip_under_the_tag_prefix_and_are_deleted_together(self):
+        channel = self.channel()
+        digest = channel.put('deploy-gates/2vcpu/g-1', 'result.json', b'{}')
+        self.assertEqual(digest, __import__('hashlib').sha256(b'{}').hexdigest())
+        self.assertEqual(channel.get('deploy-gates/2vcpu/g-1', 'result.json'), b'{}')
+        self.assertIsNone(channel.get('deploy-gates/2vcpu/g-1', 'done.json'))
+        channel.put('deploy-gates/2vcpu/other', 'done.json', b'1')
+        channel.delete('deploy-gates/2vcpu/g-1')
+        self.assertIsNone(channel.get('deploy-gates/2vcpu/g-1', 'result.json'))
+        self.assertEqual(channel.get('deploy-gates/2vcpu/other', 'done.json'), b'1')
+
+    def test_missing_credentials_fall_back_to_the_rest_path(self):
+        with self.assertRaises(ValueError):
+            gh.Channel({})
+
+    def test_done_marker_is_written_last_with_every_object_digest(self):
+        channel = self.channel()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            (out / 'artifact').mkdir()
+            (out / 'artifact' / 'result.json').write_text('{"ok": 1}')
+            (out / 'result.json').write_text('{"ok": 1}')
+            env = {'GITHUB_REF_NAME': 'deploy-gates/2vcpu/g-1', 'GITHUB_RUN_ID': '42', 'GITHUB_REPOSITORY': 'o/r'}
+            writes = []
+            original = channel.put
+            channel.put = lambda name, leaf, data: (writes.append(leaf), original(name, leaf, data))[1]
+            with patch.dict(os.environ, env), patch.object(gh, 'Channel', return_value=channel):
+                gh.publish_done(out, out / 'artifact')
+            self.assertEqual(writes[-1], 'done.json')
+            done = json.loads(channel.get('deploy-gates/2vcpu/g-1', 'done.json'))
+            self.assertEqual(done['run_id'], 42)
+            for leaf, digest in done['objects'].items():
+                self.assertEqual(__import__('hashlib').sha256(channel.get('deploy-gates/2vcpu/g-1', leaf)).hexdigest(),
+                                 digest)
+
+    def test_watch_returns_on_done_and_asks_github_only_for_a_silent_channel(self):
+        channel = self.channel()
+        name = 'deploy-gates/4vcpu/g-1'
+        channel.put(name, 'started.json', json.dumps({'run_id': 5, 'url': 'u'}).encode())
+        channel.put(name, 'done.json', json.dumps({'run_id': 5, 'objects': {}, 'at': 1}).encode())
+
+        class NoGitHub:
+            def json(self, *a, **k):
+                raise AssertionError('the channel path must not call the GitHub API')
+
+        with redirect_stdout(io.StringIO()):
+            outcome = gh.watch_channel(NoGitHub(), channel, 'h', name, gh.time.time() + 60, 0)
+        self.assertEqual((outcome['kind'], outcome['receipt']['run_id']), ('channel', 5))
+        silent = self.channel()
+        with patch.object(gh, 'START_SECONDS', 0), patch.object(gh, 'find_run', return_value=None), \
+                patch.object(gh.STOP, 'wait'):
+            self.assertEqual(gh.watch_channel(NoGitHub(), silent, 'h', name, gh.time.time() + 60, 0)['kind'],
+                             'never-started')
+
+
 if __name__ == '__main__':
     unittest.main()

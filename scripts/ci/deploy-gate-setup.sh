@@ -36,6 +36,9 @@ if [ -f "$bundle/ngrok/ngrok.yml" ]; then
   install -D -m 0600 "$bundle/ngrok/ngrok.yml" "$HOME/.config/ngrok/ngrok.yml"
 fi
 rm -rf "$bundle"
+# Tell the coordinator which run owns this gate (scripts/deploy_test_github.py result channel).
+uv run --quiet --no-project --with boto3 --with python-dotenv python3 scripts/deploy_test_github.py remote-signal \
+  --out "$RUNNER_TEMP/gate" || echo "result channel unavailable; the coordinator falls back to the GitHub API" >&2
 
 step "git identity"
 git config --global user.name "Rose Deploy Gate"

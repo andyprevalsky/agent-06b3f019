@@ -42,6 +42,7 @@ WORKFLOW = 'deploy-gates.yml'
 WORKFLOW_PATH = '.github/workflows/' + WORKFLOW
 TAG_PREFIX = 'deploy-gates'
 ARTIFACT = 'deploy-gate-result'
+CHANNEL_PREFIX = 'deploy-gates/v1'
 REQUEST_REF = 'refs/deploy-gate/request'
 REMOTE_ROOT = '/home/runner/_work/rose/rose'
 RUNNER = re.compile(r'^blacksmith-(2|4|8|16|32)vcpu-ubuntu-2404$')
@@ -51,6 +52,8 @@ API = 'https://api.github.com'
 START_SECONDS = 300.0        # tag push -> run visible (GitHub queueing + Blacksmith pickup)
 POLL_SECONDS = 60.0          # ETag-conditional; gates take minutes and the REST quota is shared
 START_POLL_SECONDS = 10.0
+CHANNEL_POLL_SECONDS = 15.0     # R2 GETs: no GitHub quota
+LIVENESS_SECONDS = 600.0        # one REST status read per gate every 10 min
 CANCEL_SECONDS = 180.0       # cancel request -> run completed (VM destroyed)
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 MAX_RESULT_BYTES = 64 * 1024 * 1024
@@ -191,6 +194,65 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class Channel:
+    """The gate's result channel: the private R2 trace bucket under deploy-gates/v1/<tag>/.
+
+    The VM writes started.json, then its result, timing and evidence zip, and done.json last
+    (with each object's sha256). The coordinator polls these objects, so the hot path never
+    spends the GitHub REST quota that every thread on a devbox shares.
+    """
+
+    def __init__(self, env: dict, client=None):
+        self.bucket = env.get('R2_BUCKET_TRACE_ARCHIVE')
+        if client is None:
+            import boto3
+            from botocore.config import Config
+            if not (env.get('R2_ACCOUNT_ID') and env.get('R2_ACCESS_KEY_ID') and env.get('R2_SECRET_ACCESS_KEY')
+                    and self.bucket):
+                raise ValueError('R2 result channel credentials are missing')
+            client = boto3.client('s3', endpoint_url=f"https://{env['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+                                  aws_access_key_id=env['R2_ACCESS_KEY_ID'],
+                                  aws_secret_access_key=env['R2_SECRET_ACCESS_KEY'], region_name='auto',
+                                  config=Config(connect_timeout=15, read_timeout=120,
+                                                retries={'max_attempts': 5, 'mode': 'adaptive'}))
+        self.client = client
+
+    @staticmethod
+    def prefix(name: str) -> str:
+        return f'{CHANNEL_PREFIX}/{name}/'
+
+    def put(self, name: str, leaf: str, data: bytes) -> str:
+        self.client.put_object(Bucket=self.bucket, Key=self.prefix(name) + leaf, Body=data)
+        return hashlib.sha256(data).hexdigest()
+
+    def get(self, name: str, leaf: str) -> bytes | None:
+        try:
+            return self.client.get_object(Bucket=self.bucket, Key=self.prefix(name) + leaf)['Body'].read()
+        except Exception as error:  # botocore NoSuchKey / 404: not written yet
+            code = getattr(error, 'response', {}).get('Error', {}).get('Code')
+            if code in ('NoSuchKey', '404', 'NotFound'):
+                return None
+            raise
+
+    def delete(self, name: str) -> None:
+        listed = self.client.list_objects_v2(Bucket=self.bucket, Prefix=self.prefix(name)).get('Contents', [])
+        if listed:
+            self.client.delete_objects(Bucket=self.bucket,
+                                       Delete={'Objects': [{'Key': o['Key']} for o in listed]})
+
+
+def env_file_values(root: Path) -> dict:
+    values = dict(os.environ)
+    try:
+        from dotenv import dotenv_values
+        for rel in ('back-end/.env', 'agents/.env'):
+            for key, value in dotenv_values(root / rel).items():
+                values.setdefault(key, value)
+    except ImportError:
+        pass
+    return values
+
+
 # ---------------------------------------------------------------- coordinator side
 
 def push_tag(root: Path, token: str, repo: str, name: str, raw: bytes) -> str:
@@ -296,6 +358,10 @@ def download_artifact(gh: GitHub, run_id: int, destination: Path) -> Path | None
         with urllib.request.urlopen(urllib.request.Request(headers['Location'],
                                     headers={'User-Agent': 'rose-deploy-gates'}), timeout=300) as response:
             body = response.read(MAX_ARTIFACT_BYTES + 1)
+    return extract_zip(body, destination)
+
+
+def extract_zip(body: bytes, destination: Path) -> Path:
     if len(body) > MAX_ARTIFACT_BYTES:
         raise ValueError('remote gate artifact exceeds the transport limit')
     destination.mkdir(parents=True, exist_ok=True)
@@ -363,35 +429,55 @@ def launch(args) -> int:
         detail = error.stderr.decode(errors='replace')[-2000:] if isinstance(error, subprocess.CalledProcessError) else ''
         return finish(blocked(request, f'remote gate launch failed: {error} {detail}'.strip()))
     gh = GitHub(token, repo)
+    folder = result_path.parent / 'remote-artifact'
     try:
-        run = find_run(gh, head, name, min(deadline, time.time() + START_SECONDS), started)
+        channel = Channel(env_file_values(root))
+    except (ImportError, ValueError) as error:
+        print(f'DEPLOY_GATE_CHANNEL unavailable ({error}); watching the run through the GitHub API', flush=True)
+        channel = None
+    try:
+        outcome = (watch_channel(gh, channel, head, name, deadline, started) if channel is not None
+                   else watch_rest(gh, head, name, deadline, started))
     except (WorkflowRejected, urllib.error.URLError) as error:
         delete_tag(root, token, repo, name)
         return finish(blocked(request, str(error), receipt={'transport': TRANSPORT, 'tag': name}))
-    if run is None:
+    kind, receipt = outcome['kind'], outcome.get('receipt') or {'transport': TRANSPORT, 'tag': name}
+    receipt['rate_limited_seconds'] = gh.rate_limited_seconds
+    if kind == 'never-started':
+        delete_tag(root, token, repo, name)  # Nothing started that we can name; the tag alone owns no VM.
         reason = 'cancelled before the remote run started' if STOP.is_set() else 'deploy-gates workflow run never started'
-        # Nothing started that we can name; the tag alone owns no VM.
-        delete_tag(root, token, repo, name)
-        return finish(blocked(request, reason, receipt={'transport': TRANSPORT, 'tag': name}))
-    print(f'DEPLOY_GATE_REMOTE_RUN {run["html_url"]}', flush=True)
-    run = wait_run(gh, run['id'], deadline)
-    if run.get('status') != 'completed':
+        return finish(blocked(request, reason, receipt=receipt))
+    if kind == 'unfinished':
         reason = 'cancelled' if STOP.is_set() else 'existing gate deadline exhausted'
-        run = cancel_run(gh, run['id'])
-        receipt = job_receipt(gh, run)
-        owner = None if run.get('status') == 'completed' else {k: receipt[k] for k in ('transport', 'run_id', 'url')}
-        if owner is None:
+        run = cancel_run(gh, receipt['run_id'])
+        confirmed = run.get('status') == 'completed'
+        receipt.update(status=run.get('status'), conclusion=run.get('conclusion'))
+        if confirmed:
             delete_tag(root, token, repo, name)
+            if channel is not None:
+                channel.delete(name)
+        owner = None if confirmed else {k: receipt.get(k) for k in ('transport', 'run_id', 'url')}
         return finish(blocked(request, f'remote run {reason}', owner=owner, receipt=receipt))
-    receipt = job_receipt(gh, run)
     delete_tag(root, token, repo, name)  # The run, its logs and artifact outlive the tag.
-    if run.get('head_sha') != head:
+    if receipt.get('head_sha') not in (None, head):
         return finish(blocked(request, 'remote run executed a different commit', receipt=receipt))
-    folder = result_path.parent / 'remote-artifact'
     try:
-        artifact = download_artifact(gh, run['id'], folder)
+        if kind == 'channel':
+            done = outcome['done']
+            for leaf in ('artifact.zip', 'result.json'):
+                if leaf in done['objects']:
+                    data = channel.get(name, leaf)
+                    if data is None or hashlib.sha256(data).hexdigest() != done['objects'][leaf]:
+                        raise ValueError(f'channel {leaf} is missing or differs from its done.json digest')
+                    if leaf == 'artifact.zip':
+                        extract_zip(data, folder)
+            artifact = folder if folder.is_dir() else None
+            channel.delete(name)
+        else:
+            artifact = download_artifact(gh, receipt['run_id'], folder)
         if artifact is None or not (artifact / 'result.json').is_file():
-            return finish(blocked(request, f"remote run {run.get('conclusion')} without a worker result", receipt=receipt))
+            return finish(blocked(request, f"remote run {receipt.get('conclusion') or 'ended'} without a worker result",
+                                  receipt=receipt))
         if (artifact / 'result.json').stat().st_size > MAX_RESULT_BYTES:
             raise ValueError('remote worker result exceeds the transport limit')
         result = json.loads((artifact / 'result.json').read_text())
@@ -403,9 +489,60 @@ def launch(args) -> int:
     if any(result.get(k) != request.get(k) for k in ('token', 'source', 'gate')):
         return finish(blocked(request, 'remote worker result identity mismatch', receipt=receipt))
     localize_logs(result, artifact)
-    receipt['rate_limited_seconds'] = gh.rate_limited_seconds
     result['remote'] = receipt
     return finish(result)
+
+
+def watch_rest(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict:
+    run = find_run(gh, head, name, min(deadline, time.time() + START_SECONDS), pushed)
+    if run is None:
+        return {'kind': 'never-started'}
+    print(f'DEPLOY_GATE_REMOTE_RUN {run["html_url"]}', flush=True)
+    run = wait_run(gh, run['id'], deadline)
+    receipt = job_receipt(gh, run)
+    return {'kind': 'rest' if run.get('status') == 'completed' else 'unfinished', 'receipt': receipt}
+
+
+def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline: float, pushed: float) -> dict:
+    """Poll the R2 channel; GitHub is asked only when the channel stays silent or the run must be cancelled."""
+    start_by, receipt, checked = min(deadline, time.time() + START_SECONDS), None, time.time()
+    while not STOP.is_set() and time.time() < deadline:
+        raw = channel.get(name, 'done.json')
+        if raw is not None:
+            done = json.loads(raw)
+            receipt = {**(receipt or {}), **{k: v for k, v in done.items() if k not in ('objects', 'at')},
+                       'finished_at': done.get('at')}
+            return {'kind': 'channel', 'done': done, 'receipt': receipt}
+        if receipt is None:
+            started = channel.get(name, 'started.json')
+            if started is not None:
+                receipt = json.loads(started)
+                print(f"DEPLOY_GATE_REMOTE_RUN {receipt.get('url')}", flush=True)
+            elif time.time() >= start_by:
+                # Silent channel: a rejected workflow, a setup failure before the env bundle, or no runner yet.
+                run = find_run(gh, head, name, time.time() + 30, pushed)
+                if run is None:
+                    return {'kind': 'never-started'}
+                receipt = {'transport': TRANSPORT, 'run_id': run['id'], 'url': run.get('html_url'), 'tag': name}
+                print(f"DEPLOY_GATE_REMOTE_RUN {receipt['url']}", flush=True)
+        if receipt is not None and time.time() - checked >= LIVENESS_SECONDS:
+            # A run that ended without done.json (VM lost, setup died early) must not wait out the deadline.
+            checked = time.time()
+            try:
+                run = gh.json(f"/actions/runs/{receipt['run_id']}", conditional=True)
+            except urllib.error.HTTPError:
+                run = {}
+            if run.get('status') == 'completed' and channel.get(name, 'done.json') is None:
+                STOP.wait(30)  # the bundle step's upload may still be landing
+                if channel.get(name, 'done.json') is None:
+                    return {'kind': 'rest', 'receipt': job_receipt(gh, run)}
+        STOP.wait(START_POLL_SECONDS if receipt is None else CHANNEL_POLL_SECONDS)
+    if receipt is None:
+        run = find_run(gh, head, name, time.time() + 30, pushed)
+        if run is None:
+            return {'kind': 'never-started'}
+        receipt = {'transport': TRANSPORT, 'run_id': run['id'], 'url': run.get('html_url'), 'tag': name}
+    return {'kind': 'unfinished', 'receipt': receipt}
 
 
 # ---------------------------------------------------------------- runner side
@@ -492,13 +629,49 @@ def remote_bundle(args) -> int:
         shutil.copyfile(path, target)
         total += size
     (artifact / 'bundle.json').write_text(json.dumps({'bytes': total, 'skipped': skipped}, indent=1))
+    publish_done(out, artifact)
     return 0
+
+
+def runner_identity() -> dict:
+    run_id = os.environ.get('GITHUB_RUN_ID')
+    return {'transport': TRANSPORT, 'run_id': int(run_id) if run_id and run_id.isdigit() else None,
+            'run_attempt': os.environ.get('GITHUB_RUN_ATTEMPT'), 'event_sha': os.environ.get('GITHUB_SHA'),
+            'tag': os.environ.get('GITHUB_REF_NAME'), 'runner_name': os.environ.get('RUNNER_NAME'),
+            'url': (f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+                    f"{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{run_id}") if run_id else None}
+
+
+def remote_signal(args) -> int:
+    """started.json, as soon as the VM can reach the channel: the coordinator's run id for cancellation."""
+    Channel(env_file_values(ROOT)).put(os.environ['GITHUB_REF_NAME'], 'started.json',
+                                       json.dumps({**runner_identity(), 'at': time.time()}).encode())
+    return 0
+
+
+def publish_done(out: Path, artifact: Path) -> None:
+    try:
+        channel = Channel(env_file_values(ROOT))
+    except (ImportError, ValueError) as error:
+        print(f'DEPLOY_GATE_CHANNEL unavailable: {error}', flush=True)
+        return  # The coordinator falls back to the run's GitHub artifact.
+    name = os.environ['GITHUB_REF_NAME']
+    archive = out / 'artifact.zip'
+    with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
+        for path in sorted(artifact.rglob('*')):
+            if path.is_file():
+                bundle.write(path, path.relative_to(artifact))
+    done = {**runner_identity(), 'at': time.time(), 'objects': {}}
+    for leaf, path in (('artifact.zip', archive), ('result.json', out / 'result.json')):
+        if path.is_file():
+            done['objects'][leaf] = channel.put(name, leaf, path.read_bytes())
+    channel.put(name, 'done.json', json.dumps(done).encode())  # written last: the completion marker
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='mode')
-    for mode in ('remote-extract', 'remote-run', 'remote-bundle'):
+    for mode in ('remote-extract', 'remote-run', 'remote-bundle', 'remote-signal'):
         step = sub.add_parser(mode)
         step.add_argument('--out', type=Path, required=True)
         if mode == 'remote-extract':
@@ -515,6 +688,8 @@ def main(argv: list[str] | None = None) -> int:
         return remote_run(args)
     if args.mode == 'remote-bundle':
         return remote_bundle(args)
+    if args.mode == 'remote-signal':
+        return remote_signal(args)
     if not (args.runner and args.worker_script and args.worker_root and args.deadline_seconds):
         parser.error('launch requires --runner, --worker-script, --worker-root and --deadline-seconds')
     return launch(args)
