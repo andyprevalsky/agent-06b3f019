@@ -436,9 +436,26 @@ def test_paged_sdk_evidence_must_tile_the_whole_session():
         return dict(row, message='Code-agent SDK event JSON:\n\n' + json.dumps({'code_agent_events': events[start:end]}),
                     metadata=dict(row['metadata'], steps_taken=total, sdk_event_range=[start, end]))
 
+    def untagged(chunk, total=len(events)):
+        return dict(row, message='Code-agent SDK event JSON:\n\n' + json.dumps({'code_agent_events': chunk}),
+                    metadata={k: v for k, v in dict(row['metadata'], steps_taken=total).items() if k != 'sdk_event_range'})
+
     middle = len(events) // 2
     child['messages'] = [page(middle, len(events)), page(0, middle), page(0, middle)]
     assert check_process_trace(task.process_spec, trace)[0]
+    # An unpaged row must still hold the whole session, and one session's rows
+    # cannot mix the two forms (golden review of fc4b838488).
+    tail = events[middle:]
+    for rows, expected in (
+        ([untagged(tail), page(len(tail), len(events))], 'truncated SDK evidence count'),
+        ([page(len(tail), len(events)), untagged(tail)], 'truncated SDK evidence count'),
+        ([untagged(events[:middle]), page(middle, len(events))], 'truncated SDK evidence count'),
+        ([untagged(events), page(0, len(events))], 'mixed paged and unpaged SDK evidence'),
+        ([page(0, len(events)), untagged(events)], 'mixed paged and unpaged SDK evidence'),
+    ):
+        child['messages'] = rows
+        passed, reason = check_process_trace(task.process_spec, trace)
+        assert not passed and expected in reason, reason
     for rows, expected in (
         ([page(0, middle)], 'truncated SDK evidence count'),
         ([page(0, middle), page(middle - 1, len(events))], 'truncated SDK evidence count'),

@@ -6888,13 +6888,32 @@ async def test_judge_evidence_of_streamed_claude_session_satisfies_native_proces
     """
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.process_bench import check_process_trace
+    from domains.spawn_claude_code_agent import service
 
     task = get_task_by_name("process-meeting-scheduling")
 
     def trace(rows):
         return {"agent": {"agent_id": "root"}, "messages": rows, "_benchmark": {}}
 
+    def row_events(rows):
+        return [e for r in rows for e in json.loads(r["message"].split("\n\n", 1)[1])["code_agent_events"]]
+
     for provider in ("claude", "codex"):
+        # Model-visible context (parent tool result / verifier): one tool_use per
+        # Claude call, and Codex item starts collapsed into their completions as
+        # before; the judge evidence alone keeps the Codex starts.
+        stream = _process_session_stream(task, provider=provider)
+        context = json.loads(service._build_code_event_context(code_events=stream, output_files=[], action_summary=[]))
+        tool_ids = [e["tool_use_id"] for e in context["code_agent_events"] if e.get("type") == "tool_use"]
+        assert len(tool_ids) == len(set(tool_ids)), (provider, tool_ids)
+        assert not any(e.get("status") == "started" for e in context["code_agent_events"]), provider
+        judged = row_events(await _persisted_judge_evidence_rows(stream, provider))
+        commands = [e.get("status") for e in judged if e.get("type") == "command"]
+        if provider == "codex":
+            assert commands and commands.count("started") == commands.count("completed"), commands
+        else:
+            assert not commands, commands
+
         # The j0015 shape: well under any page bound once superseded snapshots go.
         rows = await _persisted_judge_evidence_rows(_process_session_stream(task, provider=provider), provider)
         passed, reason = check_process_trace(task.process_spec, trace(rows))

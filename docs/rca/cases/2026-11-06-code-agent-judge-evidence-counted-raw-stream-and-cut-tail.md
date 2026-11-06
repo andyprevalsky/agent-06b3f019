@@ -79,7 +79,7 @@ process-native-trace. The rest now reach agent-behavior checks (`not a direct
 fixture action`, wrong inputs) or were cut at capture and cannot be recovered.
 10k-agent behavior: per code session, ceil(events/200) child-scoped rows,
 each bounded like the old single row. There is no fan-in and no LLM context.
-The same collapse also dropped every Codex `command` start (`partial: true`, same `item_id` as its completion), so a Codex process session failed `missing native command start`. Supersession now applies only to snapshot types (`agent_message`, `thinking`, `tool_use`; `_SNAPSHOT_EVENT_TYPES`). Lifecycle starts of other item types are kept. The blackbox regression covers both providers.
+The same collapse also dropped every Codex `command` start (`partial: true`, same `item_id` as its completion), so a Codex process session failed `missing native command start`. The judge evidence now collapses only snapshot types (`agent_message`, `thinking`, `tool_use`; `keep_lifecycle_starts=True`). The model-visible context (parent tool result, verifier) and the transcript still fold Codex item starts into their completions, as Codex rollouts do. Both now drop Claude's duplicate partial `tool_use`. A golden review of fc4b838488 found that an unpaged row could be completed by tagged pages. An unpaged row now has to satisfy `steps_taken == len(events)` as before, and one session cannot mix paged and unpaged rows. Open (rule 20): evidence pages carry no idempotency key, because the backend honours `idempotencyKey` only for direct-code-turn and transcript TOOL rows (messageIdempotency.ts hasIdempotentKind).
 
 ## Human feedback
 

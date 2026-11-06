@@ -1965,17 +1965,17 @@ def _read_handoff(
 # Event types whose partial events are snapshots a later event of the same item
 # replaces. Lifecycle events such as a Codex ``command``/``file_change``
 # ``item/started`` (``partial: true``) are not: the start is distinct evidence
-# that its completion does not repeat.
+# that its completion does not repeat, so judge evidence keeps them.
 _SNAPSHOT_EVENT_TYPES = frozenset({"agent_message", "thinking", "tool_use"})
 
 
-def _stream_item_key(event: Dict[str, Any]) -> Optional[tuple[Any, str]]:
-    """The streamed item a snapshot event upserts: its ``item_id``, else a ``tool_use`` call's id.
+def _stream_item_key(event: Dict[str, Any], *, keep_lifecycle_starts: bool) -> Optional[tuple[Any, str]]:
+    """The streamed item an event upserts: its ``item_id``, else a ``tool_use`` call's id.
 
     Claude streams a tool call's block start as a partial ``tool_use`` (empty
     input) and then the assistant envelope for the same ``tool_use_id``.
     """
-    if event.get("type") not in _SNAPSHOT_EVENT_TYPES:
+    if keep_lifecycle_starts and event.get("type") not in _SNAPSHOT_EVENT_TYPES:
         return None
     item_id = event.get("item_id")
     if isinstance(item_id, str):
@@ -1986,19 +1986,22 @@ def _stream_item_key(event: Dict[str, Any]) -> Optional[tuple[Any, str]]:
     return None
 
 
-def _latest_stream_snapshots(code_events: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+def _latest_stream_snapshots(
+    code_events: list[Dict[str, Any]], *, keep_lifecycle_starts: bool = False
+) -> list[Dict[str, Any]]:
     """Drop partial stream events superseded by a later event for the same item.
 
     Partial ``agent_message``/``thinking`` events carry the cumulative text, so
     every earlier snapshot is a prefix of the latest one (the same upsert-by-item
     rule ``utils.code_transcript`` applies), and a partial ``tool_use`` is
     replaced by its call's full record. The judge evidence would otherwise grow
-    quadratically with the streamed answer and repeat each call. Lifecycle
-    starts of other item types are kept (``_SNAPSHOT_EVENT_TYPES``).
+    quadratically with the streamed answer and repeat each call. Model-visible
+    context also folds a Codex item's start into its completion; judge evidence
+    (``keep_lifecycle_starts``) keeps those starts (``_SNAPSHOT_EVENT_TYPES``).
     """
     latest: Dict[tuple[Any, str], int] = {}
     for index, event in enumerate(code_events):
-        key = _stream_item_key(event)
+        key = _stream_item_key(event, keep_lifecycle_starts=keep_lifecycle_starts)
         if key is not None:
             latest[key] = index
     return [
@@ -2006,7 +2009,7 @@ def _latest_stream_snapshots(code_events: list[Dict[str, Any]]) -> list[Dict[str
         for index, event in enumerate(code_events)
         if not (
             event.get("partial") is True
-            and (key := _stream_item_key(event)) is not None
+            and (key := _stream_item_key(event, keep_lifecycle_starts=keep_lifecycle_starts)) is not None
             and latest[key] != index
         )
     ]
@@ -2023,8 +2026,22 @@ def _build_code_event_context(
     output_files: list[Dict[str, Any]],
     action_summary: list[str],
 ) -> str:
+    """Model-visible SDK event context: the latest snapshots, last 200 events."""
+    return _code_event_context_json(
+        events=_latest_stream_snapshots(code_events)[-200:],
+        output_files=output_files,
+        action_summary=action_summary,
+    )
+
+
+def _code_event_context_json(
+    *,
+    events: list[Dict[str, Any]],
+    output_files: list[Dict[str, Any]],
+    action_summary: list[str],
+) -> str:
     evidence = {
-        "code_agent_events": _latest_stream_snapshots(code_events)[-_JUDGE_EVIDENCE_PAGE_EVENTS:],
+        "code_agent_events": events,
         "extracted_output_files": [
             {
                 "original_filename": fp.get("original_filename"),
@@ -2062,7 +2079,9 @@ async def _persist_code_agent_judge_evidence(
     # steps_taken counts exactly these events, and they are stored in bounded
     # pages (``sdk_event_range``) rather than cut to a tail, so a judge can
     # still detect a missing page as truncated evidence.
-    events = _latest_stream_snapshots([event for event in code_events or [] if isinstance(event, dict)])
+    events = _latest_stream_snapshots(
+        [event for event in code_events or [] if isinstance(event, dict)], keep_lifecycle_starts=True
+    )
     files = output_files or []
     summary = [str(item).strip() for item in (action_summary or []) if str(item).strip()]
     if not events and not files and not summary:
@@ -2078,8 +2097,8 @@ async def _persist_code_agent_judge_evidence(
 
     for start in range(0, max(len(events), 1), _JUDGE_EVIDENCE_PAGE_EVENTS):
         page = events[start : start + _JUDGE_EVIDENCE_PAGE_EVENTS]
-        event_context = _build_code_event_context(
-            code_events=page,
+        event_context = _code_event_context_json(
+            events=page,
             output_files=files,
             action_summary=summary,
         )
