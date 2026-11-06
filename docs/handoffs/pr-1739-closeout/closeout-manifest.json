@@ -130,5 +130,9 @@
   "evidence/repro/temporal-continue-as-new-2mib-repro.py",
   "evidence/review-ledger.json",
   "private-preservation-verification.json"
- ]
+ ],
+ "factory_history": {
+  "commit": "e24b8eb812034e15e8ba689ca2ef2b02c2c7e8b8",
+  "note": "data-only chore(factory-history) commit on main publishing this deploy (stage records, review, production events and the completed outcome); factory events recorded after it are not part of this deploy"
+ }
 }

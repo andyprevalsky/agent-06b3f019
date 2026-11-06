@@ -4,7 +4,7 @@
  "deployed_sha": "58e2f7ef54fe0d4cf61987b353e2aeae9015e8b2",
  "validated_head": "f3026d2e6d740d77b06a60b7656a9933b40474b3",
  "records_branch": "records/pr1739-closeout",
- "records_base": "58e2f7ef54fe0d4cf61987b353e2aeae9015e8b2",
+ "records_base": "e24b8eb812034e15e8ba689ca2ef2b02c2c7e8b8",
  "closeout_manifest": "docs/handoffs/pr-1739-closeout/closeout-manifest.json",
  "recovery": "docs/handoffs/pr-1739-closeout/RECOVERY.md",
  "verification": "docs/handoffs/pr-1739-closeout/private-preservation-verification.json",
@@ -20,5 +20,6 @@
  },
  "freedom": "untouched",
  "open_items": [],
- "non_pass_items_disclosed": "see closeout-manifest.json non_pass_items_disclosed (Mac acceptance SKIPPED: no Mac available; AgentCard gates not selected; two stale probe agents archived by soft delete)"
+ "non_pass_items_disclosed": "see closeout-manifest.json non_pass_items_disclosed (Mac acceptance SKIPPED: no Mac available; AgentCard gates not selected; two stale probe agents archived by soft delete)",
+ "factory_history_commit": "e24b8eb812034e15e8ba689ca2ef2b02c2c7e8b8"
 }
