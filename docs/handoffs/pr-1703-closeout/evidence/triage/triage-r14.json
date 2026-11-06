@@ -1,0 +1,26 @@
+{
+ "failures": [
+  {
+   "id": "e5a2765855e5407a973f3107894c80b4",
+   "check": "seed-memory-ratchet/seed-memory-ratchet",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/seedmem/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/seedmem",
+    "--stdio"
+   ],
+   "source": {
+    "head": "b02d32ef957b124614ca7a7b62fb5bc58f48c6e9",
+    "digest": "3aa2c2137f9d601f2fe999c2c8b072110c66408166f86447fbde0907d5a386c4"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "seed-memory ratchet run 3 segfaulted (rc139) at seed-local startup; known intermittent native crash",
+   "evidence": "Native exit 1 at b02d32ef9: scripts/measure-seed-memory.sh 5 0 0 --enforce-budget run 3 exited rc=139 (SIGSEGV) at os_peak=90MB node_peak=0MB, before any measurement; runs 1,2,4,5 ok (149-160MB, fidelity verified, budget respected). This is the documented intermittent seed-local startup segfault (memory seed-local-intermittent-segfault, first seen 2026-10-09: rc139 at the first Prisma read, rerun passed 5/5; not reproduced). The same gate passed 5/5 on 052ac6ce7 earlier today. The diff touches no seed, Prisma or memory-measurement code; native crash precedes any app logic.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged full gate; no waiver",
+   "assigned_evidence": "Native exit 1 at b02d32ef9: scripts/measure-seed-memory.sh 5 0 0 --enforce-budget run 3 exited rc=139 (SIGSEGV) at os_peak=90MB node_peak=0MB, before any measurement; runs 1,2,4,5 ok (149-160MB, fidelity verified, budget respected). This is the documented intermittent seed-local startup segfault (memory seed-local-intermittent-segfault, first seen 2026-10-09: rc139 at the first Prisma read, rerun passed 5/5; not reproduced). The same gate passed 5/5 on 052ac6ce7 earlier today. The diff touches no seed, Prisma or memory-measurement code; native crash precedes any app logic."
+  }
+ ]
+}

@@ -31,6 +31,7 @@ sources:
   - commit cce696e9d
   - commit 15f2ef6cf
   - PR #1703
+  - commit fa676edc7 (PR #1703 merge)
   - agent 3c057de1-d449-49b9-b76c-a5c72ca3d140 (cloud, f25d7c064, PR #1730 deploy, 3 drags, 0.164)
   - agent c19b68c8-5306-4f81-ab50-9fee95a7760d (cloud, 2731bfe53, PR #1725 deploy, 3 drags, 0.164)
   - agent 97aa455f-1fe8-407b-9fa5-f8bad701fc71 (local control on db5b15de9, no drag, 0.057, PASS)
@@ -214,6 +215,15 @@ agent d5672824, receipt base_sha fa676edc7) passed in 133 s with captured risk
 `docs/handoffs/pr-1735-closeout/evidence/cloud-pass-fa676edc7.json`. The
 control and cloud-pass ledger rows are in
 `docs/handoffs/pr-1735-closeout/evidence/ledger-rows-pending-main.jsonl`.
+
+Deployed by PR #1703 (merged as fa676edc7 after syncing main at b02d32ef9). The
+final staged cycle on b02d32ef9 is ready: 15 gates, the seed-memory-ratchet gate
+passed on a focused rerun after a known intermittent rc139 crash, and the 12-member
+cloud smoke campaign passed with `browser-biometrics-webdecoy`. Production checks on
+fa676edc7: agents cutover job SUCCEEDED, workflow migration validation all PASS,
+and production semantic workflow run 42223715662 (source_sha fa676edc7) succeeded
+on all five jobs; the gate CLI's own receipt stayed blocked by a poller connection
+reset. Closeout: `docs/handoffs/pr-1703-closeout/closeout-manifest.json`.
 
 ## Human feedback
 
