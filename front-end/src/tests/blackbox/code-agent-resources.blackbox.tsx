@@ -182,7 +182,7 @@ describe('code-agent sandbox resources', () => {
     }
   });
 
-  it('code-agent view header: the same bars and popover lines', () => {
+  it('code-agent view top strip: the same bars and popover lines', () => {
     deliver(sample());
     renderWithProviders(
       createElement(
@@ -201,7 +201,8 @@ describe('code-agent sandbox resources', () => {
       ),
       { roseDesktop: true },
     );
-    const header = screen.getByTestId('code-agent-view-header');
+    // The view has no header: the devbox usage sits in its top-right strip.
+    const header = screen.getByTestId('code-agent-view');
     expect(bars(header)).toEqual([
       ['cpu', '36', 'false'],
       ['memory', '69', 'false'],

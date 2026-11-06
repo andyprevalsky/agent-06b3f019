@@ -868,6 +868,8 @@ function emitClaudeMessage(message) {
       session_id: message.session_id,
       cwd: message.cwd,
       model: message.model,
+      speed: effectiveSettings.speed,
+      ...(effectiveSettings.effort ? { effort: effectiveSettings.effort } : {}),
       tools: message.tools || [],
       permission_mode: message.permissionMode,
       prompt_version: promptVersion(),
@@ -964,7 +966,7 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "result") {
-    emitNativeUsage(message.usage, true);
+    emitNativeUsage(message.usage, true, message.modelUsage);
     const isSuccess = message.subtype === "success";
     appendEvent({
       type: "result",
@@ -1111,9 +1113,23 @@ function startNativeTurn(id = randomUUID()) {
   });
   return activeTurn;
 }
-function emitNativeUsage(usage, final = false) {
+// The model's context window, from the latest result's modelUsage (Claude
+// reports it per model); carried on every later usage sample.
+let contextWindow = null;
+const CONTEXT_INPUT_FIELDS = [
+  "input_tokens",
+  "cache_read_input_tokens",
+  "cache_creation_input_tokens",
+];
+function emitNativeUsage(usage, final = false, modelUsage = null) {
   if (!activeTurn || !usage || typeof usage !== "object") return;
   const fields = {};
+  const windows = Object.values(
+    modelUsage && typeof modelUsage === "object" ? modelUsage : {},
+  )
+    .map((entry) => entry?.contextWindow)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (windows.length) contextWindow = Math.max(...windows);
   const mapping = {
     output_tokens: "output_tokens",
     input_tokens: "input_tokens",
@@ -1136,6 +1152,15 @@ function emitNativeUsage(usage, final = false) {
           ? usage[mapping[name]]
           : values.reduce((sum, value) => sum + value, 0);
   }
+  // One model call's prompt (uncached + cache read + cache write) is the
+  // context it used; a result's usage is the turn's total, never a context.
+  const context = CONTEXT_INPUT_FIELDS.map((name) => usage[name]).filter(
+    (value) => Number.isFinite(value) && value >= 0,
+  );
+  const contextTokens = context.reduce((sum, value) => sum + value, 0);
+  if (!final && contextTokens > 0) fields.context_tokens = contextTokens;
+  if (contextWindow && Object.keys(fields).length)
+    fields.context_window = contextWindow;
   if (Object.keys(fields).length)
     appendEvent({ type: "usage", usage_scope: "turn", ...fields });
 }

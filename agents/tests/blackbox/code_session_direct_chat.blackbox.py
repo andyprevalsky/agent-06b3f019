@@ -225,7 +225,14 @@ def test_claude_transcript_records_from_fixture():
 def test_ui_records_follow_the_transcript_tab_contract():
     events = json.loads(CLAUDE_EVENTS.read_text())
     ui = [to_ui_record(record) for record in build_code_transcript(events, "claude", goal=CLAUDE_GOAL)]
-    assert {r["type"] for r in ui} == {"message", "thinking", "tool", "result", "control", "turn", "metrics"}
+    assert {r["type"] for r in ui} == {"message", "thinking", "tool", "result", "control", "turn", "metrics", "session"}
+    # The code-agent view's query box: the CLI's model and speed (its init) and the
+    # latest model call's context over the model's window (its nub).
+    session = next(r for r in ui if r["type"] == "session")
+    assert (session["model"], session["speed"]) == ("claude-sonnet-5", "standard")
+    contexts = [r for r in ui if r["type"] == "metrics" and "context_tokens" in r]
+    assert contexts and all(0 < r["context_tokens"] < r.get("context_window", 10**9) for r in contexts)
+    assert any(r.get("context_window") == 1_000_000 for r in ui if r["type"] == "metrics")
     tools = [r["tool"] for r in ui if r["type"] == "tool"]
     assert [(t["name"], t["target"]) for t in tools] == [
         ("Read", "calc.py"),
@@ -661,10 +668,42 @@ def test_attachment_only_turn_and_distinct_steers_remain_visible():
     assert ended["turn_outcome"] == "interrupted" and ended["turn_ended_at"] == "2026-10-20T00:00:02Z"
 
 
+def test_background_sub_agent_tool_row_stays_running_until_its_notification():
+    """A Claude sub-agent launched in the background (Task/Agent run_in_background)
+    returns `async_launched` at once; its row stays running (the code-agent view's
+    agents drawer lists it) until the CLI's task_notification names its outcome."""
+    builder = CodeTranscriptBuilder("claude")
+    builder.feed({"type": "turn_started", "turn_id": "t", "turn_started_at": "2026-11-06T00:00:00Z"}, 0)
+    for index, (tool_id, description) in enumerate((("toolu_bg", "Audit the open PRs"), ("toolu_fg", "Read the CI log")), 1):
+        builder.feed({"type": "tool_use", "turn_id": "t", "tool": "Task", "tool_use_id": tool_id,
+                      "input": {"description": description, "prompt": "go", "run_in_background": tool_id == "toolu_bg"}}, index)
+    builder.feed({"type": "tool_result", "turn_id": "t", "tool_use_id": "toolu_bg", "is_error": False,
+                  "tool_use_result": {"status": "async_launched", "agentId": "a1", "description": "Audit the open PRs"}}, 3)
+    builder.feed({"type": "tool_result", "turn_id": "t", "tool_use_id": "toolu_fg", "is_error": False,
+                  "tool_use_result": {"status": "completed", "content": []}}, 4)
+
+    def status(tool_id: str) -> tuple[str, str]:
+        record = to_ui_record(next(r for r in builder.records if r["id"] == f"tool:{tool_id}"))
+        return record["tool"]["name"], record["tool"]["result"]["status"]
+
+    assert status("toolu_bg") == ("Task", "running")
+    assert status("toolu_fg") == ("Task", "ok")
+    assert to_ui_record(next(r for r in builder.records if r["id"] == "tool:toolu_bg"))["tool"]["target"] == "Audit the open PRs"
+    out = builder.feed({"type": "cli_message", "cli_message": {"type": "system", "subtype": "task_notification",
+                        "task_id": "a1", "tool_use_id": "toolu_bg", "status": "failed"}}, 5)
+    assert [r["id"] for r in out] == ["tool:toolu_bg"]
+    assert status("toolu_bg") == ("Task", "error")
+    # A notification for an already-finished or unknown tool changes nothing.
+    assert builder.feed({"type": "cli_message", "cli_message": {"type": "system", "subtype": "task_notification",
+                         "task_id": "a2", "tool_use_id": "toolu_fg", "status": "failed"}}, 6) == []
+    assert status("toolu_fg") == ("Task", "ok")
+
+
 async def run_all_tests():
     print("code-session-direct-chat blackbox tests:")
     r = BlackboxResult()
     r.record("attachment_only_turn_and_distinct_steers_remain_visible", test_attachment_only_turn_and_distinct_steers_remain_visible)
+    r.record("background_sub_agent_tool_row_stays_running_until_its_notification", test_background_sub_agent_tool_row_stays_running_until_its_notification)
     await r.record_async("codex_native_app_server_contract", test_codex_native_app_server_contract)
     await r.record_async("claude_native_direct_chat_contract", test_claude_native_direct_chat_contract)
     await r.record_async(
