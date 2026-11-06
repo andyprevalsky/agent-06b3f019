@@ -4129,4 +4129,182 @@ class GateBenchmarkControllerTeardown(unittest.TestCase):
         self.assert_owned_teardown(result, controller, foreign, marker)
 
 
+class CloudSmokeAfterCloudbenchController(unittest.TestCase):
+    """deploy.md Step 4cb (orig L1405): when the cloudbench-controller gate is selected, the paid
+    cloud smoke gate must not start until that gate passed on the same source. That is the only
+    cross-gate order: every other gate keeps starting at once. run_phase is the real scheduler;
+    only each gate's execute is a recorder."""
+
+    def setUp(self):
+        import threading as _threading
+        from deploy_test_isolation import _ports
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name) / 'repo'
+        self.root.mkdir()
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        (self.root / 'code').write_text('original')
+        (self.root / '.git' / 'info' / 'exclude').write_text('.context/\n')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'fixture'], check=True)
+        self.directory = self.root / '.context' / 'cycle'
+        # Validation-only ports (execute is a recorder): two disjoint footprints, both wholly below
+        # the deploy-worktree claim range (RCA 2026-11-05-interrupted-proof-fixture-port-inside-deploy-claim-range).
+        first = interrupted_root_port()
+        footprint = lambda base: {base + offset for offset in _ports.LISTENER_OFFSETS}
+        second = next(b for b in range(first + 1, _ports.FIRST_BASE_PORT - _ports.FOOTPRINT_PORTS + 1)
+                      if footprint(b).isdisjoint(footprint(first)))
+
+        def local(name, port):
+            worker_root = Path(self.temp.name) / name
+            worker_root.mkdir()
+            return {'name': name, 'category': name, 'checks': [name], 'worker': name + '-local',
+                    'worker_transport': 'local-isolated', 'cwd': str(worker_root), 'worker_root': str(worker_root),
+                    'command': ['must-not-launch'], 'env': {'CONDUCTOR_WORKSPACE_NAME': name,
+                    'CONDUCTOR_PORT': str(port)}}
+        self.cloudbench = local('cloudbench-controller', first)
+        self.other = local('other', second)
+        self.smoke = {'name': 'smoke', 'category': 'smoke', 'checks': ['task-a', 'task-b'], 'worker': 'smoke-cloud',
+                      'worker_transport': 'benchmark-cloud-cli',
+                      'command': ['bash', str(Path(self.temp.name) / 'run-predeploy-cloud')]}
+        self.quick = [{'name': n, 'category': n, 'quick': True, 'command': ['true'], 'checks': [n]}
+                      for n in ('eslint', 'format', 'typescript', 'backend-structural')]
+        self.events, self.lock = [], _threading.Lock()
+        self.started = {name: _threading.Event() for name in ('cloudbench-controller', 'other', 'smoke')}
+        self.verdicts, self.on_start, self.complete = {}, {}, {}
+
+    def tearDown(self):
+        c.CANCEL.clear()
+        self.temp.cleanup()
+
+    def initialize(self, gates):
+        import time
+        self.plan = {'source': c.source(self.root), 'gates': [*self.quick, *gates]}
+        self.state = c.initialize(self.plan, self.root)
+        self.state['phase'] = 'initial'
+        clock = time.monotonic
+
+        def execute(gate, state, directory, root, local_failure=None):
+            name = gate['name']
+            with self.lock:
+                self.events.append(('start', name, clock()))
+            self.started[name].set()
+            self.on_start.get(name, lambda: None)()
+            verdict = self.verdicts.get(name, 'PASS')
+            with self.lock:
+                self.events.append(('end', name, clock()))
+            return {'gate': name, 'status': verdict, 'complete': self.complete.get(name, True), 'executed': True,
+                    'cases': {check: verdict for check in gate['checks']}, 'source': state['source'],
+                    'timed_out': False, 'cancelled': False, 'lingering_group': False}
+        return patch.object(c, 'execute', execute)
+
+    def at(self, kind, name):
+        return next(t for k, n, t in self.events if (k, n) == (kind, name))
+
+    def ran(self):
+        return {n for k, n, _ in self.events if k == 'start'}
+
+    def smoke_receipt(self):
+        return next(r for r in self.state['attempts'][-1]['results'] if r['gate'] == 'smoke')
+
+    def test_smoke_starts_only_after_cloudbench_controller_passes_while_others_run_unordered(self):
+        import time
+        # The prerequisite cannot finish until the unrelated gate started: proof the latter is unordered.
+        self.on_start['cloudbench-controller'] = lambda: (self.assertTrue(self.started['other'].wait(30)),
+                                                           time.sleep(.2))
+        self.on_start['other'] = lambda: self.started['smoke'].wait(.5)
+        with self.initialize([self.cloudbench, self.other, self.smoke]):
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertEqual({'cloudbench-controller', 'other', 'smoke'}, self.ran())
+        self.assertGreaterEqual(self.at('start', 'smoke'), self.at('end', 'cloudbench-controller'))
+        self.assertLess(self.at('start', 'other'), self.at('end', 'cloudbench-controller'))
+        self.assertEqual('PASS', self.smoke_receipt()['status'])
+        self.assertTrue(self.state['ready'])
+
+    def held(self):
+        return self.state['attempts'][-1].get('held', [])
+
+    def test_failed_cloudbench_controller_never_starts_paid_smoke(self):
+        self.verdicts['cloudbench-controller'] = 'FAIL'
+        with self.initialize([self.cloudbench, self.other, self.smoke]):
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertEqual({'cloudbench-controller', 'other'}, self.ran())
+        # The controller's own failure blocks the phase: smoke gets no receipt and no failure occurrence.
+        self.assertEqual({'cloudbench-controller', 'other'}, {r['gate'] for r in self.state['attempts'][-1]['results']})
+        self.assertEqual('triage', self.state['phase'])
+        self.assertEqual({'cloudbench-controller/cloudbench-controller'}, {f['check'] for f in self.state['failures']})
+        self.assertEqual(['smoke'], [h['gate'] for h in self.held()])
+        self.assertIn('paid cloud smoke not started', self.held()[0]['reason'])
+        self.assertEqual('cloudbench-controller', self.held()[0]['prerequisite'])
+        self.assertFalse(self.state['ready'])
+
+    def test_interrupt_during_cloudbench_controller_never_starts_paid_smoke(self):
+        self.on_start['cloudbench-controller'] = c.CANCEL.set
+        with self.initialize([self.cloudbench, self.other, self.smoke]):
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertNotIn('smoke', self.ran())
+        self.assertEqual('interrupted', self.state['phase'])
+        self.assertIn('the cycle was interrupted', self.held()[0]['reason'])
+
+    def test_unclean_prerequisite_pass_blocks_smoke_and_never_reaches_ready(self):
+        # PASS without a complete receipt is no failed case: without a blocking row the phase would
+        # advance to READY with the paid run never executed. No repair agent is launched for that row.
+        self.complete['cloudbench-controller'] = False
+        launched = []
+        with self.initialize([self.cloudbench, self.other, self.smoke]), \
+             patch.object(c, 'launch_rca', lambda path, launcher: launched.append(path.stem)):
+            c.run_phase(self.plan, self.state, self.directory, self.root, launcher=['must-not-run'])
+        self.assertNotIn('smoke', self.ran())
+        receipt = self.smoke_receipt()
+        self.assertEqual(('FAIL', False, False), (receipt['status'], receipt['executed'], receipt['complete']))
+        self.assertEqual({'task-a': 'UNVERIFIED', 'task-b': 'UNVERIFIED'}, receipt['cases'])
+        self.assertEqual('triage', self.state['phase'])
+        self.assertFalse(self.state['ready'])
+        self.assertEqual([], launched)
+        self.assertIn('not a complete clean pass', self.held()[0]['reason'])
+
+    def test_repair_phase_runs_the_uncredited_prerequisite_first(self):
+        # A repair changed the controller's inputs: only smoke is a repair gate, yet the paid run still
+        # waits for the controller to pass on this source (it is run first, never a stuck "not started").
+        with self.initialize([self.cloudbench, self.other, self.smoke]):
+            self.state.update(phase='failed-gates', repair_gates=['smoke'])
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertEqual({'cloudbench-controller', 'smoke'}, self.ran())
+        self.assertGreaterEqual(self.at('start', 'smoke'), self.at('end', 'cloudbench-controller'))
+        self.assertEqual('PASS', self.smoke_receipt()['status'])
+        self.assertEqual([], self.held())
+
+    def test_credited_prerequisite_does_not_run_again(self):
+        real = c.reusable_full_pass
+        credited = lambda state, gate: gate['name'] == 'cloudbench-controller' or real(state, gate)
+        with self.initialize([self.cloudbench, self.other, self.smoke]), patch.object(c, 'reusable_full_pass', credited):
+            self.state.update(phase='failed-gates', repair_gates=['smoke'])
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertEqual({'smoke'}, self.ran())
+        self.assertEqual('PASS', self.smoke_receipt()['status'])
+
+    def test_independent_observation_never_pays_for_smoke_while_the_prerequisite_is_pending(self):
+        with self.initialize([self.cloudbench, self.other, self.smoke]):
+            failure = {'id': 'pending-controller', 'check': 'cloudbench-controller/cloudbench-controller',
+                       'gate': 'cloudbench-controller', 'source': self.state['source'], 'phase': 'initial',
+                       'native_result': 'FAIL', 'complete': True}
+            self.state.update(phase='triage', failures=[failure], pending=['pending-controller'], ready=False)
+            c.run_phase(self.plan, self.state, self.directory, self.root, independent=True)
+        self.assertEqual({'other'}, self.ran())  # neither the pending controller nor paid smoke
+        attempt = self.state['attempts'][-1]
+        self.assertTrue(attempt['independent_full'])
+        self.assertEqual(['other'], [r['gate'] for r in attempt['results']])
+        self.assertEqual(['smoke'], [h['gate'] for h in attempt['held']])
+        self.assertIn('pending triage', attempt['held'][0]['reason'])
+        self.assertEqual('triage', self.state['phase'])
+
+    def test_without_cloudbench_controller_smoke_stays_unordered(self):
+        # smoke may start before the other gate finishes: it waits for smoke's start.
+        self.on_start['other'] = lambda: self.assertTrue(self.started['smoke'].wait(30))
+        with self.initialize([self.other, self.smoke]):
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertLess(self.at('start', 'smoke'), self.at('end', 'other'))
+        self.assertEqual('PASS', self.smoke_receipt()['status'])
+
+
 if __name__ == '__main__': unittest.main()

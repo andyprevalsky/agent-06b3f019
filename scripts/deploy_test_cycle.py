@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from fnmatch import fnmatchcase
 import fcntl
@@ -1325,6 +1325,45 @@ def launch_rca(path: Path, launcher: list[str]) -> None:
         write(receipt, value)
 
 
+CLOUD_SMOKE, CLOUD_SMOKE_PREREQUISITE = 'smoke', 'cloudbench-controller'
+
+
+def cloud_smoke_prerequisite(plan: dict, state: dict, selected: list[dict]) -> dict | None:
+    """The one cross-gate order in a phase: paid cloud smoke waits for the cloudbench-controller gate.
+
+    deploy.md Step 4cb: when the cloudbench-controller gate is planned (it is selected only when
+    cloud benchmark scripts changed), its regressions must pass on this source before any paid cloud
+    run. Returns that planned gate while it is not already credited for this source and the phase runs
+    smoke; None otherwise. Every other gate stays unordered.
+    """
+    if not any(g.get('category') == CLOUD_SMOKE for g in selected):
+        return None
+    gate = next((g for g in plan['gates'] if g.get('category') == CLOUD_SMOKE_PREREQUISITE), None)
+    return None if gate is None or reusable_full_pass(state, gate) else gate
+
+
+def prerequisite_passed(result: dict, state: dict) -> bool:
+    """This phase's prerequisite receipt is a complete, clean PASS on the cycle's source."""
+    return (result.get('status') == 'PASS' and result.get('complete') is True
+            and result.get('executed') is not False and result.get('source') == state['source']
+            and not any(result.get(k) for k in ('timed_out', 'cancelled', 'lingering_group', 'cleanup_owner')))
+
+
+def cloud_smoke_held(gate: dict, why: str) -> dict:
+    """Trace of a smoke gate that was not started this phase (no paid cloud run, no pass credit)."""
+    return {"gate": gate["name"], "prerequisite": CLOUD_SMOKE_PREREQUISITE,
+            "reason": f"paid cloud smoke not started: {CLOUD_SMOKE_PREREQUISITE} has not passed on this source "
+                      f"({why}; deploy.md Step 4cb)"}
+
+
+def cloud_smoke_blocked(gate: dict, state: dict, held: dict) -> dict:
+    """Blocking, unexecuted smoke receipt for a prerequisite that neither passed cleanly nor failed a case,
+    so the phase cannot advance to READY without the paid run."""
+    return {"gate": gate["name"], "status": "FAIL", "complete": False, "executed": False,
+            "cases": {c: "UNVERIFIED" for c in gate["checks"]}, "source": state["source"],
+            "prerequisite": held["prerequisite"], "reason": held["reason"]}
+
+
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
               launcher: list[str] | None = None, *, independent: bool = False,
               excluded_roots=()) -> None:
@@ -1349,6 +1388,18 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                 raise ValueError('prior independent worker request has no terminal receipt')
     else:
         selected = records(plan, state)
+    held_rows = []
+    prerequisite = cloud_smoke_prerequisite(plan, state, selected)
+    held = next((g for g in selected if g.get('category') == CLOUD_SMOKE), None) if prerequisite else None
+    if prerequisite is not None and all(g['name'] != prerequisite['name'] for g in selected):
+        if independent:
+            # The prerequisite is itself under unresolved triage: observe everything else, never pay
+            # for cloud smoke on a source whose controller regressions have not passed.
+            selected = [g for g in selected if g is not held]
+            held_rows.append(cloud_smoke_held(held, 'it is pending triage'))
+            held = prerequisite = None
+        else:
+            selected = [*selected, prerequisite]  # run it first: smoke is held until it passes
     if state['phase'] in {'initial', 'failed-gates', 'final'}:
         selected_names = {g['name'] for g in selected}
         for gate in plan['gates']:
@@ -1377,25 +1428,52 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                       if g.get('worker_transport') == 'local-isolated'}
     with ThreadPoolExecutor(max_workers=max(1, len(selected))) as rc_pool:
         with ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool:
-            futures = {pool.submit(execute, gate, state, directory, root,
-                local_failure=local_failures.get(local_admission_root(gate, root))
-                    if gate.get('worker_transport') == 'local-isolated' else None): gate for gate in selected}
-            for future in as_completed(futures):
-                gate = futures[future]
-                try:
-                    result = future.result()
-                except (ValueError, OSError) as error:
-                    result = {"gate": gate["name"], "status": "FAIL", "complete": False,
-                              "cases": {c: "UNVERIFIED" for c in gate["checks"]},
-                              "source": state["source"], "reason": str(error)}
+            def submit(gate):
+                return pool.submit(execute, gate, state, directory, root,
+                    local_failure=local_failures.get(local_admission_root(gate, root))
+                        if gate.get('worker_transport') == 'local-isolated' else None)
+
+            def record(result):
                 results.append(result)
                 fresh = failed_cases(state, [result])
                 state["live_failures"].extend(fresh)
                 write(directory / "cycle.json", state)
                 # Publish and dispatch each failure while healthy siblings run.
                 for path in rca_requests(state, directory):
-                    if launcher and not CANCEL.is_set() and path.stem in {f["id"] for f in fresh}:
+                    # A smoke gate blocked by its prerequisite has nothing of its own to diagnose.
+                    if (launcher and not CANCEL.is_set() and not result.get('prerequisite')
+                            and path.stem in {f["id"] for f in fresh}):
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
+
+            futures = {submit(gate): gate for gate in selected if gate is not held}
+            pending = set(futures)
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    gate = futures[future]
+                    try:
+                        result = future.result()
+                    except (ValueError, OSError) as error:
+                        result = {"gate": gate["name"], "status": "FAIL", "complete": False,
+                                  "cases": {c: "UNVERIFIED" for c in gate["checks"]},
+                                  "source": state["source"], "reason": str(error)}
+                    record(result)
+                    if held is None or gate["name"] != prerequisite["name"]:
+                        continue
+                    if prerequisite_passed(result, state) and not CANCEL.is_set():
+                        started = submit(held)
+                        futures[started] = held
+                        pending.add(started)
+                    elif CANCEL.is_set():
+                        held_rows.append(cloud_smoke_held(held, 'the cycle was interrupted'))
+                    elif failed_cases(state, [result]):
+                        # The prerequisite's own failure blocks this phase; no smoke failure of its own.
+                        held_rows.append(cloud_smoke_held(held, f'its result was {result.get("status")}'))
+                    else:
+                        # Neither a clean pass nor a failed case: block, never advance to READY unpaid.
+                        reason = cloud_smoke_held(held, 'its receipt was not a complete clean pass')
+                        held_rows.append(reason)
+                        record(cloud_smoke_blocked(held, state, reason))
         failures = state.pop("live_failures")
         if independent:
             changed = (source(root) != state['source'] or environment_digest() != state['environment']
@@ -1417,6 +1495,8 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             state.update(phase="stale", ready=False)
         else:
             advance(state, results, failures)
+        if held_rows:
+            state['attempts'][-1]['held'] = held_rows
         for job in launched:
             try:
                 job.result()
