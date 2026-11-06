@@ -4118,6 +4118,10 @@ async def _run_all_tests():
         "judge_evidence_streamed_claude_session_native_process_trace",
         test_judge_evidence_of_streamed_claude_session_satisfies_native_process_trace,
     )
+    await r.record_async(
+        "valid_handoff_empty_required_list_complete_keeps_process_evidence",
+        test_valid_handoff_with_empty_required_list_is_complete_and_keeps_process_evidence,
+    )
     await r.record_async("native_codex_terminal_finishes_idle_app_server", test_native_codex_terminal_event_finishes_idle_app_server)
     await r.record_async("native_codex_terminal_respects_hold_and_newer_active_turn", test_native_codex_terminal_respects_hold_and_newer_active_turn)
     # spawn_claude_code_activity
@@ -6936,6 +6940,94 @@ async def test_judge_evidence_of_streamed_claude_session_satisfies_native_proces
         )
         passed, reason = check_process_trace(task.process_spec, trace(rows))
         assert not passed and "protected fixture was modified" in reason, (provider, reason)
+
+
+_EMPTY_REQUIRED_LIST_HANDOFF_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "spawn_claude_code_agent"
+    / "process-expense-reimbursement-valid-handoff-empty-required-list.json"
+)
+
+
+async def test_valid_handoff_with_empty_required_list_is_complete_and_keeps_process_evidence():
+    """H-21 (descend 2026-11-06): a schema-valid handoff is the complete result.
+
+    Replays process-expense-reimbursement r002-j0032 (agent 17bbefa2, code task
+    70205ca7): the verbatim declared schema and handoff, exit 0. The handoff
+    passed its JSON Schema but answered the required ``open_issues`` with ``[]``.
+    The verifier-off path re-judged it with the extraction predicate, whose
+    unstated required-means-non-empty rule made it "unverified" (score 0.5), so
+    no SDK evidence was persisted and process-native-trace failed "need one
+    unambiguous fixture session" although all six fixture actions ran.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.process_bench import check_process_trace
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    fixture = json.loads(_EMPTY_REQUIRED_LIST_HANDOFF_FIXTURE.read_text())
+    schema, handoff = fixture["output_schema"], fixture["handoff"]
+    open_issues = next(f for f in schema["fields"] if f["name"] == "open_issues")
+    assert open_issues["required"] is True and open_issues["type"] == "list[str]", open_issues
+    assert handoff["open_issues"] == [] and fixture["exit_code"] == 0
+    task = get_task_by_name("process-expense-reimbursement")
+    stream = _process_session_stream(task)
+
+    async def run(handoff_file, *, exit_code):
+        setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        try:
+            with (
+                patch.dict("os.environ", {"ROSE_ENABLE_CODE_AGENT_VERIFIER": ""}),
+                patch(
+                    "loop.activity_helper.call_temporal_activity_from_activity",
+                    side_effect=AssertionError("no verifier"),
+                ),
+                patch("temporalio.activity.heartbeat"),
+            ):
+                score, reasoning, struct, _i, _o = await service._run_verifier(
+                    agent_id="root",
+                    task_id="code-session-1",
+                    goal="g",
+                    model="rose-labs/rose-1-flash",
+                    terminal=TerminalFilter(cols=200, rows=50),
+                    action_summary=["ran the process"],
+                    output_schema=schema,
+                    claude_token=None,
+                    exit_code=exit_code,
+                    attempt_completion=False,
+                    code_provider="claude",
+                    code_events=stream,
+                    output_files=[],
+                    handoff=handoff_file,
+                )
+            rows = []
+            for call in get_captured_requests():
+                if call.get("method") == "POST" and "/api/agents/root/messages" in (call.get("url") or ""):
+                    body = json.loads(call["requestBody"])
+                    if (body.get("metadata") or {}).get("toolName") == "code_agent_sdk_events":
+                        rows.append({"role": body["role"], "message": body["message"], "metadata": body["metadata"]})
+            return score, reasoning, struct, rows
+        finally:
+            teardown_mock()
+
+    present = {"status": "present", "content": json.dumps(handoff)}
+    score, reasoning, struct, rows = await run(present, exit_code=fixture["exit_code"])
+    assert score == 1.0, reasoning
+    assert struct == handoff, struct
+    passed, reason = check_process_trace(
+        task.process_spec, {"agent": {"agent_id": "root"}, "messages": rows, "_benchmark": {}}
+    )
+    assert passed, reason
+
+    # The outcome stays truthful: a failed process or an absent handoff is
+    # neither complete nor recorded as successful code-agent evidence.
+    score, reasoning, struct, rows = await run(present, exit_code=1)
+    assert score == 0.5 and rows == [], (score, rows)
+    assert "ended without a success signal" in reasoning, reasoning
+    score, reasoning, struct, rows = await run({"status": "missing"}, exit_code=0)
+    assert score == 0.5 and struct is None and rows == [], (score, struct, rows)
+    assert "no handoff file" in reasoning, reasoning
 
 
 def test_native_codex_usage_retains_session_scope():

@@ -2146,31 +2146,31 @@ async def _handoff_result(
 
     The handoff is the result the parent sees. Terminal output and SDK events are
     evidence for judges only and never enter the tool result.
+
+    The handoff JSON Schema is this result's one contract: the code agent was
+    given it and ``_read_handoff`` enforced it, explicit bounds included. A valid
+    handoff from a successful session is therefore complete. It is not re-judged
+    by the extraction predicate, whose required-means-non-empty rule is not in
+    that schema and rejected honest empty answers such as ``open_issues: []``.
     """
     result, handoff_error = _read_handoff(handoff, output_schema)
     has_fields = bool(isinstance(output_schema, dict) and output_schema.get("fields"))
     structured = result if has_fields else None
-    outcome, outcome_fields = _disabled_verifier_outcome(
-        output_schema,
-        structured if result is not None else None,
-        attempt_completion=attempt_completion,
-        exit_code=exit_code,
-    )
-    complete = result is not None and outcome == "complete"
+    success_signal = attempt_completion or exit_code == 0
+    complete = result is not None and success_signal
+    outcome = "complete" if complete else ("failed" if not success_signal else "invalid_handoff")
     score = 1.0 if complete else 0.5
     header = (
         f"Code-agent verifier off (provider={code_provider}, exit_code={exit_code}, "
         f"artifacts={len(output_files)})."
     )
-    if outcome == "failed":
+    if not success_signal:
         header += " The session ended without a success signal."
     if result is not None:
         reasoning = (
             f"{header} Handoff from {CODE_AGENT_HANDOFF_PATH}, validated against the declared output schema:\n\n"
             f"{json.dumps(result, ensure_ascii=False, indent=2)}"
         )
-        if outcome == "incomplete":
-            reasoning += f"\n\nDeclared output files were not extracted: {', '.join(outcome_fields)}."
     else:
         reasoning = f"{header} {handoff_error}"
     logger.info(
