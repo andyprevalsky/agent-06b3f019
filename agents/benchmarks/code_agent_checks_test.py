@@ -154,17 +154,35 @@ def test_every_code_agent_check_is_registered_and_dispatched():
     assert not _run_declared_static_check(evaluator, {"_benchmark": {}})[0]
 
 
-def test_code_agent_task_declares_startup_check_and_runs_on_every_deploy(tmp_path):
+def test_code_agent_task_earns_its_deploy_slot_from_history_on_code_session_paths(tmp_path):
+    """Not on the always-on smoke floor: a deploy_canary that a code-session change selects once it has 3 passes."""
     task = {task.name: task for task in load_tasks(DEFAULT_CATALOG)}[TASK]
     assert task.raw["project"] == "Rose" and task.raw["requires_claude_code"] is True
-    assert task.is_smoke and code_agent_checks.declares_check(task.raw["evaluators"])
-    no_history = tmp_path / "attempts.jsonl"
-    no_history.write_text("")
-    for surface in ("local", "cloud"):
-        selection = select_predeploy_benches(
-            catalog=DEFAULT_CATALOG, changed_files=[], surface=surface, attempts_file=no_history
+    assert not task.is_smoke and task.deploy_canary and task.deploy_category == "claude-code"
+    assert code_agent_checks.declares_check(task.raw["evaluators"])
+    attempts = tmp_path / "attempts.jsonl"
+
+    def selected(changed, rows):
+        attempts.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        return select_predeploy_benches(
+            catalog=DEFAULT_CATALOG, changed_files=changed, surface="local", attempts_file=attempts
         )
-        assert TASK in selection.floor, (surface, selection.floor)
+
+    def attempt(passed, hour, counts=True):
+        return {"task": TASK, "passed": passed, "counts_for_deploy_eligibility": counts,
+                "timestamp": f"2026-11-06T{hour:02d}:00:00+00:00"}
+
+    code_session_change = ["back-end/src/providers/e2bCodeSessionSandbox.ts"]
+    cold = selected(code_session_change, [])
+    assert TASK in cold.skipped_history and TASK not in cold.selected, (cold.skipped_history, cold.selected)
+    broken = selected(code_session_change, [attempt(True, 1), attempt(True, 2), attempt(False, 3), attempt(True, 4)])
+    assert TASK in broken.skipped_history and TASK not in broken.selected
+    predeploy_only = selected(code_session_change, [attempt(True, h, counts=False) for h in (1, 2, 3)])
+    assert TASK in predeploy_only.skipped_history, "predeploy attempts must not earn the slot"
+    earned = selected(code_session_change, [attempt(True, h) for h in (1, 2, 3)])
+    assert TASK in earned.selected and TASK not in earned.skipped_history
+    unrelated = selected(["docs/unrelated.md"], [attempt(True, h) for h in (1, 2, 3)])
+    assert TASK not in unrelated.selected
 
 
 def _session_evidence(rows: int, calls: int = 1) -> dict:
