@@ -232,7 +232,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     await openFromRow(user);
     const chip = () => screen.getByTestId('query-model-selector');
     const speed = () => screen.getByTestId('speed-toggle');
-    await waitFor(() => expect(chip()).toHaveTextContent('codex/Test Codex'));
+    await waitFor(() => expect(chip()).toHaveTextContent('Test Codex · medium'));
     expect(speed()).toHaveAttribute('data-state', 'normal');
     // The next turn's speed is picked on the query box's own speed toggle.
     await user.click(speed());
@@ -250,7 +250,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     expect(input).toHaveValue('Inspect this');
     expect(screen.getByText('notes.txt')).toBeInTheDocument();
     // A failed delivery applies nothing: the live session's model, the draft speed.
-    expect(chip()).toHaveTextContent('codex/Test Codex');
+    expect(chip()).toHaveTextContent('Test Codex · medium');
     expect(chip()).not.toHaveTextContent('Test Codex Two');
     expect(speed()).toHaveAttribute('data-state', 'fast');
     await user.keyboard('{Escape}');
@@ -272,7 +272,7 @@ describe('Rose left bar: a code agent opens as its own conversation (flag on)', 
     });
     expect(screen.queryByText('notes.txt')).toBeNull();
     // The delivery ACK's effective settings now drive the chip.
-    await waitFor(() => expect(chip()).toHaveTextContent('codex/Test Codex Two'));
+    await waitFor(() => expect(chip()).toHaveTextContent('Test Codex Two · high'));
     expect(speed()).toHaveAttribute('data-state', 'fast');
   });
 

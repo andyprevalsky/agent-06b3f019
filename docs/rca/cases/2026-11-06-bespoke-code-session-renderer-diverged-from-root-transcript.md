@@ -103,6 +103,14 @@ Delete/unify (Step 6a):
 10k agents: the view reads only the owner's already-loaded rows (no new fetch, poll
 or subscription); the projection is O(owner messages) per render of one open view.
 
+### Follow-up: review of the integrated run (final-run5 replay, 2026-11-06)
+
+- **Nub looked empty (C12).** The nub held only the context meter, which needs the model's window; the CLI reports it only with its first turn result, and the info item is hidden for signed-in users. A live session before its first result, or one without usage records, opened an empty strip, and even with data it held one item against the root's six. Fix: the meter shows the tokens when the window is unknown, the existing Agent settings gear is fed by the code agent's own data (messages, tokens, sandbox cost, context vs the real window), the model chip shows `<model> · <effort>`, and the nub is never an empty strip. Regression: `code-agent-view-nub.blackbox.tsx` (4 cases, red on the previous commit).
+- **Bare "Thought" rows (item 4).** Mid-turn narration is assistant text, rendered as a synthetic Thought card that carried no generation beside thinking rows that did. Fix (on the integrated code, which owns `attachGeneration`): narration rows take the generation of the call that wrote them. Regression: `code-agent-narration-generation.blackbox.tsx`.
+- **Bottom overlap (item 3).** Not reproducible: at scroll end the transcript clears the composer on both branches (14px gap plus the 128px `pb-32`); the reported screenshot was at scroll position 0, where the floating composer overlays the content below the fold, and the cut-off "Thought" row is the 320px work-history scroll box.
+
+- **'Open app' (item 2, decided by the orchestrator).** The floating pink "Open app" above the user message is header chrome and is gone; the only entry to the full-screen dev preview is now one link inside the existing devbox usage popover (`CodeResourcesIndicator` takes an optional `preview`), shown only for a session with a cross-origin `preview_url`, and kept for an idle session (no measured values, link only). Regressions: `app-view-preview-card` (no "Open app" in the view until the popover opens, the popover link opens the same preview), `code-agent-resources` (4 cases), and the ~30 app-view tests re-entered through the popover.
+
 ## Human feedback
 
 Andy (via the orchestrator): "DON'T make a new display. Use the existing FE we already

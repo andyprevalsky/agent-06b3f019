@@ -1,5 +1,5 @@
 /**
- * STATE MACHINE: OpenAppButton (code-agent view, top right; UI ledger rows 10/39)
+ * STATE MACHINE: OpenAppButton (the link inside the code-agent view's devbox usage popover; UI ledger rows 10/39)
  *
  * Shown when the session's code_agent carries a cross-origin preview_url (dev cloud
  * sessions) and an AppViewProvider is mounted (Rose Desktop terminal); else null.

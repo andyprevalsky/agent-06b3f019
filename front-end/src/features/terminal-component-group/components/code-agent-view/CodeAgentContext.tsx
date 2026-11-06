@@ -74,8 +74,8 @@ export function CodeAgentContextProvider({
   );
   const firstAt = messages[0]?.timestamp ?? new Date(0).toISOString();
   const agent = useMemo(
-    () => codeAgentDetail(taskId, ownerAgentId, c, settings, firstAt),
-    [taskId, ownerAgentId, c, settings, firstAt],
+    () => codeAgentDetail(taskId, ownerAgentId, c, settings, firstAt, messages.length),
+    [taskId, ownerAgentId, c, settings, firstAt, messages.length],
   );
   const value = useMemo<AgentContextValue>(
     () => ({
