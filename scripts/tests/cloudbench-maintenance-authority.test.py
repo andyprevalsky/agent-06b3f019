@@ -227,6 +227,42 @@ PY_TAMPER
         self.assertFalse((self.context/'start-marker').exists())
         self.assertFalse(c.read(self.context/'cycle.json')['native_maintenance'][-1]['qualified'])
 
+    def test_single_native_cache_addition_keeps_exact_old_protected_digest(self):
+        import datetime
+        app='navi-whisper-lux-bench';old=copy.deepcopy(self.provider['before'])
+        old['config']['metadata']={'owner':'original-protected-owner'}
+        original=m.machine(old);current=copy.deepcopy(old)
+        epoch=int(time.time())-10;node='a'*64;python='c'*64
+        key='rose_cloudbench_deps_'+hashlib.sha256((node+'\0'+python).encode()).hexdigest()[:32]
+        current['config']['metadata'][key]=f'{node} {python} {epoch} snapshot_one vol-owned warm {app}'
+        snapshot={'id':'snapshot_one','status':'created','size':123,'created_at':datetime.datetime.fromtimestamp(epoch+1,datetime.timezone.utc).isoformat()}
+        with patch.object(m,'get',return_value=[snapshot]) as query:
+            proof=m.owned_scope(m.machine(current),original,app=app)
+            self.assertEqual(proof['without_key_sha256'],original['stable_sha256'])
+            self.assertFalse(proof['dependency_reuse_credit'])
+            query.assert_called_once_with(app,'volumes/vol-owned/snapshots')
+        for label,mutate in (
+            ('owner',lambda v:v['config']['metadata'].update(owner='foreign')),
+            ('env',lambda v:v['config']['env'].update(PRESENT='foreign')),
+            ('file',lambda v:v['config'].update(files=[{'guest_path':'/foreign','raw_value':'foreign'}])),
+            ('mount',lambda v:v['config']['mounts'][0].update(volume='foreign')),
+            ('unknown metadata',lambda v:v['config']['metadata'].update(unrecognized='foreign')),
+            ('cache key',lambda v:v['config']['metadata'].update({key:'malformed'})),
+            ('wrong app',lambda v:v['config']['metadata'].update({key:current['config']['metadata'][key].replace(app,'foreign-app')})),
+            ('wrong metadata volume',lambda v:v['config']['metadata'].update({key:current['config']['metadata'][key].replace(' vol-owned ',' foreign ')})),
+            ('wrong key',lambda v:v['config']['metadata'].update({'rose_cloudbench_deps_'+'f'*32:v['config']['metadata'].pop(key)})),
+            ('extra metadata',lambda v:v['config']['metadata'].update({'rose_cloudbench_deps_unknown':'unproven'})),
+        ):
+            value=copy.deepcopy(current);mutate(value)
+            with self.subTest(label=label),patch.object(m,'get',return_value=[snapshot]),self.assertRaises(ValueError):
+                m.owned_scope(m.machine(value),original,app=app)
+        for change in ({'status':'pending'},{'size':0},{'id':'other'},{'created_at':'2000-01-01T00:00:00+00:00'}):
+            with self.subTest(snapshot=change),patch.object(m,'get',return_value=[{**snapshot,**change}]),self.assertRaises(ValueError):
+                m.owned_scope(m.machine(current),original,app=app)
+        # An existing advisory value is still protected; this is addition only.
+        altered=copy.deepcopy(current);altered['config']['metadata'][key]+='x'
+        with self.assertRaises(ValueError):m.owned_scope(m.machine(altered),m.machine(current),app=app)
+
     def test_original_pin_rejects_then_native_transition_qualifies(self):
         # The exact original match body rejects the new config/incarnation.
         import ast

@@ -133,6 +133,25 @@ def get(app, resource):
         return json.load(response)
 
 
+def cache_addition_projections(config, machine_id):
+    """Only the native seven-field advisory cache namespace; no ownership keys."""
+    result=[]
+    for key,value in (config.get('metadata') or {}).items():
+        if not isinstance(value,str):continue
+        fields=value.split()
+        if len(fields)!=7 or value!=' '.join(fields):continue
+        node,python,epoch,snapshot,volume,mid,app=fields
+        if (not all(re.fullmatch('[a-f0-9]{64}',x) for x in (node,python))
+            or key!='rose_cloudbench_deps_'+hashlib.sha256((node+'\0'+python).encode()).hexdigest()[:32]
+            or not re.fullmatch('[1-9][0-9]*',epoch) or not re.fullmatch('[A-Za-z0-9_-]+',snapshot)
+            or mid!=machine_id or not re.fullmatch('[a-z0-9-]+',app)
+            or not any(m.get('volume')==volume for m in config.get('mounts',[]))):continue
+        projected=copy.deepcopy(config);del projected['metadata'][key]
+        result.append(dict(key=key,node=node,python=python,epoch=int(epoch),snapshot=snapshot,
+                           volume=volume,machine=mid,app=app,without_key_sha256=digest(projected)))
+    return result
+
+
 def machine(value):
     """Only hashes/presence of config and env/file contents persist in receipts."""
     config = copy.deepcopy(value['config'])
@@ -143,7 +162,8 @@ def machine(value):
         stable.pop('init', None)
     return {**{k: value[k] for k in ('id', 'instance_id', 'name', 'state')},
             'config_sha256': hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest(),
-            'stable_sha256': digest(stable), 'guest': config.get('guest'),
+            'stable_sha256': digest(stable), 'cache_addition_projections':cache_addition_projections(stable,value['id']),
+            'guest': config.get('guest'),
             'command': config.get('init', {}).get('cmd'),
             'image': config['image'], 'image_digest': value.get('image_ref', {}).get('digest'),
             'mounts': config.get('mounts', [])}
@@ -303,13 +323,30 @@ def original_owned_baseline(state, root, entries):
     return intent['before']['warm'], {'nonce':record['nonce'],'intent_sha256':digest(intent),'result_sha256':digest(result)}
 
 
-def owned_scope(warm, original):
-    # The existing native cycle owns this exact resource scope. The previous
-    # image is never executed: setup replaces it with the qualified new build
-    # while stopped, then records a second native GET before the first start.
-    need(all(warm[k]==original[k] for k in ('id','name','mounts','stable_sha256'))
+def owned_scope(warm, original, *, app=None):
+    # Full old digest remains the authority. A single additive advisory cache
+    # entry may be projected out ONLY when the exact remaining digest matches.
+    need(all(warm[k]==original[k] for k in ('id','name','mounts'))
          and warm['state']=='stopped' and warm['instance_id']
          and warm['command']==['sleep','infinity'], 'prospective original owned resource scope')
+    if warm['stable_sha256']==original['stable_sha256']:return None
+    matching=[p for p in warm.get('cache_addition_projections',[])
+              if p['without_key_sha256']==original['stable_sha256'] and p['app']==app]
+    need(len(matching)==1,'prospective original owned resource scope')
+    proof=matching[0]
+    # Same completed-snapshot predicate as cloudbench_warm_deps_state_from_inventory.
+    import datetime
+    snapshots=get(app,'volumes/'+proof['volume']+'/snapshots')
+    need(isinstance(snapshots,list) and all(isinstance(r,dict) for r in snapshots),'added cache snapshot inventory')
+    rows=[r for r in snapshots if r.get('id')==proof['snapshot']]
+    need(len(rows)==1,'added cache snapshot identity')
+    row=rows[0]
+    created=datetime.datetime.fromisoformat(row['created_at'].replace('Z','+00:00')).timestamp()
+    need(row.get('status','').lower() in {'created','complete','completed','ready'}
+         and int(row.get('size') or 0)>0 and 0<proof['epoch']<=time.time()
+         and created>=proof['epoch']-60,'added cache snapshot completion')
+    return {**proof,'snapshot_created_at':row['created_at'],'snapshot_status':row['status'],
+            'snapshot_size':row['size'],'dependency_reuse_credit':False}
 
 
 def prestart(args):
@@ -332,7 +369,7 @@ def prestart(args):
     need(digest(read(intent['build_path']))==intent['build_sha256'], 'prestart original build receipt')
     image_build(Path(intent['build_path']),intent['image'],root,intent['source'])
     current=observation(intent['app'],intent['targets'][0][1],native_pid=args.pid)
-    owned_scope(current['warm'],intent['before']['warm'])
+    owned_scope(current['warm'],intent['before']['warm'],app=intent['app'])
     need(current['warm']['image']==intent['image'] and current['warm']['image_digest']==intent['image_digest'],
          'prestart desired immutable image')
     need(current['volumes']==intent['before']['volumes']
@@ -375,7 +412,8 @@ def begin(args):
     if prospective:
         need(historical_debt_audit(state,gate)==entries,'original historical debt authority')
         original,predecessor=original_owned_baseline(state,root,entries)
-        owned_scope(before['warm'],original)
+        compatibility=owned_scope(before['warm'],original,app=args.app)
+        if compatibility is not None:before['cache_addition']=compatibility
     else:
         need(sorted(isolated_admissions(state, args.gate), key=lambda e: e['token']) == entries, 'original debt authority')
     registry = common(root)/'cloudbench-maintenance'
@@ -407,7 +445,7 @@ def begin(args):
 def validate_prestart(intent,result,record):
     need(record['schema']==SCHEMA and record['nonce']==intent['nonce']
          and record['intent_sha256']==digest(intent) and record['producer']==intent['producer'], 'prestart native seal')
-    current=record['observation'];owned_scope(current['warm'],intent['before']['warm'])
+    current=record['observation'];owned_scope(current['warm'],intent['before']['warm'],app=intent['app'])
     need(current['warm']['image']==intent['image'] and current['warm']['image_digest']==intent['image_digest']
          and intent['started_at']<=current['observed_at']<=result['finished_at'], 'prestart image/time binding')
     need(current['volumes']==intent['before']['volumes'] and
@@ -510,7 +548,8 @@ def validate_current(state, entries, anchor, operation):
         historical_debt_audit(state,gate)
         original,predecessor=original_owned_baseline(state,root,entries)
         need(intent['prospective_origin']=={'predecessor':predecessor},'original prospective scope seal')
-        owned_scope(intent['before']['warm'],original)
+        compatibility=owned_scope(intent['before']['warm'],original,app=intent['app'])
+        need(intent['before'].get('cache_addition')==compatibility,'original cache addition proof changed')
     else:
         need(all(intent['before']['warm'][k] == expected[k] for k in ('id','instance_id','name','state','config_sha256')),
              'original pinned before authority')
