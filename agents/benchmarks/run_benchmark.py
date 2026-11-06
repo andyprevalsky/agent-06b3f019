@@ -12473,8 +12473,34 @@ and `reasoning` fields, then validate that file exists before finishing.
 """
 
 
-async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dict[str, Any]:
-    """Resolve a synced GPT/Codex compute token for the benchmark judge harness."""
+async def _agentic_judge_code_provider(user_id: str) -> str:
+    """The code harness the judge runs on, in the spawn's C15 credential order.
+
+    Codex is preferred; the backend plan (credentialOrder.ts) lists every
+    subscription before any funded key, so a cooled-down Codex login still
+    leaves a Claude subscription or the funded Azure / Anthropic path. Only an
+    empty plan is an exhausted pool (SKIPPED); a failed lookup stays an error.
+    """
+    from domains.spawn_claude_code_agent.repo import fetch_code_credential_availability
+
+    available = await fetch_code_credential_availability(user_id, prefer="codex")
+    if available is None:
+        raise RuntimeError("Code credential availability lookup failed for agentic benchmark judge")
+    step = available.get("next_credential")
+    if not isinstance(step, dict):
+        raise ComputeTokenUnavailable(
+            "Codex compute token unavailable for agentic benchmark judge: "
+            "no Codex or Claude Code subscription or funded key is leasable"
+        )
+    return str(step["provider"])
+
+
+async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> Optional[dict[str, Any]]:
+    """A synced GPT/Codex compute token for the Codex judge's verifier, when one is leasable.
+
+    The sandbox CLI credential is leased by the spawn itself (own login, pool,
+    then funded Azure), so a missing token here does not block the judge.
+    """
     from config import load_config
     from helpers.llm import fetch_gpt_code_token_activity
 
@@ -12504,7 +12530,7 @@ async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dic
                     "poolTokenId": data.get("poolTokenId"),
                 }
 
-    raise ComputeTokenUnavailable("Codex compute token unavailable for agentic benchmark judge")
+    return None
 
 
 async def _parse_agentic_judge_verdict(result: dict) -> tuple[float, str]:
@@ -12567,7 +12593,10 @@ async def _call_declared_agentic_llm_judge(
     user_id = _current_benchmark_user_id()
     judge_agent_id = str(uuid.uuid4())
     tool_call_id = str(uuid.uuid4())
-    token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id)
+    code_provider = await _agentic_judge_code_provider(user_id)
+    token_data = (
+        await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) if code_provider == "codex" else None
+    ) or {}
 
     if getattr(task, "process_spec", None) is not None:
         from benchmarks.process_bench import process_evidence
@@ -12590,8 +12619,8 @@ async def _call_declared_agentic_llm_judge(
         tool_call_id=tool_call_id,
         output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
         attachments=[attachment],
-        code_provider="codex",
-        gpt_token=token_data["accessToken"],
+        code_provider=code_provider,
+        gpt_token=token_data.get("accessToken"),
         gpt_account_id=token_data.get("accountId"),
         gpt_token_source=token_data.get("source"),
         gpt_token_pool_id=token_data.get("poolTokenId"),
