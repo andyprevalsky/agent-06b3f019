@@ -1992,6 +1992,43 @@ async def test_wait_for_agents_mode_wakes_on_listed_child_only():
     assert "- /root/draft_a: completed" in final["text"], final
 
 
+async def test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes():
+    """Supervising a multi-day agent costs one wait, not one turn per hour.
+
+    wait_for(agents=...) is capped at one hour (Codex wait_agent); a longer wait
+    is one timestamp wait (up to 31 days) that ends as soon as a background
+    agent of ours finishes. The cap's error names that path instead of
+    "call wait_for again", which spent a planner iteration every hour.
+    """
+    from domains.wait_for.handler import wait_for
+    from utils.wait_for_bounds import WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR, resolve_wait_for_agents_timeout
+
+    try:
+        resolve_wait_for_agents_timeout(3 * 24 * 3600)
+    except ValueError as exc:
+        assert str(exc) == WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR
+    else:
+        raise AssertionError("agents-mode waits stay capped at one hour")
+    assert "until_timestamp" in WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR, WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR
+    assert "call wait_for again" not in WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR, WAIT_FOR_AGENTS_MAX_TIMEOUT_ERROR
+
+    rows, clock = _Rows(), _Clock()
+    with _real_wf(rows, clock) as wf:
+        gates = {"coder": asyncio.Event()}
+        wf._execute_tool = _gated_spawns(wf, gates)
+        await _spawn_bg(wf, "coder", "toolu_coder")
+        task = asyncio.create_task(
+            wait_for(wf, {"description": "the coder", "until_timestamp": "2026-10-22T12:00:00Z"}, "tc-days")
+        )
+        await _until(lambda: rows.for_call("tc-days"))
+        clock.t = clock.t + timedelta(hours=30)
+        gates["coder"].set()
+        await asyncio.wait_for(task, 2)
+    final = rows.for_call("tc-days")[-1]
+    assert final["metadata"]["wokenBy"] == "agent_notification", final
+    assert "Woken early by a background agent notification (/root/coder)" in final["text"], final
+
+
 async def test_wait_for_wake_text_names_child_by_path_not_id():
     """Repro (bench run 2): "Woken by a sub-agent finishing (65f769fc-…)" showed an agent id.
 
@@ -2197,6 +2234,42 @@ async def test_wait_for_agents_mode_returns_at_once_for_finished_agent():
         )
     assert result.startswith("/root/draft_a already finished."), result
     assert clock.timeouts == []
+
+
+async def test_wait_for_title_never_doubles_the_waiting_prefix():
+    """Andy 2026-10-28: the work row read "Waiting for Waiting for Chase balances";
+    it must read "Waiting for <agent task name>".
+
+    A listed agent is named by its own task name even when the model's description
+    differs; the description (with any "Waiting for" prefix stripped) is only the
+    fallback when no name resolves ("any").
+    """
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    for description, agents, expected, meta_description in (
+        ("Waiting for Chase balances", ["/root/pull_bank_data"], "Waiting for pull_bank_data", "pull_bank_data"),
+        ("waiting for waiting for the bank", ["/root/pull_bank_data"], "Waiting for pull_bank_data", "pull_bank_data"),
+        ("Waiting for Chase balances", ["any"], "Waiting for Chase balances", "Chase balances"),
+        ("Chase balances", ["any"], "Waiting for Chase balances", "Chase balances"),
+    ):
+        rows, clock = _Rows(), _Clock()
+        with _real_wf(rows, clock) as wf:
+            gates = {"pull_bank_data": asyncio.Event()}
+            wf._execute_tool = _gated_spawns(wf, gates)
+            await _spawn_bg(wf, "pull_bank_data", "toolu_c")
+            gates["pull_bank_data"].set()
+            await wf._background_handles["toolu_c"]
+            events = await _collect(
+                WaitForManager().execute_tool(
+                    workflow_instance=wf,
+                    tool_call={"description": description, "agents": agents},
+                    tool_call_id="tc-title",
+                )
+            )
+        running = [e for e in events if e.status == MessageStatus.IN_PROGRESS]
+        assert running and running[0].title == expected, (description, [e.title for e in events])
+        assert running[0].metadata["description"] == meta_description, running[0].metadata
 
 
 def test_wait_for_agents_schema_is_a_plain_string_array():
@@ -2685,6 +2758,10 @@ async def run_all_tests():
     await r.record_async("wake_ts_user_message", test_wait_for_timestamp_woken_early_by_user_message)
     await r.record_async("wake_ts_agent_message", test_wait_for_timestamp_woken_early_by_agent_message)
     await r.record_async(
+        "wake_multi_day_ts_on_background_finish",
+        test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes,
+    )
+    await r.record_async(
         "wake_ts_ignores_attention_response", test_wait_for_attention_response_does_not_wake_timestamp_wait
     )
     await r.record_async("wake_condition_between_checks", test_wait_for_condition_mode_woken_between_checks)
@@ -2697,6 +2774,7 @@ async def run_all_tests():
         "agents_mode_timeout_status", test_wait_for_agents_mode_timeout_reports_status_and_reads_tree_for_others
     )
     await r.record_async("agents_mode_already_finished", test_wait_for_agents_mode_returns_at_once_for_finished_agent)
+    await r.record_async("title_never_doubles_waiting_prefix", test_wait_for_title_never_doubles_the_waiting_prefix)
     r.record("agents_mode_schema_validation", test_wait_for_schema_validates_agents_mode)
     r.record("agents_schema_is_plain_string_array", test_wait_for_agents_schema_is_a_plain_string_array)
     await r.record_async(

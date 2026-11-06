@@ -4,6 +4,11 @@
 
 import multer from 'multer';
 
+/** Account-wide repair-agent tools remain off until their explicit rollout. */
+export function accountAgentsEnabled(): boolean {
+  return process.env.ROSE_ACCOUNT_AGENTS_ENABLED === 'true';
+}
+
 /** Report Bug screenshots: one image per request, held in memory for upload. */
 export const MAX_BUG_REPORT_SCREENSHOT_BYTES = 10 * 1024 * 1024;
 

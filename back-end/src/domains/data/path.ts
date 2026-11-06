@@ -16,7 +16,7 @@
  *   `messages/+19729777432.thread/<id>` -> one message
  */
 
-import { pathSegment } from './format.snippets';
+import { pathSegment, stripTrailingSlashes } from './format.snippets';
 
 export const THREAD_SUFFIX = '.thread';
 export const CONTACT_SUFFIX = '.contact';
@@ -56,7 +56,7 @@ export function isAgentTaskPath(value: unknown): value is string {
 /** A `trace_path` value naming an agent task path (trailing slashes tolerated), else undefined. */
 export function agentTaskPathParam(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const trimmed = value.trim().replace(/\/+$/, '');
+  const trimmed = stripTrailingSlashes(value.trim());
   return isAgentTaskPath(trimmed) ? trimmed : undefined;
 }
 
@@ -138,7 +138,7 @@ export function parseAccountLabel(label: string): { accountName: string; account
  * Trailing slashes are tolerated so a subtree prefix parses like its directory.
  */
 export function parseGrepPath(value: string): ParsedGrepPath | null {
-  const trimmed = value.trim().replace(/\/+$/, '');
+  const trimmed = stripTrailingSlashes(value.trim());
   if (!trimmed) return null;
 
   const [head, ...rest] = trimmed.split('/');

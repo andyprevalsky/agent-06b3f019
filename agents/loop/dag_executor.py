@@ -20,11 +20,11 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-import structlog
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from domains.reasoning.config import MAX_CONTEXT_MESSAGES as REASONING_MAX_CONTEXT_MESSAGES
+from helpers.workflow_safe import context_logger
 from helpers.agent_addressing import ensure_planned_task_name
 from helpers.background_agents import is_agent_authored_user_metadata
 from helpers.context_compaction import is_excluded_from_model
@@ -37,7 +37,7 @@ from utils.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 from utils.tool_call_ids import spawn_group_id
 from utils.tool_schemas import TOOL_ALIASES
 
-logger = structlog.get_logger()
+logger = context_logger()
 
 STRUCTURED_OUTPUT_ERROR_TYPE = "LLMStructuredOutputError"
 STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2

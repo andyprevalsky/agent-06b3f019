@@ -3,15 +3,25 @@ import { config } from 'dotenv';
 import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
-import { retryWithBackoff } from '../../providers/retry';
+import {
+  __resetCodexFundedCooldown,
+  codexFundedCooldownUntil,
+} from '../../providers/codeSessions/usageLimit';
 import {
   testPersistOutput_coolsExhaustedOAuthCredential,
   testPersistOutput_coolsFundedKeyForObservedBalanceError,
 } from './codex-code-oauth-feedback.case';
 import { testCodexWsServerOverlayUsesLocalSource } from './codex-code-overlay.case';
 import {
+  testCodeAgentModels_createAgentRequestReachesCodeAgent,
+  testCodeAgentModels_inspectAzureTierFollowsSpeed,
+  testCodeAgentModels_overridesWin,
+  testCodeAgentModels_tierTableAndUnknownIsFlash,
+  testCodeAgentModels_wsServerFallbacksMatchFlash,
+} from './codex-code-model.case';
+import {
   testResolveCodexAuthEnvs_apiKeyFallback,
-  testResolveCodexAzureFunding_selectsWestusRegion,
+  testResolveCodexAzureFunding_selectsRegionByDeployment,
   testResolveCodexAuthEnvs_noCredsNoKeyThrows,
   testResolveCodexAuthEnvs_oauthPrimaryWithApiKeyRuntimeFallback,
   testResolveCodexAuthEnvs_oauthWithoutFundedKey,
@@ -21,6 +31,7 @@ import {
   testCodexCreditSkip_readsNestedErrorObject,
   testCodexCreditSkip_successStillWins,
   testCodexCreditSkip_authRevocationStillFailsHard,
+  testCodexCreditSkip_structuredUnusableLoginPausedForRetryIsSkip,
   testCodexCreditSkip_matchesE2bTeamBlockedWording,
   testCodexCreditSkip_createUnavailableOnCooldownIsSkip,
 } from './codex-credit-skip.case';
@@ -36,6 +47,7 @@ import {
   codexCreateUnavailableSkipReason,
   codexOauthRevocationSignal,
   codexSmokeCreditSkipReason,
+  codexSmokeLoginUnusableSkipReason,
   detectCodexCreditExhaustion,
   testCreateUnavailableSkip_cooldownOnly,
   testCreditExhaustion_neverOverridesSuccessSentinel,
@@ -44,7 +56,12 @@ import {
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
 import { waitForCodexOutput } from './codex-ws-output.support';
-import { cooldownIsLive, waitForServerFundedKeyCooldown } from './funded-key-cooldown.support';
+import {
+  assertSmokeSettings,
+  deleteSmokeParent,
+  liveSessionSettings,
+  smokeParentAgent,
+} from './code-agent-settings-smoke.support';
 import { assert, assertStatus, request } from './codex-sandbox.support';
 config();
 
@@ -93,6 +110,8 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
     },
   });
   const taskId = crypto.randomUUID();
+  await __resetCodexFundedCooldown();
+  const openAiKeyBefore = await openAiKeyCooldownUntil();
   await prisma.claudeCodeSession.create({
     data: {
       id: taskId,
@@ -134,36 +153,35 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
       'failed OAuth-to-funded-key fallback must cool the exact selected OAuth integration'
     );
 
-    const cooldown = await prisma.integration.findUnique({
-      where: {
-        userId_name_accountId: {
-          userId: '00000000-0000-0000-0000-000000000000',
-          name: 'gpt_api_key_cooldown',
-          accountId: '',
-        },
-      },
-    });
+    const fundedUntil = await codexFundedCooldownUntil();
     assert(
-      cooldown?.rateLimitedUntil instanceof Date &&
-        cooldown.rateLimitedUntil.getTime() > Date.now(),
-      'failed OAuth-to-funded-key fallback must cool the shared funded credential'
+      fundedUntil !== null && fundedUntil.getTime() > Date.now(),
+      'failed OAuth-to-Azure fallback must back off the funded Azure Codex deployment'
+    );
+    assert(
+      (await openAiKeyCooldownUntil()) === openAiKeyBefore,
+      'failed OAuth-to-Azure fallback must not cool the shared OpenAI key (Rose chat path)'
     );
   } finally {
     await prisma.claudeCodeSession.deleteMany({ where: { id: taskId } });
     await prisma.integration.deleteMany({ where: { id: integration.id } });
-    await prisma.integration.deleteMany({
-      where: {
+    await __resetCodexFundedCooldown();
+  }
+}
+
+/** The shared OpenAI-key cooldown end; Codex credential feedback must never move it. */
+async function openAiKeyCooldownUntil(): Promise<number | null> {
+  const row = await prisma.integration.findUnique({
+    where: {
+      userId_name_accountId: {
         userId: '00000000-0000-0000-0000-000000000000',
         name: 'gpt_api_key_cooldown',
+        accountId: '',
       },
-    });
-    await waitForServerFundedKeyCooldown({
-      baseUrl: BASE_URL,
-      apiKey: API_KEY,
-      key: 'gpt',
-      onCooldown: false,
-    });
-  }
+    },
+    select: { rateLimitedUntil: true },
+  });
+  return row?.rateLimitedUntil?.getTime() ?? null;
 }
 
 async function testPersistOutput_rejectsInvalidCredentialFeedback() {
@@ -178,54 +196,18 @@ async function testPersistOutput_rejectsInvalidCredentialFeedback() {
   assertStatus(res.status, 400, res.data);
 }
 
-/**
- * Feedback cases on this backend cool the shared funded key and then delete
- * its row; the backend honors that within its 15-second recheck interval.
- */
-async function waitForFundedGptKeyRestore(): Promise<void> {
-  await retryWithBackoff(
-    () =>
-      request(`${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`, {
-        headers: apiKeyHeaders(),
-      }),
-    {
-      maxRetries: 21,
-      fixedDelays: Array.from({ length: 20 }, () => 1500),
-      shouldRetryResult: (res) => (res.data as { onCooldown?: boolean }).onCooldown === true,
-      component: 'CodexSmokeFundedKey',
-    }
-  );
-}
-
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
     process.env.E2B_API_KEY !== undefined && process.env.E2B_API_KEY !== '',
     'E2B_API_KEY is required'
   );
-  await waitForFundedGptKeyRestore();
-  const agentId = crypto.randomUUID();
+  // The parent's tier and Fast Mode button decide the CLI model, effort and speed.
+  const parent = await smokeParentAgent(DEV_USER_ID);
+  const agentId = parent.agentId;
   let taskId: string | undefined;
   let sandboxId: string | undefined;
   let closed = false;
-  const sharedCooldown = await prisma.integration.findUnique({
-    where: {
-      userId_name_accountId: {
-        userId: '00000000-0000-0000-0000-000000000000',
-        name: 'gpt_api_key_cooldown',
-        accountId: '',
-      },
-    },
-    select: { rateLimitedUntil: true },
-  });
-  if (!cooldownIsLive(sharedCooldown)) {
-    await waitForServerFundedKeyCooldown({
-      baseUrl: BASE_URL,
-      apiKey: API_KEY,
-      key: 'gpt',
-      onCooldown: false,
-    });
-  }
 
   try {
     const createRes = await request(`${BASE_URL}/api/codex-code-session/create`, {
@@ -248,13 +230,8 @@ async function testSmoke_codexCompletesE2bTask() {
         typeof createRes.data === 'string' ? createRes.data : JSON.stringify(createRes.data ?? {});
       let createSkip = detectCodexCreditExhaustion(createBody, []);
       if (!createSkip) {
-        const cooldownRes = await request(
-          `${BASE_URL}/api/integrations/compute-code/gpt-key/cooldown`,
-          {
-            headers: apiKeyHeaders(),
-          }
-        );
-        const onCooldown = (cooldownRes.data as { onCooldown?: boolean }).onCooldown === true;
+        // The funded Codex path is the Azure deployment; its backoff is a DB row.
+        const onCooldown = (await codexFundedCooldownUntil()) !== null;
         createSkip = codexCreateUnavailableSkipReason(createBody, onCooldown);
       }
       if (createSkip) {
@@ -277,16 +254,10 @@ async function testSmoke_codexCompletesE2bTask() {
     sandboxId = body.sandbox_id;
 
     const { output, events, exitCode } = await waitForCodexOutput(body.ws_url);
-    // The app-server transport reports a failed turn only as events, so the
-    // transcript can be empty; the classification below still has to run.
-    if (output !== '') {
-      const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
-        method: 'POST',
-        headers: apiKeyHeaders(),
-        body: JSON.stringify({ output }),
-      });
-      assertStatus(outputRes.status, 200, outputRes.data);
-    }
+    // Classify the run before persisting its output: an exhausted run can end
+    // with no output at all, and the output route rejects an empty body, which
+    // would hide the deploy-approved credit SKIP (and any real failure) behind
+    // a 400.
     // Before treating a missing sentinel as a hard failure, check whether the
     // run simply ran out of credits on EVERY credential path (OAuth + funded
     // key). That is an external funding state, not a code regression, so it is
@@ -301,6 +272,15 @@ async function testSmoke_codexCompletesE2bTask() {
     });
     const succeeded = turnCompleted || exitCode === 0;
     // A completed turn is the success signal; success always wins over a skip.
+    // Subscriptions first (C15): a revoked login with another subscription leasable
+    // runs without the Azure switch and pauses for the parent's retry on that
+    // subscription. The login is unavailable until reconnected: SKIP, never PASS.
+    const unusableLogin = succeeded ? null : codexSmokeLoginUnusableSkipReason(events);
+    if (unusableLogin) {
+      throw new CredentialExhaustionSkip(
+        `Codex login unusable (revoked or refresh failed) with no Azure switch armed; the run paused for a retry on the next credential. Reconnect the Codex login. Smoke SKIPPED without failing the deploy gate. Signal: ${unusableLogin}. exit=${exitCode ?? 'unknown'}`
+      );
+    }
     const creditSkip = succeeded ? null : codexSmokeCreditSkipReason(output, events);
     if (creditSkip) {
       throw new CredentialExhaustionSkip(
@@ -311,6 +291,16 @@ async function testSmoke_codexCompletesE2bTask() {
       succeeded,
       `Codex turn did not complete. exit=${exitCode ?? 'unknown'} oauth_revocation=${JSON.stringify(codexOauthRevocationSignal(output, events))} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
     );
+    // App-server can complete a turn with an empty transcript; persist only
+    // populated output after the outcome has been classified.
+    if (output !== '') {
+      const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+        method: 'POST',
+        headers: apiKeyHeaders(),
+        body: JSON.stringify({ output }),
+      });
+      assertStatus(outputRes.status, 200, outputRes.data);
+    }
     assert(
       events.some((event) => {
         const typed = event as { type?: string; provider?: string };
@@ -319,17 +309,18 @@ async function testSmoke_codexCompletesE2bTask() {
       `Expected normalized Codex session event, got: ${JSON.stringify(events).slice(0, 500)}`
     );
 
-    // Runtime-fallback invariant: if the ChatGPT OAuth token hit its usage limit
-    // or proved revoked mid-run, the sandbox MUST re-login with the funded key
-    // (auth_fallback event) rather than giving up — otherwise the completed turn above
-    // could never have been produced on an exhausted token. This is exactly the
-    // failure that stalled deploy; it passes trivially when the OAuth token is
-    // healthy (no usage-limit event → no requirement).
+    // Runtime-fallback invariant: if the ChatGPT login proved unusable (revoked,
+    // refresh failed) mid-run and the run still completed, the sandbox switched to
+    // the funded Azure deployment (auth_fallback event). The switch is armed only
+    // when no other subscription is leasable (subscriptions first, C15); otherwise
+    // the run fails above (a revoked login stays a hard failure) and the parent's
+    // retry takes that subscription. A usage limit is not switched in the sandbox:
+    // it pauses for the parent's retry, so a limited run is a credit SKIP above.
     const sawRecoverableOAuthFailure = events.some((event) => {
       const typed = event as { type?: string; message?: string };
       return (
         typed.type === 'error' &&
-        /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits|refresh_token_invalidated|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again/i.test(
+        /refresh_token_invalidated|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again/i.test(
           String(typed.message ?? '')
         )
       );
@@ -338,22 +329,72 @@ async function testSmoke_codexCompletesE2bTask() {
       const typed = event as { type?: string; to?: string };
       return typed.type === 'auth_fallback' && typed.to === 'openai_api_key';
     });
+    // The task row records what served the run at spawn: a ChatGPT login ('user' | 'pool')
+    // or the funded Azure deployment alone ('azure').
+    const servedBy = (
+      await prisma.claudeCodeSession.findUnique({
+        where: { id: taskId },
+        select: { claudeTokenSource: true },
+      })
+    )?.claudeTokenSource;
+    assert(
+      servedBy === 'user' || servedBy === 'pool' || servedBy === 'azure',
+      `Codex task must record the credential that served it, got ${String(servedBy)}`
+    );
     if (sawRecoverableOAuthFailure) {
       assert(
         sawAuthFallback,
-        `Codex OAuth credential failed but did NOT fall back to the OpenAI API key. events=${JSON.stringify(events).slice(-1000)}`
+        `Codex OAuth credential failed but did NOT fall back to the Azure deployment. events=${JSON.stringify(events).slice(-1000)}`
       );
       console.log(
-        '    ↳ codex smoke completed via the Azure funded runtime fallback (OAuth unusable)'
+        `    ↳ codex smoke completed via the Azure funded runtime fallback (${servedBy} OAuth unusable)`
       );
+    } else if (servedBy === 'azure') {
+      console.log('    ↳ codex smoke completed on the funded Azure deployment (no ChatGPT login)');
     } else {
-      console.log('    ↳ codex smoke completed via ChatGPT OAuth token (no usage limit hit)');
+      console.log(`    ↳ codex smoke completed via ${servedBy} ChatGPT OAuth (no usage limit hit)`);
     }
 
     const { Sandbox } = await import('e2b');
     const sandbox = await Sandbox.connect(sandboxId!, {
       apiKey: process.env.E2B_API_KEY,
     });
+    // What the run really served: the session's own effective settings, and on
+    // Azure the funded provider's host and tier from the sandbox log.
+    const onAzure = servedBy === 'azure' || sawAuthFallback;
+    const proof = assertSmokeSettings(
+      'codex',
+      parent,
+      await liveSessionSettings(body.ws_url!, taskId),
+      {
+        azure: onAzure,
+      }
+    );
+    console.log(`    ↳ codex smoke ${proof}`);
+    if (onAzure) {
+      const wsLog = String(
+        await sandbox.files.read('/tmp/codex-ws-server.log', { format: 'text' })
+      );
+      const funded = wsLog
+        .split('\n')
+        .map((line) => {
+          try {
+            return JSON.parse(line) as Record<string, unknown>;
+          } catch {
+            return null;
+          }
+        })
+        .find((line) => line?.message === 'Using the Azure OpenAI funded provider');
+      assert(funded !== undefined && funded !== null, 'the sandbox logged the Azure provider');
+      console.log(
+        `    ↳ codex smoke Azure host=${String(funded.host)} model=${String(funded.model)} service_tier=${String(funded.service_tier)} effort=${String(funded.effort)}`
+      );
+      assert(
+        String(funded.host).includes('southcentralus') ||
+          process.env.CODEX_AZURE_FOUNDRY_HOST !== undefined,
+        `Azure host ${String(funded.host)} is the region deploying gpt-6.1-sol`
+      );
+    }
     const promptFile = await sandbox.files.read('/home/user/AGENTS.md', {
       format: 'text',
     });
@@ -386,6 +427,7 @@ async function testSmoke_codexCompletesE2bTask() {
         body: JSON.stringify({ task_id: taskId }),
       });
     }
+    await deleteSmokeParent(parent);
   }
 }
 
@@ -394,9 +436,9 @@ async function runAll() {
   console.log(`Testing against: ${BASE_URL}\n`);
 
   const tests: { name: string; fn: () => Promise<void> }[] = [];
-  // The feedback cases put the shared funded GPT key on cooldown, and the backend caches that
-  // cooldown in-process for its full window; deleting the DB row afterwards does not undo it.
-  // Without a synced Codex OAuth credential the smoke depends on that key, so it must run first.
+  // The feedback cases back the funded Azure Codex deployment off (codex_funded_cooldown) and
+  // reset it afterwards. Without a synced Codex OAuth credential the smoke depends on that
+  // deployment, so it runs first.
   if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
     console.log(
       '  SKIP  smoke -- Codex completes task in real E2B sandbox (BACKEND_CODEX_SMOKE_SKIP=1)'
@@ -442,8 +484,32 @@ async function runAll() {
       fn: async () => testResolveCodexAuthEnvs_apiKeyFallback(),
     },
     {
-      name: 'auth -- Azure funding resolves from the westus Foundry region',
-      fn: async () => testResolveCodexAzureFunding_selectsWestusRegion(),
+      name: 'auth -- Azure funding resolves from the region that deploys gpt-6.1-sol',
+      fn: async () => testResolveCodexAzureFunding_selectsRegionByDeployment(),
+    },
+    {
+      name: 'model -- tier table: Opus 5.5 / GPT-6.1 Sol, ultra xhigh, flash medium, unknown = flash',
+      fn: async () => testCodeAgentModels_tierTableAndUnknownIsFlash(),
+    },
+    {
+      name: 'model -- env overrides win over every tier',
+      fn: async () => testCodeAgentModels_overridesWin(),
+    },
+    {
+      name: 'model -- ws-server fallbacks equal the flash row; Azure catalog is priority-only',
+      fn: async () => testCodeAgentModels_wsServerFallbacksMatchFlash(),
+    },
+    {
+      name: 'model -- Azure exec asks for priority only when the agent is fast',
+      fn: async () => testCodeAgentModels_inspectAzureTierFollowsSpeed(),
+    },
+    {
+      name: 'model -- POST /api/agents model + fast_mode_cache_enabled reach the code agent and Azure tier',
+      fn: () =>
+        testCodeAgentModels_createAgentRequestReachesCodeAgent(BASE_URL, {
+          'X-API-Key': API_KEY,
+          'X-User-Id': DEV_USER_ID,
+        }),
     },
     {
       name: 'credit-skip -- live "no credits remaining" wording is recognized',
@@ -460,6 +526,10 @@ async function runAll() {
     {
       name: 'credit-skip -- auth revocation still fails hard',
       fn: async () => testCodexCreditSkip_authRevocationStillFailsHard(),
+    },
+    {
+      name: 'credit-skip -- structured unusable login paused for a retry is a skip',
+      fn: async () => testCodexCreditSkip_structuredUnusableLoginPausedForRetryIsSkip(),
     },
     {
       name: 'credit-skip -- E2B team-blocked / missing payment method is recognized',

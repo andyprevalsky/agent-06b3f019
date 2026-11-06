@@ -6,12 +6,13 @@ surface: infra
 component: cloudbench-fleet
 classification: configuration-error
 problem_class: fixture-environment-data-mismatch
-first_bad_boundary: scripts/cloudbench-sync-deps.sh:88-94 — FATALs when the branch JS dep fingerprint differs from the baked donor image
+first_bad_boundary: Fresh storage selects an incompatible immutable /app dependency image while bypassing refreshed volume snapshot; sync-deps.sh:400-413 detects the mismatch
 symptoms:
   - "isolated runner exited before synchronized start barrier (0/N ready)"
   - "dispatch status='failed' with actual=[] and every task status=None"
   - 'run_benchmark.py --ci exits 1 with "no report-card.json produced"'
   - 'live report-card stuck at status:"queued" / run_id:"starting"'
+  - "FATAL: warm image/volume JavaScript dependencies do not match the checked-out ref"
 tags:
   - cloudbench
   - fly
@@ -20,8 +21,13 @@ tags:
   - predeploy-smoke
 sources:
   - memory:project_cloudbench_warm_image_dep_sync
+  - PR #1662
+  - commit 72a8bd7bf7e3a92b5717d13d617c2954bf453fca
+  - commit e35e0bd6e4bcec35998bf13020cc3a0bf89707da
+  - fleet run 20261102-232738-1139385
+  - task 01fccf7d55714e55bbee3e30525f74f5
 repro: none-recorded
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -65,6 +71,22 @@ h2c 500), fall back to a local
 rebuilt image matches exactly one dep-set: rebuild for the branch pre-merge, and
 after merge main carries the dep so the image stays valid — other in-flight
 branches without the dep will fail cloud smoke until they rebase.
+
+## Recurrence — November 2, 2026
+
+PR1662 focused request 6a2cc539afc44cd19842069affd4f029, frozen e35e0bd6e4bcec35998bf13020cc3a0bf89707da (digest abc77610583734e169f183a8adaabb6599fa81c4862fadbd7c42db99f588e6dc), retained all17 original checks. Native N2 infra canary run20261102-232738-1139385 was owned by campaign job r001-j0003. Both guests verified exact e35, injected env digests and repaired independent provider contract backend=tilion worker=kernel, then failed at dep_sync before service/task execution. Both native exits were1 with cleanup_ack1 and no current run artifact. This is separate from the earlier provider-contract defect and repaired PG15 fixture prerequisite.
+
+The controller accepted the proven Node fingerprint 4ef2db9dda6bdd37cca1b2d6bd11f5cc8181591a26b4a1fd5cc0447d615d12f9, Python9d08ed65778213690792a290d583b22aefd1328a07740814846eafbec59f538e and snapshot vs_yN5ma3O2VJGhGypQpe6n. That snapshot was produced by the native c13 central refresh after rebuilding /data/repo and quiescing the donor. However, both canary catalog entries were REAL and the unchanged default FRESH_VOLUMES=1 selected fresh storage. Their native primary logs say mode=fresh; the native owned Volume create omits snapshot-id. Matching snapshot metadata therefore did not establish dependency compatibility for the actual fresh-volume consumers. Those guests use /app from immutable image digest9961d27adc9e9960d3f472d96540d93934a922c21484982d31849be9ff6d2aae instead of the refreshed /data snapshot.
+
+The literal native inequality guard proves that both the installed marker and immutable donor fingerprint differ from required4ef2. Exact actual marker and donor hash were not captured and remain UNKNOWN; no new provider query was made. Do not infer the image hash from historical metadata. Native dependency guards remain strict.
+
+Gate: NOT_INTRODUCED for this native dependency-source failure compared with actual current-main merge-base72a8bd7bf7e3a92b5717d13d617c2954bf453fca to e35. Main72a8, c13 and e35 have identical tracked JS dependency inputs and fingerprint4ef2; fleet and dependency-sync code are byte-identical across these revisions. Older basebf92cbd98ab436af20f9a8d647c32e748c67e93a has fingerprint977c7ed6ff5f489e0b7b8822af62b9a924fb6514916a1fba7cdb4747d6dc8de4. The changed backend dependency is jpeg-js0.4.4 and eight lockfile lines inherited from main commit401714255, not a dependency change in the provider repair. No baseline whole-smoke PASS is asserted.
+
+Private controls under /var/tmp/pr1662-e35-dependency-sync-rca execute the actual unchanged native storage selection and volume-create functions: main/e35 fresh selects no snapshot, while existing snapshot mode includes the exact snapshot ID. Actual unchanged sync-deps on main/c13/e35 rejects the same authentic historical-manifest donor, and matching-marker controls pass. The historical donor is a controlled input, not an assertion about the actual image contents. Matching-marker controls prove branch selection and strict comparison, not installed packages or benchmark success.
+
+The earlier snapshot refresh did not hold for this occurrence because it updated /data, while fresh REAL consumers read immutable /app. Required preparation is a compatible native dependency-image build with an independently verified publication/digest receipt, followed by parent-owned supported setup at a terminal, stopped-donor/shared-app-lock boundary. Prebuilt WARM_IMAGE_REF setup bypasses the publisher: preserve its independent image receipt. Setup stages full independently verified environments, activates the image with skip-start only on stopped donor/declared stopped pool (active pool skipped), then starts/prepares donor, clones/fetches repo and parks donor; preserve the entire transaction. The parent began the unchanged benchmark-only native image build; no image activation or repaired dependency runtime result is claimed here. Repeating only --refresh-deps cannot update immutable /app. Tasks, assertions, concurrency, timeouts, provider limits and production configuration remain unchanged.
+
+Campaign1/17 infra stop at23:36:20.560008Z preserves one preflight failure,15 started sibling cancellations143 and one never-started member separately. All17 task outcomes remain UNVERIFIED. Saved native audits for18 controller runs report provider-teardown-verified; all16 recorded scheduled controller PIDs are absent. Only two fresh entries exist: machines85d3eea4514378 /862e70fe5e4428 and volumesvol_4oj805dz5yjqjpxr /vol_vp2eygx5y5oqyky4 are destroyed-provider-retained, not proven absent. The viewer remains retained-exact-owner-transfer-required. Adapter cleanup_complete=false and outer lingering_group=true remain preserved. A second native canary233613-1425174 was cancelled143 with no fresh audit entries. No provider outage/credit exception or completed operational repair is asserted.
 
 ## Human feedback
 

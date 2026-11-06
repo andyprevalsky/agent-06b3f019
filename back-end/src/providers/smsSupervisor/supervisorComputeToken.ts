@@ -7,16 +7,12 @@
  * supervisorHandler.ts to keep that file under its line budget.
  */
 
-import { fetchComputeTokenForUser } from '../computeCredentials';
+import { fetchComputeTokenForUser, type ComputeCodeCredentialResult } from '../computeCredentials';
 import { createLogger } from '../logger';
 
 const log = createLogger('SmsSupervisor');
 
-export interface SupervisorComputeToken {
-  type: 'claude' | 'gpt';
-  accessToken: string;
-  accountId?: string;
-}
+export type SupervisorComputeToken = ComputeCodeCredentialResult;
 
 /**
  * Benchmark-only compute-token type pin for supervisor model A/Bs
@@ -41,11 +37,7 @@ export async function getComputeToken(userId: string): Promise<SupervisorCompute
         source: computeToken.source,
         poolTokenId: computeToken.poolTokenId,
       });
-      return {
-        type: computeToken.type,
-        accessToken: computeToken.accessToken,
-        accountId: computeToken.accountId,
-      };
+      return computeToken;
     }
 
     log.info('[SmsSupervisor] No compute token available, will use waterfall', { userId });

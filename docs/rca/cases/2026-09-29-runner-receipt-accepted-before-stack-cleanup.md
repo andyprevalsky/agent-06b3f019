@@ -553,3 +553,53 @@ Parent R10 source, processes, databases, providers and historical failed runs
 remain untouched. No native-recipe trust registration is changed; parent must
 review the resulting composite recipe and rerun deployment gates. Local causal
 proof does not imply a benchmark or deployment PASS.
+
+
+### November 4 b9 seed-proof fixture inherited host process discovery
+
+Four native benchmark-domain cases on `b9a1f743` timed out at the unchanged
+`local_lifecycle_test.py:1013` child wait30, before their cleanup assertions.
+The shell argv includes OWNER_READY and the entire bootstrap; that traceback
+does not establish which phase consumed the original deadline. Its temporary
+child logs were not retained, so historical whole-check attribution is UNKNOWN.
+
+The fixture faked Docker, socket discovery, PostgreSQL and cache tools but left
+`pgrep` inherited. A private owning control supplied1000 unrelated synthetic
+worker IDs above native PID range, without sleeps or actual process targets.
+Original code performed641 fake lsof lookups and expired the same30s wait
+before reaching seed admission (30.30s). Adding only fixture-owned pgrep
+returning no matches makes the identical control pass in2.55s. It never consults
+the ambient inventory. All four original receipt/owner failure cases plus that
+control pass in13.69s; their function ASTs and30s wait are unchanged. The
+external-command allowlist adds only the mocked pgrep. Actual run.sh is unchanged.
+The existing benchmark wrapper dynamically registers this new test_* control.
+
+This proves the fixture inventory-isolation defect, also present in identical
+main0784 code; it does not reconstruct the four original under-cohort stalls.
+Original failures stay failed. The fixture candidate remains private pending
+composed validation/deploy; no runtime, budget or cleanup-consumer relaxation.
+Evidence: plan:/var/tmp/pr1662-b9-local-lifecycle-fixture/report.json.
+
+
+### November 4: Reaped structural children retained a launch fence
+
+The b9 structural gate kept its original UNVERIFIED result and
+`lingering_group=true` after its native supervisor adopted and reaped 347
+processes. The supervisor recorded 46 owned TERM targets, each in the reaped
+set, the original child exit 1, quiescence, no remaining processes, and no
+KILL, timeout or cancellation. Those cleanup facts do not make the failed
+structural tests pass. The prior typed local cleanup path handled backend
+receipts only and could not reconcile this structural launch fence.
+
+The existing `local-supervisor-cleanup-v1` validator now accepts this narrow
+structural receipt shape, bound to the current gate contract, exact original
+request/result/receipt/supervisor hashes and case-log hash. It verifies the
+reaped descendant inventory and rechecks the exact root admission lock and
+physical quietness. It grants launch eligibility only; original failures,
+orphan observations, signals and receipt bytes stay unchanged. A causal
+refusal control passed after the extension; 14 structural, Card and backend
+controls passed. Independent review matched the actual saved artifacts.
+
+Evidence: `plan:/var/tmp/staged-deploy-implementation/.context/preparation/next-repairs/b9-next/structural-cleanup-report.json`.
+The original structural timeout causes remain UNKNOWN and require the normal
+full-gate rerun; this reconciliation is not a timing repair or test credit.

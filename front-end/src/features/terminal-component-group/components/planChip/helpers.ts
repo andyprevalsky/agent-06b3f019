@@ -20,7 +20,8 @@ export function topologicalSort(
 
   const taskInfos: TaskWithDeps[] = tasks.map((task, idx) => ({
     originalIndex: idx,
-    text: task.goal,
+    // Show the short title; plans made before task titles only have the full goal.
+    text: task.title?.trim() || task.goal,
     toolName: task.tool_name,
     deps: (normalizedDeps[String(idx)] || []).map((d) => parseInt(d)),
   }));

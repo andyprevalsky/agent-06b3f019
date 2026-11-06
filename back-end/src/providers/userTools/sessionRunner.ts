@@ -65,6 +65,7 @@ import {
   recordE2bCodeSessionSandbox,
 } from '../e2bCodeSessionSandbox';
 import { createSandboxWithRetry, E2BSandboxCapacityError } from '../e2bSandboxCreate';
+import { DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from '../claudeCodeTemplate';
 import { isSafeUserUiPath } from '../userUi/manifest';
 import { readOwnedUserUiFile, userOwnsUserUiVersion } from '../userUi/store';
 import { completeUserToolCall, findUserToolCall, type UserToolRun } from './callRecords';
@@ -158,13 +159,12 @@ async function localSandbox(session: CodeSessionRow): Promise<UserToolSandbox> {
 async function e2bSandbox(session: CodeSessionRow): Promise<UserToolSandbox> {
   const apiKey = process.env.E2B_API_KEY;
   const templateId =
-    process.env.E2B_USER_TOOLS_TEMPLATE_ID?.trim() ||
-    process.env.E2B_CLAUDE_CODE_TEMPLATE_ID?.trim();
-  if (apiKey === undefined || apiKey === '' || templateId === undefined || templateId === '') {
+    process.env.E2B_USER_TOOLS_TEMPLATE_ID?.trim() || DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
+  if (apiKey === undefined || apiKey === '') {
     throw new UserToolRunError(
       503,
       'USER_TOOL_SANDBOX_UNAVAILABLE',
-      'E2B is not configured for user tool code sessions (E2B_API_KEY + E2B_CLAUDE_CODE_TEMPLATE_ID)'
+      'E2B is not configured for user tool code sessions (E2B_API_KEY)'
     );
   }
   try {
@@ -341,7 +341,7 @@ async function runInSandbox(
 
 /** Lease one of the caller's tools sessions (at most USER_TOOL_MAX_LIVE_SESSIONS). */
 async function leaseToolSession(params: UserToolRunParams) {
-  sweepExpiredCodeSessions(params.userId);
+  void sweepExpiredCodeSessions(params.userId);
   try {
     return await resolveCodeSession({
       userId: params.userId,

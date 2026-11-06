@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import importlib.util
 import json
 import math
 import os
@@ -17,7 +18,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from factory_metadata import load_metadata
+# File-spec callers do not add this script's directory to module search paths.
+_METADATA_PATH = Path(__file__).resolve().with_name("factory_metadata.py")
+_METADATA_SPEC = importlib.util.spec_from_file_location(
+    "rose_factory_metadata", _METADATA_PATH
+)
+if _METADATA_SPEC is None or _METADATA_SPEC.loader is None:
+    raise ImportError(f"could not load factory metadata module: {_METADATA_PATH}")
+_METADATA_MODULE = importlib.util.module_from_spec(_METADATA_SPEC)
+_METADATA_SPEC.loader.exec_module(_METADATA_MODULE)
+factory_metadata = _METADATA_MODULE
+load_metadata = factory_metadata.load_metadata
+ROOT = Path(__file__).resolve().parents[1]
 
 ACTIVE_STATUSES = {"active", "finishing"}
 
@@ -132,23 +144,42 @@ def start_lifecycle(
     started_epoch: float,
     git_sha: str,
     branch: str,
-) -> None:
-    """Initialize a run and publish it only after the metadata is durable."""
+) -> dict:
+    """Initialize a run and publish it only after the metadata is durable.
+
+    The selected factory telemetry snapshot is re-stamped first with this
+    launch's head (``observed_at``, ``validation.source_sha``), so the run
+    defaults and every stage row carry the head actually launched; the
+    returned refresh report says whether and why not. An invalid snapshot
+    refuses the run before anything is written.
+    """
 
     _validate_identifier(run_id, "deploy run id")
     with _lifecycle_lock(run_root):
         current_path = run_root / "current"
+        stale_pointer = False
         if current_path.exists():
             current_id = _read_current_run_id(run_root)
             current_metadata = _read_metadata(run_root / current_id)
             if current_metadata.get("status") in ACTIVE_STATUSES:
                 raise LifecycleError(f"deploy timing run already active: {current_id}")
-            current_path.unlink()
+            stale_pointer = True
 
         run_dir = run_root / run_id
         metadata_path = run_dir / "metadata.json"
         if metadata_path.exists():
             raise LifecycleError(f"deploy timing run already exists: {run_id}")
+        # Only a start that will actually publish this run re-stamps the
+        # snapshot: a refused start (run already active) leaves it untouched.
+        # A snapshot that cannot be read or rewritten is reported (status
+        # "error") and the run still starts; only an invalid one refuses it.
+        try:
+            refresh = factory_metadata.refresh_selected_snapshot(
+                git_sha, producer="run-deploy-stage --start", checkout=ROOT)
+        except ValueError as error:
+            raise LifecycleError(f"factory metadata snapshot rejected, run not started: {error}") from error
+        if stale_pointer:
+            current_path.unlink()
         (run_dir / "logs").mkdir(parents=True, exist_ok=True)
         init_run(
             run_dir,
@@ -161,6 +192,13 @@ def start_lifecycle(
         pointer = current_path.with_name(f".{current_path.name}.{os.getpid()}.tmp")
         pointer.write_text(f"{run_id}\n")
         pointer.replace(current_path)
+        # Stage admission ends before review/merge/production. Their factory
+        # events still belong to this deployment until its outcome is emitted.
+        factory_pointer = run_root / "factory-current"
+        pointer = factory_pointer.with_name(f".{factory_pointer.name}.{os.getpid()}.tmp")
+        pointer.write_text(f"{run_id}\n")
+        pointer.replace(factory_pointer)
+    return refresh
 
 
 def admit_stage(run_root: Path, *, token: str, pid: int) -> str:
@@ -282,24 +320,26 @@ def append_stage(
     exit_code: int,
     log: str,
     telemetry: dict | None = None,
+    detail: dict | None = None,
+    status: str | None = None,
 ) -> None:
-    _append_json_line(
-        run_dir / "stages.jsonl",
-        {
-            "schema_version": 1,
-            "telemetry": load_metadata() if telemetry is None else telemetry,
-            "run_id": run_id,
-            "stage": stage,
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "started_epoch": started_epoch,
-            "finished_epoch": finished_epoch,
-            "duration_seconds": round(max(0.0, finished_epoch - started_epoch), 1),
-            "status": "passed" if exit_code == 0 else "failed",
-            "exit_code": exit_code,
-            "log": log,
-        },
-    )
+    row = {
+        "schema_version": 1,
+        "telemetry": load_metadata() if telemetry is None else telemetry,
+        "run_id": run_id,
+        "stage": stage,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "started_epoch": started_epoch,
+        "finished_epoch": finished_epoch,
+        "duration_seconds": round(max(0.0, finished_epoch - started_epoch), 1),
+        "status": status or ("passed" if exit_code == 0 else "failed"),
+        "exit_code": exit_code,
+        "log": log,
+    }
+    if detail is not None:
+        row["detail"] = detail
+    _append_json_line(run_dir / "stages.jsonl", row)
 
 
 def _load_rows(path: Path) -> list[dict]:
@@ -364,15 +404,20 @@ def render_summary(run_dir: Path) -> str:
     run_id = run_dir.name
     if not rows:
         return f"Deploy run {run_id}: no timed stages recorded"
-    lines = [f"Deploy run {run_id}", "", "Stage                         Status    Duration  Log"]
-    lines.append("----------------------------  --------  --------  ------------------------------")
+    # 13 columns fit every status, including "reused-scoped".
+    lines = [f"Deploy run {run_id}", "", "Stage                         Status         Duration  Log"]
+    lines.append("----------------------------  -------------  --------  ------------------------------")
     for row in rows:
         lines.append(
             f"{str(row.get('stage', '')):<28}  "
-            f"{str(row.get('status', '')):<8}  "
+            f"{str(row.get('status', '')):<13}  "
             f"{float(row.get('duration_seconds', 0.0)):>7.1f}s  "
             f"{row.get('log', '')}"
         )
+    reused_scoped = _reused_scoped_counts(rows)
+    if reused_scoped[0]:
+        lines.append("")
+        lines.append(_reused_scoped_line(*reused_scoped))
     metadata_path = run_dir / "metadata.json"
     try:
         metadata = json.loads(metadata_path.read_text())
@@ -398,6 +443,34 @@ def render_summary(run_dir: Path) -> str:
     return "\n".join(lines)
 
 
+def _reused_scoped_counts(rows: Sequence[dict]) -> tuple[dict[str, int], dict[str, int]]:
+    """Per-stage counts of ``reused-scoped`` rows and, separately, of those
+    whose provenance says the pass came from an earlier timing run."""
+    reused_scoped: dict[str, int] = defaultdict(int)
+    cross_run: dict[str, int] = defaultdict(int)
+    for row in rows:
+        if row.get("status") != "reused-scoped":
+            continue
+        stage = str(row.get("stage", ""))
+        reused_scoped[stage] += 1
+        reuse = (row.get("detail") or {}).get("reuse") or {}
+        if isinstance(reuse, dict) and reuse.get("cross_run"):
+            cross_run[stage] += 1
+    return reused_scoped, cross_run
+
+
+def _reused_scoped_line(reused_scoped: dict[str, int], cross_run: dict[str, int]) -> str:
+    """The status label stays ``reused-scoped``; the suffix tells humans which
+    of those passes were read from an earlier run."""
+    line = (
+        "Reused lane-scoped passes (inert changes only, not executed on these bytes): "
+        + ", ".join(f"{stage}={count}" for stage, count in sorted(reused_scoped.items()))
+    )
+    if cross_run:
+        line += " (cross-run: " + ", ".join(f"{stage}={count}" for stage, count in sorted(cross_run.items())) + ")"
+    return line
+
+
 def render_history(run_root: Path) -> str:
     runs: list[tuple[Path, list[dict]]] = []
     for path in sorted(run_root.glob("*/stages.jsonl")):
@@ -410,8 +483,15 @@ def render_history(run_root: Path) -> str:
     durations: dict[str, list[float]] = defaultdict(list)
     passed_durations: dict[str, list[float]] = defaultdict(list)
     passes: dict[str, int] = defaultdict(int)
+    reused: dict[str, int] = defaultdict(int)
+    reused_scoped, cross_run = _reused_scoped_counts([row for _, rows in runs for row in rows])
     for _, rows in runs:
         for row in rows:
+            if row.get("status") == "reused":
+                reused[str(row.get("stage", ""))] += 1
+                continue
+            if row.get("status") == "reused-scoped":
+                continue
             stage = str(row.get("stage", ""))
             duration = row.get("duration_seconds")
             if stage and isinstance(duration, (int, float)):
@@ -435,6 +515,13 @@ def render_history(run_root: Path) -> str:
         else:
             timing = f"{'n/a':>9}  {'n/a':>9}"
         lines.append(f"{stage:<28}  {len(values):>4}  {pass_rate:>5.1f}%  {timing}")
+    if reused:
+        lines.append(
+            "Reused exact-input passes: "
+            + ", ".join(f"{stage}={count}" for stage, count in sorted(reused.items()))
+        )
+    if reused_scoped:
+        lines.append(_reused_scoped_line(reused_scoped, cross_run))
 
     run_spans: list[float] = []
     completed_names: list[str] = []
@@ -523,7 +610,11 @@ def main() -> int:
     values.pop("command")
     try:
         if args.command == "lifecycle-start":
-            start_lifecycle(**values)
+            started = start_lifecycle(**values)
+            if started["status"] == "error":
+                print(f"warning: {started['message']}", file=sys.stderr)
+            else:
+                print(started["message"])
         elif args.command == "lifecycle-admit":
             print(admit_stage(**values))
         elif args.command == "lifecycle-release":

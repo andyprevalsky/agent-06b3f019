@@ -185,8 +185,9 @@ async def populate_tool_params(
     params = {k: v for k, v in tool_call.items() if k != "tool"}
 
     tool_model = TOOL_MODELS[tool_name]
-    model_schema = tool_model.model_json_schema()
-    required = model_schema.get("required", [])
+    # Wire schemas may require nullable keys that are optional at runtime.
+    # Conditional constraints already ran during structured-result validation.
+    required = [name for name, field in tool_model.model_fields.items() if field.is_required()]
     for field in required:
         if field == "tool":
             continue

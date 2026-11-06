@@ -57,6 +57,13 @@
  *   npx tsx src/tests/blackbox/claude-code.blackbox.ts
  */
 
+import {
+  assertSmokeSettings,
+  deleteSmokeParent,
+  liveSessionSettings,
+  type SmokeParent,
+  smokeParentAgent,
+} from './code-agent-settings-smoke.support';
 import { config } from 'dotenv';
 import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
 import { z } from 'zod';
@@ -1415,7 +1422,16 @@ async function testSmokeCredentialFailureClassifier() {
 
 async function testSmoke_claudeCodeAnswersQuestion() {
   await ensureSmokeUserClaudeCredentials();
+  // The parent's tier and Fast Mode button decide the CLI model, effort and speed.
+  const parent = await smokeParentAgent(DEV_USER_ID);
+  try {
+    await claudeSmokeFromParent(parent);
+  } finally {
+    await deleteSmokeParent(parent);
+  }
+}
 
+async function claudeSmokeFromParent(parent: SmokeParent) {
   // 1. Create a real session with a simple math question.
   // Pass user_id so the backend resolves per-user Claude Code credentials
   // (ANTHROPIC_API_KEY fallback uses a stale key that won't authenticate).
@@ -1423,7 +1439,7 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     method: 'POST',
     headers: apiKeyHeaders(),
     body: JSON.stringify({
-      agent_id: crypto.randomUUID(),
+      agent_id: parent.agentId,
       goal: handoffSmokeGoal(
         'Create /home/user/output/claude-smoke.txt containing exactly CLAUDE_E2B_OK. Then reply with exactly CLAUDE_E2B_DONE.'
       ),
@@ -1506,7 +1522,10 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         }
         // Strip ANSI codes to get clean text
         const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
+        // A CLI that already exited (live 2026-10-28: "Claude Code 2.1.138 does
+        // not support this model") answers now instead of after the 240s timeout.
         if (
+          msg.type === 'exit' ||
           clean.includes('CLAUDE_E2B_DONE') ||
           isClaudeSmokeCredentialFailure(clean) ||
           isClaudeSmokeFundingFailure(clean)
@@ -1553,6 +1572,13 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       finalOutput.includes('CLAUDE_E2B_DONE'),
       `Claude Code output does not contain CLAUDE_E2B_DONE: ${finalOutput.slice(-300)}`
     );
+    // What the run really served: the session's own effective settings.
+    const proof = assertSmokeSettings(
+      'claude',
+      parent,
+      await liveSessionSettings(body.ws_url, taskId)
+    );
+    console.log(`    ↳ claude smoke ${proof}`);
     assert(
       wsEvents.some((event) => {
         const typed = event as { provider?: string; type?: string };

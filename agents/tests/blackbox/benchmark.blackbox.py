@@ -1923,7 +1923,10 @@ def _live_report_producer_harness(tasks, executor, max_concurrency):
     start = next(
         i
         for i, node in enumerate(main.body)
-        if isinstance(node, ast.ImportFrom) and node.module == "benchmarks.report_card"
+        # Include the real initial preflight custody producer, which the
+        # coordinator's never-admitted list now consumes before dispatch.
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "initial_credential_skips" for target in node.targets)
     )
     end = next(
         i
@@ -2008,6 +2011,8 @@ async def test_live_report_counts_executor_admission_and_drains_cancellation():
         await held.wait()
 
     namespace, cards = _live_report_producer_harness(tasks, executor, 1)
+    assert namespace["initial_credential_skips"] == ()
+    assert namespace["_never_admitted_results"] == []
     with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
         coordinator = asyncio.create_task(namespace["_drive_parallel"]())
         try:
@@ -4434,6 +4439,20 @@ async def test_agentcard_release_stall_cannot_replace_an_independent_task_failur
     assert "Independent wrong output" in result.failure_reason
 
 
+def test_agentcard_release_stall_accepts_only_the_same_prior_settlement_mismatch():
+    """A pre-cleanup HELD status must not veto the approved closed-card stall."""
+    from benchmarks.run_benchmark import _agentcard_release_prior_failure_is_settlement_only
+
+    lifecycle = _agentcard_release_stall_lifecycle()
+    name = "agent-payment-abandonment"
+    mismatch = "payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'"
+    assert _agentcard_release_prior_failure_is_settlement_only(name, None, lifecycle)
+    assert _agentcard_release_prior_failure_is_settlement_only(name, mismatch, lifecycle)
+    assert not _agentcard_release_prior_failure_is_settlement_only(name, mismatch + " | wrong output", lifecycle)
+    assert not _agentcard_release_prior_failure_is_settlement_only(name, "Independent wrong output", lifecycle)
+    assert not _agentcard_release_prior_failure_is_settlement_only(name, mismatch, {**lifecycle, "stripeRefund": {}})
+
+
 async def test_payment_browser_seal_rejects_empty_declared_browser_evidence():
     from benchmarks import run_benchmark as bench
 
@@ -5857,9 +5876,11 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     task = get_task_by_name("test-mass-agent-run-0")
     evaluator = next(e for e in task.evaluators if e.get("id") == "t7-schema-task-complete")
     judged_task = replace(task, evaluators=[{**evaluator, "method": "agentic_llm_judge"}])
+    nothing_leasable = AsyncMock(return_value={"claude": False, "codex": False, "next_credential": None})
     with (
         patch.object(bench, "_sync_compute_tokens", lambda **_: None),
         patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
+        patch("domains.spawn_claude_code_agent.repo.fetch_code_credential_availability", nothing_leasable),
         patch.object(bench.httpx, "AsyncClient", _Client),
     ):
         try:
@@ -5868,6 +5889,7 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
             judge_error = error
         else:
             raise AssertionError("judge must not succeed without a compute token")
+    assert isinstance(judge_error, bench.ComputeTokenUnavailable), judge_error
     assert "Codex compute token unavailable for agentic benchmark judge" in str(judge_error)
 
     logs = {"failure_evidence": {"errors": []}}
@@ -5906,6 +5928,72 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     spec.loader.exec_module(campaign)
     verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
     assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
+
+
+async def test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_codex_login():
+    """RCA 2026-11-05 mass-agent judge Codex token unavailable: the only Codex login was
+    cooling down (prod: until 2026-11-10), so the judge's GPT-token preflight SKIPPED
+    test-mass-agent-run-0 although the spawn it guarded leases own → pool → funded Azure
+    and the C15 plan still had a credential. The judge must run on the plan's provider
+    and skip only when the plan is empty; a failed plan lookup is an error, not a skip."""
+    from dataclasses import replace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("test-mass-agent-run-0")
+    evaluator = next(e for e in task.evaluators if e.get("id") == "t7-schema-task-complete")
+    judged_task = replace(task, evaluators=[{**evaluator, "method": "agentic_llm_judge"}])
+    verdict = {"structured_response": {"score": 1.0, "reasoning": "every card shows real outputs"}}
+
+    spawns: list[AsyncMock] = []
+
+    async def judge(plan, gpt_token=None, token_error=None):
+        spawn = AsyncMock(return_value=verdict)
+        spawns.append(spawn)
+        token = AsyncMock(
+            side_effect=token_error, return_value={"accessToken": gpt_token} if gpt_token else None
+        )
+        with (
+            patch.object(bench, "_sync_compute_tokens", lambda **_: True),
+            patch.object(bench, "_fetch_agentic_judge_compute_token", token),
+            patch("domains.spawn_claude_code_agent.repo.fetch_code_credential_availability", AsyncMock(return_value=plan)),
+            patch("domains.spawn_claude_code_agent.service.spawn_claude_code_activity", spawn),
+            patch("helpers.attachments.upload_to_storage", AsyncMock(return_value={"id": "evidence"})),
+        ):
+            passed, reason, results = await bench._run_declared_evaluators(judged_task, {"messages": []})
+        return passed, reason, results, spawn, token
+
+    codex_funded = {"claude": False, "codex": True, "next_credential": {"provider": "codex", "tier": "funded"}}
+    passed, reason, results, spawn, token = await judge(codex_funded)
+    assert (passed, reason) == (True, None), reason
+    assert results[0]["score"] == 1.0
+    kwargs = spawn.await_args.kwargs
+    assert (kwargs["code_provider"], kwargs["gpt_token"]) == ("codex", None), kwargs
+    token.assert_awaited_once()
+
+    _, _, _, spawn, _ = await judge(codex_funded, gpt_token="pool-login")
+    assert spawn.await_args.kwargs["gpt_token"] == "pool-login"
+
+    _, _, _, spawn, _ = await judge(codex_funded, token_error=bench.httpx.ConnectTimeout("token fetch"))
+    assert (spawn.await_args.kwargs["code_provider"], spawn.await_args.kwargs["gpt_token"]) == ("codex", None)
+
+    claude_sub = {"claude": True, "codex": False, "next_credential": {"provider": "claude", "tier": "subscription"}}
+    passed, _, _, spawn, token = await judge(claude_sub)
+    assert passed is True
+    assert (spawn.await_args.kwargs["code_provider"], spawn.await_args.kwargs["gpt_token"]) == ("claude", None)
+    token.assert_not_awaited()
+
+    # An older backend without next_credential: the spawn's own fallback reads the provider flags.
+    passed, _, _, spawn, _ = await judge({"claude": True, "codex": False})
+    assert passed is True and spawn.await_args.kwargs["code_provider"] == "claude"
+
+    try:
+        await judge(None)
+    except RuntimeError as lookup_failed:
+        assert not isinstance(lookup_failed, bench.ComputeTokenUnavailable), lookup_failed
+    else:
+        raise AssertionError("a failed credential-plan lookup must not run the judge")
+    spawns[-1].assert_not_awaited()
 
 
 def test_ci_permits_only_the_opt_in_agentcard_release_skip():
@@ -9720,13 +9808,13 @@ def test_claude_code_session_output_static_check_is_fail_closed():
     assert "api_base_url is missing" in reason
 
 
-def _spawn_sub_agents_record(*, gp_explores: bool = True, product: str = "121362308052156") -> dict:
+def _spawn_sub_agents_record(*, gp_explores: bool = True, product: str = "3658993") -> dict:
     """Saved-run shape of spawn-sub-agents agent 30434b44 (original600 run 1792738962466034914).
 
     The root posts its general-purpose completions as ``spawn_agent`` FINISHED rows, so a
     tree-wide ``spawn_agent`` count is 2 even when no explore ever ran.
     """
-    root, tokyo, nyc = "30434b44-root", "450a67e0-tokyo", "c9c5cad6-nyc"
+    root, paris, sf = "30434b44-root", "450a67e0-paris", "c9c5cad6-sf"
 
     def tool(name: str, call_id: str, **extra) -> dict:
         metadata = {"toolName": name, "toolStatus": "FINISHED", "toolCallId": call_id, **extra}
@@ -9751,15 +9839,15 @@ def _spawn_sub_agents_record(*, gp_explores: bool = True, product: str = "121362
         tool("spawn_agent", "230e1dd3"),
         {
             "role": "TOOL",
-            "message": "I verified both official figures and multiplied them.",
+            "message": "I found both years and multiplied them.",
             "metadata": {
                 "toolName": "completion_summary",
                 "toolStatus": "FINISHED",
                 "completionSummary": {
-                    "summary": "I verified both official figures and multiplied them.",
+                    "summary": "I found both years and multiplied them.",
                     "outputs": [
-                        {"key": "tokyo_population", "value": "14137164"},
-                        {"key": "nyc_population", "value": "8584629"},
+                        {"key": "eiffel_tower_completed", "value": "1889"},
+                        {"key": "golden_gate_opened", "value": "1937"},
                         {"key": "product", "value": product},
                     ],
                 },
@@ -9768,14 +9856,14 @@ def _spawn_sub_agents_record(*, gp_explores: bool = True, product: str = "121362
     ]
     tree = {
         root: {"status": "COMPLETED", "goal": "spawn-sub-agents", "messages": root_messages},
-        tokyo: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("call_55fc", "e88ee23d")},
-        nyc: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("toolu_01Ate", "706a812c")},
+        paris: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("call_55fc", "e88ee23d")},
+        sf: {"status": "COMPLETED", "parent_agent_id": root, "messages": gp_messages("toolu_01Ate", "706a812c")},
     }
     return {"agent": {"agent_id": root}, "messages": root_messages, "_benchmark": {"tree": tree}}
 
 
 async def test_spawn_sub_agents_catalog_checks_explore_spawns_and_final_product():
-    """spawn-sub-agents: >=2 explore spawns and the official figures with their exact product.
+    """spawn-sub-agents: >=2 explore spawns and both landmark years with their exact product.
 
     Repro: original600 run 1792738962466034914 failed 3/5 valid copies on the stale
     ``min_tool_counts.web_search=2`` while the 2026-06-02 bulk eval_prompt removal (79fe5c19e)
@@ -9804,8 +9892,8 @@ async def test_spawn_sub_agents_catalog_checks_explore_spawns_and_final_product(
     ok, reason = await run(no_explore)
     assert not ok and "explore-research" in reason and "spawned 0 explore" in reason
 
-    ok, reason = await run(_spawn_sub_agents_record(product="121362308052000"))
-    assert not ok and "final-answer-population-product" in reason and "121362308052156" in reason
+    ok, reason = await run(_spawn_sub_agents_record(product="3658000"))
+    assert not ok and "final-answer-year-product" in reason and "3658993" in reason
 
 
 def test_cuda_kernel_catalog_enforces_code_agent_route_and_no_tool_failures():
@@ -13207,6 +13295,106 @@ def test_compute_token_sync_propagates_openrouter_claude_fallback_from_backend_e
     assert captured["env"]["OPENROUTER_API_KEY"] == "sk-or-test-fallback"
 
 
+async def test_non_claude_compute_refresh_scopes_seed_opt_in_and_preserves_strict_gates():
+    """Absent Claude OAuth cannot gate explicit non-Claude tasks before dispatch."""
+    import benchmarks.run_benchmark as bench
+    from dataclasses import replace
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    browser = get_task_by_name("browser-smoke")
+    claude = get_task_by_name("claude-code-agent")
+    assert browser.requires_claude_code is False and claude.requires_claude_code is True
+    flag = "SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK"
+    observed = []
+
+    def seed(command, **kwargs):
+        env = kwargs["env"]
+        observed.append(env.copy())
+        # The unchanged seed consumer owns this existing opt-in. Other seed
+        # branches are exercised by the registered seed/fallback controls.
+        admitted = env.get(flag) == "1"
+        return subprocess.CompletedProcess(
+            command, 0 if admitted else 1, "",
+            "" if admitted else "No usable claude_code integrations after sync",
+        )
+
+    async def refresh(tasks, *, require=False, expect_opt_in=False, cost_gate=False):
+        observed.clear()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CODEX_AUTH_PATH", None)
+            os.environ.pop("BENCHMARK_REQUIRE_COMPUTE_TOKENS", None)
+            os.environ.pop(flag, None)
+            if not expect_opt_in:
+                # Ambient launch flags must not authorize Claude/mixed/default callers.
+                os.environ[flag] = "1"
+            if cost_gate:
+                os.environ["BENCHMARK_REQUIRE_COMPUTE_TOKENS"] = "1"
+            error = None
+            try:
+                await bench._refresh_local_compute_tokens_for_run(
+                    "http://localhost:55120", tasks=tasks, require_claude_code=require,
+                )
+            except RuntimeError as exc:
+                error = str(exc)
+        assert len(observed) == 1
+        assert (observed[0].get(flag) == "1") is expect_opt_in
+        assert "SEED_ALLOW_MISSING_CLAUDE_CODE" not in observed[0]
+        if cost_gate:
+            assert error and "BENCHMARK_REQUIRE_COMPUTE_TOKENS=1" in error, error
+        elif expect_opt_in:
+            assert error is None, error
+        else:
+            assert error == "Benchmark run could not refresh local compute tokens", error
+        return observed[0]
+
+    with (
+        anthropic_family(excluded=False),
+        patch.object(bench, "_is_simulate_mode", return_value=False),
+        patch.object(bench, "_local_victoria_database_url", return_value="postgresql://127.0.0.1/local"),
+        patch.object(bench, "_compute_token_source_database_url", return_value=("postgresql://source/rose", "fixture")),
+        patch.object(bench, "_has_usable_anthropic_api_key_fallback", new=AsyncMock(return_value=False)),
+        patch.object(bench, "_run_seed_subprocess", side_effect=seed),
+        patch.object(bench, "_refresh_local_claude_token_from_keychain", return_value=False),
+        patch.object(bench, "_local_db_has_usable_direct_compute_token", return_value=False),
+    ):
+        try:
+            await refresh([browser], expect_opt_in=True)
+            await refresh([browser], require=True)
+            # Unknown/malformed catalog flags are not explicit non-Claude permission.
+            await refresh([replace(browser, requires_claude_code=None)])
+            claude_env = await refresh([claude])
+            assert claude_env["SEED_REQUIRE_COMPUTE_TOKEN_TYPES"] == "claude"
+            mixed_env = await refresh([claude, browser])
+            assert "SEED_REQUIRE_COMPUTE_TOKEN_TYPES" not in mixed_env
+            await refresh([])
+            await refresh([browser], expect_opt_in=True, cost_gate=True)
+            with patch.dict(os.environ, {flag: "1"}, clear=False):
+                observed.clear()
+                assert bench._sync_compute_tokens(
+                    allow_missing_claude_for_non_claude_tasks=1,
+                ) is False
+                assert flag not in observed[0]
+            # Existing AgentCard launchers intentionally inherit this flag.
+            # Their later fixture/default sync must retain that established scope.
+            with (
+                patch.dict(os.environ, {flag: "1"}, clear=False),
+                patch.object(bench, "_sync_email_credentials", return_value=True),
+                patch.object(bench, "_sync_browser_credentials", return_value=True),
+            ):
+                observed.clear()
+                assert bench._sync_compute_tokens() is True
+                assert observed[0][flag] == "1"
+                observed.clear()
+                result = bench._apply_live_fixture(bench.LiveFixtureContext(
+                    base_url="http://localhost:55120", user_id="fixture-user",
+                    auth_realm="example.test", cookie_domains=(),
+                ))
+                assert result["browser_auth"] is True
+                assert observed[0][flag] == "1"
+        finally:
+            bench._withheld_compute_token_types.clear()
+
+
 def test_shared_workspace_compute_source_requires_usable_claude_code():
     """A reachable shared DB without an agent token must not shadow prod."""
     from unittest.mock import patch
@@ -13857,6 +14045,48 @@ def test_fast_mode_pass_does_not_seed_timeout_history():
     assert recorded == []
     # ...but the attempt is still recorded in the run-stats ledger
     assert len(attempts) == 1 and attempts[0]["fast_mode_cache_enabled"] is True
+    # Factory reviews group attempts per benchmark run and outcome.
+    assert attempts[0]["run_id"] == run.run_id and attempts[0]["outcome_class"] == "passed"
+
+
+def test_attempt_ledger_records_run_id_and_outcome_class():
+    """Attempts carry run/campaign identity and outcome; absent values stay absent."""
+    import tempfile
+    from unittest.mock import patch
+
+    import benchmarks.timeout_history as timeout_history
+
+    with tempfile.TemporaryDirectory() as scratch:
+        ledger = pathlib.Path(scratch) / "attempts.jsonl"
+        with (
+            patch.object(timeout_history, "HISTORY_DIR", scratch),
+            patch.object(timeout_history, "ATTEMPTS_FILE", str(ledger)),
+        ):
+            with patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": "campaign-7"}):
+                timeout_history.record_attempt(
+                    task_name="t",
+                    passed=False,
+                    status="COMPLETED",
+                    duration_seconds=4.0,
+                    cost_cents=0.0,
+                    run_id="run-1",
+                    outcome_class="cleanup-failure",
+                )
+            with patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": ""}):
+                timeout_history.record_attempt(
+                    task_name="t",
+                    passed=True,
+                    status="COMPLETED",
+                    duration_seconds=2.0,
+                    cost_cents=0.0,
+                )
+        first, second = (json.loads(line) for line in ledger.read_text().splitlines())
+    assert (first["run_id"], first["group_run_id"], first["outcome_class"]) == (
+        "run-1",
+        "campaign-7",
+        "cleanup-failure",
+    )
+    assert not {"run_id", "group_run_id", "outcome_class"} & set(second)
 
 
 def test_non_fast_mode_pass_still_seeds_timeout_history():
@@ -13989,7 +14219,6 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
     import benchmarks.run_benchmark as bench
     import helpers.llm as llm
     from providers.rose.client import _reset_anthropic_api_key_cooldown_cache
-    from _test_utils import setup_mock_fn, teardown_mock
 
     real_check_progress = llm.check_progress
     probe = SimpleNamespace(invocations=0, openrouter_calls=0, call_sites=[], sleeps=AsyncMock())
@@ -14029,10 +14258,24 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
             return httpx.Response(429, json={"error": {"message": "Rate limit exceeded", "code": 429}})
         return httpx.Response(404, json={"error": f"No mock for {url}"})
 
+    # Install at send, before the capture harness's transport-level mock. A
+    # strict offline send guard otherwise prevents that mock from ever seeing
+    # requests: the no-verdict case passes accidentally, but recovery cannot.
+    # This boundary still builds real HTTPX requests and runs the real Rose
+    # waterfall/SSE parser. It never calls a network-capable client/transport.
+    mock_transport = httpx.MockTransport(handler)
+
+    async def mocked_send(_client, request, **kwargs):
+        response = await mock_transport.handle_async_request(request)
+        response.request = request
+        if not kwargs.get("stream", False):
+            await response.aread()
+        return response
+
     _reset_anthropic_api_key_cooldown_cache()
-    setup_mock_fn(handler)
     try:
         with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(httpx.AsyncClient, "send", mocked_send))
             stack.enter_context(patch.object(llm, "check_progress", counting_check_progress))
             stack.enter_context(patch.object(bench, "_benchmark_judge_claude_auth_kwargs", AsyncMock(return_value={})))
             stack.enter_context(patch.object(bench, "_benchmark_judge_gpt_auth_kwargs", AsyncMock(return_value={})))
@@ -14040,7 +14283,6 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
             stack.enter_context(patch("temporalio.activity.heartbeat"))
             yield probe
     finally:
-        teardown_mock()
         _reset_anthropic_api_key_cooldown_cache()
 
 
@@ -14158,8 +14400,9 @@ async def test_declared_judge_without_verdict_is_judge_unavailable_error():
                 stack.enter_context(patch.object(sms, "parse_sms_script", return_value={"turns": []}))
                 stack.enter_context(patch.object(sms, "_user_phone", return_value="+15555550100"))
                 stack.enter_context(patch.object(sms, "_live_agent_ids", return_value=set()))
-                for helper in ("_reset_session", "_seed_transcript", "_cleanup", "_apply_web_search_fixture"):
+                for helper in ("_reset_session", "_seed_transcript", "_apply_web_search_fixture"):
                     stack.enter_context(patch.object(sms, helper))
+                stack.enter_context(patch.object(sms, "_cleanup", return_value={"verified": True}))
                 stack.enter_context(patch.object(sms, "_seed_agents", return_value=[]))
                 sms_results[label] = await sms.run_sms_task("http://127.0.0.1:32001", sms_task, deps)
             assert set(probe.call_sites) == {"benchmark_sms_evaluator"}, probe.call_sites
@@ -14188,10 +14431,12 @@ async def test_semantic_output_judge_without_verdict_is_judge_unavailable():
             raise AssertionError(f"no-verdict semantic judge was scored: {outcome}")
     assert probe.invocations == 1 + len(bench.BENCHMARK_JUDGE_NO_VERDICT_RETRY_DELAYS_S), probe.invocations
     assert set(probe.call_sites) == {"semantic_output_field_recovery_judge"}, probe.call_sites
+    assert probe.openrouter_calls >= probe.invocations  # actual scripted 429s, not blocked HTTP
 
     with _scripted_judge_provider(verdict_from_invocation=2, output={"receipt_id": "tp_c505"}) as probe:
         assert await bench._judge_output_recovers_expected_fields("agent-1", blob, schema, "receipt-task") is None
     assert probe.invocations == 2, probe.invocations
+    assert probe.openrouter_calls >= probe.invocations  # scripted recovery reached the SSE parser
 
 
 async def test_declared_judge_low_score_verdict_is_not_rejudged():
@@ -14276,6 +14521,40 @@ async def test_codex_runner_harness_error_has_explicit_error_outcome():
         )
     assert result.passed is False
     assert result.benchmark_status == "ERROR", result.benchmark_status
+
+
+async def test_codex_runner_poll_returns_output_after_exit():
+    """The Codex runner's ws poll returns the output and exit code once the session exits.
+
+    Its cleanup called ``client.close()``, which ClaudeCodeWsClient does not have
+    (it has ``disconnect()``), so every finished run raised AttributeError.
+    """
+    from aiohttp import web
+    import benchmarks.codex_runner as codex
+
+    async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_str(json.dumps({"type": "stdout", "data": "collatz steps: 111\n"}))
+        await ws.send_str(json.dumps({"type": "exit", "code": 0}))
+        await asyncio.sleep(5)
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", ws_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        output, exit_code = await asyncio.wait_for(
+            codex._poll_codex_ws_until_exit(f"ws://127.0.0.1:{port}/", timeout_seconds=10), 15
+        )
+    finally:
+        await runner.cleanup()
+    assert exit_code == 0, exit_code
+    assert "collatz steps: 111" in output, output
 
 
 async def test_codex_runner_creates_session_on_mounted_internal_route():
@@ -14782,8 +15061,8 @@ def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
     assert getattr(task, "browser_profile_mode", None) == "fresh"
     assert getattr(task, "browser_auth_realm", None) == "webdecoy.com"
     assert task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert task.expected_browser_provider is None
     assert task.expected_browser_session_metadata_values == {
-        "profile_source": "new_user_persistent",
         "auth_source": "none",
         "cookies_injected": False,
         "cookies_count": 0,
@@ -14841,6 +15120,83 @@ def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
     finally:
         bench._restore_isolated_browser_state_scenario = original_restore
     assert restored == [(manifest, "fresh browser state")]
+
+
+def test_webdecoy_catalog_requires_provider_neutral_isolation():
+    """Check isolation state without coupling acceptance to provider labels."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = get_task_by_name("browser-biometrics-webdecoy")
+    # Captured on agent 520014be, browser_use_step_1 (2026-10-29).
+    metadata = {
+        "provider": "tilion",
+        "requested_provider": "tilion",
+        "provider_fallback_reason": None,
+        "profile_id": None,
+        "profile_source": "tilion_ephemeral",
+        "auth_source": "none",
+        "cookies_injected": False,
+        "cookies_count": 0,
+        "local_storage_origin_count": 0,
+        "indexed_db_origin_count": 0,
+        "permission_grant_count": 0,
+        "cache_storage_origin_count": 0,
+    }
+
+    def data_for(items, score="0.02"):
+        return {
+            "agent": {"status": "COMPLETED", "progress": 1.0},
+            "messages": [{"role": "TOOL", "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"}}] + [
+                {
+                    "role": "TOOL",
+                    "message": (
+                        "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                        "Clicked checkbox. Submitted invisible mode form with "
+                        "benchmark-human@example.com. Risk Score: " + score
+                    ),
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolStatus": "FINISHED",
+                        "action_type": "task_complete",
+                        "task_id": "browser-task-" + str(index),
+                        "browser_session_id": "session-" + str(index),
+                        "browser_session_metadata": item,
+                        "structured_response": {"fcaptcha_risk_score": score},
+                    },
+                }
+                for index, item in enumerate(items)
+            ],
+        }
+
+    actual = evaluate_task(task, data_for([metadata]), 0)
+    assert actual == (True, None), actual
+    for field in (
+        "auth_source", "cookies_injected", "cookies_count", "local_storage_origin_count",
+        "indexed_db_origin_count", "permission_grant_count", "cache_storage_origin_count",
+    ):
+        altered = dict(metadata)
+        altered[field] = "cookie_bundle" if field == "auth_source" else (
+            True if field == "cookies_injected" else 1
+        )
+        assert evaluate_task(task, data_for([altered]), 0)[0] is False, field
+        del altered[field]
+        assert evaluate_task(task, data_for([altered]), 0)[0] is False, "missing:" + field
+    # Provider and profile-source labels are not evidence of auth/storage state.
+    for provider, source in (("tilion", "tilion_ephemeral"), ("kernel", "new_user_persistent"),
+                             ("future-provider", "new-label"), (None, None)):
+        item = {**metadata, "provider": provider, "profile_source": source}
+        if provider is None:
+            item.pop("provider")
+            item.pop("profile_source")
+        assert evaluate_task(task, data_for([item]), 0) == (True, None)
+    assert evaluate_task(task, data_for([{}]), 0)[0] is False
+    # Separate sessions cannot combine partial isolation evidence.
+    split = [{**metadata, "cookies_count": 1}, {**metadata, "local_storage_origin_count": 1}]
+    assert evaluate_task(task, data_for(split), 0)[0] is False
+    # Correct isolation alone must not bypass the existing outcome ratchet.
+    passed, reason = evaluate_task(task, data_for([metadata], score="0.164"), 0)
+    assert passed is False and "ratchet" in reason.lower(), reason
 
 
 async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
@@ -16151,6 +16507,36 @@ async def test_normal_code_preflight_preserves_shared_fallback():
                                 '/api/integrations/compute-code/anthropic-key/cooldown']
 
 
+async def test_codex_harness_preflight_uses_backend_codex_plan_not_gpt_api_key():
+    """No GPT login: the backend's Codex plan (Azure unless backed off) decides; GPT_API_KEY never funds Codex."""
+    import benchmarks.run_benchmark as bench
+    import httpx
+    from unittest.mock import patch
+    original_client = httpx.AsyncClient
+    plan = {}
+    requests = []
+    def respond(request):
+        requests.append((request.url.path, dict(request.url.params), request.headers.get('x-api-key')))
+        if request.url.path == '/api/integrations/gpt-code/credentials/token':
+            return httpx.Response(404, json={'error': 'NoTokensAvailable'})
+        return httpx.Response(200, json=plan)
+    with patch.dict(bench.os.environ, {'GPT_API_KEY': 'unfunded-openai-key'}), \
+         patch.object(bench, 'API_KEY', 'test-key'), \
+         patch.object(bench, '_api_headers', new=AsyncMock(return_value={})), \
+         patch.object(bench, '_current_benchmark_user_id', return_value='bench-user'), \
+         patch.object(bench.httpx, 'AsyncClient', side_effect=lambda **kw: original_client(transport=httpx.MockTransport(respond), **kw)):
+        for codex, expected in [(True, True), (False, False)]:
+            plan.clear()
+            plan.update({'claude': True, 'codex': codex})
+            requests.clear()
+            assert await bench._check_codex_harness_credentials('http://fixture.invalid') is expected, plan
+            assert requests == [
+                ('/api/integrations/gpt-code/credentials/token', {}, None),
+                ('/api/claude-code-session/credential-availability', {'user_id': 'bench-user'}, 'test-key'),
+            ], requests
+    assert 'Azure' in bench.CODEX_HARNESS_CREDENTIAL_SKIP_REASON
+
+
 async def test_code_dispatch_skip_remains_opt_in():
     import benchmarks.run_benchmark as bench
     from unittest.mock import patch
@@ -16343,6 +16729,7 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
             "tolerate_gpt_code_unavailable": True,
             "tolerate_claude_code_unavailable": True,
             "required_token_types": None,
+            "allow_missing_claude_for_non_claude_tasks": False,
         }
     ]
     assert http_calls == [
@@ -16388,6 +16775,7 @@ async def test_local_compute_refresh_rehydrates_tokens_after_base_restore():
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=False,
         required_token_types=None,
+        allow_missing_claude_for_non_claude_tasks=False,
     )
 
 
@@ -16550,6 +16938,96 @@ def test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score():
     passed, reason = _evaluate_webdecoy_biometrics_result(_msg("Final visible FCaptcha Risk Score: 0.44."))
     assert passed is False
     assert "ratchet" in reason.lower()
+
+
+def test_webdecoy_score_evidence_is_recorded_for_comparison():
+    """Replay of the failing predeploy capture (agent 8d029581, FCaptcha 0.187 > 0.163).
+
+    The ledger kept only the failure line, and passes recorded no score at all, so
+    the 0.187 could not be compared with the passes. The capture shows the score is
+    the Kernel-residential baseline 0.153164 (PoW challenge_network_mismatch +
+    teleport click) plus a datacenter-flagged exit (+0.0336): the browser session
+    decides the number. Every attempt therefore records score, engine, the verify
+    detections and the browser provider/exit, and the failure line names them.
+    """
+    import tempfile
+
+    from benchmarks.results import BenchmarkRun, TaskResult
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result, _webdecoy_score_evidence
+    import benchmarks.timeout_history as timeout_history
+
+    fixture = pathlib.Path(__file__).parent / "fixtures" / "webdecoy_kernel_datacenter_fail" / "network" / "index.json"
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Visited https://webdecoy.com/product/fcaptcha-demo/. Clicked the checkbox. "
+                    "Entered benchmark-human@example.com in invisible mode and clicked Submit."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "network_recording_path": str(fixture),
+                    "browser_session_metadata": {"provider": "kernel", "proxy_source": "kernel_residential_city"},
+                },
+            }
+        ]
+    }
+
+    evidence = _webdecoy_score_evidence(data)
+    assert evidence == {
+        "fcaptcha_score": 0.18676399999999999,
+        "fcaptcha_score_source": "captured API",
+        "fcaptcha_engine_version": "1.46.1",
+        "fcaptcha_detections": [
+            "bot: PoW verification failed: challenge_network_mismatch",
+            "datacenter: Request from known datacenter IP range",
+            "bot: No local speech synthesis voices",
+            "vision_ai: Click injected with no pointer trajectory (1 teleport clicks)",
+            "captcha_farm: Unusually long interaction time",
+        ],
+        "browser_provider": "kernel",
+        "browser_proxy_source": "kernel_residential_city",
+    }
+
+    passed, reason = _evaluate_webdecoy_biometrics_result(data)
+    assert passed is False
+    assert "risk score 0.187 exceeds ratchet 0.163" in reason
+    assert "FCaptcha engine v1.46.1" in reason
+    assert "vision_ai: Click injected with no pointer trajectory" in reason
+    # The flag that tipped the score over only fired on the first verify.
+    assert "datacenter: Request from known datacenter IP range" in reason
+    assert "browser kernel/kernel_residential_city" in reason
+
+    # Passing attempts carry the same evidence into the attempts ledger.
+    with tempfile.TemporaryDirectory() as scratch:
+        ledger = pathlib.Path(scratch) / "attempts.jsonl"
+        with (
+            patch.object(timeout_history, "HISTORY_DIR", scratch),
+            patch.object(timeout_history, "ATTEMPTS_FILE", str(ledger)),
+            patch.object(timeout_history, "record_pass", lambda **_kwargs: None),
+            patch.dict(os.environ, {"BENCHMARK_HUB_GROUP_RUN_ID": "", "BENCHMARK_HISTORY_PARK_DIR": ""}),
+        ):
+            run = BenchmarkRun(suite="predeploy", base_url="http://localhost:3300")
+            run.task_results.append(
+                TaskResult(
+                    name="browser-biometrics-webdecoy",
+                    passed=True,
+                    agent_id="agent-pass",
+                    status="COMPLETED",
+                    progress_score=1.0,
+                    duration_seconds=140.0,
+                    cost_cents=27.0,
+                    message_count=1,
+                    evaluator_evidence={**evidence, "fcaptcha_score": 0.018, "browser_provider": "tilion"},
+                )
+            )
+            run._record_history()
+        (row,) = (json.loads(line) for line in ledger.read_text().splitlines())
+    assert row["passed"] is True
+    assert row["evaluator_evidence"]["fcaptcha_score"] == 0.018
+    assert row["evaluator_evidence"]["fcaptcha_engine_version"] == "1.46.1"
+    assert row["evaluator_evidence"]["browser_provider"] == "tilion"
 
 
 def test_webdecoy_biometrics_evaluator_prefers_grounded_result_over_instruction_examples():
@@ -18469,6 +18947,45 @@ def test_isolated_postgres_default_keeps_macos_stacks_separate():
 
 
 # This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+def test_local_isolated_stack_compute_token_authority_default():
+    """A1 (approved 2026-10-20): isolated stacks share production's compute-token state.
+
+    Default URL is the production backend with the stack's own BACKEND_API_KEY;
+    BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off is the diagnostics opt-out; explicit
+    values win; a missing key fails the stack before it starts (fail closed).
+    """
+    import tempfile
+
+    import benchmarks.local as local_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "back-end").mkdir()
+        (root / "back-end" / ".env").write_text('BACKEND_API_KEY="dotenv-key"\n')
+        with patch.object(local_bench, "REPO_ROOT", root):
+            env: dict[str, str] = {"BACKEND_API_KEY": "shell-key"}
+            local_bench.apply_compute_token_authority_env(env)
+            assert env["COMPUTE_TOKEN_AUTHORITY_URL"] == "https://navi-j9a9.onrender.com"
+            assert env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == "shell-key"
+
+            env = {"COMPUTE_TOKEN_AUTHORITY_URL": "https://authority.example", "COMPUTE_TOKEN_AUTHORITY_API_KEY": "k"}
+            local_bench.apply_compute_token_authority_env(env)
+            assert env["COMPUTE_TOKEN_AUTHORITY_URL"] == "https://authority.example"
+            assert env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == "k"
+
+            env = {"BENCHMARK_COMPUTE_TOKEN_AUTHORITY": "off", "COMPUTE_TOKEN_AUTHORITY_URL": "https://x"}
+            local_bench.apply_compute_token_authority_env(env)
+            assert env["COMPUTE_TOKEN_AUTHORITY_URL"] == "" and env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == ""
+
+            (root / "back-end" / ".env").write_text("")
+            try:
+                local_bench.apply_compute_token_authority_env({})
+            except RuntimeError as error:
+                assert "BACKEND_API_KEY" in str(error) and "BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off" in str(error)
+            else:
+                raise AssertionError("an isolated stack without an authority key must not start")
+
+
 @patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
 def test_local_isolated_stack_opts_into_fast_seed_dump():
     """An isolated stack must use its own tunnel and restore a cached seed."""
@@ -18513,8 +19030,12 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
                 workspace_name="blackbox-bench-isolated-run",
                 base_port=55120,
             )
-            local_bench.start_services(stack, clean_first=False)
+            with patch.dict(os.environ, {"COMPUTE_TOKEN_AUTHORITY_API_KEY": "isolated-authority-key"}):
+                local_bench.start_services(stack, clean_first=False)
 
+            # A1: the isolated stack delegates compute-token state to the shared authority.
+            assert captured["env"]["COMPUTE_TOKEN_AUTHORITY_URL"] == "https://navi-j9a9.onrender.com"
+            assert captured["env"]["COMPUTE_TOKEN_AUTHORITY_API_KEY"] == "isolated-authority-key"
             seed_dump = Path(captured["env"]["BENCHMARK_SEED_DUMP"])
             assert seed_dump.parent == local_bench.BENCHMARK_CONTEXT_ROOT / "seed-cache"
             assert seed_dump.name.endswith(".dump")
@@ -18616,6 +19137,143 @@ def test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only():
             os.environ.pop("FAST_MODE_CACHE_DATABASE_URL", None)
         else:
             os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
+
+
+# This fixture models setup/readiness; native ownership is exercised by the real owner fixture.
+@patch("benchmarks.local._record_stack_cleanup_owner", new=lambda *_args: None)
+def test_local_stack_env_excludes_worker_dotenv_loaded_by_launcher_imports():
+    """RCA (browser-biometrics-webdecoy, FCaptcha 0.187 > ratchet 0.163, predeploy only).
+
+    With --max-concurrency > 1, local.py imports run_benchmark (needs_independent_worlds)
+    before starting the stack, and agents config load_dotenv()s agents/.env into the
+    launcher's os.environ. start_services forwarded that to run.sh, so the backend
+    inherited the worker's BROWSER_PROVIDER=kernel over back-end/.env's tilion (the
+    production provider): every predeploy browser task ran on Kernel residential
+    exits, where FCaptcha sits at 0.153 and a datacenter-flagged exit fails the
+    ratchet. Each service loads its own env file; the launcher must forward only
+    what it was launched with or set itself.
+    """
+    from unittest.mock import patch
+
+    from dotenv import load_dotenv
+
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    worker_only = "ROSE_RCA_WORKER_DOTENV_ONLY"
+    exported = "ROSE_RCA_OPERATOR_EXPORTED"
+    launcher_set = "ROSE_RCA_LAUNCHER_SET"
+    with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=False):
+        for key in ("BROWSER_PROVIDER", worker_only, launcher_set):
+            os.environ.pop(key, None)
+        os.environ[exported] = "operator"
+        launch_environ = dict(os.environ)
+        worker_dotenv = Path(tmp) / "agents.env"
+        worker_dotenv.write_text(f"BROWSER_PROVIDER=kernel\n{worker_only}=worker\n{exported}=worker\n")
+        # The import side effect the launcher really executes (agents config.load_config()).
+        load_dotenv(worker_dotenv, override=False)
+        os.environ[launcher_set] = "launcher"
+        assert os.environ["BROWSER_PROVIDER"] == "kernel"
+        context_dir = Path(tmp) / "worker-dotenv-run"
+        stack = local_bench.ServiceStack(
+            run_id="worker-dotenv-run",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-worker-dotenv-run",
+            base_port=55150,
+        )
+        with (
+            patch.object(local_bench.subprocess, "Popen", fake_popen),
+            patch.object(local_bench, "wait_for_services", lambda *_args, **_kwargs: {"ports": {}}),
+            patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack"),
+            patch.object(local_bench, "WORKER_DOTENV_PATH", worker_dotenv, create=True),
+            patch.object(local_bench, "_LAUNCH_ENVIRON", launch_environ, create=True),
+        ):
+            local_bench.start_services(stack, clean_first=False, tasks=["browser-biometrics-webdecoy"])
+
+    env = captured["env"]
+    assert "BROWSER_PROVIDER" not in env, (
+        f"backend inherited the worker dotenv BROWSER_PROVIDER={env.get('BROWSER_PROVIDER')!r} over back-end/.env"
+    )
+    assert worker_only not in env, "worker-only dotenv values must not reach the stack services"
+    # Operator exports and values the launcher sets itself are still forwarded.
+    assert env[exported] == "operator"
+    assert env[launcher_set] == "launcher"
+    assert env["DISABLE_GMAIL_SYNC"] == "1"
+
+
+def test_benchmark_launcher_imports_do_not_load_worker_dotenv():
+    """The real import chain behind the predeploy env leak, in a fresh interpreter.
+
+    local.py imports run_benchmark (needs_independent_worlds) before it starts a
+    stack; helpers/check_usage.py and helpers/fetch_queue_pointer.py call
+    load_config() at import, which load_dotenv()s the worker env file into the
+    launcher. Whatever that import does to os.environ, the env handed to the
+    stack services must not carry a value that only came from the worker dotenv.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    agents_dir = pathlib.Path(__file__).resolve().parents[2]
+    probe = (
+        "import json, os, sys\n"
+        f"sys.path.insert(0, {str(agents_dir)!r})\n"
+        "before = dict(os.environ)\n"
+        "import benchmarks.local as local\n"
+        # Under `python -c` the dotenv loaded is the working directory's (the real
+        # launcher's is agents/.env, which is WORKER_DOTENV_PATH's default).
+        "local.WORKER_DOTENV_PATH = local.Path(os.getcwd()) / '.env'\n"
+        "import benchmarks.run_benchmark\n"
+        "from benchmarks.local_worlds import needs_independent_worlds\n"
+        "needs_independent_worlds(['browser-biometrics-webdecoy', 'agent-payment-new-user-journey'], 2)\n"
+        "stack = local.service_base_environ()\n"
+        "print(json.dumps({\n"
+        "    'stack_leaked': sorted(k for k in stack if stack.get(k) != before.get(k)),\n"
+        "    'stack_provider': stack.get('BROWSER_PROVIDER'),\n"
+        "}))\n"
+    )
+    # Keys agents config.load_config() requires, plus the leaked provider and a sentinel:
+    # every one of them reaches the launcher only through the worker dotenv here.
+    worker_dotenv = {
+        "BROWSER_PROVIDER": "kernel",
+        "ROSE_RCA_WORKER_DOTENV_ONLY": "worker",
+        **{
+            key: "rca-worker-dotenv"
+            for key in (
+                "TEMPORAL_API_KEY",
+                "TEMPORAL_NAMESPACE",
+                "TEMPORAL_ADDRESS",
+                "TEMPORAL_TASK_QUEUE",
+                "OPENROUTER_API_KEY",
+                "OPENAI_API_KEY",
+                "PERPLEXITY_API_KEY",
+                "GEMINI_API_KEY",
+                "BROWSERBASE_API_KEY",
+                "BROWSERBASE_PROJECT_ID",
+            )
+        },
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        # With `python -c`, load_dotenv()'s find_dotenv() starts from the working directory.
+        pathlib.Path(tmp, ".env").write_text("".join(f"{k}={v}\n" for k, v in worker_dotenv.items()))
+        env = {k: v for k, v in os.environ.items() if k not in worker_dotenv}
+        result = subprocess.run(
+            [sys.executable, "-c", probe], cwd=tmp, env=env, capture_output=True, text=True, timeout=300
+        )
+    assert result.returncode == 0, result.stderr[-2000:]
+    observed = json.loads(result.stdout.strip().splitlines()[-1])
+    assert observed == {"stack_leaked": [], "stack_provider": None}, observed
 
 
 async def test_claude_code_only_run_withholds_gpt_compute_credentials():
@@ -21179,6 +21837,7 @@ async def test_user_data_prod_grep_final_answer_semantic_judge():
             "role": "ASSISTANT",
             "text": "here is my summary",
             "metadata": {
+                "toolName": "completion_summary", "toolStatus": "FINISHED",
                 "completionSummary": {
                     "outputs": [
                         {
@@ -21199,8 +21858,8 @@ async def test_user_data_prod_grep_final_answer_semantic_judge():
 
     blob = _extract_agent_structured_output(messages, root_data)
     assert "provider_audit" in blob and "documents/claude/session.json" in blob
-    # The extractor judges the populated output schema, not free-text prose.
-    assert "here is my summary" not in blob
+    # Preserve nonempty text on the same completed card as well as its outputs.
+    assert "here is my summary" in blob
 
     schema = SEMANTIC_OUTPUT_EXPECTATIONS["user-data-prod-grep"]
     # The expectation is a response_schema the verifier must POPULATE before scoring.
@@ -21211,6 +21870,7 @@ async def test_user_data_prod_grep_final_answer_semantic_judge():
     def _assert_populate_then_score(**kwargs):
         assert kwargs["response_schema"] == schema  # verifier must populate THIS schema
         assert "grounded tool evidence" in kwargs["verifier_system_prompt"]  # approved verifier
+        assert kwargs["context"][1]["metadata"]["benchmark_final_evidence"] is True
         return {"score": 1.0, "reasoning": "all four recoverable", "output": {"chatgpt_evidence": "no data"}}
 
     with patch("helpers.llm.check_progress", new=AsyncMock(side_effect=_assert_populate_then_score)):
@@ -21240,6 +21900,7 @@ async def test_user_data_prod_grep_final_answer_semantic_judge():
     receipt_messages = [
         {
             "metadata": {
+                "toolName": "completion_summary", "toolStatus": "FINISHED",
                 "completionSummary": {
                     "outputs": [{"key": "order", "value": {"confirmation": "tp_c505", "paid": 43.96}}]
                 }
@@ -25739,6 +26400,60 @@ async def test_poll_elapsed_stall_and_chat():
     )
 
 
+async def test_polar_judge_sees_final_completion_summary():
+    """The polar judge must receive the final answer the product shows the user.
+
+    Polar batch 1 (2026-10-20): agent 25c02595 (polar-odysseys-7cc602f23977 K2)
+    finished with a ``completion_summary`` card whose message text is empty and
+    whose answer lives in ``metadata.completionSummary`` (summary + outputs),
+    which is exactly what the FE CompletionSummaryCard renders. The polar
+    action history dropped it, so the R4 judge reported "the trajectory ends
+    with verifier and completion actions ... not a final user-facing summary".
+    The fixture is that run's Hub transcript (Kernel live-view tokens redacted).
+    """
+    import gzip
+
+    from benchmarks.polar_evaluator import run_polar_evaluator
+
+    fixture = Path(__file__).resolve().parents[2] / "benchmarks/fixtures/polar/hub_transcript_25c02595.json.gz"
+    data = json.loads(gzip.decompress(fixture.read_bytes()))
+    finals = [
+        m["metadata"]["completionSummary"]
+        for m in data["messages"]
+        if (m.get("metadata") or {}).get("isFinalSummary") is True
+    ]
+    assert len(finals) == 1 and finals[0]["summary"]
+    card = finals[0]
+    # Precondition: the answer is only in metadata, as the agent posted it.
+    final_rows = [m for m in data["messages"] if (m.get("metadata") or {}).get("isFinalSummary") is True]
+    assert final_rows[0]["text"] == ""
+
+    prompts: list[str] = []
+
+    async def capture_judge(messages, **_kwargs):
+        prompts.append(messages[1]["content"][0]["text"])
+        return 'Thoughts: captured\nStatus: "success"'
+
+    evaluator = {
+        "method": "polar",
+        "rubrics": [{"id": "R4", "requirement": "Return a concise final summary.", "verification": "Final response."}],
+    }
+    await run_polar_evaluator(task_prompt=data["agent"]["goal"], evaluator=evaluator, data=data, judge_llm=capture_judge)
+    assert len(prompts) == 1
+    history = prompts[0].split("Full Action History:\n", 1)[1].split("\n\nScreenshots attached below:", 1)[0]
+    last_step = history.rsplit("\n265. ", 1)[-1]
+    # The final step is the completion card, presented as the agent's response.
+    assert last_step.startswith("Response: " + card["summary"]), last_step[:400]
+    assert "completion_summary" in last_step and "status=FINISHED" in last_step
+    for output in card["outputs"]:
+        assert output["label"] in last_step
+        for value in output["value"].values():
+            assert json.dumps(value, ensure_ascii=False) in last_step, (output["key"], value)
+    # The empty IN_PROGRESS card and the verifier rows are unchanged.
+    assert "\n264. Action: completion_summary | status=IN_PROGRESS\n" in history
+    assert history.count(card["summary"]) == 1
+
+
 async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
     """Guest stale cleanup must not multiply visibility load on a throttled namespace.
 
@@ -25795,6 +26510,87 @@ async def test_stale_workflow_count_backs_off_on_namespace_rate_limit():
         raise AssertionError("non-throttling errors keep their original single-attempt failure")
     assert len(calls) == 1 and sleeps == [], (calls, sleeps)
 
+
+async def test_all_benchmark_judges_preserve_complete_final_cards():
+    """Final cards are actual agent evidence for populated output, message text, Polar and verifier transport.
+
+    Declared single-turn/agentic evidence shapes are owned by main's runtime-cap design
+    (016714d19, 0660bb87e, 7202b10ac) and their own registered tests.
+    """
+    from benchmarks.run_benchmark import _extract_agent_structured_output, _message_text
+    from benchmarks.polar_evaluator import build_polar_trajectory
+
+    outputs = [{"key": f"field-{i}", "label": f"Field {i}", "value": {"n": i}} for i in range(205)]
+    summary = "  Actual final answer " + "x" * 13000 + " END-OF-FINAL  "
+    card = {"summary": summary, "outputs": outputs}
+    final = {"id": "final-root", "role": "TOOL", "text": "existing final prose", "metadata": {
+        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "root-card",
+        "completionSummary": card,
+    }}
+    child = {"id": "final-child", "role": "TOOL", "text": "", "metadata": {
+        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "child-card",
+        "completionSummary": {"summary": "child final answer", "outputs": [{"key": "ok", "value": False}]},
+    }}
+    pending = {"role": "TOOL", "text": "still working", "metadata": {
+        "toolName": "completion_summary", "toolStatus": "IN_PROGRESS", "completionSummary": {"summary": "NOT FINAL"},
+    }}
+    data = {"agent": {"agent_id": "root", "structured_output": {"real": 0}}, "messages": [pending, final, dict(final)],
+            "_semantic_evaluator_tree": {"child": {"parent_agent_id": "root", "messages": [child]}}}
+    original = json.dumps(data, sort_keys=True)
+    with patch("socket.socket.connect", side_effect=AssertionError("external traffic forbidden")), \
+         patch("httpx.AsyncClient.send", side_effect=AssertionError("HTTP forbidden")):
+        populated = json.loads(_extract_agent_structured_output(data["messages"], data))
+        assert populated["completion_cards"][0]["summary"] == summary
+        assert populated["structured_output"] == {"real": 0}
+        assert "END-OF-FINAL" in _message_text(final)
+        history, _ = build_polar_trajectory(data)
+        assert history.count("END-OF-FINAL") == 1
+        assert "Field 204" in history and "existing final prose" in history
+        assert "NOT FINAL" not in history
+    assert json.dumps(data, sort_keys=True) == original
+    from benchmarks.completion_evidence import completion_messages, tree_completion_messages
+    # Identical content is legitimate when identities differ or are unavailable.
+    anonymous = dict(final)
+    anonymous.pop("id")
+    distinct = dict(final, id="another-final")
+    assert len(completion_messages([final, final, dict(final), distinct, anonymous, anonymous])) == 4
+    assert build_polar_trajectory({"messages": [final, final]})[0].count("END-OF-FINAL") == 1
+    same_text = dict(final, text=summary)
+    assert _message_text(same_text).count("END-OF-FINAL") == 1
+    ordered = {"agent": {"agent_id": "root"},
+               "messages": [dict(final, created_at="2026-10-20T02:00:00Z")],
+               "_semantic_evaluator_tree": {"child": {"messages": [dict(child, created_at="2026-10-20T01:00:00Z")]}}}
+    assert [source for source, _ in tree_completion_messages(ordered)] == ["child", "root"]
+    from helpers.llm import build_verifier_context_messages
+    for site in ("benchmark_declared_evaluator", "semantic_output_field_recovery_judge"):
+        size = 200000 if site == "benchmark_declared_evaluator" else 330000
+        transport_text = "begin " + "x" * size + " complete-final-end"
+        rendered = build_verifier_context_messages([
+            {"role": "TOOL", "text": transport_text, "metadata": {"benchmark_final_evidence": True}}
+        ], "unchanged system", call_site=site)
+        assert transport_text in json.dumps(rendered)
+
+
+def test_polar_completion_card_does_not_repeat_same_message_summary():
+    """Project a card once while preserving distinct and independently repeated prose."""
+    from benchmarks.polar_evaluator import build_polar_trajectory
+
+    summary = "ACTUAL FINAL SUMMARY"
+    final = {"id": "finished-card", "role": "ASSISTANT", "text": summary, "metadata": {
+        "toolName": "completion_summary", "toolStatus": "FINISHED",
+        "completionSummary": {"summary": summary, "outputs": [{"key": "answer", "value": 42}]},
+    }}
+    for role in ("ASSISTANT", "TOOL"):
+        for text in (summary, summary + "\n- answer: 42", "distinct final detail"):
+            history, _ = build_polar_trajectory({"messages": [dict(final, role=role, text=text)]})
+            assert history.count(summary) == 1, history
+            assert history.count("- answer: 42") == 1, history
+            if text == "distinct final detail":
+                assert text in history, history
+    history, _ = build_polar_trajectory({"messages": [
+        final, {"id": "independent-message", "role": "ASSISTANT", "text": summary}
+    ]})
+    assert history.count(summary) == 2, history
 
 def test_fly_log_subprocesses_close_their_transports_before_loop_shutdown():
     """The prod runner printed "RuntimeError: Event loop is closed" after its result.
@@ -25877,6 +26673,8 @@ async def run_all_tests():
         "local_port_run_binds_judge_backend_to_the_stack_under_test",
         test_local_port_run_binds_judge_backend_to_the_stack_under_test,
     )
+    r.record("polar_completion_card_no_same_message_repeat", test_polar_completion_card_does_not_repeat_same_message_summary)
+    await r.record_async("all_benchmark_judges_complete_final_cards", test_all_benchmark_judges_preserve_complete_final_cards)
     await r.record_async("poll_elapsed_deadlines_900", test_poll_elapsed_deadlines_900)
     await r.record_async("poll_elapsed_deadlines_1200", test_poll_elapsed_deadlines_1200)
     await r.record_async(
@@ -25885,6 +26683,7 @@ async def run_all_tests():
     await r.record_async("poll_elapsed_disabled_polar", test_poll_elapsed_disabled_polar)
     await r.record_async("poll_elapsed_payment_budget", test_poll_elapsed_payment_budget)
     await r.record_async("poll_elapsed_stall_and_chat", test_poll_elapsed_stall_and_chat)
+    await r.record_async("polar_judge_sees_final_completion_summary", test_polar_judge_sees_final_completion_summary)
     r.record("controller_v39_full_native_pair", test_controller_v39_full_native_pair)
     r.record("controller_v39_cleanup_all_uid_writers", test_controller_v39_cleanup_all_uid_writers)
     r.record("controller_v39_receipt_bound_runtime", test_controller_v39_receipt_bound_runtime)
@@ -25944,6 +26743,10 @@ async def run_all_tests():
         test_judge_compute_token_unavailable_is_a_skipped_test_not_infra,
     )
     await r.record_async(
+        "agentic_judge_follows_c15_credential_order",
+        test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_codex_login,
+    )
+    await r.record_async(
         "agentcard_release_skip_execution_cleanup",
         test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup,
     )
@@ -25954,6 +26757,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_release_skip_preserves_task_failure",
         test_agentcard_release_stall_cannot_replace_an_independent_task_failure,
+    )
+    r.record(
+        "agentcard_release_skip_prior_settlement_only",
+        test_agentcard_release_stall_accepts_only_the_same_prior_settlement_mismatch,
     )
     await r.record_async(
         "agentcard_release_skip_catalog_wait", test_agentcard_release_skip_catalog_wait_rejects_production_and_unknown
@@ -26238,6 +27045,7 @@ async def run_all_tests():
         test_normal_run_never_implicitly_shortens_the_benchmark_timeout,
     )
     r.record("fast_mode_pass_skips_timeout_history", test_fast_mode_pass_does_not_seed_timeout_history)
+    r.record("attempt_ledger_records_run_id_and_outcome_class", test_attempt_ledger_records_run_id_and_outcome_class)
     r.record("non_fast_mode_pass_records_timeout_history", test_non_fast_mode_pass_still_seeds_timeout_history)
     r.record(
         "test_history_success_output_pipe_preserves_save_and_later_tasks",
@@ -26286,6 +27094,7 @@ async def run_all_tests():
     await r.record_async(
         "codex_runner_mounted_internal_route", test_codex_runner_creates_session_on_mounted_internal_route
     )
+    await r.record_async("codex_runner_poll_returns_after_exit", test_codex_runner_poll_returns_output_after_exit)
     await r.record_async(
         "minted_child_harness_outcomes",
         test_minted_benchmark_preserves_child_harness_outcomes,
@@ -26337,6 +27146,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_fresh_browser_state",
         test_webdecoy_biometrics_uses_fresh_isolated_browser_state,
+    )
+    r.record(
+        "webdecoy_catalog_provider_neutral_isolation",
+        test_webdecoy_catalog_requires_provider_neutral_isolation,
     )
     await r.record_async(
         "live_fixture_setup_restore_yields",
@@ -26433,6 +27246,10 @@ async def run_all_tests():
     await r.record_async("normal_code_preflight_preserves_shared_fallback", test_normal_code_preflight_preserves_shared_fallback)
     await r.record_async("code_dispatch_skip_remains_opt_in", test_code_dispatch_skip_remains_opt_in)
     await r.record_async(
+        "codex_harness_preflight_uses_backend_codex_plan",
+        test_codex_harness_preflight_uses_backend_codex_plan_not_gpt_api_key,
+    )
+    await r.record_async(
         "claude_code_preflight_uses_runtime_credential_route",
         test_claude_code_preflight_uses_runtime_credential_route,
     )
@@ -26457,6 +27274,10 @@ async def run_all_tests():
         test_compute_token_sync_propagates_openrouter_claude_fallback_from_backend_env,
     )
     await r.record_async(
+        "non_claude_compute_refresh_scopes_seed_opt_in_and_preserves_strict_gates",
+        test_non_claude_compute_refresh_scopes_seed_opt_in_and_preserves_strict_gates,
+    )
+    await r.record_async(
         "anthropic_api_key_fallback_availability_fails_closed",
         test_anthropic_api_key_fallback_availability_fails_closed,
     )
@@ -26466,6 +27287,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_biometrics_evaluator",
         test_webdecoy_biometrics_evaluator_requires_interaction_and_low_score,
+    )
+    r.record(
+        "webdecoy_score_evidence_recorded",
+        test_webdecoy_score_evidence_is_recorded_for_comparison,
     )
     r.record(
         "webdecoy_biometrics_grounded_result_precedence",
@@ -26576,6 +27401,7 @@ async def run_all_tests():
     )
     r.record("isolated_postgres_default", test_isolated_postgres_default_keeps_macos_stacks_separate)
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record("local_isolated_compute_token_authority", test_local_isolated_stack_compute_token_authority_default)
     r.record(
         "dotenv_fast_mode_cache_falls_back_to_database_url",
         test_dotenv_fast_mode_cache_falls_back_to_database_url,
@@ -26583,6 +27409,14 @@ async def run_all_tests():
     r.record(
         "local_isolated_july_cache_read_only",
         test_local_isolated_demo_cache_on_keeps_shared_july_cache_read_only,
+    )
+    r.record(
+        "local_stack_env_excludes_worker_dotenv",
+        test_local_stack_env_excludes_worker_dotenv_loaded_by_launcher_imports,
+    )
+    r.record(
+        "benchmark_launcher_imports_do_not_load_worker_dotenv",
+        test_benchmark_launcher_imports_do_not_load_worker_dotenv,
     )
     r.record(
         "cloudbench_demo_cache_on_guest_read_only_like_local",

@@ -21,7 +21,7 @@ sources:
   - PR #1299
   - commit ce406cbef163386a99845f5d530f09cf7786e056
 repro: scripts/tests/prisma-test-launcher-readonly.test.py
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -109,6 +109,38 @@ and runtime helper is unchanged. The owning TypeScript coverage-script unit also
 passed in 6.409 seconds. The full backend coverage gate still requires a fresh
 report after its separate treasury failure is resolved; unaffected passing gates
 do not require repetition for this test-only change.
+
+### 2026-11-04: Read-only launcher fixture freshness failure remains OPEN
+
+The b9 frozen source `b9a1f743152e29cb6626ed33fdce88d24a919ba1`
+(digest `4932feb31a837ec6c218643f1d9e9193e924c7ace9acc9fbaf2ad5ac2d1f233f`)
+full backend unit run failed two of356files. In `coverage-script.test.ts`,
+`test_blackbox_fresh_client_remains_read_only` expected77 and received1:
+`Prisma client is stale or unavailable`. The five remaining launcher-fixture
+cases completed. The original native units log is preserved privately with
+its SHA256 in the delegated RCA report.
+
+This is a recurrence in the existing regression fixture, not proof that the
+historical shared-client rewrite recurred. **Gate: UNKNOWN; follow-up OPEN.**
+The actual freshness guard exited before the fixture's post-sync sentinel.
+Its catch combines package resolution/version failures, formatter status/error
+or the unchanged10000ms formatter timeout, and schema-byte mismatch into the
+same diagnostic. The failed temporary fixture was removed; its inner exception,
+formatted/source/generated schema bytes and original dependency identities
+were not retained. The fixture and guard are byte unchanged from baseline6f
+throughb9; that alone does not explain this occurrence.
+
+A private unchanged original fresh-client invocation passed in2.179s, then the
+unchanged complete six-control command
+`python3 scripts/tests/prisma-test-launcher-readonly.test.py` passed in8.423s.
+These later observations do not repair or supersede the retained native failure.
+No fixture/runtime change is proposed and no memory, timeout or concurrent-write
+cause is inferred. Preserve the10000ms guard,40s launcher and90s wrapper bounds,
+all read-only/negative assertions and the original failed result. The missing
+next discriminator is the actual failed guard exception/formatter status and
+its disposable input bytes; capture those through an authorized narrow
+observation before choosing a repair. Full current-source acceptance remains
+unverified. Parent retains source/deploy ownership.
 
 ## Human feedback
 

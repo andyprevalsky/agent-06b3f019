@@ -5,7 +5,8 @@
  *   Agent Settings → Report Bug → description
  *     → POST /api/agents/:id/report-bug
  *     → boxes.dev thread-automation API trigger (configurable request)
- *     → new devbox thread titled from the description, prompt `/rca … [id]\n<description>`
+ *     → new devbox thread titled from the description, prompt
+ *       `/goal … finish the /deploy …\n/rca … [id]\n<description>`
  *
  * Screenshots (the automation API accepts only prompt text):
  *   drag / paste image → POST /api/agents/:id/report-bug/screenshots
@@ -107,6 +108,16 @@ export function buildBugReportPrompt(agentId: string, description: string): stri
   return `/rca the following bug for agent with ID: [${agentId}]\n${description.trim()}`;
 }
 
+// Leads the FE Report Bug prompt so the thread's active goal carries the fix
+// through /deploy instead of stopping at the diagnosis. The 24h stuck-agent job
+// keeps the plain /rca prompt.
+export const BUG_REPORT_GOAL_LINE =
+  '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful';
+
+export function buildManualBugReportPrompt(agentId: string, description: string): string {
+  return `${BUG_REPORT_GOAL_LINE}\n${buildBugReportPrompt(agentId, description)}`;
+}
+
 /**
  * Report Bug only needs a stable Rose agent id for the /rca prompt. Live DB rows
  * and benchmark-hub archived runs both qualify — GET /agents/:id already serves
@@ -177,7 +188,7 @@ export async function reportAgentBug(
   }
 
   const name = buildBugReportChatName(trimmed);
-  const promptText = buildBugReportPrompt(agentId, trimmed);
+  const promptText = buildManualBugReportPrompt(agentId, trimmed);
   const idempotencyKey = buildBugReportIdempotencyKey(agentId, trimmed);
   const launch = deps.launch ?? launchBugReportAutomation;
   const recordReport = deps.recordReport ?? recordManualAgentBugReport;

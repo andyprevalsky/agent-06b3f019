@@ -56,7 +56,7 @@ import {
 import { useAppData } from '@/hooks/appDataContext';
 import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
-import { isRoseDesktopUser } from '@/lib/roseDesktop';
+import { isRoseDesktopSession, roseDesktopAccountId } from '@/lib/roseDesktopSession';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { RoseThemeProvider } from '@/features/rose-theme';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
@@ -64,6 +64,7 @@ import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 import { UserUiProvider, UserUiShell } from '@/features/user-ui';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
+import { useTerminalLogoutAction } from '../hooks/useTerminalLogoutAction';
 import { useTerminalDerivedState, type TerminalLayoutProps } from './terminalLayoutState';
 import { useDrippiness } from '../hooks/useDrippiness';
 import { useLockedDocumentScroll } from '../hooks/useLockedDocumentScroll';
@@ -75,7 +76,7 @@ import { BROWSER_REVIEW_TEST_PHONE } from '../config';
 
 import { BackgroundPattern } from './BackgroundPattern';
 import { InspectionAccountBadge } from './InspectionAccountBadge';
-import { TerminalHeader } from './TerminalHeader';
+import { TerminalHeaderSection } from './TerminalHeaderSection';
 import { MainContent } from './TerminalMainContent';
 import { TerminalModals } from './TerminalModals';
 
@@ -84,6 +85,10 @@ const BrowserStatusBarCarousel = lazy(() =>
     default: m.default,
   })),
 );
+
+/** iOS keeps the shell on the visible viewport (app-wiring initViewportHeight
+ * sets --app-top/--app-height: flush on the keyboard, full-screen in the PWA). */
+const APP_SHELL_STYLE = { top: 'var(--app-top, 0px)', height: 'var(--app-height, 100dvh)' };
 
 export function TerminalContent(props: {
   loadAgentsRef: React.MutableRefObject<(() => void) | null>;
@@ -121,30 +126,37 @@ export function TerminalContent() {
 
 /** The per-user UI belongs to the signed-in session user only. */
 function resolveUserUiUserId(agents: ReturnType<typeof useTerminalAgents>): string | null {
-  if (!isRoseDesktopAccount(agents) || isBenchmarkArchiveMode()) return null;
-  return agents.user?.id ?? null;
+  if (isBenchmarkArchiveMode()) return null;
+  return roseDesktopAccountId(agents);
 }
 
 /** Rose Desktop chrome is on only for flagged, signed-in accounts (lib/roseDesktop.ts). */
 function isRoseDesktopAccount(agents: ReturnType<typeof useTerminalAgents>): boolean {
-  return !agents.isAnonymous && isRoseDesktopUser(agents.user);
+  return isRoseDesktopSession(agents);
 }
 
 function TerminalLayout(props: TerminalLayoutProps) {
+  const onLogout = useTerminalLogoutAction(props.agents.handleLogout);
   if (isBenchmarkSharedView()) return <SharedBenchmarkLayout {...props} />;
   const roseDesktop = isRoseDesktopAccount(props.agents);
+  // Same identity that turns Rose Desktop on, so the theme/apps never flip when
+  // the async invite check resolves (stock accounts keep the invite-gated user).
+  const accountUserId = roseDesktop
+    ? roseDesktopAccountId(props.agents)
+    : (props.agents.user?.id ?? null);
   return (
     <RoseDesktopContext.Provider value={roseDesktop}>
-      <RoseThemeProvider userId={props.agents.user?.id ?? null} darkOnLogin>
+      <RoseThemeProvider userId={accountUserId} darkOnLogin>
         <RoseAppsProvider
           agents={props.agents.agents}
           selectedAgentId={props.agents.selectedAgentId}
           onSelectAgent={props.agents.handleSelectAgent}
           publishLayout={roseDesktop}
-          onLogout={() => void props.agents.handleLogout()}
+          onLogout={onLogout}
           onCreateAgentInProject={props.agents.handleCreateNewAgentInProject}
+          newAgentFolderId={props.agents.newAgentFolderId}
         >
-          <AppViewProvider userId={props.agents.user?.id ?? null}>
+          <AppViewProvider userId={accountUserId}>
             <CodeAgentViewProvider
               enabled={roseDesktop}
               selectedAgentId={props.agents.selectedAgentId}
@@ -170,36 +182,6 @@ function InteractiveTerminalLayout(props: TerminalLayoutProps) {
   );
 }
 
-/** The header row; Back on mobile returns to the open agent's parent when it has one. */
-function TerminalHeaderSection({ agents, drip }: Pick<TerminalLayoutProps, 'agents' | 'drip'>) {
-  const detail = agents.agentDetail;
-  return (
-    <TerminalHeader
-      onCreateNewAgent={agents.handleCreateNewAgent}
-      onSelectAgent={agents.handleSelectAgent}
-      onLoginClick={agents.handleLoginClick}
-      onLogout={() => {
-        void agents.handleLogout();
-      }}
-      isSignedIn={agents.isFullySignedIn}
-      clientSource={agents.clientSource}
-      agents={agents.agents}
-      isLoadingAgents={agents.isLoadingAgents}
-      hasLoadedAgents={agents.hasLoadedAgents}
-      selectedAgentId={agents.selectedAgentId}
-      selectedAgentParentId={
-        detail?.agent_id === agents.selectedAgentId ? detail?.parent_agent_id : null
-      }
-      onRefreshAgents={agents.loadAgents}
-      dripStyles={drip.dripStyles}
-      blur={drip.blur}
-      backgroundColors={drip.backgroundColors}
-      borderColor={drip.borderColor}
-      shadowIntensity={drip.shadowIntensity}
-    />
-  );
-}
-
 function InteractiveTerminalChrome(props: TerminalLayoutProps) {
   const { agents, drip, tileAnimation, currentView, setCurrentView, derived } = props;
   // THE app-wide attention subscription. Held here because this is the common
@@ -213,8 +195,9 @@ function InteractiveTerminalChrome(props: TerminalLayoutProps) {
   return (
     <AttentionRequestsProvider value={attention}>
       <div
-        className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black relative overflow-hidden"
-        style={{ height: '100dvh' }}
+        data-testid="terminal-app-shell"
+        className="h-screen w-screen flex flex-col bg-background dark:bg-navi-black fixed left-0 overflow-hidden"
+        style={APP_SHELL_STYLE}
       >
         <BackgroundPattern
           patternOffset={props.patternOffset}
@@ -230,7 +213,7 @@ function InteractiveTerminalChrome(props: TerminalLayoutProps) {
 
         {currentView === 'agents' && <InspectionAccountBadge context={agents.inspectionContext} />}
 
-        <div className="h-screen flex z-[4]" style={{ height: '100dvh' }}>
+        <div className="h-screen flex z-[4]" style={{ height: APP_SHELL_STYLE.height }}>
           <SidebarSection
             agents={agents}
             drip={drip}
@@ -323,6 +306,7 @@ function SidebarSection({
   showBenchmarks: boolean;
   showAdminHealth: boolean;
 }) {
+  const onLogout = useTerminalLogoutAction(agents.handleLogout);
   return (
     <AppSidebar
       currentView={currentView}
@@ -337,14 +321,13 @@ function SidebarSection({
       roseActions={{
         onCreateAgentInProject: agents.handleCreateNewAgentInProject,
         newAgentProjectId: agents.newAgentProjectId,
+        newAgentFolderId: agents.newAgentFolderId,
       }}
       onRefreshAgents={agents.loadAgents}
       onRefreshAttention={onRefreshAttention}
       attentionAgentIds={attentionAgentIds}
       user={agents.user}
-      onLogout={() => {
-        void agents.handleLogout();
-      }}
+      onLogout={onLogout}
       onLoginClick={agents.handleLoginClick}
       showAdminHealth={showAdminHealth}
       dripStyles={drip.dripStyles}

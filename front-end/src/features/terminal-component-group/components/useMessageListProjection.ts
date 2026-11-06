@@ -4,16 +4,18 @@ import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 import type { Message } from '../hooks';
 import { dedupeCodeDisplays } from '../hooks/codeDisplayIdentity';
 import { EMPTY_DISPLAY_MEDIA_GROUPING, groupDisplayMedia } from './inline-media/displayMediaGroups';
-import { useDisplayDestination } from './rose-apps/useDisplayDestination';
 import { useAgentExchangeGroups } from './useAgentExchangeGroups';
 import { useTrajectoryWorkGroups } from './useTrajectoryWorkGroups';
+import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
+import type { WebSearchTurnGrouping } from './webSearchTurnGroups';
 export function useMessageListProjection({
   filteredMessages,
   groupAgentMessages,
   compressWork,
   workStatus,
   workEndedAt,
-  selectedAgentId,
+  agentExchangeGroups,
+  webSearchGrouping,
   currentAnimatingId,
   onAnimationComplete,
 }: {
@@ -22,7 +24,8 @@ export function useMessageListProjection({
   compressWork: boolean;
   workStatus?: string;
   workEndedAt?: string;
-  selectedAgentId: string | null;
+  agentExchangeGroups?: ReturnType<typeof useAgentExchangeGroups>['groups'];
+  webSearchGrouping: WebSearchTurnGrouping;
   currentAnimatingId: string | null;
   onAnimationComplete: () => void;
 }) {
@@ -31,7 +34,6 @@ export function useMessageListProjection({
     () => (roseDesktop ? dedupeCodeDisplays(filteredMessages) : filteredMessages),
     [filteredMessages, roseDesktop],
   );
-  const openDisplay = useDisplayDestination(visibleMessages, selectedAgentId, roseDesktop);
   const displayGrouping = useMemo(
     () => (roseDesktop ? groupDisplayMedia(visibleMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
     [visibleMessages, roseDesktop],
@@ -41,6 +43,8 @@ export function useMessageListProjection({
     roseDesktop && groupAgentMessages && !compressWork,
     currentAnimatingId,
     onAnimationComplete,
+    false,
+    agentExchangeGroups,
   );
   const workGroups = useTrajectoryWorkGroups(
     visibleMessages,
@@ -50,5 +54,22 @@ export function useMessageListProjection({
     currentAnimatingId,
     onAnimationComplete,
   );
-  return { visibleMessages, openDisplay, displayGrouping, localExchanges, workGroups };
+  const exchanges = agentExchangeGroups ?? localExchanges.groups;
+  const renderedMessages = useMemo(
+    () =>
+      visibleMessages.filter((message) => {
+        if (roseDesktop && isHiddenTrajectoryRow(message)) return false;
+        const id = message.message_id;
+        if (workGroups.groupsByLeadId.has(id)) return true;
+        if (workGroups.foldedIds.has(id)) return false;
+        if (exchanges.groupsByLeadId.has(id)) return true;
+        return (
+          !exchanges.foldedIds.has(id) &&
+          !webSearchGrouping.hiddenMessageIds.has(id) &&
+          !displayGrouping.hiddenMessageIds.has(id)
+        );
+      }),
+    [visibleMessages, roseDesktop, workGroups, exchanges, webSearchGrouping, displayGrouping],
+  );
+  return { renderedMessages, displayGrouping, localExchanges, workGroups };
 }

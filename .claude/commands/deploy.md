@@ -1,42 +1,181 @@
 ---
-description: "Push current branch, obtain a CodeRabbit or Claude fallback review, merge, and wait for deploy to complete."
+description: "Push current branch, obtain a CodeRabbit review, merge, and wait for deploy to complete."
+rose-agent-spawn: false
 ---
 
 # Deploy
 
-Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code fallback), merge, and wait for deploys to finish.
+Push the current branch, create a PR, obtain a CodeRabbit review, merge, and wait for deploys to finish.
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
-**(pre-approved) A human PR reviewer is NOT mandatory** — never block merge waiting for a human GitHub review/approval; CodeRabbit (or the Claude fallback, or the usage-exhaustion skip) is the only review gate.
+**Execution continuity (standing user clarification, November 2, 2026):** A
+blocking result is work the deploy owner must resolve before declaring the
+release verified; it is not a request for human intervention or permission to
+end the deploy. Continue diagnosis, repairs, qualified failure triage and
+independent validation until production verification and the final scorecard
+are complete. Do not turn an owner label, a self-imposed monitoring deadline,
+or a routine repair/review cycle into an additional stopping gate. Coordinate
+only operations that actually conflict on a shared checkout, database, resource
+or production cutover; run independent work on isolated resources meanwhile.
+Keep native failures, missing verification and qualified warnings visible.
+Never manufacture a pass or a finished scorecard to satisfy this instruction.
 
-## Provider outages: report and retry every 10 minutes
+**(pre-approved) A human PR reviewer is NOT mandatory** — never block merge waiting for a human GitHub review/approval; CodeRabbit (or the usage-exhaustion skip) is the only review gate.
 
-When a provider outage blocks a deploy gate, promptly tell the user which
-provider and gate are affected, the observed failure, the official incident
-link when available, the deployment impact, and the next retry time in UTC.
-Distinguish confirmed attribution from a suspected cause supported by an
-incident and matching traces; a status-page incident alone does not prove causality.
+## Controlling failure policy
 
-Keep the deploy active and retry the affected failed check every 10 minutes.
-Persist each attempt's start time and set its next retry due time to start +
-600 seconds. Before each retry, recheck provider status and report the result
-and next due time. Never overlap attempts: if execution or owned cleanup lasts
-past the due time, join it before starting the next retry. Keep healthy checks
-and independent diagnosis moving; do not rerun successful payment checks or
-other successful lanes merely because an unrelated provider is unavailable.
+Read `.claude/shared/deploy-failure-policy.md` before handling a failure. It
+controls test tiers, provider checks (including review providers) and
+production checks in this command, overriding older all-green, retry, escalation and same-PR
+repair wording for those failures. Independent correctness/security review
+findings retain the existing Step 10 requirements; only comments about an
+exact recorded qualifying test/gate failure may reference its existing
+handoff. The assigned repair remains owned and blocking until its required
+validation passes, regardless of INTRODUCED/NOT_INTRODUCED attribution; never
+waive or re-delegate it. INTRODUCED and UNKNOWN additional test/gate failures
+remain blocking. An evidenced NOT INTRODUCED failed test outside the assigned
+repair is retained for post-merge handoff; it does not
+block merge, and its actual post-merge handoff waives that exact failure
+without waiting for the independent repair to finish.
+External provider outages or exhausted credits are non-blocking, receive no
+handoff, and appear as alarming alerts at the very end of every scorecard.
+This workflow authorizes independent boxes.dev repair goals only for actual
+failed tests, created after this PR merges to main. Each owns its fix through
+its own completed deploy, at high effort and normal speed. Rose account
+commands remain default-off until the
+separate, explicitly authorized migration described in the linked policy.
 
-Preserve every failed attempt, its original clocks, actual source identity,
-artifacts and cleanup evidence. An outage does not waive a gate or turn a
-failure into a pass. Continue this cadence until the affected gate passes, the
-user stops the work, or evidence identifies a different cause requiring the
-normal repair or credential/budget handling. Retain existing authorization,
-financial limits and bounded review cycles; review-provider usage exhaustion
-still follows Step 9a. A retryable outage alone is not a reason to end the turn
-with a terminal blocked handoff or ask the user for another approval.
-This outage path takes precedence over generic failure-handling directions;
-gate criteria, cleanup, credential, financial and review requirements remain
-mandatory.
+Diagnose every test/gate failure with `/RCA` before routing it. Its response
+must include an evidence-backed `Gate: INTRODUCED` or `Gate: NOT_INTRODUCED`.
+Unresolved attribution remains UNKNOWN and blocking.
+
+## Staged validation and RCA dispositions (current execution policy)
+
+Use `scripts/deploy_test_plan.py` and `scripts/deploy_test_cycle.py` as described
+in `docs/deploy-test-cycle.md`. This policy supersedes older full-rerun,
+sequential-lane, diagnostic-only selection and outage-retry instructions below.
+The source/approval/whole-devbox and production-verification requirements remain.
+In the older predeployment recipes below, "no skip" means every check inside
+a selected category is required (subject to the controlling failure policy).
+Only the quick categories below are always selected. Source/approval guards
+and post-deployment requirements are not made optional by test selection.
+
+Use one state directory throughout planning, execution and Phase 3:
+`DEPLOY_TEST_CYCLE_STATE_DIR=${DEPLOY_TEST_CYCLE_STATE_DIR:-.context/deploy-pipeline}`.
+Save the selected plan there and pass that same directory to every cycle command.
+The legacy pipeline's fix-loop cap below applies only to its legacy runner;
+the staged runner requests `/RCA` on the first failure of every round.
+
+- Format checks, lint, types and application structural checks run concurrently
+  in the quick phase (under two minutes). Deploy-tooling regressions are an
+  affected suite, not part of the quick phase.
+- Select complete affected categories using the dependency graph and conservative
+  runtime triggers. Unknown impact expands selection. Record every inclusion and
+  omission; do not silently cut coverage to meet a quota.
+- After quick checks pass, start every selected independent suite concurrently
+  on its own isolated worker. Cloud smoke runs through the benchmark CLI. No
+  coverage/semantic/smoke/AgentCard/live/E2B sibling ordering edges. Each worker
+  still owns its actual setup, resource safety and cleanup.
+- Start independent `/RCA` investigations concurrently as failures arrive;
+  retain healthy running work. Group a shared cause only after reading evidence.
+  Use the canonical `.claude/shared/deploy-failure-policy.md` and
+  `scripts/deploy_failure_report.py` attribution/waiver decision.
+- Only actual blocking FAILs enter the focused repair loop: preserve the failing
+  tests/assertions/timeouts, fix the underlying cause, rerun failing tests plus
+  affected regressions, then run the full failed gates in parallel. When those
+  pass, run quick checks and account for all selected gates on the final frozen
+  source. After a code repair, run the required final sweep. A sync alone must
+  not invalidate an unchanged gate: retain its original passing receipt when
+  verified input/contract equivalence proves it still applies, and rerun affected
+  or unknown gates. Report carried results with their original source and proof,
+  never as newly executed tests. A clean initial sweep is not duplicated.
+- Qualified SKIPs do not initiate any rerun. Keep original native failures and
+  waiver evidence; they remain SKIP/warnings, never PASS. Mixed aggregates must
+  account for every constituent check; unexecuted work still needs execution.
+  INTRODUCED or unresolved attribution remains blocking. Source changes require
+  renewed evidence only for skips whose actual input fingerprint changed.
+- A failure in final verification returns to parallel `/RCA`; never call the
+  deployment ready because a focused subset passed. `deploy_test_cycle.py verify`
+  must pass on the exact current source/plan before the existing merge gates.
+
+
+## AgentCard election (current and future deploys)
+
+The user or deploy operator may explicitly elect to skip the local AgentCard
+lifecycle gate (Step 6a), the production AgentCard lifecycle gate (Step 13c), or
+both. Record the election, affected step and reason as **SKIPPED** in the plan,
+`TEST_REPORT` and deploy scorecard. For the staged local plan, pass
+`--skip-agentcard "<reason>"` to `scripts/deploy_test_plan.py`; a nonempty reason
+is required and only `agentcard-lifecycle` is omitted as SKIPPED/unexecuted.
+For the legacy planner, omit `--agentcard`. No environment bypass is implied.
+For Step 13c, record the explicit election/reason and do not launch the elected
+production task. Keep an explicit skipped AgentCard row visible.
+
+This election changes only those AgentCard gates. All non-AgentCard gates and
+assertions remain required. Preserve original failures, receipts, cleanup
+obligations and financial debts; a skip is never PASS, cleanup proof, a refund
+or settlement. Any already-started operation still requires its normal owned
+cleanup and financial accounting. The exact release-stall exception below
+remains available independently when AgentCard is selected.
+
+## Sync without restarting the whole deploy
+
+An hourly `/sync` must not become a global stop or reset the deploy's original
+clock, selected coverage, failure history or cleanup obligations.
+
+1. Fetch and inspect main while independent work continues. Identify changed
+   source and dependency inputs and the checkout/database/resources they affect.
+2. Merge and install dependencies only at a safe boundary for those resources.
+   Never replace source, packages or a database under their active consumers.
+   A worker using an isolated checkout and database may finish its frozen run.
+   `setup-db.sh` serializes only against other setup runs on the same target
+   database; it does not detect running tests. Confirm every consumer of that
+   database has finished before invoking it. Gates on other databases do not
+   wait for that reset.
+3. Record the merged source and replan without dropping the original selected
+   gates or checks. Preserve completed and running receipts with their original
+   source. A changed HEAD alone is not evidence that every test input changed.
+   Use exact-input or lane-scoped reuse only where the chosen runner implements
+   and verifies it; report reuse as reuse, not a fresh run. A conflict-free merge
+   does not by itself prove equivalence, and a changed HEAD does not by itself
+   disprove it. Compare each gate's source/dependency/configuration inputs.
+   Final verification must account for every selected check on the merged
+   source through actual execution or a verified unchanged-input receipt.
+4. Carry qualified skip evidence forward when its relevant inputs are unchanged.
+   When they changed, re-establish that exception's applicability rather than
+   automatically rerunning a known skipped operation. Never clear native failures,
+   pending work or retained-resource obligations as part of a sync.
+5. Continue every supported independent lane while resolving a conflicting one.
+   If a runner cannot admit an otherwise isolated lane, identify that specific
+   tooling limitation; do not invent a successful receipt or relax cleanup.
+   `--follow-source` explicitly supersedes and cancels an old attempt. It is not
+   the default way to perform an hourly sync through healthy long-running work.
+
+See `.claude/commands/sync.md` for the merge and database steps and
+`docs/deploy-test-cycle.md` for the staged runner's supported transitions.
+
+## Check permitted skips before launching or diagnosing a gate
+
+Read the relevant exception alongside the selected test, before launch and again
+at its first failure. A recognized exception must not enter a repair/retry loop
+as an ordinary blocking failure. These are conditional rules, not permission to
+omit the test or to turn unexecuted assertions into PASS.
+
+| Test or failure | Existing eligibility and required evidence | Continue with |
+| --- | --- | --- |
+| AgentCard lifecycle or selected payment canary | Step 6a's exact closed-card, zero-balance, HELD/RECLAIMING purchase and same-card consumed transfer with `releasedCents=0`, in the expected mode; use the native lifecycle predicate and preserve the other assertions. | Loud warning/SKIP for that settlement stall; retain unreleased funds/refund debt. Do not keep reclaiming, mint a replacement card or ask again. Other lifecycle, read, cancellation and cleanup failures still fail. |
+| Claude Code smoke credential preflight | Step 6: native preflight proves no synced eligible Claude credentials and no pool token. An API fallback is not that evidence. | Exact credential SKIP, with the unexecuted coverage visible. Task correctness failures remain blocking. |
+| Benchmark judge compute quota | A complete native SKIPPED row plus the existing typed, exact-receipt confirmation of third-party compute-quota exhaustion. A missing credential or unexplained token failure alone is insufficient. | The existing qualified resource warning; retain the native failure and unexecuted judge coverage, without another doomed run. |
+| Third-party provider outage or exhausted credits | `.claude/shared/deploy-failure-policy.md`: actual provider evidence and exact affected failure; unknown failures, authentication rejection and our configuration bugs do not qualify. | Preserve the native result and record the permitted external exception; no retry loop or repair handoff for that outage/credit condition. |
+| CodeRabbit quota exhaustion | Step 9a: current-head, current-attempt explicit quota/spending-cap evidence. A skipped review, bare 429 or absent review is insufficient. | Record the existing review-exhaustion disposition; never skip an actual delivered review's findings. |
+| Platform-unavailable Mac checks on Linux | Standing Linux platform exclusion; record the selected check and unavailable platform. | Explicit unverified omission, never PASS; applicable checks on supported platforms remain required. |
+
+Record the native outcome, exact qualifying evidence, skipped assertions and any
+remaining resource or financial debt in the same gate report. For a mixed result,
+qualify only the matching component: a payment warning does not close an unrelated
+cancelled task, missing artifact or unverified cleanup. Consult the source sections
+above for the controlling predicates; this table introduces no new exception.
 
 ## Canonical human-approval format
 
@@ -54,8 +193,12 @@ adversarial review on the hunks the gate flagged for human approval only;
 never extend grounding to the rest of the diff. A `GROUNDED` verdict clears the Step 0p, 0b and 0c human
 gates: rerun the guard with its mandatory flag, record
 `<Guard> | Pass | golden-reference review GROUNDED <approval-id> @ <sha>, reviewer <agent-id>`
-in `TEST_REPORT`, list it in the PR body and continue. Only `NOT_GROUNDED` and
-`HUMAN_REQUIRED` packets stop for the user.
+in `TEST_REPORT`, list it in the PR body and continue. `NOT_GROUNDED` and
+`HUMAN_REQUIRED` packets still go to the user per `approval-format.md`; they are
+not a blanket stop: continue authorized independent work while that exact
+requirement is resolved. An existing explicit user authorization for that exact
+action is the decision; do not ask again. Resolve findings through repair and
+review without assuming authority for an unrelated operation.
 
 ---
 
@@ -84,12 +227,13 @@ end and stays active for the user's reply. Only the user ends it early, with
 `/goal clear`; never clear or pause it yourself.
 
     /deploy of <branch> is finished: the PR is merged, every applicable
-    production lane is verified, and the scorecard ending in READY TO CLOSE
-    is posted. Stopping earlier is allowed only when the last message is one
+    production lane is verified or has an exact recorded qualified exception,
+    and the final scorecard is posted with its actual completion status in the
+    fixed layout. Stopping earlier is allowed only when the last message is one
     of /deploy's defined stops: a prompt, agent-behavior or
     trajectory-injection approval request (Steps 0p/0b/0c) that the
     golden-reference review did not clear; a credential or
-    billing escalation; a request for an explicit gate override; an approval
+    billing change requiring user action that is not a qualified external exception; a request for an explicit gate override; an approval
     for a destructive or irreversible action; or a deploy failure that cannot
     be fixed without the user.
 
@@ -97,7 +241,64 @@ end and stays active for the user's reply. Only the user ends it early, with
 
 # Phase 1: Test Loop
 
-**DEFAULT RULE: 100% of tests must pass before proceeding to Phase 2.** "Pre-existing failure", "not related to my changes", "performance issue", "local resource contention", and "flaky test" are not automatic excuses. If a test fails, fix it or stop and ask the user unless the user explicitly overrides that specific gate under the policy below.
+**DEFAULT RULE: every applicable check must pass or have an exact recorded exception under the controlling failure policy or an explicit user override.** Never classify an unexplained failure as unrelated or external. Preserve failed native results and unverified checks; exceptions are not PASS.
+
+## Third-party credits or storage exhaustion: skip and warn
+
+**Standing user instruction, October 29, 2026:** tests blocked by a third-party
+provider being out of credits or storage capacity must be **SKIPPED**, reported
+in the final scorecard's warnings, and must never stop a deploy. Do not ask for
+a top-up, wait for billing changes, or mutate paid quota. This instruction
+applies to every test, including required smoke tasks and their model judges.
+
+Require explicit provider/resource-exhaustion evidence for the affected test.
+Preserve its original failure/skip receipt, source, timestamps and cleanup;
+record the provider, test, reason and evidence time as `⚠️ Skipped`, never PASS.
+Keep all other tests running. Missing evidence, assertions, authentication or
+permission errors, local disk exhaustion and generic outages do not qualify;
+handle those under the controlling failure policy. Older outage-retry
+instructions do not apply to confirmed credit/storage exhaustion.
+
+Validate terminal task outcomes, not just a successful launcher exit. A skipped
+task is not a passed task. The final report and generated scorecard warnings
+must identify every resource-exhausted skip and the resulting unverified
+coverage; no other skipped or missing task may silently satisfy a required gate.
+This section takes precedence over any contrary provider credit/storage
+escalation or limited-skip rule elsewhere in this command. CodeRabbit's ledger
+mechanics remain governed by Step 9a.
+
+For the smoke gate, validate its exact terminal receipts before recording the
+release result (repeat `--run-dir` for every batch):
+
+```bash
+python3 scripts/validate_predeploy_receipts.py --summary "$SMOKE_SUMMARY" \
+  --run-dir "$SMOKE_RUN_DIR" --confirmations "$RESOURCE_CONFIRMATIONS" \
+  --bindings "$SMOKE_RECEIPT_BINDINGS" > "$SMOKE_POLICY_RESULT"
+```
+
+Use the validator's `PASS`, `SKIPPED_WITH_WARNING` or `BLOCKED` projection,
+not the launcher's process-status summary, in `TEST_REPORT`, the PR and final
+scorecard. Include its warning rows with provider, task, reason and evidence
+time. Confirmations are reviewed evidence bound to exact receipts, not an
+automatically generated exception from matching log text. An unexplained
+nonzero launcher exit, missing task or unverified cleanup still blocks.
+For a nonzero exit caused exclusively by the confirmed resource-failed tasks,
+pass `--wrapper-explanation "$RESOURCE_EXIT_EXPLANATION"` as well. That reviewed
+explanation must bind the exact original summary, runner log, exit code and
+terminal receipt cohort and exclude independent launcher failures. Preserve
+the original nonzero exit in the warning; never relabel it as a process pass.
+
+## Treasury failures: skip and warn permanently
+
+**Standing user instruction, October 29, 2026:** treasury test failures are
+always **SKIPPED**, reported in the final scorecard's warnings, and must never
+block this or any future deploy. Preserve the original failure receipt and
+record the test, reason, affected treasury record or mint when available, and
+evidence time as `⚠️ Skipped`, never PASS. Do not mutate treasury or financial
+records to manufacture a passing result, reclaim or delete records as part of
+the skip, or hide pending and overdue obligations. Continue every unrelated
+gate. Any independent non-treasury failure remains blocking under its existing
+rule, including when it occurs in the same process or test cohort.
 
 ## Explicit user gate overrides (highest-precedence deploy rule)
 
@@ -194,16 +395,16 @@ claim, validates credential links, and preserves its existing correctly labeled
 Postgres container. It refuses foreign resources. The script has no `--resume`
 option. Primary Conductor worktrees continue to use the check gate above.
 
-**You must fix ALL non-overridden failing tests, even if they are not caused by the changes in this branch.** The deploy flow defaults to keeping main green. If a test was already broken before your branch, that is now your responsibility to fix before merging unless the user explicitly overrides that exact gate. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else.
+Apply the controlling failure policy to every failure. Own INTRODUCED repairs, establish UNKNOWN attribution, hand off NOT INTRODUCED repairs, and report evidenced external outages/credit exhaustion without handing them off.
 
-Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
+Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top. Qualified exceptions under the controlling policy remain recorded; a waiver is not a code repair and does not require rerunning a failed aggregate solely to hide its original result.
 
 ## Test Report Tracking
 
 As you run each step in Phase 1, track the results in a `TEST_REPORT` variable. For each step, record:
 
 - The step name
-- Pass/fail status
+- Actual result and any exact delegated waiver, external-provider exception or user override
 - A brief summary of the output (e.g., "0 errors", "3 files formatted", "6/6 benchmarks passed")
 
 Build the report as a markdown table:
@@ -252,12 +453,15 @@ scope boundary. Before change detection or freezing gate inputs:
    raw research datasets or generated evidence as source.
 
 
-**`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
+**`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. Preserve intended deliverables; blocking conditions, repair ownership and external exceptions follow the controlling failure policy. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
 
-If the branch is behind `origin/main`, sync first (commit the worktree, then
-`git merge origin/main`). Resolve conflicts keeping every feature, re-sync deps
-(`npm install` + `npx prisma generate`; `pip install -r requirements.txt`), and
-re-run the gates on the merged tree — then proceed. Step 0 derives the latest
+If the branch is behind `origin/main`, sync at the safe resource boundary above
+(commit the worktree, then `git merge origin/main`). Resolve conflicts keeping
+every feature, refresh dependencies whose inputs changed (`npm install` +
+`npx prisma generate` for changed JS inputs; the pinned Python installation for
+changed Python inputs), and validate the merged tree with the supported reuse
+rules and required final verification. Do not reinstall unchanged dependencies
+or restart unrelated running gates solely because main advanced. Step 0 derives the latest
 main-sync delta from merge history so shared type changes introduced by either
 this merge or an earlier `/sync` remain lint seeds.
 
@@ -311,9 +515,36 @@ CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes"
 # data, not payment lifecycle code; a main sync carries other deploys' rows.
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -v '^agents/benchmarks/history/' | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 
-# Keep the aggregate coverage worker pool within this 14-core deploy host.
-# Backend blackboxes and unit files overlap, so both pools count. An uncapped
-# all-repo run starts 18+ workers and makes every lane slower.
+# These worker counts are ceilings for a 14-core/high-memory host. The pipeline
+# scales them down using os.cpu_count(), MemTotal and MemAvailable, and the
+# recorded boxes watchdog cap (90% of MemTotal when no cap is recorded).
+# macOS reads /usr/sbin/sysctl -n hw.memsize and /usr/bin/vm_stat on each
+# sample; available memory estimates free + inactive + speculative pages,
+# excluding overlapping purgeable/file-backed counts. Missing native counters
+# fail closed with the commands to verify; physical RAM alone is insufficient.
+# Each lane declares memory_mb; plan also derives a default --max-parallel
+# from cores and usable memory, capped at seven lanes. Structural --max-workers
+# is passed explicitly so its worker count matches its memory reservation.
+# Structural reserves a pinned 1.25x margin over its largest recorded
+# process-tree peak scaled to its width (3220 MiB at three workers); its width
+# is still sized by the 1840 MiB per-suite floor (1471.98 MiB largest child x1.25).
+# run reserves 2 GiB for other processes below both available memory and the
+# watchdog cap, rechecks whole-box headroom before every admission, and never
+# admits unmaterialized declared totals over the startup budget. Against the
+# startup budget and against live headroom, which already contains what the
+# running lanes use, a phased lane is charged only the running lanes'
+# unmaterialized declarations (declared minus the lane's freshly sampled
+# anonymous process-tree PSS, Pss_Anon: file-backed pages are still counted in
+# MemAvailable); unphased lanes (semantic-stack) and unobserved usage keep
+# the declared sum (#1640: smoke waited 16 min on a double-counted 3712 MB;
+# #1658 round 1: agents-coverage waited ~14 min on 8758 declared vs 8755).
+# A lane that cannot fit alone fails
+# visibly without starting. Explicit resource limits can only tighten memory
+# admission. Receipts include timestamped MemAvailable samples, per-lane child
+# peak RSS (wait4/getrusage), per-lane process-tree PSS, every admission's
+# inputs, load peaks and memory-watchdog TERM records.
+# Account for Postgres, Docker and other agents outside the deploy cgroup:
+# MemoryHigh on one unit does not protect the rest of this 16 GiB box.
 BACKEND_BLACKBOX_WORKERS=4
 BACKEND_UNIT_WORKERS=6
 AGENTS_COVERAGE_WORKERS=6
@@ -345,7 +576,7 @@ fi
 
 ## Step 0p: Prompt human-approval guard (no skip — always runs)
 
-Prompt modifications are high-risk behavior changes. **Any prompt modification MUST be approved by a human before deploy proceeds.** This includes system prompts, tool prompts, agent/skill instructions, `CLAUDE.md`, `.claude/commands/*.md`, prompt template files, strategy overrides, and prompt-related diff hunks.
+Prompt modifications are high-risk behavior changes. **Any prompt modification MUST be approved by a human before the deploy merges.** Steps 0p, 0b and 0c run together once at the source freeze and deliver one batched approval packet while the gates keep running (see **Source freeze: batched approvals and first review push** below); "stop" in these steps means hold the merge, not the test lanes. This includes system prompts, tool prompts, agent/skill instructions, `CLAUDE.md`, `.claude/commands/*.md`, prompt template files, strategy overrides, and prompt-related diff hunks.
 
 **MANDATORY for EVERY human-approval request in this deploy (Step 0p, Step 0b, Step 0c, and any other escalation): link the file(s) under review.** Whenever you stop for human approval, present each affected item as a clickable `repo-relative/path:line` reference — one per file/hunk — so the human can open and read the exact code before approving. Pasting a snippet is not enough on its own; the link is required. An approval request without file:line links is incomplete — do not ask for approval until you have listed the precise files + line ranges to review.
 
@@ -425,10 +656,14 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
 
 **Execution model for Steps 1–4a (run in this order):**
 
-1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
-   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
-   1c. **LLM trajectory-injection approval gate** (read-only, runs alongside Steps 0p/0b): Step 0c. If runtime trajectory-injection hunks are detected, stop until a human approves them (or the golden-reference review returns `GROUNDED`), then rerun Step 0c with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change trajectory-injection hunks, return to Step 0c without the flag and request fresh approval.
-2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
+1. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once. Mutators run first so the approved bytes are the bytes that ship.
+2. **Source freeze: batched approvals and first review push** (below). Steps
+   0p, 0b and 0c run together on the frozen commit; one golden-reference review
+   and, unless it returns `GROUNDED`, one batched human packet cover every
+   approval-scoped hunk. The push that opens the PR (initial CodeRabbit review)
+   and the PR-time worker-image prebuild happen at the same moment. Group 3
+   starts immediately; approvals and review proceed in parallel with it and
+   Group 4. Only Phase 3 (merge) waits for the decision.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker
    budgets computed above, except for the Step 4cb ordering rule below). Every repository
@@ -451,7 +686,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (no skip)
-   - Step 4s: deploy environment + command structural tests (no skip)
+   - Step 4s: deploy environment + command structural tests (full suite when selected)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
    - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty). If
      `CHANGED_AGENTS` is also non-empty, defer this lane until Step 4g exits; the agents
@@ -486,6 +721,225 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    unions it only once in Group 3 wall clock.
 
 If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all verifiers are green.
+
+### Source freeze: batched approvals and first review push
+
+Run this once per frozen snapshot, immediately after the mutator commit:
+
+```bash
+FREEZE_SHA=$(git rev-parse HEAD)
+python3 scripts/deploy_approval_batch.py freeze --head "$FREEZE_SHA"
+```
+
+It runs the Step 0p, 0b and 0c guards without the approval flag, records a
+per-file digest of exactly the approval-scoped diff in
+`.context/deploy-approval-batch.json`, and writes the one combined diff to
+`.context/deploy-approval-batch.diff`. Classify the flagged hunks as Steps 0p/0b/0c
+describe (code-behavior-only prompt-guard hunks pass without a human, exactly
+as before). For the remaining approval-scoped hunks, run **one**
+golden-reference review over all of them together. `GROUNDED` →
+`python3 scripts/deploy_approval_batch.py decide --decision grounded --evidence "<approval-id> reviewer <agent-id>"`.
+Otherwise send **one** batched packet in the canonical approval format that pastes
+the complete combined diff inline, and run
+`python3 scripts/record_factory_event.py deploy approval-request combined`
+immediately before it. Deliver it as the final message of the current turn,
+after Group 3 is running in the background with its event waiter (below)
+armed: boxes.dev sends the user a push notification when a turn ends, and the
+waiter's exit or the user's reply resumes the deploy. Hold a bounded
+`dvb-onbox devboxes keep-awake set` for the wait and cancel it by `holdId`.
+Never pause gates for the answer. Record the answer with
+`record_factory_event.py deploy approval-decision approved|rejected` and
+`deploy_approval_batch.py decide --decision approved|rejected --evidence "<user message>"`.
+
+Before Phase 3 (and again right before Step 12) prove the approval still
+covers the bytes being merged:
+
+```bash
+python3 scripts/deploy_approval_batch.py check
+```
+
+Exit 0 (`clear` or `covered`) → rerun each guard named in `guards_to_flag` with
+`mandatory-human-approval-retrieved=true` and record its row. Exit 3 → the
+decision is still pending; keep the merge held. Exit 1 → `re-request`: a
+post-freeze fix changed or added an approval-scoped hunk (or the user
+rejected). Freeze the new snapshot and send a fresh packet for **only** those
+files; approval is snapshot-scoped exactly as Steps 0p/0b/0c state. Post-freeze
+edits outside approval scope never re-request.
+
+At the same freeze, start the first review: commit everything intended, then
+run the Step 4d push block (ledger `start --reset --kind initial`, factory
+`stage-start code-review`, push, open the PR). Opening the PR starts both the
+initial CodeRabbit review and, for agents changes, the
+`prebuild-agents-image.yml` worker-image build. The review then overlaps Group 3
+instead of starting after it. Step 9's CodeRabbit waiter runs in the background
+alongside the gates. If a Group 3 lane later needs a fix, follow the existing
+"do not push while a review cycle is open" rule: let the cycle finish, batch
+the gate fixes and review findings, and push once; the incremental cycle
+reviews them.
+
+### Event-driven gate waits
+
+Launch each long lane as `bash scripts/run-deploy-stage <stage> -- <command>`
+with the Bash tool's `run_in_background`. Before launching a group, capture
+`GROUP_SINCE=$(date +%s.%N)`. Then arm one waiter, also in the background:
+
+```bash
+bash scripts/run-deploy-stage --wait --since "$GROUP_SINCE" --timeout 540 \
+  --stall-seconds 900 <stage> [<stage> ...]
+```
+
+The harness wakes the agent when it exits: `0` all named stages passed; `1`
+the first failure (exit immediately; the other lanes keep running and are
+never cancelled); `3` a runner died without its finish receipt; `4` a lane's
+log has not grown for `--stall-seconds`; `124` healthy lanes still running
+(inspect, then re-arm). It reads the runner's own admission and atomic
+`stages.jsonl` receipts, so it wakes within ~0.2 s instead of up to one 60 s
+poll interval, and it doubles as the rule-19 liveness/output-growth owner after
+the first 60 s (keep the 10 s early-death checks during that first minute).
+Smoke, semantic, AgentCard and E2B lanes in Group 4 use the same pattern.
+
+Optionally drive Group 3 and Group 4 lanes concurrently with
+`python3 scripts/run_deploy_pipeline.py plan|run` (every lane still runs
+through `run-deploy-stage`; previously failed lanes are admitted first, lanes
+are admitted against the host's cores and memory budget as described under
+the worker budgets above, and a source change after the freeze marks the run
+`stale`). Capture `SINCE=$(python3 -c 'import time; print(time.time())')`
+before launching `run`; its
+`python3 scripts/run_deploy_pipeline.py wait --state-dir <dir> --since "$SINCE" [--stall-seconds S]`
+is this same waiter over the pipeline's lanes, with the same exit codes plus
+`5` for a stale source, `6` for the fix-loop cap and `3` for a dead
+supervisor; a receipt started before `--since` belongs to an earlier iteration
+and never satisfies the wait, and a lane that failed before writing a stage row
+(refused by the memory budget, spawn error) wakes it like any other failure.
+Never arm a second, different waiter for the same lanes. An exact-input
+`--reuse-passed` hit records `reused`, which both count as a pass; a
+lane-scoped reuse records the distinct `reused-scoped` (a pass for the waiter
+and `overall`, never shown as a fresh pass of the current bytes). Enabled by
+the plan field `lane_scoped_reuse` (default off), which the pipeline forwards as
+`--lane-scoped-reuse`, or by that flag on a direct `scripts/run_deploy_stage.py`
+invocation for one stage (`DEPLOY_LANE_SCOPED_REUSE=0` is a kill switch, never
+an enabler; dry-run with `python3 scripts/run_deploy_stage.py
+--preview-lane-scoped-reuse PASSED_HEAD[..CURRENT_HEAD]`), a lane in
+`_SCOPED_REUSE_LANES` running its real command marker reuses the newest
+inert-equivalent PASSED record: every path changed since it is in the lane's
+declared inert set AND the change→test graph selects nothing in the lane
+(run_all, unmapped and never-inert paths force a rerun; a stack lane with no
+graph lanes — smoke, semantic-stack — additionally treats a non-test code file
+under `scripts/*`, `back-end/scripts/*`, `front-end/scripts/*`,
+`agents/scripts/*` or `mac-app/scripts/*` (`_STACK_REACH_TREES`) as inert when
+nothing in `STACK_ENTRYPOINTS` or a backend route reaches it in the change→test
+graph), and no newer failed
+head on an inert-equivalent tree vetoes it. The candidate may also come from
+an earlier timing run of the same `.context/deploy-runs/` root regardless of
+its metadata `branch` (recorded as `passed_run_branch`, never compared; same
+invocation, passed head an ancestor of HEAD, record under 24 h —
+`DEPLOY_LANE_SCOPED_REUSE_MAX_AGE_SECONDS` may only lower it — read in place,
+never copied; failed heads from any such run still veto); the row's
+`detail.reuse` then carries `cross_run: true` with
+`passed_run_id`/`passed_run_dir`/`passed_record`, and the receipt lists the
+lane in `reused_scoped_cross_run_lanes` (`PIPELINE_VERIFY … cross_run=`).
+The row's `detail.reuse` and the receipt's `lane_scoped_reuse` /
+`reused_scoped_lanes` (`reconcile_reused_lane`; `PIPELINE_VERIFY …
+reused_scoped=`) carry the provenance. For most
+lanes the exact input is HEAD, the worktree diff and untracked files, cwd,
+argv and the environment minus process/session/terminal identity variables
+(e.g. systemd `INVOCATION_ID`, `JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`,
+`NOTIFY_SOCKET`, `LISTEN_*`; shell `_`, `PWD`, `OLDPWD`, `SHLVL`; `COLUMNS`,
+`LINES`, terminal/SSH session ids — the full list is
+`_PROCESS_IDENTITY_ENV` plus `_PROCESS_IDENTITY_ENV_PREFIXES` in
+`scripts/run_deploy_stage.py`), so a lane
+relaunched by a fresh process on identical bytes reuses its own pass instead
+of re-running. Two lane groups narrow that input: `eslint`, `typescript` and
+`backend-structural` drop the append-only `agents/benchmarks/history/`
+ledgers (tracked diff and untracked files) when they run their real command (lint-affected over the
+deploy lint list, `tsc`, `npm run test:structural`), and the front-end and mac
+lanes (`_LANE_SCOPES`) hash only their in-scope file content instead of HEAD.
+Every reuse line names the scope it matched. The local smoke lane itself no
+longer dirties those ledgers while it runs: inside a deploy
+(`ROSE_DEPLOY_WORKTREE=1`, or `PREDEPLOY_PARK_LEDGERS=1`)
+`scripts/run-predeploy-local` parks the attempt, duration and span rows its
+run records under `.context/deploy-ledger-park/` (`BENCHMARK_HISTORY_PARK_DIR`,
+honoured by the ledger writers in `agents/benchmarks/timeout_history.py` and
+`span_history.py`; reads keep the tracked files), so its recorded pass
+fingerprint and every whole-worktree lane admitted after it stay stable across
+attempts. Publish those rows with the normal ledger step,
+`scripts/benchmark-history-latest-only.py --apply-parked <park dir> … --write`
+(the launcher prints the exact command with its park directory; the default is
+`.context/deploy-ledger-park` under the worktree, e.g.
+`python3 scripts/benchmark-history-latest-only.py --base origin/main --apply-parked "<worktree>/.context/deploy-ledger-park" --write`),
+which refuses the publish if any parked row is unparseable, appends the rows
+to the tracked ledgers (span rows through the segmented append; rows an
+interrupted publish already appended are skipped, so a replay is a no-op)
+before the latest-only filter and renames the parked files `*.applied-<utc>`.
+
+**Speculative gates on the next HEAD (`run --follow-source`).** Start the
+pipeline with `--follow-source` so a fix committed while CodeRabbit is still
+reviewing the frozen HEAD does not wait for the in-flight lanes: once the
+worktree bytes have settled (`--settle-seconds`, default 10) the supervisor
+prints `PIPELINE_SUPERSEDED`, terminates the lanes bound to the old digest,
+discards their results, and starts a new attempt on the new HEAD with the
+superseded attempt's failed lanes first (unchanged lanes still reuse their
+`--reuse-passed` receipts). `wait` follows the supersede and reports the
+attempt it woke on. This changes only when gates start: it never pushes,
+never opens or closes a review cycle, and never requests a review, so the
+bounded `deploy_review_cycle.py` ledger is untouched; push the batch once the
+open cycle is terminal exactly as before. Every receipt is bound to the HEAD
+plus source digest it ran on, and Phase 3 runs
+`python3 scripts/run_deploy_pipeline.py verify --require-staged --state-dir <dir> --expect-head "$(git rev-parse HEAD)"`
+before `require-mergeable`: a green receipt from other bytes exits `5` and
+the gates rerun.
+
+**Lane teardown after a supersede or termination.** Each lane launch carries a
+unique `DEPLOY_PIPELINE_LANE_TOKEN`; after a signalled lane's wrapper exits the
+supervisor reads the owner records under `.context/benchmarks/` written since
+the lane started (reported, never deleted) and signals only the token-owned
+processes they name; foreign records are reported, never signalled. It writes
+`<state-dir>/teardown/attempt-<n>-<lane>.json`, prints
+`PIPELINE_LANE_TEARDOWN … outcome=`, waits `DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS`
+(default 120) for them to exit, TERMs each surviving run's live
+`benchmarks/local.py` controller, else the record's exact owner pid (`run.sh`),
+never a bash wrapper, and SIGKILLs lane-owned survivors as the last resort after
+the kill-after budget (`local_worker_supervisor.py --shutdown-timeout`, 2175 s by
+default, plus a 120 s margin; `DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS`
+overrides it) passed with no progress for a whole wait bound, or at the hard
+ceiling of twice that budget even while the stack still publishes progress.
+Outcomes `killed` and `failed` (survivors after SIGKILL) require
+`scripts/run-bench --local --run-id <run> --reconcile-cleanup` before the next
+smoke lane — an operator instruction in the receipt note, not enforced.
+
+**Owner-run classification.** Before each attempt, and again in the lane
+teardown for that lane's own runs, the supervisor classifies every run under
+`.context/benchmarks/` (`PIPELINE_OWNER_RUNS … live/finished/aborted/stranded/
+bootstrapping/unknown` counts; every row appended to
+`<state-dir>/owner-runs.jsonl`). The preflight acts only on this deploy's own
+runs (those its earlier lane teardown receipts named); another session's run
+is classified and reported, never renamed or waited on (an `unknown` one still
+refuses). A pid-less run that no live process carries (`BENCHMARK_RUN_ID` in
+its environment, `--run-id` on its command line, or a command line naming the
+run when its environment cannot be read) past the startup grace
+(`BENCHMARK_STARTUP_GRACE_SECONDS`, 90 s by default) or whose manifest/cleanup
+receipt shows the bootstrap ended is `aborted` when it left no manifest or a
+`clean` cleanup receipt, and is set aside under `_aborted/` (renamed, never
+deleted, classification written beside the evidence); one that left a manifest
+without a clean receipt is `stranded`: reported and left in place for
+`--reconcile-cleanup`. An own `bootstrapping` run is waited out (the grace plus one
+poll, at most) and refuses the launch if still bootstrapping after it. A run
+directory that a concurrent cleanup removes mid-classification is `finished`
+(reported, never refused). An unreadable
+record, a symlinked `.context/benchmarks` or an unavailable `/proc` is
+`unknown` and refuses the launch (`PIPELINE_OWNER_RUNS_REFUSED`, every lane
+`failed`, not a fix-loop round) — never move a run dir by hand while a process
+still carries its run id.
+
+**Fix-loop cap (`FIX_LOOP_CAP`, exit 6).** After two consecutive completed
+failed rounds in the same state dir (`--fix-loop-cap`, env
+`DEPLOY_FIX_LOOP_CAP`, default 2; recorded in every receipt's `fix_loop`),
+`run` refuses a third blind rerun and prints `FIX_LOOP_CAP: ... failure
+classes: <lane>=<class,...>` from the lanes' stage records. Do not rerun: open
+`/RCA` for each independent failure class (local repro + fix + registered
+regression), then resume with `run --after-rca "<rca ref>"`, which records the
+reference and restarts the count. A passed round also restarts it. The cap is
+telemetry plus routing; it never changes which lanes run.
 
 ## Step 1: Prettier format
 
@@ -542,17 +996,26 @@ cd back-end && bash ../scripts/run-deploy-stage eslint --reuse-passed -- \
 
 If there are remaining errors, fix them manually. Loop until the affected-file lint reports 0 errors.
 
-**CRITICAL: You must reach 0 errors across every affected file. "Pre-existing" or "this error was already on main" is NOT an excuse to skip it.** This includes `no-console`, `no-explicit-any`, `strict-boolean-expressions`, `max-lines`, and any other rule. Fix them all.
+**CRITICAL: preserve every affected-file lint result and apply the controlling failure policy.** INTRODUCED errors remain your responsibility; evidence-backed NOT INTRODUCED errors require a repair handoff before waiver. No silent suppression, assertion weakening or invented attribution.
 
 If any files were modified by this step, stage and commit them (can combine with Step 1's commit if both ran together).
 
 ## Step 3: TypeScript type check
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage typescript --reuse-passed -- npx tsc --noEmit
+cd back-end && bash ../scripts/run-deploy-stage typescript --reuse-passed -- \
+  bash -c 'mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental --tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo'
 ```
 
-Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Fix any errors before proceeding — pre-existing type errors in touched files are your responsibility.
+Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Apply the controlling failure policy to errors, including existing errors in touched files.
+
+`--incremental` keeps a per-worktree `.tsbuildinfo` under `.context/` (never
+committed): tsc re-checks only files whose content hash changed plus their
+dependents and re-reports the cached diagnostics for the rest, so the error
+set is identical to a full `tsc --noEmit` (verified on three injected
+signature breaks with 399/12/4 errors) while a one-file fix iteration drops
+from ~25 s to ~7 s. A missing or stale buildinfo simply costs one full check.
+`run_deploy_pipeline.py plan` emits the same command for the `typescript` lane.
 
 ## Step 4: Structural tests + fix (no skip)
 
@@ -571,12 +1034,13 @@ template, `docs/rca/`). `scripts/tests/semantic-deploy-gate.test.sh` fails if a
 
 If any invariant fails, fix the violation. The test output includes remediation guidance (e.g., "Move the needed logic to service.ts or extract to a provider.").
 
-## Step 4s: Deploy environment + command structural tests (no skip)
+## Step 4s: Deploy environment + command structural tests (full suite when selected)
 
 The concurrent runner executes exactly these independent suites, without changing
 their assertions or test counts:
 
 `bash scripts/tests/workspace-env.test.sh`,
+`bash scripts/tests/rose-startup-script.test.sh`,
 `python3 scripts/tests/temporal-namespace-isolation.test.py`,
 `python3 scripts/tests/swap-harness.test.py`,
 `bash scripts/tests/kill-services.test.sh`,
@@ -601,16 +1065,23 @@ their assertions or test counts:
 `bash scripts/tests/descend-command.test.sh`,
 `python3 scripts/tests/benchmark-live-results.test.py`,
 `python3 scripts/tests/jev-progress-core.test.py`,
+`python3 scripts/tests/select-affected-tests.test.py`,
+`python3 scripts/tests/deploy-test-cycle.test.py`,
+`python3 scripts/tests/deploy-test-plan.test.py`,
+`python3 scripts/tests/deploy-test-worker.test.py`,
+`python3 scripts/tests/deploy-test-static.test.py`,
 `python3 scripts/tests/benchmark-history-latest-only.test.py`,
 `python3 scripts/tests/cloudbench-full-selection.test.py`,
 `python3 -m unittest discover -s scripts/live_display -p test_*.py`,
 `python3 scripts/tests/cloudbench-provider-capacity.test.py`,
 `bash scripts/tests/campaign-hub-grouping.test.sh`,
 `bash scripts/tests/cloudbench-fetch-ref.test.sh`,
+`python3 scripts/tests/cloudbench-warm-pool.test.py`,
 `python3 scripts/tests/verify-successful-llm-queries.test.py`,
 `python3 scripts/tests/cloudbench-exact-session-multi-root.test.py`,
 `python3 scripts/tests/cloudbench-forensic-quiesced.test.py`,
 `python3 scripts/tests/cloudbench-controller-linux.test.py`,
+`python3 scripts/tests/final-review-script-regressions.test.py`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/factory-metadata.test.py`,
 `python3 scripts/biz_review.py self-test`,
@@ -622,6 +1093,7 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py`,
 `python3 scripts/tests/cloudbench-static-service-observation.test.py`,
 `python3 scripts/tests/cloudbench-scorecard.test.py`,
+`bash scripts/tests/cloudbench-export-recovery.test.sh`,
 `python3 scripts/tests/original600-portable-operator.test.py`,
 `python3 scripts/tests/cloudbench-explicit-idle-admission.test.py`,
 `python3 scripts/tests/cloudbench-fixed-native-worker.test.py`,
@@ -630,13 +1102,24 @@ their assertions or test counts:
 `python3 scripts/tests/cloudbench-live-primary-return.test.py`,
 `python3 scripts/tests/cloudbench-primary-exact-shape-reuse.test.py`,
 `python3 scripts/tests/cloudbench-maintenance-env.test.py`,
-`python3 scripts/tests/cloudbench-resume-controller-export.test.py`,
+`python3 scripts/tests/cloudbench-shard-coordinator.test.py`,
 `python3 scripts/tests/cloudbench-controller-orphan-drain.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
+`bash scripts/tests/claude-review-fallback.test.sh`,
+`python3 scripts/tests/claude-review-fallback-diagnose.test.py`,
 `python3 scripts/tests/read-graphide-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`,
+`python3 scripts/tests/deploy-failure-policy.test.py`,
+`python3 scripts/tests/predeploy-receipts.test.py`,
 `bash scripts/tests/run-deploy-stage.test.sh`,
+`python3 scripts/tests/deploy-stage-wait.test.py`,
+`python3 scripts/tests/deploy-approval-batch.test.py`,
+`bash scripts/tests/prebuild-agents-image.test.sh`,
+`python3 scripts/tests/run-deploy-pipeline.test.py`,
+`bash scripts/tests/run-deploy-semantic-stack.test.sh`,
+`bash scripts/tests/backend-coverage-sharded.test.sh`,
 `python3 scripts/tests/run-deploy-structural-gates.test.py`,
+`python3 scripts/tests/final-review-script-regressions.test.py`,
 `python3 scripts/tests/deploy-live-probes.test.py`,
 `bash scripts/tests/run-process-cleanup.test.sh`,
 `bash scripts/tests/run-isolated-cloud-kill.test.sh`,
@@ -660,8 +1143,8 @@ The descend gate owns its behavioral fixtures. The semantic deploy gate
 verifies its registration and documented command without recursively executing
 it, so it runs once in the complete registry.
 
-The compact benchmark gates above run on every deploy, including deploys
-without cloud-runner changes. They exercise the canonical CLI dispatch (including
+When the deploy-tooling category is selected, run every compact benchmark gate
+above, including those without direct cloud-runner changes. They exercise the canonical CLI dispatch (including
 one 50-task dispatch and production-only routing), completed LIVE-query evidence,
 exact composite-root cleanup, and quiesced resource retirement offline. Larger
 paid fleet campaigns remain explicit human-requested validation; they are not
@@ -737,8 +1220,10 @@ and observe through owned-resource release. Early task PASS/FAIL and stale cards
 are distinct from controller exit and cleanup. The existing live-results gate
 also runs the compact monitor controls; no additional live verification is added.
 
-The structural runner admits eight suites concurrently by default and runs the
-complete registry. Use `--max-workers N` to choose a host-appropriate limit;
+The structural runner defaults to `floor(8 * cores / 14)` concurrent suites
+(between 1 and 8; eight on a 14-core host, four on an 8-core host), and runs the
+complete registry. The pipeline supplies its memory-scaled `--max-workers`
+explicitly. Use `--max-workers N` to choose another limit;
 this changes test scheduling only, not benchmark fleet width or task deadlines.
 Activate `agents/venv` and keep its `bin` before Homebrew in `PATH`, since the
 registered Python children inherit that interpreter selection.
@@ -768,12 +1253,90 @@ cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reus
   env BLACKBOX_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS" \
       CONTRACT_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS" \
       BACKEND_UNIT_CONCURRENCY="$BACKEND_UNIT_WORKERS" \
-      npm run test:coverage
+      npm run test:coverage:sharded
 ```
 
-This one command runs all 91 deterministic back-end blackbox domains plus unit
-tests under V8 coverage. It must both pass every test and meet
-`back-end/.c8rc.json`; the real provider credential probe runs once in Step 4c.
+This one command runs every deterministic back-end blackbox domain
+(`back-end/src/tests/blackbox/*.blackbox.ts`, 239 files on 2026-10-30, minus
+the provider-dependent `integration-health`: 238 domains run) under V8
+coverage as **two
+blackbox shards** (`scripts/run-coverage-sharded.sh`: each shard has its own
+instrumented backend, database, port and raw V8 directory; the blackbox and
+contract worker counts apply per shard, `BACKEND_UNIT_CONCURRENCY` to the
+unit pass), with the **unit pass beside the shards**
+(`BACKEND_COVERAGE_UNIT_PASS=1`, its own `<workspace>_s0` database and port
+pair, log `coverage/units.log`, every unit file except the headless-browser
+fps probe `rose-ui-cli-browser.test.ts`), then that **fps probe alone**
+(`BACKEND_COVERAGE_UNIT_PASS_LABEL=probe`, log `coverage/units-probe.log`)
+after every shard and the unit pass have finished: the probe is host-load
+dependent and failed 4/4 sharded runs beside two blackbox streams
+(2026-10-30), while the full unit suite (probe included) waited 12.7 min
+after the shards on #1639. All raw coverage is merged into one
+`c8 report --check-coverage`, so it must both pass every test and meet
+`back-end/.c8rc.json` on the merged report; the real provider credential probe
+runs once in Step 4c. On an isolated deploy worktree on system Postgres
+(`BACKEND_COVERAGE_DATABASE_URL` = the prepared `.context/deploy-system-pg.db`
+database) the shards still run: shard `i/N` owns the derived
+`<prepared>_s<i>` database on the same server
+(`back-end/scripts/coverage-database-url.mjs`), so never substitute the
+unsharded `npm run test:coverage` there; the 2026-10-29 deploy did and paid
+a 1,505 s single sweep. `run_deploy_pipeline.py plan` emits the sharded
+command, phases Group 3 (quick lanes → `deploy-command-structural` alone among
+the Group 3 lanes at full budget-backed width → the coverage lanes together, longest recorded
+first) from `.context/deploy-durations/pipeline-lanes.json`, and
+`run_deploy_pipeline.py simulate --plan <plan> --legacy-plan <plan --schedule legacy>`
+projects the union wall from the same ledger (plus a `group3` block for the
+Group 3 lanes alone). The local smoke lane (Group 4, 4150 MB: a pinned 1.25x
+margin over its largest recorded 3319 MB process-tree peak;
+`SMOKE_RECORDED_TREE_PEAK_MB`) declares
+`"phase": "stack"` in the plan: it is admitted right after the quick lanes
+beside the exclusive structural lane, which now reserves a pinned 1.25x margin
+over the largest recorded process-tree peak (2575 MB over 19 passed
+three-worker attempts in the 2026-10-30/31 receipts;
+`STRUCTURAL_RECORDED_TREE_PEAK_MB`, re-pin when a receipt exceeds it) — 3220 MB
+at three workers, down from 6544 —, so 3220 + 4150 MB fit the ~8 GB
+budget together, and no later phase waits for it: the coverage lanes still
+wait for the exclusive lane, and beside `backend-coverage-blackbox` (4150 +
+2560 MB) smoke fits the budget afterwards. Admitted first and unphased, the
+smoke lane had held the memory the structural lane needed (#1638 attempt 5
+ran smoke alone for ~22 min; 11–24 min across attempts); in the coverage
+phase it waited the whole 9–10 min exclusive phase every round. The AgentCard
+lane declares the same phase. Undeclared Group 4 lanes stay unphased, and a plan's
+own `after` edges are never removed. `plan --live-probes --semantic-stack
+--e2b-smoke` (default off; flag-less plans are unchanged byte for byte) adds the
+three tails that until 2026-10-31 lived only in a private launcher plan:
+`live-probes` (Group 3, `python3 scripts/run_deploy_live_probes.py`, 963 MB =
+1.25x its 769.7 MB recorded tree peak, `LIVE_PROBES_RECORDED_TREE_PEAK_MB`)
+after every other Group 3 lane (Step 4p); `semantic-stack` (Group 4,
+`bash scripts/run-deploy-semantic-stack.sh`: Steps 5 + 6b, 6108 MB = 1.25x the
+4886.2 MB peak of its first split-lane receipt,
+`SEMANTIC_STACK_RECORDED_TREE_PEAK_MB`) after `deploy-command-structural` and
+the agents/frontend coverage lanes only; and `e2b-smoke` (Group 4,
+`bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only`: Step 6c, 812 MB =
+1.25x its 649.1 MB recorded tree peak) after `live-probes` and backend
+coverage, which drive the same `run-blackbox-tests.sh` database. The
+semantic-stack edges are ownership, not memory: its non-isolated
+`run.sh --benchmark` startup/EXIT `kill-services.sh` sweeps reap same-worktree
+worker.py, Playwright-driver, npm and vite children, which the agents and
+frontend coverage lanes spawn, while backend coverage and the live probes boot
+`bootstrap.ts` backends no sweep pattern matches. The sweeps still spare every
+process of a live isolated run (`smoke`, `agentcard-lifecycle`) through its
+owner record, live manifest or the `BENCHMARK_RUN_ID` its processes carry
+(`scripts/tests/kill-services.test.sh`,
+`scripts/tests/run-isolated-cloud-kill.test.sh`), so semantic-stack may run
+beside them whenever both whole declarations fit live headroom. On the recorded
+7979 MB budget they do not: 6108 + 4150 (smoke) and 6108 + 2560 (backend
+coverage) exceed it, so admission defers semantic-stack until both release
+their reservations, declarations unchanged (6108 + 1152 beside agents coverage
+would fit; the sweep edge holds it there), and 6108 + 812 lets `e2b-smoke`
+overlap it on this budget as on the launcher host's 8755 MB.
+
+**Retry after a failure: failed-first, still a full sweep.** Rerun the same
+stage with `BACKEND_COVERAGE_FAILED_FIRST=1` in the `env` above. The previously
+failed domains run first in their shard and the first repeated failure stops
+every shard; when they pass, every domain and unit file still runs and the
+merged threshold is enforced. `scripts/coverage-rerun-failed.sh --mode=subset`
+is a diagnostic only (it ends `PARTIAL`) and never satisfies this gate.
 After coverage passes it runs `scripts/tests/blackbox-backend-teardown.test.sh`,
 which drives the isolated-backend runner through a normal exit and a SIGTERM and
 fails if either leaves its backend or port lock behind. It runs here, after the
@@ -816,7 +1379,7 @@ Commit any resulting changes (can combine with Step 1's commit).
 
 ## Step 4m-lint: Mac-app format:check + lint + type-check (skip if `$CHANGED_MAC_APP` is empty)
 
-Parallel verifier. Enforces the same 0-error bar as back-end Step 2b — "pre-existing" violations in the mac-app files you touched are your responsibility.
+Parallel verifier. Uses back-end Step 2b's controlling failure policy, with every actual violation and exception retained.
 
 ```bash
 cd mac-app && bash ../scripts/run-deploy-stage mac-static --reuse-passed -- bash -c 'npm run format:check && npm run lint && npm run type-check'
@@ -904,17 +1467,18 @@ approval.
 After all parallel Group 3 branches finish, validate every external credential
 (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase) with the focused test
 below. The deterministic Step 4a batch excludes this provider-dependent domain,
-so this runs exactly once and a provider outage can be retried without rerunning
-all 91 instrumented back-end domains.
+so it runs separately from the instrumented back-end domains. Record an
+evidenced provider outage or exhausted credits as an external exception; do
+not wait or loop retries.
 
 Step 4p launches the exact `run-deploy-stage credential-health` command with
 `npx tsx src/tests/blackbox/integration-health.blackbox.ts`.
 
-**If any hard credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
+**If a credential is rejected**, the error message names the exact env var to refresh and the provider dashboard URL. Preserve that diagnostic and apply the controlling failure policy. Evidenced outages or exhausted credits are non-blocking external exceptions with no handoff. A rejection alone does not prove either; introduced or unknown configuration failures remain blocking, while evidenced NOT INTRODUCED defects receive a repair handoff. Do not change production authentication to make a rejected credential appear healthy.
 
 Anthropic/Claude is intentionally non-blocking in this gate: the probe should still run by default and report `WARN` on exhausted credits, rejected auth, or provider availability problems, but future deploys may proceed without human approval when only this provider fails. The optional `DEPLOY_GATE_OVERRIDES=credential-health:anthropic` path remains available when an operator wants an explicit audited skip instead of a live probe. Parallel.ai is also warn-only.
 
-## Step 4h: Live Amplitude admin-health probe (no skip)
+## Step 4h: Live Amplitude admin-health probe (when its live-probe category is selected)
 
 Run this once after all parallel Group 3 branches finish and before recording
 the `runtime-blackbox` finish boundary. Step 4p launches the exact
@@ -923,8 +1487,8 @@ the `runtime-blackbox` finish boundary. Step 4p launches the exact
 
 This starts an isolated local backend and executes only the strict weekly
 admin-health case. Missing credentials fail closed; all six Amplitude funnel
-steps must be `ready` with real counts. A 429 blocks deploy, but its rerun
-repeats only this focused probe—not the complete coverage suite.
+steps must be `ready` with real counts for PASS. Apply the controlling policy
+to a 429 or other failure; a repair reruns only this focused probe.
 
 ## Step 4p: Concurrent focused live probes
 
@@ -938,8 +1502,14 @@ runner's db push and trigger hooks:
 python3 scripts/run_deploy_live_probes.py
 ```
 
-All four stage records must pass before closing the `runtime-blackbox`
+All four stage records must pass or have exact qualified exceptions before closing the `runtime-blackbox`
 boundary.
+
+`run_deploy_pipeline.py plan --live-probes` emits this command as the
+`live-probes` lane (963 MB) with an `after` edge on every other Group 3 lane,
+so the pipeline starts it only once static, coverage and the other Group 3
+branches have exited, never in the same wave: two `run-blackbox-tests.sh`
+setups on `victoria_<workspace>` deadlocked its schema sync on 2026-10-12.
 
 `migration-preflight` runs `back-end/scripts/migration-preflight.ts` read-only
 against production for every migration in `back-end/prisma/migrations` that
@@ -967,7 +1537,7 @@ failure, blocks the deploy. A block means the failover could not serve that
 turn at that moment: diagnose it from the printed host, connect, and response
 timings and the `openrouter_fast_chat.end` records before rerunning.
 
-## Step 4r: Cold-seed memory ratchet (no skip)
+## Step 4r: Cold-seed memory ratchet (when selected)
 
 Measure five full cold seeds against the newest cached production dump. Every
 run gets a fresh target database and must pass the source/target fidelity
@@ -1001,6 +1571,17 @@ the Group 4 semantic gate; coverage commands already ran every repository
 blackbox exactly once. Pre-Deploy smoke runs on its own separate isolated stack
 via `run-bench --local` (or, opt-in, the cloud fleet). In benchmark mode,
 `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`.
+
+`bash scripts/run-deploy-semantic-stack.sh` is this step and Step 6b as one
+versioned command (`run_deploy_pipeline.py plan --semantic-stack` emits it as
+the `semantic-stack` lane): the Step 5.0 sweep, the exact `run.sh --benchmark`
+launch below, readiness, the two Step 6b stages and the mandatory teardown,
+all env-driven (`CONDUCTOR_PORT` required, `ROSE_USE_SYSTEM_PG`, the normalized
+`CONDUCTOR_WORKSPACE_NAME`). `--with-e2b-smoke` appends Step 6c on the same
+Postgres; `--e2b-smoke-only` runs Step 6c alone (the `e2b-smoke` lane). It
+exits 2 before starting anything when `CONDUCTOR_PORT` is unset or the stack
+database is not ready, and 1 when the stack never became ready or a stage
+failed.
 
 ```bash
 # Conductor provides the base port; run.sh fans out backend/frontend/health from it.
@@ -1095,8 +1676,10 @@ bash scripts/kill-services.sh                    # kills run.sh tree, preserves 
 
 ## Step 4d: Open the PR and launch parallel Group 4
 
-The read-only static, coverage, and runtime-blackbox lanes in Group 3 are now
-green. Commit all intended files. CodeRabbit automatically reviews a new PR
+The push block below normally already ran at the source freeze (before Group 3),
+so the review has been running alongside Group 3. Run it here only when this
+snapshot has not been pushed yet (for example, after a Test Loop restart that
+froze a new snapshot). CodeRabbit automatically reviews a new PR
 once, but `.coderabbit.yaml` deliberately disables review-on-every-push. `/deploy`
 owns every later review request so intermediate gate fixes cannot create an
 unbounded reviewer loop.
@@ -1121,21 +1704,21 @@ review finish, collect all Group 4 results, and batch every valid review/gate
 fix into one stabilization pass. This keeps the PR HEAD immutable while the
 exact-HEAD waiter is running.
 
-Immediately after the PR exists, launch all applicable Group 4 lanes together
+Once Group 3 is green and the PR exists, launch all applicable Group 4 lanes together
 in one assistant message with separate parallel Bash tool calls:
 
-1. Code review polling (Step 9).
+1. CodeRabbit review waiter (Step 9; already running since the freeze push).
 2. Smoke benchmarks (Step 6; skip only under its documented classifier).
-3. AgentCard lifecycle (Step 6a; skip only when its classifier is empty).
-4. Semantic tests (Step 6b; never skip).
-5. Claude Code E2B sandbox smoke (Step 6c; NEVER skip — runs on every deploy).
+3. AgentCard lifecycle (Step 6a; omit when its classifier is empty or an explicit AgentCard election is recorded).
+4. Semantic tests (Step 6b; complete suite when selected).
+5. Claude Code E2B sandbox smoke (Step 6c; complete suite when selected).
 
 Matching Group 4 rows in `/factory-review` therefore share a real start phase.
 Do not wait for one lane before starting another. All applicable lanes must be
 green before merge. If any lane requires a code change, wait for the open review
 to finish, batch all fixes, restart the Test Loop from Step 0, and relaunch the
 applicable test lanes. Do not request another review until those lanes stabilize.
-The later automated review cycle (CodeRabbit or Claude fallback) covers every commit accumulated since the prior review — not a human PR reviewer.
+The later automated CodeRabbit review cycle covers every commit accumulated since the prior review — not a human PR reviewer.
 
 By Phase 2, the push and PR already exist. Treat Steps 7 and 8 as “verify
 already done” unless a failed test-loop iteration forced a restart.
@@ -1226,7 +1809,7 @@ Timeout history remains catalog-driven on the checked-out ref. Do not fabricate 
 **Universal background-task cadence (applies here AND to every background task in this repo):**
 
 - **First 60 seconds:** poll every **10 seconds** (catches silent early deaths — 0-byte logs, missing-env crashes, queue-routing bugs)
-- **After 60 seconds:** poll every **60 seconds**
+- **After 60 seconds:** block on the event waiter (`bash scripts/run-deploy-stage --wait --since "$GROUP_SINCE" --stall-seconds 900 smoke`, see **Event-driven gate waits**), which wakes on completion, the first failure, a dead runner or a silent stall; do the checks below at each wake. Only a lane not launched through `run-deploy-stage` falls back to polling every **60 seconds**
 - **Exit the monitor the instant the last task finishes** — do NOT keep sleeping out the interval. As soon as the completion signal is seen (`LOCAL_SMOKE_EXIT=`, the "RESULTS:" line, PID no longer running), stop polling and move on.
 
 At each poll, check:
@@ -1245,24 +1828,31 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL non-skipped Pre-Deploy smoke benchmarks must pass, with 0 failures.** The deploy-approved credential skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. The standing AgentCard release-stall exception in Step 6a also applies when a selected payment canary encounters that exact state. These exceptions apply to future deploys without additional human approval. Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only in `run-predeploy-local` and must be reported as a risk when it misses. On the local path, `run-predeploy-local` must exit 0 and every non-skipped task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Other timeouts, stalls, wrong tool usage, backend crashes, or failures must be diagnosed and fixed.
+**All Pre-Deploy smoke benchmarks must pass or have exact recorded exceptions under the controlling failure policy.** The deploy-approved credential skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. The standing AgentCard release-stall exception in Step 6a also applies when a selected payment canary encounters that exact state. These exceptions apply to future deploys without additional human approval. Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only in `run-predeploy-local` and must be reported as a risk when it misses. On the local path, preserve `run-predeploy-local`'s actual exit and each task's outcome; a qualified exception does not require a synthetic zero exit. Every task reported as PASS must show on its FE link that the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Route other timeouts, stalls, wrong tool usage, backend crashes and failures by attribution under the controlling policy.
 
-**Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
+**Smoke failure handling:** follow `.claude/shared/deploy-failure-policy.md`.
+Read existing repair claims before starting another investigation; send
+matching evidence or discuss uncertain matches. Retain the exact failed test,
+command, scope and emitted error; dispatch its independent `/goal` only after
+this PR merges to main, through the policy's active backend. That handoff is
+non-blocking for this deploy. Do not create one repair per failed agent when
+several occurrences may share a cause, and do not spawn a repair for an
+external provider outage or exhausted credits.
 
-Don't try to diagnose smoke failures inline in your own context — the diagnostic
-output for a single failed agent is hundreds of KB across 3 log files, plus
-multiple span-tree dumps, and burns the main context fast. Delegate, and ship a
-fix that the main loop can verify.
+INTRODUCED failures remain owned and blocking. UNKNOWN attribution must be
+established before a delegation waiver. The owning investigator follows `/RCA`.
+Credential/authentication defects that are not evidenced outages or credit
+exhaustion follow normal attribution handling; do not work around auth errors
+in code. External outage/credit exceptions receive no handoff.
 
-**For each failed task, in a single message, spawn ONE `general-purpose` agent
-per failed `agent_id`** (run them concurrently — they're independent). Hand
-each agent the full failure context and tell it to do steps 1–4 end to end:
+**Existing smoke diagnosis checklist for the repair owner:**
 
-```
-Agent({
-  description: "Diagnose + fix <task-name> smoke failure",
-  subagent_type: "general-purpose",
-  prompt: """
+Use the original diagnostic instructions below where those run artifacts are
+available. A separate Rose agent needs accessible evidence or attachments;
+local paths are not a shared filesystem. These instructions do not change
+attribution or make the originating deploy wait for an independent repair.
+
+```text
 Smoke task <task-name> just failed in /deploy (LOCAL run). Agent ID: <agent_id>.
 Failure reason from benchmark runner: <reason string from results JSON>.
 
@@ -1302,40 +1892,36 @@ Steps 1–5 — do them all, do not stop early:
    in your final report.
 
 5. Verify the fix is sane: re-run any structural/blackbox/lint check that
-   covers the modified file(s). You do NOT re-run smoke — the parent loop
-   does that next.
+   covers the modified file(s). For deploy-owned repairs, the deploy owner
+   re-runs smoke next. Independent repair owners follow `/RCA` outcome proof;
+   their originating deploy does not wait for it.
 
 Final report (under 200 words):
 - Root cause (1 sentence)
 - Files modified + line ranges
 - Whether worker/backend needs restart for the fix to take effect
 - Any follow-up risks
-"""
-})
 ```
-
-When all spawned agents return, **the main loop** re-runs static checks for
-the fix, and re-runs the full local smoke group from the top. If the same task fails again with
-a NEW failure mode, spawn a fresh diagnostic agent — never assume a previous
-agent's fix was complete.
-
-**Do not** read >5 KB of log content inline before delegating. Grep for the
-exact agent_id, scan the result, then hand the agent_id off.
 
 **NOT allowed when fixing smoke tests:**
 
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
-- Skipping or disabling tests, except the standing AgentCard release-stall exception in Step 6a (sandbox AND production) and two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
+- Skipping or disabling tests, except an explicit AgentCard election above, the standing AgentCard release-stall exception in Step 6a (sandbox AND production) and two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
 
-**Escalation is ONLY for:**
+Qualified handoff/provider exceptions under the controlling failure policy
+change deploy disposition only; they do not weaken the original task, its
+assertions, timeout controls or the repair owner's proof requirements.
 
-- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded") — EXCEPT (a) the Codex E2B smoke, which now auto-skips this funding state without human approval (see above); a Codex out-of-funds state no longer blocks the deploy gate, and (b) **the code-review providers (CodeRabbit / the Claude review fallback), which NEVER escalate for credits — see Step 9a, "Review-provider usage exhaustion"**. This escalation list is scoped to Step 6 smoke benchmarks and product-path providers; it does not govern the review gate.
-- Authentication/OAuth token errors (e.g., "401", "authentication failed", "credentials expired") — these require the user to re-authenticate or provide fresh tokens. Do NOT work around auth errors in code; escalate to the user to retrieve valid tokens.
-
-Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
-
-If a benchmark fails due to infrastructure (local stack flake, or on the cloud alternate a fleet/Fly issue), fix the runner and re-run the full smoke group. On the local path all tasks must pass in one `run-predeploy-local` invocation; on the cloud alternate a sequential diagnostic run does not satisfy the concurrent gate.
+For deploy-owned repairs, the main loop re-runs static checks for the fix and
+the full local smoke group from the top. If the same task fails again with a
+new failure mode, inspect the new evidence and coordinate existing claims;
+do not assume the previous fix was complete or create a duplicate repair.
+If a benchmark fails due to infrastructure still owned by this deploy, fix
+the runner and re-run the full smoke group. On the local path all non-waived
+tasks must pass in one `run-predeploy-local` invocation; on the cloud alternate
+a sequential diagnostic run does not satisfy the concurrent gate. A delegated
+waiver preserves the original native result and does not cover unexecuted checks.
 
 ### Local cleanup
 
@@ -1373,8 +1959,9 @@ Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree
 
 ## Step 6a: AgentCard sandbox lifecycle gate
 
-Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Otherwise, start this as
-one Group 4 lane alongside smoke, semantic, and code review. Its local benchmark
+Skip when `$CHANGED_AGENTCARD_PAYMENT` is empty or Step 6a is explicitly elected
+SKIPPED under **AgentCard election** above. Otherwise, start this as one Group 4
+lane alongside smoke, semantic, and code review. Its local benchmark
 runner owns one isolated backend/frontend/worker/Postgres stack, so it never
 tears down or contends with the shared Step 5 stack used by semantic tests.
 The four payment tasks stay sequential inside this lane because they mutate one
@@ -1442,7 +2029,7 @@ Stripe, or prove native cleanup; retain that liability and its evidence.
 
 Semantic tests exercise real user flows through Playwright/Chromium against the full local stack (backend + worker + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
 
-**Semantic tests run on every /deploy unless the user explicitly overrides that gate.** This is independent of the smoke-benchmark change classifier: documentation-only, test-only, frontend-only, and backend-only deploys all run the complete semantic suite by default. A deploy changes production state even when the app diff is small, so the user-visible frontend contract is normally re-proven.
+**When selected by the affected-category plan, run the complete semantic suite.** Frontend, backend and agent changes can select it through consumer dependencies and integration triggers; documentation-only changes need not. An unknown dependency selects all categories. This predeploy selection does not waive the required post-deploy production semantic verification.
 
 ### Running semantic tests
 
@@ -1476,7 +2063,7 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 
 ### Pass criteria
 
-**ALL semantic tests must pass — 0 failures.** Per CLAUDE.md rule #15: if a semantic test fails, you diagnose and fix the root cause. "Flaky selector", "realtime broadcast didn't arrive", "timeout" — none of those are excuses. Fix the underlying issue.
+**All semantic tests must pass or have exact recorded qualified exceptions.** Diagnose failures rather than dismissing them as flaky selectors, missing realtime broadcasts or timeouts. Apply the controlling failure policy to ownership; introduced or unknown failures remain blocking.
 
 ### On failure
 
@@ -1485,14 +2072,14 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 3. Fix the root cause in code.
 4. Restart services (Step 5) and re-run the failed semantic test.
 
-After all Group 4 lanes pass, run the mandatory Step 5 teardown. If any lane
+After all Group 4 lanes pass or have exact qualified exceptions, run the mandatory Step 5 teardown. If any lane
 fails, preserve the failed agent long enough to collect diagnostics, complete
 any payment lifecycle cleanup, then tear down before restarting the Test Loop.
 
-## Step 6c: Claude Code E2B sandbox smoke (NO SKIP — real E2B sandbox)
+## Step 6c: Claude Code E2B sandbox smoke (when selected — real E2B sandbox)
 
-**This gate is NON-SKIPPABLE. It runs on every `/deploy` regardless of the change
-classifier or which paths changed.** It is the only gate that proves the Claude
+**Run this complete gate when the affected-category plan selects it.**
+It is the only gate that proves the Claude
 Code agent path works end-to-end through a real E2B sandbox: DB credential read →
 decrypt → sandbox create → `ws-server.mjs` overlay → Claude Code CLI invocation →
 Anthropic → completion. A regression here (e.g. a CLI-arg contract break like the
@@ -1500,8 +2087,8 @@ Anthropic → completion. A regression here (e.g. a CLI-arg contract break like 
 ignored the positional prompt under `--output-format stream-json` and every
 session exited 1) is invisible to the ordinary back-end blackbox suite because
 Step 4a's coverage run deliberately keeps `BLACKBOX_SMOKE` unset and never spins a
-real sandbox. Do NOT downgrade this to WARN, gate it behind a change classifier,
-or skip it because "claude-code wasn't touched."
+real sandbox. When selected, run it in full; only an evidence-bound exception
+under the controlling failure policy can turn a failed case into SKIP.
 
 With the full stack from Step 5 still running, resolve its actual backend and
 database ports from the live service manifest. Create the separate local
@@ -1525,6 +2112,13 @@ cd back-end && BLACKBOX_SMOKE=1 \
   bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
   bash scripts/run-blackbox-tests.sh claude-code
 ```
+
+`bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only` runs this block
+without a running Step 5 stack (`run_deploy_pipeline.py plan --e2b-smoke` emits
+it as the `e2b-smoke` lane after `live-probes` and backend coverage): the
+Postgres port comes from `DEPLOY_E2B_DB_PORT`, else the running stack's
+manifest, else the deploy environment's `LOCAL_DB_PORT`, and it creates
+`victoria_$CONDUCTOR_WORKSPACE_NAME` when missing.
 
 This lane launches **its own** backend on purpose. It must not be pointed at the
 Step 5 semantic stack with `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`: that stack is
@@ -1570,13 +2164,18 @@ bash scripts/run-deploy-stage --finish
 
 ---
 
+The checklist below retains the existing gate criteria. Its pass/no-skip
+requirements are subject only to exact exceptions under the controlling
+failure policy; required coverage, sampling, cleanup and test intent are
+unchanged. Do not drop remaining unexecuted checks.
+
 # ╔══════════════════════════════════════════════════════════════════════╗
 
 # ║ HARD GATE — PHASE 2 BLOCKED ║
 
 # ║ ║
 
-# ║ Do NOT enter Phase 2 unless ALL of the following are true: ║
+# ║ Phase 2 requires every item below or an exact qualified exception: ║
 
 # ║ ║
 
@@ -1616,7 +2215,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ lifecycle surface changed ║
 
-# ║ 6b. Semantic tests: 100% pass on every /deploy; never skipped. ║
+# ║ 6b. Semantic tests: complete selected suite must pass or have an exact exception. ║
 
 # ║ Includes four chat paths × five full-lifecycle samples. ║
 
@@ -1632,13 +2231,13 @@ bash scripts/run-deploy-stage --finish
 
 # ║ ║
 
-# ║ If ANY test has ANY failure, you are BLOCKED. ║
+# ║ An unwaived INTRODUCED or UNKNOWN failure blocks deployment. ║
 
-# ║ Fix it or escalate to the user. Do NOT proceed. ║
+# ║ Apply the controlling failure policy; preserve native results. ║
 
 # ║ ║
 
-# ║ INVALID EXCUSES (do NOT use these to justify proceeding): ║
+# ║ These labels alone do not prove an exception or attribution: ║
 
 # ║ - "Pre-existing" / "not related to my changes" ║
 
@@ -1650,17 +2249,17 @@ bash scripts/run-deploy-stage --finish
 
 # ║ smoke, not just agents/) ║
 
-# ║ - "Expired tokens" (re-run seed script or escalate to user) ║
+# ║ - "Expired tokens" (classify from evidence; do not bypass auth) ║
 
-# ║ - "Temporal connectivity" (restart workers, fix it) ║
+# ║ - "Temporal connectivity" (classify and route under the policy) ║
 
-# ║ - "Agents timing out" (investigate and fix) ║
+# ║ - "Agents timing out" (investigate and establish attribution) ║
 
 # ║ ║
 
-# ║ Merging or creating a PR with known failures is a CRITICAL ║
+# ║ Never merge an unwaived blocking failure or invent a PASS. ║
 
-# ║ ERROR. The user has explicitly and repeatedly stated this. ║
+# ║ Qualified exceptions remain visible with their native outcomes. ║
 
 # ╚══════════════════════════════════════════════════════════════════════╝
 
@@ -1771,6 +2370,11 @@ fi
 bash scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD" --timeout 600 --poll 5
 ```
 
+Run it with `run_in_background` (it starts at the freeze push and overlaps
+Group 3/4). The Claude fallback is disabled (Step 9a), so this waits only for
+CodeRabbit; there is no fallback race. Only confirmed usage exhaustion follows
+Step 9a's skip clause; other missing substantive reviews hold the merge.
+
 This fails if the PR HEAD changes while waiting, preventing an older success
 from satisfying the gate. **A green check alone does not prove a substantive
 review happened.** Once it returns, read reviews from ALL three comment
@@ -1789,82 +2393,66 @@ a freshness boundary.
 
 ### Step 9a: Verify CodeRabbit delivered a substantive review
 
-Inspect the newest CodeRabbit-authored content from all three endpoints. Treat CodeRabbit as unavailable and run the Claude fallback for the same `REVIEW_HEAD` when any of these is true:
+Inspect the newest CodeRabbit-authored content from all three endpoints. Treat CodeRabbit as unavailable when any of these is true:
 
 - The check is missing, failed, or timed out.
 - The newest bot output contains `Review limit reached`, `rate limited`, `usage spending cap`, `review skipped`, or a service/internal error.
 - The check is green but there is no substantive review result for `REVIEW_HEAD`. A quota/error comment is not a review.
-- The `@coderabbitai review` comment was posted by a bot account (for example `cursor[bot]` when a Cloud Agent comments through its PR tool). CodeRabbit silently ignores bot-authored commands, so the push only produces `Review skipped: incremental reviews are disabled` and no review follows. Go straight to the fallback instead of re-requesting.
+- The `@coderabbitai review` comment was posted by a bot account (for example `cursor[bot]`). CodeRabbit silently ignores bot-authored commands, so post `@coderabbitai full review` once from the user's account instead of re-requesting.
 
-Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for `REVIEW_HEAD` by toggling the opt-in label. The fallback remains part of the already-open lifecycle; it does not consume another review cycle:
+**The Claude fallback review is DISABLED (user, October 28, 2026).** Never add the `claude-review-fallback` label, never start `claude-code-review-fallback.yml`, and never wait on or repair it. Its `CLAUDE_CODE_OAUTH_TOKEN` secret has been revoked since 2026-07-24, so it only added wait time. The workflow file stays inert (label/manual dispatch only). If someone dispatches it manually, its `Diagnose Claude failure` step classifies a failure as `CREDENTIAL_INVALID` (401, revoked secret) or `USAGE_EXHAUSTED` (429); `is_error:true`, 1 turn, ~2s and `$0` alone are not exhaustion (RCA 2026-10-28). That diagnosis never re-enables the fallback in `/deploy`.
 
-```bash
-FALLBACK_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-gh label create claude-review-fallback \
-  --description "Run Claude Code review when the primary reviewer is unavailable" \
-  --color 7B61FF --force
-gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
-  -X DELETE >/dev/null 2>&1 || true
-gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels \
-  -X POST -f 'labels[]=claude-review-fallback' >/dev/null
-```
+When CodeRabbit is unavailable, never close it `clean` merely because the Claude fallback is disabled.
 
-Wait for the workflow run created after `FALLBACK_TS` and require it to succeed:
-
-```bash
-FALLBACK_RUN_ID=""
-for i in $(seq 1 40); do
-  FALLBACK_RUN_ID=$(gh run list \
-    --workflow claude-code-review-fallback.yml \
-    --event pull_request \
-    --limit 20 \
-    --json databaseId,createdAt,headSha \
-    --jq ".[] | select(.headSha == \"$REVIEW_HEAD\" and .createdAt > \"$FALLBACK_TS\") | .databaseId" \
-    | head -1)
-  [ -n "$FALLBACK_RUN_ID" ] && break
-  sleep 15
-done
-[ -n "$FALLBACK_RUN_ID" ] || { echo "Claude fallback did not start" >&2; exit 1; }
-gh run watch "$FALLBACK_RUN_ID" --exit-status
-```
-
-After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails for a **repairable** reason (bad checkout, workflow bug, transient 5xx, missing/rotated `CLAUDE_CODE_OAUTH_TOKEN` secret), do not merge — inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD. If it failed from **usage exhaustion**, do not repair and do not rerun — go straight to the clause below.
+When CodeRabbit is unavailable, make at most one zero-touch retry (`@coderabbitai full review` for a false-green). Apply the controlling failure policy to the diagnosed result: evidenced outages or usage exhaustion are non-blocking external exceptions, with no repair handoff and no waiting for recovery. A missing, failed, timed-out, service-error, false-green or file-limit review alone does not establish an outage; unresolved attribution remains blocking. Preserve the exact reviewer result and exception evidence, never report an unavailable review as passed.
 
 ### Review-provider usage exhaustion: TANK THROUGH, never ask
 
 **This is pre-authorized. Do NOT stop. Do NOT ask the user for permission, approval, an override, a top-up, or a decision. Do NOT wait out a quota window. Record it and keep deploying.** The review gate exists to catch code defects, not to block on billing state; the agent cannot fix user-owned billing, so pausing to ask only stalls the deploy at zero information gain. This clause **overrides** every contrary instruction in this command — the Step 6 "Escalation is ONLY for … out of credits/funds" list, the "credential/billing escalation" halt in Step 0, and the "if the workflow fails, do not merge" line above. Escalating a review-credit block is a deploy defect, not caution.
 
-**Trigger — either reviewer is usage-exhausted and the other cannot cover it:**
+**Trigger — confirmed CodeRabbit usage exhaustion (the Claude fallback is disabled):**
 
-- CodeRabbit: rate-limit, spending cap, "Review limit reached", or a quota comment in place of a review.
-- Claude fallback: provider usage exhaustion. The signature is unmistakable — `is_error:true` with `num_turns:1`, `duration_ms` ~2000, and `total_cost_usd:0`, and/or an Anthropic "credit balance is too low" / 400 / 429 / spending-cap error. ~2s + 1 turn + $0 = provider-blocked.
-
-Distinguish this from a **repairable** fallback failure (bad checkout, workflow bug, transient 5xx, revoked secret) — those you still fix and rerun. Exhaustion is not repairable by you.
+- CodeRabbit: an explicit usage quota, spending cap, "Review limit reached", or quota comment in place of a review. A bare 429, service error, missing review or file-count limit is not proof of usage exhaustion.
 
 **What to do, mechanically:**
 
-1. Record in `TEST_REPORT`:
-   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback <reason>)`
-2. Close the open cycle as **clean** — this is the only result that satisfies `require-mergeable`:
+1. Record in `TEST_REPORT` the row `skip` prints:
+   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit: '<quote>', issue comment <id> updated <ts> naming commit <sha9>; check run <id> <conclusion> '<title>'; Claude fallback disabled)`
+2. Close the open cycle as **clean for merge accounting only**, retaining the reviewer outcome as `unavailable / external exception` — the result that satisfies `require-mergeable` —
+   through the versioned disposition, which requires the CodeRabbit comment naming
+   `REVIEW_HEAD` with `Review limit reached`/`usage spending cap` (id + `updated_at`; the
+   comment is mutable) plus a non-success CodeRabbit check run on `REVIEW_HEAD` (e.g.
+   `Review rate limited`), refuses when any substantive review
+   of `REVIEW_HEAD` exists (empty-body reply wrappers are not reviews), records the evidence
+   on the cycle and appends `.context/deploy-review-dispositions.jsonl`:
    ```bash
-   python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result clean
+   python3 scripts/deploy_review_cycle.py skip --head "$REVIEW_HEAD" --pr "$PR_NUMBER" --reason usage-cap
    ```
-   **Never use `--result unavailable`.** It is an accepted value but it hard-fails
-   `require-mergeable` at Phase 3 entry and again at Step 12, and it cannot be undone in
-   place (a second `finish` and a re-`start` on the same HEAD are both rejected) — you
-   would have to `start --reset` or hand-edit `.context/deploy-review-cycle.json`. The
-   ledger has no `--note`/`--reason` flag; the note lives in `TEST_REPORT` and the PR body.
+   A confirmed quota skip delivered no substantive review and consumes no
+   delivered-review budget, although its result is clean for merge accounting.
+   Keep the skipped entry and its evidence unchanged. If a later stabilization
+   HEAD needs review, `next` retains that review position; the new HEAD still
+   needs its own substantive review or fresh exact-HEAD quota disposition.
+   Never re-request the same skipped HEAD, erase history, reset a running
+   deploy, increase the three-review cap, or count skips toward the standing
+   three-round finding-deferral authorization.
+
+   **Never use `--result unavailable` for exhaustion.** `unavailable` is only for a cycle
+   whose HEAD a gate fix superseded before any review arrived: it hard-fails
+   `require-mergeable`, consumes no review budget, and the superseding HEAD re-`start`s
+   the same `--kind` (`deploy_review_cycle.py next` prints it; Step 10 reads it)
+   without `--reset`, keeping the entry in the ledger.
+   After three review rounds on the PR (ledger cycles that delivered a review — an
+   `unavailable` cycle does not count — plus `--prior-rounds` from restarted
+   deploys of it), remaining findings may be deferred under the user's standing
+   pre-authorization (never a security- or prod-impacting one): reply `[DEFERRED] <target>`
+   on each, then `python3 scripts/deploy_review_cycle.py override --head "$REVIEW_HEAD"
+   --pr "$PR_NUMBER" --finding-ids <ids> --deferred-to <PR/branch>` records
+   `Code Review | ⚠️ Overridden | …` with the ids and target (ledger result `clean`).
 3. Surface the exhaustion and its concrete risk (**this diff merged unreviewed**) in the PR body and in the final handoff.
 4. **Proceed to merge.** Do not open a new review cycle for the same HEAD.
 
 **Still true:** never label an unavailable review as passing (the `⚠️ Skipped` row is mandatory — a silent `clean` is misreporting); never use this path to skip a reviewer that _did_ run and returned findings; and CodeRabbit merely declining to re-review an already-seen commit is **not** exhaustion — that is a false-green, so force `@coderabbitai full review` instead. If a reviewer can be restored with a zero-touch retry you already have in hand, prefer that — but never block, and never ask, to obtain one.
-
-Remove the fallback label after a successful review so later pushes do not spend Claude quota unless the fallback is explicitly requested again:
-
-```bash
-gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
-  -X DELETE >/dev/null 2>&1 || true
-```
 
 ### Step 9b: Read the optional Graphide review (skippable, never blocks)
 
@@ -1934,7 +2522,12 @@ python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result cle
 
 The normal budget is the initial review plus one batched incremental review. A
 third verification review is allowed only when the second review found a valid
-issue that required another code change. `deploy_review_cycle.py` hard-stops a
+issue that required another code change. A separately approved final-admission exception may use
+`start --kind verification --head "$REVIEW_HEAD" --verification-approval <approval-id>`
+after a clean second cycle when later required gate fixes changed the source.
+Record the explicit user approval ID and exact scope in TEST_REPORT and the PR.
+This preserves the old entries and the three-cycle cap; it only opens the final
+review and does not waive a review result or any other gate. `deploy_review_cycle.py` hard-stops a
 fourth cycle. If cycle three still has valid findings, record `deploy outcome
 blocked` and stop this deploy as **review-unstable**; never merge an unreviewed
 fix. Stabilize the branch as development work, then start a fresh `/deploy`.
@@ -1948,13 +2541,12 @@ fix. Stabilize the branch as development work, then start a fresh `/deploy`.
 - **GRAPHIDE CRITICAL FINDING** (Step 9b, cycle 1 only) → treat as a valid
   finding: close as `findings` and include the fix in the same batch. Graphide
   skipped or only non-critical findings → no effect on the cycle result.
-- **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check) → use the Claude fallback from Step 9a.
-- **BOTH REVIEWERS USAGE-EXHAUSTED** → close the cycle `--result clean`, record the
-  `⚠️ Skipped` row, and keep going. Never stop to ask — see Step 9a,
-  "Review-provider usage exhaustion: TANK THROUGH, never ask."
-- **REVIEW SKIPPED** (e.g., "Too many files!") → finish the current immutable
-  HEAD through the Claude fallback. Do not push filter edits while its review
-  cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is
+- **CODE RABBIT USAGE-EXHAUSTED** (confirmed quota, spending cap or review-limit exhaustion) → close the cycle `--result clean`, record the
+  `⚠️ Skipped` row, and keep going under Step 9a's existing usage-exhaustion exception.
+- **CODE RABBIT UNAVAILABLE WITHOUT USAGE EXHAUSTION** (service failure, missing/timed-out review or false-green) → diagnose under Step 9a and the controlling failure policy. An evidenced provider outage receives the non-blocking external exception; an unexplained failure remains blocking. The disabled Claude fallback alone does not waive substantive review; never close it `clean` merely because the Claude fallback is disabled.
+- **REVIEW SKIPPED** (e.g., "Too many files!") → keep the current immutable
+  HEAD blocked until a substantive review is obtained. Do not close it `clean`
+  or push filter edits while the review cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is
   the canonical safe-filter set for a later stabilized commit because those
   paths are already gated locally:
   ```yaml
@@ -2008,16 +2600,14 @@ cycle:
 
 ```bash
 REVIEW_HEAD=$(git rev-parse HEAD)
-REVIEW_COUNT=$(python3 scripts/deploy_review_cycle.py status | python3 -c \
-  'import json,sys; print(len(json.load(sys.stdin)["cycles"]))')
-[ "$REVIEW_COUNT" -lt 3 ] || {
+REVIEW_NEXT=$(python3 scripts/deploy_review_cycle.py next) || {
   python3 scripts/record_factory_event.py deploy outcome blocked
   python3 scripts/factory_ledger.py publish
-  echo "review cycle cap reached; deploy is review-unstable" >&2
+  echo "the ledger refused another review cycle (see above); deploy is review-unstable" >&2
   exit 1
 }
-REVIEW_KIND=incremental
-[ "$REVIEW_COUNT" -lt 2 ] || REVIEW_KIND=verification
+REVIEW_KIND=$(printf '%s' "$REVIEW_NEXT" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["kind"])')
 python3 scripts/deploy_review_cycle.py start --kind "$REVIEW_KIND" --head "$REVIEW_HEAD"
 python3 scripts/record_factory_event.py deploy stage-start code-review
 git push origin HEAD
@@ -2027,10 +2617,18 @@ gh pr comment "$PR_NUMBER" --body '@coderabbitai review'
 
 **Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit or Claude found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
 
+A comment about an exact qualifying failed test may reference its recorded
+RCA and pending post-merge handoff before merge, or its actual waiver and
+repair link after dispatch, instead of duplicating its fix. This does not waive an
+independent correctness/security finding merely because it is unrelated to
+this change.
+
 **Reply to every review comment** before proceeding. For each comment, reply with one of:
 
 - `[FIXED] <short solution description>` — if you fixed the issue
 - `[IGNORED] <reason>` — ONLY for pure style nits with zero correctness/security impact
+- `[DELEGATED] <failure description> — <repair-agent link>` — ONLY when the comment concerns the exact recorded qualifying NOT INTRODUCED test/gate failure already handed off under the controlling policy
+- `[POST-MERGE REPAIR] <failed test> — <RCA evidence>` — ONLY for that exact qualifying failed test before merge, while its actual handoff is deferred under the controlling policy; never invent a repair link
 
 Use `gh api` to post replies:
 
@@ -2046,10 +2644,17 @@ gh api repos/{owner}/{repo}/issues/comments/<COMMENT_ID> -X PATCH -f body="<orig
 
 # Phase 3: Finalize
 
-Only enter this phase when the Test Loop is green and the exact current HEAD has
-a clean completed review. Enforce that invariant rather than trusting prose:
+Only enter this phase when every Test Loop requirement is verified or has an
+exact qualified exception, and the exact current HEAD has completed review
+accounting. An external review exception remains unavailable, never PASS.
+Enforce the ledger state rather than trusting prose:
 
 ```bash
+# The staged cycle must exist and be ready on these exact bytes.
+# Exit 5 means stale source/configuration; no legacy receipt can bypass this.
+DEPLOY_TEST_CYCLE_STATE_DIR=${DEPLOY_TEST_CYCLE_STATE_DIR:-.context/deploy-pipeline}
+python3 scripts/run_deploy_pipeline.py verify --require-staged \
+  --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR" --expect-head "$(git rev-parse HEAD)"
 python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
 ```
 
@@ -2106,6 +2711,38 @@ cd "$(git rev-parse --show-toplevel)/back-end" && npx tsx scripts/cleanup-stale-
 
 This is best-effort — if it fails (e.g., no Temporal API key, no Docker), proceed to merge anyway.
 
+## Step 11b: Include preservation records in the release PR
+
+**Standing user instruction, November 4, 2026:** a finished `/deploy` leaves
+its worktree and local environment ready for deletion. Returning the final
+deploy scorecard is a promise that this is true. Successful production checks
+alone do not satisfy completion.
+
+Start a preservation inventory before the final review. Include every local
+record needed to recover, understand or audit this workspace's work: intended
+source changes and unmerged commits, plans, RCA evidence, original failed or
+interrupted runs, final test/review/deploy receipts, benchmark traces, and
+necessary local configuration. Cover related worktrees and the real targets of
+symlinks; an ignored file or a path outside the checkout is not automatically
+disposable. Preserve original failures and unknowns without relabeling them.
+
+Commit safe, reviewable records and a closeout manifest in the release PR.
+Include them in the normal source freeze/review; preservation is not permission
+to slip an unreviewed commit past Step 12.
+For large or sensitive records, preserve their exact bytes in the approved
+durable private archive and commit the manifest, content hashes, immutable
+object references, verification receipts and restoration instructions instead.
+Never commit credentials, raw secret-bearing logs, private transcripts or an
+archive decryption key. A local-only archive, temporary URL, unverified upload,
+or decryption key available only on this devbox is not preservation.
+
+The manifest must give every inventoried path or grouped record an explicit
+disposition: committed, durably archived and verified, or reproducible and
+unneeded (with its regeneration source/command). Record source/ref coverage,
+configuration and secret recovery, excluded caches/build products, and any
+known historical loss. Do not silently exclude an old run or abandoned patch
+because the latest run passed. Unresolved preservation items block completion.
+
 ## Step 12: Merge
 
 **Never push an unreviewed commit immediately before merge.** Recorded smoke
@@ -2119,6 +2756,7 @@ if [ -n "$(git log @{u}..HEAD --oneline 2>/dev/null)" ]; then
   exit 1
 fi
 python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
+python3 scripts/deploy_approval_batch.py check  # 0 = clear/covered; 1/3 hold the merge
 ```
 
 Immediately before merging, start the production-verification lifecycle:
@@ -2136,6 +2774,11 @@ DEPLOY_MERGED_SHA=$(gh pr view <PR_NUMBER> --json mergeCommit --jq '.mergeCommit
   { echo "❌ Could not resolve the exact merge commit for PR <PR_NUMBER>"; exit 1; }
 ```
 
+Bind this merge and its run/report in
+`.context/deploy-scorecard-latest.json` under the controlling policy's
+**Scorecard freshness: latest merge from this workspace** rule. Later card
+refreshes must use this workspace's newest merge and its own timing receipts.
+
 If `main` can be checked out in this worktree, switch back to main and pull:
 
 ```bash
@@ -2147,6 +2790,34 @@ If `main` is already checked out in another worktree, do not force a branch dele
 ```bash
 git fetch origin main
 ```
+
+## Step 12a: Dispatch independent repairs after merge
+
+After the merge is confirmed and refs are refreshed, dispatch every pending
+NOT INTRODUCED failed-test packet under the controlling failure policy.
+Create new devboxes from current main containing `$DEPLOY_MERGED_SHA`, with
+explicit high effort and normal speed, and start each repair's `/goal` through
+its own finished deploy scorecard. Use a different devbox from this deploy,
+automatically place it in the project's Bugs folder and verify membership
+using the controlling policy's commands. The goal and deploy coordinator
+both live there; no local coordinator may keep this box open for the repair.
+Include the exact test, command, scope,
+verbatim error and original evidence. Never dispatch an observation without
+an actual failed test. Record the returned repair links in DELEGATED; do not
+wait for acknowledgement or repair completion. Failures discovered by the
+post-merge production checks use the same protocol when they occur.
+
+After recording each actual repair link with the cycle's `resolve` action,
+check completion before the final scorecard:
+
+```bash
+python3 scripts/deploy_test_cycle.py complete \
+  --plan "$DEPLOY_TEST_CYCLE_STATE_DIR/plan.json" \
+  --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+```
+
+A non-zero `DEPLOY_CYCLE INCOMPLETE` result is a named blocker: dispatch and
+resolve the remaining packets before claiming the deploy complete.
 
 ## Step 13: Wait for deploys
 
@@ -2170,6 +2841,32 @@ no finish event and leaves the aggregate production lifecycle incomplete:
 - Render: `deploy production-start render` → exact-SHA live poll → `deploy production-finish render`
 - Vercel: `deploy production-start vercel` → exact-SHA deployment poll → `deploy production-finish vercel`
 - Mac: `deploy production-start mac-release` → `release-mac-app.yml` watch → `deploy production-finish mac-release`
+
+**Prebuilt worker image.** For agents changes, `prebuild-agents-image.yml`
+built `registry.fly.io/<app>:prebuilt-<agents tree>` on the PR head during the
+gates. The cutover promotes it by digest when the merge commit's `agents/` tree
+is identical (log line `Promoting prebuilt worker image`) and otherwise builds
+exactly as before. Confirm the prebuild run for the final PR HEAD succeeded
+before merge when it is still running; a missing or failed prebuild only costs
+the old build time, never correctness. The cutover prepares the eight reserved
+bank Machines concurrently and, after the old queue is certified retired and
+the serving bank passes a fresh health check, retires the old bank concurrently
+(`for_each_machine` in `scripts/worker_pool_cutover.py`); each Machine keeps its
+own native lease and ownership checks, and the cooperative drain is unchanged.
+
+**The applicable Mac release remains a required production gate.** Start its
+watch with `run_in_background` alongside the independent provider lanes and
+Step 13b. Record `production-finish mac-release` only on success. A failed or
+unverified applicable release keeps `production-verify` and deploy completion
+open; diagnose and repair it through the normal RCA/deploy loop.
+
+**Post-Render checks run in parallel.** As soon as Render serves the merged
+SHA (Step 13a step 1), launch the Step 13a functional probes and log scan,
+Step 13b production semantics (once Vercel/Fly surfaces it exercises are also
+live) and Step 13c in separate parallel tool calls. Each applicable lane,
+including the Mac release, remains a hard gate subject to its documented
+exceptions; Step 13c may be explicitly elected SKIPPED under **AgentCard election**.
+A red non-skipped probe blocks completion.
 
 Prefix each marker above with
 `python3 scripts/record_factory_event.py`. For example, the full Fly start is
@@ -2337,25 +3034,29 @@ Render has no GitHub Actions run to watch, so the only proof a backend deploy is
 
 ```bash
 python3 scripts/record_factory_event.py deploy production-start render
-cd "$(git rev-parse --show-toplevel)/back-end" && source .env
-MERGED_SHA="$DEPLOY_MERGED_SHA"   # immutable merge commit captured in Step 12
-echo "Waiting for Render to deploy ${MERGED_SHA:0:7}..."
-DEPLOY_OK=""
-for i in $(seq 1 90); do  # up to ~15 min at 10s (Render builds can be slow)
-  read -r STATUS COMMIT < <(curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
-    "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=1" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin)[0]['deploy']; print(d.get('status',''), (d.get('commit') or {}).get('id','')[:7])")
-  echo "  Render: status=$STATUS commit=$COMMIT (want ${MERGED_SHA:0:7})"
-  case "$STATUS" in
-    live)
-      if [ "$COMMIT" = "${MERGED_SHA:0:7}" ]; then DEPLOY_OK=1; break; fi ;;
-    build_failed|update_failed|canceled|pre_deploy_failed)
-      echo "❌ Render deploy $STATUS for $COMMIT"; DEPLOY_OK="failed"; break ;;
-  esac
-  sleep 10
-done
-[ "$DEPLOY_OK" = "1" ] || { echo "❌ Render did not bring ${MERGED_SHA:0:7} live (last status: $STATUS)"; exit 1; }
-echo "✅ Render live on ${MERGED_SHA:0:7}"
+cd "$(git rev-parse --show-toplevel)"
+# Polls the Render deploys API (RENDER_API_KEY/RENDER_SERVICE_ID from
+# back-end/.env) up to 90 x 10 s. A deploy for the merged SHA is the authority
+# (live opens, build_failed/update_failed/canceled/pre_deploy_failed block).
+# Render auto-deploy skips a commit with no change under its Root Directory,
+# so no deploy ever appears (#1652, #1655 spun to the bound). With no deploy
+# for the merged SHA the live deploy's commit opens the gate as
+# source-equivalent only when `git diff <live> <merged> -- back-end/
+# render.yaml package.json package-lock.json` is empty AND the live commit is
+# an ancestor of the merged SHA (Render skipped the merge) or a descendant of
+# it (a later PR deployed the identical backend). This assumes the Render
+# service's Root Directory is back-end with no build filters. A descendant
+# that changed those paths means the merged backend never ran as-is: the gate
+# blocks and that is a manual decision; an unrelated live commit or any such
+# change keeps waiting. Records `render` (status, live_commit,
+# observed_live_commit, merged_sha, backend_diff, equivalence) in
+# .context/deploy-pipeline/production.json; prints RENDER_LIVE or
+# RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha> reason=<code>. Exit 2 =
+# Render API, git or credential failure (fail closed; repair and rerun),
+# never a pass.
+python3 scripts/run_deploy_pipeline.py production-render --merged-sha "$DEPLOY_MERGED_SHA" \
+  --state-dir .context/deploy-pipeline ||
+  { echo "❌ Render does not serve the merged backend ${DEPLOY_MERGED_SHA:0:7}"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-finish render
 ```
 
@@ -2419,9 +3120,9 @@ sys.exit(1 if bad else 0)
 "
 ```
 
-If this exits non-zero, the deploy is **unhealthy even though it's live** — treat as a deploy failure: diagnose the error (most likely a schema/migration mismatch or missing env var — see the 2026-06-27 incident for the migration-vs-DB drift pattern), fix it, new PR, continue from Step 9. Do NOT proceed to Step 14 with errors in the prod log.
+If this exits non-zero, the deploy is **unhealthy even though it's live** — treat as a deploy failure: diagnose the error (most likely a schema/migration mismatch or missing env var — see the 2026-06-27 incident for the migration-vs-DB drift pattern), fix it, new PR, continue from Step 9. Do NOT proceed to Step 14 with errors in the prod log. Apply the controlling failure policy before treating the native failure as blocking: exact qualified exceptions remain failed/unverified, are not called healthy, and do not require the unrelated repair in this PR.
 
-After the endpoint checks and log scan are both green, close this lane:
+After the endpoint checks and log scan pass or have exact qualified exceptions, close this lane with their actual results retained:
 
 ```bash
 python3 scripts/record_factory_event.py deploy production-finish backend-probes
@@ -2579,8 +3280,8 @@ script removes its own fixtures on SIGTERM/SIGINT, but an interrupted run proves
 nothing and must be re-run.
 
 Retain the JSON output as the production migration report card. Any failed row,
-including fixture cleanup, blocks deploy completion and must be diagnosed and
-fixed before Step 13b.
+including fixture cleanup, requires attribution under the controlling failure
+policy before Step 13b. Introduced or unknown failures remain blocking.
 
 ## Step 13w: Cloud WMH refresh + SIM smoke (skip unless WMH paths changed)
 
@@ -2620,45 +3321,57 @@ task FAIL is reported, not retried into a pass.
 ## Step 13b: Production semantic frontend gate (no skip — always runs)
 
 After the changed runtime surfaces exercised by semantics are live (Fly,
-Render, and/or Vercel) and Step 13a is green when applicable, dispatch the
-trusted production semantic workflow. Do not wait for the independent Mac release lane;
+Render, and/or Vercel), dispatch the trusted production semantic workflow
+concurrently with the Step 13a probes; a red Step 13a probe still blocks
+completion. Do not wait for the independent Mac release lane;
 keep it running concurrently. This runs every frontend semantic
 spec in one job with four Playwright workers and one shared authenticated
-session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
+session. The four-path, five-sample, full-lifecycle chat ratchet runs as four
+concurrent one-worker jobs, one chat path per runner (`CHAT_LIFECYCLE_PATH`),
+so paths no longer wait for each other and no runner hosts two browsers. Both
+jobs use a sparse, blob-filtered checkout.
 
 ```bash
 # The boxes.dev gh wrapper replaces GH_TOKEN with an App token that cannot
 # dispatch workflows; call its binary with the repo's workflow-scoped token.
 if [ -x /opt/devbox-tools/gh/current/bin/gh ]; then
   GH_TOKEN=$(set -a && . back-end/.env >/dev/null && printf %s "$GITHUB_TOKEN")
-  export GH_TOKEN
+  export GH_TOKEN DEPLOY_GH_BIN=/opt/devbox-tools/gh/current/bin/gh
   gh() { /opt/devbox-tools/gh/current/bin/gh "$@"; }
 fi
+# Fly lane gate (agents runtime changes only): the exact deploy-agents.yml run
+# on the merged SHA must be completed and its durable job SUCCEEDED with the
+# Step 13ab verify passing before this dispatch (a resumed job keeps the run's
+# failure conclusion; the job is the authority); #1639 dispatched during the
+# cutover and 4/5 jobs failed. Records run id, attempt, job id, conclusion,
+# job stage and every GitHub wait in .context/deploy-pipeline/production.json;
+# no agents change → no wait.
+python3 scripts/run_deploy_pipeline.py production --merged-sha "$DEPLOY_MERGED_SHA" \
+  --state-dir .context/deploy-pipeline ||
+  { echo "❌ Fly lane is not live/verified for $DEPLOY_MERGED_SHA; not dispatching production semantics"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-start semantic
-SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-gh workflow run chat-lifecycle-ratchet.yml --ref main \
-  -f frontend_url=https://www.roselabs.ai \
-  -f backend_url=https://navi-j9a9.onrender.com
-
-SEMANTIC_RUN_ID=""
-for i in $(seq 1 40); do
-  SEMANTIC_RUN_ID=$(gh run list \
-    --workflow chat-lifecycle-ratchet.yml \
-    --event workflow_dispatch \
-    --branch main \
-    --limit 20 \
-    --json databaseId,createdAt \
-    --jq ".[] | select(.createdAt >= \"$SEMANTIC_DISPATCH_TS\") | .databaseId" \
-    | head -1)
-  [ -n "$SEMANTIC_RUN_ID" ] && break
-  sleep 5
-done
-[ -n "$SEMANTIC_RUN_ID" ] || { echo "❌ Production semantic workflow did not start"; exit 1; }
-gh run watch "$SEMANTIC_RUN_ID" --exit-status
+# Dispatches chat-lifecycle-ratchet.yml on main with source_sha=$DEPLOY_MERGED_SHA
+# (the harness checks out that exact commit; #1646's raw dispatch ran main's
+# later data-only head and needed a separate equivalence proof), binds to the
+# run this dispatch created (never an older run), polls every 30 s, records
+# run id, url, headSha, source_sha and per-job conclusions under `semantic` in
+# .context/deploy-pipeline/production.json and exits non-zero unless every job
+# succeeded. Prints SEMANTIC_RUN_ID=<id> and SEMANTIC_LANE_END <ts>.
+python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha "$DEPLOY_MERGED_SHA" \
+  --state-dir .context/deploy-pipeline \
+  --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com ||
+  { echo "❌ production semantic gate is not green for $DEPLOY_MERGED_SHA"; exit 1; }
 python3 scripts/record_factory_event.py deploy production-finish semantic
 ```
 
-This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs. For a provider outage, follow "Provider outages: report and retry every 10 minutes" above; use `gh run rerun "$SEMANTIC_RUN_ID" --failed` once the prior attempt is terminal so only failed jobs are retried. Retain successful jobs under their original execution provenance and audit the retry's actual checkout SHA and results. For a code defect, fix the root cause in a new PR and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+Inspect failed workflow Playwright artifacts and service logs, then apply the controlling failure policy. An evidenced provider outage or exhausted credits receives an external exception and no handoff. A NOT INTRODUCED defect receives a repair handoff and waiver. Fix INTRODUCED defects and rerun affected checks; UNKNOWN remains blocking. Preserve native failures and execution provenance. Proceed to Step 14 only after every requirement is verified or has an exact qualified exception.
+
+For a required same-source retry of a non-waived failure, wait until the prior
+attempt is terminal, then rerun the same command with
+`--retry-failed-once "<justification>"`. The CLI retries only failed jobs once,
+refuses a second retry, preserves successful jobs' execution provenance, and
+records the retry's checkout SHA. A qualified SKIP does not trigger this retry.
+
 
 If no workflow-scoped token is available, `gh workflow run` returns HTTP 403
 `Resource not accessible by integration`. In that case, run the workflow's two
@@ -2676,8 +3389,10 @@ SEMANTIC_WORKERS=1 bash front-end/scripts/run-semantic-tests.sh --prod chat-life
 
 ## Step 13c: AgentCard production lifecycle gate
 
-Skip when `$CHANGED_AGENTCARD_PAYMENT` is empty. The standing release-stall
-exception in Step 6a also applies to this production gate automatically and
+Skip when `$CHANGED_AGENTCARD_PAYMENT` is empty or Step 13c is explicitly elected
+SKIPPED under **AgentCard election** above. Record its reason without a passing
+production result or settlement claim. The standing release-stall exception in
+Step 6a also applies to this production gate automatically and
 without further approval. Run after both the backend
 and frontend merged commits are live. Launch it concurrently with the semantic
 gate because the two checks are isolated:
@@ -2733,12 +3448,45 @@ that waived result. If the process was forcibly killed, recover the printed
 agent's execution/browser resources before assessing the financial exception.
 
 After every applicable production deployment, health, semantic, release, and
-AgentCard gate has passed or has this explicitly permitted warning skip, close
+AgentCard gate has passed or has an explicit election or permitted warning skip, close
 the production-verification lifecycle:
 
 ```bash
 python3 scripts/record_factory_event.py deploy stage-finish production-verify
 ```
+
+## Step 13d: Finish preservation and prove deletion readiness
+
+After all admitted jobs and evidence writers are terminal, capture the final
+post-merge records, including production verification, cleanup, qualified
+exceptions, final scorecard HTML/link and all failed attempts. Prepare the
+scorecard artifact without returning it as a completion message yet. Reconcile this
+delta against the Step 11b inventory and existing verified archives. Verify
+remote readback, authenticated decryption and every archived member's hash;
+restore representative files using documented credentials/key material that
+will remain available after this devbox is deleted.
+
+The deployed PR must contain the complete preservation record. When records
+are produced after that PR has merged, land a reviewed records-only follow-up
+on `main` and link its merged commit and closeout manifest from the deployed
+PR before returning the final scorecard. The merged Git commit preserves the
+closeout manifest itself; do not create an endless chain of self-archiving
+receipts. This is required completion work, not a promise to archive later. Keep secret/raw content in its private archive;
+put its durable manifest and recovery/verification record in the PR.
+
+Check the entire local deletion boundary again: no intended source is only
+local, no required record or unique environment value depends on this disk,
+no active work still needs this worktree, and owned processes/resources have
+been retired or explicitly handed over with a durable receipt. Preserve
+Freedom and protected/shared resources; deletion readiness does not authorize
+uninstalling, weakening or terminating them. If safe cleanup or recovery
+cannot be proved, keep the environment and report the exact open item.
+
+Write a committed deletion-readiness receipt that binds the deployed SHA,
+record/follow-up commit, final inventory, archive verification, independent key
+recovery, configuration recovery and resource disposition. It must be possible
+to recover the preserved work without this machine or its `/tmp`, `/project`,
+ignored files, symlink targets, local-only refs or environment files.
 
 ## Step 14: New branch
 
@@ -2770,98 +3518,90 @@ events to `main`'s `agents/benchmarks/history/factory_events.jsonl` (see the
 publication rule before Step 0i). `/factory-review` then rebuilds /deploy and /RCA
 timing from the repo on any machine.
 
-After the new branch is created, the final message is only this scorecard in a
-`text` block, with no prose before or after it. Fill every value from recorded
-evidence:
+Before returning the final scorecard, reconcile and preserve any records created
+by final publication or closeout itself. Include the final factory commit and
+any final archive/scorecard metadata in the deployed PR's linked closeout
+record. Verify that record is merged and independently recoverable, then run
+the deletion-readiness check one last time. Do not return a completed scorecard
+with “archive later”, unpreserved local records, or unresolved recovery work.
 
-- Lane times come from `.context/deploy-runs/<run-id>/stages.jsonl`: sum every
-  attempt of the lane (passed, failed, interrupted) and show the run count and
-  failure causes. Production lane times come from `.context/factory-events.jsonl`
-  and also cover every attempt. Parallel lanes overlap.
-- `⏱` is the total from `metadata.json` `started_at` to the `deploy outcome` event,
-  broken down so it adds up: active gate/review/prod time (union of intervals) +
-  each blocked window + other time (investigation, fixes, waiting on the user).
-- `💸` is the summed benchmark `cost_cents` of this deploy's runs.
+After the new branch is created, publish only the deploy scorecard using the
+stable `deploy-summary-v2` template in
+`.claude/shared/report-display-format.md` and populate
+`.claude/shared/deploy-scorecard-template.html`. Preserve the user-approved structure
+shown at https://boxes.dev/visuals/vis_1997f1fd05813cc9be440f44d5700ffe:
 
-Lane marks:
+1. Title with the actual colored **SHIPPED / NOT SHIPPED** status.
+2. Elapsed deploy time immediately below the title.
+3. One **WHAT DEPLOYED** box.
+4. One cumulative **DELEGATED** box, retaining failure descriptions and repair
+   links across refreshes/resumes; independent delegated repairs do not block
+   this deploy.
+5. One **EXTERNAL PROVIDER FAILURES** box with every unresolved alarming
+   `🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING`
+   alert, affected checks and evidence. Qualified provider failures remain
+   non-blocking.
+6. One **FOLLOWUPS** box only when follow-ups exist, including unshipped work,
+   skips, overrides, retained cleanup obligations and unsettled funds.
+7. Lastly, concise colored per-stage bars on **one shared elapsed-time axis**,
+   showing actual overlaps, retries and gaps.
 
-- `✅` means the lane ran and passed.
-- `❌` means failed.
-- `⚠️` is reserved for a required check that was skipped, with the reason.
-- Omit lanes that did not apply, except TEMPORAL, which is always shown.
+This explicit user-approved layout supersedes older lane-table layouts and
+provider-alert placement rules. Do not show production/validation hashes,
+observed/producer bookkeeping noise or a second deploy-owner-complete line.
+Keep that provenance in the underlying evidence. A benchmark card may be linked
+as evidence, but must never replace this deploy card or its timeline. Values,
+applicable stage rows and attempt intervals may update; do not redesign the
+fixed structure ad hoc.
 
-TEMPORAL reports Step 13–13ab:
+Apply the existing scorecard-freshness rule before every publication: rebuild
+from the matching current deploy, preserve the original durable start and
+actual outcome timestamps, and update the latest-card URL and completion
+receipt together. Never reuse a prior release's elapsed time. Stage intervals
+come from `stages.jsonl` and production factory events, including failed and
+interrupted attempts; parallel intervals overlap on the same axis. Missing
+boundaries stay explicitly unmeasured, never invented. Preserve costs and
+source/proof bindings in the underlying evidence.
 
-- After a cutover: old → new generation, workflows drained, and force-migrated
-  count.
-- Otherwise: `no cutover needed` and the live pointer generation, read with
-  Step 13's queue-pointer `--read` query.
+Returning the final **SHIPPED** scorecard also certifies deletion readiness:
+required deployment work is complete (including qualified exceptions), the
+deployed PR contains the merged closeout record, and the worktree and local
+environment can be deleted without losing needed records or configuration.
+If preservation, key/configuration recovery, intended source or resource
+handoff remains unresolved, keep the deploy incomplete and list the exact item
+in FOLLOWUPS. Independent repairs and qualified external exceptions do not
+waive preservation. Do not add a second status line or redesign the approved
+scorecard layout to report this requirement.
 
-SHIPPED WITH has one `▲` row per warning, override, skip, substitution, or
-unreviewed commit. Each row shows the wall time it wasted: stopped, failed or
-superseded attempts, review cycles that produced no review, retries, and detours
-around it. Use `0s` when it cost nothing, add a total row, or write `▲ none`.
+Apply **Work versus waiting** in `.claude/shared/report-display-format.md` to
+all current and future deploy agents. Split recorded active fixes and running
+automation from waits for users, credits, providers, queues and dependencies.
+Never use a mixed "fixes / other" row. Record mode transitions with the native
+activity events; unmatched historical gaps appear only as **Wait — reason
+unrecorded**, with no invented cause or active-work credit. Keep the same boxes
+and shared axis; add the work/wait totals inside the final timeline box.
 
-NOT SHIPPED has one `✖` row per piece of this workspace's work that is absent
-from `origin/main` after the merge, each with a concise explanation of what the
-change is and why it was not included:
-
-- Non-ignored uncommitted or untracked changes.
-- Reverted or unmerged commits on branches this workspace created or pushed.
-
-Ignore other workspaces' branches. Write `✖ none` if there is nothing.
-
-End with a `READY TO CLOSE` line: `✅` when nothing is left open; `⚠️` plus the
-open items when work remains outside the merge (unsettled prod state, unshipped
-rows, follow-ups); `❌` when the deploy is not complete.
-
-```text
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- 🚀 DEPLOY SCORECARD                                  ✅ SHIPPED
- #1456 · bounded Hub index repair · 014727c → main
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- STATIC     ✅  lint · tsc · structural · 45 gates            4m55s
- COVERAGE   ✅  BE 190/190 domains · 89.2% lines             11m10s
- LIVE       ✅  creds 6/7 · amplitude · failover · seed 156MB  2m15s
- SMOKE      ✅  8/8 benches                                  18m14s
- SEMANTIC   ✅  8/8 UI · latency p50 0.7–1.9s                10m06s
- SANDBOX    ✅  Claude Code E2B 56/56                           37s
- REVIEW     ⚠️  3 cycles · 1 fixed · last skipped (quota)    12m14s
-────────────────────────────────────────────────────────────────
- PROD       ✅  Render live · 14/14 probes · 0 log errors     6m23s
-            ✅  semantic 6/6 · AgentCard $1 → refunded       11m14s
- TEMPORAL   ✅  no cutover needed · gen 7d9946f524be live
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ⏱ <total> = <active> active + <blocked> blocked + <other> other
- 💸 $1.68 LLM   🌿 fix/hub-index-repair-bounded-2
- 🔗 github.com/Rose-Ai-Labs/rose/pull/1456
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ▲ SHIPPED WITH                                          ⌛ wasted
- ▲ last review cycle skipped · CodeRabbit + Claude quota      4m17s
- ▲ history-ledger revert · GitHub merge conflict              2m27s
- ▲ Anthropic API credits exhausted · warn-only                   0s
- ▲ prod semantic run locally · GH token can't dispatch           0s
-                                                    total     6m44s
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ✖ NOT SHIPPED · this workspace
- ✖ 150ba48a0  smoke history: 30 ledger rows + 10,479 spans · reverted
-   because GitHub flagged a ledger merge conflict
- ✖ worktree   prod AgentCard history rows · uncommitted; landing them
-   would have changed HEAD after review
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- READY TO CLOSE  ✅  nothing left open
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-That example is the PR #1456 deploy. Keep the layout and replace every value. For
-a deploy that stops early, the header reads `❌ BLOCKED · <lane> <result>`, the
-failing lane is listed first, and lanes that never ran are omitted.
-
+WHAT DEPLOYED includes the actual production/Temporal state and verified
+coverage. Every elected AgentCard gate remains **SKIPPED — <reason>**, never
+PASS, cleanup or settlement. Original failures, receipts, delegated repairs,
+financial liabilities and intended unshipped work remain accounted for in the
+fixed boxes. SHIPPED requires the remaining required work to be complete under
+the controlling failure policy and explicit elections; missing validation
+must not become a completion claim.
 
 ### Required post-deploy: cloud-origin local Mac execution and computer use
 
-This is an explicit user acceptance gate. Keep it **OPEN** until witnessed on an
-owned connected Mac; offline relay tests or a tool acknowledgement are insufficient.
+This is an explicit user acceptance gate when an owned Mac is available.
+**Standing user instruction, November 2, 2026:** if no Mac is available, skip
+this test and continue deployment. First inspect owner-scoped device discovery;
+when it establishes that no connected Mac is available, record **SKIPPED — no
+Mac available** with the timestamp and discovery evidence in the deploy report.
+Do not wait for a Mac, request one, or block an otherwise eligible deployment.
+This is an availability skip, not a passing Mac test. When a Mac is available,
+keep the acceptance **OPEN** until witnessed; offline relay tests or a tool
+acknowledgement are insufficient. Access or consent failures on an available
+Mac are not covered by the no-device exception.
+An authentication error or unavailable inventory is not proof of absence.
 Do not start a new database, migrate production, replace encryption keys, or reset
 sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
 
@@ -2886,8 +3626,9 @@ sign-in/app data to satisfy it. Preserve Freedom and all its blocking services.
    cloud fallback may be created. Close only the test-owned session and preserve
    the Mac app, granted files, data, user services and Freedom.
 
-Owner: Code Main. Missing connected Mac/access/consent keeps this acceptance OPEN;
-report that prerequisite instead of marking a mocked or Linux-only run successful.
+Owner: Code Main. With no available connected Mac, apply the recorded skip above.
+Otherwise missing access/consent keeps this acceptance OPEN; report that
+prerequisite instead of marking a mocked or Linux-only run successful.
 
 ## Required factory execution metadata
 
@@ -2897,5 +3638,10 @@ usage and cost, worker attribution, resource/concurrency context, disjoint wait
 times and validation provenance. Every known value requires a timestamped source;
 unavailable values stay explicitly unknown. Never guess historical settings or
 publish raw transcripts, secrets or signed URLs. Set `FACTORY_METADATA_FILE`
-before collection, append snapshots for changes and publish the ledger. Final
+before collection, append snapshots for changes and publish the ledger.
+`run-deploy-stage --start` and every pipeline attempt re-stamp it
+(`factory_metadata.refresh_snapshot`: `observed_at` and `validation.source_sha`
+only) when it is a file directly under this checkout's `.context/` (normally
+`.context/factory-metadata.json`); a retrospective record, a file elsewhere, an
+`unset` or `missing` file is skipped and reported. Final
 scorecards report model/effort/tier and collection gaps alongside timings.

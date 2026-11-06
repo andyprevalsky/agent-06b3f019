@@ -1,0 +1,60 @@
+---
+id: 2026-10-28-node-import-compatibility
+date: 2026-10-28
+title: Process helper used an unavailable flag on supported early Node18
+surface: back-end
+component: deploy-speed-integration
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: The declared Node range included versions predating --import.
+symptoms:
+  - "The declared Node range included versions predating --import."
+  - "--import"
+tags:
+  - deploy
+  - review-stabilization
+sources:
+  - PR #1627
+  - commit da889f4ecc65ce8c1ba92120d0c9301847a02467
+repro: cd back-end && node --experimental-test-module-mocks --import tsx src/tests/unit/processSafety.test.ts
+status: open
+---
+
+## Problem
+
+The declared Node range included versions predating --import.
+
+## Diagnosis
+
+The exact final review and independent triage are retained in
+/var/tmp/deploy-1627/final-review-new-findings.json and
+final-coderabbit-independent-triage.md. Boundary-specific original/candidate
+commands, assertions, outputs, and limitations are retained under
+/var/tmp/deploy-1627/cycle3-code-rca/. These local artifacts supplement the permanent
+owning regression; they do not substitute for full deploy gates.
+
+## Solution
+
+Select loader or import by the supported Node transition; older runtimes are selector-tested, not claimed executed.
+
+The correction was reproduced and independently reviewed outside the frozen integration checkout, then applied after its checks ended. Integrated permanent regression verification and the genuinely fresh full deploy remain required. No original failed receipt is changed to passing.
+Status remains open pending those checks. Golden reference is not applicable to
+these code and diagnostic changes; no new product prompt approval is inferred.
+
+## Human feedback
+
+Preserve the user-required full final sweep, assertions, budgets, review-cycle
+limit, original clocks, exact resource ownership, and Freedom. The prior deploy
+is review-unstable after its third cycle. Stabilize as development and begin a
+fresh deploy rather than adding a fourth cycle to the blocked run.
+
+## Reusable lesson
+
+Validate the owning boundary with the same before/after regression and retain
+failure evidence until the complete new deployment is verified.
+
+The command selects the reviewed candidate snapshot; the report records the same unchanged permanent tests selecting the before snapshot and failing. Old Node selection is mocked; only installed Node22 actual child execution is claimed.
+
+## Integration application
+
+Approved correction applied after all frozen da889f4ec lanes became terminal on 2026-10-28. The prior deployment remains review-unstable with Kernel403 failure. Integrated owning repetitions and the fresh full deploy remain required; no case is closed by temporary proof.

@@ -294,7 +294,23 @@ class CodeTranscriptBuilder:
             )
         ]
 
+    def _superseded_snapshot(self, event: dict[str, Any], index: int, kind: str) -> list[Optional[TranscriptRecord]]:
+        """A replayed partial whose text a later snapshot superseded (the sandbox keeps only its delta).
+
+        It still counts a revision, so a replay reaches the revision already
+        persisted live; its text is the stored one until the next snapshot.
+        """
+        key = f"item:{event['item_id']}"
+        text = {} if key in self._records else {"text": ""}
+        return [self._upsert(key, index, event.get("timestamp"), kind=kind, partial=True, **text)]
+
+    @staticmethod
+    def _is_superseded_snapshot(event: dict[str, Any]) -> bool:
+        return event.get("partial") is True and isinstance(event.get("item_id"), str) and "text" not in event
+
     def _on_thinking(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
+        if self._is_superseded_snapshot(event):
+            return self._superseded_snapshot(event, index, "thinking")
         text = event.get("text") if isinstance(event.get("text"), str) else ""
         key = f"item:{event['item_id']}" if isinstance(event.get("item_id"), str) else f"thinking:{index}"
         tokens, self._thinking_tokens = self._thinking_tokens, None
@@ -324,6 +340,8 @@ class CodeTranscriptBuilder:
         return []
 
     def _on_agent_message(self, event: dict[str, Any], index: int) -> list[Optional[TranscriptRecord]]:
+        if self._is_superseded_snapshot(event):
+            return self._superseded_snapshot(event, index, "assistant")
         text = event.get("text")
         if not isinstance(text, str) or not text.strip():
             return []

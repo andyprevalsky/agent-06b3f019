@@ -3,8 +3,9 @@
  *
  * [MOUNTED] --> renders each section card delegating to domain hooks.
  *
- * Pebble Index 01 is the last card; its plus opens the guided setup modal
- * (state owned by Integrations).
+ * Granola: GranolaSection over the page's useGranola (API key, sync, disconnect).
+ * "Other" (last): Granola, then Pebble Index 01, whose plus opens the guided
+ * setup modal (state owned by Integrations).
  *
  * File System is a FE-only stub: website shows Download for Mac; Mac app
  * shows the plus and stays [MOUNTED] on click (no hook, no backend).
@@ -19,6 +20,7 @@ import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { useGmailConnect } from '../hooks/useGmailConnect';
 import type { useIntegrationActions } from '../hooks/useIntegrationActions';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
+import type { useGranola } from '../hooks/useGranola';
 
 import BrowserCookiesSection from './BrowserCookiesSection';
 import PasswordsSection from './PasswordsSection';
@@ -27,6 +29,7 @@ import ComputeSection from './ComputeSection';
 import SocialsSection from './SocialsSection';
 import PlaidSection from './PlaidSection';
 import FileSystemSection from './FileSystemSection';
+import GranolaSection from './GranolaSection';
 import PebbleIndexSection from './PebbleIndexSection';
 
 interface IntegrationSectionsProps {
@@ -48,6 +51,7 @@ interface IntegrationSectionsProps {
   gmail: ReturnType<typeof useGmailConnect>;
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
+  granola: ReturnType<typeof useGranola>;
 }
 
 function PlaidIntegrationSection({ plaid }: Pick<IntegrationSectionsProps, 'plaid'>) {
@@ -133,6 +137,76 @@ function MessagesIntegrationSection({
   );
 }
 
+function PasswordsIntegrationSection({
+  isBrowserCookiesAvailable,
+  isPasskeysAvailable,
+  accordion,
+  data,
+  passwords,
+  actions,
+}: Pick<
+  IntegrationSectionsProps,
+  | 'isBrowserCookiesAvailable'
+  | 'isPasskeysAvailable'
+  | 'accordion'
+  | 'data'
+  | 'passwords'
+  | 'actions'
+>) {
+  return (
+    <PasswordsSection
+      expanded={accordion.passwordsExpanded}
+      onToggle={() => accordion.toggleSection('passwords')}
+      isBrowserCookiesAvailable={isBrowserCookiesAvailable}
+      isPasskeysAvailable={isPasskeysAvailable}
+      chromePasswordsSynced={data.chromePasswordsSynced}
+      applePasswordsSynced={data.applePasswordsSynced}
+      passkeysSynced={data.passkeysSynced}
+      atlasPasswordsSynced={data.atlasPasswordsSynced}
+      passwordSyncLoading={passwords.passwordSyncLoading}
+      onChromeSync={() => void actions.onChromePasswordsSync()}
+      onPasskeysOpen={() => passwords.openCredentialExchangeModal()}
+      onAtlasPasswordsOpen={() => passwords.setAtlasPasswordsModalOpen(true)}
+    />
+  );
+}
+
+function SocialsIntegrationSection({
+  isBrowserCookiesAvailable,
+  accordion,
+  messages,
+  actions,
+}: Pick<
+  IntegrationSectionsProps,
+  'isBrowserCookiesAvailable' | 'accordion' | 'messages' | 'actions'
+>) {
+  return (
+    <SocialsSection
+      expanded={accordion.socialsExpanded}
+      onToggle={() => accordion.toggleSection('socials')}
+      isBrowserCookiesAvailable={isBrowserCookiesAvailable}
+      linkedinSyncLoading={messages.linkedinSyncLoading}
+      linkedinSyncStarted={messages.linkedinSyncStarted}
+      linkedinConnected={messages.linkedinConnected}
+      onLinkedInSync={() => void actions.onLinkedInSync()}
+    />
+  );
+}
+
+/** "Other", always last: Granola (signed-in accounts) then Pebble Index 01. */
+function OtherSection({
+  isFullySignedIn,
+  granola,
+  onPebbleIndexConnect,
+}: Pick<IntegrationSectionsProps, 'isFullySignedIn' | 'granola' | 'onPebbleIndexConnect'>) {
+  return (
+    <>
+      {isFullySignedIn && <GranolaSection granola={granola} />}
+      <PebbleIndexSection onConnect={onPebbleIndexConnect} />
+    </>
+  );
+}
+
 export default function IntegrationSections({
   isBrowserCookiesAvailable,
   isPasskeysAvailable,
@@ -152,6 +226,7 @@ export default function IntegrationSections({
   gmail,
   actions,
   plaid,
+  granola,
 }: IntegrationSectionsProps) {
   return (
     <>
@@ -165,19 +240,13 @@ export default function IntegrationSections({
         onBrowserSync={(bt) => void actions.onBrowserSync(bt)}
       />
 
-      <PasswordsSection
-        expanded={accordion.passwordsExpanded}
-        onToggle={() => accordion.toggleSection('passwords')}
+      <PasswordsIntegrationSection
         isBrowserCookiesAvailable={isBrowserCookiesAvailable}
         isPasskeysAvailable={isPasskeysAvailable}
-        chromePasswordsSynced={data.chromePasswordsSynced}
-        applePasswordsSynced={data.applePasswordsSynced}
-        passkeysSynced={data.passkeysSynced}
-        atlasPasswordsSynced={data.atlasPasswordsSynced}
-        passwordSyncLoading={passwords.passwordSyncLoading}
-        onChromeSync={() => void actions.onChromePasswordsSync()}
-        onPasskeysOpen={() => passwords.openCredentialExchangeModal()}
-        onAtlasPasswordsOpen={() => passwords.setAtlasPasswordsModalOpen(true)}
+        accordion={accordion}
+        data={data}
+        passwords={passwords}
+        actions={actions}
       />
 
       <MessagesIntegrationSection
@@ -203,19 +272,20 @@ export default function IntegrationSections({
 
       {isFullySignedIn && <PlaidIntegrationSection plaid={plaid} />}
 
-      <SocialsSection
-        expanded={accordion.socialsExpanded}
-        onToggle={() => accordion.toggleSection('socials')}
+      <SocialsIntegrationSection
         isBrowserCookiesAvailable={isBrowserCookiesAvailable}
-        linkedinSyncLoading={messages.linkedinSyncLoading}
-        linkedinSyncStarted={messages.linkedinSyncStarted}
-        linkedinConnected={messages.linkedinConnected}
-        onLinkedInSync={() => void actions.onLinkedInSync()}
+        accordion={accordion}
+        messages={messages}
+        actions={actions}
       />
 
       <FileSystemSection isAvailable={isFileSystemAvailable} />
 
-      <PebbleIndexSection onConnect={onPebbleIndexConnect} />
+      <OtherSection
+        isFullySignedIn={isFullySignedIn}
+        granola={granola}
+        onPebbleIndexConnect={onPebbleIndexConnect}
+      />
     </>
   );
 }

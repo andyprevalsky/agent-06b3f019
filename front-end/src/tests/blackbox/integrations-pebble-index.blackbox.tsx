@@ -51,13 +51,17 @@ describe('Pebble Index 01 integration', () => {
   });
   afterEach(() => localStorage.clear());
 
-  it('is the last Rose Desktop row and its Connect opens the guided setup', async () => {
+  it('is the last Rose Desktop row, under "Other" after Granola, and Connect opens the setup', async () => {
     serveCredentials();
     const user = userEvent.setup();
     const list = await renderDesktop();
     await waitFor(() => expect(within(list).getByText('Compute')).toBeInTheDocument());
     const rows = [...list.querySelectorAll('[data-testid^="integration-row-"]')];
     expect(rows[rows.length - 1]).toBe(rowEl('pebble-index'));
+    expect(rows[rows.length - 2]).toBe(rowEl('granola'));
+    const other = within(list).getByRole('region', { name: 'Other' });
+    expect(within(other).getByText('Granola')).toBeInTheDocument();
+    expect(within(other).getByText('Pebble Index 01')).toBeInTheDocument();
     expect(within(rowEl('pebble-index')).getByText('Pebble Index 01')).toBeInTheDocument();
     expect(rowEl('pebble-index').querySelector('img[src*="pebble-index-icon"]')).not.toBeNull();
 
@@ -135,13 +139,14 @@ describe('Pebble Index 01 integration', () => {
     expect(served.calls).toBe(2);
   });
 
-  it('is the last card on the stock page (flag off) and opens the same setup', async () => {
+  it('is the last card on the stock page (flag off), after Granola, and opens the same setup', async () => {
     serveCredentials();
     const user = userEvent.setup();
     renderIntegrations({ roseDesktop: false });
     const connect = await screen.findByRole('button', { name: 'Connect Pebble Index 01' });
     const cards = connect.closest('.space-y-3')?.children;
     expect(cards?.[cards.length - 1]).toContainElement(connect);
+    expect(cards?.[cards.length - 2]).toHaveTextContent('Granola');
     await user.click(connect);
     expect(await screen.findByTestId('pebble-setup-steps')).toBeInTheDocument();
   });

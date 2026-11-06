@@ -96,6 +96,9 @@ export const TICKER_SPEED_PX_PER_SEC = 30;
 /** Agent polling interval in milliseconds. */
 export const AGENT_POLL_INTERVAL_MS = 10000;
 
+/** Retire an unresponsive list read so automatic refresh can recover. */
+export const AGENT_LOAD_TIMEOUT_MS = 30000;
+
 // ── Drippiness defaults ───────────────────────────────────────────────────
 
 export const DEFAULT_BG_COLORS = 3;

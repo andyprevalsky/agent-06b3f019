@@ -14,12 +14,27 @@ _SECRET_QUERY_KEYS = frozenset({"token", "apikey", "api_key", "jwt"})
 
 
 def tilion_hosts() -> set:
-    """Hostnames of the configured Tilion deployment (``TILION_BASE_URL``)."""
+    """Root hostnames of the Tilion deployment: production plus ``TILION_BASE_URL``."""
     configured = urlsplit((os.environ.get("TILION_BASE_URL") or _TILION_DEFAULT_BASE_URL).strip())
     hosts = {"back.tilion.dev"}
     if configured.hostname:
         hosts.add(configured.hostname.lower())
     return hosts
+
+
+def is_tilion_host(hostname: Optional[str]) -> bool:
+    """Whether ``hostname`` belongs to the Tilion deployment.
+
+    Tilion serves a session's CDP and live-view URLs from a regional subdomain of
+    its deployment (``east.back.tilion.dev``, ``oregon.back.tilion.dev``), so the
+    deployment root and every subdomain of it count. A lookalike that merely
+    contains the root (``evilback.tilion.dev``, ``back.tilion.dev.evil.example``)
+    does not.
+    """
+    host = (hostname or "").lower().rstrip(".")
+    if not host:
+        return False
+    return any(host == root or host.endswith("." + root) for root in tilion_hosts())
 
 
 def redact_cdp_url(cdp_url: str) -> str:
@@ -45,4 +60,4 @@ def redact_url_secrets(url: Optional[str]) -> Optional[str]:
     if not url:
         return url
     host = (urlsplit(url).hostname or "").lower()
-    return redact_cdp_url(url) if host in tilion_hosts() else url
+    return redact_cdp_url(url) if is_tilion_host(host) else url

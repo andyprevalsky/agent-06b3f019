@@ -7,7 +7,6 @@
 import { createContext, useContext } from 'react';
 import type { BrowserSessionMetadata } from '../browser-status-bar/types';
 import type { Agent } from '../../hooks';
-import type { AgentDisplayEntry } from './agentDisplayEntries';
 
 /**
  * Everything that opens in the right-panel slot (one at a time):
@@ -17,7 +16,6 @@ import type { AgentDisplayEntry } from './agentDisplayEntries';
  */
 export type RoseApp =
   | 'browser'
-  | 'display'
   | 'validation'
   | 'phone'
   | 'integrations'
@@ -31,6 +29,8 @@ export interface AgentBrowserTab {
   taskId: string;
   taskLabel?: string;
   live: boolean;
+  /** Owning agent finished: address bar reads "Session ended", never "Connecting…". */
+  ended?: boolean;
   /** Page the agent's browser is on (address bar, UI ledger row 74); null = unknown yet. */
   pageUrl?: string | null;
   /** Latest model reported by this browser task, never the owner model selection. */
@@ -44,13 +44,10 @@ export interface RoseAppsValue {
   openApp: RoseApp | null;
   browserMode: 'local' | 'remote';
   setBrowserMode: (mode: 'local' | 'remote') => void;
-  displayEntries: AgentDisplayEntry[];
-  displaySelection: { agentId: string; id: string } | null;
-  registerDisplays: (entries: AgentDisplayEntry[]) => void;
-  selectDisplay: (selection: { agentId: string; id: string }) => void;
-  openAgentDisplay: (agentId: string, id: string) => void;
-  /** null = Root tab. */
+  /** null = Root tab (or NO_SESSION for a selected agent unless Root was chosen). */
   browserTabAgentId: string | null;
+  /** The user explicitly clicked Root; a selected agent's missing tab never falls back to it. */
+  browserRootChosen: boolean;
   browserTabTaskId: string | null;
   tabs: AgentBrowserTab[];
   agents: Agent[];
@@ -71,7 +68,11 @@ export interface RoseAppsValue {
   openAgent: (agentId: string) => void;
   /** Sign out (Settings panel); undefined when the host has no session. */
   onLogout?: () => void;
-  onCreateAgentInProject?: (project: import('@/lib/api/projects').Project) => void;
+  onCreateAgentInProject?: (
+    project: import('@/lib/api/projects').Project,
+    folderId?: string | null,
+  ) => void;
+  newAgentFolderId?: string | null;
   setSlot: (el: HTMLElement | null) => void;
   setDrawerWidth: (width: number) => void;
   setIsResizing: (resizing: boolean) => void;

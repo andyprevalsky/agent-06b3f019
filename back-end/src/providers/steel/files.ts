@@ -3,6 +3,7 @@
  */
 
 import { prisma } from '../database';
+import { fingerprintInjectionEnabled } from './fingerprintSwitch';
 import { buildFingerprintScript } from './injectionScripts';
 import { steel } from './session';
 import { type FingerprintData, type SteelFileInfo, log } from './types';
@@ -115,6 +116,9 @@ export async function getFingerprintInjectionData(userId: string): Promise<{
   /** IANA timezone from the user's browser fingerprint (user location). */
   timezone: string | null;
 } | null> {
+  // Single producer for every consumer (worker CDP emulation + init script,
+  // challenge recovery, resume): disabled means no payload anywhere.
+  if (!fingerprintInjectionEnabled()) return null;
   const integration = await prisma.integration.findUnique({
     where: { userId_name_accountId: { userId, name: 'browser_fingerprint', accountId: '' } },
   });

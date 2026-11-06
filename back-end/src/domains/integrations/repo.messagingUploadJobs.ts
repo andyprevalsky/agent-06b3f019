@@ -27,6 +27,23 @@ export async function insertMessagingUploadParts(rows: MessagingUploadPartInput[
   await prisma.messagingUploadJob.createMany({ data: rows, skipDuplicates: true });
 }
 
+/**
+ * Extend a claim this drain still holds: only while the part is unfinished and
+ * its lease is still the exact one this drain set, so a claim another instance
+ * took over is never extended. Returns false once the claim is lost.
+ */
+export async function renewMessagingUploadJobClaim(
+  id: string,
+  heldUntil: Date,
+  until: Date
+): Promise<boolean> {
+  const renewed = await prisma.messagingUploadJob.updateMany({
+    where: { id, processedAt: null, failedAt: null, claimedUntil: heldUntil },
+    data: { claimedUntil: until },
+  });
+  return renewed.count === 1;
+}
+
 /** Oldest unfinished parts with attempts left and no live claim. */
 export async function findClaimableMessagingUploadJobIds(
   now: Date,

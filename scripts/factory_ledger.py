@@ -41,6 +41,7 @@ STAGE_FIELDS = (
 )
 RUN_FIELDS = ("git_sha", "branch")
 EVENT_FIELDS = (
+    "run_id",
     "workflow",
     "event",
     "value",
@@ -126,6 +127,8 @@ def stage_rows(root: Path) -> Iterable[dict[str, Any]]:
             record.update({field: metadata.get(field) for field in RUN_FIELDS})
             if record.get("telemetry") is None and metadata.get("telemetry") is not None:
                 record["telemetry"] = metadata["telemetry"]
+            if isinstance(row.get("detail"), dict):
+                record["detail"] = row["detail"]
             yield record
 
 
@@ -137,11 +140,23 @@ def event_rows(root: Path) -> Iterable[dict[str, Any]]:
             continue
         record: dict[str, Any] = {"schema_version": SCHEMA_VERSION, "kind": "factory-event"}
         record.update({field: row.get(field) for field in EVENT_FIELDS})
+        if isinstance(row.get("detail"), dict):
+            record["detail"] = row["detail"]
         yield record
 
 
 def row_epoch(row: dict[str, Any]) -> float:
     return float(row.get("started_epoch") or row.get("recorded_epoch") or 0.0)
+
+
+def is_identity_enrichment(old: dict[str, Any], new: dict[str, Any]) -> bool:
+    """An append-only run link cannot alter an event's native facts."""
+    if old.get("kind") != "factory-event" or old.get("run_id"):
+        return False
+    if not isinstance(new.get("run_id"), str) or not new["run_id"]:
+        return False
+    ignored = {"run_id"}
+    return all(old.get(key) == new.get(key) for key in (old.keys() | new.keys()) - ignored)
 
 
 def encode_rows(rows: Iterable[dict[str, Any]]) -> str:
@@ -153,13 +168,14 @@ def encode_rows(rows: Iterable[dict[str, Any]]) -> str:
 
 def pending_rows(existing_text: str, roots: Iterable[Path]) -> list[dict[str, Any]]:
     """Local stage records and factory events that `existing_text` lacks."""
-    existing = {row_key(row) for row in parse_jsonl(existing_text)}
+    existing = {row_key(row): row for row in parse_jsonl(existing_text)}
     pending: dict[tuple[Any, ...], dict[str, Any]] = {}
     for root in roots:
         for row in (*stage_rows(root), *event_rows(root)):
             key = row_key(row)
-            if key not in existing:
-                pending.setdefault(key, row)
+            if key not in existing or is_identity_enrichment(existing[key], row):
+                if key not in pending or is_identity_enrichment(pending[key], row):
+                    pending[key] = row
     return sorted(pending.values(), key=row_epoch)
 
 

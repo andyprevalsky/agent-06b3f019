@@ -13,14 +13,13 @@ import {
   createWorkflowMessageGroup,
 } from '../../providers/messages';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
-import {
-  generateResponseSchema,
-  type ResponseSchemaDirectAuth,
-} from '../../providers/setResponseSchema';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
+import { buildUserMessageSignalValue } from './agentMessageSignal';
+export { buildUserMessageSignalValue } from './agentMessageSignal';
+import { broadcastChatReactivation } from './agentMessageReactivation';
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
@@ -52,20 +51,6 @@ function resolveRole(
     return { role: body.role };
   }
   return { role: 'USER' };
-}
-
-export function buildUserMessageSignalValue(
-  messageText: string,
-  metadata: Record<string, unknown> | undefined
-): string {
-  const idempotencyKey = metadata?.idempotencyKey;
-  if (metadata?.isResponseSchemaUpdate === true && typeof idempotencyKey === 'string') {
-    return JSON.stringify({
-      internal_type: 'response_schema_update',
-      idempotency_key: idempotencyKey,
-    });
-  }
-  return messageText;
 }
 
 /** USER rows written by agents rather than people (metadata flags, never text). */
@@ -104,6 +89,9 @@ async function routeUserMessage(
     if (count > 0) {
       agentForChat.temporalWorkflowId = null;
       agentForChat.status = 'ACTIVE';
+      // Clients still hold the finished run's status; tell them before the chat
+      // turn streams (the chat Start agent button is gated on ACTIVE).
+      await broadcastChatReactivation(agentId, agentForChat.busId ?? undefined);
     } else {
       const fresh = await repo.findAgentUnique(agentId);
       if (fresh !== null) {
@@ -132,21 +120,6 @@ async function routeUserMessage(
       });
     });
   }
-}
-
-/**
- * Every USER message sent to an agent lifts a user pause, whoever sends it.
- * Only rows the agent's own workflow writes (internal writes stamped with its
- * generation: response-schema context, OTP relays, sub-agent auto-replies)
- * leave the pause alone, because they can land after the user paused.
- */
-async function deliverUserMessage(
-  agentId: string,
-  body: PostMessageBody,
-  authoredByWorkflow: boolean
-): Promise<void> {
-  const signalValue = buildUserMessageSignalValue(body.message, body.metadata);
-  await routeUserMessage(agentId, signalValue, authoredByWorkflow);
 }
 
 /**
@@ -371,8 +344,13 @@ export async function postMessage(
   // echoing them back as receive_user_response would read as user feedback.
   // A Browser-composer message belongs to that browser task: the browser reads
   // it at its next step, so the owner's loop is never signalled for it.
+  // User messages lift a user pause; generation-stamped workflow writes leave it alone.
   if (role === 'USER' && targeted === null && !(isInternal && isAgentAuthoredRow(body.metadata))) {
-    await deliverUserMessage(agentId, body, isInternal && workflowGeneration !== undefined);
+    await routeUserMessage(
+      agentId,
+      buildUserMessageSignalValue(body.message, body.metadata),
+      isInternal && workflowGeneration !== undefined
+    );
   }
 
   return withPiggybackedInbox(agentId, body, isInternal, {
@@ -381,43 +359,4 @@ export async function postMessage(
     text: message.text,
     role: message.role,
   });
-}
-
-// ---------------------------------------------------------------------------
-// Batch message lookup (context pointer resolution)
-// ---------------------------------------------------------------------------
-
-const MAX_BATCH_SIZE = 50;
-
-/** Fetch messages by IDs for context pointer resolution. Scoped to user's agents. */
-export async function getMessagesBatch(ids: unknown, userId: string) {
-  if (!Array.isArray(ids) || ids.length === 0) {
-    return { error: 'ids must be a non-empty array', status: 400 };
-  }
-
-  if (ids.length > MAX_BATCH_SIZE) {
-    return { error: `Maximum ${MAX_BATCH_SIZE} IDs per batch request`, status: 400 };
-  }
-
-  const messages = await repo.findMessagesByIds(ids as string[], userId);
-  return { messages };
-}
-
-// ---------------------------------------------------------------------------
-// Generate response schema
-// ---------------------------------------------------------------------------
-
-/** Generate response schema for a goal (used by browser agent). */
-export async function generateSchema(goal: string, directAuth?: ResponseSchemaDirectAuth) {
-  return generateResponseSchema(goal, { directAuth });
-}
-
-// ---------------------------------------------------------------------------
-// Batch fetch messages
-// ---------------------------------------------------------------------------
-
-/** Fetch messages by IDs, scoped to the requesting user. */
-export async function batchFetchMessages(ids: string[], userId: string) {
-  const messages = await repo.findMessagesByIds(ids, userId);
-  return { messages };
 }

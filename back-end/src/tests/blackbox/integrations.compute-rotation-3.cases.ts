@@ -127,6 +127,8 @@ export async function testRotation_gptUserAuthErrorDisablesToken() {
         source: 'user',
         userId: caller.userId,
         failureReason: 'auth_error',
+        // The report names the leased login; unscoped reports disable none (T7).
+        integrationId: userToken.id,
       }),
     });
     assertStatus(mark.status, 200, mark.data);

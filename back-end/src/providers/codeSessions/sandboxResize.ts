@@ -536,7 +536,8 @@ export async function performSandboxResize<T extends ResizeSessionResult>(params
 export async function stopSandboxCli(sandboxId: string): Promise<void> {
   const sandbox = await Sandbox.connect(sandboxId, { apiKey: process.env.E2B_API_KEY });
   await sandbox.commands.run(
-    'for p in $(pgrep -f \'node /home/user/ws-server.mjs\'); do pkill -TERM -P "$p"; kill -TERM "$p"; done; sleep 1; true',
+    // `[n]ode`: a plain pattern also matches this command's own shell, which the loop then killed.
+    'for p in $(pgrep -f \'[n]ode /home/user/ws-server.mjs\'); do pkill -TERM -P "$p"; kill -TERM "$p"; done; sleep 1; true',
     { timeoutMs: 15_000 }
   );
 }

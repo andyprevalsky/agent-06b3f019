@@ -114,6 +114,25 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'moonshotai/kimi-k3': openRouter(3, 15),
   'openai/gpt-6-luna': openAi(0.1, 0.5, 1.25),
   'openai/gpt-6-sol': openAi(2, 10, 1.25),
+  // Standard short-context API-equivalent prices; subscription usage still has
+  // zero LLM cost in the separate zeroLlmCostDollars scenario.
+  // https://developers.openai.com/api/docs/models/gpt-6.1-sol
+  'gpt-6.1-sol': { ...openAi(2, 10, 1.25), cacheReadMultiplier: 0.05 },
+  'openai/gpt-6.1-sol': { ...openAi(2, 10, 1.25), cacheReadMultiplier: 0.05 },
+  // Global Standard Foundry rates have the same $2 / $0.10 / $10 buckets.
+  // Keep its identity explicit rather than rewriting arbitrary Foundry ids.
+  // https://devblogs.microsoft.com/foundry/whats-new-in-microsoft-foundry-september-2026/
+  'gpt-6.1-sol-foundry': { ...openAi(2, 10, 1.25), cacheReadMultiplier: 0.05 },
+  // Global Standard short-context API equivalent, not regional invoice pricing.
+  // https://devblogs.microsoft.com/foundry/whats-new-in-microsoft-foundry-september-2026/
+  // Cache writes use the model's documented 1.25x API-equivalent convention.
+  'gpt-6-luna-foundry': openAi(0.1, 0.5, 1.25),
+  // Standard API-equivalent Terra rates (30-minute cache writes), not actual
+  // speed/long-context/retention-adjusted charges. Published by both routes:
+  // https://developers.openai.com/api/docs/models/gpt-6.1-terra
+  // https://openrouter.ai/openai/gpt-6.1-terra/
+  'gpt-6.1-terra': { ...openAi(1, 5, 1.25), cacheReadMultiplier: 0.05 },
+  'openai/gpt-6.1-terra': { ...openAi(1, 5, 1.25), cacheReadMultiplier: 0.05 },
   // Historical Cerebras chat primary (archived 2026-08-20). Keep for ledger rows.
   'zai-glm-4.7': uncached(2.25, 2.75),
   'z-ai/glm-4.7': openRouter(0.4, 1.75),

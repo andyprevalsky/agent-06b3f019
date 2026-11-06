@@ -12,10 +12,10 @@ import {
   writeFileSync,
 } from "fs";
 import { spawn, execFileSync } from "child_process";
-import { timingSafeEqual } from "crypto";
-import { createServer } from "http";
+import { createHash, timingSafeEqual } from "crypto";
 import { homedir } from "os";
 import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 
 const LOG_FILE = "/tmp/codex-ws-server.log";
 function log(level, message, data = {}) {
@@ -42,16 +42,28 @@ const CODEX_AZURE_MODEL = process.env.CODEX_AZURE_MODEL || "";
 const FUNDED_PROVIDER = Boolean(
   AZURE_OPENAI_API_KEY && CODEX_AZURE_BASE_URL && CODEX_AZURE_MODEL,
 );
-const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-5.6-terra";
+// The backend sets CODEX_MODEL from the parent's tier; this fallback is the
+// flash row of back-end/src/providers/codeAgentModels.ts (codex-code-model.case.ts).
+const CODEX_MODEL = process.env.CODEX_MODEL || "gpt-6.1-sol";
+// The speed the spawning agent asked for (standard | fast | ultrafast, from its
+// Fast Mode button); catalogSpeed maps it onto the model's real tiers. Azure
+// OpenAI has priority only: fast or ultrafast -> priority, standard -> none.
+const CODEX_SPEED = process.env.CODEX_SPEED || "";
+const CODEX_AZURE_SERVICE_TIER = "priority";
+const CODEX_REASONING_EFFORT = process.env.CODEX_REASONING_EFFORT || "";
+// Codex model catalog for the funded provider (codexTemplate.ts
+// CODEX_AZURE_MODEL_CATALOG_FILE), shipped next to this file. The CLI's bundled
+// catalog has no gpt-6.1-sol, so without it Codex uses generic metadata that
+// drops the priority tier and reasoning effort.
+const CODEX_AZURE_MODEL_CATALOG = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "azure-model-catalog.json",
+);
 const CODE_AGENT_SYSTEM_PROMPT = process.env.CODE_AGENT_SYSTEM_PROMPT || "";
 // Backend-provided Mobbin MCP bearer (design references); unset = no Mobbin server.
 const MOBBIN_MCP_TOKEN = process.env.MOBBIN_MCP_TOKEN || "";
 const GITHUB_REPO_URL = process.env.GITHUB_REPO_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const CODEX_FAST_MODE_PROXY_URL = process.env.CODEX_FAST_MODE_PROXY_URL;
-const CODEX_FAST_MODE_PROXY_PORT = Number(
-  process.env.CODEX_FAST_MODE_PROXY_PORT || "37441",
-);
 
 if (!GOAL) {
   log("error", "CODEX_GOAL not set");
@@ -69,10 +81,17 @@ let eventBuffer = [];
 let exitCode = null;
 let processExited = false;
 let stdoutLineBuffer = "";
-// Set when a Codex turn proves the ChatGPT OAuth credential unusable. Drives the
-// runtime fallback to the funded OpenAI API key (see the run-with-fallback block
-// below). A credential can be DB-valid yet revoked or over quota, so this only
-// surfaces mid-run — a null-credential fallback in the backend cannot catch it.
+// The first credential failure a typed Codex error classifies. Only an unusable
+// login (oauth_refresh_invalid: revoked, refresh failed) switches the run to the
+// funded Azure deployment in the sandbox (see the run-with-fallback block below).
+// A usage limit or out of credits (usage_limit_reached) is reported as a
+// structured usage_limit instead: the code-agent activity pauses the session and
+// the parent's retry rotates own login -> shared pool -> Azure (C15), so the
+// sandbox never starts an Azure continuation that the pause would throw away.
+// The sandbox cannot lease another login itself (the backend leases credentials
+// only at session create), so the backend arms the Azure switch only when no other
+// subscription is leasable; otherwise the error carries `login_unusable` and the
+// session pauses for the parent's retry (reportedLoginUnusable).
 let oauthFallbackReason = null;
 const clients = new Set();
 
@@ -129,6 +148,42 @@ function classifyOAuthFallbackReason(message) {
   }
   return null;
 }
+/**
+ * The unusable login to report on a failed Codex turn, or null. An unusable
+ * ChatGPT login (oauth_refresh_invalid: revoked, refresh failed) switches the run
+ * to Azure only when the backend armed that switch (FUNDED_PROVIDER), which it
+ * does only when no other subscription is leasable (subscriptions first, C15).
+ * Without it the error carries `login_unusable`: the code-agent activity pauses
+ * the session, the login is marked for reconnect and the parent's retry takes
+ * the next credential. The first classification decides, as for usage limits.
+ */
+function reportedLoginUnusable(message) {
+  if (FUNDED_PROVIDER || oauthFallbackReason !== "oauth_refresh_invalid")
+    return null;
+  return classifyOAuthFallbackReason(message || "") === "oauth_refresh_invalid"
+    ? {
+        reason: "oauth_refresh_invalid",
+        ...(CREDENTIAL_FINGERPRINT
+          ? { credential: CREDENTIAL_FINGERPRINT }
+          : {}),
+      }
+    : null;
+}
+/**
+ * Which leased login this sandbox holds, as a digest of its access token (never
+ * the token): the backend marks a login for reconnect only when the stored
+ * credential is still this one and has not simply expired (credentialFeedback.ts).
+ */
+const CREDENTIAL_FINGERPRINT = (() => {
+  try {
+    const token = JSON.parse(CODEX_AUTH_JSON || "null")?.tokens?.access_token;
+    return typeof token === "string" && token
+      ? createHash("sha256").update(token).digest("hex").slice(0, 16)
+      : null;
+  } catch {
+    return null;
+  }
+})();
 // C15: Codex's own rate-limit snapshot (the rollout's latest `token_count`
 // event: rate_limits.{primary,secondary}.used_percent / resets_at and
 // rate_limit_reached_type) says whether a failed turn hit a usage limit. A
@@ -158,6 +213,28 @@ function newestCodexRollout() {
   };
   walk(root, 0);
   return newest?.path ?? null;
+}
+
+/**
+ * The usage limit to report on a failed Codex turn, or null. A limit pauses the
+ * session (C15), so none is reported while an unusable-login switch is pending.
+ * Codex's own snapshot (rate limits, codexErrorInfo) wins; a typed error whose
+ * complete message reports plan or credit exhaustion is a limit without a reset.
+ * The ChatGPT snapshot is ignored once the funded Azure provider serves the run.
+ */
+function reportedUsageLimit(snapshot, error, message) {
+  if (oauthFallbackReason === "oauth_refresh_invalid" && !usingApiKey)
+    return null;
+  if (snapshot && !usingApiKey) return snapshot;
+  const info = error?.codexErrorInfo ?? error?.codex_error_info;
+  if (
+    info === "usageLimitExceeded" ||
+    info === "usage_limit_exceeded" ||
+    classifyOAuthFallbackReason(message) === "usage_limit_reached"
+  ) {
+    return { reached_type: null, resets_at: null };
+  }
+  return null;
 }
 
 function codexUsageLimit() {
@@ -200,6 +277,9 @@ function codexUsageLimit() {
 }
 
 const wss = new WebSocketServer({ port: PORT });
+wss.on("listening", () => {
+  log("info", "Server listening", { port: wss.address().port });
+});
 
 function broadcast(type, data) {
   const message = JSON.stringify({ type, data });
@@ -213,6 +293,27 @@ function appendOutput(type, data) {
   broadcast(type, data);
 }
 
+// Each partial stream event carries the whole item so far. Once a newer
+// snapshot or the completed item arrives, the stored copy keeps only its
+// delta, so the replay buffer grows with the output, not its square.
+const latestPartialIndex = new Map();
+function supersedePartialSnapshot(event, index) {
+  // An empty final (e.g. redacted thinking) supersedes nothing: the streamed
+  // text is the only copy.
+  if (typeof event.item_id !== "string" || typeof event.text !== "string")
+    return;
+  if (!event.text) return;
+  const key = `${event.type}:${event.turn_id ?? ""}:${event.item_id}`;
+  const previous = latestPartialIndex.get(key);
+  if (previous !== undefined) {
+    const compacted = { ...eventBuffer[previous] };
+    delete compacted.text;
+    eventBuffer[previous] = compacted;
+  }
+  if (event.partial === true) latestPartialIndex.set(key, index);
+  else latestPartialIndex.delete(key);
+}
+
 function appendEvent(event) {
   const normalized = {
     version: 1,
@@ -224,8 +325,61 @@ function appendEvent(event) {
       ? { seq: eventBuffer.length + 1 }
       : {}),
   };
+  supersedePartialSnapshot(normalized, eventBuffer.length);
   eventBuffer.push(normalized);
   broadcast("code_agent_event", normalized);
+}
+
+// Replay frames stay far below a client's receive limit (aiohttp: 4 MiB). One
+// frame for a long session's whole history exceeded it, and the client then
+// reconnected forever without reading the exit queued behind it.
+const REPLAY_FRAME_BYTES = 1024 * 1024;
+const REPLAY_OUTPUT_CHARS = 256 * 1024;
+
+// The terminal buffer replays as `buffer` (reset) followed by `stdout` (append)
+// chunks, which every client already handles.
+function sendOutputReplay(ws) {
+  for (let start = 0; start < outputBuffer.length;) {
+    let end = Math.min(start + REPLAY_OUTPUT_CHARS, outputBuffer.length);
+    const last = outputBuffer.charCodeAt(end - 1);
+    if (end < outputBuffer.length && last >= 0xd800 && last <= 0xdbff) end--;
+    ws.send(
+      JSON.stringify({
+        type: start === 0 ? "buffer" : "stdout",
+        data: outputBuffer.slice(start, end),
+      }),
+    );
+    start = end;
+  }
+}
+
+// A client that asks for `?replay_chunks=1` gets the event history as bounded
+// `code_agent_events` frames: chunk 0 replaces what it holds, later chunks
+// append, `last` marks the end. Older clients get the single frame they expect.
+function sendEventReplay(ws, events, chunked) {
+  if (!chunked) {
+    ws.send(JSON.stringify({ type: "code_agent_events", data: events }));
+    return;
+  }
+  let parts = [];
+  let bytes = 0;
+  let chunk = 0;
+  const flush = (last) => {
+    ws.send(
+      `{"type":"code_agent_events","chunk":${chunk},"last":${last},"data":[${parts.join(",")}]}`,
+    );
+    chunk++;
+    parts = [];
+    bytes = 0;
+  };
+  for (const event of events) {
+    const part = JSON.stringify(event);
+    const size = Buffer.byteLength(part);
+    if (parts.length > 0 && bytes + size > REPLAY_FRAME_BYTES) flush(false);
+    parts.push(part);
+    bytes += size;
+  }
+  flush(true);
 }
 
 function describeFileChanges(changes = []) {
@@ -277,13 +431,19 @@ function renderCodexJsonLine(line) {
   if (event.type === "turn.failed") {
     const message = event.error?.message || event.message || "unknown error";
     oauthFallbackReason ??= classifyOAuthFallbackReason(message);
-    const usageLimit = codexUsageLimit();
+    const usageLimit = reportedUsageLimit(
+      codexUsageLimit(),
+      event.error,
+      message,
+    );
+    const loginUnusable = reportedLoginUnusable(message);
     appendEvent({
       type: "error",
       raw_type: event.type,
       message,
       error: event.error || null,
       ...(usageLimit ? { usage_limit: usageLimit } : {}),
+      ...(loginUnusable ? { login_unusable: loginUnusable } : {}),
     });
     return `[Codex] Turn failed: ${message}\n`;
   }
@@ -291,13 +451,19 @@ function renderCodexJsonLine(line) {
     const message =
       event.message || event.error?.message || JSON.stringify(event);
     oauthFallbackReason ??= classifyOAuthFallbackReason(message);
-    const usageLimit = codexUsageLimit();
+    const usageLimit = reportedUsageLimit(
+      codexUsageLimit(),
+      event.error,
+      message,
+    );
+    const loginUnusable = reportedLoginUnusable(message);
     appendEvent({
       type: "error",
       raw_type: event.type,
       message,
       error: event.error || null,
       ...(usageLimit ? { usage_limit: usageLimit } : {}),
+      ...(loginUnusable ? { login_unusable: loginUnusable } : {}),
     });
     return `[Codex] Error: ${message}\n`;
   }
@@ -390,9 +556,6 @@ function appendCodexStdout(data) {
 async function shutdown(code = 0) {
   log("info", "Starting graceful shutdown", { code });
   nativeCodex?.child.kill("SIGTERM");
-  if (codexFastModeProxy) {
-    await new Promise((resolve) => codexFastModeProxy.server.close(resolve));
-  }
   for (const client of clients) {
     if (client.readyState === 1)
       client.send(JSON.stringify({ type: "exit", code }));
@@ -497,18 +660,14 @@ wss.on("connection", (ws, req) => {
   } catch {
     replay = true;
   }
-  if (replay && outputBuffer.length > 0)
-    ws.send(JSON.stringify({ type: "buffer", data: outputBuffer }));
-  const cursor = Number(
-    new URL(req?.url || "/", "http://localhost").searchParams.get("cursor") ||
-      0,
-  );
+  const params = new URL(req?.url || "/", "http://localhost").searchParams;
+  if (replay && outputBuffer.length > 0) sendOutputReplay(ws);
+  const cursor = Number(params.get("cursor") || 0);
   if (replay && eventBuffer.length > 0)
-    ws.send(
-      JSON.stringify({
-        type: "code_agent_events",
-        data: eventBuffer.filter((event) => !event.seq || event.seq > cursor),
-      }),
+    sendEventReplay(
+      ws,
+      eventBuffer.filter((event) => !event.seq || event.seq > cursor),
+      params.get("replay_chunks") === "1",
     );
   if (processExited)
     ws.send(JSON.stringify({ type: "exit", code: exitCode ?? 0 }));
@@ -584,124 +743,6 @@ wss.on("connection", (ws, req) => {
 process.on("SIGINT", () => shutdown(exitCode ?? 0));
 process.on("SIGTERM", () => shutdown(exitCode ?? 0));
 
-log("info", "Server listening", { port: PORT });
-
-function collectBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
-}
-
-function proxyHeaders(headers) {
-  const out = {};
-  const skip = new Set([
-    "connection",
-    "content-length",
-    "host",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-  ]);
-  for (const [key, value] of Object.entries(headers)) {
-    if (skip.has(key.toLowerCase()) || value === undefined) continue;
-    out[key] = Array.isArray(value) ? value.join(", ") : String(value);
-  }
-  return out;
-}
-
-async function startCodexFastModeProxy() {
-  if (!CODEX_FAST_MODE_PROXY_URL) return null;
-
-  const targetBase = new URL(CODEX_FAST_MODE_PROXY_URL.replace(/\/$/, ""));
-  const server = createServer(async (req, res) => {
-    try {
-      const body = await collectBody(req);
-      const target = new URL(
-        `${targetBase.pathname}${req.url || "/"}`,
-        targetBase.origin,
-      );
-      const headers = proxyHeaders(req.headers);
-      const method = req.method || "GET";
-      const upstream = await fetch(target, {
-        method,
-        headers,
-        body: method === "GET" || method === "HEAD" ? undefined : body,
-      });
-      res.statusCode = upstream.status;
-      upstream.headers.forEach((value, key) => {
-        if (
-          ![
-            "content-encoding",
-            "content-length",
-            "connection",
-            "transfer-encoding",
-          ].includes(key.toLowerCase())
-        ) {
-          res.setHeader(key, value);
-        }
-      });
-      const responseBody = Buffer.from(await upstream.arrayBuffer());
-      res.end(responseBody);
-      const cacheHeader = upstream.headers.get("x-fast-mode-cache") || null;
-      log("info", "Codex Fast Mode proxy request", {
-        method,
-        path: req.url,
-        status: upstream.status,
-        cache: cacheHeader,
-      });
-      appendEvent({
-        type: "fast_cache_proxy_request",
-        raw_type: "codex_fast_mode_proxy_request",
-        method,
-        path: req.url,
-        status: upstream.status,
-        cache: cacheHeader,
-      });
-    } catch (err) {
-      log("error", "Codex Fast Mode proxy failed", { error: err.message });
-      appendEvent({
-        type: "fast_cache_proxy_error",
-        raw_type: "codex_fast_mode_proxy_error",
-        method: req.method || "GET",
-        path: req.url,
-        error: err.message,
-      });
-      res.statusCode = 502;
-      res.end(JSON.stringify({ error: "Codex Fast Mode proxy failed" }));
-    }
-  });
-
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(CODEX_FAST_MODE_PROXY_PORT, "127.0.0.1", resolve);
-  });
-  const baseUrl = `http://127.0.0.1:${CODEX_FAST_MODE_PROXY_PORT}`;
-  const sanitizedTarget = CODEX_FAST_MODE_PROXY_URL.replace(
-    /\/[^/]*$/,
-    "/<goalHash>",
-  );
-  log("info", "Codex Fast Mode proxy listening", {
-    baseUrl,
-    target: sanitizedTarget,
-  });
-  appendEvent({
-    type: "fast_cache_proxy_started",
-    raw_type: "codex_fast_mode_proxy_started",
-    base_url: baseUrl,
-    target: sanitizedTarget,
-  });
-  return { server, baseUrl };
-}
-
-let codexFastModeProxy = await startCodexFastModeProxy();
-
 const home = homedir();
 const codexHome = join(home, ".codex");
 // Same contract as the Claude Code ws-server: ROSE_PROJECT_WORKDIR names an
@@ -724,12 +765,46 @@ function useFundedProvider() {
   }
   log("info", "Using the Azure OpenAI funded provider", {
     model: CODEX_AZURE_MODEL,
+    host: azureHost(),
+    service_tier: azureServiceTier(),
+    effort: CODEX_REASONING_EFFORT || null,
+    model_catalog: azureModelCatalogPath(),
   });
   return true;
 }
 
+/** Exec-transport default tier on Azure; app-server turns name theirs explicitly. */
+function azureServiceTier() {
+  return CODEX_SPEED === "fast" ||
+    CODEX_SPEED === "priority" ||
+    CODEX_SPEED === "ultrafast"
+    ? CODEX_AZURE_SERVICE_TIER
+    : null;
+}
+
+function azureHost() {
+  try {
+    return new URL(CODEX_AZURE_BASE_URL).host;
+  } catch {
+    return null;
+  }
+}
+
+/** The shipped catalog when it describes the Azure deployment; otherwise the CLI's own. */
+function azureModelCatalogPath() {
+  try {
+    const catalog = JSON.parse(readFileSync(CODEX_AZURE_MODEL_CATALOG, "utf8"));
+    return (catalog.models || []).some((m) => m.slug === CODEX_AZURE_MODEL)
+      ? CODEX_AZURE_MODEL_CATALOG
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Codex -c flags that select the Azure OpenAI funded provider. */
 function fundedProviderArgs() {
+  const catalog = azureModelCatalogPath();
   return [
     "-c",
     'model_provider="azure"',
@@ -741,6 +816,11 @@ function fundedProviderArgs() {
     'model_providers.azure.env_key="AZURE_OPENAI_API_KEY"',
     "-c",
     'model_providers.azure.wire_api="responses"',
+    // Default tier for exec turns; app-server turns pass it explicitly.
+    ...(azureServiceTier()
+      ? ["-c", `service_tier=${JSON.stringify(azureServiceTier())}`]
+      : []),
+    ...(catalog ? ["-c", `model_catalog_json=${JSON.stringify(catalog)}`] : []),
   ];
 }
 
@@ -964,7 +1044,7 @@ const sanitizedGoal = [
 // The ChatGPT fast-mode proxy only makes sense for the OAuth token — it forwards
 // to the ChatGPT codex backend, which won't authenticate an OpenAI API key. So
 // the API-key path (initial or fallback) runs against the default OpenAI endpoint.
-function buildCodexArgs({ useFastModeProxy, resume = null }) {
+function buildCodexArgs({ resume = null } = {}) {
   const args = [
     "exec",
     "--ignore-user-config",
@@ -975,6 +1055,13 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
     // codex-rs/features/src/lib.rs:1761). runCodexAppServer copies every -c.
     "-c",
     "features.default_mode_request_user_input=false",
+    // The tier's effort for exec turns; app-server turns name it explicitly.
+    ...(CODEX_REASONING_EFFORT
+      ? [
+          "-c",
+          `model_reasoning_effort=${JSON.stringify(CODEX_REASONING_EFFORT)}`,
+        ]
+      : []),
     "--json",
     "--cd",
     workDir,
@@ -1018,18 +1105,6 @@ function buildCodexArgs({ useFastModeProxy, resume = null }) {
       'mcp_servers.mobbin.bearer_token_env_var="MOBBIN_MCP_TOKEN"',
       "-c",
       'mcp_servers.mobbin.enabled_tools=["search_screens","search_flows","search_sections"]',
-    );
-  }
-  if (useFastModeProxy && codexFastModeProxy) {
-    args.splice(
-      1,
-      0,
-      "-c",
-      `chatgpt_base_url="${codexFastModeProxy.baseUrl}"`,
-      "-c",
-      'model_provider="fastmode"',
-      "-c",
-      `model_providers.fastmode={name="fastmode",base_url="${codexFastModeProxy.baseUrl}/backend-api/codex",wire_api="responses"}`,
     );
   }
   return args;
@@ -1180,7 +1255,7 @@ class CodexAppServer {
       this.settings = {
         model: settings.model,
         effort: settings.effort,
-        speed: settings.serviceTier || "standard",
+        speed: reportedSpeed(settings.serviceTier),
       };
       this.settingsVersion++;
       this.emit({
@@ -1220,7 +1295,7 @@ class CodexAppServer {
           type: "error",
           message: p.turn.error?.message || "Codex turn failed",
           error: p.turn.error,
-          usage_limit: this.usageLimit(),
+          usage_limit: null,
         });
         return;
       }
@@ -1258,7 +1333,11 @@ class CodexAppServer {
           type: "error",
           message: p.turn.error?.message || "Codex turn failed",
           error: p.turn.error,
-          usage_limit: this.usageLimit(),
+          usage_limit: this.usageLimit(
+            p.turn.error,
+            p.turn.error?.message || "Codex turn failed",
+          ),
+          ...this.loginUnusable(p.turn.error?.message || "Codex turn failed"),
         });
       this.emit({
         ...common,
@@ -1377,10 +1456,20 @@ class CodexAppServer {
         type: "error",
         message: p.error?.message || p.message,
         error: p.error,
-        usage_limit: this.usageLimit(),
+        usage_limit: this.usageLimit(p.error, p.error?.message || p.message),
+        ...this.loginUnusable(p.error?.message || p.message),
       });
   }
-  usageLimit() {
+  usageLimit(error, message) {
+    oauthFallbackReason ??= classifyOAuthFallbackReason(message || "");
+    return reportedUsageLimit(this.rateLimitSnapshot(), error, message);
+  }
+  /** `login_unusable` for an error event (see reportedLoginUnusable); call after usageLimit. */
+  loginUnusable(message) {
+    const unusable = reportedLoginUnusable(message);
+    return unusable ? { login_unusable: unusable } : {};
+  }
+  rateLimitSnapshot() {
     const limits = this.rateLimits;
     if (!limits) return null;
     const windows = [limits.primary, limits.secondary].filter(Boolean);
@@ -1403,19 +1492,42 @@ class CodexAppServer {
     const catalog = await this.request("model/list", { includeHidden: true });
     this.models = catalog.data || [];
   }
+  catalogModel(name) {
+    return (
+      this.models.find((m) => m.model === name || m.id === name) ||
+      this.models.find((m) => m.isDefault)
+    );
+  }
   // Re-send a failed turn on a new app-server process (same thread, same input).
   async resumeTurn(threadId, turnStart) {
     await this.connect();
+    // The new provider's catalog decides the tier: a ChatGPT-only tier
+    // (ultrafast) carried over from the failed login becomes Azure's priority.
+    const speed = catalogSpeed(
+      this.catalogModel(this.settings.model),
+      this.settings.speed,
+    );
     const response = await this.request("thread/resume", {
       threadId,
       model: this.settings.model,
-      serviceTier:
-        this.settings.speed === "standard" ? null : this.settings.speed,
+      serviceTier: speed === "standard" ? null : speed,
       cwd: workDir,
       approvalPolicy: "never",
       sandbox: "danger-full-access",
     });
     this.threadId = response.thread.id;
+    this.settings = {
+      ...this.settings,
+      model: response.model || this.settings.model,
+      speed: reportedSpeed(response.serviceTier),
+    };
+    this.settingsVersion++;
+    this.emit({
+      type: "settings",
+      thread_id: this.threadId,
+      effective_settings: this.settings,
+      reason: "auth_fallback",
+    });
     const turnId = await this.start(
       turnStart.input,
       this.settings,
@@ -1428,26 +1540,22 @@ class CodexAppServer {
   async initialize(resumeId, goal) {
     await this.connect();
     // Catalog -> supported defaults -> native ACK -> first turn.
-    const model =
-      this.models.find(
-        (m) => m.model === this.settings.model || m.id === this.settings.model,
-      ) || this.models.find((m) => m.isDefault);
+    const model = this.catalogModel(this.settings.model);
     const efforts = (model?.supportedReasoningEfforts || []).map(
       (e) => e.reasoningEffort,
     );
-    const tiers = (model?.serviceTiers || []).map((t) => t.id);
     this.settings = {
       ...this.settings,
       effort:
         this.settings.effort ??
         (!resumeId && efforts.includes("medium") ? "medium" : null),
-      speed:
-        this.settings.speed ??
-        (!resumeId
-          ? ["ultrafast", "fast", "priority"].find((tier) =>
-              tiers.includes(tier),
-            ) || "standard"
-          : null),
+      // The agent's request mapped onto this catalog (never "the fastest
+      // tier by default"); no request is standard, or the saved tier on resume.
+      speed: this.settings.speed
+        ? catalogSpeed(model, this.settings.speed)
+        : resumeId
+          ? null
+          : "standard",
     };
     const response = await this.request(
       resumeId ? "thread/resume" : "thread/start",
@@ -1468,7 +1576,7 @@ class CodexAppServer {
     this.settings = {
       model: response.model,
       effort: response.reasoningEffort ?? this.settings.effort,
-      speed: response.serviceTier || "standard",
+      speed: reportedSpeed(response.serviceTier),
     };
     const goalTurnId = await this.start(
       [{ type: "text", text: goal, text_elements: [] }],
@@ -1637,6 +1745,34 @@ function handoffFromFinalMessage(text, schema) {
   return `${JSON.stringify(prune(value, schema), null, 2)}\n`;
 }
 
+/** A funded Azure session keeps its deployment; only non-standard requests use priority. */
+function azureSpeed(requested) {
+  return requested && requested !== "standard" ? "priority" : "standard";
+}
+
+// A requested speed -> the catalog tiers that satisfy it, nearest first. Codex
+// names priority processing "Fast"; ultrafast falls back to it when a model
+// (gpt-6.1-terra, the Azure catalog) does not offer ultrafast.
+const SPEED_TIERS = {
+  ultrafast: ["ultrafast", "fast", "priority"],
+  fast: ["priority", "fast"],
+  priority: ["priority", "fast"],
+};
+
+/** Codex reports explicit standard routing as "default"; Rose calls it standard. */
+function reportedSpeed(serviceTier) {
+  return !serviceTier || serviceTier === "default" ? "standard" : serviceTier;
+}
+
+/** The tier this catalog model really offers for `requested`; standard when none. */
+function catalogSpeed(model, requested) {
+  const tiers = (model?.serviceTiers || []).map((t) => t.id);
+  return (
+    (SPEED_TIERS[requested] || []).find((tier) => tiers.includes(tier)) ||
+    "standard"
+  );
+}
+
 function stageDirectAttachments(id, attachments = []) {
   if (!Array.isArray(attachments) || attachments.length > 20)
     throw new Error("invalid_attachments");
@@ -1676,7 +1812,7 @@ function stageDirectAttachments(id, attachments = []) {
 }
 
 function spawnCodexAppServer() {
-  const legacyArgs = buildCodexArgs({ useFastModeProxy: !usingApiKey });
+  const legacyArgs = buildCodexArgs();
   // Keep the existing MCP/proxy overrides, replacing exec-only flags.
   const args = ["app-server", "--listen", "stdio://"];
   for (let i = 1; i < legacyArgs.length; i++) {
@@ -1720,7 +1856,9 @@ async function runCodexAppServer() {
   const settings = {
     model: usingApiKey ? CODEX_AZURE_MODEL : CODEX_MODEL,
     effort: process.env.CODEX_REASONING_EFFORT || null,
-    speed: process.env.CODEX_SPEED || null,
+    speed: usingApiKey
+      ? azureSpeed(process.env.CODEX_SPEED || null)
+      : process.env.CODEX_SPEED || null,
   };
   nativeCodex = new CodexAppServer(child, appendEvent, settings, handoff);
   // Runtime fallback, as in the exec transport: a turn that failed because the
@@ -1729,19 +1867,23 @@ async function runCodexAppServer() {
   let fallback = null;
   nativeCodex.recoverFailedTurn = (turn, error) => {
     const reason = classifyOAuthFallbackReason(error?.message || "");
-    if (fallback || usingApiKey || !FUNDED_PROVIDER || !reason) return false;
+    // A usage limit pauses the session instead (C15); see oauthFallbackReason.
+    if (fallback || usingApiKey || !FUNDED_PROVIDER) return false;
+    if (reason !== "oauth_refresh_invalid") return false;
+    if ((oauthFallbackReason ?? reason) !== "oauth_refresh_invalid")
+      return false;
     const failed = nativeCodex;
     const turnStart = failed.turnStarts.get(turn.id) ?? failed.pendingTurnStart;
     const threadId = failed.threadId;
     if (!turnStart || !threadId) return false;
     oauthFallbackReason = reason;
     fallback = (async () => {
-      log("info", "Codex OAuth unavailable; retrying on the Azure provider", {
+      log("info", "Codex OAuth unusable; continuing on the Azure provider", {
         reason,
       });
       appendOutput(
         "stdout",
-        "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n",
+        "[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n",
       );
       appendEvent({
         type: "auth_fallback",
@@ -1759,7 +1901,11 @@ async function runCodexAppServer() {
       const resumed = new CodexAppServer(
         next.child,
         appendEvent,
-        { ...failed.settings, model: CODEX_AZURE_MODEL },
+        {
+          ...failed.settings,
+          model: CODEX_AZURE_MODEL,
+          speed: azureSpeed(failed.settings.speed),
+        },
         handoff,
       );
       nativeCodex = resumed;
@@ -1812,21 +1958,25 @@ if (CODEX_TRANSPORT === "app-server") {
 } else {
   // An API-key-only session (no OAuth credential) must skip the ChatGPT fast-mode
   // proxy — it targets the ChatGPT backend, which won't authenticate an API key.
-  let { code, signal } = await runCodex(
-    buildCodexArgs({ useFastModeProxy: !usingApiKey }),
-  );
+  let { code, signal } = await runCodex(buildCodexArgs());
 
   // Runtime fallback: the ChatGPT OAuth token became unusable mid-run. Retry
   // ONCE on the funded Azure OpenAI provider (no ChatGPT proxy). Mirrors the
   // Rose compute-token→funded fallback.
-  if (code !== 0 && !usingApiKey && FUNDED_PROVIDER && oauthFallbackReason) {
+  // Only an unusable login switches here; a usage limit already paused the run (C15).
+  if (
+    code !== 0 &&
+    !usingApiKey &&
+    FUNDED_PROVIDER &&
+    oauthFallbackReason === "oauth_refresh_invalid"
+  ) {
     const fallbackReason = oauthFallbackReason;
-    log("info", "Codex OAuth unavailable; retrying on the Azure provider", {
+    log("info", "Codex OAuth unusable; continuing on the Azure provider", {
       reason: fallbackReason,
     });
     appendOutput(
       "stdout",
-      "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n",
+      "[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n",
     );
     appendEvent({
       type: "auth_fallback",
@@ -1838,9 +1988,7 @@ if (CODEX_TRANSPORT === "app-server") {
     useFundedProvider();
     usingApiKey = true;
     oauthFallbackReason = null;
-    ({ code, signal } = await runCodex(
-      buildCodexArgs({ useFastModeProxy: false }),
-    ));
+    ({ code, signal } = await runCodex(buildCodexArgs()));
   }
 
   // Delivered user turns run, in order, as resumed turns of the same thread.
@@ -1852,7 +2000,6 @@ if (CODEX_TRANSPORT === "app-server") {
     });
     ({ code, signal } = await runCodex(
       buildCodexArgs({
-        useFastModeProxy: !usingApiKey,
         resume: { threadId: codexThreadId, text: turn.text },
       }),
     ));

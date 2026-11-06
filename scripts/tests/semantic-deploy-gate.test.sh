@@ -172,7 +172,23 @@ if grep -Fq -- "--no-package-lock" "$WORKFLOW"; then
   fail "production semantic installs must not bypass the workspace lockfile"
 fi
 require_text "$RUNNER" 'node scripts/generate-prod-test-session.mjs' "production semantics must not install backend dependencies only to generate auth"
-require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must use four concurrent workers"
+require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must request four concurrent workers as its ceiling"
+# RCA 2026-10-31-production-semantic-gate-oversubscribed-two-vcpu-runner: the
+# runner must cap that ceiling at the runner's CPUs in production mode too.
+# Four Chromium workers on the private-repository runner's two vCPUs scaled every
+# UI case 1.5-1.9x between runs of identical source and pushed the longest case
+# past its unchanged 90s deadline.
+require_text "$RUNNER" 'if [[ "$PROD_MODE" -eq 1 ]]; then
+  SIZING_LOAD1=""' "production semantic sizing must ignore the transient post-install load and cap on CPU count"
+# The folder-controls profiling fixture is opt-in: its browser-wide CDP CPU
+# profiler added ~10s to the 1280px body on one core (35.5s vs 25.3s), a third
+# of the unchanged 90s deadline. Neither the fixture nor the workflow may turn
+# it on by default.
+FOLDER_PROFILE_FIXTURE="$ROOT_DIR/front-end/tests-e2e/folder-profile.ts"
+require_text "$FOLDER_PROFILE_FIXTURE" "const enabled = process.env.SEMANTIC_FOLDER_PROFILE ?? '0';" "folder-controls profiling must be opt-in, never a CI default"
+if grep -q "SEMANTIC_FOLDER_PROFILE" "$WORKFLOW"; then
+  fail "the production semantic workflow must not enable the folder-controls profiler"
+fi
 require_text "$WORKFLOW" "bash front-end/scripts/run-semantic-tests.sh --prod" "production gate must run every semantic spec"
 require_text "$RUNNER" 'FRONTEND_URL="${FRONTEND_URL:-https://www.roselabs.ai}"' "prod semantic default frontend must be www (apex 307s and flakes on some runners)"
 require_text "$RUNNER" 'is_loopback_url()' "prod semantic must detect loopback URLs via host parse"
@@ -182,13 +198,25 @@ require_text "$RUNNER" '127\.([0-9]{1,3}\.){2}[0-9]{1,3}' "prod semantic loopbac
 require_text "$RUNNER" 'localhost|*.localhost|::1' "prod semantic loopback check must cover localhost and IPv6 ::1"
 require_text "$RUNNER" 'curl -4 -sfL --max-time 20 -o /dev/null "$FRONTEND_URL"' "prod frontend probe must force IPv4, follow redirects, and bound wait"
 require_text "$WORKFLOW" "default: https://www.roselabs.ai" "workflow_dispatch frontend default must match the hardened www probe"
-require_text "$DEPLOY_COMMAND" "-f frontend_url=https://www.roselabs.ai" "/deploy production semantic dispatch must target www"
+require_text "$DEPLOY_COMMAND" "--frontend-url https://www.roselabs.ai" "/deploy production semantic dispatch must target www"
+require_text "$WORKFLOW" "source_sha:" "production semantic gate must accept the exact merged commit (source_sha)"
+require_count "$WORKFLOW" 'ref: ${{ inputs.source_sha || (github.event_name == '"'"'workflow_dispatch'"'"' && github.sha) || github.event.repository.default_branch }}' "2" "both semantic checkouts must check out source_sha on dispatch and the trusted default branch on deployment events"
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 1" "latency ratchet must avoid renderer contention"
 require_text "$WORKFLOW" "--prod chat-lifecycle-latency" "production gate must run the lifecycle ratchet"
-if grep -Fq "matrix:" "$WORKFLOW"; then
-  fail "production semantic gate must not split paths into separate sessions"
-fi
+# The lifecycle ratchet shards one chat path per runner (one browser, one worker
+# each). The shard list must cover every path the spec defines, exactly once, and
+# each shard must select its path; the UI job stays one four-worker session.
+LIFECYCLE_SPEC_PATHS=$(sed -nE "s/^    id: '([a-z_]+)',$/\1/p" "$LIFECYCLE_SPEC" | sort | tr '\n' ' ')
+WORKFLOW_MATRIX_PATHS=$(sed -nE 's/^        path: \[(.*)\]$/\1/p' "$WORKFLOW" | tr -d ' ' | tr ',' '\n' | sort | tr '\n' ' ')
+[ -n "$LIFECYCLE_SPEC_PATHS" ] || fail "could not read CHAT_PATHS ids from the lifecycle spec"
+[ "$LIFECYCLE_SPEC_PATHS" = "$WORKFLOW_MATRIX_PATHS" ] ||
+  fail "lifecycle shard matrix ($WORKFLOW_MATRIX_PATHS) must equal the spec's chat paths ($LIFECYCLE_SPEC_PATHS)"
+require_count "$WORKFLOW" "matrix:" "1" "only the lifecycle ratchet may shard; the UI semantic job keeps one shared session"
+require_text "$WORKFLOW" 'CHAT_LIFECYCLE_PATH: ${{ matrix.path }}' "each lifecycle shard must run exactly its own chat path"
+require_text "$WORKFLOW" "fail-fast: false" "one failing lifecycle shard must not cancel the evidence of the others"
+require_count "$WORKFLOW" "filter: blob:none" "2" "both semantic jobs must use the blob-filtered checkout"
+require_text "$WORKFLOW" "/agents/benchmarks/tasks.json" "sparse semantic checkout must keep the benchmark task catalog the specs read"
 if grep -Fq 'npm run dev > frontend-logs.log' "$DEPLOY_COMMAND"; then
   fail "/deploy must not start a second frontend; run.sh --benchmark already owns it"
 fi
@@ -202,7 +230,8 @@ require_text "$DEPLOY_COMMAND" "Explicit user gate overrides (highest-precedence
 require_text "$DEPLOY_COMMAND" "may override **any** \`/deploy\` gate" "/deploy must allow explicit user overrides for every gate"
 require_text "$DEPLOY_COMMAND" 'Record `⚠️ Overridden` in `TEST_REPORT`' "/deploy must disclose overridden gates instead of reporting them as passing"
 require_text "$DEPLOY_COMMAND" 'DEPLOY_GATE_OVERRIDES=credential-health:anthropic' "/deploy must document the narrow Anthropic credential override"
-require_text "$DEPLOY_COMMAND" "Semantic tests run on every /deploy unless the user explicitly overrides that gate." "/deploy must make semantic tests default-on while honoring explicit overrides"
+require_text "$DEPLOY_COMMAND" "When selected by the affected-category plan, run the complete semantic suite." "/deploy must run the complete selected semantic category"
+require_text "$DEPLOY_COMMAND" "This predeploy selection does not waive the required post-deploy production semantic verification." "/deploy must retain production semantic verification"
 require_text "$DEPLOY_COMMAND" "WHERE workspace_path = '\$ESCAPED_WORKSPACE_PATH' AND branch = '\$ESCAPED_BRANCH'" "/deploy must lock PR titles to the exact Conductor workspace path and branch"
 if grep -Fq "WHERE directory_name =" "$DEPLOY_COMMAND"; then
   fail "/deploy must not update Conductor PR title locks by basename; multiple archived workspaces can share the same directory name"
@@ -225,7 +254,28 @@ require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/d
 require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-live-probes.test.py' "/deploy must protect concurrent live-probe scheduling"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/run-deploy-structural-gates.py' "/deploy must schedule independent command-structural suites concurrently"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" 'DEFAULT_MAX_WORKERS = 8' "command-structural runner must bound default host admission"
-require_text "$DEPLOY_STRUCTURAL_RUNNER" 'max_workers=DEFAULT_MAX_WORKERS' "command-structural runner must use bounded default admission"
+# Exercise the default CLI branch; source spelling is not admission behavior.
+python3 - "$DEPLOY_STRUCTURAL_RUNNER" <<'PY_ADMISSION'
+import importlib.util
+import sys
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('structural_admission_contract', sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = runner
+spec.loader.exec_module(runner)
+assert runner.DEFAULT_MAX_WORKERS == 8
+for cpus, expected in ((None, 1), (1, 1), (8, 4), (14, 8), (128, 8)):
+    with patch.object(runner.os, 'cpu_count', return_value=cpus):
+        assert runner.default_max_workers() == expected
+        for status in (0, 1):
+            with patch.object(sys, 'argv', [str(runner.__file__)]), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'load_durations', return_value={}), patch.object(runner, 'run_gates', return_value=status) as run:
+                assert runner.main() == status
+                run.assert_called_once_with(list(runner.GATES), max_workers=expected, failure_state=runner.ROOT / runner.FAILURE_STATE, durations_state=runner.ROOT / runner.DURATIONS_STATE)
+with patch.object(sys, 'argv', [str(runner.__file__), '--max-workers', '3']), patch.object(runner.shutil, 'which', return_value='/fixture/tool'), patch.object(runner, 'load_durations', return_value={}), patch.object(runner, 'run_gates', return_value=1) as run:
+    assert runner.main() == 1
+    run.assert_called_once_with(list(runner.GATES), max_workers=3, failure_state=runner.ROOT / runner.FAILURE_STATE, durations_state=runner.ROOT / runner.DURATIONS_STATE)
+print('PASS: scaled bounded defaults, explicit override, full registry, failure propagation')
+PY_ADMISSION
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"kill-services"' "command-structural runner must retain the benchmark-controller cleanup regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"deploy-structural-runner"' "command-structural runner must retain its signal-handling regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"seed-memory-ratchet"' "command-structural runner must protect the seed-memory deploy wiring"
@@ -233,6 +283,20 @@ require_text "$DEPLOY_COMMAND" 'bash scripts/measure-seed-memory.sh 5 0 0 --enfo
 require_text "$CODERABBIT_CONFIG" 'auto_incremental_review: false' "CodeRabbit must not review every intermediate deploy push"
 require_text "$CODERABBIT_CONFIG" 'auto_pause_after_reviewed_commits: 2' "CodeRabbit must retain a defensive automatic review cap"
 require_text "$DEPLOY_COMMAND" 'scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD"' "/deploy must wait for CodeRabbit on one exact HEAD"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/deploy_approval_batch.py freeze --head "$FREEZE_SHA"' "/deploy must batch approval-scoped hunks at the source freeze"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/deploy_approval_batch.py check' "/deploy must prove the approval still covers the merged bytes"
+require_text "$DEPLOY_COMMAND" 'npm run test:coverage:sharded' "/deploy backend coverage must run as merged-threshold shards"
+require_text "$DEPLOY_COMMAND" 'BACKEND_COVERAGE_FAILED_FIRST=1' "/deploy backend coverage retries must be failed-first full sweeps"
+require_text "$ROOT_DIR/back-end/package.json" '"test:coverage:sharded": "bash scripts/run-coverage-sharded.sh 2 &&' "backend sharded coverage must keep two shards and the teardown check"
+require_text "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" '--check-coverage' "sharded backend coverage must enforce thresholds on the merged report"
+require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage --wait --since "$GROUP_SINCE"' "/deploy gate waits must wake on stage receipts, not fixed polls"
+require_text "$DEPLOY_COMMAND" 'The applicable Mac release remains a required production gate' "/deploy must retain required applicable Mac release completion"
+require_text "$DEPLOY_COMMAND" 'including the Mac release, remains a hard gate' "parallel production checks must retain the Mac release gate"
+require_text "$DEPLOY_COMMAND" 'never close it `clean` merely because the Claude fallback is disabled' "disabled fallback must not waive substantive CodeRabbit review"
+require_text "$ROOT_DIR/CLAUDE.md" 'Format, ESLint, TypeScript and application structural checks always' "the quick categories must always run"
+require_text "$ROOT_DIR/CLAUDE.md" 'Coverage thresholds inside a selected full gate remain' "selected categories must preserve full coverage thresholds"
+require_text "$ROOT_DIR/CLAUDE.md" 'a focused subset cannot masquerade as a full coverage pass' "focused subsets must not replace full selected coverage"
+require_text "$DEPLOY_COMMAND" 'Promoting prebuilt worker image' "/deploy must document prebuilt worker-image promotion"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py start --reset --kind initial' "/deploy must initialize a bounded review ledger"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py require-mergeable --head' "/deploy must reject an unreviewed merge HEAD"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py inherit-sync --head' "/deploy must record main-sync-only HEADs through the audited ledger path"
@@ -423,10 +487,15 @@ require_agentcard_command '--max-concurrency 1 --no-dashboard' "/deploy must pre
 if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; then
   fail "/deploy must not tear down and rebuild the shared stack for each AgentCard task"
 fi
-require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha "$DEPLOY_MERGED_SHA"' "/deploy must dispatch the production semantic gate through the versioned CLI on the exact merged SHA"
+if grep -Fq "gh workflow run chat-lifecycle-ratchet.yml" "$DEPLOY_COMMAND"; then
+  fail "/deploy must not dispatch the production semantic workflow by hand: the raw dispatch tests main's later head, not the merged SHA (#1646)"
+fi
+require_text "$DEPLOY_COMMAND" 'export GH_TOKEN DEPLOY_GH_BIN=/opt/devbox-tools/gh/current/bin/gh' "/deploy must hand the CLI the workflow-scoped gh binary on boxes.dev"
 require_text "$DEPLOY_COMMAND" 'STACK_PORTS=$(bash scripts/resolve-deploy-stack-db.sh) || exit 1' "/deploy E2B smoke must fail closed when it cannot resolve the running stack"
 require_text "$DEPLOY_COMMAND" 'BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/victoria_$CONDUCTOR_WORKSPACE_NAME"' "/deploy E2B smoke must name the isolated workspace test database"
-require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
+require_text "$DEPLOY_COMMAND" 'echo "❌ production semantic gate is not green for $DEPLOY_MERGED_SHA"; exit 1; }' "/deploy must block on production semantic success"
+require_text "$DEPLOY_COMMAND" '--retry-failed-once "<justification>"' "/deploy must document the single failed-jobs retry"
 require_text "$DEPLOY_COMMAND" "Start every applicable provider lane concurrently" "/deploy must not serialize independent production providers"
 require_text "$DEPLOY_COMMAND" "Do not wait for the independent Mac release lane" "production semantics must overlap Mac release work"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export BENCHMARK_SKIP_WMH_BUILD=1' "AgentCard lifecycle stacks must skip unrelated WMH build/refresh before readiness"
@@ -458,6 +527,14 @@ node --test "$PROD_SESSION_TEST"
 # 14 cores, four Chromium workers left one renderer frozen for 34s and a 30s
 # chip poll failed without ever observing a value. Other workspaces' load may
 # never drop, so the runner sizes concurrency (floor 1) instead of waiting.
+# gawk >= 5.3 (ubuntu-latest) rejects `-v load=`: "cannot use gawk builtin `load' as variable name" took every
+# production semantic job down with exit 2 once prod-mode sizing called this function (run 41250037375).
+if grep -nE '^[^#]*-v (load|and|or|xor|lshift|rshift|compl|strtonum|mktime|strftime|systime|gensub|patsplit|asort|asorti|isarray|typeof)=' "$RUNNER"; then
+  fail "semantic_workers_for_capacity must not name an awk variable after a gawk builtin (load, and, or, xor, ...)"
+fi
+if command -v gawk >/dev/null 2>&1; then
+  gawk -v load1=1 'BEGIN { exit (load1 == 1 ? 0 : 1) }' || fail "gawk must accept the renamed load1 variable"
+fi
 eval "$(sed -n '/^semantic_workers_for_capacity() {/,/^}/p' "$RUNNER")"
 [ "$(semantic_workers_for_capacity 4 14 56.20 44)" = 1 ] || fail "an overloaded host must drop semantic workers to one"
 [ "$(semantic_workers_for_capacity 4 14 1.50 60)" = 4 ] || fail "an idle host must keep the requested semantic workers"
@@ -465,18 +542,72 @@ eval "$(sed -n '/^semantic_workers_for_capacity() {/,/^}/p' "$RUNNER")"
 [ "$(semantic_workers_for_capacity 4 14 1.50 10)" = 1 ] || fail "low free memory must drop semantic workers to one"
 [ "$(semantic_workers_for_capacity 1 14 0.10 90)" = 1 ] || fail "host capacity must never raise semantic workers above the request"
 [ "$(semantic_workers_for_capacity 4 '' '' '')" = 4 ] || fail "unknown host capacity must not cap semantic workers"
+# Production mode passes no load: the dedicated two-vCPU GitHub runner caps on
+# CPU count alone (RCA 2026-10-31-production-semantic-gate-oversubscribed-two-vcpu-runner).
+[ "$(semantic_workers_for_capacity 4 2 '' 60)" = 2 ] || fail "a two-vCPU dedicated runner must cap semantic workers at two"
+[ "$(semantic_workers_for_capacity 4 4 '' 60)" = 4 ] || fail "a four-vCPU dedicated runner must keep the requested four workers"
+[ "$(semantic_workers_for_capacity 4 1 '' 60)" = 1 ] || fail "a one-vCPU dedicated runner must serialize semantic workers"
+[ "$(semantic_workers_for_capacity 4 2 '' 10)" = 1 ] || fail "low free memory must still drop a dedicated runner to one worker"
 eval "$(sed -n '/^probe_semantic_host_capacity() {/,/^}/p' "$RUNNER")"
 IFS='|' read -r probe_cpus probe_load probe_mem <<< "$(probe_semantic_host_capacity)"
 [[ "$probe_cpus" =~ ^[1-9][0-9]*$ ]] || fail "host capacity probe must report the CPU count"
-[[ "$probe_load" =~ ^[0-9]+\.[0-9]{2}$ ]] || fail "host capacity probe must report the 1-minute load average"
+[[ -z "$probe_load" || "$probe_load" =~ ^[0-9]+\.[0-9]{2}$ ]] || fail "host capacity probe must report the 1-minute load average as a two-decimal number or leave it empty"
 [[ -z "$probe_mem" || "$probe_mem" =~ ^[0-9]+$ ]] || fail "host capacity probe must report free memory as a whole percentage"
-require_text "$RUNNER" 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS"' "local semantic runs must size Playwright workers to measured host capacity"
+# The probe caps the affinity count at the CFS bandwidth quota (a quota limits
+# CPU time without hiding cores) and withholds the host-wide load whenever the
+# allowed CPU count is narrower than the host, because that load mostly
+# measures work outside the mask. Exercised against a fake cgroup tree.
+PROBE_HOST_CPUS=$(python3 -c 'import os; print(os.cpu_count() or 0)')
+PROBE_AFFINITY=$(python3 -c 'import os; print(len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 0))')
+FAKE_CGROUP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/semantic-cgroup.XXXXXX")
+trap 'rm -rf "$LOCK_TEST_DIR" "$FAKE_CGROUP_ROOT"' EXIT
+printf '0::/\n' > "$FAKE_CGROUP_ROOT/proc-cgroup-v2"
+printf '200000 100000\n' > "$FAKE_CGROUP_ROOT/cpu.max"
+IFS='|' read -r quota_cpus quota_load _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v2" probe_semantic_host_capacity)"
+expected_quota_cpus=$(( PROBE_AFFINITY < 2 ? PROBE_AFFINITY : 2 ))
+[ "$quota_cpus" = "$expected_quota_cpus" ] || fail "a cgroup v2 cpu.max of 200000/100000 must cap the probe at two CPUs (got '$quota_cpus', affinity $PROBE_AFFINITY)"
+if [ "$PROBE_HOST_CPUS" -gt 2 ]; then
+  [ -z "$quota_load" ] || fail "a quota narrower than the host must withhold the host-wide load (got '$quota_load')"
+fi
+printf '250000 100000\n' > "$FAKE_CGROUP_ROOT/cpu.max"
+IFS='|' read -r quota_cpus _ _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v2" probe_semantic_host_capacity)"
+[ "$quota_cpus" = "$(( PROBE_AFFINITY < 3 ? PROBE_AFFINITY : 3 ))" ] || fail "a fractional CFS quota must round up to whole CPUs (got '$quota_cpus')"
+printf 'max 100000\n' > "$FAKE_CGROUP_ROOT/cpu.max"
+IFS='|' read -r quota_cpus quota_load _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v2" probe_semantic_host_capacity)"
+[ "$quota_cpus" = "$PROBE_AFFINITY" ] || fail "an unlimited cpu.max must leave the affinity count (got '$quota_cpus', affinity $PROBE_AFFINITY)"
+if [ "$PROBE_AFFINITY" = "$PROBE_HOST_CPUS" ]; then
+  [[ "$quota_load" =~ ^[0-9]+\.[0-9]{2}$ ]] || fail "an unrestricted host must keep subtracting the 1-minute load (got '$quota_load')"
+fi
+mkdir -p "$FAKE_CGROUP_ROOT/cpu/lane"
+printf '4:cpu,cpuacct:/lane\n' > "$FAKE_CGROUP_ROOT/proc-cgroup-v1"
+printf '%s\n' 100000 > "$FAKE_CGROUP_ROOT/cpu/lane/cpu.cfs_quota_us"
+printf '%s\n' 100000 > "$FAKE_CGROUP_ROOT/cpu/lane/cpu.cfs_period_us"
+IFS='|' read -r quota_cpus quota_load _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v1" probe_semantic_host_capacity)"
+[ "$quota_cpus" = 1 ] || fail "a cgroup v1 cfs quota of one period must cap the probe at one CPU (got '$quota_cpus')"
+if [ "$PROBE_HOST_CPUS" -gt 1 ]; then
+  [ -z "$quota_load" ] || fail "a v1 quota narrower than the host must withhold the host-wide load (got '$quota_load')"
+fi
+printf '%s\n' -1 > "$FAKE_CGROUP_ROOT/cpu/lane/cpu.cfs_quota_us"
+IFS='|' read -r quota_cpus _ _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v1" probe_semantic_host_capacity)"
+[ "$quota_cpus" = "$PROBE_AFFINITY" ] || fail "a cgroup v1 quota of -1 must leave the affinity count (got '$quota_cpus')"
+if command -v taskset >/dev/null 2>&1 && [ "$PROBE_HOST_CPUS" -gt 1 ]; then
+  first_cpu=$(python3 -c 'import os; print(sorted(os.sched_getaffinity(0))[0])')
+  IFS='|' read -r mask_cpus mask_load _ <<< "$(SEMANTIC_CGROUP_ROOT="$FAKE_CGROUP_ROOT" SEMANTIC_PROC_CGROUP="$FAKE_CGROUP_ROOT/proc-cgroup-v2" taskset -c "$first_cpu" bash -c "$(declare -f probe_semantic_host_capacity); probe_semantic_host_capacity")"
+  [ "$mask_cpus" = 1 ] || fail "a one-CPU affinity mask must report one CPU (got '$mask_cpus')"
+  [ -z "$mask_load" ] || fail "an affinity mask narrower than the host must withhold the host-wide load (got '$mask_load')"
+fi
+require_text "$RUNNER" 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity "$REQUESTED_SEMANTIC_WORKERS"' "semantic runs must size Playwright workers to measured host capacity"
 require_text "$RUNNER" 'echo "  Semantic workers: requested=$REQUESTED_SEMANTIC_WORKERS effective=$SEMANTIC_WORKERS' "semantic runner must log the capacity inputs behind its worker count"
 validate_line=$(grep -n 'SEMANTIC_WORKERS must be a positive integer' "$RUNNER" | head -1 | cut -d: -f1)
 capacity_line=$(grep -n 'SEMANTIC_WORKERS=$(semantic_workers_for_capacity' "$RUNNER" | head -1 | cut -d: -f1)
 first_launch_line=$(grep -n 'run_playwright test' "$RUNNER" | head -1 | cut -d: -f1)
 [ -n "$capacity_line" ] && [ "$validate_line" -lt "$capacity_line" ] && [ "$capacity_line" -lt "$first_launch_line" ] \
   || fail "semantic worker sizing must run after request validation and before Playwright launches"
+# The sizing block must not be fenced to local mode again: the production gate
+# is where four workers met two vCPUs.
+if sed -n "${validate_line},${capacity_line}p" "$RUNNER" | grep -q 'PROD_MODE" -eq 0'; then
+  fail "semantic worker sizing must apply in production mode as well as local mode"
+fi
 
 # LOCAL_DB_PORT + unset DATABASE + set DIRECT must not clobber the caller URL.
 REPO_DIR="$LOCK_TEST_DIR"

@@ -26,6 +26,7 @@ import {
   RoseStallError,
 } from './errors';
 import type { PoolSpec } from './pools';
+import { anthropicSpeedFor, type AgentSpeed } from './speed';
 import {
   boundedRateLimitBackoffMs,
   extractRateLimitedUntil,
@@ -72,7 +73,7 @@ interface BuildBodyOptions {
   toolChoice?: unknown;
   maxTokens?: number;
   temperature?: number;
-  providerFastMode?: boolean;
+  speed?: AgentSpeed;
   effort?: string;
 }
 
@@ -122,10 +123,6 @@ function downgradeForcedToolChoiceIfUnsupported(
     downgraded.disable_parallel_tool_use = true;
   }
   body.tool_choice = downgraded;
-}
-
-function supportsAnthropicFastMode(model: string): boolean {
-  return ['claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8'].includes(model);
 }
 
 function addCacheBreakpoint(messages: Array<{ role: string; content: unknown }>): void {
@@ -280,9 +277,8 @@ export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unkno
   if (modelSupportsOutputConfigEffort(opts.poolSpec.claudeAuthModel)) {
     body.output_config = { effort: normalizeReasoningEffort(opts.effort) };
   }
-  if (opts.providerFastMode === true && supportsAnthropicFastMode(opts.poolSpec.claudeAuthModel)) {
-    body.speed = 'fast';
-  }
+  const anthropicSpeed = anthropicSpeedFor(opts.speed, opts.poolSpec.claudeAuthModel);
+  if (anthropicSpeed !== undefined) body.speed = anthropicSpeed;
 
   // Detect whether tools were synthesized from response_format below — when
   // they are, we MUST force tool_choice so the model emits a tool_use block
@@ -353,7 +349,7 @@ interface ClaudeAuthOptions {
   callSite?: string;
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
-  providerFastMode?: boolean;
+  speed?: AgentSpeed;
   effort?: string;
 }
 
@@ -371,7 +367,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     toolChoice: opts.toolChoice,
     maxTokens: opts.maxTokens,
     temperature: opts.temperature,
-    providerFastMode: opts.providerFastMode,
+    speed: opts.speed,
     effort: opts.effort,
   });
   // `-claude` marks the $0 OAuth path (used for cost detection downstream);

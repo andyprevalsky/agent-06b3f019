@@ -175,6 +175,9 @@ def test_sandbox_instance_does_not_reload_dotenv():
     importer = Importer(workflow_sandbox_restrictions(), RestrictionContext())
     with importer.applied():
         builtins.__import__("workflows.agent_workflow")
+        # Shared activity imports may no longer pull config into the sandbox.
+        # Exercise its passthrough policy directly instead of relying on that side effect.
+        builtins.__import__("config")
     sandbox_modules = importer.new_modules
     assert sandbox_modules.get("workflows.agent_workflow") is not sys.modules["workflows.agent_workflow"], (
         "sandbox did not re-import the workflow module"

@@ -24,6 +24,7 @@ import { gmailAccounts } from '../hooks/useIntegrationData';
 import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { usePasswordSync } from '../hooks/usePasswordSync';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
+import type { useGranola } from '../hooks/useGranola';
 import BrowserIcon from './BrowserIcon';
 import { BrowserCookiesIcon } from './BrowserCookiesSection';
 import type {
@@ -59,6 +60,7 @@ import {
 import { visibleInstitutionItems } from './plaidItemView';
 import PlaidLogoIcon from './PlaidLogoIcon';
 import { InstagramIcon, LinkedInIcon, XIcon } from './SocialsSection';
+import { GranolaIcon } from './GranolaSection';
 
 export interface DesktopIntegrationsProps {
   isBrowserCookiesAvailable: boolean;
@@ -78,6 +80,7 @@ export interface DesktopIntegrationsProps {
   gmail: ReturnType<typeof useGmailConnect>;
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
+  granola: ReturnType<typeof useGranola>;
 }
 
 export interface DesktopSectionView {
@@ -342,6 +345,25 @@ function socialRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
   return views;
 }
 
+function granolaRow(p: DesktopIntegrationsProps, removal: RemovalPort): DesktopIntegrationView {
+  const row = p.data.connectedIntegrations.find((i) => i.name === 'granola');
+  const { granola } = p;
+  const label = granola.status?.accountEmail ?? 'Granola';
+  return {
+    key: 'granola',
+    name: 'Granola',
+    icon: tile(DropdownIconPreset.granola, <GranolaIcon />),
+    accounts: singleAccount(row, { displayName: 'Granola', label }, removal),
+    availability: 'ready',
+    onConnect: () => void granola.connect(),
+    connecting: granola.busy === 'connect',
+    extra:
+      granola.error !== null ? (
+        <p className="ml-[46px] mt-1 text-xs text-destructive">{granola.error}</p>
+      ) : undefined,
+  };
+}
+
 function fileSystemRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
   return {
     key: 'file-system',
@@ -367,7 +389,7 @@ function pebbleIndexRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
 }
 
 /** Sections in the stock order; Compute and Banks need a fully signed-in account.
- * Pebble Index 01 (Wearables) is always last. */
+ * "Other" is always last: Granola (signed in) then Pebble Index 01. */
 export function desktopSectionViews(
   p: DesktopIntegrationsProps,
   removal: RemovalPort,
@@ -392,6 +414,7 @@ export function desktopSectionViews(
   }
   sections.push({ title: 'Socials', rows: socialRows(p, removal) });
   sections.push({ title: 'File System', rows: [fileSystemRow(p)] });
-  sections.push({ title: 'Wearables', rows: [pebbleIndexRow(p)] });
+  const other = p.isFullySignedIn ? [granolaRow(p, removal)] : [];
+  sections.push({ title: 'Other', rows: [...other, pebbleIndexRow(p)] });
   return sections;
 }

@@ -21,6 +21,9 @@ export type {
   CompletionOptions,
   ContentBlock,
   ResponseFormat,
+  SubscriptionCredential,
+  SubscriptionLeaseFailure,
+  SubscriptionLeases,
 } from './types';
 export {
   RoseAllFailed,
@@ -36,3 +39,13 @@ export {
 export { POOL_REGISTRY, getPool, isRoseModel, poolForModel } from './pools';
 export type { PoolName, PoolSpec } from './pools';
 export { StructuredOutputAccumulator, StructuredOutputCardinalityError } from './structuredOutput';
+export {
+  AGENT_SPEEDS,
+  agentSpeedFromRow,
+  isAgentSpeed,
+  normalizeAgentSpeed,
+  anthropicSpeedFor,
+  openAiServiceTierFor,
+  foundryServiceTierFor,
+} from './speed';
+export type { AgentSpeed } from './speed';

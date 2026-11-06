@@ -1,4 +1,5 @@
 import type React from 'react';
+import { replaceEqualDeep } from '@tanstack/react-query';
 import type { AgentDetail, AgentDetailResponse, Message } from '@/lib/api';
 import type { InsertMessagePayload } from '@/lib/realtime';
 
@@ -30,11 +31,14 @@ export function applyAgentBackfill(
     if (!isCurrentAgent()) return previous;
     const apiIds = new Set(data.messages.map((message) => message.message_id));
     const realtimeOnly = previous.filter((message) => !apiIds.has(message.message_id));
-    return [...data.messages, ...realtimeOnly].sort((left, right) =>
-      (left.timestamp ?? '').localeCompare(right.timestamp ?? ''),
+    return replaceEqualDeep(
+      previous,
+      [...data.messages, ...realtimeOnly].sort((left, right) =>
+        (left.timestamp ?? '').localeCompare(right.timestamp ?? ''),
+      ),
     );
   });
-  setAgent((previous) => (isCurrentAgent() ? data.agent : previous));
+  setAgent((previous) => (isCurrentAgent() ? replaceEqualDeep(previous, data.agent) : previous));
   setIsChatMode((previous) => (isCurrentAgent() ? isChatCapableAgent(data.agent) : previous));
 }
 
@@ -89,10 +93,17 @@ export function registerBrowserBackfillTask(
 }
 
 /** A stalled read must release its owner even if the transport ignores abort. */
-async function fetchCompletionSnapshot(agentId: string, timeoutMs: number) {
+async function fetchCompletionSnapshot(agentId: string, timeoutMs: number, signal?: AbortSignal) {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort = () => {};
   const timeout = new Promise<never>((_resolve, reject) => {
+    abort = () => {
+      controller.abort();
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     timer = setTimeout(() => {
       controller.abort();
       reject(new Error('Connected backfill request timed out'));
@@ -102,7 +113,22 @@ async function fetchCompletionSnapshot(agentId: string, timeoutMs: number) {
     return await Promise.race([fetchAgentDetail(agentId, controller.signal), timeout]);
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
+}
+
+/** Release both the retry timer and its captured trajectory when its owner exits. */
+function waitForBackfill(delayMs: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    signal?.addEventListener('abort', finish, { once: true });
+    if (signal?.aborted) finish();
+  });
 }
 
 interface PostSubscribeBackfillDeps {
@@ -115,6 +141,7 @@ interface PostSubscribeBackfillDeps {
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>;
   setIsChatMode: React.Dispatch<React.SetStateAction<boolean>>;
+  signal?: AbortSignal;
 }
 
 /**
@@ -131,6 +158,7 @@ export async function runPostSubscribeBackfill({
   setMessages,
   setAgent,
   setIsChatMode,
+  signal,
 }: PostSubscribeBackfillDeps): Promise<void> {
   if (leaseRef.current?.agentId !== selectedAgentId) {
     leaseRef.current = {
@@ -156,6 +184,7 @@ export async function runPostSubscribeBackfill({
           DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS,
           attempt === 0 ? DISCONNECTED_BACKFILL_REQUEST_TIMEOUT_MS : remainingMs,
         ),
+        signal,
       );
       if (isCancelled() || !isCurrentAgent()) return;
       applyAgentBackfill(data, setMessages, setAgent, setIsChatMode, isCurrentAgent);
@@ -196,7 +225,7 @@ export async function runPostSubscribeBackfill({
     }
     const delayMs = Math.min(retryDelayMs, lease.expiresAt - Date.now());
     if (delayMs <= 0) break;
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    await waitForBackfill(delayMs, signal);
     if (isCancelled()) return;
   }
 }

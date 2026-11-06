@@ -424,8 +424,9 @@ describe('BrowserAgentChip recording', () => {
     const header = screen.getByTestId('browser-agent-chip-header');
     expect(header).toHaveTextContent('Done');
     expect(header).not.toHaveTextContent('Failed');
-    const collapsed = screen.getByText(/^\*\*Goal\*\*: Find the error banner/);
-    expect(collapsed.textContent?.startsWith('**Goal**: Find the error banner')).toBe(true);
+    // Andy 2026-10-28: the collapsed preview leads with the goal, without raw markdown.
+    const collapsed = screen.getByText(/^Goal: Find the error banner/);
+    expect(collapsed.textContent).not.toContain('**');
     unmount();
 
     const failure = { ...anchorMsg, text: goalFirst('❌ FAILED') };

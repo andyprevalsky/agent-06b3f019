@@ -8,12 +8,12 @@ const expected = {
     hash: 'bb160b5b525e80277a8009f80f575f0c2e0ab9a1ca9dc9856bbd83a298b665cd',
   },
   sequentialTests: {
-    count: 17,
-    hash: '8b1f3584d289c31a81def8b5ab119b80392865750697e8ee5d35a3b78d479384',
+    count: 16,
+    hash: '5179a4b62d6546997493dd47d3ac7c3856decfd5f5ebd3f4fdb3a7f7f8e7b752',
   },
   pooledSequentialTests: {
     count: 34,
-    hash: '969d66efa40349cb9fbf62df916a0f5cd59322c00efe22c0f94c6333dcae6881',
+    hash: '04776ce085bb4c80590ac063625c7e36be4394dd68dbf8368b96857b62d11183',
   },
   boundarySequentialTests: {
     count: 7,

@@ -461,7 +461,8 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
 STOCK_SPAWN_CODE_LINE = (
     "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
     "Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after "
-    "completion. The task should be tightly scoped and self-sufficient."
+    "completion. The task should be tightly scoped and self-sufficient. Send video generation or editing "
+    "to a code agent; tell it to make real footage with `rose video` and edit with ffmpeg."
 )
 ROSE_DESKTOP_PROMPT_TERMS = ("inline_view", "rose_user_ui", "Rose app UI", "pinned", "inline view")
 
@@ -543,6 +544,36 @@ async def test_planner_tools_description_follows_the_workflow_account():
             async for _event in SetPlanManager().execute_tool(_Wf(user_id), {"tool": "set_plan"}, "call-1"):
                 pass
     assert captured == [True, True, False]
+
+
+def test_root_agent_routes_video_requests_to_a_code_agent():
+    """User-directed (Andy, 2026-10-28): video generation/editing goes to a code agent.
+
+    The rule lives in the spawn_agent ``code`` line for both account groups, so the root
+    planner sees it; the code agent's side is the talk-to-user skill's ``video.md``
+    (`rose video`, back-end rose-skills structural test).
+    """
+    from domains.set_plan.service import get_planner_tools_description
+    from tools.prompts.spawn_agent import CODE_LINE, CODE_LINE_ROSE_DESKTOP, CODE_VIDEO_SENTENCE
+
+    rule = "Send video generation or editing to a code agent; tell it to make real footage with `rose video`"
+    assert CODE_VIDEO_SENTENCE.startswith(rule)
+    for line in (CODE_LINE, CODE_LINE_ROSE_DESKTOP):
+        assert line.endswith(" " + CODE_VIDEO_SENTENCE), line
+    for rose_desktop in (False, True):
+        planner = get_planner_tools_description(rose_desktop=rose_desktop)
+        assert planner.count(rule) == 1, f"planner (rose_desktop={rose_desktop}) states the video rule once"
+
+    # Prod 2026-10-28 (root 74c5b166): with the rule only on the spawn_agent code line,
+    # an un-hinted "make a video" goal went to browser agents on Replicate. The root
+    # system prompt's tool section must route video to a code agent in both phases.
+    from utils.prompts import build_system_prompt
+
+    root_rule = 'Video: to make or edit a video, use spawn_agent(type="code").'
+    for phase in ("PLAN", "EXECUTE"):
+        prompt = build_system_prompt(phase, [])
+        assert prompt.count(root_rule) == 1, f"root {phase} prompt states the video routing rule once"
+        assert "do not use a browser on third-party video sites" in prompt
 
 
 def test_planner_spawn_aliases_documented_in_prompt():
@@ -1566,6 +1597,26 @@ def test_change_environment_size_skill_guards_against_runaways():
         assert phrase not in lower, f"banned phrase {phrase!r} in the skill"
 
 
+_AGENT_GRAPH_SKILL = AGENTS_ROOT.parent / "back-end" / "src" / "assets" / "rose-skills" / "agent-graph" / "SKILL.md"
+
+
+def test_agent_graph_skill_states_when_messages_reach_a_code_agent():
+    """The agent-graph skill matches the ws-server delivery contract.
+
+    ws-server.mjs merges a message that arrives while the CLI works into the
+    running turn, and ends stdin when an autonomous turn finishes (a later
+    turn is rejected session_ended). The skill promised the opposite
+    ("arrive as a new user turn after your current turn"), so a code agent
+    that asked its parent a question and ended its turn never got the answer.
+    """
+    text = _AGENT_GRAPH_SKILL.read_text()
+    lower = " ".join(text.lower().split())
+    assert "after your current turn" not in lower, "a finished turn receives no later messages"
+    for needle in ("while you are still working", "added to your current turn", "your run is over"):
+        assert needle in lower, f"agent-graph SKILL.md must say {needle!r}"
+    assert "\u2014" not in text and "\u2013" not in text, "no em-dashes or en-dashes in the skill"
+
+
 def test_no_banned_phrases_in_prompt_strings():
     """Banned phrases must not appear in prompt-source string literals.
 
@@ -2189,7 +2240,6 @@ def test_parent_prompts_route_browser_approval_through_commit_click():
         )
 
 
-
 # ============================================================================
 # 24. Browser sign-up identity facts
 # ----------------------------------------------------------------------------
@@ -2215,6 +2265,85 @@ def test_browser_identity_facts_in_spawn_goal_and_auth_contract():
     rule = "Sign in or sign up only with identities listed in Auth Options."
     for recover in (True, False):
         assert rule in build_authentication_contract(recover_enabled=recover)
+
+
+_CODE_AGENT_NAME = re.compile(r"spawn_code_agent|spawn_claude_code_agent|code agent|type='code'|type=\"code\"", re.I)
+_LIFETIME_WORD = re.compile(r"lifetime|deadline|time limit|time-limit|timeout|expires|at most", re.I)
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*(seconds?|secs?|s|minutes?|mins?|min|hours?|hrs?|h|days?|d)\b", re.I)
+_DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _stated_durations(line):
+    for amount, unit in _DURATION.findall(line):
+        key = unit.lower()[0] if not unit.lower().startswith("mi") else "m"
+        yield float(amount) * _DURATION_UNIT_SECONDS[key]
+
+
+def test_planner_prompt_states_no_code_agent_lifetime_shorter_than_runtime():
+    """The planner prompt must not give code agents a lifetime the runtime does not enforce.
+
+    The code-agent activity runs with CODE_AGENT_ACTIVITY_NO_DEADLINE (C11: no
+    runtime limit, liveness is the heartbeat; an idle session pauses and
+    resumes). The planner prompt said "spawn_code_agent has a 10 min lifetime",
+    so plans cut multi-day code work into 10-minute pieces. Any line of the
+    prompt the planner receives that names a code agent together with a
+    lifetime/deadline word may only state a duration at least that long.
+    """
+    from domains.set_plan.service import get_planner_tools_description
+    from domains.spawn_claude_code_agent.config import CODE_AGENT_ACTIVITY_NO_DEADLINE
+    from utils.prompts import build_planner_system_prompt
+
+    runtime_seconds = CODE_AGENT_ACTIVITY_NO_DEADLINE.total_seconds()
+    assert runtime_seconds >= 365 * 86400, "the code-agent activity has no practical deadline (C11)"
+    for rose_desktop in (False, True):
+        prompt = build_planner_system_prompt(get_planner_tools_description(rose_desktop=rose_desktop))
+        for line in prompt.splitlines():
+            if not (_CODE_AGENT_NAME.search(line) and _LIFETIME_WORD.search(line)):
+                continue
+            for seconds in _stated_durations(line):
+                assert seconds >= runtime_seconds, (
+                    f"planner prompt states a {seconds:.0f}s code-agent lifetime; the runtime deadline is "
+                    f"{runtime_seconds:.0f}s (CODE_AGENT_ACTIVITY_NO_DEADLINE): {line!r}"
+                )
+
+
+def test_wait_for_timeout_description_points_long_waits_to_until_timestamp():
+    """WaitForTool.timeout_seconds names the event-driven long wait the runtime implements.
+
+    agents-mode waits are capped at WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS (Codex
+    wait_agent parity). A longer wait is one until_timestamp wait (up to
+    MAX_WAIT_SECONDS) that ends early on GENERAL_WAKE_KINDS: a background agent
+    finishing (agent_notification) or an agent message (agent_message). The
+    runtime behavior is proven by wait_for.blackbox.py
+    test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes.
+    """
+    import importlib.util
+
+    from domains.wait_for.config import MAX_WAIT_SECONDS
+    from helpers.wait_wake import GENERAL_WAKE_KINDS
+    from utils.tool_schemas import WaitForTool
+    from utils.wait_for_bounds import WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS
+
+    # The runtime the text describes.
+    assert MAX_WAIT_SECONDS > WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS, "until_timestamp must outlast the agents cap"
+    assert {"agent_notification", "agent_message"} <= set(GENERAL_WAKE_KINDS), GENERAL_WAKE_KINDS
+    spec = importlib.util.spec_from_file_location(
+        "wait_for_blackbox_for_invariant", AGENTS_ROOT / "tests" / "blackbox" / "wait_for.blackbox.py"
+    )
+    wait_tests = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(wait_tests)
+    assert callable(
+        getattr(wait_tests, "test_wait_for_multi_day_timestamp_wakes_when_a_background_agent_finishes", None)
+    )
+
+    description = " ".join(WaitForTool.model_json_schema()["properties"]["timeout_seconds"]["description"].split())
+    assert f"at most {WAIT_FOR_AGENTS_MAX_TIMEOUT_SECONDS}" in description, description
+    lower = description.lower()
+    assert "for a longer wait use until_timestamp" in lower, description
+    assert "ends early" in lower, "the description must state the early wake"
+    assert "background agents finishes" in lower, "agent_notification wake must be described"
+    assert "messages you" in lower, "agent_message wake must be described"
+
 
 async def run_all_tests():
     print("prompt-invariants blackbox tests:")
@@ -2395,6 +2524,18 @@ async def run_all_tests():
         "change_environment_size_skill_guards_against_runaways",
         test_change_environment_size_skill_guards_against_runaways,
     )
+    r.record(
+        "agent_graph_skill_states_when_messages_reach_a_code_agent",
+        test_agent_graph_skill_states_when_messages_reach_a_code_agent,
+    )
+    r.record(
+        "planner_prompt_no_code_agent_lifetime_shorter_than_runtime",
+        test_planner_prompt_states_no_code_agent_lifetime_shorter_than_runtime,
+    )
+    r.record(
+        "wait_for_timeout_description_points_long_waits_to_until_timestamp",
+        test_wait_for_timeout_description_points_long_waits_to_until_timestamp,
+    )
 
     # 12. No restating-the-schema patterns / broken cross-refs (C6, C7)
     r.record(
@@ -2482,6 +2623,11 @@ async def run_all_tests():
     await r.record_async(
         "planner_tools_description_follows_the_workflow_account",
         test_planner_tools_description_follows_the_workflow_account,
+    )
+    # 23b. Video generation/editing routes to a code agent (user-directed 2026-10-28)
+    r.record(
+        "root_agent_routes_video_requests_to_a_code_agent",
+        test_root_agent_routes_video_requests_to_a_code_agent,
     )
     # 24. Browser sign-up identity facts (RCA Q3b, run e0c401c1)
     r.record(

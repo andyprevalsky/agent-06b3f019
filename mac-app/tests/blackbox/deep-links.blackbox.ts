@@ -18,6 +18,8 @@
  *       * host=payment-success  -> shows/focuses the window + sends
  *         payment-complete { success: true }.
  *       * host=payment-cancel   -> sends payment-complete { success: false }.
+ *       * host=oauth-complete   -> focuses + sends oauth-complete { success } from
+ *         the backend's `oauth_result` param (Gmail callback back into the app).
  *       * unknown host          -> no send (no-op).
  *       * malformed URL         -> swallowed (no throw, no send).
  *       * getMainWindow() null OR window.isDestroyed() -> no focus/send (guard).
@@ -153,6 +155,21 @@ describe('deepLinks — handleDeepLink', () => {
     handleDeepLink('roselabs://payment-cancel', () => win as never, vi.fn());
 
     expect(win.webContents.send).toHaveBeenCalledWith('payment-complete', { success: false });
+  });
+
+  it('oauth-complete: focuses the app and forwards the OAuth result', () => {
+    const win = makeWindow();
+    handleDeepLink(
+      'roselabs://oauth-complete?oauth_result=success&message=Connected',
+      () => win as never,
+      vi.fn()
+    );
+    expect(win.show).toHaveBeenCalled();
+    expect(win.webContents.send).toHaveBeenCalledWith('oauth-complete', { success: true });
+
+    const failed = makeWindow();
+    handleDeepLink('roselabs://oauth-complete?oauth_result=error', () => failed as never, vi.fn());
+    expect(failed.webContents.send).toHaveBeenCalledWith('oauth-complete', { success: false });
   });
 
   it('unknown host: does not focus or send anything', () => {

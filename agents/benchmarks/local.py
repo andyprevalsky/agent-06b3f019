@@ -37,6 +37,10 @@ from urllib.parse import urlsplit
 
 AGENTS_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = AGENTS_DIR.parent
+# The environment this launcher was started with, captured before any worker
+# module import can load agents/.env into os.environ (see service_base_environ).
+_LAUNCH_ENVIRON = dict(os.environ)
+WORKER_DOTENV_PATH = AGENTS_DIR / ".env"
 if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
@@ -323,6 +327,15 @@ def _owned_shutdown_timeout() -> int:
     if seconds <= 0:
         raise RuntimeError("invalid owned worker shutdown deadline")
     return seconds
+
+
+def _own_process_start_ticks() -> str:
+    """This process's kernel start time (/proc stat field 22); empty off Linux."""
+    try:
+        stat = Path(f"/proc/{os.getpid()}/stat").read_text()
+        return stat.rsplit(") ", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
 
 
 def _record_stack_cleanup_owner(stack: ServiceStack, process: subprocess.Popen, token: str) -> None:
@@ -1083,7 +1096,36 @@ def stop_active_child_processes(grace_seconds: float = 10.0) -> None:
         _ACTIVE_CHILD_PROCESSES.discard(process)
 
 
+def _proc_port_listener_pids(port: int) -> set[int]:
+    """Linux: owners of LISTEN sockets on ``port`` from /proc (no lsof needed)."""
+    inodes: set[str] = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        with contextlib.suppress(OSError):
+            for line in Path(table).read_text().splitlines()[1:]:
+                parts = line.split()
+                # local_address is HEX_IP:HEX_PORT; state 0A is TCP_LISTEN.
+                if len(parts) > 9 and parts[3] == "0A" and int(parts[1].rsplit(":", 1)[1], 16) == port:
+                    inodes.add(parts[9])
+    pids: set[int] = set()
+    if not inodes:
+        return pids
+    wanted = {f"socket:[{inode}]" for inode in inodes}
+    for proc_dir in Path("/proc").iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        with contextlib.suppress(OSError):
+            for fd in (proc_dir / "fd").iterdir():
+                with contextlib.suppress(OSError):
+                    if os.readlink(fd) in wanted:
+                        pids.add(int(proc_dir.name))
+                        break
+    return pids
+
+
 def _port_listener_pids(port: int) -> set[int]:
+    # Fresh boxes.dev images ship without lsof; read /proc there instead.
+    if Path("/proc/net/tcp").is_file():
+        return _proc_port_listener_pids(port)
     try:
         out = subprocess.run(
             ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True, timeout=3, check=False
@@ -1144,6 +1186,17 @@ def _pid_cwd_under_worktree(pid: int) -> bool:
     """True iff pid's cwd is inside this worktree. Safety gate: guarantees the
     isolated teardown can never reach a process owned by a sibling worktree,
     even if a PID/port were somehow reused."""
+    root = str(REPO_ROOT)
+    # Linux: read the cwd link directly. lsof is absent on some images (fresh
+    # boxes.dev devboxes), which made every candidate fail this gate and the
+    # isolated teardown reap nothing.
+    proc_cwd = Path("/proc") / str(pid) / "cwd"
+    if Path("/proc").is_dir():
+        try:
+            cwd = os.readlink(proc_cwd)
+        except OSError:
+            return False
+        return cwd == root or cwd.startswith(root + os.sep)
     try:
         out = subprocess.run(
             ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
@@ -1154,7 +1207,6 @@ def _pid_cwd_under_worktree(pid: int) -> bool:
         ).stdout
     except Exception:
         return False
-    root = str(REPO_ROOT)
     for line in out.splitlines():
         if line.startswith("n"):
             cwd = line[1:]
@@ -1312,6 +1364,43 @@ def _dotenv_values(path: Path) -> dict[str, str]:
     return values
 
 
+COMPUTE_TOKEN_AUTHORITY_DEFAULT_URL = "https://navi-j9a9.onrender.com"
+
+
+def apply_compute_token_authority_env(env: dict[str, str]) -> None:
+    """Point an isolated stack's compute-token state at one shared authority.
+
+    A1 (approved 2026-10-20): every isolated stack restores its own database
+    with copies of the same real compute tokens, so its lease semaphore,
+    rate-limit marks and Foundry deployment cooldowns diverge from production's
+    and from every other stack's (RCA
+    2026-10-20-bench-guests-ran-independent-compute-token-semaphores). The
+    stack's backend delegates those internal calls to the production backend,
+    authenticated with ``BACKEND_API_KEY`` from ``back-end/.env``; an
+    unreachable authority fails them closed. ``BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off``
+    keeps the copied local state for diagnostics; an explicit
+    ``COMPUTE_TOKEN_AUTHORITY_URL`` / ``_API_KEY`` in the environment wins.
+    """
+    if env.get("BENCHMARK_COMPUTE_TOKEN_AUTHORITY", "").strip().lower() in {"off", "0", "false", "no"}:
+        # Empty exports also mask saved dotenv values in the child services.
+        env["COMPUTE_TOKEN_AUTHORITY_URL"] = ""
+        env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] = ""
+        return
+    url = (env.get("COMPUTE_TOKEN_AUTHORITY_URL") or "").strip() or COMPUTE_TOKEN_AUTHORITY_DEFAULT_URL
+    api_key = (env.get("COMPUTE_TOKEN_AUTHORITY_API_KEY") or "").strip()
+    if not api_key:
+        api_key = (env.get("BACKEND_API_KEY") or "").strip()
+    if not api_key:
+        api_key = _dotenv_values(REPO_ROOT / "back-end" / ".env").get("BACKEND_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            f"compute-token authority {url} needs BACKEND_API_KEY in back-end/.env "
+            "(or BENCHMARK_COMPUTE_TOKEN_AUTHORITY=off to keep the stack's copied token state for diagnostics)"
+        )
+    env["COMPUTE_TOKEN_AUTHORITY_URL"] = url
+    env["COMPUTE_TOKEN_AUTHORITY_API_KEY"] = api_key
+
+
 def validate_agentcard_org_credentials(
     tasks: Sequence[str],
     *,
@@ -1434,8 +1523,9 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
 
 def seed_payment_fixture(manifest: dict) -> None:
     database_url = manifest_database_url(manifest)
+    # A backend script: like the stack services, it reads back-end/.env itself.
     env = {
-        **os.environ,
+        **service_base_environ(),
         "DATABASE_URL": database_url,
         "DIRECT_URL": database_url,
     }
@@ -1742,6 +1832,28 @@ def benchmark_runner_env(base: Mapping[str, str] | None = None) -> dict[str, str
     return env
 
 
+def service_base_environ() -> dict[str, str]:
+    """os.environ minus values this launcher only acquired by loading the worker's dotenv.
+
+    Importing run_benchmark (for example ``needs_independent_worlds`` whenever
+    --max-concurrency > 1) runs the agents ``config.load_config()``, which
+    ``load_dotenv()``s agents/.env into this process. Forwarding those values to
+    run.sh handed the backend the worker's config ahead of back-end/.env
+    (process env beats dotenv): BROWSER_PROVIDER=kernel instead of the
+    production provider, so every predeploy browser task ran on a provider
+    production does not use. Each service loads its own env file, so keep what
+    the launcher was started with or set itself and drop the rest.
+    """
+    from dotenv import dotenv_values
+
+    worker_values = dotenv_values(WORKER_DOTENV_PATH) if WORKER_DOTENV_PATH.exists() else {}
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in _LAUNCH_ENVIRON or worker_values.get(key) != value
+    }
+
+
 def start_services(
     stack: ServiceStack,
     clean_first: bool = True,
@@ -1752,11 +1864,12 @@ def start_services(
     tasks: Sequence[str] = (),
     on_process: Callable[[subprocess.Popen], None] | None = None,
     on_owner_ready: Callable[[], None] | None = None,
+    outlive_controller: bool = False,
 ) -> tuple[subprocess.Popen, dict]:
     stack.context_dir.mkdir(parents=True, exist_ok=True)
     if clean_first and not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
-    env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
+    env = {**service_base_environ(), "DISABLE_GMAIL_SYNC": "1"}
     stack_cleanup_token = uuid.uuid4().hex
     if stack.isolated:
         env["RUN_STACK_CLEANUP_STATUS_FILE"] = str((stack.context_dir / "local-stack-cleanup.status").resolve())
@@ -1786,6 +1899,7 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        apply_compute_token_authority_env(env)
         # Default isolated stacks keep DEMO cache on the local Postgres so
         # Tokyo / other smokes cannot write through Andy into the shared pooler.
         # demo_cache:on tasks read the shared July cache. Ordinary agent
@@ -1894,6 +2008,15 @@ def start_services(
         # apply_public_tunnel_env() (already applied above; keep EPHEMERAL
         # pinned off here for the non-isolated path).
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
+
+    if stack.isolated and not outlive_controller:
+        # The stack runs in its own session, so no signal to this controller's
+        # group reaches it. A wrapper's grace-period SIGKILL of this process
+        # would otherwise orphan it; run.sh shuts down once this exact process
+        # (pid + start time) is gone. A stack the caller asked to keep
+        # (stack_outlives_controller) must not arm that watch.
+        env["RUN_SH_OWNER_PID"] = str(os.getpid())
+        env["RUN_SH_OWNER_START"] = _own_process_start_ticks()
 
     try:
         with open(stack.service_log, "w") as service_log:
@@ -2144,6 +2267,11 @@ def resolve_repo_path(value: str) -> Path:
 
 def checkpoint_requested(args: argparse.Namespace) -> bool:
     return args.checkpoint is not None or bool(args.checkpoint_start_agent_id)
+
+
+def stack_outlives_controller(args: argparse.Namespace) -> bool:
+    """Whether the started stack is kept running after this controller exits."""
+    return bool(args.keep_services) or (checkpoint_requested(args) and bool(args.checkpoint_no_start))
 
 
 def checkpoint_source_path(task_name: str, args: argparse.Namespace) -> Path:
@@ -3033,6 +3161,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     result_paths: list[Path] = []
     benchmark_owner = LocalBenchmarkOwner(stack)
     if stack.isolated:
+        # Every child started from here on (run.sh, run_benchmark.py, tunnels,
+        # the dashboard) inherits the run id, so the deploy pipeline's
+        # owner-run classification sees a carrier for a custom run id too (a
+        # generated id already embeds this controller's pid). A runtime
+        # environment write never reaches this process's own /proc environ;
+        # the controller itself is recognised by its ``--run-id`` argument.
+        os.environ["BENCHMARK_RUN_ID"] = stack.run_id
         benchmark_owner.record("not_started")
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     # Isolated stacks and --use-existing local stacks both key browser-provider
@@ -3095,6 +3230,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     tasks=cohort_tasks,
                     on_process=remember_stack_process,
                     on_owner_ready=stack_owner_ready,
+                    outlive_controller=stack_outlives_controller(args),
                 )
             finally:
                 benchmark_owner.starting = False
@@ -3233,10 +3369,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stop_frontend_tunnel(frontend_tunnel)
                 if dashboard is not None:
                     dashboard.stop()
-                keep_paused_checkpoint_stack = checkpoint_requested(args) and args.checkpoint_no_start
-                if keep_paused_checkpoint_stack and not args.keep_services and not args.use_existing:
-                    print("Keeping benchmark services running so the paused checkpoint FE link remains valid.")
-                if not args.keep_services and not args.use_existing and not keep_paused_checkpoint_stack:
+                if stack_outlives_controller(args) and not args.use_existing:
+                    print(f"Keeping benchmark services running: {stack.context_dir}")
+                elif not args.use_existing:
                     stop_services(process, stack=stack)
         finally:
             signal.signal(signal.SIGTERM, previous_sigterm)

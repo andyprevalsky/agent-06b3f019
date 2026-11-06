@@ -219,13 +219,13 @@ describe('Rose header on iPad (flag on, >= 768px)', () => {
       expect(within(banner).getByRole('button', { name: 'Attention requests' })).toBeVisible();
       const icons = screen.getByRole('navigation', { name: 'Apps' });
       expect(icons).toHaveAttribute('data-placement', 'corner');
-      expect(within(icons).getAllByRole('button')).toHaveLength(5);
+      expect(within(icons).getAllByRole('button')).toHaveLength(4);
       expect(screen.getByTestId('rose-sidebar')).toBeInTheDocument();
       // Centered 320px pill vs the 64px rail (left) and the icon row (right).
       const pillLeft = width / 2 - 160;
       const pillRight = width / 2 + 160;
       expect(pillLeft).toBeGreaterThan(64);
-      expect(pillRight).toBeLessThan(width - appIconsInset(5));
+      expect(pillRight).toBeLessThan(width - appIconsInset(4));
     },
   );
 });

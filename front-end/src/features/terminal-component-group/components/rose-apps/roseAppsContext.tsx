@@ -3,6 +3,7 @@
  *
  * OPEN APP (one at a time — opening any app or Settings closes the other):
  *   [CLOSED] --click Browser icon | openAgentBrowser(agent, task)--> [BROWSER]
+ *   Agent displays are not an app: they render inline in the chat (expandable).
  *   [CLOSED] --Phone icon--> [PHONE]   --Integrations icon--> [INTEGRATIONS]
  *   [CLOSED] --left bar Feedback / Benchmarks / account row--> [FEEDBACK|BENCHMARKS|SETTINGS]
  *   [ANY] --click its trigger again | close button | Escape--> [CLOSED]
@@ -11,7 +12,11 @@
  * BROWSER TAB (only meaningful while [BROWSER]):
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id, taskId)]
  *   [AGENT(id, taskId)] --click Root tab--> [ROOT]
- *   selectedAgentId changes --> [AGENT(selected)] if it has a browser tab, else [ROOT]
+ *   selectedAgentId changes | Browser opens --> [AGENT(selected)] if it has a
+ *     browser tab, else [NO_SESSION] (an agent is selected) or [ROOT] (Home).
+ *   [NO_SESSION] the selected agent has no browser task: a quiet "No browser
+ *     session" state. Never falls back to the user's Root browser (that read as
+ *     a random cloud browser); only an explicit Root click shows Root.
  *   Clicking an agent tab also selects that agent, so its chat (and the
  *   BrowserStatusBar that owns its live session state) mounts.
  *
@@ -52,7 +57,6 @@ import type { Agent } from '../../hooks';
 import { appIconsInset, clampDrawerWidth, defaultDrawerWidth } from './roseAppsLayout';
 import { ROSE_APP_ICON_COUNT } from './roseAppCatalog';
 import { RoseAppDrawers } from './RoseAppDrawers';
-import { useAgentDisplays } from './useAgentDisplays';
 import {
   RoseAppsContext,
   type AgentBrowserTab,
@@ -71,7 +75,11 @@ interface ProviderProps {
   publishLayout?: boolean;
   /** Sign out, offered at the bottom of the Settings panel. */
   onLogout?: () => void;
-  onCreateAgentInProject?: (project: import('@/lib/api/projects').Project) => void;
+  onCreateAgentInProject?: (
+    project: import('@/lib/api/projects').Project,
+    folderId?: string | null,
+  ) => void;
+  newAgentFolderId?: string | null;
 }
 
 /** Publish the Rose Desktop layout variables on <html> while mounted. */
@@ -99,6 +107,7 @@ function useAgentTabs(agents: Agent[], selectedAgentId: string | null) {
       if (existing === undefined) return [...prev, tab];
       if (
         existing.live === tab.live &&
+        (existing.ended ?? false) === (tab.ended ?? false) &&
         existing.taskLabel === tab.taskLabel &&
         (existing.pageUrl ?? null) === (tab.pageUrl ?? null) &&
         (existing.actualModel ?? null) === (tab.actualModel ?? null) &&
@@ -159,9 +168,8 @@ export function RoseAppsProvider({
   publishLayout = false,
   onLogout,
   onCreateAgentInProject,
+  newAgentFolderId,
 }: ProviderProps) {
-  const displays = useAgentDisplays();
-  const { selectDisplay } = displays;
   const localLink =
     typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('browser') === 'local';
@@ -175,6 +183,8 @@ export function RoseAppsProvider({
     agentId: string;
     taskId: string;
   } | null>(null);
+  /** Root was clicked explicitly; otherwise a selected agent without a tab shows NO_SESSION. */
+  const [browserRootChosen, setBrowserRootChosen] = useState(false);
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const [browserComposerSlot, setBrowserComposerSlot] = useState<HTMLElement | null>(null);
   const [isResizing, setIsResizing] = useState(false);
@@ -210,6 +220,7 @@ export function RoseAppsProvider({
     }
     const tab = tabsRef.current.find((t) => t.agentId === selectedAgentId);
     pendingSwitchRef.current = tab ? null : selectedAgentId;
+    setBrowserRootChosen(false);
     setBrowserSelection((current) => {
       if (
         current?.agentId === selectedAgentId &&
@@ -234,6 +245,7 @@ export function RoseAppsProvider({
     (app: RoseApp) => {
       // Opening Browser lands on the selected agent's tab when it has one.
       if (app === 'browser' && openApp !== 'browser') {
+        setBrowserRootChosen(false);
         const tab = tabsRef.current.find((t) => t.agentId === selectedAgentId);
         setBrowserSelection((current) => {
           if (
@@ -250,20 +262,13 @@ export function RoseAppsProvider({
     },
     [openApp, selectedAgentId],
   );
-  const openAgentDisplay = useCallback(
-    (agentId: string, id: string) => {
-      selectDisplay({ agentId, id });
-      if (agentId !== selectedAgentId) onSelectAgent?.(agentId);
-      setOpenApp('display');
-    },
-    [selectDisplay, onSelectAgent, selectedAgentId],
-  );
   const closeApp = useCallback(() => setOpenApp(null), []);
 
   const openAgentBrowser = useCallback(
     (agentId: string, taskId: string) => {
       setBrowserMode('remote');
       focusTask(agentId, taskId);
+      setBrowserRootChosen(false);
       setBrowserSelection({ agentId, taskId });
       setOpenApp('browser');
     },
@@ -276,6 +281,7 @@ export function RoseAppsProvider({
         (t) => t.agentId === agentId && (taskId === undefined || t.taskId === taskId),
       );
       setBrowserSelection(tab ? { agentId: tab.agentId, taskId: tab.taskId } : null);
+      setBrowserRootChosen(agentId === null);
       if (agentId !== null && agentId !== selectedAgentId) onSelectAgent?.(agentId);
     },
     [onSelectAgent, selectedAgentId],
@@ -308,9 +314,8 @@ export function RoseAppsProvider({
       openApp,
       browserMode,
       setBrowserMode,
-      ...displays,
-      openAgentDisplay,
       browserTabAgentId,
+      browserRootChosen,
       browserTabTaskId,
       tabs,
       agents,
@@ -329,6 +334,7 @@ export function RoseAppsProvider({
       openAgent,
       onLogout,
       onCreateAgentInProject,
+      newAgentFolderId,
       setSlot,
       setDrawerWidth,
       setIsResizing,
@@ -339,9 +345,8 @@ export function RoseAppsProvider({
     [
       openApp,
       browserMode,
-      displays,
-      openAgentDisplay,
       browserTabAgentId,
+      browserRootChosen,
       browserTabTaskId,
       tabs,
       agents,
@@ -360,6 +365,7 @@ export function RoseAppsProvider({
       openAgent,
       onLogout,
       onCreateAgentInProject,
+      newAgentFolderId,
       setDrawerWidth,
       registerAndSwitch,
       unregisterAgentBrowser,

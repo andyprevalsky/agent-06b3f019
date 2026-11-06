@@ -12,6 +12,7 @@ import {
   findAncestorsAcrossRuns,
   findTreeAcrossRuns,
 } from '../../providers/benchmarkHubStore';
+import { agentSpeedFromRow } from '../../providers/rose/speed';
 
 // ---------------------------------------------------------------------------
 // List agents
@@ -46,9 +47,11 @@ function toListItem(agent: ListedAgent) {
     context_size: agent.contextSize,
     message_count: agent.messageCount,
     fast_mode_cache_enabled: agent.fastModeCacheEnabled,
+    speed: agentSpeedFromRow(agent),
     world_model_mode: agent.worldModelMode,
     memory_enabled: agent.memoryEnabled,
     project_id: agent.projectId,
+    folder_id: agent.folderId,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
   };
@@ -247,9 +250,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
   const rawAgent = await repo.findAgentWithRelations(agentId, options.userId);
   const agent = rawAgent === null ? null : (await hydrateProgressEstimates([rawAgent]))[0];
 
-  if (!agent) {
-    return getMissingAgentDetail(agentId, options);
-  }
+  if (!agent) return getMissingAgentDetail(agentId, options);
 
   const [messages, parentGoal, toolUsages, inspectionContext] = await Promise.all([
     repo.findMessages(agentId, options.since, options.browserToolCallId),
@@ -289,9 +290,11 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       price_limit_cents: agent.priceLimitCents,
       tree_cost_cents: agent.treeCostCents,
       fast_mode_cache_enabled: agent.fastModeCacheEnabled,
+      speed: agentSpeedFromRow(agent),
       world_model_mode: agent.worldModelMode,
       memory_enabled: agent.memoryEnabled,
       project_id: agent.projectId,
+      folder_id: agent.folderId,
       token_in_price_microdollars: agent.tokenInPriceMicrodollars,
       token_out_price_microdollars: agent.tokenOutPriceMicrodollars,
       created_at: agent.createdAt,
@@ -299,11 +302,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       write_lock_enabled: agent.writeLockEnabled,
       structured_output: agent.structuredResponse,
       failure_context: detailFailureContext(agent),
-      verifier: agent.verifier
-        ? {
-            type: agent.verifier.type,
-          }
-        : null,
+      verifier: agent.verifier ? { type: agent.verifier.type } : null,
       tools: agent.tools.map((at) => ({
         id: at.tool.id,
         name: at.tool.name,

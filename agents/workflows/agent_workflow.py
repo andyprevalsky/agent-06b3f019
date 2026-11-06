@@ -21,8 +21,6 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, FailureError
 from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 
-from helpers.wmh_activity_policy import wmh_activity_timeout_options
-
 # Import pass-through for workflow context:
 # - Our own modules are safe (config.py has no import-time side effects)
 # - Third-party libraries (httpx, instructor) may have import-time issues
@@ -73,7 +71,6 @@ with workflow.unsafe.imports_passed_through():
     from helpers.llm import (
         call_llm_activity,
         fetch_compute_token_activity,
-        mark_compute_token_rate_limited_activity,
         persist_response_schema_activity,
         release_compute_token_lineage_activity,
         set_response_schema_activity,
@@ -90,7 +87,10 @@ with workflow.unsafe.imports_passed_through():
     )
     from helpers.wait_on_world_clock import _read_world_time_ms, _refresh_world_time_cursor
     from helpers.wait_wake import note_context_snapshot, wake_mark
+    from helpers.wmh_activity_policy import wmh_activity_timeout_options
+    from helpers.workflow_safe import context_logger
     from helpers.world_model_runtime import world_clock_activity
+    from loop.context_utils import refresh_user_pause
     from loop.dag_executor import (
         TaskDAG,
         execute_dag,
@@ -120,12 +120,13 @@ with workflow.unsafe.imports_passed_through():
         raise_gate_direct,
     )
     from tools.google_oauth_demo import google_oauth_demo
-
-    # Tool executors (map tool name → workflow helper)
     from tools.grep import grep
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
+
+    # Tool executors (map tool name → workflow helper)
+    from tools.read_tool_output import read_tool_output_for_workflow
     from tools.request_user_approval import (
         UserRejectedError,
         request_user_approval_direct,
@@ -151,7 +152,7 @@ with workflow.unsafe.imports_passed_through():
     from workflows.background_agents import BackgroundAgentsMixin
     from workflows.environment_context import EnvironmentContextMixin
 
-logger = structlog.get_logger()
+logger = context_logger()
 
 # Loop-critical control-plane read (poll_new_messages), modelled on Claude
 # Code's session-transcript ingress client: 20 s per request
@@ -241,6 +242,7 @@ def _demo_cache_compute_affinity_key(user_id: str, goal: str) -> str:
 
 # Tool name → executor function mapping
 TOOL_EXECUTORS = {
+    "read_tool_output": read_tool_output_for_workflow,
     "google_workspace_run": google_oauth_demo,
     "spawn_agent": spawn_agent,  # Unified: browser/code/general_purpose/explore
     "wait_for": wait_for,
@@ -869,6 +871,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.is_paused: bool = False
         # Authentication can pause itself while waiting for the user's reply.
         self._pause_signal_sequence: int = 0
+        self._user_pause_active: bool = False  # Explicit PAUSE signal, not budget/auth waits.
         self._paused_by_parent: bool = False  # Track if pause was inherited from parent
         # Orphan detection: every child must stop once Temporal confirms that its
         # parent chain is gone. Otherwise an active child can keep spending after a
@@ -992,6 +995,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id: Optional[str] = None
         self.gpt_code_token_source: Optional[str] = None
         self.gpt_code_token_pool_id: Optional[str] = None
+        # The exact Integration row the active compute token was leased from;
+        # failure reports name it so they never reach the user's other logins.
+        self.compute_token_integration_id: Optional[str] = None
         self.compute_token_lineage_key: Optional[str] = None
         self.compute_token_demo_cache_affinity_key: Optional[str] = None
         self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
@@ -1118,6 +1124,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if self._resume_prior_status == "OUT_OF_CREDITS":
             self._has_credits = False
         self.is_paused = self._resume_prior_status in {"PAUSED", "COST_LIMIT_REACHED", "OUT_OF_CREDITS"}
+        self._user_pause_active = False
 
         runtime = state.get("runtime_state")
         if not isinstance(runtime, dict):
@@ -1126,6 +1133,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._deployment_validation = runtime.get("deployment_validation") is True
         self.last_message_check = self._restored_datetime(runtime.get("last_message_check"))
         self._paused_by_parent = runtime.get("paused_by_parent") is True
+        self._user_pause_active = self.is_paused and runtime.get("user_pause_active") is True
         pause_sequence = runtime.get("pause_signal_sequence")
         if type(pause_sequence) is int and pause_sequence >= 0:
             self._pause_signal_sequence = pause_sequence
@@ -1296,6 +1304,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._cost_limit_wrapup_pending = runtime.get("cost_limit_wrapup_pending") is True
         if "cost_limit_wrapup_consumed" in runtime:
             self._cost_limit_wrapup_consumed = runtime.get("cost_limit_wrapup_consumed") is True
+        if (
+            self._resume_prior_status == "COST_LIMIT_REACHED"
+            and self._cost_limit_wrapup_pending
+            and not self._cost_limit_wrapup_consumed
+            and runtime.get("cost_limit_wrapup_paused") is False
+            and self._has_credits
+            and not self._user_pause_active
+            and not self._paused_by_parent
+        ):
+            self.is_paused = False
         self._restore_background_state(runtime.get("background_agents"))
         pending_tool_resumes = runtime.get("pending_tool_resumes")
         if isinstance(pending_tool_resumes, list):
@@ -1317,13 +1335,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         result: Any,
         paused_before: bool,
         cost_limit_before: bool,
+        pause_sequence_before: Optional[int] = None,
     ) -> None:
         """Allow one attempt_completion turn when browser costs newly trip the limit.
 
-        Only arms when THIS tool caused the cost-limit pause. User/parent pauses
-        that were already active before the tool ran stay intact.
+        Only arms for verified browser usage that newly crosses the limit.
+        Existing user/parent pauses and intervening pause signals stay intact.
         """
-        if tool_name != "spawn_browser_agent":
+        if tool_name not in {"spawn_browser_agent", "spawn_agent"}:
             return
         if not isinstance(result, dict):
             return
@@ -1333,10 +1352,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         }
         if not success:
             return
-        if not self._cost_limit_reached or not self.is_paused:
+        if not self._cost_limit_reached and (
+            self.parent_workflow_id is not None or self.subtree_cost_cents < self.price_limit_cents
+        ):
             return
         # Tool did not newly trip the limit — do not clear an unrelated pause.
-        if cost_limit_before or paused_before or self._paused_by_parent:
+        if cost_limit_before or paused_before or self._paused_by_parent or not self._has_credits:
+            return
+        # Terminal accounting arms before a budget pause. Any pause that is
+        # present now belongs to an independent control and must stay paused.
+        if pause_sequence_before is not None and (
+            self.is_paused or self._pause_signal_sequence != pause_sequence_before
+        ):
             return
         workflow.logger.warning(
             "💰 Successful spawn_browser_agent tripped the cost limit "
@@ -1344,6 +1371,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             "allowing one wrap-up turn for attempt_completion"
         )
         self.is_paused = False
+        self._user_pause_active = False
+        self._cost_limit_reached = True
         self._cost_limit_wrapup_pending = True
         self._cost_limit_wrapup_consumed = False
 
@@ -1365,6 +1394,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         elif status == "ACTIVE":
             self._resume_prior_status = "ACTIVE"
             self.is_paused = False
+            self._user_pause_active = False
             self._cost_limit_reached = False
             self._has_credits = True
         price_limit = agent_config.get("price_limit_cents")
@@ -1415,8 +1445,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             **({"user_tools": dict(self.user_tools)} if getattr(self, "user_tools_pinned", False) else {}),
             "runtime_state": {
                 "last_message_check": self._serialized_datetime(self.last_message_check),
+                "cost_limit_wrapup_paused": self._cost_limit_wrapup_pending and self.is_paused,
                 "paused_by_parent": self._paused_by_parent,
                 "pause_signal_sequence": self._pause_signal_sequence,
+                "user_pause_active": self._user_pause_active,
                 "orphaned": self._orphaned,
                 "kill_request": dict(self._kill_request) if self._kill_request is not None else None,
                 "abort_info": dict(self._abort_info) if self._abort_info is not None else None,
@@ -1554,10 +1586,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             workflow.logger.info(f"Generation handoff signalled: live={task_queue}")
 
     @workflow.signal
-    async def pause(self):
-        """Pause workflow execution."""
+    async def pause(self, cause: str = "user"):
+        """Pause with producer-supplied cause; omitted cause preserves legacy user controls."""
         workflow.logger.info("🔴 Received PAUSE signal")
         self._pause_signal_sequence = getattr(self, "_pause_signal_sequence", 0) + 1
+        self._user_pause_active = cause == "user" or (self.is_paused and self._user_pause_active)
+        episode_cause = "user" if self._user_pause_active else cause
         self.is_paused = True
         await self._update_tree_state(status="PAUSED")
 
@@ -1565,7 +1599,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         for child_wf_id in self._get_pending_child_workflow_ids():
             try:
                 handle = workflow.get_external_workflow_handle(child_wf_id)
-                await handle.signal("pause")
+                # A user pause keeps the legacy zero-argument signal: a child on a
+                # draining older generation defines `pause(self)` and would fail its
+                # workflow task on every retry if given a cause.
+                if episode_cause == "user":
+                    await handle.signal("pause")
+                else:
+                    await handle.signal("pause", episode_cause)
             except Exception as e:
                 workflow.logger.warning(f"Failed to cascade pause to child: {e}")
 
@@ -1591,6 +1631,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._has_credits = True
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
+        self._user_pause_active = False
         self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
 
@@ -2017,6 +2058,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.price_limit_cents = new_limit
         self._cost_limit_reached = False
         self.is_paused = False
+        self._user_pause_active = False
         self._paused_by_parent = False
         await self._update_tree_state(status="ACTIVE")
 
@@ -3659,16 +3701,31 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         await self._check_parent_state()
         # Yield to event loop so Temporal processes any pending signals before we read is_paused
         await asyncio.sleep(0)
+        return self.is_paused
+
+    async def _check_paused_before_turn(self) -> bool:
+        """Consume browser wrap-up once per turn, never once per stream check."""
+        if await self._check_paused():
+            return True
         if self._cost_limit_wrapup_pending and self._cost_limit_reached and not self._is_finished:
             if not self._cost_limit_wrapup_consumed:
-                # First pause-check after arming wrap-up: allow one more turn.
+                # Admission belongs to the turn boundary, not stream polling.
                 self._cost_limit_wrapup_consumed = True
                 return False
             # Wrap-up turn used without completing — re-assert the cost pause.
-            self.is_paused = True
             self._cost_limit_wrapup_pending = False
-            return True
+            self._cost_limit_reached = False
+            await self._check_cost_limit()
         return self.is_paused
+
+    def _refund_unaccepted_browser_wrapup_turn(self) -> None:
+        """Keep the loop's bounded pre-response retry on the same allowance.
+
+        Accepted responses never call this hook; every provider attempt still
+        uses the normal accounting owner, and genuine pauses remain untouched.
+        """
+        if self._cost_limit_wrapup_pending and not self._is_finished:
+            self._cost_limit_wrapup_consumed = False
 
     async def _check_orphaned(self) -> bool:
         """Terminal abort signal for run_agent. True once this child has been
@@ -3786,6 +3843,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     "context": list(self.context),
                 }
             run_agent_kwargs["get_requirement_revision"] = lambda: self._response_schema_revision
+            run_agent_kwargs["check_paused_before_turn"] = self._check_paused_before_turn
+            run_agent_kwargs["on_unaccepted_turn_retry"] = self._refund_unaccepted_browser_wrapup_turn
             run_agent_kwargs.setdefault("user_tools", declared_user_tools(self))
             # Read the latest known schema without waiting for async schema regeneration.
             run_agent_kwargs["get_jev_response_schema"] = lambda: self.output_schema
@@ -3902,6 +3961,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id = None
         self.gpt_code_token_source = None
         self.gpt_code_token_pool_id = None
+        self.compute_token_integration_id = None
         self.compute_token_fetched_at = None
         self.claude_max_token_fetched_at = None
 
@@ -3911,6 +3971,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         now = workflow.now()
         self._clear_compute_token()
         self.compute_token_provider = token.get("type")
+        self.compute_token_integration_id = token.get("integrationId")
         if token.get("lineageKey"):
             self.compute_token_lineage_key = token.get("lineageKey")
         if self.compute_token_provider == "claude":
@@ -4013,6 +4074,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "userId": self.user_id,
                 "source": self.claude_max_token_source,
                 "poolTokenId": self.claude_max_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -4026,6 +4088,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "accountId": self.gpt_code_account_id,
                 "source": self.gpt_code_token_source,
                 "poolTokenId": self.gpt_code_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -4281,6 +4344,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     message_id = msg.get("message_id") or msg.get("id")
                     if message_id:
                         if message_id in seen_message_ids:
+                            refresh_user_pause(self.context, msg)
                             continue
                         seen_message_ids.add(message_id)
                     else:
@@ -4343,6 +4407,30 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         role_alternation and causes the LLM to re-emit the same tool_calls
         (regression: smoke task `parallel-tool-calls`).
         """
+        if (
+            (self._cost_limit_wrapup_pending or self._cost_limit_wrapup_consumed)
+            and self._cost_limit_reached
+            and tool_name not in {"attempt_completion", "attempt_completion_with_result"}
+        ):
+            # Every productive call is refused, including an older turn that
+            # was already in flight when browser accounting armed the allowance.
+            # Only an admitted wrap-up turn can spend that future allowance.
+            if self._cost_limit_wrapup_consumed:
+                self._cost_limit_wrapup_pending = False
+                if not self.is_paused:
+                    self._cost_limit_reached = False
+                    await self._check_cost_limit()
+            await self._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Cost limit reached",
+                    message="Cost limit reached",
+                    status=MessageStatus.ERROR,
+                ),
+                tool_call_id,
+                tool_name,
+            )
+            return {"error": True, "message": "Cost limit reached"}
         if tool_name == "attempt_completion":
             # Pending background agents do not block completion: the verifier
             # sees their status, and a finishing parent stops them.
@@ -4426,8 +4514,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         )
 
             executor = TOOL_EXECUTORS[tool_name]
-            paused_before_tool = self.is_paused
-            cost_limit_before_tool = self._cost_limit_reached
             self._active_tool_calls[tool_call_id] = (tool_name, dict(tool_args))
 
             # Tools migrated to new signature: (execute_activity, tool_call, tool_call_id, agent_id, user_id)
@@ -4493,13 +4579,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     # Extract actual result for caller
                     result = result.get("result", result)
 
-                self._maybe_arm_cost_limit_wrapup_after_browser(
-                    tool_name=tool_name,
-                    result=result,
-                    paused_before=paused_before_tool,
-                    cost_limit_before=cost_limit_before_tool,
-                )
-
                 # Route rotation signals from the per-tool summarizer through
                 # _on_tokens so pool-token rotation kicks in on 401/429/stall
                 # the same way it would for the main LLM call.
@@ -4550,12 +4629,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     if original_usage:
                         await self._track_usage(original_usage, tool_name=tool_name)
                     result = executor_result.get("result", executor_result)
-                    self._maybe_arm_cost_limit_wrapup_after_browser(
-                        tool_name=tool_name,
-                        result=result,
-                        paused_before=paused_before_tool,
-                        cost_limit_before=cost_limit_before_tool,
-                    )
                     return {"success": True, "message": f"{tool_name} completed", "result": result}
                 # spawn_agent returns (last_status, summary) tuple
                 if isinstance(executor_result, tuple):
@@ -4918,7 +4991,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         await self._update_cost_and_signal_parent()
 
     async def _track_usage(
-        self, usage: Optional[Dict] = None, tool_name: Optional[str] = None, call_site: Optional[str] = None
+        self, usage: Optional[Dict] = None, tool_name: Optional[str] = None, call_site: Optional[str] = None,
+        browser_completed: bool = False,
     ) -> None:
         """
         Track usage from any activity result.
@@ -4937,6 +5011,10 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         """
         if not usage:
             return
+
+        paused_before = self.is_paused
+        cost_limit_before = self._cost_limit_reached
+        pause_sequence_before = self._pause_signal_sequence
 
         total_cost_cents = 0
         usage_items_for_db = []
@@ -5062,7 +5140,17 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self.own_cost_cents += total_cost_cents
             workflow.logger.info(f"💰 Total own_cost_cents: {self.own_cost_cents}c (+{total_cost_cents}c)")
 
-            # Signal parent for hierarchical cost relay
+            # Admit the verified terminal result before any persistence/signal
+            # await can admit another child cost update and publish a cost stop.
+            if browser_completed:
+                self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
+                self._maybe_arm_cost_limit_wrapup_after_browser(
+                    tool_name=tool_name,
+                    result={"success": True},
+                    paused_before=paused_before,
+                    cost_limit_before=cost_limit_before or self._cost_limit_reached,
+                    pause_sequence_before=pause_sequence_before,
+                )
             await self._update_cost_and_signal_parent()
 
         # Write to ToolUsage table (if tool_name provided). This intentionally
@@ -5170,6 +5258,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 workflow.logger.warning("Parent workflow gone — orphaned child aborting")
                 self._orphaned = True
                 self.is_paused = False
+                self._user_pause_active = False
                 self._paused_by_parent = False
             self._parent_query_failures_while_paused = 0
             return
@@ -5187,6 +5276,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                     )
                     self._orphaned = True
                     self.is_paused = False
+                    self._user_pause_active = False
                     self._paused_by_parent = False
             return
 
@@ -5206,15 +5296,19 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         elif parent_paused:
             if not self.is_paused:
                 workflow.logger.warning("Parent is paused — inheriting state")
+                self._user_pause_active = state.get("user_pause_active") is True
                 self.is_paused = True
                 self._paused_by_parent = True
                 await self._update_tree_state(status="PAUSED")
+            elif self._paused_by_parent:
+                self._user_pause_active = state.get("user_pause_active") is True
         else:
             # Parent is running — unpause if we were paused by parent
             if self._paused_by_parent:
                 workflow.logger.info("Parent resumed — clearing inherited pause")
                 self._cost_limit_reached = False
                 self.is_paused = False
+                self._user_pause_active = False
                 self._paused_by_parent = False
                 await self._update_tree_state(status="ACTIVE")
 
@@ -5327,30 +5421,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if claude_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
-                        f"marking {self.claude_max_token_source} token rate-limited and rotating"
+                        f"re-leasing after the {self.claude_max_token_source} token failed"
                     )
-                    # Mark the offending token rate-limited in DB so the next fetch rotates:
-                    #   source='user' → next fetch falls back to pool
-                    #   source='pool' → fetchPoolToken skips this ID and returns a different pool token
-                    # The cooldown is time-windowed (5 min); token auto-heals after rateLimitedUntil.
-                    if self.claude_max_token_source and self.user_id:
-                        try:
-                            await workflow.execute_activity(
-                                mark_compute_token_rate_limited_activity,
-                                args=[
-                                    "claude",
-                                    self.claude_max_token_source,
-                                    self.user_id,
-                                    self.claude_max_token_pool_id,
-                                    5 * 60,
-                                    None,
-                                    claude_token_error,
-                                ],
-                                start_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=2),
-                            )
-                        except Exception as mark_error:
-                            workflow.logger.warning(f"Failed to mark Claude token rate-limited: {mark_error}")
+                    # RoseClient already reported each failed attempt with that
+                    # attempt's own login (provider cool-down / stall mark). This
+                    # usage names only the last error, and after an in-call
+                    # rotation the cached lease is not the failed one, so the
+                    # workflow never reports it: it only re-leases (T7).
                     if self.user_id:
                         try:
                             await self._rotate_compute_token(self.user_id)
@@ -5386,26 +5463,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if gpt_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ GPT token {gpt_token_error}: actual_model={actual_model}, "
-                        f"marking {self.gpt_code_token_source} token rate-limited and rotating"
+                        f"re-leasing after the {self.gpt_code_token_source} token failed"
                     )
-                    if self.gpt_code_token_source and self.user_id:
-                        try:
-                            await workflow.execute_activity(
-                                mark_compute_token_rate_limited_activity,
-                                args=[
-                                    "gpt",
-                                    self.gpt_code_token_source,
-                                    self.user_id,
-                                    self.gpt_code_token_pool_id,
-                                    5 * 60,
-                                    None,
-                                    gpt_token_error,
-                                ],
-                                start_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=2),
-                            )
-                        except Exception as mark_error:
-                            workflow.logger.warning(f"Failed to mark GPT token rate-limited: {mark_error}")
+                    # RoseClient already reported each failed attempt with that
+                    # attempt's own login (provider cool-down / stall mark). This
+                    # usage names only the last error, and after an in-call
+                    # rotation the cached lease is not the failed one, so the
+                    # workflow never reports it: it only re-leases (T7).
                     if self.user_id:
                         try:
                             await self._rotate_compute_token(self.user_id)
@@ -5506,7 +5570,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         causes the activity timeouts that stall the loop and the out-of-order
         broadcasts that flicker the FE cost. Pass force=True on terminal/cost-limit
         transitions to flush the final value immediately. Parent cost signal and the
-        root cost-limit check always run so aggregation/enforcement stay real-time.
+        root cost-limit check normally run immediately. Verified browser terminal
+        usage settles its existing completion allowance before publishing a stop.
         """
         # Recalculate subtree cost
         self.subtree_cost_cents = self.own_cost_cents + sum(self.children_cost_cents.values())
@@ -6684,6 +6749,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             "is_paused": self.is_paused,
             "is_cost_limit_reached": self._cost_limit_reached,
             "is_finished": self._is_finished,
+            "user_pause_active": self.is_paused and self._user_pause_active,
         }
 
     @workflow.query

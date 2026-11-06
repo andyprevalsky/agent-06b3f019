@@ -1,5 +1,5 @@
 import type { AgentStatus, Prisma } from '@prisma/client';
-import { fetchComputeTokenForUser } from './computeCredentials';
+import { computeSubscriptionLeases } from './computeSubscriptionLeases';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { createStreamingCompletion } from './rose/client';
@@ -503,27 +503,13 @@ function parseClassifierResponse(
 const CLASSIFIER_MAX_OUTPUT_TOKENS = 8192;
 
 /* c8 ignore start -- live classifier auth path requires real compute credentials */
-async function directAuthForClassifier(agent: AgentForPropagation) {
+/**
+ * The judge's subscriptions. Rose leases one only when the classifier's pool runs
+ * subscription legs, and rotates through the rest before any funded key.
+ */
+function directAuthForClassifier(agent: AgentForPropagation) {
   if (agent.userId === undefined || agent.userId === '') return {};
-
-  try {
-    const token = await fetchComputeTokenForUser(agent.userId);
-    if (token === null) return {};
-    log.info('Failure classifier using compute token', {
-      agent_id: agent.id,
-      type: token.type,
-      source: token.source,
-      poolTokenId: token.poolTokenId,
-    });
-    if (token.type === 'claude') return { claude_token: token.accessToken };
-    return { gpt_token: token.accessToken, gpt_account_id: token.accountId };
-  } catch (error) {
-    log.warn('Failure classifier could not load compute token; falling back to Rose waterfall', {
-      agent_id: agent.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return {};
-  }
+  return { subscription_leases: computeSubscriptionLeases({ userId: agent.userId }) };
 }
 /* c8 ignore stop */
 
@@ -603,7 +589,7 @@ async function classifierContent(
   if (mockContent !== undefined) return mockContent;
 
   /* c8 ignore start -- live classifier streaming path requires real LLM provider */
-  const directAuth = await directAuthForClassifier(agent);
+  const directAuth = directAuthForClassifier(agent);
   const credentialInventory = await loadCredentialInventory(agent.userId, credentialRefs);
   const stream = await createStreamingCompletion({
     model: 'rose-labs/rose-1-flash',

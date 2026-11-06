@@ -1,0 +1,75 @@
+{
+ "success": false,
+ "score": 0.113264,
+ "experimental": {
+  "mode": "observe",
+  "policy": "stealth-corroboration-v1",
+  "score": 0.113264,
+  "wouldBlock": false,
+  "detections": [],
+  "corroboratingCategories": [],
+  "observations": {
+   "animation-consistency-v1": {
+    "mode": "observe",
+    "status": "clear",
+    "detections": []
+   },
+   "identity-coherence-v1": {
+    "mode": "observe",
+    "status": "detected",
+    "detections": [
+     {
+      "id": "font-set-os-mismatch",
+      "reason": "Font set (Windows faces) contradicts claimed OS (Linux)"
+     }
+    ]
+   },
+   "pointer-movement-v1": {
+    "mode": "observe",
+    "status": "detected",
+    "detections": [
+     {
+      "id": "pointer-movement-never-zero",
+      "reason": "Pointer moves always report movement; experimental observation, not proof of automation"
+     }
+    ]
+   }
+  }
+ },
+ "timestamp": 1793744175,
+ "recommendation": "allow",
+ "categoryScores": {
+  "automation": 0,
+  "behavioral": 0,
+  "bot": 0.6128,
+  "cdp": 0,
+  "datacenter": 0.48,
+  "declared_ai": 0,
+  "fingerprint": 0,
+  "headless": 0,
+  "rate_limit": 0,
+  "tor_vpn": 0,
+  "vision_ai": 0
+ },
+ "detections": [
+  {
+   "category": "bot",
+   "score": 0.7,
+   "confidence": 0.8,
+   "reason": "PoW verification failed: challenge_network_mismatch"
+  },
+  {
+   "category": "datacenter",
+   "score": 0.6,
+   "confidence": 0.8,
+   "reason": "Request from known datacenter IP range"
+  },
+  {
+   "category": "bot",
+   "score": 0.3,
+   "confidence": 0.4,
+   "reason": "No local speech synthesis voices"
+  }
+ ],
+ "reason": "pow_not_satisfied"
+}

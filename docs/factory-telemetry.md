@@ -59,9 +59,30 @@ python3 scripts/factory_ledger.py publish
 ```
 
 Emit snapshots at assignment start/end and configuration changes. New stages
-read the refreshed file; snapshots do not rewrite older stages. Final reports
+read the refreshed file; snapshots do not rewrite older stages. `bash
+scripts/run-deploy-stage --start` and every `run_deploy_pipeline.py run` attempt
+re-stamp the selected snapshot's `observed_at` and `validation.source_sha` (with
+its evidence) from `git rev-parse HEAD` when the file lives inside that checkout;
+nothing else is rewritten, and an invalid snapshot refuses the run. Final reports
 must show recorded model/effort/tier (or UNKNOWN), usage scope and collection gaps.
 Do not claim the ledger alone collected these settings automatically.
+
+## Work and wait intervals
+
+All agents follow **Work versus waiting** in
+`.claude/shared/report-display-format.md`. Record actual work and wait
+transitions with `record_factory_event.py` using `work-start`/`work-finish` or
+`wait-start`/`wait-finish`, a stable `request_id`, the original `run_id`, and a
+nonsecret `reason` in `--detail`. Close a work interval before waiting; give
+independent parallel activity its own ID. Use native stage receipts for running
+automation rather than labeling a whole test duration as agent effort.
+
+`deploy_timeline.event_intervals` pairs matching native records;
+`deploy_timeline.account` computes disjoint wall totals while preserving
+overlapping lane evidence. Missing historical intervals count only in the
+**Wait — reason unrecorded** reporting bucket. That bucket proves neither a
+specific external cause nor active work. Do not retroactively manufacture
+activity or label an unknown gap as an out-of-credits/user delay.
 
 ## Backfill, publication and privacy
 

@@ -17,6 +17,7 @@ import {
   unsubscribe,
 } from '../../hooks';
 import { supabase } from '@/lib/supabase';
+import { isSubscriptionAbort } from '@/lib/realtime';
 import type { AttentionRequest } from './types';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -64,6 +65,7 @@ function recordToRequest(data: InsertRecord): AttentionRequest {
 function buildSubscriptionHandlers(
   setRequests: Dispatch<SetStateAction<AttentionRequest[]>>,
   scheduleReconnect: () => void,
+  isCancelled: () => boolean,
 ) {
   return {
     onInsert: (payload: unknown) => {
@@ -94,6 +96,8 @@ function buildSubscriptionHandlers(
       setRequests((prev) => prev.filter((req) => req.id !== data.id));
     },
     onDisconnect: () => {
+      // Our own unsubscribe on cleanup also surfaces as CLOSED; not a disconnect.
+      if (isCancelled()) return;
       console.warn('[AttentionInbox] Channel disconnected, scheduling reconnect');
       scheduleReconnect();
     },
@@ -146,9 +150,7 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
       // down `window` — otherwise setup().catch can create a timer after unmount
       // that no later cleanup can clear.
       if (cancelled || typeof window === 'undefined') return;
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       const attempt = reconnectAttemptRef.current;
       const delay = Math.min(
         BASE_RECONNECT_DELAY_MS * Math.pow(2, attempt),
@@ -162,6 +164,9 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
       }, delay);
     };
 
+    // Cancels a join still pending at teardown (channelRef is only set once SUBSCRIBED).
+    const pendingJoin = new AbortController();
+
     const setup = async () => {
       const session = getStoredSession();
       const userId = session?.user?.id;
@@ -173,10 +178,10 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
       }
 
       try {
-        const channel = await subscribeToAttentionRequests(
-          userId,
-          buildSubscriptionHandlers(setRequests, scheduleReconnect),
-        );
+        const channel = await subscribeToAttentionRequests(userId, {
+          ...buildSubscriptionHandlers(setRequests, scheduleReconnect, () => cancelled),
+          signal: pendingJoin.signal,
+        });
         if (cancelled) {
           await supabase.removeChannel(channel);
           return;
@@ -185,6 +190,8 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
         reconnectAttemptRef.current = 0;
         await refetch();
       } catch (error) {
+        // Our own cancellation: the channel is already gone, nothing to retry.
+        if (cancelled && isSubscriptionAbort(error)) return;
         console.error('Failed to subscribe to attention requests:', error);
         scheduleReconnect();
       }
@@ -194,6 +201,7 @@ export function useAttentionRequests(realtimeReady: boolean): UseAttentionReques
 
     return () => {
       cancelled = true;
+      pendingJoin.abort();
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;

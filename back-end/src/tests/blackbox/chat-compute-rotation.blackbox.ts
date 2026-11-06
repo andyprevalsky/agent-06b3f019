@@ -6,8 +6,17 @@ import {
   toChatComputeAuth,
   type ChatComputeAuth,
 } from '../../providers/chat/computeRotation';
-import type { ComputeCodeCredentialResult } from '../../providers/computeCredentials';
-import { RoseAuthError, RoseRateLimitError } from '../../providers/rose';
+import type {
+  ComputeCodeCredentialResult,
+  fetchComputeTokenForUser,
+  markComputeTokenUnavailable,
+} from '../../providers/computeCredentials';
+import { computeSubscriptionLeases } from '../../providers/computeSubscriptionLeases';
+import {
+  RoseAuthError,
+  RoseRateLimitError,
+  type SubscriptionLeaseFailure,
+} from '../../providers/rose';
 
 interface TestResult {
   name: string;
@@ -265,6 +274,113 @@ async function testForceWaterfallSkipsChatComputeLookup(): Promise<void> {
   }
 }
 
+// ── Rose in-call subscription leases (computeSubscriptionLeases) ─────────────
+//
+// A fake compute-token store: marking a token takes it out of circulation unless
+// `marksStick` is false (a mark that did not land), exclusions are honoured.
+
+function fakeTokenStore(tokens: ComputeCodeCredentialResult[], marksStick = true) {
+  const marked = new Set<string>();
+  const marks: Array<{ token: string; reason: string; until?: string }> = [];
+  const lookups: Array<Parameters<typeof fetchComputeTokenForUser>[1]> = [];
+  const fetchToken: typeof fetchComputeTokenForUser = async (_userId, options) => {
+    lookups.push(options);
+    const excluded = new Set(options?.excludePoolTokenIds ?? []);
+    return (
+      tokens.find(
+        (candidate) =>
+          !marked.has(candidate.accessToken) &&
+          !(candidate.poolTokenId && excluded.has(candidate.poolTokenId)) &&
+          !(options?.forcePool === true && candidate.source === 'user') &&
+          (options?.tokenType === undefined || candidate.type === options.tokenType)
+      ) ?? null
+    );
+  };
+  const markToken: typeof markComputeTokenUnavailable = async (failed, reason, until) => {
+    marks.push({ token: failed.accessToken, reason, until });
+    if (marksStick) marked.add(failed.accessToken);
+  };
+  return { fetchToken, markToken, marks, lookups };
+}
+
+function limited(accessToken: string, until?: string): SubscriptionLeaseFailure {
+  const type = accessToken.startsWith('gpt') ? 'gpt' : 'claude';
+  return { credential: { type, accessToken }, reason: 'rate_limit', rateLimitedUntil: until };
+}
+
+async function testSubscriptionLeasesRotateThroughEveryAvailableLease(): Promise<void> {
+  const pool = ['a', 'b', 'c', 'd', 'e'].map((suffix, index) =>
+    token(index % 2 === 0 ? 'claude' : 'gpt', suffix)
+  );
+  const store = fakeTokenStore(pool);
+  const leases = computeSubscriptionLeases({ userId: 'u1', initial: pool[0], ...store });
+  const served: string[] = [];
+  let current = pool[0].accessToken;
+  for (;;) {
+    const next = await leases.next(limited(current, '2026-10-28T12:00:00.000Z'));
+    if (next === null) break;
+    served.push(next.accessToken);
+    current = next.accessToken;
+  }
+  assertEqual(
+    JSON.stringify(served),
+    JSON.stringify(pool.slice(1).map((t) => t.accessToken)),
+    'every remaining subscription, no fixed cap'
+  );
+  assertEqual(store.marks.length, 5, 'each failed lease marked once');
+  assert(
+    store.marks.every((mark) => mark.reason === 'rate_limit' && mark.until?.startsWith('2026')),
+    "provider's reset reaches every mark"
+  );
+  const lastLookup = store.lookups[store.lookups.length - 1];
+  assertEqual(lastLookup?.excludePoolTokenIds?.length, 5, 'failed pool leases excluded');
+}
+
+async function testSubscriptionLeasesKeepTheCallersPinAndLeaseFirstOnlyWhenAsked(): Promise<void> {
+  const store = fakeTokenStore([token('claude', 'a'), token('gpt', 'b'), token('claude', 'c')]);
+  const leases = computeSubscriptionLeases({
+    userId: 'u1',
+    leaseOptions: { tokenType: 'claude', fastCacheAffinityKey: 'demo-key' },
+    ...store,
+  });
+  const first = await leases.next(null);
+  assertEqual(first?.accessToken, 'claude-token-a', 'first lease on demand');
+  assertEqual(store.marks.length, 0, 'first lease marks nothing');
+  const second = await leases.next({
+    credential: { type: 'claude', accessToken: 'claude-token-a' },
+    reason: 'auth_error',
+  });
+  assertEqual(second?.accessToken, 'claude-token-c', 'pinned type: the GPT lease is skipped');
+  assertEqual(store.marks[0]?.reason, 'auth_error', 'revoked lease marked auth_error');
+  assert(
+    store.lookups.every(
+      (lookup) => lookup?.tokenType === 'claude' && lookup.fastCacheAffinityKey === 'demo-key'
+    ),
+    'lease options pass through every lookup'
+  );
+}
+
+async function testSubscriptionLeasesNeverServeATriedLeaseTwice(): Promise<void> {
+  // The user token's mark does not land, so the store keeps returning it.
+  const user = token('claude', 'u', 'user');
+  const store = fakeTokenStore([user, token('gpt', 'p')], false);
+  const failingMark: typeof markComputeTokenUnavailable = async (...args) => {
+    await store.markToken(...args);
+    throw new Error('db down');
+  };
+  const leases = computeSubscriptionLeases({
+    userId: 'owner-u',
+    initial: user,
+    fetchToken: store.fetchToken,
+    markToken: failingMark,
+  });
+  const next = await leases.next(limited(user.accessToken));
+  assertEqual(next?.accessToken, 'gpt-token-p', 'moves past the repeated user lease to the pool');
+  assertEqual(store.lookups[1]?.forcePool, true, 'user tier skipped after a repeat');
+  const after = await leases.next(limited('gpt-token-p'));
+  assertEqual(after, null, 'no lease is served twice; then funded keys');
+}
+
 async function main(): Promise<void> {
   const tests: Array<{ name: string; fn: () => Promise<void> }> = [
     {
@@ -290,6 +406,18 @@ async function main(): Promise<void> {
     {
       name: 'chat compute / force waterfall skips direct token lookup',
       fn: testForceWaterfallSkipsChatComputeLookup,
+    },
+    {
+      name: 'subscription leases / rotate through every available lease',
+      fn: testSubscriptionLeasesRotateThroughEveryAvailableLease,
+    },
+    {
+      name: 'subscription leases / keep the caller pin; first lease only on demand',
+      fn: testSubscriptionLeasesKeepTheCallersPinAndLeaseFirstOnlyWhenAsked,
+    },
+    {
+      name: 'subscription leases / never serve a tried lease twice',
+      fn: testSubscriptionLeasesNeverServeATriedLeaseTwice,
     },
   ];
 

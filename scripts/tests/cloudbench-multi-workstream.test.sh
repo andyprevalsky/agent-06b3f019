@@ -208,6 +208,15 @@ cleanup() {
         # Immutable audit/owner ledgers are chmod a-w; regain write before rm
         # so a green run never leaves /tmp fixtures behind (observed after
         # scenario 16 when teardown-ownership/* blocked rm -rf).
+        if [ -n "${FIXTURE_STORAGE_DEVICE:-}" ] && [ -z "$(fixture_process_pids)" ]; then
+            python3 - "$FIXTURE_STORAGE_DEVICE" <<'PY'
+import os,shutil,sys
+from pathlib import Path
+value=sys.argv[1]
+assert value.isdigit() and int(value)>2**48
+shutil.rmtree(Path('/tmp')/('rose-cloudbench-cleanup-admission-'+str(os.getuid()))/value,ignore_errors=True)
+PY
+        fi
         chmod -R u+w "$TMP_ROOT" 2>/dev/null || true
         rm -rf "$TMP_ROOT"
     fi
@@ -895,13 +904,87 @@ FAKE_DIR="$TMP_ROOT/fake-fly"
 FAKE_BIN="$TMP_ROOT/fake-bin"
 mkdir -p "$FAKE_DIR/markers" "$FAKE_BIN"
 
+# The provider is simulated, so its controllers share one bounded simulated
+# disk, not the host filesystem's live cleanup-admission ledger or blocks.
+prepare_fixture_storage_transport() {
+    FIXTURE_STORAGE="$TMP_ROOT/reserve-transport"
+    mkdir -p "$FIXTURE_STORAGE"
+    FIXTURE_STORAGE_DEVICE="$(python3 - "$TMP_ROOT" <<'PY'
+import hashlib,os,sys,time
+print(2**48+int(hashlib.sha256(f'{sys.argv[1]}:{os.getpid()}:{time.time_ns()}'.encode()).hexdigest()[:12],16)+1)
+PY
+)" || return 1
+    printf '%s\n' '{"capacity_mb":18000,"allocations":{}}' > "$FIXTURE_STORAGE/state.json"
+    cat > "$FIXTURE_STORAGE/sitecustomize.py" <<'PY'
+import fcntl,json,os,stat
+from pathlib import Path
+scope=Path(os.environ['CLOUDBENCH_TEST_STORAGE_SCOPE'])
+state=Path(os.environ['CLOUDBENCH_TEST_STORAGE_STATE'])
+real_lstat,real_fstat=Path.lstat,os.fstat
+
+def private(path):
+    return Path(path).is_relative_to(scope)
+
+def observed_path(self,*args,**kwargs):
+    value=real_lstat(self,*args,**kwargs)
+    if private(self) and stat.S_ISDIR(value.st_mode):
+        fields=list(value);fields[2]=int(os.environ['CLOUDBENCH_TEST_STORAGE_DEVICE'])
+        return os.stat_result(fields)
+    if private(self) and self.name=='cleanup-disk-reserve':
+        return os.stat_result(tuple(value),{'st_blocks':value.st_size//512})
+    return value
+
+def allocate(fd,offset,size):
+    path=Path(os.readlink(f'/proc/self/fd/{fd}'))
+    if not private(path) or path.name!='cleanup-disk-reserve' or offset!=0:
+        raise OSError('fixture allocation escaped its private reserve')
+    with (state.parent/'storage.lock').open('a+') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        data=json.loads(state.read_text())
+        data['allocations']={p:n for p,n in data['allocations'].items() if Path(p).exists()}
+        old=data['allocations'].get(str(path),0)
+        if sum(data['allocations'].values())-old+size>data['capacity_mb']*1048576:
+            raise OSError(28,'bounded fixture disk exhausted')
+        os.ftruncate(fd,size)
+        data['allocations'][str(path)]=size;state.write_text(json.dumps(data))
+
+def observed_fd(fd):
+    value=real_fstat(fd)
+    try:path=Path(os.readlink(f'/proc/self/fd/{fd}'))
+    except OSError:return value
+    if private(path) and path.name=='cleanup-disk-reserve':
+        return os.stat_result(tuple(value),{'st_blocks':value.st_size//512})
+    return value
+Path.lstat=observed_path
+os.posix_fallocate=allocate
+os.fstat=observed_fd
+PY
+    cat > "$FIXTURE_STORAGE/df" <<'PY'
+#!/usr/bin/env python3
+import fcntl,json,os,sys
+from pathlib import Path
+scope=Path(os.environ['CLOUDBENCH_TEST_STORAGE_SCOPE'])
+if not Path(sys.argv[-1]).is_relative_to(scope):raise SystemExit('fixture df escaped private scope')
+p=Path(os.environ['CLOUDBENCH_TEST_STORAGE_STATE'])
+with (p.parent/'storage.lock').open('a+') as lock:
+ fcntl.flock(lock,fcntl.LOCK_SH);data=json.loads(p.read_text())
+ allocated=sum(n for name,n in data['allocations'].items() if Path(name).exists())
+ free=data['capacity_mb']*1048576-allocated
+ print('Filesystem 1024-blocks Used Available Capacity Mounted on')
+ print('fixture 20000000 0',free//1024,'0% /fixture')
+PY
+    chmod 700 "$FIXTURE_STORAGE/df"
+}
+
+prepare_fixture_storage_transport || exit 1
+
 reset_fake_state() {
     rm -rf "$FAKE_DIR/markers" "$FAKE_DIR/machines"
     mkdir -p "$FAKE_DIR/markers" "$FAKE_DIR/machines"
     cat > "$FAKE_DIR/state.json" <<'JSON'
 {
   "secrets": ["AGENTS_ENV_B64", "BACKEND_ENV_B64", "AGENTS_ENV_SHA256",
-              "BACKEND_ENV_SHA256", "CLOUDBENCH_BROWSER_PROVIDER", "GITHUB_TOKEN"],
+              "BACKEND_ENV_SHA256", "CLOUDBENCH_BROWSER_PROVIDER", "CLOUDBENCH_WORKER_BROWSER_PROVIDER", "GITHUB_TOKEN"],
   "machines": [
     {"id": "aaaa0000000001", "name": "cloudbench-warm", "state": "stopped",
      "region": "iad", "private_ip": "",
@@ -2666,7 +2749,11 @@ os.execvp(sys.argv[1], sys.argv[1:])')
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
         -u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS \
         -u FLY_API_TOKEN -u FLY_ACCESS_TOKEN \
-        PATH="$FAKE_BIN:$PATH" \
+        PATH="$FIXTURE_STORAGE:$FAKE_BIN:$PATH" \
+        PYTHONPATH="$FIXTURE_STORAGE${PYTHONPATH:+:$PYTHONPATH}" \
+        CLOUDBENCH_TEST_STORAGE_SCOPE="$TMP_ROOT" \
+        CLOUDBENCH_TEST_STORAGE_STATE="$FIXTURE_STORAGE/state.json" \
+        CLOUDBENCH_TEST_STORAGE_DEVICE="$FIXTURE_STORAGE_DEVICE" \
         TMPDIR="$SCRIPT_SNAPSHOT_TMP" \
         FLY_BENCH_API_TOKEN="$FAKE_FLY_TOKEN" \
         CONDUCTOR_PORT="$port" \

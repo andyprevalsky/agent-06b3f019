@@ -26,6 +26,7 @@ import contextlib
 import copy
 import contextvars
 import importlib.util
+import json
 import os
 import time
 import uuid
@@ -142,12 +143,27 @@ def _long_activity_outcomes(outcomes: list[tuple[str, str, Any]], name: str) -> 
 class _Backend:
     """The backend and Supabase as the workers see them: queue pointer, browser control + inbox, realtime."""
 
-    def __init__(self, live_queue: str) -> None:
+    def __init__(self, live_queue: str, agent_speeds: Optional[dict[str, str]] = None) -> None:
         self.live_queue = live_queue
+        self.agent_speeds = dict(agent_speeds or {})
+        self.speed_reads: list[str] = []
         self.unexpected: list[str] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if request.method == "POST" and path == "/api/fast-cache/agent-flag":
+            payload = json.loads(request.content)
+            agent_id = payload.get("agentId")
+            if payload == {"agentId": agent_id} and agent_id in self.agent_speeds:
+                speed = self.agent_speeds[agent_id]
+                self.speed_reads.append(agent_id)
+                return httpx.Response(200, json={
+                    "goal": "Finish the delegated task",
+                    "enabled": False,
+                    "writeEnabled": False,
+                    "providerFastMode": speed == "standard",
+                    "speed": speed,
+                })
         if path == "/api/agent-queue-pointer":
             return httpx.Response(200, json={"taskQueue": self.live_queue, "surfaceHash": "deploy-e2e"})
         if request.method == "GET" and path.startswith("/api/agents/") and path.endswith("/agent-inbox"):
@@ -212,7 +228,12 @@ async def _deploy_environment(backend: _Backend):
     setup_mock_fn(backend.handle)
     try:
         # Browser activities schedule JEV estimates in-process; without a key they stay offline.
-        with _replay_stable_workflow_clock(), patch.dict(os.environ, {"TYPESAFE_API_KEY": ""}):
+        with (
+            _replay_stable_workflow_clock(),
+            patch.dict(os.environ, {"TYPESAFE_API_KEY": ""}),
+            patch("providers.demo_cache.client._AGENT_SPEED", {}),
+            patch("providers.demo_cache.client._AGENT_FASTMODE", {}),
+        ):
             async with await WorkflowEnvironment.start_time_skipping() as env:
                 yield env
     finally:
@@ -381,6 +402,7 @@ class _BrowserServices:
         self.on_deploy_step = on_deploy_step
         self.llm_turns: list[str] = []
         self.llm_pools: list[str] = []
+        self.llm_speeds: list[str] = []
         self.steps: list[str] = []
         self.session_inits: list[str] = []
         self.session_lookups: list[tuple[str, str]] = []
@@ -410,6 +432,9 @@ class _BrowserServices:
         self.session_closes.append((_WORKER_LABEL.get(), session_id, pause))
 
     async def llm_step(self, *args, **kwargs):
+        from providers.rose.speed import current_agent_speed
+
+        self.llm_speeds.append(current_agent_speed())
         self.llm_turns.append(_WORKER_LABEL.get())
         self.llm_pools.append(kwargs.get("pool"))
         usage = {"prompt_tokens": STEP_PROMPT_TOKENS, "completion_tokens": 60, "actual_model": "rose-1-browser-use"}
@@ -582,7 +607,7 @@ def _assert_activity_handoff(outcomes: list, name: str, yielded_status: str, old
 async def test_rolling_deploy_resumes_browser_task_on_the_new_machine() -> None:
     agent_id = "agent-deploy-rolling-browser"
     workflow_id = f"deploy-rolling-browser-{uuid.uuid4().hex[:8]}"
-    backend = _Backend(ROLLING_QUEUE)
+    backend = _Backend(ROLLING_QUEUE, {agent_id: "ultrafast"})
     outcomes: list = []
     deploy_landed = asyncio.Event()
 
@@ -627,13 +652,15 @@ async def test_rolling_deploy_resumes_browser_task_on_the_new_machine() -> None:
     _assert_activity_handoff(
         outcomes, "spawn_browser_agent_activity_v3", BROWSER_DRAIN_YIELD_STATUS, "old-machine", "new-machine"
     )
+    assert browser.llm_speeds == [backend.agent_speeds[agent_id]] * BROWSER_STEPS
+    assert backend.speed_reads == [agent_id], "startup speed read is memoized across the resumed task"
     assert not backend.unexpected, f"unexpected backend calls: {backend.unexpected}"
 
 
 async def test_cutover_resumes_browser_task_on_the_new_generation() -> None:
     agent_id = "agent-deploy-cutover-browser"
     workflow_id = f"deploy-cutover-browser-{uuid.uuid4().hex[:8]}"
-    backend = _Backend(OLD_GENERATION_QUEUE)
+    backend = _Backend(OLD_GENERATION_QUEUE, {agent_id: "fast"})
     outcomes: list = []
 
     async def pointer_moves_mid_step() -> None:
@@ -665,6 +692,8 @@ async def test_cutover_resumes_browser_task_on_the_new_generation() -> None:
     _assert_activity_handoff(
         outcomes, "spawn_browser_agent_activity_v3", BROWSER_DRAIN_YIELD_STATUS, "old-generation", "new-generation"
     )
+    assert browser.llm_speeds == [backend.agent_speeds[agent_id]] * BROWSER_STEPS
+    assert backend.speed_reads == [agent_id], "startup speed read is memoized across the resumed task"
     assert not backend.unexpected, f"unexpected backend calls: {backend.unexpected}"
 
 

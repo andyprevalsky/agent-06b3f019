@@ -23,6 +23,14 @@ from typing import List, Optional
 
 HISTORY_DIR = os.path.join(os.path.dirname(__file__), "history")
 HISTORY_FILE = os.path.join(HISTORY_DIR, "task_durations.jsonl")
+# A deploy's local smoke lane (scripts/run-predeploy-local on an isolated deploy
+# worktree) sets this to a directory under .context: the rows it records are
+# written there, byte-for-byte as they would be appended to the tracked
+# ledgers, so the tracked files stay unchanged while the other gates
+# fingerprint the worktree. Reads (timeout derivation, the predeploy history
+# gate) keep the tracked ledgers; `scripts/benchmark-history-latest-only.py
+# --apply-parked --write` replays the parked rows at publish time.
+PARK_DIR_ENV = "BENCHMARK_HISTORY_PARK_DIR"
 
 MIN_SAMPLES = 5
 # Derive timeouts from p95 of the recent successful runs × a safety buffer.
@@ -36,6 +44,15 @@ SAFETY_MULTIPLIER = 2.25
 PERCENTILE = 95.0
 FLOOR_SECONDS = 30
 CEIL_SECONDS = 900
+
+
+def _write_target(ledger_path: str) -> str:
+    """Where a new row of ``ledger_path`` is appended: the parked copy of that
+    ledger when PARK_DIR_ENV names a directory, otherwise the ledger itself."""
+    park = os.environ.get(PARK_DIR_ENV, "").strip()
+    if not park:
+        return ledger_path
+    return os.path.join(park, os.path.basename(ledger_path))
 
 
 class InsufficientHistoryError(Exception):
@@ -66,7 +83,8 @@ def record_pass(
     Writes with O_APPEND — atomic for lines under PIPE_BUF, safe for parallel
     task execution. Never raises on write failure (history is best-effort).
     """
-    os.makedirs(HISTORY_DIR, exist_ok=True)
+    target = _write_target(HISTORY_FILE)
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
     entry = {
         "task": task_name,
         "duration_seconds": round(float(duration_seconds), 1),
@@ -75,7 +93,7 @@ def record_pass(
         "agent_id": agent_id,
     }
     try:
-        with open(HISTORY_FILE, "a") as f:
+        with open(target, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError:
         pass
@@ -140,6 +158,9 @@ def record_attempt(
     timestamp: Optional[str] = None,
     suite: Optional[str] = None,
     counts_for_deploy_eligibility: Optional[bool] = None,
+    run_id: Optional[str] = None,
+    outcome_class: Optional[str] = None,
+    evaluator_evidence: Optional[dict] = None,
 ) -> None:
     """Append EVERY completed run (pass or fail, local or prod) to the attempts ledger.
 
@@ -153,9 +174,16 @@ def record_attempt(
     `counts_for_deploy_eligibility=false` so they cannot break a canary's
     last-3-pass streak after it is assigned into smoke.
 
+    `run_id` groups the attempts of one benchmark run (plus the optional
+    `BENCHMARK_HUB_GROUP_RUN_ID` campaign group) so factory reviews can report
+    per-run task counts and per-attempt durations; `outcome_class` separates
+    a passed verdict, a failed verdict and an owned-cleanup failure. Absent
+    values are omitted, never guessed.
+
     Best-effort, O_APPEND, never raises.
     """
-    os.makedirs(HISTORY_DIR, exist_ok=True)
+    target = _write_target(ATTEMPTS_FILE)
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
     resolved_suite = _resolve_attempt_suite(suite)
     eligibility = _resolve_counts_for_deploy_eligibility(
         suite=resolved_suite,
@@ -175,8 +203,17 @@ def record_attempt(
     }
     if resolved_suite:
         entry["suite"] = resolved_suite
+    if run_id:
+        entry["run_id"] = str(run_id)[:128]
+    group_run_id = os.environ.get("BENCHMARK_HUB_GROUP_RUN_ID", "").strip()
+    if group_run_id:
+        entry["group_run_id"] = group_run_id[:128]
+    if outcome_class:
+        entry["outcome_class"] = outcome_class
+    if evaluator_evidence:
+        entry["evaluator_evidence"] = evaluator_evidence
     try:
-        with open(ATTEMPTS_FILE, "a") as f:
+        with open(target, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError:
         pass

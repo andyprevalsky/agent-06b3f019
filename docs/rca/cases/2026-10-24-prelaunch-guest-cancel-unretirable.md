@@ -149,3 +149,14 @@ Every guest lifecycle state that a cancellation can produce must have a
 truthful runtime-evidence and cleanup contract. Every long pre-launch step
 must honour the durable stop request within the controller's
 acknowledgement window.
+
+
+### Regression 2026-10-27: launched-driver test observed lifecycle before HTTP readiness
+
+The five-test `cloudbench-prelaunch-cancel` gate reported connection refused while asserting `/runtime-evidence == 409`, on `46bfbfb5f3f33e273fefbbf0fc560cf9a3e00277`. The original log did not capture the status process's output/outcome, so the archived process's specific state remains unknown.
+
+A controlled native reproduction delayed the real status-server process by 800 ms. The driver exited rc=0 and published `exited`; the test immediately requested runtime evidence while the separate server process was alive but had not bound its socket. No prelaunch seal existed. The original five-test native file failed with the same connection refusal, 3.614 s, and passed unchanged in assertions after the readiness correction, 3.828 s.
+
+The first-bad boundary was the regression test equating a driver-state file with readiness of an independently scheduled HTTP process. Inside the existing 20-second startup deadline it now requires real `/driver-health == 410`, retrying only connection refusal before bind. The existing 409 runtime-evidence assertion, no-prelaunch-seal check, request timeout, polling cadence, and cleanup bounds remain intact. A subclass runs both original lifecycle cases with controlled delayed server startup. The permanent seven-test command fails before this correction (one matching connection-refused error, 5.812 s) and passes after it (7/7, 6.522 s). A real server exit-17 control still fails within the original startup deadline (20.662 s).
+
+The earlier production lifecycle/evidence contract is preserved; this does not demonstrate that its fix recurred in production. The coordinator reviewed and applied the exact native-tested bytes (SHA256 `9be4b4d85a6579eaa428d81caf59335bdeeeab244307c6de0a8032c344075d4b`) after all batch-2 gates exited. Full combined-source acceptance and deployment remain pending. Exact diff/proof hashes and joined cleanup are in `.context/prelaunch-cancel-rca-20261027/`.

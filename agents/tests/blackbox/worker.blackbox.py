@@ -665,6 +665,7 @@ def _check_stack_worker_cleanup(worker_exit, bad_receipt=False):
                 function("descendant_pids"),
                 function("kill_tree_hard"),
                 function("remove_isolated_frontend_build"),
+                function("stop_stack_owner_watch"),
                 function("cleanup"),
                 f"{shlex.quote(sys.executable)} backend.py &",
                 "backend_fixture_pid=$!",

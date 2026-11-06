@@ -26,9 +26,8 @@
  *   pinned question (display.placement 'pinned') → not inline; PinnedQuestionMount shows it
  *   metadata.a2a (USER or TOOL agent_message row) → AgentToAgentRow, never a user bubble
  */
-import { useEffect, type ReactNode } from 'react';
+import { Fragment, useEffect, type ReactNode } from 'react';
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
-import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import MessageBubble from './MessageBubble';
@@ -269,17 +268,17 @@ export function MessageListItems({
   agentExchangeProjection,
   ...itemProps
 }: MessageListItemsProps) {
-  const roseDesktop = useRoseDesktop();
-  const { visibleMessages, openDisplay, displayGrouping, localExchanges, workGroups } =
+  const { renderedMessages, displayGrouping, localExchanges, workGroups } =
     useMessageListProjection({
       ...itemProps,
       filteredMessages,
+      agentExchangeGroups: agentExchangeProjection?.groups,
+      webSearchGrouping,
       groupAgentMessages: itemProps.groupAgentMessages ?? false,
       compressWork: itemProps.compressWork ?? false,
     });
   const { groups: exchangeGroups, now } = agentExchangeProjection ?? localExchanges;
-  return visibleMessages.map((message) => {
-    if (roseDesktop && isHiddenTrajectoryRow(message)) return null;
+  const items = renderedMessages.map((message) => {
     const workGroup = workGroups.groupsByLeadId.get(message.message_id);
     if (workGroup)
       return (
@@ -293,7 +292,6 @@ export function MessageListItems({
           )}
         />
       );
-    if (workGroups.foldedIds.has(message.message_id)) return null;
     const exchangeGroup = exchangeGroups.groupsByLeadId.get(message.message_id);
     if (exchangeGroup)
       return (
@@ -304,9 +302,6 @@ export function MessageListItems({
           now={now}
         />
       );
-    if (exchangeGroups.foldedIds.has(message.message_id)) return null;
-    if (webSearchGrouping.hiddenMessageIds.has(message.message_id)) return null;
-    if (displayGrouping.hiddenMessageIds.has(message.message_id)) return null;
     const displayItems = displayGrouping.groupsByLeadId.get(message.message_id);
     if (displayItems) {
       return (
@@ -314,7 +309,6 @@ export function MessageListItems({
           key={message.message_id}
           message={message}
           items={displayItems}
-          onOpen={openDisplay ? () => openDisplay(message) : undefined}
           agentId={itemProps.selectedAgentId || undefined}
           shouldType={message.message_id === itemProps.currentAnimatingId}
           onTypingComplete={itemProps.onAnimationComplete}
@@ -336,4 +330,5 @@ export function MessageListItems({
     }
     return <MessageListItem key={getMessageRenderKey(message)} message={message} {...itemProps} />;
   });
+  return <Fragment key={itemProps.selectedAgentId}>{items}</Fragment>;
 }

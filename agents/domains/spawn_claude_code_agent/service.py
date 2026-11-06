@@ -10,7 +10,7 @@ import re
 import time
 import uuid as uuid_module
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import structlog
 import structlog.contextvars
@@ -20,18 +20,19 @@ from temporalio.exceptions import ApplicationError
 
 from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_DRAIN_YIELD_STATUS,
-    CODE_AGENT_RESIZE_YIELD_REASON,
-    CODE_SESSION_RESIZE_HEARTBEAT_S,
     CODE_AGENT_ERROR_RETRY_LIMIT,
+    CODE_AGENT_ERRORS_HEARTBEAT_KEY,
     CODE_AGENT_PAUSED_STATUS,
+    CODE_AGENT_RESIZE_YIELD_REASON,
     CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_SESSION_IDLE_PAUSE_S,
     CODE_SESSION_KEEPALIVE_INTERVAL_S,
+    CODE_SESSION_RESIZE_HEARTBEAT_S,
     DRAIN_CHECK_INTERVAL_S,
-    E2B_COST_CENTS_PER_SECOND,
+    E2B_COST_CENTS_PER_VCPU_SECOND,
+    E2B_DEFAULT_SANDBOX_VCPUS,
     ECHO_SUPPRESS_S,
-    FATAL_ERROR_PATTERNS,
     MAX_UNCHANGED_OUTPUTS,
     REATTACH_PROBE_ATTEMPTS,
     REATTACH_PROBE_BACKOFF_S,
@@ -52,7 +53,6 @@ from domains.spawn_claude_code_agent.repo import (
     save_claude_code_message,
     save_code_transcript_batch,
 )
-from domains.spawn_claude_code_agent.types import ClaudeCodeParentResponse
 from helpers.activity_generation_drain import activity_drain_reason
 from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
 from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
@@ -84,45 +84,23 @@ def resolve_code_agent_provider(default_provider: str) -> str:
     return forced if forced in {"claude", "codex"} else default_provider
 
 
-def check_fatal_errors(output: str) -> Optional[str]:
-    """Check terminal output for fatal errors that should immediately abort the session.
-
-    Returns an error message if a fatal error is detected, None otherwise.
-    """
-    for pattern, message in FATAL_ERROR_PATTERNS:
-        if pattern in output:
-            return message
-    return None
-
-
 def check_terminal_fatal_error(
-    output: str,
     *,
     code_provider: str,
     exit_code: Optional[int],
     credential_feedback: Optional[list[dict[str, str]]] = None,
 ) -> Optional[str]:
-    """Classify terminal failures after the provider process has exited.
+    """Classify a terminal credential failure from structured CLI signals only.
 
-    Codex can retain either supported plan-exhaustion wording in the terminal,
-    retry with the funded API key, and then exit successfully. Credential
-    exhaustion is therefore terminal only when the complete Codex process
-    still failed after its runtime fallback opportunity.
+    Terminal text (tool output, assistant prose, injected turns) is never
+    classified: an agent may print any banner string while doing healthy work.
+    Claude Code credential failures (usage limit, out of credits, rejected
+    login) arrive as structured events and pause the session instead (C15).
+    Codex can switch to the funded API key in the sandbox and still exit
+    successfully, so its structured credential feedback is terminal only when
+    the complete Codex process still failed after that fallback opportunity.
     """
-    fatal_error = check_fatal_errors(output)
-    if fatal_error is not None:
-        return fatal_error
-    codex_credential_exhausted = bool(credential_feedback) or any(
-        marker in output.lower()
-        for marker in (
-            "you've hit your usage limit",
-            "usage_limit_reached",
-            "purchase more credits",
-            "quota exceeded. check your plan and billing details.",
-            "insufficient_quota",
-        )
-    )
-    if code_provider == "codex" and exit_code != 0 and codex_credential_exhausted:
+    if code_provider == "codex" and exit_code != 0 and credential_feedback:
         return (
             "Codex credentials are rate-limited or out of quota and the runtime "
             "fallback did not complete successfully."
@@ -140,6 +118,7 @@ def build_codex_credential_feedback(
     scrolls the original OAuth error and fallback marker out of the terminal.
     """
     feedback_by_source: dict[str, str] = {}
+    credential_by_source: dict[str, str] = {}
     fallback_seen = False
 
     for event in code_events:
@@ -151,6 +130,16 @@ def build_codex_credential_feedback(
             feedback_by_source.setdefault("oauth", reason[:2000])
             continue
         if event.get("type") != "error":
+            continue
+        if isinstance(event.get("login_unusable"), dict):
+            # The ws-server's structured unusable login (no Azure switch armed): the
+            # backend marks exactly that login for reconnect, never a rate limit.
+            reason = str(event["login_unusable"].get("reason") or "oauth_refresh_invalid")
+            source = "funded_api_key" if fallback_seen else "initial"
+            feedback_by_source.setdefault(source, reason[:2000])
+            credential = event["login_unusable"].get("credential")
+            if isinstance(credential, str) and credential:
+                credential_by_source.setdefault(source, credential[:64])
             continue
 
         error = event.get("error")
@@ -178,12 +167,41 @@ def build_codex_credential_feedback(
     if fallback_seen and "initial" in feedback_by_source:
         initial_reason = feedback_by_source.pop("initial")
         feedback_by_source["oauth"] = initial_reason
+        if "initial" in credential_by_source:
+            credential_by_source["oauth"] = credential_by_source.pop("initial")
 
     return [
-        {"source": source, "reason": feedback_by_source[source]}
+        {
+            "source": source,
+            "reason": feedback_by_source[source],
+            **({"credential": credential_by_source[source]} if source in credential_by_source else {}),
+        }
         for source in ("initial", "oauth", "funded_api_key")
         if source in feedback_by_source
     ]
+
+
+def build_credential_feedback(code_events: list[Dict[str, Any]], code_provider: str) -> list[dict[str, str]]:
+    """The credential failures a run observed, from structured CLI events only (never terminal text).
+
+    Claude Code: a rejected login (``authentication_failed``) with the
+    fingerprint of the credential the sandbox held, so the backend tells an
+    expired or since-replaced token from a revoked one. Usage limits and out
+    of credits are reported through the C15 usage-limit path instead.
+    """
+    if code_provider == "codex":
+        return build_codex_credential_feedback(code_events)
+    for event in code_events:
+        unusable = login_unusable_from_event(event)
+        if unusable is not None and unusable["provider"] == "claude":
+            return [
+                {
+                    "source": "initial",
+                    "reason": unusable["reason"],
+                    **({"credential": unusable["credential"]} if unusable.get("credential") else {}),
+                }
+            ]
+    return []
 
 
 _TIMELINE_EVENT_TYPES = frozenset(
@@ -260,9 +278,9 @@ def format_code_events_transcript(
     ``[Claude]``, ``[Claude tool]``, ``[Claude result]``.
     """
     lines: list[str] = []
-    for event in code_events or []:
-        if not isinstance(event, dict):
-            continue
+    # One line per streamed message: partial snapshots superseded by a later
+    # snapshot or the final block would repeat its text once per delta.
+    for event in _latest_stream_snapshots([event for event in code_events or [] if isinstance(event, dict)]):
         event_type = str(event.get("type") or event.get("event_type") or "").strip().lower()
         provider = str(event.get("provider") or "claude").strip().title() or "Claude"
         if provider.lower() not in {"claude", "codex"}:
@@ -382,7 +400,6 @@ def build_durable_terminal_transcript(
     return formatted_events
 
 
-
 def safe_time() -> float:
     """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
     try:
@@ -422,143 +439,6 @@ def build_context_summary(
             summary_parts.append(f"  • {action}")
 
     return "\n".join(summary_parts)
-
-
-# ---------------------------------------------------------------------------
-# Parent LLM interaction
-# ---------------------------------------------------------------------------
-
-
-async def call_parent_llm(
-    goal: str,
-    filtered_output: str,
-    conversation_history: List[Dict[str, str]],
-    agent_id: str,
-    on_chunk: Callable[[str, int], Awaitable[None]],
-    model: str = "rose-labs/rose-1-flash",
-    claude_token: Optional[str] = None,
-    gpt_token: Optional[str] = None,
-    gpt_account_id: Optional[str] = None,
-    gpt_token_source: Optional[str] = None,
-    gpt_token_pool_id: Optional[str] = None,
-    gpt_token_user_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Call the parent agent's LLM to decide whether to respond or complete.
-
-    Claude Code's terminal output appears as USER messages.
-    Parent LLM's responses are sent to Claude Code's stdin.
-
-    Returns
-    -------
-    Dict with ``attempt_completion`` (bool), ``response`` (str|None),
-    ``usage`` (dict).
-    """
-    from helpers.llm import call_llm_structured_streaming
-    from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
-
-    # Build file info for system prompt (static; same body whenever attachments
-    # are present in the conversation, no per-call interpolation).
-    file_info = ""
-    if conversation_history and any("attachments" in str(h) for h in conversation_history):
-        file_info = """
-
-# Available Files
-User attachments are available in /home/user/attachments/
-Claude Code can read and process these files as needed.
-
-# Output Files
-When Claude Code creates files the user needs, it should copy them to /home/user/output/
-Files in this directory will be automatically uploaded and returned to the user."""
-
-    # System prompt is split at SYSTEM_PROMPT_DYNAMIC_BOUNDARY:
-    #   - Static portion (above the marker): identity, role, decision rules,
-    #     response guidelines, attachments info. Globally cacheable across
-    #     every claude-code spawn.
-    #   - Dynamic portion (below the marker): the original goal. Varies per
-    #     spawn so it must NOT contaminate the cacheable prefix.
-    # Per-call timestamps live in the [STATE: ...] line on the user message.
-    static_system = (
-        "You are the parent agent monitoring Claude Code, a terminal-based coding agent. "
-        "You read its terminal output and decide when to respond, intervene, or mark the task complete.\n\n"
-        "Claude Code's terminal output appears as USER messages. Your responses will be sent to Claude Code's stdin.\n\n"
-        "# Your Role\n"
-        "- Monitor Claude Code's progress on the task\n"
-        "- Answer questions Claude Code asks (numbered options can be answered with just the number)\n"
-        "- Provide guidance when Claude Code seems stuck\n"
-        "- Determine when the task is complete\n\n"
-        "# Decision Making\n"
-        "Set attempt_completion=true ONLY when:\n"
-        "- Claude Code has explicitly stated the task is done\n"
-        "- The output shows clear completion (tests passing, task finished, etc.)\n"
-        "- Claude Code is asking \"Is there anything else?\" or similar\n\n"
-        "Set attempt_completion=false when:\n"
-        "- Claude Code is asking questions or requesting input\n"
-        "- Claude Code is still working (you see active tool calls, file operations)\n"
-        "- Claude Code encountered an error that needs addressing\n\n"
-        "# Response Guidelines\n"
-        "- Be concise; Claude Code is a terminal agent\n"
-        "- If Claude asks numbered options (like 1, 2, 3), respond with just the number\n"
-        "- If unsure about a question, let Claude Code decide (respond with \"your choice\" or similar)\n"
-        "- Don't repeat the original goal back to Claude Code; it already knows it"
-        f"{file_info}"
-    )
-
-    dynamic_system = f"# Original Goal\n{goal}"
-
-    system_prompt = static_system + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + dynamic_system
-
-    # Build messages for LLM
-    messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
-
-    # Add conversation history
-    for msg in conversation_history:
-        messages.append(msg)
-
-    # Add current output as user message, with a trailing [STATE: time=...] line
-    # so the per-call timestamp lives outside the cacheable prefix.
-    current_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    state_line = f"[STATE: time={current_ts}]"
-    messages.append({"role": "user", "content": f"{filtered_output}\n\n{state_line}"})
-
-    try:
-        result, usage, _ = await call_llm_structured_streaming(
-            messages=messages,
-            model=model,
-            temperature=0.3,
-            max_tokens=500,
-            response_model=ClaudeCodeParentResponse,
-            on_chunk=on_chunk,
-            agent_id=agent_id,
-            claude_token=claude_token,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            gpt_token_source=gpt_token_source,
-            gpt_token_pool_id=gpt_token_pool_id,
-            gpt_token_user_id=gpt_token_user_id,
-            call_site="claude_code_agent",
-        )
-
-        return {
-            "attempt_completion": result.attempt_completion,
-            "response": result.response if not result.attempt_completion else None,
-            "usage": usage,
-        }
-
-    except Exception as e:
-        logger.error(
-            "[ClaudeCode] Parent LLM call failed",
-            agent_id=agent_id,
-            error=extract_error_message(e),
-        )
-        # Return empty response so the loop doesn't send anything to stdin.
-        # Previously this returned "continue" which created infinite loops:
-        # the error kept firing, "continue" was sent to stdin each time,
-        # and the same unchanged terminal output triggered another failed LLM call.
-        return {
-            "attempt_completion": False,
-            "response": "",
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-        }
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +682,8 @@ _CODE_SESSION_FIELDS = (
     "transcript_events",
     # vCPUs / memory of the sandbox (C16); the code_agent block reports it.
     "sandbox_size",
+    # Attached to a live CLI: its events before this spawn's goal turn are history.
+    "history_events",
 )
 
 
@@ -864,6 +746,90 @@ def _code_session_from_heartbeat() -> Optional[Dict[str, Any]]:
     return None
 
 
+class ToolsInFlight:
+    """Tools a code-agent session started and has not finished.
+
+    Keyed by tool id, so the events repeated for one call (Claude: the streamed
+    block start and the assistant envelope; Codex: item/started then
+    item/completed) count it once, and one tool_result carrying several calls
+    (``tool_results``) finishes each of them. A finished turn has no tool left.
+    """
+
+    _CODEX_ITEM_TYPES = frozenset({"tool_use", "command", "file_change"})
+
+    def __init__(self) -> None:
+        self._ids: set[str] = set()
+        self._anonymous = 0  # tool_use events without an id (older sandboxes)
+
+    def __len__(self) -> int:
+        return len(self._ids) + self._anonymous
+
+    def clear(self) -> None:
+        self._ids.clear()
+        self._anonymous = 0
+
+    def observe(self, event: dict[str, Any]) -> None:
+        event_type = event.get("type")
+        item_id = event.get("item_id")
+        if (
+            event.get("provider") == "codex"
+            and event_type in self._CODEX_ITEM_TYPES
+            and isinstance(item_id, str)
+            and event.get("status") in ("started", "completed")
+        ):
+            if event.get("status") == "started":
+                self._ids.add(item_id)
+            else:
+                self._ids.discard(item_id)
+        elif event_type == "tool_use":
+            tool_id = event.get("tool_use_id")
+            if isinstance(tool_id, str) and tool_id:
+                self._ids.add(tool_id)
+            else:
+                self._anonymous += 1
+        elif event_type == "tool_result":
+            results = event.get("tool_results")
+            ids = [
+                tool_id
+                for tool_id in (
+                    [part.get("tool_use_id") for part in results if isinstance(part, dict)]
+                    if isinstance(results, list)
+                    else [event.get("tool_use_id")]
+                )
+                if isinstance(tool_id, str) and tool_id
+            ]
+            if ids:
+                self._ids.difference_update(ids)
+            elif self._anonymous:
+                self._anonymous -= 1
+        elif event_type in ("result", "turn_ended", "final"):
+            self.clear()
+
+
+def _supersede_partial_snapshot(
+    code_events: list[Dict[str, Any]], latest_partials: dict[tuple[Any, Any, str], int], index: int
+) -> None:
+    """Drop the text of the item's previous partial snapshot once a newer one arrives.
+
+    A partial stream event carries the whole block so far, so keeping every
+    snapshot grows memory with the square of the output. The stored copy keeps
+    its delta and its place (indices identify sandbox events across replays).
+    """
+    event = code_events[index]
+    item_id = event.get("item_id")
+    text = event.get("text")
+    # An empty final (e.g. redacted thinking) supersedes nothing: the streamed
+    # text is the only copy.
+    if not isinstance(item_id, str) or not isinstance(text, str) or not text:
+        return
+    key = (event.get("type"), event.get("turn_id"), item_id)
+    previous = latest_partials.pop(key, None)
+    if previous is not None:
+        code_events[previous] = {k: v for k, v in code_events[previous].items() if k != "text"}
+    if event.get("partial") is True:
+        latest_partials[key] = index
+
+
 async def _run_agentic_loop(
     *,
     agent_id: str,
@@ -916,19 +882,22 @@ async def _run_agentic_loop(
     last_filtered_output = ""
     unchanged_output_count = 0
     last_stdin_send_time: float = 0.0
-    interaction_count = 0
     total_input_tokens = 0
     total_output_tokens = 0
     code_events = code_events if code_events is not None else []
     completed_codex_turn_keys: set[str] = set()
     completed_codex_turns = 0
-    # Tools awaiting their tool_result: while any is in flight the session is
+    # Tools awaiting their result: while any is in flight the session is
     # working and never idle-paused, however long the tool runs.
-    in_flight_tool_count = 0
+    tools_in_flight = ToolsInFlight()
+    latest_partials: dict[tuple[Any, Any, str], int] = {}
     # Wall-clock of first SDK type=result; the exit-grace backstop ends the
     # monitor if the CLI never exits after declaring completion.
     sdk_result_at: float | None = None
     logged_events = int((code_session or {}).get("logged_events") or 0)
+    # Attached to a live CLI (resumed_from=live_cli): the ws-server's events
+    # before this spawn's goal turn belong to earlier spawns.
+    history_events = int((code_session or {}).get("history_events") or 0)
     # Direct chat: while the user holds the session (ws-server `direct_chat`
     # held → released), the user's turns drive the CLI. The monitor must not
     # end the session on post-result grace / SDK idle, and never writes to
@@ -992,9 +961,10 @@ async def _run_agentic_loop(
     async def on_events_replay(events: list[dict[str, Any]]) -> None:
         # The ws-server resends its whole history on every (re)connect, so it
         # replaces everything seen so far instead of appending to it.
-        nonlocal completed_codex_turns, in_flight_tool_count
+        nonlocal completed_codex_turns
         nonlocal direct_chat_active, transcript, user_turns_seen, sdk_results_seen, native_codex_terminal
         code_events.clear()
+        latest_partials.clear()
         native_codex_terminal = None
         direct_chat_active = False
         user_turns_seen = 0
@@ -1003,7 +973,7 @@ async def _run_agentic_loop(
         transcript_pending.clear()
         completed_codex_turn_keys.clear()
         completed_codex_turns = 0
-        in_flight_tool_count = 0
+        tools_in_flight.clear()
         for event in events:
             await on_event(event)
         logger.info(
@@ -1012,17 +982,24 @@ async def _run_agentic_loop(
 
     async def on_event(event: dict[str, Any]) -> None:
         nonlocal completed_codex_turns, last_output_time
-        nonlocal in_flight_tool_count, sdk_result_at, logged_events
+        nonlocal sdk_result_at, logged_events
         nonlocal direct_chat_active, user_turns_seen, sdk_results_seen, native_codex_terminal
         last_output_time = safe_time()
         code_events.append(event)
-        usage_limit = usage_limit_from_event(event)
+        event_index = len(code_events) - 1
+        # Events before this spawn's goal turn (attached to a live CLI) are the
+        # earlier turns' history: their usage limit or login failure is not this run's.
+        history = event_index < history_events
+        usage_limit = None if history else usage_limit_from_event(event)
         if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
             loop_outcome["usage_limit"] = usage_limit
-        event_index = len(code_events) - 1
+        login_unusable = None if history else login_unusable_from_event(event)
+        if login_unusable is not None and loop_outcome is not None and "login_unusable" not in loop_outcome:
+            loop_outcome["login_unusable"] = login_unusable
         for record in transcript.feed(event, event_index):
             if event_index >= transcript_flushed:
                 transcript_pending[record["id"]] = record
+        _supersede_partial_snapshot(code_events, latest_partials, event_index)
         if event.get("provider") == "codex":
             if event.get("type") == "turn_started":
                 native_codex_terminal = None
@@ -1053,15 +1030,8 @@ async def _run_agentic_loop(
                 completed_codex_turn_keys.add(key)
                 completed_codex_turns += 1
         event_type = event.get("type")
-        # Count every tool_use toward in-flight, even when name is missing /
-        # non-string — tool_result always decrements, and a name-gated
-        # increment made those paths asymmetric (CodeRabbit #1260).
-        if event_type == "tool_use":
-            in_flight_tool_count += 1
-        elif event_type == "tool_result":
-            if in_flight_tool_count > 0:
-                in_flight_tool_count -= 1
-        elif event_type == "result":
+        tools_in_flight.observe(event)
+        if event_type == "result":
             # The result of the latest delivered turn arms the exit-grace
             # backstop (r31 a2/a3); an earlier turn's result does not.
             sdk_results_seen += 1
@@ -1149,11 +1119,11 @@ async def _run_agentic_loop(
 
     loop_start = loop_started_at if loop_started_at is not None else safe_time()
     last_status_update = safe_time()
+    # Codex reports completed turns; Claude runs have no progress counter, so they
+    # write no status rows (their transcript batches carry liveness).
+    last_status_progress: Optional[int] = 0 if code_provider == "codex" else None
     last_drain_check = 0.0
     last_keepalive = safe_time()
-
-    async def on_chunk(text: str, tokens: int) -> None:
-        pass  # Parent LLM streaming not needed
 
     try:
         while exit_code is None and not attempt_completion:
@@ -1174,8 +1144,18 @@ async def _run_agentic_loop(
                     )
                     raise CodeSessionDrained(drain_reason)
 
-            # C15: a provider usage limit ends this run; the session is saved
-            # and the parent retries on the next available credential.
+            # C15: a provider usage limit (or an unusable login the sandbox may
+            # not switch away from) ends this run; the session is saved and the
+            # parent retries on the next available credential.
+            if loop_outcome is not None and loop_outcome.get("login_unusable") and not loop_outcome.get("usage_limit"):
+                logger.warning(
+                    "[ClaudeCode] Provider login unusable; saving the session",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    login_unusable=loop_outcome["login_unusable"],
+                )
+                action_summary.append("Provider login unusable; session saved for a retry")
+                break
             if loop_outcome is not None and loop_outcome.get("usage_limit"):
                 logger.warning(
                     "[ClaudeCode] Provider usage limit reached; saving the session",
@@ -1191,20 +1171,6 @@ async def _run_agentic_loop(
             if safe_time() - last_keepalive >= CODE_SESSION_KEEPALIVE_INTERVAL_S:
                 last_keepalive = safe_time()
                 keepalive = await keepalive_e2b_session(task_id, code_provider)
-                awaiting = keepalive.get("awaiting_parent") if isinstance(keepalive, dict) else None
-                if isinstance(awaiting, dict) and awaiting.get("question") and not direct_chat_active:
-                    # The spawning agent is blocked inside this spawn: pause the
-                    # session and hand it the question instead of both waiting.
-                    logger.info(
-                        "[ClaudeCode] Code agent asked its spawner a question; pausing the session",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        message_id=awaiting.get("message_id"),
-                    )
-                    action_summary.append("Code agent asked its parent a question; session paused for the answer")
-                    if loop_outcome is not None:
-                        loop_outcome["awaiting_parent"] = awaiting
-                    break
                 resize = keepalive.get("resize_requested") if isinstance(keepalive, dict) else None
                 if isinstance(resize, dict) and resize.get("request_id") and not direct_chat_active:
                     # C16: the code agent asked for another sandbox size. Detach (the
@@ -1261,7 +1227,7 @@ async def _run_agentic_loop(
             # CLI with nothing in flight and no SDK result is idle.
             if (
                 silence_duration >= CODE_SESSION_IDLE_PAUSE_S
-                and in_flight_tool_count == 0
+                and not tools_in_flight
                 and sdk_result_at is None
                 and not pending_output
                 and ws_connected
@@ -1284,8 +1250,6 @@ async def _run_agentic_loop(
                 break
 
             if silence_duration >= SILENCE_TIMEOUT_S and pending_output and ws_connected:
-                # (The parent-LLM relay below is unreachable: every branch
-                # `continue`s before it. Direct chat also never reaches it.)
                 filtered_output = terminal.get_display()
                 pending_output = False
 
@@ -1304,60 +1268,9 @@ async def _run_agentic_loop(
                         unchanged_output_count = 0
                         last_filtered_output = filtered_output
 
-                    fatal_error = check_fatal_errors(filtered_output)
-                    if fatal_error:
-                        logger.error(
-                            "[ClaudeCode] Fatal error detected in output, aborting",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            error=fatal_error,
-                        )
-                        action_summary.append(f"FATAL: {fatal_error}")
-                        # Persist the terminal output BEFORE bubbling the fatal
-                        # exception so the back-end can see the auth-failure
-                        # banner and mark the pool token broken (otherwise the
-                        # Temporal-retried activity will re-fetch the same
-                        # broken token via LRU and burn another E2B sandbox).
-                        try:
-                            durable_fatal_output = build_durable_terminal_transcript(
-                                filtered_output,
-                                code_events,
-                                action_summary,
-                            )
-                            if durable_fatal_output:
-                                await persist_terminal_output(
-                                    task_id,
-                                    durable_fatal_output,
-                                    agent_id,
-                                    code_provider,
-                                    credential_feedback=build_codex_credential_feedback(code_events)
-                                    if code_provider == "codex"
-                                    else None,
-                                )
-                                _mark_terminal_output_persisted()
-                        except Exception as persist_err:
-                            logger.warning(
-                                "[ClaudeCode] Failed to persist fatal terminal output",
-                                agent_id=agent_id,
-                                task_id=task_id,
-                                error=str(persist_err),
-                            )
-                        await save_claude_code_message(
-                            agent_id=agent_id,
-                            title="Authentication Error",
-                            task_id=task_id,
-                            message=fatal_error,
-                            status=MessageStatus.ERROR,
-                            action_type="system",
-                            tool_call_id=tool_call_id,
-                            code_provider=code_provider,
-                        )
-                        raise ApplicationError(
-                            fatal_error,
-                            type="CLAUDE_CODE_FATAL",
-                            non_retryable=True,
-                        )
-
+                    # Credential failures are structured CLI events (C15: usage limit,
+                    # out of credits, rejected login) that pause the session; the
+                    # terminal text is never classified (an agent may print any banner).
                     logger.info(
                         "[ClaudeCode] Code-agent output observed; waiting for SDK completion",
                         agent_id=agent_id,
@@ -1368,94 +1281,25 @@ async def _run_agentic_loop(
                     )
                     continue
 
-                    logger.info(
-                        "[ClaudeCode] Silence detected, calling parent LLM",
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        output_len=len(filtered_output),
-                        silence_s=silence_duration,
-                    )
-
-                    llm_response = await call_parent_llm(
-                        goal=goal,
-                        filtered_output=filtered_output,
-                        conversation_history=conversation_history,
-                        agent_id=agent_id,
-                        on_chunk=on_chunk,
-                        model=model,
-                        claude_token=claude_token,
-                        gpt_token=gpt_token,
-                        gpt_account_id=gpt_account_id,
-                        gpt_token_source=gpt_token_source,
-                        gpt_token_pool_id=gpt_token_pool_id,
-                        gpt_token_user_id=gpt_token_user_id,
-                    )
-
-                    usage = llm_response.get("usage", {})
-                    total_input_tokens += usage.get("prompt_tokens", 0)
-                    total_output_tokens += usage.get("completion_tokens", 0)
-
-                    if llm_response.get("attempt_completion"):
-                        attempt_completion = True
-                        logger.info("[ClaudeCode] Parent LLM signaled completion", agent_id=agent_id, task_id=task_id)
-                        action_summary.append("Parent LLM signaled task completion")
-                    elif llm_response.get("response"):
-                        response_text = llm_response["response"]
-                        last_stdin_send_time = safe_time()
-                        sent_ok = await ws_client.send_stdin(response_text)
-
-                        if not sent_ok:
-                            last_stdin_send_time = 0.0
-                            logger.error(
-                                "[ClaudeCode] stdin send FAILED — message did not reach terminal",
-                                agent_id=agent_id,
-                                task_id=task_id,
-                                response=response_text[:100],
-                            )
-                            action_summary.append(f"STDIN SEND FAILED: '{response_text[:50]}'")
-                            pending_output = True
-                            continue
-
-                        interaction_count += 1
-                        conversation_history.append({"role": "user", "content": filtered_output})
-                        conversation_history.append({"role": "assistant", "content": response_text})
-
-                        logger.info(
-                            "[ClaudeCode] Sent stdin response",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            response=response_text[:100],
-                            interaction=interaction_count,
-                        )
-                        action_summary.append(f"Interaction {interaction_count}: sent '{response_text[:50]}'")
-
-                        await save_claude_code_message(
-                            agent_id=agent_id,
-                            title=f"Response #{interaction_count}",
-                            task_id=task_id,
-                            message=response_text,
-                            status=MessageStatus.FINISHED,
-                            action_type="agent_response",
-                            tool_call_id=tool_call_id,
-                            code_provider=code_provider,
-                        )
-
             await flush_transcript()
 
-            if safe_time() - last_status_update >= 30:
-                elapsed_int = int(elapsed)
+            # A status row only when the reported progress changed: elapsed time
+            # is derivable from started_at, and a row per interval grows the
+            # tool call's lifecycle rows (and their per-write scan) with run time.
+            progress = completed_codex_turns if code_provider == "codex" else None
+            if progress != last_status_progress and safe_time() - last_status_update >= 30:
                 await save_claude_code_message(
                     agent_id=agent_id,
-                    title=f"Claude Code working ({elapsed_int}s)",
+                    title="Claude Code working",
                     task_id=task_id,
-                    message=f"Elapsed: {elapsed_int}s, Interactions: {interaction_count}",
+                    message=f"Completed turns: {progress}",
                     status=MessageStatus.FINISHED,
                     action_type="agent_observation",
                     tool_call_id=tool_call_id,
                     code_provider=code_provider,
-                    completed_turns=completed_codex_turns if code_provider == "codex" else None,
+                    completed_turns=progress,
                 )
-                action_summary.append(f"Status update at {elapsed_int}s")
+                last_status_progress = progress
                 last_status_update = safe_time()
 
             await asyncio.sleep(0.1)
@@ -1484,9 +1328,8 @@ async def _run_agentic_loop(
         task_id=task_id,
         exit_code=exit_code,
         attempt_completion=attempt_completion,
-        interactions=interaction_count,
     )
-    action_summary.append(f"Agentic loop finished: {interaction_count} interactions")
+    action_summary.append("Agentic loop finished")
 
     return (
         exit_code if exit_code is not None else -1,
@@ -1542,6 +1385,8 @@ async def _apply_sandbox_resize(
             "ws_url": continuing["ws_url"],
             "logged_events": 0,
             "transcript_events": 0,
+            # The resized sandbox's ws-server is new: none of its events are history.
+            "history_events": int(resized.get("history_events") or 0),
             "sandbox_size": size or session_record.get("sandbox_size"),
             "code_session_id": resized.get("code_session_id") or session_record.get("code_session_id"),
         }
@@ -2636,8 +2481,13 @@ def build_usage_items(
     model_pricing: Dict[str, Any],
     execution_time_ms: float,
     claude_code_usage: Optional[Dict[str, Any]] = None,
+    code_agent_meta: Optional[Dict[str, Any]] = None,
 ) -> list[Dict[str, Any]]:
-    """Build standardized usage items for cost tracking."""
+    """Build standardized usage items for cost tracking.
+
+    ``code_agent_meta`` prices the sandbox: its ``sandbox_size`` vCPUs (C16),
+    and nothing for a run on the user's own Mac (``target`` "local").
+    """
     usage_items: list[Dict[str, Any]] = []
 
     if total_input_tokens > 0 or total_output_tokens > 0:
@@ -2677,7 +2527,14 @@ def build_usage_items(
                 }
             )
 
-    e2b_cost_cents = round((execution_time_ms / 1000) * E2B_COST_CENTS_PER_SECOND, 4)
+    meta = code_agent_meta or {}
+    if meta.get("target") == "local":
+        return usage_items
+    size = meta.get("sandbox_size") if isinstance(meta.get("sandbox_size"), dict) else {}
+    vcpus = size.get("cpu")
+    if not isinstance(vcpus, (int, float)) or isinstance(vcpus, bool) or vcpus <= 0:
+        vcpus = E2B_DEFAULT_SANDBOX_VCPUS
+    e2b_cost_cents = round((execution_time_ms / 1000) * E2B_COST_CENTS_PER_VCPU_SECOND * vcpus, 4)
     usage_items.append(
         {
             "type": "service",
@@ -2687,6 +2544,11 @@ def build_usage_items(
     )
 
     return usage_items
+
+
+def _sandbox_usage_items(code_agent_meta: Dict[str, Any], started_at: float) -> list[Dict[str, Any]]:
+    """Usage of a run that ends without a verifier call: its sandbox time only."""
+    return build_usage_items(0, 0, "", {}, (safe_time() - started_at) * 1000, code_agent_meta=code_agent_meta)
 
 
 # ---------------------------------------------------------------------------
@@ -2809,10 +2671,40 @@ def usage_limit_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         info = message.get("rate_limit_info") if isinstance(message.get("rate_limit_info"), dict) else {}
         if info.get("status") == "rejected":
             return {"provider": "claude", "resets_at": info.get("resetsAt"), "limit_type": info.get("rateLimitType")}
+    if event.get("type") == "cli_message" and event.get("raw_type") == "assistant.api_error":
+        # Out of credits: the SDK's structured ``billing_error`` on an assistant message.
+        message = event.get("cli_message") if isinstance(event.get("cli_message"), dict) else {}
+        if message.get("error") == "billing_error":
+            return {"provider": "claude", "resets_at": None, "limit_type": "billing"}
     if event.get("type") == "error" and isinstance(event.get("usage_limit"), dict):
         usage = event["usage_limit"]
         return {"provider": "codex", "resets_at": usage.get("resets_at"), "limit_type": usage.get("reached_type")}
     return None
+
+
+def login_unusable_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A login the provider rejected, from structured CLI events only (C15; no prose matching).
+
+    Claude Code: the SDK's ``authentication_failed`` on an assistant message (a
+    401/403, e.g. the sandbox's access token expired or was revoked). Codex: the
+    ws-server's ``login_unusable`` error (refresh failed or revoked), reported
+    only when the sandbox has no Azure switch armed (subscriptions first). The
+    session pauses like a usage limit and the parent's retry re-leases a
+    credential and resumes the conversation. ``credential`` is the ws-server's
+    fingerprint of the token it held (never the token).
+    """
+    unusable: Optional[Dict[str, Any]] = None
+    credential = event.get("credential")
+    if event.get("type") == "cli_message" and event.get("raw_type") == "assistant.api_error":
+        message = event.get("cli_message") if isinstance(event.get("cli_message"), dict) else {}
+        if message.get("error") == "authentication_failed":
+            unusable = {"provider": "claude", "reason": "authentication_failed"}
+    elif event.get("type") == "error" and isinstance(event.get("login_unusable"), dict):
+        credential = event["login_unusable"].get("credential")
+        unusable = {"provider": "codex", "reason": event["login_unusable"].get("reason") or "oauth_refresh_invalid"}
+    if unusable is not None and isinstance(credential, str) and credential:
+        unusable["credential"] = credential[:64]
+    return unusable
 
 
 def _provider_label(code_provider: str) -> str:
@@ -2848,21 +2740,90 @@ def _usage_accounts_block(accounts: Optional[List[Dict[str, Any]]]) -> str:
     return "\nConnected accounts:\n" + "\n".join(_account_line(account) for account in accounts)
 
 
-def _respawn_clause(next_lease: Optional[Dict[str, Any]], *, local: bool) -> str:
-    """What a respawn leases: an account that is not rate-limited, else the earliest reset."""
-    then = "continues from the files in that folder" if local else "resumes from the latest checkpoint"
-    free = "one of your own logins" if local else "an account"
-    verb = "uses" if local else "leases"
-    if not isinstance(next_lease, dict) or not next_lease.get("provider"):
-        return f"the respawn {verb} {free} that is not rate-limited and {then}."
-    provider = _provider_label(str(next_lease["provider"]))
+def _shared_path_line(path: Dict[str, Any]) -> str:
+    """``- shared Codex subscriptions: 2 of 3 available`` / ``- funded Anthropic API key: available``."""
+    status = path.get("status")
+    until = path.get("limited_until")
+    if path.get("kind") == "pool":
+        total = path.get("total_count") or 0
+        if status == "unconfigured":
+            state = "none connected"
+        elif status == "available":
+            state = f"{path.get('available_count') or 0} of {total} available"
+        else:
+            state = f"all {total} limited" + (f" until {until}" if until else "")
+    elif status == "unconfigured":
+        state = "not configured"
+    elif status == "available":
+        state = "available"
+    else:
+        state = "limited" + (f" until {until}" if until else "")
+    return f"- {path.get('label')}: {state}"
+
+
+def _shared_paths_block(paths: Optional[List[Dict[str, Any]]]) -> str:
+    """Shared subscription pools and funded keys (stored state only; no usage estimates)."""
+    if not paths:
+        return ""
+    return "\nShared credential paths:\n" + "\n".join(_shared_path_line(path) for path in paths)
+
+
+def _lease_name(next_lease: Dict[str, Any]) -> str:
+    """An own account reads ``Codex me@x``; a shared path's label already names its provider."""
+    provider = _provider_label(str(next_lease.get("provider")))
+    if next_lease.get("kind") in ("pool", "funded"):
+        return str(next_lease.get("label"))
     label = next_lease.get("label")
-    if next_lease.get("available_now"):
+    return f"{provider} {label}" if label else f"a shared {provider} account"
+
+
+def _respawn_clause(next_lease: Optional[Dict[str, Any]], *, local: bool, from_provider: Optional[str] = None) -> str:
+    """What a retry leases and how it continues: native resume, provider handoff, or nothing yet."""
+    if local:
+        then = "continues from the files in that folder"
+        if not isinstance(next_lease, dict) or not next_lease.get("provider"):
+            return f"the respawn uses one of your own logins that is not rate-limited and {then}."
+        provider = _provider_label(str(next_lease["provider"]))
+        label = next_lease.get("label")
+        if next_lease.get("available_now"):
+            now = f"now {provider} {label}" if label else f"now a shared {provider} account"
+            return f"the respawn uses one of your own logins that is not rate-limited ({now}) and {then}."
+        return (
+            f"no login is free until {next_lease.get('available_at')} "
+            f"(the earliest reset: {provider} {label}); a respawn after that uses it and {then}."
+        )
+    if not isinstance(next_lease, dict) or not next_lease.get("provider"):
+        return "the retry leases an account that is not rate-limited and resumes the paused session."
+    provider = _provider_label(str(next_lease["provider"]))
+    if not next_lease.get("available_now"):
+        return (
+            f"no credential is free until {next_lease.get('available_at')} "
+            f"(the earliest reset: {_lease_name(next_lease)}); a retry before that stays paused and "
+            "starts nothing, so wait with wait_for(until_timestamp=<that time>) first."
+        )
+    label = next_lease.get("label")
+    funded = next_lease.get("kind") == "funded"
+    if funded:
+        now = f"now the {label}" if label else f"now the funded {provider} key"
+    else:
         now = f"now {provider} {label}" if label else f"now a shared {provider} account"
-        return f"the respawn {verb} {free} that is not rate-limited ({now}) and {then}."
+    if from_provider is None or next_lease["provider"] == from_provider:
+        if funded:
+            return (
+                f"no {provider} subscription is left, so the retry uses the {label or 'funded key'}, "
+                f"resumes the paused sandbox and continues the same {provider} conversation."
+            )
+        return (
+            f"the retry leases an account that is not rate-limited ({now}), resumes the paused "
+            f"sandbox and continues the same {provider} conversation."
+        )
+    # Subscriptions come first (C15): a subscription of the other provider is
+    # taken while this provider's funded key is still available.
+    left = "subscription" if next_lease.get("kind") in ("own", "pool") else "credential"
     return (
-        f"no {'login' if local else 'account'} is free until {next_lease.get('available_at')} "
-        f"(the earliest reset: {provider} {label}); a respawn after that {verb} it and {then}."
+        f"no {_provider_label(from_provider)} {left} is left, so the retry continues this session on "
+        f"{provider} ({now}) from the latest checkpoint, with a handoff prompt that points it at the "
+        "previous agent's trajectory."
     )
 
 
@@ -2874,12 +2835,14 @@ def format_usage_limit_message(
     local_place: Optional[str] = None,
     accounts: Optional[List[Dict[str, Any]]] = None,
     next_lease: Optional[Dict[str, Any]] = None,
+    paths: Optional[List[Dict[str, Any]]] = None,
+    limit_type: Optional[str] = None,
 ) -> str:
-    """The parent's tool error for a usage limit (C15): what stopped, every account, the respawn.
+    """The parent's tool error for a usage limit (C15): what stopped, every path, the retry.
 
-    The activity never fails over on its own: the parent decides. ``accounts``
-    and ``next_lease`` are the backend's stored view (no provider calls), so a
-    respawn leases an account that is not rate-limited, else the earliest reset.
+    The activity never fails over on its own: the parent retries with the
+    session id and the next spawn re-credentials. ``accounts``, ``paths`` and
+    ``next_lease`` are the backend's stored view (no provider calls).
     ``local_place`` (a Mac run): the work stays in that folder and the run used
     the user's own CLI login, so the respawn targets the Mac again.
     """
@@ -2888,6 +2851,14 @@ def format_usage_limit_message(
     limited = next((a for a in accounts or [] if a.get("this_run")), None)
     on_account = f" {limited.get('label')}" if limited else ""
     block = _usage_accounts_block(accounts)
+    unusable = limit_type == LOGIN_UNUSABLE_LIMIT_TYPE
+    if local_place and unusable:
+        return (
+            f"Code agent stopped: your own {_provider_label(code_provider)} login{on_account} can no longer be "
+            f"used (sign in again to reconnect it). Its files and commits stay in {local_place}.{block}\n"
+            "Respawn with spawn_agent(type='code', target='local', goal=<the same goal>) to continue there: "
+            + _respawn_clause(next_lease, local=True)
+        )
     if local_place:
         return (
             f"Code agent stopped: the usage limit of your own {_provider_label(code_provider)} login"
@@ -2900,11 +2871,66 @@ def format_usage_limit_message(
         saved += f" on branch {facts['branch']}"
     if facts.get("checkpoint_seq"):
         saved += f" (checkpoint {facts['checkpoint_seq']})"
+    if unusable and code_provider == "codex":
+        stopped = (
+            f"the {_provider_label(code_provider)} login{on_account} was rejected "
+            "(its access token expired or was revoked)"
+        )
+    elif unusable:
+        # Claude Code's authentication_failed is any 401/403: an expired or revoked
+        # login, or an invalid or disallowed API key.
+        stopped = (
+            f"the {_provider_label(code_provider)} credential{on_account} was rejected by the provider "
+            "(authentication failed)"
+        )
+    elif limit_type == "billing":
+        stopped = (
+            f"the {_provider_label(code_provider)} credential{' ' + on_account.strip() if on_account else ''} "
+            f"ran out of credits{resets}"
+        )
+    else:
+        stopped = (
+            f"the {_provider_label(code_provider)} usage limit was reached"
+            f"{' on' + on_account if on_account else ''}{resets}"
+        )
+    if unusable and not (isinstance(next_lease, dict) and next_lease.get("provider")):
+        clause = (
+            "no other credential can be leased right now, so a retry stays paused and starts nothing "
+            "until the credential is re-synced, reconnected or replaced, or another account is connected."
+        )
+    else:
+        clause = _respawn_clause(next_lease, local=False, from_provider=code_provider)
     return (
-        f"Code agent stopped: the {_provider_label(code_provider)} usage limit was reached"
-        f"{' on' + on_account if on_account else ''}{resets}. {saved}.{block}\n"
-        f"Respawn with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
-        "goal=<the same goal>) to continue: " + _respawn_clause(next_lease, local=False)
+        f"Code agent stopped: {stopped}. {saved}; the sandbox is paused, not killed."
+        f"{block}{_shared_paths_block(paths)}\n"
+        f"Retry with spawn_agent(type='code', code_session_id='{facts.get('code_session_id')}', "
+        "goal=<the same goal>) to continue: " + clause
+    )
+
+
+def format_no_credential_message(
+    *,
+    code_session_id: str,
+    accounts: Optional[List[Dict[str, Any]]] = None,
+    paths: Optional[List[Dict[str, Any]]] = None,
+    next_lease: Optional[Dict[str, Any]] = None,
+) -> str:
+    """The parent's tool error for a retry that can lease nothing (C15): nothing started, the earliest reset."""
+    retry = f"spawn_agent(type='code', code_session_id='{code_session_id}', goal=<the same goal>)"
+    if isinstance(next_lease, dict) and next_lease.get("available_at"):
+        when = (
+            f"The earliest reset is {next_lease['available_at']} ({_lease_name(next_lease)}). "
+            f"Wait with wait_for(until_timestamp=<that time>), then retry with {retry}."
+        )
+    else:
+        when = (
+            "No reset time is known: an account must be reconnected or a funded key refilled "
+            f"before {retry} can continue."
+        )
+    return (
+        "Code agent not resumed: no Claude Code or Codex credential can be leased right now, so no "
+        f"agent was started. Code session {code_session_id} stays paused with its work saved."
+        f"{_usage_accounts_block(accounts)}{_shared_paths_block(paths)}\n{when}"
     )
 
 
@@ -2931,6 +2957,7 @@ def format_usage_limit_user_message(
     resets_at_iso: Optional[str],
     local_place: Optional[str] = None,
     now: Optional[float] = None,
+    limit_type: Optional[str] = None,
 ) -> str:
     """The user's one line for a usage-limit pause (``code_agent.failure_message``).
 
@@ -2940,6 +2967,10 @@ def format_usage_limit_user_message(
     provider = "Codex" if code_provider == "codex" else "Claude"
     resets = f" (resets {reset})" if reset else ""
     saved = f"Work stays in {local_place}." if local_place else "Work is saved."
+    if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE:
+        if code_provider == "codex":
+            return f"Paused: the {provider} login was rejected (expired or revoked). {saved}"
+        return f"Paused: the {provider} credential was rejected (authentication failed). {saved}"
     return f"Paused: {provider} usage limit reached{resets}. {saved}"
 
 
@@ -2966,23 +2997,112 @@ def format_code_session_summary(facts: Optional[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _raise_bounded_activity_error(error: BaseException) -> None:
-    """Re-raise an activity error; stop Temporal retrying it after the error limit.
+def _no_credential_result(
+    *,
+    available: Dict[str, Any],
+    code_session_id: str,
+    code_provider: str,
+    code_agent_meta: Dict[str, Any],
+    started_at: float,
+) -> Dict[str, Any]:
+    """A retry with no leasable credential anywhere (C15): nothing created, the session stays paused."""
+    outlook = available.get("outlook") if isinstance(available.get("outlook"), dict) else {}
+    accounts = outlook.get("accounts") if isinstance(outlook.get("accounts"), list) else None
+    paths = outlook.get("paths") if isinstance(outlook.get("paths"), list) else None
+    next_lease = outlook.get("next_lease") if isinstance(outlook.get("next_lease"), dict) else None
+    reset_iso = (next_lease or {}).get("available_at")
+    reset = _reset_label(reset_iso, safe_time())
+    user_message = (
+        f"Paused: no Claude or Codex credential is available{f' (earliest reset {reset})' if reset else ''}. "
+        "Work is saved."
+    )
+    facts = {"code_session_id": code_session_id, "state": "PAUSED"}
+    logger.warning(
+        "[ClaudeCode] Retry has no leasable credential; the session stays paused",
+        code_session_id=code_session_id,
+        earliest_reset=reset_iso,
+    )
+    return {
+        "status": CODE_AGENT_USAGE_LIMIT_STATUS,
+        "success": False,
+        "failure_kind": "no_credentials",
+        "retryable": True,
+        "message": format_no_credential_message(
+            code_session_id=code_session_id, accounts=accounts, paths=paths, next_lease=next_lease
+        ),
+        "usage_limit": {
+            "provider": code_provider,
+            "resets_at": reset_iso,
+            "limit_type": None,
+            "credential_marked": None,
+            "accounts": accounts,
+            "paths": paths,
+            "next_lease": next_lease,
+        },
+        "retry": {"tool": "spawn_agent", "type": "code", "code_session_id": code_session_id},
+        "task_id": None,
+        "ws_url": None,
+        "execution_time_ms": (safe_time() - started_at) * 1000,
+        "usage_items": [],
+        "structured_response": None,
+        "output_files": [],
+        "code_provider": code_provider,
+        "code_session": facts,
+        "code_agent": build_code_agent_metadata(
+            target_meta=code_agent_meta,
+            task_id=None,
+            provider=code_provider,
+            state="paused",
+            started_at=started_at,
+            ended_at=safe_time(),
+            facts=facts,
+            failure_message=user_message,
+        ),
+        "completed_turns": None,
+    }
+
+
+def _activity_errors_so_far() -> int:
+    """How many errors earlier attempts of this activity raised (from their heartbeats).
+
+    Worker deaths and heartbeat timeouts raise nothing, so they never count.
+    """
+    if not activity.in_activity():
+        return 0
+    for detail in activity.info().heartbeat_details or ():
+        if isinstance(detail, dict):
+            count = detail.get(CODE_AGENT_ERRORS_HEARTBEAT_KEY)
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                return count
+    return 0
+
+
+def _bounded_activity_error(error: BaseException, errors: int) -> BaseException:
+    """The error to raise when this activity has raised ``errors`` errors in total.
 
     Retries are otherwise unlimited (worker crashes and deploys never end a code
-    session), so a deterministic failure must not loop forever.
+    session), so a deterministic failure must not loop forever: the
+    ``CODE_AGENT_ERROR_RETRY_LIMIT``-th error the activity itself raises is
+    non-retryable. Outside an activity nothing retries and the error is final.
     """
     if (
         activity.in_activity()
-        and activity.info().attempt >= CODE_AGENT_ERROR_RETRY_LIMIT
+        and errors >= CODE_AGENT_ERROR_RETRY_LIMIT
         and not (isinstance(error, ApplicationError) and error.non_retryable)
     ):
-        raise ApplicationError(
+        final = ApplicationError(
             extract_error_message(error),
             type=type(error).__name__,
             non_retryable=True,
-        ) from error
-    raise error
+        )
+        final.__cause__ = error
+        return final
+    return error
+
+
+def _error_ends_the_run(error: BaseException) -> bool:
+    """Whether no later attempt of this activity will run after ``error``."""
+    return not activity.in_activity() or (isinstance(error, ApplicationError) and error.non_retryable)
 
 
 # ---------------------------------------------------------------------------
@@ -2994,6 +3114,49 @@ def _raise_bounded_activity_error(error: BaseException) -> None:
 async def resolve_code_agent_provider_activity(default_provider: str) -> str:
     """Record provider overrides in activity history for deterministic replay."""
     return resolve_code_agent_provider(default_provider)
+
+
+LOGIN_UNUSABLE_LIMIT_TYPE = "login_unusable"
+
+
+async def _unusable_login_outlook(
+    user_id: str, code_provider: str, code_session_id: Optional[str], *, local: bool
+) -> Dict[str, Any]:
+    """The stored outlook after a rejected login was fed back (C15; no lease taken).
+
+    The usage-limit report would rate-limit the login, so the plan answers instead:
+    the connected accounts (a revoked login reads disconnected; an expired token
+    waits for its device's re-sync), the shared paths and the next lease in the
+    subscription-first order.
+    """
+    available = await fetch_code_credential_availability(
+        user_id,
+        own_only=local,
+        code_session_id=None if local else code_session_id,
+        prefer=code_provider,
+    )
+    outlook = (available or {}).get("outlook")
+    return {"marked": "login_rejected", "resets_at": None, **(outlook if isinstance(outlook, dict) else {})}
+
+
+def _next_code_credential(available: Optional[Dict[str, Any]], preferred: str) -> tuple[Optional[str], Optional[str]]:
+    """The provider (and tier) a spawn takes: the backend's ``next_credential`` (C15 order).
+
+    An older backend without it: the preferred provider when it has any
+    credential, else the other one.
+    """
+    if available is None:
+        return None, None
+    step = available.get("next_credential")
+    if isinstance(step, dict) and step.get("provider") in ("claude", "codex"):
+        return str(step["provider"]), str(step.get("tier") or "") or None
+    if "next_credential" in available:
+        return None, None
+    other = "codex" if preferred == "claude" else "claude"
+    for provider in (preferred, other):
+        if available.get(provider):
+            return provider, None
+    return None, None
 
 
 async def _resolve_claude_token_for_activity(user_id: str, code_provider: str) -> Optional[str]:
@@ -3087,6 +3250,12 @@ async def spawn_claude_code_activity(
     log_collector: Optional[SandboxLogCollector] = None
     session_record: Optional[Dict[str, Any]] = None
     session_heartbeats = contextlib.ExitStack()
+    # Every heartbeat carries how many errors this activity raised so far, so
+    # the retry budget counts only those, never worker deaths (see
+    # _bounded_activity_error). Entered before anything can heartbeat.
+    retry_state: Dict[str, Any] = {CODE_AGENT_ERRORS_HEARTBEAT_KEY: _activity_errors_so_far()}
+    retry_heartbeats = contextlib.ExitStack()
+    retry_heartbeats.enter_context(heartbeat_resume_details(retry_state))
     generation_yield = not (isinstance(resume_session, dict) and resume_session.get("generation_yield") is False)
     # A retry's heartbeat session is newer than the scheduled resume_session: the
     # earlier attempt may have replaced an unreachable sandbox with a fresh one.
@@ -3180,21 +3349,56 @@ async def spawn_claude_code_activity(
             action_summary.append(f"Reattached to E2B sandbox: {sandbox_id}")
 
         if attached is None:
-            # C15: continue on the other provider when this one has no
-            # leasable credential left (the session itself is provider-neutral).
+            # C15 re-credentialing, in the backend's order: every subscription
+            # before any funded key. A resumed session (a retry after a usage
+            # limit, or the root passing its code_session_id) prefers its own
+            # provider: same harness, native resume of its conversation. With
+            # none of its subscriptions left the session continues on the other
+            # provider's subscription (provider handoff in the backend) before
+            # its own funded key. A retry that can lease nothing stays paused
+            # and starts nothing.
             # A Mac run only ever gets the user's own CLI login, never a pool token.
-            available = await fetch_code_credential_availability(user_id, own_only=target == "local")
-            other_provider = "codex" if code_provider == "claude" else "claude"
-            if available is not None and not available.get(code_provider) and available.get(other_provider):
+            resuming = code_session_id if target != "local" else None
+            available = await fetch_code_credential_availability(
+                user_id,
+                own_only=target == "local",
+                code_session_id=resuming,
+                prefer=code_provider,
+            )
+            session_provider = (available or {}).get("session_provider")
+            preferred = session_provider if session_provider in ("claude", "codex") else code_provider
+            chosen, chosen_tier = _next_code_credential(available, preferred)
+            if available is not None and chosen == preferred:
+                if preferred != code_provider:
+                    logger.info(
+                        "[ClaudeCode] Resuming the code session on its own provider",
+                        agent_id=agent_id,
+                        requested_provider=code_provider,
+                        session_provider=preferred,
+                        code_session_id=code_session_id,
+                    )
+                    action_summary.append(f"Resuming code session on its own provider ({preferred})")
+                code_provider = preferred
+            elif available is not None and chosen is not None:
                 logger.warning(
-                    "[ClaudeCode] No leasable credential for provider; continuing on the other one",
+                    "[ClaudeCode] No subscription left for provider; continuing on the other one",
                     agent_id=agent_id,
-                    from_provider=code_provider,
-                    to_provider=other_provider,
+                    from_provider=preferred,
+                    to_provider=chosen,
+                    to_tier=chosen_tier,
                     code_session_id=code_session_id,
                 )
-                action_summary.append(f"No {code_provider} credential available; continuing on {other_provider}")
-                code_provider = other_provider
+                left = "subscription" if chosen_tier == "subscription" else "credential"
+                action_summary.append(f"No {preferred} {left} available; continuing on {chosen}")
+                code_provider = chosen
+            elif available is not None and resuming:
+                return _no_credential_result(
+                    available=available,
+                    code_session_id=resuming,
+                    code_provider=preferred,
+                    code_agent_meta=code_agent_meta,
+                    started_at=start_time,
+                )
 
         claude_token = await _resolve_claude_token_for_activity(user_id, code_provider)
 
@@ -3254,6 +3458,8 @@ async def spawn_claude_code_activity(
                 else f"Created E2B sandbox: {sandbox_id}"
             )
 
+        # A spawn attached to a live CLI starts its logs and transcript at its own goal turn.
+        history_events = int((attached if attached is not None else session_data).get("history_events") or 0)
         session_record = {
             "task_id": task_id,
             "sandbox_id": sandbox_id,
@@ -3262,12 +3468,13 @@ async def spawn_claude_code_activity(
             "github_repo_url": actual_github_repo_url,
             "started_at": start_time,
             "loop_started_at": loop_started_at,
-            "logged_events": int((attached or {}).get("logged_events") or 0),
+            "logged_events": max(int((attached or {}).get("logged_events") or 0), history_events),
+            "history_events": history_events,
             "code_session_id": code_session_id,
             "branch": (code_session_facts or {}).get("branch") or (attached or {}).get("branch"),
             "merge_target": (code_session_facts or {}).get("merge_target")
             or (attached or {}).get("merge_target"),
-            "transcript_events": int((attached or {}).get("transcript_events") or 0),
+            "transcript_events": max(int((attached or {}).get("transcript_events") or 0), history_events),
             "preview_url": code_agent_meta.get("preview_url"),
             "sandbox_size": code_agent_meta.get("sandbox_size"),
         }
@@ -3291,7 +3498,9 @@ async def spawn_claude_code_activity(
         # throttle interval, so nothing may heartbeat before the session rides
         # along, and the session must ride along before anything else can fail:
         # a crash in either window would hide the sandbox from the retry.
-        session_heartbeats.enter_context(heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}))
+        session_heartbeats.enter_context(
+            heartbeat_resume_details({CODE_SESSION_HEARTBEAT_KEY: session_record}, retry_state)
+        )
         safe_heartbeat("Claude Code sandbox attached")
 
         log_collector = SandboxLogCollector(sandbox_id, agent_id, task_id)
@@ -3425,8 +3634,9 @@ async def spawn_claude_code_activity(
 
         # 4. Persist terminal output (durable fallback when PTY display is empty)
         filtered_output = terminal.get_display()
-        credential_feedback = (
-            build_codex_credential_feedback(code_events) if code_provider == "codex" else None
+        # Only this spawn's events: an attached live CLI's earlier turns are history.
+        credential_feedback = build_credential_feedback(
+            code_events[int(session_record.get("history_events") or 0) :], code_provider
         )
         durable_output = build_durable_terminal_transcript(
             filtered_output,
@@ -3450,10 +3660,12 @@ async def spawn_claude_code_activity(
             )
 
         usage_limit = loop_outcome.get("usage_limit")
-        if isinstance(usage_limit, dict):
-            # C15: save the session (checkpoint + pause), rate-limit the token,
-            # and hand the parent the exact retry. Never a Temporal retry: the
-            # same exhausted credential would fail again.
+        login_unusable = loop_outcome.get("login_unusable") if not isinstance(usage_limit, dict) else None
+        if isinstance(usage_limit, dict) or isinstance(login_unusable, dict):
+            # C15: save the session (checkpoint + pause), rate-limit the token
+            # (an unusable login was marked for reconnect by the persisted
+            # credential feedback above), and hand the parent the exact retry.
+            # Never a Temporal retry: the same credential would fail again.
             close_data = await close_e2b_session(
                 task_id=task_id,
                 user_id=user_id,
@@ -3463,12 +3675,19 @@ async def spawn_claude_code_activity(
                 reason="usage_limit",
             )
             code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
-            marked = await report_code_usage_limit(task_id, code_provider, usage_limit.get("resets_at"))
+            local_place = local_workspace_place(code_agent_meta)
+            if isinstance(usage_limit, dict):
+                marked = await report_code_usage_limit(task_id, code_provider, usage_limit.get("resets_at"))
+                limit_type = usage_limit.get("limit_type")
+            else:
+                marked = await _unusable_login_outlook(
+                    user_id, code_provider, (code_session_facts or {}).get("code_session_id"), local=bool(local_place)
+                )
+                limit_type = LOGIN_UNUSABLE_LIMIT_TYPE
             session_heartbeats.close()
             if log_collector:
                 await log_collector.stop()
             resets_at_iso = (marked or {}).get("resets_at")
-            local_place = local_workspace_place(code_agent_meta)
             # The parent reads the error with every connected account and what a
             # respawn leases (the backend's stored view); the user reads a
             # resumable pause. The parent decides; nothing fails over here.
@@ -3476,6 +3695,8 @@ async def spawn_claude_code_activity(
             accounts = accounts if isinstance(accounts, list) else None
             next_lease = (marked or {}).get("next_lease")
             next_lease = next_lease if isinstance(next_lease, dict) else None
+            paths = (marked or {}).get("paths")
+            paths = paths if isinstance(paths, list) else None
             message = format_usage_limit_message(
                 code_provider=code_provider,
                 resets_at_iso=resets_at_iso,
@@ -3483,11 +3704,14 @@ async def spawn_claude_code_activity(
                 local_place=local_place,
                 accounts=accounts,
                 next_lease=next_lease,
+                paths=paths,
+                limit_type=limit_type,
             )
             user_message = format_usage_limit_user_message(
                 code_provider=code_provider,
                 resets_at_iso=resets_at_iso,
                 local_place=local_place,
+                limit_type=limit_type,
             )
             code_agent = build_code_agent_metadata(
                 target_meta=code_agent_meta,
@@ -3501,7 +3725,11 @@ async def spawn_claude_code_activity(
             )
             await save_claude_code_message(
                 agent_id=agent_id,
-                title="Code agent hit a usage limit",
+                title=(
+                    "Code agent credential was rejected"
+                    if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE
+                    else "Code agent hit a usage limit"
+                ),
                 task_id=task_id,
                 message=user_message,
                 status=MessageStatus.FINISHED,
@@ -3514,15 +3742,16 @@ async def spawn_claude_code_activity(
             return {
                 "status": CODE_AGENT_USAGE_LIMIT_STATUS,
                 "success": False,
-                "failure_kind": "usage_limit",
+                "failure_kind": "login_unusable" if limit_type == LOGIN_UNUSABLE_LIMIT_TYPE else "usage_limit",
                 "retryable": True,
                 "message": message,
                 "usage_limit": {
                     "provider": code_provider,
                     "resets_at": resets_at_iso,
-                    "limit_type": usage_limit.get("limit_type"),
+                    "limit_type": limit_type,
                     "credential_marked": (marked or {}).get("marked"),
                     "accounts": accounts,
+                    "paths": paths,
                     "next_lease": next_lease,
                 },
                 # A Mac run has no code session: its retry targets the same Mac folder.
@@ -3538,7 +3767,7 @@ async def spawn_claude_code_activity(
                 "task_id": task_id,
                 "ws_url": ws_url,
                 "execution_time_ms": (safe_time() - start_time) * 1000,
-                "usage_items": [],
+                "usage_items": _sandbox_usage_items(code_agent_meta, start_time),
                 "structured_response": None,
                 "output_files": close_data.get("output_files", []),
                 "code_provider": code_provider,
@@ -3547,14 +3776,10 @@ async def spawn_claude_code_activity(
                 "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
             }
 
-        # A fast CLI failure can set ``exit_code`` before the one-second silence
-        # window in ``_run_agentic_loop`` gets a chance to inspect the terminal.
-        # Re-check the final snapshot here so a revoked OAuth token is surfaced
-        # as a terminal tool error instead of going through the verifier as an
-        # ordinary incomplete result. The latter makes the parent believe the
-        # tool executed successfully and repeatedly spawn new paid sandboxes.
+        # A Codex run whose credentials stayed exhausted after its in-sandbox
+        # fallback is a terminal tool error, not an ordinary incomplete result
+        # for the verifier (which would make the parent re-spawn paid sandboxes).
         fatal_error = check_terminal_fatal_error(
-            filtered_output,
             code_provider=code_provider,
             exit_code=exit_code,
             credential_feedback=credential_feedback,
@@ -3570,15 +3795,14 @@ async def spawn_claude_code_activity(
         # 5. Close session and extract output files before verifier so the
         # verifier sees the SDK event JSON plus the actual extracted artifacts.
         # A persistent session is checkpointed and paused, never killed.
-        awaiting_parent = loop_outcome.get("awaiting_parent")
-        idle_paused = loop_outcome.get("idle_paused") is True or isinstance(awaiting_parent, dict)
+        idle_paused = loop_outcome.get("idle_paused") is True
         close_data = await close_e2b_session(
             task_id=task_id,
             user_id=user_id,
             agent_id=agent_id,
             additional_paths=[],
             code_provider=code_provider,
-            reason="awaiting_parent" if isinstance(awaiting_parent, dict) else "idle" if idle_paused else "close",
+            reason="idle" if idle_paused else "close",
         )
         output_files = close_data.get("output_files", [])
         claude_code_usage = close_data.get("usage")
@@ -3590,19 +3814,7 @@ async def spawn_claude_code_activity(
             if log_collector:
                 await log_collector.stop()
             local_place = local_workspace_place(code_agent_meta)
-            if isinstance(awaiting_parent, dict) and local_place:
-                message = (
-                    f"The code agent asked you: {awaiting_parent.get('question')}\n"
-                    "It is paused (not failed) and waiting for your answer. Spawn the code agent "
-                    f"again with target='local' and your answer as the goal to continue in {local_place}."
-                )
-            elif isinstance(awaiting_parent, dict):
-                message = (
-                    f"The code agent asked you: {awaiting_parent.get('question')}\n"
-                    "It is paused (not failed) and waiting for your answer. Spawn the code agent "
-                    "again with this code_session_id and your answer as the goal to resume it."
-                )
-            elif local_place:
+            if local_place:
                 # A Mac session cannot be E2B-paused: its CLI is stopped and the
                 # work stays in the user's folder; the next spawn continues there.
                 message = (
@@ -3644,7 +3856,7 @@ async def spawn_claude_code_activity(
                 "task_id": task_id,
                 "ws_url": ws_url,
                 "execution_time_ms": (safe_time() - start_time) * 1000,
-                "usage_items": [],
+                "usage_items": _sandbox_usage_items(code_agent_meta, start_time),
                 "structured_response": None,
                 "output_files": output_files,
                 "code_provider": code_provider,
@@ -3767,6 +3979,7 @@ async def spawn_claude_code_activity(
             model_pricing,
             execution_time_ms,
             claude_code_usage,
+            code_agent_meta=code_agent_meta,
         )
 
         if log_collector:
@@ -3895,19 +4108,32 @@ async def spawn_claude_code_activity(
             "code_provider": code_provider,
             "code_session": code_session_facts,
             "code_agent": paused_code_agent,
+            "usage_items": _sandbox_usage_items(code_agent_meta, start_time) if task_id else [],
         }
 
     except Exception as e:
+        retry_state[CODE_AGENT_ERRORS_HEARTBEAT_KEY] += 1
+        error = _bounded_activity_error(e, retry_state[CODE_AGENT_ERRORS_HEARTBEAT_KEY])
+        final = _error_ends_the_run(error)
         logger.error(
             "[ClaudeCode] Automation failed",
             agent_id=agent_id,
             task_id=task_id,
             error=extract_error_message(e),
             error_type=type(e).__name__,
+            activity_errors=retry_state[CODE_AGENT_ERRORS_HEARTBEAT_KEY],
+            final=final,
         )
 
         if log_collector:
             await log_collector.stop()
+
+        if not final:
+            # Temporal retries this attempt. The sandbox stays live and rides on
+            # this last heartbeat (with the error count), so the retry reattaches
+            # to the running CLI instead of pausing it and restarting the goal.
+            safe_heartbeat("Code agent error; Temporal retries the attempt")
+            raise e
 
         error_context = f"Failed during: {action_summary[-1] if action_summary else 'initialization'}"
         error_message = build_context_summary(
@@ -3977,7 +4203,8 @@ async def spawn_claude_code_activity(
                     error=str(cleanup_error),
                 )
 
-        _raise_bounded_activity_error(e)
+        raise error
 
     finally:
         session_heartbeats.close()
+        retry_heartbeats.close()

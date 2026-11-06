@@ -50,6 +50,7 @@ import {
   useAuth,
 } from '../hooks';
 import { usePlaidIntegration } from '../hooks/usePlaidIntegration';
+import { useGranola } from '../hooks/useGranola';
 
 import DesktopIntegrations from './DesktopIntegrations';
 import IntegrationModals from './IntegrationModals';
@@ -163,8 +164,10 @@ export default function Integrations() {
 /** Stock cards with the flag off; the Rose Desktop list with it on. */
 function IntegrationSectionsSwitch({
   accordion,
-  ...props
-}: React.ComponentProps<typeof IntegrationSections>) {
+  ...rest
+}: Omit<React.ComponentProps<typeof IntegrationSections>, 'granola'>) {
+  const granola = useGranola(rest.isFullySignedIn, rest.data.fetchIntegrations);
+  const props = { ...rest, granola };
   if (useRoseDesktop()) return <DesktopIntegrations {...props} />;
   return <IntegrationSections accordion={accordion} {...props} />;
 }

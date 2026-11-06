@@ -1,4 +1,8 @@
-import { codexCreateUnavailableSkipReason, codexSmokeCreditSkipReason } from './codex-credit-skip';
+import {
+  codexCreateUnavailableSkipReason,
+  codexSmokeCreditSkipReason,
+  codexSmokeLoginUnusableSkipReason,
+} from './codex-credit-skip';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`ASSERTION FAILED: ${message}`);
@@ -50,7 +54,7 @@ export function testCodexCreditSkip_authRevocationStillFailsHard() {
   assert(
     codexSmokeCreditSkipReason(
       '[Codex] Error: Your access token could not be refreshed because your refresh token was revoked.\n' +
-        '[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n' +
+        '[Codex] ChatGPT OAuth unusable — continuing on the funded Azure OpenAI deployment\n' +
         'You have no credits remaining. Add credits to continue.',
       [
         { type: 'auth_fallback', reason: 'oauth_refresh_invalid' },
@@ -64,6 +68,33 @@ export function testCodexCreditSkip_authRevocationStillFailsHard() {
       { type: 'error', error: { message: 'token_revoked' } },
     ]) === null,
     'code-only token_revoked must remain a hard failure even with funded-key exhaustion'
+  );
+}
+
+export function testCodexCreditSkip_structuredUnusableLoginPausedForRetryIsSkip() {
+  const revoked = 'Your access token could not be refreshed: refresh_token_invalidated';
+  assert(
+    codexSmokeLoginUnusableSkipReason([
+      {
+        type: 'error',
+        message: revoked,
+        usage_limit: null,
+        login_unusable: { reason: 'oauth_refresh_invalid' },
+      },
+    ]) === 'login_unusable: oauth_refresh_invalid',
+    'a structured unusable login (no Azure switch armed) paused for a retry is an unavailable-credential skip'
+  );
+  assert(
+    codexSmokeLoginUnusableSkipReason([{ type: 'error', message: revoked, usage_limit: null }]) ===
+      null,
+    'revocation prose without the structured field still fails hard'
+  );
+  assert(
+    codexSmokeLoginUnusableSkipReason([
+      { type: 'error', message: revoked, login_unusable: { reason: 'oauth_refresh_invalid' } },
+      { type: 'auth_fallback', reason: 'oauth_refresh_invalid' },
+    ]) === null,
+    'a run that switched to Azure must complete there; it never skips'
   );
 }
 

@@ -1,6 +1,8 @@
 import Kernel, { APIConnectionTimeoutError, BadRequestError } from '@onkernel/sdk';
+import type { Prisma } from '@prisma/client';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { ProxyListResponse } from '@onkernel/sdk/resources/proxies';
-import { prisma } from '../database';
+import { prisma, runTransactionWithRetry } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 
 export type KernelProxyType = 'residential' | 'mobile' | 'isp';
@@ -228,29 +230,98 @@ export function selectReusableKernelProxy(
   })?.id;
 }
 
+const inFlightProxyConfigs = new Map<string, Promise<ResolvedKernelProxy>>();
+const PROXY_FILL_TRANSACTION_MS = 10_000 + KERNEL_CREATE_REQUEST_OPTIONS.timeout + 5_000;
+const PROXY_FILL_ACQUIRE_MS = 2_000;
+// A valid list+create+commit can outlive the create request alone. Wait for the
+// existing holder's whole bounded transaction, including pool acquisition.
+const PROXY_REUSE_WAIT_MS = PROXY_FILL_ACQUIRE_MS + PROXY_FILL_TRANSACTION_MS;
+
 export async function getOrCreateKernelProxy(
   client: Kernel,
   candidate: KernelProxyCandidate
 ): Promise<ResolvedKernelProxy> {
-  const existing = await prisma.browserProviderProxy.findUnique({
+  const pending = inFlightProxyConfigs.get(candidate.proxyKey);
+  if (pending !== undefined) {
+    const resolved = await pending;
+    return { ...resolved, source: candidate.source, location: candidate.location };
+  }
+  const work = resolveKernelProxy(client, candidate);
+  inFlightProxyConfigs.set(candidate.proxyKey, work);
+  try {
+    return await work;
+  } finally {
+    inFlightProxyConfigs.delete(candidate.proxyKey);
+  }
+}
+
+async function resolveKernelProxy(
+  client: Kernel,
+  candidate: KernelProxyCandidate
+): Promise<ResolvedKernelProxy> {
+  const deadline = Date.now() + PROXY_REUSE_WAIT_MS;
+  while (Date.now() < deadline) {
+    const existing = await prisma.browserProviderProxy.findUnique({
+      where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
+    });
+    if (existing !== null) return resolvedProxy(candidate, existing);
+
+    // Serialize rare cache fills database-wide: at most ONE transaction holds a
+    // connection during remote I/O, even when many different geo keys miss.
+    // A blocking advisory lock would occupy the entire pool with waiters.
+    // Try-lock losers commit immediately and sleep without a DB connection.
+    const resolved = await runTransactionWithRetry(
+      async (tx) => {
+        const [lock] = await tx.$queryRaw<Array<{ acquired: boolean }>>`
+        SELECT pg_try_advisory_xact_lock(187003377, 1) AS acquired
+      `;
+        if (!lock?.acquired) return undefined;
+        const cached = await tx.browserProviderProxy.findUnique({
+          where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
+        });
+        if (cached !== null) return resolvedProxy(candidate, cached);
+        return provisionKernelProxy(client, candidate, tx.browserProviderProxy);
+      },
+      { maxWait: PROXY_FILL_ACQUIRE_MS, timeout: PROXY_FILL_TRANSACTION_MS }
+    );
+    if (resolved !== undefined) return resolved;
+    await delay(Math.min(100, Math.max(0, deadline - Date.now())));
+  }
+  // The holder may commit exactly as the final sleep reaches the deadline.
+  // Observe that completed fill once more; do not allocate after the deadline.
+  const committed = await prisma.browserProviderProxy.findUnique({
     where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
   });
-  if (existing !== null) {
-    return {
-      proxyId: existing.proxyId,
-      proxyKey: existing.proxyKey,
-      proxyType: candidate.type,
-      source: candidate.source,
-      location: candidate.location,
-    };
-  }
+  if (committed !== null) return resolvedProxy(candidate, committed);
+  throw new KernelProxyReuseTimeoutError(
+    `Timed out waiting for Kernel proxy configuration reuse: ${candidate.proxyKey}`
+  );
+}
 
+function resolvedProxy(
+  candidate: KernelProxyCandidate,
+  row: { proxyId: string; proxyKey: string }
+): ResolvedKernelProxy {
+  return {
+    proxyId: row.proxyId,
+    proxyKey: row.proxyKey,
+    proxyType: candidate.type,
+    source: candidate.source,
+    location: candidate.location,
+  };
+}
+
+async function provisionKernelProxy(
+  client: Kernel,
+  candidate: KernelProxyCandidate,
+  cache: Prisma.TransactionClient['browserProviderProxy']
+): Promise<ResolvedKernelProxy> {
   // Isolated benchmark databases and restored snapshots can lose the local row
   // while the project still owns this proxy. Reuse it instead of provisioning
   // another identical proxy (which can exceed browser-session init deadlines).
   let projectProxies = await client.proxies.list(
     { query: candidate.name, limit: 100 },
-    { timeout: 10_000, maxRetries: 0 }
+    { timeout: 10_000, maxRetries: 0, signal: AbortSignal.timeout(10_000) }
   );
   let reusableId: string | undefined;
   while (true) {
@@ -273,40 +344,20 @@ export async function getOrCreateKernelProxy(
     throw new Error(`Kernel proxy creation returned no ID for ${candidate.proxyKey}`);
   }
 
-  try {
-    const stored = await prisma.browserProviderProxy.create({
-      data: {
-        provider: 'kernel',
-        proxyKey: candidate.proxyKey,
-        proxyId: remoteId,
-        proxyType: candidate.type,
-        config: candidate.config,
-      },
-    });
-    return {
-      proxyId: stored.proxyId,
-      proxyKey: stored.proxyKey,
+  // A pre-lock rollout worker can still win the unique insert. Native upsert
+  // preserves that winner without aborting this PostgreSQL transaction.
+  const stored = await cache.upsert({
+    where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
+    update: { proxyType: candidate.type },
+    create: {
+      provider: 'kernel',
+      proxyKey: candidate.proxyKey,
+      proxyId: remoteId,
       proxyType: candidate.type,
-      source: candidate.source,
-      location: candidate.location,
-    };
-  } catch (error) {
-    const winner = await prisma.browserProviderProxy.findUnique({
-      where: { provider_proxyKey: { provider: 'kernel', proxyKey: candidate.proxyKey } },
-    });
-    if (winner !== null) {
-      return {
-        proxyId: winner.proxyId,
-        proxyKey: winner.proxyKey,
-        proxyType: candidate.type,
-        source: candidate.source,
-        location: candidate.location,
-      };
-    }
-    // Another caller may have listed this remote proxy and be about to save it.
-    // Retain it for a later lookup rather than deleting a possibly referenced ID.
-    throw error;
-  }
+      config: candidate.config,
+    },
+  });
+  return resolvedProxy(candidate, stored);
 }
 
 /** Drop the cache row only while it still names the failed proxy, not a concurrent replacement. */
@@ -368,6 +419,7 @@ export async function createSessionOnKernelProxyLadder<T>(
         // gone — forgetting it would recreate orphans for the same geo key.
         const message =
           error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+        if (isKernelProxyPermissionError(error)) throw error;
         const unhealthy =
           resolved !== undefined &&
           (await kernelRejectedUnhealthyProxy(client, error, resolved.proxyId));
@@ -391,7 +443,21 @@ export async function createSessionOnKernelProxyLadder<T>(
   throw new Error('Kernel proxy ladder needs at least one candidate');
 }
 
+function isKernelProxyPermissionError(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    status === 401 ||
+    status === 403 ||
+    /\b(?:401|403)\b|permission|forbidden|unauthori[sz]ed|access denied/i.test(message)
+  );
+}
+
+export class KernelProxyReuseTimeoutError extends Error {}
+
 export function isKernelProxyAvailabilityError(error: unknown): boolean {
+  if (error instanceof KernelProxyReuseTimeoutError) return false;
+  if (isKernelProxyPermissionError(error)) return false;
   // SDK request timeouts (city proxy allocate / session create hung) are
   // transient location-capacity failures — fall back to a coarser geo key.
   if (error instanceof APIConnectionTimeoutError) return true;

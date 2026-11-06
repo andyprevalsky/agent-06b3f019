@@ -1,5 +1,8 @@
 """Offline owning controls for independent OTP delivery and durable references."""
 import asyncio
+import json
+
+import httpx
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 from domains.spawn_browser_agent_v3.service_crypto import ExtractedOTP
@@ -31,20 +34,44 @@ def assert_unexecuted_action_refund_is_bounded():
 
 
 @contextmanager
-def _offline_activity_edges():
+def _offline_activity_edges(agent_speeds=None):
     """Fail even when an unexpected external attempt is swallowed by activity code."""
     attempts = []
+    # A real browser activity reads its spawning agent once at startup. Model
+    # that persisted row at the HTTP edge, including an opposing legacy flag.
+    # Unknown agents/routes still hit the same no-network assertion below.
+    speeds = {"agent-1": "ultrafast"} if agent_speeds is None else dict(agent_speeds)
+    assert all(speed in {"standard", "fast", "ultrafast"} for speed in speeds.values())
+    reads = []
 
     def deny(*args, **kwargs):
         attempts.append("external attempt")
         raise AssertionError("OTP owning control forbids network")
+
+    def send(request, *args, **kwargs):
+        if request.method == "POST" and str(request.url) == "https://speed-fixture.invalid/api/fast-cache/agent-flag":
+            payload = json.loads(request.content)
+            agent_id = payload.get("agentId")
+            if payload == {"agentId": agent_id} and agent_id in speeds:
+                reads.append(agent_id)
+                return httpx.Response(200, request=request, json={
+                    "enabled": False,
+                    "writeEnabled": False,
+                    "goal": "Offline browser speed fixture",
+                    "providerFastMode": speeds[agent_id] == "standard",
+                    "speed": speeds[agent_id],
+                })
+        return deny(request, *args, **kwargs)
 
     async def scripted_progress(*args, **kwargs):
         return {"progress": 0, "output": None, "usage": {}}
 
     try:
         with (
-            patch("httpx.AsyncClient.send", side_effect=deny),
+            patch("httpx.AsyncClient.send", side_effect=send),
+            patch("providers.demo_cache.client._backend", return_value=("https://speed-fixture.invalid", "fixture-key")),
+            patch("providers.demo_cache.client._AGENT_SPEED", {}),
+            patch("providers.demo_cache.client._AGENT_FASTMODE", {}),
             patch("httpx.Client.send", side_effect=deny),
             patch("requests.Session.request", side_effect=deny),
             patch("socket.socket.connect", deny),
@@ -56,7 +83,7 @@ def _offline_activity_edges():
             patch("domains.spawn_browser_agent_v3.repo.list_session_files", AsyncMock(return_value=[])),
             patch("domains.spawn_browser_agent_v3.service.list_session_files", AsyncMock(return_value=[])),
         ):
-            yield
+            yield reads
     finally:
         assert not attempts, f"Unexpected network attempts, including swallowed errors: {attempts}"
 
@@ -136,3 +163,11 @@ async def assert_repeated_supersession_is_bounded(owning_fixture, case="repeated
     from domains.spawn_browser_agent_v3.config import MAX_ITERATIONS
     with _offline_activity_edges():
         await owning_fixture(case, MAX_ITERATIONS - 1)
+
+
+async def assert_browser_activity_inherits_stored_speed(owning_fixture):
+    """Run real startup resolution and inspect speed inside real browser decisions."""
+    for speed in ("standard", "fast", "ultrafast"):
+        with _offline_activity_edges({"agent-1": speed}) as reads:
+            await owning_fixture(expected_speed=speed)
+            assert reads == ["agent-1"], "browser startup must read the persisted speed exactly once"

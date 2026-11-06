@@ -594,13 +594,22 @@ def test_clean_source_sha_only_for_clean_git_head(tmp_path):
     git = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t"]
     subprocess.run([*git, "init", "-q"], check=True)
     (tmp_path / "f.txt").write_text("a")
-    subprocess.run([*git, "add", "f.txt"], check=True)
+    history = tmp_path / 'agents/benchmarks/history/task_attempts.jsonl'
+    history.parent.mkdir(parents=True); history.write_text('original\n')
+    subprocess.run([*git, "add", "f.txt", str(history)], check=True)
     subprocess.run([*git, "commit", "-qm", "init"], check=True)
     head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     (tmp_path / "untracked.txt").write_text("ignored")
     assert clean_source_sha(tmp_path) == head
+    history.write_text('original\nactual native attempt\n')
+    assert clean_source_sha(tmp_path) == head
+    subprocess.run([*git, 'add', str(history)], check=True)
+    assert clean_source_sha(tmp_path) == head  # staged output is also excluded, never source
     (tmp_path / "f.txt").write_text("b")
     assert clean_source_sha(tmp_path) is None  # dirty tracked file: HEAD is not what ran
+    (tmp_path / 'f.txt').write_text('a')
+    subprocess.run([*git, 'mv', 'f.txt', str(history.parent / 'renamed-code.txt')], check=True)
+    assert clean_source_sha(tmp_path) is None  # code -> history rename cannot hide deleted source
 
 
 def test_card_status_keeps_interrupted_tasks_out_of_failures():
