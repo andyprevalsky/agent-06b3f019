@@ -18,6 +18,7 @@
  *   operationKey  agent-self-bug-report:<agentId>  (unique → one tool report per run)
  *   status        STARTED / FAILED  request frozen; any retry re-sends it unchanged
  *                 SUCCEEDED         externalId = boxes.dev run id
+ *                 RECORDED          saved for /rca only; nothing launched (outside production)
  */
 
 import { randomUUID } from 'node:crypto';
@@ -230,11 +231,17 @@ export interface AgentSelfBugReportRequest {
   name: string;
   promptText: string;
   idempotencyKey: string;
+  description: string;
 }
 
 export interface AgentSelfBugReportClaim extends AgentSelfBugReportRequest {
   status: string;
   runId: string | null;
+}
+
+export interface AgentSelfBugReportRow extends AgentSelfBugReportClaim {
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 /** Read a claim row back into its frozen request; null when the row is malformed. */
@@ -255,6 +262,7 @@ function selfClaimFromRow(row: {
     name: stored.name,
     promptText: stored.promptText,
     idempotencyKey: stored.idempotencyKey,
+    description: typeof stored.description === 'string' ? stored.description : '',
     status: row.status,
     runId: row.status === 'SUCCEEDED' ? row.externalId : null,
   };
@@ -271,14 +279,30 @@ export async function findAgentSelfBugReport(
   return row === null ? null : selfClaimFromRow(row);
 }
 
+/** The tree root's report_bug row with its timestamps, for /rca reads. */
+export async function findAgentSelfBugReportRow(
+  agentId: string
+): Promise<AgentSelfBugReportRow | null> {
+  const row = await prisma.toolSideEffect.findUnique({
+    where: { operationKey: agentSelfBugReportKey(agentId) },
+    select: { status: true, externalId: true, request: true, createdAt: true, updatedAt: true },
+  });
+  const claim = row === null ? null : selfClaimFromRow(row);
+  return row === null || claim === null
+    ? null
+    : { ...claim, createdAt: row.createdAt, updatedAt: row.updatedAt };
+}
+
 /**
- * Freeze the agent's one report_bug request. A concurrent first call keeps the
- * row the winner inserted; both callers then send that same request.
+ * Freeze the agent's one report_bug request: STARTED before a launch, RECORDED
+ * when it is only saved. A concurrent first call keeps the row the winner
+ * inserted; both callers then use that same request.
  */
 export async function claimAgentSelfBugReport(
   agentId: string,
   launch: AgentSelfBugReportRequest,
-  now: Date
+  now: Date,
+  status: 'STARTED' | 'RECORDED' = 'STARTED'
 ): Promise<AgentSelfBugReportClaim> {
   const request = { agentId, source: 'agent', ...launch };
   await prisma.$executeRaw(Prisma.sql`
@@ -286,7 +310,7 @@ export async function claimAgentSelfBugReport(
       (id, "operationKey", "operationType", status, request, "createdAt", "updatedAt")
     VALUES
       (${randomUUID()}, ${agentSelfBugReportKey(agentId)}, ${AGENT_SELF_BUG_REPORT_OPERATION_TYPE},
-       'STARTED', ${JSON.stringify(request)}::jsonb, ${now}, ${now})
+       ${status}, ${JSON.stringify(request)}::jsonb, ${now}, ${now})
     ON CONFLICT ("operationKey") DO NOTHING
   `);
   const claim = await findAgentSelfBugReport(agentId);
@@ -300,7 +324,7 @@ export async function markAgentSelfBugReportLaunched(
   runId: string
 ): Promise<void> {
   await prisma.toolSideEffect.updateMany({
-    where: { operationKey: agentSelfBugReportKey(agentId), status: { not: 'SUCCEEDED' } },
+    where: { operationKey: agentSelfBugReportKey(agentId), status: { in: ['STARTED', 'FAILED'] } },
     data: { status: 'SUCCEEDED', externalId: runId, response: { runId }, error: null },
   });
 }
@@ -308,17 +332,18 @@ export async function markAgentSelfBugReportLaunched(
 /** Keep the frozen request after a failed launch so a retry re-sends it unchanged. */
 export async function markAgentSelfBugReportFailed(agentId: string, error: string): Promise<void> {
   await prisma.toolSideEffect.updateMany({
-    where: { operationKey: agentSelfBugReportKey(agentId), status: { not: 'SUCCEEDED' } },
+    where: { operationKey: agentSelfBugReportKey(agentId), status: { in: ['STARTED', 'FAILED'] } },
     data: { status: 'FAILED', error: error.slice(0, 2000) },
   });
 }
 
-/** report_bug claims first made in [since, until], for the tool's daily cap. */
+/** Launching report_bug claims first made in [since, until], for the tool's daily cap. */
 export async function countAgentSelfBugReportsBetween(since: Date, until: Date): Promise<number> {
   return prisma.toolSideEffect.count({
     where: {
       operationType: AGENT_SELF_BUG_REPORT_OPERATION_TYPE,
       createdAt: { gte: since, lte: until },
+      status: { not: 'RECORDED' },
     },
   });
 }

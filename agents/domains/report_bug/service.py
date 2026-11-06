@@ -8,7 +8,9 @@ from domains.report_bug.repo import post_agent_bug_report
 
 
 @activity.defn
-async def report_bug_activity(agent_id: str, user_id: str, description: str) -> Dict[str, Any]:
-    """File the agent's bug report; retry-safe (the backend freezes one request per run)."""
+async def report_bug_activity(
+    agent_id: str, user_id: str, description: str, record_only: bool = False
+) -> Dict[str, Any]:
+    """File (or, with record_only, only save) the agent's bug report; retry-safe (one frozen request per run)."""
     activity.heartbeat("Filing bug report")
-    return await post_agent_bug_report(agent_id, user_id, description)
+    return await post_agent_bug_report(agent_id, user_id, description, record_only)

@@ -3,15 +3,16 @@
  * the agent for its own run.
  *
  *   report_bug(description)                       (agents/domains/report_bug)
- *     → POST /api/agents/:id/report-bug/by-agent  (internal API key, the agent's own id)
- *     → production backend only (dev, devbox and benchmark stacks refuse)
- *     → admin owner (the button's gate) + real root run
- *       (not a sub-agent, benchmark or simulated run)
- *     → one claim per run: agent-self-bug-report:<id> freezes the first request,
- *       so retries and parallel calls re-send it under one idempotency key
- *     → daily cap across agents, checked only before a run's first claim
- *     → boxes.dev thread `--ai-- <description>` with the manual /goal + /rca prompt
- *     → agent-bug-report:<id> (source agent), so the 24h stuck-agent job skips it
+ *     → POST /api/agents/:id/report-bug/by-agent  (internal API key, the agent's own id;
+ *       body record_only=true when the worker is not on production Temporal)
+ *     → admin owner (the button's gate) + real-world root run (not a sub-agent or simulated run)
+ *     → one claim per run: agent-self-bug-report:<id> freezes the first request
+ *     → launch = production backend AND not record_only AND not a benchmark run:
+ *         daily cap across agents (checked only before a run's first claim)
+ *         → boxes.dev thread `--ai-- <description>` with the manual /goal + /rca prompt
+ *         → agent-bug-report:<id> (source agent), so the 24h stuck-agent job skips it
+ *       otherwise the claim is saved as RECORDED and nothing is launched
+ *     → GET /api/agents/:id/report-bug/by-agent: the tree root's report, for /rca
  *
  * 10k agents: one indexed claim read per call, one count + insert on the first,
  * and at most one boxes.dev run per agent run.
@@ -26,7 +27,6 @@ import {
   type ReportBugLaunch,
   type ReportBugLaunchArgs,
   ReportBugNotFoundError,
-  type ReportBugResult,
   ReportBugValidationError,
   validateBugDescription,
 } from './bugReportService';
@@ -39,6 +39,7 @@ import {
   claimAgentSelfBugReport,
   countAgentSelfBugReportsBetween,
   findAgentSelfBugReport,
+  findAgentSelfBugReportRow,
   markAgentSelfBugReportFailed,
   markAgentSelfBugReportLaunched,
   recordManualAgentBugReport,
@@ -57,16 +58,28 @@ export class ReportBugLimitError extends Error {
   }
 }
 
-export class ReportBugNotProductionError extends Error {
-  constructor() {
-    super('Agent bug reports are filed only in production');
-    this.name = 'ReportBugNotProductionError';
-  }
-}
-
-export interface AgentReportBugResult extends ReportBugResult {
+export interface AgentReportBugResult {
+  success: true;
+  /** launched: a boxes.dev /rca run exists; recorded: saved for /rca only (outside production). */
+  mode: 'launched' | 'recorded';
+  name: string;
+  url: string | null;
+  run_id: string | null;
   /** True when this run's one report carries an earlier description; this one was not sent. */
   already_reported: boolean;
+}
+
+export interface AgentSelfBugReportView {
+  agent_id: string;
+  root_agent_id: string;
+  report: {
+    status: 'launched' | 'recorded' | 'launching' | 'launch_failed';
+    title: string;
+    description: string;
+    boxes_run_id: string | null;
+    created_at: string;
+    updated_at: string;
+  } | null;
 }
 
 export interface AgentReportBugDeps {
@@ -95,26 +108,24 @@ export function buildAgentBugReportIdempotencyKey(agentId: string): string {
   return `rose-agent-report-bug-${agentId}`;
 }
 
-/** The agent is the owner's own live, real-world, non-benchmark root run. */
-async function assertReportableRootRun(
+type ReportableAgent = NonNullable<Awaited<ReturnType<typeof repo.findAgentById>>>;
+
+/** The agent is the owner's own live, real-world root run. */
+async function loadReportableRootRun(
   userId: string,
   agentId: string,
   findAgentById: typeof repo.findAgentById
-): Promise<void> {
+): Promise<ReportableAgent> {
   const agent = await findAgentById(agentId);
   if (agent === null || agent.userId !== userId) {
     throw new ReportBugNotFoundError();
   }
-  if (
-    agent.parentAgentId !== null ||
-    agent.depth !== 0 ||
-    agent.isBenchmark ||
-    agent.worldModelMode !== 'real'
-  ) {
+  if (agent.parentAgentId !== null || agent.depth !== 0 || agent.worldModelMode !== 'real') {
     throw new ReportBugValidationError(
-      'Only a real root agent run can report a bug (not a sub-agent, benchmark or simulated run)'
+      'Only a real-world root agent run can report a bug (not a sub-agent or simulated run)'
     );
   }
+  return agent;
 }
 
 /** The run's existing claim, or a new one when the daily cap allows it. */
@@ -173,31 +184,63 @@ async function launchClaim(
   return launched;
 }
 
+function claimResult(
+  claim: AgentSelfBugReportClaim,
+  already_reported: boolean
+): AgentReportBugResult {
+  const launched = claim.status === 'SUCCEEDED' && claim.runId !== null;
+  return {
+    success: true,
+    mode: launched ? 'launched' : 'recorded',
+    name: claim.name,
+    url: launched ? getBoxesBugReportAppUrl() : null,
+    run_id: launched ? claim.runId : null,
+    already_reported,
+  };
+}
+
 /** File the calling root agent's one bug report (see the file header for every gate). */
 export async function reportAgentBugFromAgent(
   userId: string | undefined,
   agentId: string,
   description: unknown,
-  deps: AgentReportBugDeps = {}
+  deps: AgentReportBugDeps = {},
+  options: { recordOnly?: boolean } = {}
 ): Promise<AgentReportBugResult> {
   assertReportBugAdmin(userId);
-  if (!(deps.isProduction ?? (() => isProductionEnvironment(process.env)))()) {
-    throw new ReportBugNotProductionError();
-  }
   const trimmed = validateBugDescription(description);
-  await assertReportableRootRun(userId, agentId, deps.findAgentById ?? repo.findAgentById);
+  const agent = await loadReportableRootRun(
+    userId,
+    agentId,
+    deps.findAgentById ?? repo.findAgentById
+  );
+  const production = (deps.isProduction ?? (() => isProductionEnvironment(process.env)))();
+  const launch = production && options.recordOnly !== true && !agent.isBenchmark;
 
   const request: AgentSelfBugReportRequest = {
     name: `--ai-- ${buildBugReportChatName(trimmed)}`,
     promptText: buildAgentBugReportPrompt(agentId, trimmed),
     idempotencyKey: buildAgentBugReportIdempotencyKey(agentId),
+    description: trimmed,
   };
   const now = (deps.now ?? (() => new Date()))();
+  if (!launch) {
+    // Saved for /rca only: no boxes.dev run, so no daily cap.
+    const recorded =
+      (await (deps.findClaim ?? findAgentSelfBugReport)(agentId)) ??
+      (await (deps.claim ?? claimAgentSelfBugReport)(agentId, request, now, 'RECORDED'));
+    log.info('Recorded agent bug report without launching', {
+      rose_agent_id: agentId,
+      production,
+      record_only: options.recordOnly === true,
+      benchmark: agent.isBenchmark,
+    });
+    return claimResult(recorded, recorded.promptText !== request.promptText);
+  }
   const claim = await claimReport(agentId, request, now, deps);
   const already_reported = claim.promptText !== request.promptText;
-  if (claim.status === 'SUCCEEDED' && claim.runId !== null) {
-    const url = getBoxesBugReportAppUrl();
-    return { success: true, name: claim.name, url, run_id: claim.runId, already_reported };
+  if (claim.status === 'RECORDED' || (claim.status === 'SUCCEEDED' && claim.runId !== null)) {
+    return claimResult(claim, already_reported);
   }
 
   // Do not log the description — it can carry customer incident text.
@@ -208,9 +251,44 @@ export async function reportAgentBugFromAgent(
   const launched = await launchClaim(agentId, claim, deps);
   return {
     success: true,
+    mode: 'launched',
     name: launched.name,
     url: launched.url,
     run_id: launched.run_id,
     already_reported,
+  };
+}
+
+const VIEW_STATUS = {
+  SUCCEEDED: 'launched',
+  RECORDED: 'recorded',
+  STARTED: 'launching',
+  FAILED: 'launch_failed',
+} as const;
+
+/** The report_bug report of the tree that `agentId` belongs to (filed by its root), for /rca. */
+export async function readAgentSelfBugReport(
+  agentId: string,
+  deps: {
+    findAgentById?: typeof repo.findAgentById;
+    findRow?: typeof findAgentSelfBugReportRow;
+  } = {}
+): Promise<AgentSelfBugReportView> {
+  const agent = await (deps.findAgentById ?? repo.findAgentById)(agentId);
+  if (agent === null) throw new ReportBugNotFoundError();
+  const rootId = agent.parentAgentId === null ? agent.id : (agent.busId ?? agent.id);
+  const row = await (deps.findRow ?? findAgentSelfBugReportRow)(rootId);
+  if (row === null) return { agent_id: agentId, root_agent_id: rootId, report: null };
+  return {
+    agent_id: agentId,
+    root_agent_id: rootId,
+    report: {
+      status: VIEW_STATUS[row.status as keyof typeof VIEW_STATUS] ?? 'launching',
+      title: row.name,
+      description: row.description,
+      boxes_run_id: row.runId,
+      created_at: row.createdAt.toISOString(),
+      updated_at: row.updatedAt.toISOString(),
+    },
   };
 }

@@ -3,7 +3,9 @@
  *
  *   POST /:id/report-bug              Report Bug button (admin session or API key)
  *   POST /:id/report-bug/screenshots  Report Bug image upload
- *   POST /:id/report-bug/by-agent     root agent report_bug tool (internal API key, production only)
+ *   POST /:id/report-bug/by-agent     root agent report_bug tool (internal API key; launches only in
+ *                                     production, otherwise saves the report)
+ *   GET  /:id/report-bug/by-agent     the tree root's report_bug report, for /rca (internal API key)
  */
 
 import { type NextFunction, type RequestHandler, type Response, Router } from 'express';
@@ -23,7 +25,7 @@ import {
 } from './bugReportService';
 import {
   ReportBugLimitError,
-  ReportBugNotProductionError,
+  readAgentSelfBugReport,
   reportAgentBugFromAgent,
 } from './agentBugReportService';
 import { bugReportScreenshotUpload, MAX_BUG_REPORT_SCREENSHOT_BYTES } from './config';
@@ -33,7 +35,7 @@ const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 
 function sendReportBugError(res: Response, error: unknown, agentId: string, action: string): void {
-  if (error instanceof ReportBugForbiddenError || error instanceof ReportBugNotProductionError) {
+  if (error instanceof ReportBugForbiddenError) {
     res.status(403).json({ error: error.message });
     return;
   }
@@ -88,14 +90,33 @@ router.post(
   requireInternal,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
-      const description =
-        req.body !== null && typeof req.body === 'object' && 'description' in req.body
-          ? (req.body as { description: unknown }).description
-          : undefined;
-      const result = await reportAgentBugFromAgent(req.userId, req.params.id, description);
+      const body =
+        req.body !== null && typeof req.body === 'object'
+          ? (req.body as { description?: unknown; record_only?: unknown })
+          : {};
+      const result = await reportAgentBugFromAgent(
+        req.userId,
+        req.params.id,
+        body.description,
+        {},
+        { recordOnly: body.record_only === true }
+      );
       res.status(201).json(result);
     } catch (error) {
       sendReportBugError(res, error, req.params.id, 'file agent bug report');
+    }
+  })
+);
+
+router.get(
+  '/:id/report-bug/by-agent',
+  auth,
+  requireInternal,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      res.json(await readAgentSelfBugReport(req.params.id));
+    } catch (error) {
+      sendReportBugError(res, error, req.params.id, 'read agent bug report');
     }
   })
 );

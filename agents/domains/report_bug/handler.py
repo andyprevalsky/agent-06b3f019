@@ -21,7 +21,7 @@ def _in_production() -> bool:
     """This workflow runs on production Temporal (namespace + queue; deterministic, no env read).
 
     Dev, devbox and benchmark stacks are refused the production namespace
-    (temporal_connection.production_namespace_refusal), so they never see report_bug.
+    (temporal_connection.production_namespace_refusal), so their reports are only saved.
     """
     if not workflow.in_workflow():
         return False
@@ -30,10 +30,9 @@ def _in_production() -> bool:
 
 
 def can_report_bug(workflow_instance: Any) -> bool:
-    """A real-world production root agent whose owner may use Report Bug."""
+    """A real-world root agent whose owner may use Report Bug (any stack; see report_bug)."""
     return (
-        _in_production()
-        and int(getattr(workflow_instance, "depth", 0) or 0) == 0
+        int(getattr(workflow_instance, "depth", 0) or 0) == 0
         and not getattr(workflow_instance, "parent_workflow_id", None)
         and getattr(workflow_instance, "world_model_mode", "real") == "real"
         and getattr(workflow_instance, "user_id", None) in REPORT_BUG_USER_IDS
@@ -50,31 +49,35 @@ def with_report_bug(tools: Sequence[str], workflow_instance: Any) -> List[str]:
 
 
 def _result_text(result: Dict[str, Any]) -> str:
-    """Truthful tool result: the filed report, or the run's earlier one."""
+    """Truthful tool result: the filed or saved report, or the run's earlier one."""
     title = str(result.get("name") or "bug report")
     run = str(result.get("run_id") or "")
+    filed = (
+        f'filed: "{title}" (boxes.dev run {run})'
+        if result.get("mode") == "launched"
+        else f'saved: "{title}" (outside production it is kept for a later /rca instead of starting one)'
+    )
     if result.get("already_reported"):
-        return (
-            f'This run already filed its one bug report, "{title}" (boxes.dev run {run}); '
-            "this description was not sent."
-        )
-    return f'Bug report filed: "{title}" (boxes.dev run {run}). An engineering agent will investigate it.'
+        return f"This run already reported its one bug, {filed}; this description was not sent."
+    if result.get("mode") == "launched":
+        return f"Bug report {filed}. An engineering agent will investigate it."
+    return f"Bug report {filed}."
 
 
 async def report_bug(workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str) -> Tuple[MessageStatus, str]:
-    """File a Rose bug for this root agent's run through the Report Bug automation."""
+    """File a Rose bug for this root agent's run: launched in production, saved elsewhere."""
     description = str(tool_call.get("description") or "").strip()
     error = None
     result: Dict[str, Any] = {}
     if not can_report_bug(workflow_instance):
-        error = "report_bug is only available to the production root agent."
+        error = "report_bug is only available to the root agent."
     elif not description:
         error = "`description` is required."
     else:
         try:
             result = await workflow.execute_activity(
                 report_bug_activity,
-                args=[workflow_instance.agent_id, workflow_instance.user_id, description],
+                args=[workflow_instance.agent_id, workflow_instance.user_id, description, not _in_production()],
                 start_to_close_timeout=ACTIVITY_TIMEOUT,
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -92,6 +95,9 @@ async def report_bug(workflow_instance: Any, tool_call: Dict[str, Any], tool_cal
             "bugReportTitle": result.get("name"),
             "bugReportRunId": result.get("run_id"),
             "bugReportUrl": result.get("url"),
+            "bugReportMode": result.get("mode"),
+            # Archived and cloud-benchmark transcripts outlive their DB; /rca reads this.
+            "bugReportDescription": description,
             "alreadyReported": bool(result.get("already_reported")),
         }
     await workflow_instance._handle_tool_event(

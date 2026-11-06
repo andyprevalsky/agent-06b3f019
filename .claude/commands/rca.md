@@ -133,6 +133,33 @@ critical path, binary-search to the first-bad boundary, reproduce, cement).
 Then follow it exactly. Do not skip Step 0 (gather runtime evidence) and do not
 reason from code alone when logs/DB/HTTP evidence exists.
 
+## Step 0.25 — READ THE AGENT'S OWN BUG REPORT (mandatory, every time)
+
+A root agent can report a Rose bug itself with its `report_bug` tool. In
+production that launches a /rca like this one (its prompt quotes the
+description); everywhere else (local, devbox, benchmark) the report is only
+saved. Check for one on the agent under investigation; any agent in a tree
+resolves to its root's report:
+
+```bash
+curl -s "$BACKEND_URL/api/agents/<agent_id>/report-bug/by-agent" \
+  -H "X-API-Key: $BACKEND_API_KEY"   # report is null when none was filed
+```
+
+Archived and cloud-benchmark runs lose their database: read the root
+transcript instead (`GET /api/agents/<root_id>` also serves Hub-archived runs).
+The TOOL row for `report_bug` carries the full description:
+
+```bash
+curl -s "$BACKEND_URL/api/agents/<root_id>" -H "X-API-Key: $BACKEND_API_KEY" \
+  -H "X-User-Id: <owner_user_id>" | jq '.messages[]
+  | select(.metadata.toolName == "report_bug") | .metadata.bugReportDescription'
+```
+
+A self-report is the agent's own account: use its tool, call and error as
+leads, then confirm or refute them with runtime evidence. State in the output
+whether the agent reported a bug and whether the evidence confirmed it.
+
 ## Step 0.5 — SEARCH THE RCA ARCHIVE (mandatory, every time)
 
 `docs/rca/cases/` is the checked-in record of every RCA this repo has completed:

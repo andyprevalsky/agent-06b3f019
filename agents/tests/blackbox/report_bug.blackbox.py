@@ -90,19 +90,22 @@ def test_report_bug_is_withheld_from_ineligible_agents():
         assert plan == list(PLAN_PHASE_TOOLS) and execute == list(EXECUTE_PHASE_TOOLS), label
 
 
-def test_report_bug_is_production_only():
-    """Dev, devbox and benchmark stacks (their own namespace or queue) never get the tool."""
+NON_PROD = (
+    ("benchmark namespace", {"namespace": "rose-bench.tch2n", "task_queue": "navi-agent-tasks-rbe2e"}),
+    ("benchmark namespace, prod-shaped queue", {"namespace": "rose-bench.tch2n"}),
+    ("prod namespace, stack queue", {"task_queue": "navi-agent-tasks-managua-v1"}),
+)
+
+
+def test_report_bug_stays_active_outside_production():
+    """Dev, devbox and benchmark stacks keep the tool; their reports are only saved (see handler tests)."""
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
 
-    for label, context in (
-        ("benchmark namespace", _temporal(namespace="rose-bench.tch2n", task_queue="navi-agent-tasks-rbe2e")),
-        ("benchmark namespace, prod-shaped queue", _temporal(namespace="rose-bench.tch2n")),
-        ("prod namespace, stack queue", _temporal(task_queue="navi-agent-tasks-managua-v1")),
-        ("not in a workflow", contextlib.nullcontext()),
-    ):
-        with context:
+    for label, temporal in NON_PROD:
+        with _temporal(**temporal):
             plan, execute = _workflow()._phase_tool_lists()
-        assert plan == list(PLAN_PHASE_TOOLS) and execute == list(EXECUTE_PHASE_TOOLS), label
+        assert plan == [*PLAN_PHASE_TOOLS[:-1], "report_bug", "attempt_completion"], label
+        assert execute == [*EXECUTE_PHASE_TOOLS[:-1], "report_bug", "attempt_completion"], label
 
 
 def test_demo_goal_tool_lists_are_unchanged():
@@ -159,6 +162,7 @@ async def test_handler_files_report_through_backend_route():
     teardown_mock()
     body = {
         "success": True,
+        "mode": "launched",
         "name": "--ai-- grep returned HTTP 500 twice",
         "url": "https://boxes.dev/open/desktop?box=rose&automation=ta_x",
         "run_id": "tar_123",
@@ -176,15 +180,47 @@ async def test_handler_files_report_through_backend_route():
     assert len(calls) == 1 and calls[0]["method"] == "POST" and calls[0]["url"].endswith(ROUTE), calls
     headers = {k.lower(): v for k, v in calls[0]["requestHeaders"].items()}
     assert headers["x-user-id"] == ANDY and headers.get("x-api-key"), headers
-    assert json.loads(calls[0]["requestBody"]) == {"description": "grep returned HTTP 500 twice"}, calls[0]
+    assert json.loads(calls[0]["requestBody"]) == {"description": "grep returned HTTP 500 twice", "record_only": False}
     tool_name, tool_call_id, event = wf.posted[-1]
     assert (tool_name, tool_call_id) == ("report_bug", "toolu_report")
     assert event.metadata == {
         "bugReportTitle": body["name"],
         "bugReportRunId": "tar_123",
         "bugReportUrl": body["url"],
+        "bugReportMode": "launched",
+        "bugReportDescription": "grep returned HTTP 500 twice",
         "alreadyReported": False,
     }, event.metadata
+    teardown_mock()
+
+
+async def test_handler_only_saves_reports_outside_production():
+    """Non-production Temporal sends record_only; the backend saves it and launches nothing."""
+    from tools.base import MessageStatus
+
+    for label, temporal in NON_PROD:
+        teardown_mock()
+        body = {
+            "success": True,
+            "mode": "recorded",
+            "name": "--ai-- grep 500",
+            "url": None,
+            "run_id": None,
+            "already_reported": False,
+        }
+        setup_mock({ROUTE: {"status": 201, "json": body}})
+        wf = _workflow()
+        status, text = await _run_handler(wf, {"description": "grep 500"}, **temporal)
+        assert status == MessageStatus.FINISHED, (label, text)
+        assert text == (
+            'Bug report saved: "--ai-- grep 500" (outside production it is kept for a later /rca '
+            "instead of starting one)."
+        ), text
+        calls = get_captured_requests()
+        assert json.loads(calls[0]["requestBody"]) == {"description": "grep 500", "record_only": True}, label
+        meta = wf.posted[-1][2].metadata
+        assert meta["bugReportMode"] == "recorded" and meta["bugReportDescription"] == "grep 500", meta
+        assert meta["bugReportRunId"] is None, meta
     teardown_mock()
 
 
@@ -192,11 +228,18 @@ async def test_handler_reports_an_already_filed_run():
     from tools.base import MessageStatus
 
     teardown_mock()
-    setup_mock({ROUTE: {"status": 201, "json": {"name": "--ai-- first", "run_id": "tar_1", "already_reported": True}}})
+    setup_mock(
+        {
+            ROUTE: {
+                "status": 201,
+                "json": {"mode": "launched", "name": "--ai-- first", "run_id": "tar_1", "already_reported": True},
+            }
+        }
+    )
     status, text = await _run_handler(_workflow(), {"description": "a second problem"})
     assert status == MessageStatus.FINISHED
     assert text == (
-        'This run already filed its one bug report, "--ai-- first" (boxes.dev run tar_1); '
+        'This run already reported its one bug, filed: "--ai-- first" (boxes.dev run tar_1); '
         "this description was not sent."
     ), text
     teardown_mock()
@@ -226,12 +269,12 @@ async def test_handler_refuses_without_calling_backend():
     teardown_mock()
     setup_mock({ROUTE: {"status": 201, "json": {}}})
     cases = (
-        (_workflow(depth=1, parent_workflow_id="agent-parent"), {}, "only available to the production root"),
-        (_workflow(), {"namespace": "rose-bench.tch2n"}, "only available to the production root"),
+        (_workflow(depth=1, parent_workflow_id="agent-parent"), {}, "only available to the root agent"),
+        (_workflow(user_id="00000000-0000-4000-8000-0000000000aa"), {}, "only available to the root agent"),
         (_workflow(), {}, "`description` is required"),
     )
     for wf, temporal, expected in cases:
-        call = {"description": "x" if "production" in expected else "   "}
+        call = {"description": "x" if "root agent" in expected else "   "}
         status, text = await _run_handler(wf, call, **temporal)
         assert status == MessageStatus.ERROR and expected in text, text
     assert get_captured_requests() == []
@@ -265,11 +308,12 @@ async def run_all_tests():
     r = BlackboxResult()
     r.record("root_admin_agent_gets_report_bug", test_root_admin_agent_gets_report_bug_in_both_phases)
     r.record("report_bug_withheld_from_ineligible_agents", test_report_bug_is_withheld_from_ineligible_agents)
-    r.record("report_bug_production_only", test_report_bug_is_production_only)
+    r.record("report_bug_stays_active_outside_production", test_report_bug_stays_active_outside_production)
     r.record("demo_goal_tool_lists_unchanged", test_demo_goal_tool_lists_are_unchanged)
     r.record("registration_schema_and_prompt", test_registration_schema_and_prompt)
     r.record("agent_admin_ids_match_backend", test_agent_admin_ids_match_backend_admin_access)
     await r.record_async("handler_files_report", test_handler_files_report_through_backend_route)
+    await r.record_async("handler_saves_outside_production", test_handler_only_saves_reports_outside_production)
     await r.record_async("handler_already_filed", test_handler_reports_an_already_filed_run)
     await r.record_async("handler_backend_refusals", test_handler_surfaces_backend_refusals)
     await r.record_async("handler_refuses_locally", test_handler_refuses_without_calling_backend)

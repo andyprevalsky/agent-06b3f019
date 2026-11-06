@@ -29,10 +29,13 @@ def _error_text(response: Any) -> str:
     return str(body)[:ERROR_TEXT_MAX_LEN]
 
 
-async def post_agent_bug_report(agent_id: str, user_id: str, description: str) -> Dict[str, Any]:
+async def post_agent_bug_report(
+    agent_id: str, user_id: str, description: str, record_only: bool = False
+) -> Dict[str, Any]:
     """File one bug report for ``agent_id`` (reply shape: types.AgentBugReportResult).
 
-    Returns the backend body ``{"name", "url", "run_id", "already_reported"}``, or
+    ``record_only`` asks the backend to save the report without launching (non-production
+    Temporal). Returns ``{"mode", "name", "url", "run_id", "already_reported"}``, or
     ``{"error", "status"}`` for a refusal (4xx, or 503 when the automation is not
     configured). Other 5xx raise so the activity retries the same idempotent request.
     """
@@ -42,13 +45,14 @@ async def post_agent_bug_report(agent_id: str, user_id: str, description: str) -
     response = await get_http_client().post(
         f"{config.backend.api_url.rstrip('/')}/api/agents/{agent_id}/report-bug/by-agent",
         headers={"X-API-Key": config.backend.api_key, "X-User-Id": user_id, "Content-Type": "application/json"},
-        json={"description": description},
+        json={"description": description, "record_only": record_only},
         timeout=REPORT_BUG_HTTP_TIMEOUT_SECONDS,
     )
     logger.info(
         "[ReportBug] agent bug report posted",
         agent_id=agent_id,
         description_chars=len(description),
+        record_only=record_only,
         status=response.status_code,
     )
     if 400 <= response.status_code < 500 or response.status_code == 503:
