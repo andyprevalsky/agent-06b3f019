@@ -458,7 +458,16 @@ def validate(receipt, owner, proof):
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
-        run = document(fleet / '_batch/run.json')  # Bind original outcomes without regrading them.
+        run_path = fleet / '_batch/run.json'
+        if isolated or fleet in admission_parents:
+            run = document(run_path)
+        else:
+            # Native task logs can exceed the small control-receipt cap. Preserve
+            # the full hash and JSON-object contract without loading those logs.
+            from native_json_evidence import verify_native_object
+            verify_native_object(run_path, bindings.get(str(run_path)))
+            used.add(str(run_path))
+            run = None
         life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')

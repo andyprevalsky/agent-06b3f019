@@ -3398,6 +3398,20 @@ class Cycle(unittest.TestCase):
             self.assertEqual(before, state)
         path.write_bytes(original); manifest.write_bytes(original_manifest)
 
+    def test_large_native_result_binds_without_materializing_logs(self):
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        path = parents[0] / '_batch/run.json'
+        with path.open('wb') as stream:
+            stream.write(b'{"native_log":"')
+            for _ in range(65):
+                stream.write(b'x' * (1024 * 1024))
+            stream.write(b'","tasks":[],"status":"failed"}')
+        proof['files'][str(path)] = c.sha_file(path)
+        before = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state['attempts'])
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+
     def test_campaign_cleanup_membership_preserves_all_native_unknowns(self):
         state, occurrence, paths, proof, parents = self.campaign_recon_state()
         original = copy.deepcopy(state['attempts'])
@@ -4596,6 +4610,44 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
         self.physical['physical']['unknown_live_userland']=[];self.benchmark['state']='running';self.seal()
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
+
+
+class NativeJsonEvidence(unittest.TestCase):
+    def test_json_chunk_boundaries_and_original_scalar_forms(self):
+        import hashlib
+        from native_json_evidence import verify_native_object
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'native.json'
+            for length in range(65526, 65538):
+                for suffix in ['\\', '"', '\n', '\x00', '雪']:
+                    value = {'logs': 'x' * length + suffix, 'values': [1, -2, 1.5e-9, True, False, None]}
+                    raw = json.dumps(value, ensure_ascii=False).encode()
+                    path.write_bytes(raw)
+                    verify_native_object(path, hashlib.sha256(raw).hexdigest())
+
+    def test_malformed_or_nonobject_native_json_refuses(self):
+        import hashlib
+        from native_json_evidence import verify_native_object
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'native.json'
+            for raw in [b'[]', b'{', b'{"x":}', b'{}{}', b'{"x":"\\u12"}',
+                        b'{"x":01}', b'{"x":true,}', b'{"x":[1,]}', b'{"x":"\xff"}']:
+                path.write_bytes(raw)
+                with self.subTest(raw=raw), self.assertRaises((ValueError, UnicodeError)):
+                    verify_native_object(path, hashlib.sha256(raw).hexdigest())
+
+    def test_original_hash_and_physical_path_remain_required(self):
+        import hashlib
+        from native_json_evidence import verify_native_object
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'native.json'
+            path.write_bytes(b'{}')
+            with self.assertRaises(ValueError):
+                verify_native_object(path, '0' * 64)
+            alias = Path(directory) / 'alias'
+            alias.symlink_to(path)
+            with self.assertRaises(ValueError):
+                verify_native_object(alias, hashlib.sha256(b'{}').hexdigest())
 
 
 if __name__ == '__main__': unittest.main()
