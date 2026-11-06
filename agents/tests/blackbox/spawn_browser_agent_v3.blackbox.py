@@ -31693,7 +31693,7 @@ async def _drive_browser_write_pause_archive_boundary(
                     carrier.is_paused = wf.is_paused
                     carrier._pause_signal_sequence = getattr(wf, "_pause_signal_sequence", 0)
                     carrier._pending_tool_resumes = wf._pending_tool_resumes
-                    state = carrier._continuation_resume_state(copy.deepcopy(wf.context))
+                    state = carrier._continuation_resume_state()
                     restored = AgentWorkflow()
                     restored._restore_deployment_state(state)
                     assert restored._pause_signal_sequence == (1 if pause else 0)
