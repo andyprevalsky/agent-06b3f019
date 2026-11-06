@@ -76,16 +76,16 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "click": {
         "description": (
-            "Click element by index. The mouse pointer first moves to the element along a natural, "
-            "human-like path, then presses and releases; no separate pointer movement is needed."
+            "Click element by index. The click itself moves the mouse pointer to the element before "
+            "pressing, so no separate pointer movement is needed."
         ),
         "params": {"index": {"type": "integer", "description": "Element index from browser_state", "required": True}},
     },
     "click_coordinates": {
         "description": (
             "Fallback only: click at specific coordinates when the target has no numeric DOM index. "
-            "Do not use when the current browser state lists a relevant [index]. Like click, the pointer "
-            "moves to the target along a natural, human-like path before pressing."
+            "Do not use when the current browser state lists a relevant [index]. Like click, it moves "
+            "the mouse pointer to the target itself before pressing."
         ),
         "params": {
             "x": {"type": "integer", "description": "X coordinate", "required": True},
@@ -98,7 +98,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "(CDP Input.dispatchMouseEvent, same path browser-use uses for Element.drag_to). "
             "The mouse button stays held for the whole movement. Use only for sliders, CAPTCHA / "
             "'Bot or Not' slide-to-verify widgets, scrubbers, and drag-and-drop; never to move the "
-            "pointer, because click and click_coordinates already move it naturally. Both ends are "
+            "pointer, because click and click_coordinates already move it. Both ends are "
             "required: source_index or start_x/start_y, and target_index or end_x/end_y. Prefer "
             "indexes when those nodes are indexed; otherwise use screenshot viewport coordinates."
         ),
@@ -123,9 +123,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "hover": {
         "description": (
-            "Move the mouse pointer to an element by index, or to viewport coordinates x/y, along a "
-            "natural, human-like path without clicking. Useful for triggering hover states such as "
-            "menus and tooltips."
+            "Move the mouse pointer to an element by index, or to viewport coordinates x/y, without "
+            "clicking, using the same pointer movement as click. Useful for triggering hover states "
+            "such as menus and tooltips."
         ),
         "params": {
             "index": {"type": "integer", "description": "Element index from browser_state"},
@@ -194,7 +194,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     "evaluate": {
         "description": (
             "Execute JavaScript in the live browser page context. Use for ACTIONS or LIVE DOM STATE QUERIES "
-            "that page markdown cannot answer: hover, drag, custom selectors, shadow DOM traversal, reading "
+            "that page markdown cannot answer: custom selectors, shadow DOM traversal, reading "
             "computed styles, dispatching events, querying iframe contents, or reading visible product/cart "
             "facts before navigating away. Wrap in IIFE with try-catch. Prefer evaluate over inventing "
             "page content."

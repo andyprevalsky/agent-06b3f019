@@ -1237,6 +1237,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             context.dom_service,
             context.action_history,
             context.params,
+            humanizer=context.humanizer,
         )
     if context.action_name == "hover":
         return await _execute_hover(context)
@@ -3690,10 +3691,17 @@ async def _execute_hover(context: _ActionContext) -> Dict[str, Any]:
         target = (int(context.params["x"]), int(context.params["y"]))
     else:
         return {"success": False, "error": "hover requires index or both x and y"}
-    if context.humanizer is None:
-        return {"success": False, "error": "hover is unavailable: this browser session has no pointer humanizer"}
     x, y = int(target[0]), int(target[1])
-    await context.humanizer.hover(x, y)
+    if context.humanizer:
+        await context.humanizer.hover(x, y)
+    else:
+        # Same fallback as an unhumanized click: one CDP pointer move, no press.
+        logger.warning("\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using a CDP pointer move")
+        cdp_session = await context.session.get_or_create_cdp_session()
+        await cdp_session.cdp_client.send.Input.dispatchMouseEvent(
+            params={"type": "mouseMoved", "x": x, "y": y},
+            session_id=cdp_session.session_id,
+        )
     await context.action_history.record_action(
         dom_service=context.dom_service,
         action="hover",

@@ -11938,7 +11938,7 @@ async def test_execute_action_drag_dispatches_to_tool_executor():
     ah = MagicMock()
     ah.record_action = AsyncMock()
 
-    async def drag(dom_service, action_history, params):
+    async def drag(dom_service, action_history, params, humanizer=None):
         await action_history.record_action(
             dom_service=dom_service,
             action="drag",
@@ -12017,6 +12017,52 @@ async def test_execute_action_hover_moves_pointer_without_pressing():
 
     missing = await execute_action(dom, history, {"action": "hover", "params": {}}, humanizer=humanizer)
     assert missing["success"] is False and "hover requires index" in missing["error"]
+
+    # Without a humanizer, hover falls back like an unhumanized click: one pointer move, no press.
+    send = AsyncMock()
+    dom.session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=SimpleNamespace(
+        session_id="sess-1",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(Input=SimpleNamespace(dispatchMouseEvent=send))),
+    )))
+    unhumanized = await execute_action(dom, history, {"action": "hover", "params": {"x": 10, "y": 20}})
+    assert unhumanized["success"] is True, unhumanized
+    assert [call.kwargs["params"] for call in send.await_args_list] == [{"type": "mouseMoved", "x": 10, "y": 20}]
+
+
+async def test_humanized_drag_approaches_start_before_pressing():
+    """A raw CDP drag presses where the pointer teleported to.
+
+    Repro: browser-biometrics-webdecoy dc306296 (0.164 > 0.163 ratchet) and local
+    1eeef95c each made one drag and FCaptcha reported "vision_ai: Click injected
+    with no pointer trajectory (1 teleport clicks)"; humanizer.drag_between first
+    travels to the start point, so the dispatcher must use it when present.
+    """
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    send = AsyncMock()
+    dom = SimpleNamespace(
+        session=SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=SimpleNamespace(
+            session_id="sess-1",
+            cdp_client=SimpleNamespace(send=SimpleNamespace(Input=SimpleNamespace(dispatchMouseEvent=send))),
+        ))),
+        selector_map={},
+        get_element_at_coordinates=AsyncMock(return_value=None),
+        ensure_browser_overlays_suppressed=AsyncMock(),
+    )
+    humanizer = MagicMock()
+    humanizer.drag_between = AsyncMock()
+    history = ActionHistory()
+    out = await execute_action(
+        dom,
+        history,
+        {"action": "drag", "params": {"start_x": 400, "start_y": 450, "end_x": 565, "end_y": 592, "steps": 30}},
+        humanizer=humanizer,
+    )
+    assert out["success"] is True, out
+    humanizer.drag_between.assert_awaited_once_with(400, 450, 565, 592, steps=30)
+    send.assert_not_awaited()
+    assert history.get_entries()[-1]["action"] == "drag"
 
 
 async def test_action_history_record_action_accepts_tuple_coordinates():
@@ -35766,6 +35812,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_action_hover_moves_pointer_without_pressing",
         test_execute_action_hover_moves_pointer_without_pressing,
+    )
+    await r.record_async(
+        "humanized_drag_approaches_start_before_pressing",
+        test_humanized_drag_approaches_start_before_pressing,
     )
     await r.record_async(
         "action_history_record_action_accepts_tuple_coordinates",

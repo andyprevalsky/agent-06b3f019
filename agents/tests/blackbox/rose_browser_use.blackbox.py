@@ -359,14 +359,20 @@ def test_pointer_move_intent_has_a_hover_tool_instead_of_drag():
             pass
 
 
-def test_pointer_tool_descriptions_match_humanized_runtime():
-    """Clicks already travel a humanized path; drag holds the button (humanizer.py)."""
-    tools = {tool["name"]: tool["description"] for tool in build_browser_use_tools(["click", "click_coordinates", "drag", "hover"])}
+def test_pointer_tool_descriptions_match_runtime():
+    """Clicks move the pointer themselves (humanized or browser-use fallback); drag holds the button."""
+    tools = {
+        tool["name"]: tool["description"]
+        for tool in build_browser_use_tools(["click", "click_coordinates", "drag", "hover", "evaluate"])
+    }
     for click_tool in ("click", "click_coordinates"):
-        assert "natural, human-like path" in tools[click_tool], click_tool
+        assert "moves the mouse pointer to the" in tools[click_tool], click_tool
+    assert "same pointer movement as click" in tools["hover"]
     assert "button stays held" in tools["drag"]
-    assert "never to move the pointer" in tools["drag"]
+    assert "never to move the" in tools["drag"]
     assert "source_index or start_x/start_y" in tools["drag"]
+    # Native hover/drag tools exist; evaluate must not route either to JavaScript.
+    assert "hover" not in tools["evaluate"] and "drag" not in tools["evaluate"]
 
 
 async def test_rejected_browser_tool_args_are_still_dumped():
@@ -2600,7 +2606,7 @@ async def run_all_tests():
     r.record("drag_tool_catalog_and_normalize", test_drag_tool_in_catalog_and_normalizes_coordinates)
     r.record("drag_tool_schema_requires_endpoints", test_drag_tool_schema_requires_start_and_end)
     r.record("pointer_move_intent_has_hover_tool", test_pointer_move_intent_has_a_hover_tool_instead_of_drag)
-    r.record("pointer_tool_descriptions_match_runtime", test_pointer_tool_descriptions_match_humanized_runtime)
+    r.record("pointer_tool_descriptions_match_runtime", test_pointer_tool_descriptions_match_runtime)
     await r.record_async("rejected browser tool args are still dumped", test_rejected_browser_tool_args_are_still_dumped)
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
     r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)
@@ -2985,12 +2991,12 @@ def test_phone_off_matches_prephone_bytes():
     one action reproduces the previous tools hash exactly; system/messages are unchanged.
     Re-pinned for the webdecoy pointer contract (2026-11-06 RCA
     browser-pointer-move-intent-had-no-tool): the hover action plus truthful
-    click/click_coordinates/drag descriptions changed only the tools hash in both
-    modes; system/messages hashes are unchanged.
+    click/click_coordinates/drag/evaluate descriptions changed only the tools hash
+    in both modes; system/messages hashes are unchanged.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('05ccaa5203e84651aa459a198715045e869f6ae9ac74f265778f6015434e0b8e', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('ca519a79c3c1da15515c88c1a0d82e889a50fab37dfc0b1b9f822b67dea95871', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
+    expected = {'0': ('967a09355e9e7d4c23aecdc6d4a9e3105a17b447bebc5db839cbf6942265d8cd', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('bddcafef4058651312c933bd4db69038bbd09e452a4ff214cf9d505e87e1f14f', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
