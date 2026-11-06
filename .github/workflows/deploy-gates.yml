@@ -48,8 +48,9 @@ jobs:
           mirror=/home/runner/rose-git-mirror/rose.git
           sudo chown "$(id -u):$(id -g)" /home/runner/rose-git-mirror
           if [ ! -f "$mirror/HEAD" ]; then
+            # main and the gate's own tag only: the repository carries thousands of branches.
             rm -rf "$mirror"
-            git -c http.extraheader="$auth" clone --quiet --bare "$url" "$mirror"
+            git init --quiet --bare --initial-branch=main "$mirror"
           fi
           git -C "$mirror" -c http.extraheader="$auth" fetch --quiet --no-tags "$url" \
             '+refs/heads/main:refs/heads/main' "+$GITHUB_REF:refs/deploy-gate/request"
