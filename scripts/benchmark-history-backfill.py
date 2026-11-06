@@ -289,10 +289,6 @@ def plan(repo: Path, base: str, hub_runs: list[dict] | None, scan_branches: bool
             admit("branch", row, git(repo, "rev-parse", f"{parent}^1").strip())
 
     if hub_runs is not None:
-        group_code: dict[str, set] = collections.defaultdict(set)
-        for run in hub_runs:
-            if run.get("code") and run.get("group_run_id"):
-                group_code[run["group_run_id"]].add(run["code"])
         seen_agents: set = set()
         for run in sorted(hub_runs, key=lambda r: bool(r.get("live"))):  # final bundles first
             for task in run.get("tasks") or []:
@@ -308,9 +304,9 @@ def plan(repo: Path, base: str, hub_runs: list[dict] | None, scan_branches: bool
                 if row is None:
                     gaps["hub rows without a duration or timestamp"] += 1
                     continue
+                # Only the run's own identity binds it: a campaign group can be resumed on
+                # different source, so a sibling's `code` says nothing about this run.
                 code = run.get("code")
-                if not code and len(group_code.get(run.get("group_run_id") or "", ())) == 1:
-                    code = next(iter(group_code[run["group_run_id"]]))
                 match = CODE_RE.match(code or "")
                 if match and "+patch" in match.group("state"):
                     counts["hub"]["found"] += 1
@@ -349,15 +345,20 @@ def plan(repo: Path, base: str, hub_runs: list[dict] | None, scan_branches: bool
 
     duration_agents = {r.get("agent_id") for r in durations if r.get("agent_id")}
     duration_keys = {(r.get("task"), r.get("timestamp")) for r in durations}
-    new_durations = [
-        {"task": r["task"], "duration_seconds": r["duration_seconds"], "cost_cents": r["cost_cents"],
-         "timestamp": r["timestamp"], "agent_id": r.get("agent_id") or "",
-         "backfill_source": r["backfill_source"]}
-        for r in unique
-        if r.get("passed") is True
-        and not (r.get("agent_id") and r["agent_id"] in duration_agents)
-        and (r["task"], r["timestamp"]) not in duration_keys
-    ]
+    # Backfilled attempts an interrupted earlier --write already appended still owe their
+    # duration rows; recover them independently of attempt deduplication.
+    owed = [r for r in attempts if r.get("backfill_source")] + unique
+    new_durations, owed_keys = [], set()
+    for r in owed:
+        key = (r["task"], r["timestamp"])
+        if (r.get("passed") is not True or key in duration_keys or key in owed_keys
+                or (r.get("agent_id") and r["agent_id"] in duration_agents)):
+            continue
+        owed_keys.add(key)
+        new_durations.append(
+            {"task": r["task"], "duration_seconds": r["duration_seconds"], "cost_cents": r.get("cost_cents", 0.0),
+             "timestamp": r["timestamp"], "agent_id": r.get("agent_id") or "",
+             "backfill_source": r["backfill_source"]})
     return {"attempts": unique, "durations": new_durations, "counts": counts, "gaps": gaps}
 
 

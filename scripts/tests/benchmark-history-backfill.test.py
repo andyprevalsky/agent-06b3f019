@@ -151,15 +151,16 @@ class BackfillTests(unittest.TestCase):
         self.run_tool("--write")
         added = {r["agent_id"]: r for r in self.current() if r.get("backfill_source")}
         # fail -> fix -> pass -> merge lands only the pass; an earlier t3 run is superseded
-        # by the later t3 row the merge already landed
-        self.assertEqual(sorted(added), ["fix-late", "hist-only", "hub-pass", "lost-1", "main-a", "main-b"])
+        # by the later t3 row the merge already landed. main-b shares a campaign group with
+        # main-a but carries no source identity of its own, so it stays unbound.
+        self.assertEqual(sorted(added), ["fix-late", "hist-only", "hub-pass", "lost-1", "main-a"])
         self.assertEqual(added["hub-pass"]["timestamp"], "2026-10-02T12:01:00+00:00")
         self.assertEqual(added["lost-1"]["backfill_source"], "main-loss")
         self.assertEqual(added["hist-only"]["backfill_source"], "branch")
         self.assertTrue(all(r["counts_for_deploy_eligibility"] is False for r in added.values()))
         durations = (self.repo / HISTORY / "task_durations.jsonl").read_text().splitlines()
         duration_agents = sorted(json.loads(line)["agent_id"] for line in durations)
-        self.assertEqual(duration_agents, ["fix-late", "hist-only", "hub-pass", "lost-1", "main-1", "main-b"])
+        self.assertEqual(duration_agents, ["fix-late", "hist-only", "hub-pass", "lost-1", "main-1"])
         # the deploy-time latest-only pass leaves backfilled history alone
         latest_only = SCRIPT.with_name("benchmark-history-latest-only.py")
         check = subprocess.run((sys.executable, str(latest_only), "--repo", str(self.repo), "--base", "main",
@@ -169,6 +170,14 @@ class BackfillTests(unittest.TestCase):
         before = (self.repo / HISTORY / "task_attempts.jsonl").read_text()
         self.assertIn("0 attempt rows, 0 duration rows", self.run_tool("--write"))
         self.assertEqual(before, (self.repo / HISTORY / "task_attempts.jsonl").read_text())
+        # an interrupted write that appended attempts but not durations is recovered
+        durations_path = self.repo / HISTORY / "task_durations.jsonl"
+        durations_path.write_text("".join(
+            line + "\n" for line in durations if not json.loads(line).get("backfill_source")))
+        self.assertIn("0 attempt rows, 4 duration rows", self.run_tool("--write"))
+        self.assertEqual(before, (self.repo / HISTORY / "task_attempts.jsonl").read_text())
+        recovered = sorted(json.loads(line)["agent_id"] for line in durations_path.read_text().splitlines())
+        self.assertEqual(recovered, duration_agents)
 
 
 if __name__ == "__main__":
