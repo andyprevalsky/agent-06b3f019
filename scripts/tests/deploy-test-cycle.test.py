@@ -3812,4 +3812,273 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
 
 
+class RelayStartupEvidence(unittest.TestCase):
+    """Prospective startup custody; never upgrades an old unsealed attempt."""
+    def setUp(self):
+        import importlib.util
+        self.temp = tempfile.TemporaryDirectory(prefix='relay-startup-proof-')
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.target = Path(os.environ.get('RELAY_SOURCE_ROOT', str(ROOT))) / 'scripts'
+        spec = importlib.util.spec_from_file_location('startup_native', self.target/'deploy_test_native_cleanup.py')
+        self.native = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.native)
+
+    def test_refused_version_retains_authenticated_identity(self):
+        import asyncio,runpy,socket,struct
+        module=runpy.run_path(str(self.target/'cloudbench-shared-relay.py'))
+        address=self.base/'fly-agent.sock'
+        listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        listener.bind(str(address));address.chmod(0o600);listener.listen(1);listener.settimeout(2)
+        self.addCleanup(listener.close)
+        broker=module['Broker']({'parent_pid':os.getpid(),'parent_start':module['birth'](os.getpid()),
+                                'agent_socket':str(address)},'a'*64,self.base)
+        def respond(value):
+            errors=[]
+            def serve():
+                try:
+                    stream,_=listener.accept()
+                    with stream:
+                        stream.settimeout(2)
+                        header=stream.recv(2);size=int.from_bytes(header,'little');request=b''
+                        while len(request)<size:request+=stream.recv(size-len(request))
+                        self.assertEqual(request,b'ping')
+                        body=b'ok '+json.dumps(value).encode()
+                        stream.sendall(struct.pack('<H',len(body))+body)
+                except BaseException as error:errors.append(error)
+            thread=threading.Thread(target=serve);thread.start()
+            return thread,errors
+        def run(value,reason=None):
+            thread,errors=respond(value)
+            try:
+                if reason:
+                    with self.assertRaisesRegex(ValueError,reason):asyncio.run(broker.start_agent())
+                else:asyncio.run(broker.start_agent())
+            finally:
+                thread.join(3);self.assertFalse(thread.is_alive());self.assertEqual(errors,[])
+        run({'Version':'v0.5.5','PID':os.getpid()},'unsupported Fly agent version')
+        record=json.loads((self.base/'startup-agent.json').read_text())
+        self.assertEqual(record['agent']['pid'],os.getpid())
+        self.assertEqual(record['agent']['birth'],module['birth'](os.getpid()))
+        self.assertEqual(record['agent']['version'],'0.5.5')
+        self.assertEqual(record['agent']['socket_identity'],[address.stat().st_dev,address.stat().st_ino])
+        self.assertEqual(record['authority_sha256'],'a'*64)
+        self.assertEqual((self.base/'startup-agent.json').stat().st_mode&0o777,0o600)
+        self.assertFalse((self.base/'ready.json').exists())
+        (self.base/'startup-agent.json').unlink()
+        run({'Version':'v0.5.5','PID':os.getpid()+1},'PING peer differs')
+        self.assertFalse((self.base/'startup-agent.json').exists())
+        run({'Version':'v0.4.115','PID':os.getpid()})
+        self.assertEqual(json.loads((self.base/'startup-agent.json').read_text())['agent']['version'],'0.4.115')
+
+    def test_owned_supervisor_retains_native_failure_and_quiescence(self):
+        from deploy_test_process import run_command
+        output=self.base/'native.log'
+        with output.open('wb')as stream:
+            result=run_command([sys.executable,'-c','raise SystemExit(1)'],cwd=self.base,
+                               env=os.environ.copy(),output=stream,timeout=5,owned_lifecycle=True)
+        self.assertEqual(result,(1,False,False,False))
+        receipt=json.loads(Path(str(output)+'.process.json').read_text())
+        self.assertIs(receipt['quiescent'],True);self.assertEqual(receipt['remaining'],[])
+        self.assertFalse(Path('/proc',str(receipt['supervisor_pid'])).exists())
+        self.assertFalse(Path('/proc',str(receipt['child_pid'])).exists())
+
+    def fixture(self):
+        import hashlib,time,runpy
+        from datetime import datetime,timezone
+        token='startup-owned-token';root=self.base;key=hashlib.sha256(token.encode()).hexdigest()
+        runs=root/'.context/deploy-cloud'/key/'runs';runs.mkdir(parents=True)
+        campaign=runs.parent/'campaigns'/('deploy-'+key);relay=campaign/'shared-relay';relay.mkdir(parents=True)
+        def stamp(pid):
+            return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()[19]
+        rows=[]
+        for _ in range(5):
+            p=subprocess.run([sys.executable,'-c',"import os;from pathlib import Path;print(str(os.getpid())+' '+Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19])"],capture_output=True,text=True,check=True)
+            pid,start=p.stdout.split();rows.append({'pid':int(pid),'birth':'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+start})
+        parent,bootstrap,broker,agent,publisher=rows;self.live_stamp=stamp
+        source={'head':'a'*40,'digest':'b'*64};now=time.time()
+        request={'token':token,'source':source,'gate':'smoke','checks':['browser-smoke'],'skips':{}}
+        cases={'browser-smoke':'UNVERIFIED'}
+        adapter={**request,'cases':cases,'native_exit':1,'started_at':now-5,'runner_log':str(runs.parent/'cli.log'),
+                 'native_command':['bash','scripts/run-bench','browser-smoke','--runs','1','--concurrency','1','--retry-infra','0','--ref',source['head']]}
+        folder=root/'attempt';folder.mkdir();adapter_path=folder/'result.json'
+        def save(path,v):path.write_text(json.dumps(v));path.chmod(0o600)
+        save(adapter_path,adapter)
+        sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+        reference={'result':str(adapter_path),'result_sha256':sha(adapter_path),'native_directory':str(campaign),'cleanup_complete':False}
+        owner={'request_token':token,'worker_root':str(root),'native_cleanup_reference':reference}
+        receipt={**request,'cases':cases,'lifecycle':'native-producer','complete':False,'timed_out':False,'cancelled':False,
+                 'finished_at':now-1,'worker_result':str(adapter_path),'log':str(folder/'output.log'),'native_cleanup_reference':reference,
+                 'cleanup_owner':owner,'lingering_group':True}
+        save(folder/'receipt.json',receipt);save(folder/'request.json',request)
+        (runs.parent/'cli.log').write_text(str(campaign))
+        job={'job_id':'r001-j0001','task':'browser-smoke','run':1,'attempt':1,'attempts':[],'status':'cancelled','log':str(campaign/'r001-j0001.log')}
+        summary={'campaign_id':campaign.name,'jobs':[job],'runs':1,'retry_infra':0,'status':'failed','peak_concurrency':0,
+                 'shared_inventory_failed':True,'task_count':1,'total_jobs':1,
+                 'started_at':datetime.fromtimestamp(now-4,timezone.utc).isoformat(),'finished_at':datetime.fromtimestamp(now-2,timezone.utc).isoformat()}
+        save(campaign/'summary.json',summary)
+        private='/tmp/cb-relay-abcdefgh'
+        authority={'schema':'shared-relay-authority-v1','parent_pid':parent['pid'],'parent_start':parent['birth'],
+                   'inventory_directory':str(campaign/'shared-inventory'),'agent_socket':private+'/fly-agent.sock',
+                   'source_sha256':hashlib.sha256(b'original-broker').hexdigest()}
+        authority['inventory_owner']={'app':'fixture','pid':str(publisher['pid']),'pid_start':publisher['birth'],
+                                      'token':'b'*32,'parent_pid':str(parent['pid']),'parent_start':parent['birth']}
+        inventory=campaign/'shared-inventory';inventory.mkdir()
+        (inventory/'owner').write_text(''.join(k+'='+v+'\n'for k,v in authority['inventory_owner'].items()))
+        save(relay/'authority.private.json',authority)
+        for name,row in [('bootstrap',bootstrap),('broker',broker)]:
+            save(relay/(name+'-owner.json'),{**row,'parent_pid':parent['pid'],'parent_start':parent['birth']})
+        save(campaign/'shared-relay-location.json',{'directory':private})
+        capture={'schema':'shared-relay-startup-agent-v1','authority_sha256':sha(relay/'authority.private.json'),
+                 'parent':parent,'broker':broker,'uid':os.getuid(),'socket':authority['agent_socket'],
+                 'agent':{**agent,'version':'0.5.5','socket_identity':[3,4]}}
+        save(relay/'startup-agent.json',capture)
+        cleanup={'schema':'shared-relay-startup-cleanup-v1','parent':parent,'bootstrap_joined':True,'broker_joined':True,
+                 'bootstrap_exit':0,'broker_exit':1,'agent_identity_sha256':sha(relay/'startup-agent.json'),
+                 'producer_sha256':hashlib.sha256(b'original-campaign').hexdigest(),
+                 'agent_shutdown_verified':False,'agent_retirement_pending':True}
+        save(relay/'startup-cleanup.json',cleanup)
+        sidecar={'native_exit':1,'child_pid':parent['pid'],'supervisor_pid':999999,'quiescent':True,'orphaned_children':False,
+                 'timed_out':False,'cancelled':False,'remaining':[],'term_sent':[],'kill_sent':[],'error':None,
+                 'reaped':[{'pid':parent['pid'],'status':256}]}
+        save(runs.parent/'cli.log.process.json',sidecar)
+        save(campaign/'hub-group.json',{});save(campaign/'hub-group-publication-ack.private.json',{})
+        proof={'kind':'native-cloud-cleanup-v1','owner':owner,'request_token':token,'source':source,
+               'receipt_sha256':sha(folder/'receipt.json'),'worker_result_sha256':sha(adapter_path),'confirmed_at':now,
+               'observed_by':'fixture','layout':'campaign-startup-v1','campaign':str(campaign)}
+        self.reseal=lambda:proof.update(files={str(p):sha(p) for p in root.rglob('*')if p.is_file() and p.name not in ('receipt.json','result.json')})
+        self.reseal();self.save=save;self.relay=relay;self.campaign=campaign;self.runs=runs;self.proof=proof
+        return receipt,owner,proof
+
+    def validate_fixture(self,receipt,owner,proof):
+        import types
+        published=types.ModuleType('deploy_test_cloud');published.campaign_published=lambda *_a:True
+        with patch.dict(sys.modules,deploy_test_cloud=published),patch.object(self.native.runpy,'run_path',return_value={}),\
+             patch.object(self.native.subprocess,'check_output',side_effect=lambda args:
+                 b'original-broker' if args[-1].endswith('cloudbench-shared-relay.py') else
+                 (ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes() if args[-1].endswith('cloudbench-campaign-inventory.sh') else b'original-campaign'):
+            state={'plan':{'gates':[{'name':'smoke','native_cloud':True}]},
+                   'attempts':[{'results':[receipt]}],
+                   'failures':[{'id':'original-failure','gate':'smoke','check':'smoke/browser-smoke',
+                                'native_result':'UNVERIFIED','complete':False}]}
+            self.native.reconcile(state,'original-failure',proof)
+            return next(iter(state['reconciled_owners'].values()))
+
+    def test_native_adapter_requests_owned_supervision(self):
+        import ast,contextlib,hashlib,time
+        code=(self.target/'deploy_test_cloud.py').read_text()
+        function=next(n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name=='execute')
+        calls=[];requested={'checks':['browser-smoke'],'skips':{},'token':'owned','source':{'head':'a'*40},'gate':'smoke'}
+        namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=lambda _r:requested['source'],
+                       campaign_width=lambda _c:1,hashlib=hashlib,os=os,time=time,sys=sys,
+                       cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,
+                       run_command=lambda *a,**k:(calls.append((a,k)) or (1,False,False,False)),
+                       collect_campaign=lambda *_a:({'browser-smoke':'UNVERIFIED'},{},False,'fixture'))
+        exec(compile(ast.Module(body=[function],type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)
+        namespace['execute'](requested,self.base)
+        self.assertEqual(len(calls),1)
+        self.assertIs(calls[0][1].get('owned_lifecycle'),True)
+
+    def test_startup_only_reconciliation_retains_unverified_bytes(self):
+        receipt,owner,proof=self.fixture();before=json.dumps(receipt,sort_keys=True)
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted']);self.assertEqual(result['participants'],[])
+        self.assertEqual(json.dumps(receipt,sort_keys=True),before)
+        self.assertEqual(receipt['cases'],{'browser-smoke':'UNVERIFIED'})
+
+    def test_startup_publisher_exit_removes_owner_without_losing_captured_identity(self):
+        receipt,owner,proof=self.fixture()
+        inventory=self.campaign/'shared-inventory'
+        original=(inventory/'owner').read_bytes()
+        (inventory/'owner').unlink()
+        (inventory/'stop').write_bytes(b'')
+        scripts=inventory/'scripts';scripts.mkdir()
+        producer=scripts/'cloudbench-campaign-inventory.sh'
+        producer.write_bytes((ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes())
+        self.reseal()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(result['startup_processes'][-1]['pid'],int(dict(
+            line.split('=',1)for line in original.decode().splitlines())['pid']))
+        (inventory/'owner').write_bytes(original.replace(b'app=fixture',b'app=foreign'))
+        self.reseal()
+        with self.assertRaisesRegex(ValueError,'publisher binding'):
+            self.validate_fixture(receipt,owner,proof)
+        (inventory/'owner').unlink();(inventory/'stop').unlink();self.reseal()
+        with self.assertRaisesRegex(ValueError,'noncanonical proof file'):
+            self.validate_fixture(receipt,owner,proof)
+        (inventory/'stop').write_bytes(b'');producer.write_bytes(b'unsupported publisher');self.reseal()
+        with self.assertRaisesRegex(ValueError,'publisher removal contract'):
+            self.validate_fixture(receipt,owner,proof)
+
+    def test_original_fly_logs_allow_only_absent_same_boot_startup_agent(self):
+        import ast,datetime,hashlib
+        receipt,owner,proof=self.fixture()
+        capture=json.loads((self.relay/'startup-agent.json').read_text())
+        (self.relay/'startup-agent.json').unlink();(self.runs.parent/'cli.log.process.json').unlink()
+        self.save(self.relay/'startup-cleanup.json',dict(bootstrap_joined=True,broker_joined=True,
+                                                       agent_shutdown_verified=False,agent_retirement_pending=True))
+        (self.relay/'broker.private.log').write_text('unsupported Fly agent version\n')
+        pid=capture['agent']['pid'];socket=capture['socket']
+        native=self.base/'native';native.mkdir()
+        bootstrap=native/'bootstrap.log';agent=native/'agent.log'
+        bootstrap.write_text(f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {pid}, log: /private/agent-logs/123.log)\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n')
+        when=datetime.datetime.fromisoformat(json.loads((self.campaign/'summary.json').read_text())['started_at'])+datetime.timedelta(seconds=.5)
+        stamp=when.strftime('%Y/%m/%d %H:%M:%S.%f')
+        payload=('ok '+json.dumps({'PID':pid,'Version':'0.5.5'})+'\n').encode()
+        raw=(len(payload).to_bytes(2,'little')+payload).decode('latin1')
+        import json as json_module
+        quoted=json_module.dumps(raw)
+        agent.write_text(f'{stamp} srv OK {pid}\n{stamp} #1 -> ({len(raw)}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        proof['fly_native_logs']={'bootstrap':str(bootstrap),'agent':str(agent)};self.reseal()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted']);self.assertTrue(result['startup_processes'][3]['native_log_identity'])
+        self.assertNotIn('birth',result['startup_processes'][3])
+        prior=agent.read_text()
+        for mutation,reason in [(prior.replace(str(pid),str(os.getpid())),'bootstrap|PING|shutdown'),
+                                (prior.replace('srv QUIT','missing shutdown'),'shutdown chain'),
+                                (prior.replace(socket,'/foreign/socket'),'shutdown chain')]:
+            agent.write_text(mutation);self.reseal()
+            with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        agent.write_text(prior);self.reseal()
+        live=bootstrap.read_text().replace(str(pid),str(os.getpid()))
+        bootstrap.write_text(live);agent.write_text(prior.replace(str(pid),str(os.getpid())));self.reseal()
+        with self.assertRaisesRegex(ValueError,'PID present'):self.validate_fixture(receipt,owner,proof)
+
+    def test_startup_reconciliation_rejects_missing_or_live_or_dispatched_evidence(self):
+        receipt,owner,proof=self.fixture()
+        paths=[self.relay/'startup-agent.json',self.runs.parent/'cli.log.process.json',self.campaign/'summary.json']
+        original={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        def alter(path,**kwargs):self.save(path,{**json.loads(path.read_text()),**kwargs})
+        def live_agent():
+            import hashlib
+            alter(paths[0],agent={'pid':os.getpid(),'birth':self.live_stamp(os.getpid()),'version':'0.5.5','socket_identity':[3,4]})
+            alter(self.relay/'startup-cleanup.json',agent_identity_sha256=hashlib.sha256(paths[0].read_bytes()).hexdigest())
+        def started_job():
+            summary=json.loads(paths[2].read_text());summary['jobs'][0]['started_at']='2026-01-01';self.save(paths[2],summary)
+        mutations=[('missing-capture',lambda:paths[0].unlink(),None),
+                   ('missing-sidecar',lambda:paths[1].unlink(),None),
+                   ('unjoined-supervisor',lambda:alter(paths[1],quiescent=False),'process closure'),
+                   ('forced-cleanup',lambda:alter(paths[1],term_sent=[123]),'process closure'),
+                   ('dispatched-job',lambda:alter(paths[2],peak_concurrency=1),'startup inventory'),
+                   ('started-job',started_job,'dispatched job'),
+                   ('live-agent',live_agent,'exact process remains live'),
+                   ('reached-ready',lambda:self.save(self.relay/'ready.json',{}),'reached relay admission'),
+                   ('bad-source',lambda:proof.update(source={'head':'f'*40,'digest':'b'*64}),'request identity')]
+        for name,mutate,reason in mutations:
+            with self.subTest(name=name):
+                for p in self.base.rglob('*'):
+                    if p.is_file() and p not in original:p.unlink()
+                for p,raw in original.items():p.write_bytes(raw)
+                proof['source']=receipt['source'];mutate();self.reseal()
+                if reason is None:
+                    with self.assertRaisesRegex(ValueError,'noncanonical proof file'):self.validate_fixture(receipt,owner,proof)
+                else:
+                    with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        for p,raw in original.items():p.write_bytes(raw)
+        proof['source']=receipt['source'];self.reseal()
+        proof['files'][str(paths[0])]='0'*64
+        with self.assertRaisesRegex(ValueError,'hash mismatch'):
+            self.validate_fixture(receipt,owner,proof)
+
+
 if __name__ == '__main__': unittest.main()

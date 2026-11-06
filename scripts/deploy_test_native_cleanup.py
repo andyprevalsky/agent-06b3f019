@@ -279,6 +279,192 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     return not rows  # Missing provenance is supported only before ANY native guest allocation.
 
 
+def logged_startup_agent(proof, root, socket_path, parent, start, finish, bound):
+    """Consume positive original Fly log identity; never invent a missing birth."""
+    import ast
+    from datetime import datetime, timezone
+    logs = proof.get('fly_native_logs')
+    need(isinstance(logs,dict) and set(logs) == {'bootstrap','agent'}, 'startup original Fly logs required')
+    bootstrap = bound(Path(logs['bootstrap'])).decode()
+    agent = bound(Path(logs['agent'])).decode()
+    matches = re.findall(r'^DEBUG started agent process \(pid: ([0-9]+), log: ([^\n]+)\)$',bootstrap,re.M)
+    need(len(matches) == 1, 'startup native agent identity ambiguous')
+    pid = int(matches[0][0])
+    need(pid > 1 and f'DEBUG determined working directory: "{root}"' in bootstrap
+         and 'dial unix '+str(socket_path)+': operation was canceled' in bootstrap
+         and re.fullmatch(r'/[^\n]+/agent-logs/[0-9]+[.]log',matches[0][1]), 'startup native bootstrap binding')
+    observed, opened, stopped, quit_at = [], [], [], []
+    for line in agent.splitlines():
+        match = re.fullmatch(r'([0-9/]{10} [0-9:.]+) (.*)',line)
+        need(match is not None, 'startup native log framing')
+        instant = datetime.strptime(match[1],'%Y/%m/%d %H:%M:%S.%f').replace(tzinfo=timezone.utc).timestamp()
+        need(start <= instant <= finish, 'startup native log clock')
+        message = match[2]
+        if message == 'srv OK '+str(pid): opened.append(instant)
+        if message == 'srv parent process exited; shutting down': stopped.append(instant)
+        if message == 'srv QUIT': quit_at.append(instant)
+        frame = re.fullmatch(r'#[0-9]+ -> \( *([0-9]+)\) (".*")',message)
+        if frame:
+            raw = ast.literal_eval(frame[2]).encode('latin1')
+            # Other RPC frames may be truncated/redacted by native logging;
+            # they supply no identity evidence. A used PING must be complete.
+            if b'"PID"' not in raw[2:]:
+                continue
+            need(len(raw) == int(frame[1]) and len(raw) >= 2
+                 and int.from_bytes(raw[:2],'little') == len(raw)-2
+                 and raw[2:].startswith(b'ok {'), 'startup native frame length')
+            if raw[2:].startswith(b'ok {'):
+                ping = json.loads(raw[5:])
+                need(type(ping.get('PID')) is int and ping['PID'] == pid
+                     and isinstance(ping.get('Version'),str) and ping['Version'], 'startup native PING identity')
+                observed.append((instant,ping['Version']))
+    need(len(opened) == len(stopped) == len(quit_at) == 1 and observed
+         and opened[0] <= min(t for t,_v in observed) <= max(t for t,_v in observed)
+         <= stopped[0] <= quit_at[0] and len({v for _t,v in observed}) == 1
+         and 'write unix '+str(socket_path)+'->@' in agent, 'startup native shutdown chain')
+    boot = parent['birth'].split(':')
+    need(len(boot) == 3 and Path('/proc/sys/kernel/random/boot_id').read_text().strip() == boot[1],
+         'startup native boot changed')
+    # A reused PID is deliberately refused, even if a different birth is visible.
+    need(not (Path('/proc')/str(pid)).exists(), 'startup logged agent PID present')
+    return dict(pid=pid, native_log_identity=True, version=observed[0][1])
+
+
+def startup_campaign(root, runs, campaign, request, receipt, adapter, confirmed, document, bound, proof):
+    """Only a positively captured, supervised, never-dispatched startup can retire."""
+    from datetime import datetime
+    summary = document(campaign / 'summary.json')
+    checks, jobs = request['checks'], summary['jobs']
+    need(checks and len(set(checks)) == len(checks)
+         and summary['campaign_id'] == campaign.name and summary['runs'] == 1
+         and summary['retry_infra'] == 0 and summary['status'] == 'failed'
+         and summary['peak_concurrency'] == 0 and summary['shared_inventory_failed'] is True
+         and summary['task_count'] == summary['total_jobs'] == len(jobs) == len(checks), 'startup inventory')
+    need(len({j['job_id'] for j in jobs}) == len(jobs) and {j['task'] for j in jobs} == set(checks)
+         and all(re.fullmatch(r'r001-j[0-9]{4}', j['job_id']) and j['run'] == 1 and j['attempt'] == 1
+                 and j['attempts'] == [] and j['status'] == 'cancelled'
+                 and all(j.get(k) is None for k in ('started_at','finished_at','controller_pid','controller_exit_code','wall_clock_seconds'))
+                 for j in jobs), 'startup dispatched job')
+    need(runs.is_dir() and not any(runs.iterdir()), 'startup has native participants')
+    need(not request.get('skips') and receipt.get('cases') == dict.fromkeys(checks,'UNVERIFIED')
+         and adapter.get('cases') == receipt['cases'], 'startup case outcomes changed')
+    command = adapter.get('native_command',[])
+    need(len(command) == len(checks)+10 and command[:2] == ['bash','scripts/run-bench']
+         and command[2:2+len(checks)] == checks and command[-8:-5] == ['--runs','1','--concurrency']
+         and isinstance(command[-5],str) and command[-5].isdigit() and 1 <= int(command[-5]) <= len(checks)
+         and command[-4:] == ['--retry-infra','0','--ref',receipt['source']['head']], 'startup native command')
+    for job in jobs:
+        log = campaign/(job['job_id']+'.log')
+        need(job['log'] == str(log) and not log.exists() and not log.is_symlink(), 'startup job log present')
+    need(not summary.get('startup_cohorts') and not summary.get('cleanup_ticket_failure')
+         and not summary.get('shared_transport_cleanup_pending'), 'startup additional ownership')
+    start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at','finished_at'))
+    need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
+         <= receipt['finished_at'] <= confirmed, 'startup clocks')
+    relay = campaign / 'shared-relay'
+    cleanup = document(relay / 'startup-cleanup.json')
+    authority = document(relay / 'authority.private.json')
+    bootstrap, broker = (document(relay / (name + '-owner.json')) for name in ('bootstrap','broker'))
+    need(cleanup['bootstrap_joined'] is True and cleanup['broker_joined'] is True, 'startup joins')
+    for name in ('ready.json','serve.once.json'):
+        need(not (relay/name).exists() and not (relay/name).is_symlink(), 'startup reached relay admission')
+    leases = relay/'leases'
+    need(not leases.is_symlink() and (not leases.exists() or (leases.is_dir() and not any(leases.iterdir()))), 'startup relay leases present')
+    parent = dict(pid=authority['parent_pid'], birth=authority['parent_start'])
+    need(authority['schema'] == 'shared-relay-authority-v1'
+         and all(v['parent_pid'] == parent['pid'] and v['parent_start'] == parent['birth'] for v in (bootstrap,broker))
+         and authority['inventory_directory'] == str(campaign/'shared-inventory'), 'startup owner binding')
+    location = document(campaign/'shared-relay-location.json')
+    need(isinstance(location.get('directory'),str)
+         and re.fullmatch(r'/tmp/cb-relay-[A-Za-z0-9_]{8}',location['directory'])
+         and authority['agent_socket'] == location['directory']+'/fly-agent.sock', 'startup socket binding')
+    # The authority carries the exact source used by the producer, not HEAD now.
+    original = subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',
+                                        receipt['source']['head']+':scripts/cloudbench-shared-relay.py'])
+    campaign_source = subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',
+                                               receipt['source']['head']+':scripts/run-bench-campaign.py'])
+    need(authority['source_sha256'] == hashlib.sha256(original).hexdigest(), 'startup producer source')
+    socket_path = Path(authority['agent_socket'])
+    need(not socket_path.exists() and not socket_path.is_symlink(), 'startup private socket remains')
+    if cleanup.get('schema') == 'shared-relay-startup-cleanup-v1':
+        need(not proof.get('fly_native_logs')
+             and all(type(cleanup.get(k)) is int for k in ('bootstrap_exit','broker_exit'))
+             and cleanup['broker_exit'] != 0, 'startup duplicate agent authority or joins')
+        capture = document(relay/'startup-agent.json')
+        need(capture.get('schema') == 'shared-relay-startup-agent-v1'
+             and cleanup['agent_identity_sha256'] == hashlib.sha256(bound(relay/'startup-agent.json')).hexdigest()
+             and capture['authority_sha256'] == hashlib.sha256(bound(relay/'authority.private.json')).hexdigest()
+             and capture['parent'] == cleanup['parent'] == parent
+             and capture['broker'] == dict(pid=broker['pid'],birth=broker['birth'])
+             and capture['socket'] == str(socket_path)
+             and cleanup['producer_sha256'] == hashlib.sha256(campaign_source).hexdigest(), 'startup capture binding')
+        agent = capture['agent']
+        need(type(capture['uid']) is int and capture['uid'] == (relay/'startup-agent.json').stat().st_uid
+             and isinstance(agent.get('version'),str) and agent['version']
+             and isinstance(agent.get('socket_identity'),list) and len(agent['socket_identity']) == 2
+             and all(type(x) is int and x >= 0 for x in agent['socket_identity']), 'startup peer identity')
+        supervisor = document(runs.parent/'cli.log.process.json')
+        need(type(adapter['native_exit']) is int and adapter['native_exit'] != 0
+             and supervisor['native_exit'] == adapter['native_exit'] and supervisor['child_pid'] == parent['pid']
+             and supervisor['quiescent'] is True and supervisor['orphaned_children'] is False
+             and supervisor['timed_out'] is False and supervisor['cancelled'] is False
+             and supervisor['remaining'] == supervisor['term_sent'] == supervisor['kill_sent'] == []
+             and supervisor['error'] is None
+             and any(r.get('pid') == parent['pid'] and r.get('status') == adapter['native_exit'] * 256
+                     for r in supervisor['reaped']), 'startup native process closure')
+    else:
+        need(cleanup == dict(bootstrap_joined=True,broker_joined=True,agent_shutdown_verified=False,
+                             agent_retirement_pending=True)
+             and all(type(v) is bool for v in cleanup.values())
+             and not (relay/'startup-agent.json').exists()
+             and bound(relay/'broker.private.log').decode().strip() == 'unsupported Fly agent version',
+             'unsupported legacy startup record')
+        agent = logged_startup_agent(proof,root,socket_path,parent,start,finish,bound)
+    # Never infer which agent retired from socket disappearance or a process name.
+    inventory_directory = campaign/'shared-inventory'
+    owner_path = inventory_directory/'owner'
+    if owner_path.exists() or owner_path.is_symlink():
+        publisher = fields(bound(owner_path))
+    else:
+        # This exact producer joins its snapshot loop and removes owner on EXIT.
+        # Use the original captured authority, never recreate a deleted owner.
+        # Unknown producer contracts remain unsupported rather than inferred.
+        publisher_source = subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',
+                                                    receipt['source']['head']+':scripts/cloudbench-campaign-inventory.sh'])
+        need(hashlib.sha256(publisher_source).hexdigest()
+             == 'e924d72f258bd5b2507348e5b53143aa4c2afa1c410cd63bdf495f27dfd2082d'
+             and bound(inventory_directory/'scripts/cloudbench-campaign-inventory.sh') == publisher_source,
+             'startup publisher removal contract')
+        need(bound(inventory_directory/'stop') == b'', 'startup publisher stop marker')
+        publisher = authority['inventory_owner']
+    need(publisher == authority['inventory_owner'] and publisher['parent_pid'] == str(parent['pid'])
+         and publisher['parent_start'] == parent['birth'], 'startup inventory publisher binding')
+    inventory = dict(pid=int(publisher['pid']),birth=publisher['pid_start'])
+    identities = [parent, bootstrap, broker, agent, inventory]
+    need(len({v['pid'] for v in identities}) == len(identities), 'startup aliased process identity')
+    for value in identities:
+        if value.get('native_log_identity') is True:
+            continue  # Checked PID absence and boot above; no fabricated birth.
+        need(type(value.get('pid')) is int and value['pid'] > 1
+             and isinstance(value.get('birth'),str)
+             and re.fullmatch(r'proc-start:[0-9a-f-]+:[0-9]+',value['birth']), 'startup process identity')
+        path = Path('/proc')/str(value['pid'])/'stat'
+        try:
+            process_fields = path.read_text().rsplit(') ',1)[1].split()
+            current = 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+process_fields[19]
+        except (FileNotFoundError,ProcessLookupError):
+            continue
+        need(current != value['birth'] or process_fields[0] in ('Z','X'), 'startup exact process remains live')
+    # Reuse the native publisher contract; failed inventory is retained as a
+    # failure, while all local publication processes must have actually joined.
+    from deploy_test_cloud import campaign_published
+    native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+    for path in (campaign/'hub-group.json',campaign/'hub-group-publication-ack.private.json'):
+        document(path)
+    need(campaign_published(summary,campaign,adapter['started_at'],native), 'startup publication closure')
+    return identities
+
+
 def validate(receipt, owner, proof):
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
     need(proof.get('kind') == KIND and proof.get('owner') == owner, 'full original owner mismatch')
@@ -337,6 +523,18 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links = {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-startup-v1':
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
+             and proof.get('purpose') is None and not proof.get('recovered_runtime')
+             and reference.get('native_directory') == str(campaign)
+             and str(campaign) in cli_text, 'startup root binding')
+        identities = startup_campaign(root, runs, campaign, request, receipt, adapter, confirmed, document, bound, proof)
+        need(used == set(bindings), 'startup proof file closure')
+        return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
+                'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
+                'participants': [], 'native_audit_seals': {}, 'retained_services': [],
+                'startup_processes': identities, 'credit_granted': False}
     if layout == 'campaign-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')

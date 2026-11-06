@@ -212,7 +212,7 @@ def execute(request, root):
             print(guidance, file=sys.stderr, flush=True)
             log.write((guidance + '\n').encode())
             log.flush()
-        code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None)
+        code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None, owned_lifecycle=True)
     reason = None
     try:
         if timed_out or cancelled or lingering or source(root) != request['source']:

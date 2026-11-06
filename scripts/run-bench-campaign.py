@@ -1053,9 +1053,22 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                 process.wait()
         # Joining the bootstrap delivers EOF to its private agent, but before
         # broker readiness there is no sealed agent identity to verify retirement.
+        peer = directory / 'startup-agent.json'
+        # Keep a missing capture explicit. A later read-only reconciliation may
+        # use a captured exact peer, but cannot infer it from a vanished socket.
+        try:
+            peer_hash = hashlib.sha256(peer.read_bytes()).hexdigest() if peer.is_file() else None
+        except OSError:
+            peer_hash = None  # Preserve the original startup exception; proof stays incomplete.
         write_json_atomic(directory / 'startup-cleanup.json', {
+            'schema': 'shared-relay-startup-cleanup-v1',
+            'producer_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'parent': {'pid': os.getpid(), 'birth': parent_start},
             'bootstrap_joined': value['bootstrap'] is not None and value['bootstrap'].returncode is not None,
             'broker_joined': value['process'] is not None and value['process'].returncode is not None,
+            'bootstrap_exit': value['bootstrap'].returncode if value['bootstrap'] is not None else None,
+            'broker_exit': value['process'].returncode if value['process'] is not None else None,
+            'agent_identity_sha256': peer_hash,
             'agent_shutdown_verified': False, 'agent_retirement_pending': value['bootstrap'] is not None})
         log.close(); bootstrap_log.close()
         try: archive_shared_relay(directory, archive)

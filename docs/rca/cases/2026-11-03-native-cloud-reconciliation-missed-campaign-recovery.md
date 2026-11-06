@@ -11,6 +11,8 @@ symptoms:
   - "native cleanup proof refused"
   - "controller_log"
   - "native audit seal"
+  - "unsupported Fly agent version"
+  - "unsupported proof layout"
 tags:
   - deploy
   - campaign
@@ -159,3 +161,43 @@ unchanged; historical `credit_granted` and `cleanup_complete` remain false.
 No canonical reconciliation, new-source FULL coverage or full-gate PASS is
 claimed. Evidence remains under `.context/preparation/731-current/reconciliation/`
 and `/var/tmp/pr1662-731-clean-successor-renewal/`. This does not close the case.
+
+
+## November 6 recurrence: relay refusal before any campaign dispatch
+
+PR #1716 smoke source `7afb10b48266450397a12c99f3a5dc4a9d41f83e`
+failed at `unsupported Fly agent version` after installing CLI 0.5.5 while the
+relay correctly pinned 0.4.115. The original summary retained nine cancelled,
+never-started jobs, empty runs and peak concurrency zero. All nine native
+results remained UNVERIFIED. Reinstalling the pinned CLI repaired the executable
+prerequisite, but the cleanup verifier rejected this pre-dispatch producer shape
+at `unsupported proof layout`. Socket absence alone was insufficient custody:
+the original broker had rejected version before authenticating/capturing its
+peer, and the native cloud adapter had not requested its existing supervisor.
+
+The correction captures authenticated Unix peer PID/UID/birth/socket and source
+before version refusal, emits typed startup join evidence, and requests existing
+owned native supervision for future attempts. A separate `campaign-startup-v1`
+verifier requires exact zero-dispatch inventory, immutable original request,
+receipt, result, source and owner bindings, no admitted routes/leases/fleets,
+retired local owners and native publication closure. For historical startup only,
+complete original official Fly bootstrap/PING/shutdown logs can establish the
+same-boot exact agent PID; any current entry at that PID refuses. No missing
+birth or supervisor sidecar is synthesized.
+
+The publisher normally removes its owner file after joining its snapshot loop.
+The verifier supports only the exact reviewed producer source hash, its retained
+byte-identical script and empty stop marker, then consumes the inventory identity
+already captured in the original relay authority and checks retirement. A present
+conflicting owner always refuses; no owner file is recreated.
+
+Seven registered `RelayStartupEvidence` cases cover the public reconcile path,
+real Unix peers, actual native supervisor and refusal controls. Baseline fails
+at unsupported layout/missing capture; after correction all seven pass. The
+additional removed-owner regression fails before its correction and passes after.
+Parent validation of the complete original 15-file proof used actual Git objects,
+publication records, original Fly logs and current process checks without mocks;
+it returned `credit_granted=false`. The independent reviewer found no remaining
+blocking defect in the exact startup/removed-owner scope. Full smoke success and
+production verification remain separate deploy obligations; this recurrence does
+not close the older six unresolved owners or upgrade historical test results.
