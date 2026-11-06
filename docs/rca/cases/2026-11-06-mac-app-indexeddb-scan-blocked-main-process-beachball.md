@@ -5,10 +5,12 @@ title: The Mac app froze with the spinning beachball because the periodic browse
 surface: mac-app
 component: mac-app/main/domains/indexed-db-reader (called by browser-state-sync every 5 minutes and at startup)
 classification: our-bug
-problem_class: synchronous-cpu-work-on-ui-owning-event-loop
+problem_class: concurrency-inefficiency
 first_bad_boundary: mac-app/main/domains/indexed-db-reader/service.ts readIndexedDB — `await Promise.resolve()` then a fully synchronous readIndexedDbDatabases + JSON.stringify hash per origin on the main process
 symptoms:
-  - "on the mac-app, i get stutters sometimes, it feels like the CPU gets throttled, I get the little mac spinner thing with the app freezing" (Andy, 2026-11-06)
+  - Mac app freezes with the spinning beachball
+  - periodic browser-state sync blocks the Electron main process
+  - synchronous IndexedDB scan stalls the event loop
 tags:
   - mac-app
   - electron-main
@@ -16,10 +18,10 @@ tags:
   - indexeddb
   - browser-state-sync
 sources:
-  - user report 2026-11-06
-  - local repro .context/beachball-rca (headless Chromium profile, 20,000 Gmail-like IndexedDB records)
+  - memory: user report 2026-11-06
+  - task local repro .context/beachball-rca (headless Chromium profile, 20,000 Gmail-like IndexedDB records)
 repro: mac-app/tests/blackbox/indexed-db-reader.blackbox.ts › main-process responsiveness
-status: fixed (main-process stall); Mac-side confirmation pending
+status: fixed
 ---
 
 ## Problem
@@ -51,7 +53,7 @@ main-process JavaScript runs for seconds.
    `postEncryptedPayload` ran one `JSON.stringify` over the batch. For the
    20,000-record profile (38 MB JSON) that alone blocked for **1,476 ms**.
 
-## Fix
+## Solution
 
 - `main/base/timeSlice.ts` `SliceClock` (8 ms budget) hands the loop back with
   `setImmediate` once a slice is used up.
@@ -85,6 +87,8 @@ the mac-app vitest suite used by `/deploy`.
 
 ## Open / Mac-only
 
+The archive status denotes the measured main-process fix; Mac-side confirmation remains pending.
+
 - This repro runs on Linux Node 22, not Electron on Andy's Mac, and his IndexedDB
   size is unknown. The console log line
   `[IndexedDBReader] Read N origins, D databases, R records` in
@@ -102,3 +106,11 @@ the mac-app vitest suite used by `/deploy`.
 - The renderer liquid-metal shader (`@paper-design/shaders`) pauses only when
   `document.hidden`. It is one small canvas in the update chip, which makes it
   an unlikely cause of a multi-second freeze.
+
+## Human feedback
+
+The original report described intermittent Mac-app stutters and the spinning beachball. Preserve the distinction between the measured local reproduction and the still-pending Mac-side confirmation above.
+
+## Reusable lesson
+
+Bound synchronous decoding and serialization on a UI-owning event loop, and test responsiveness alongside byte and hash equivalence. A local regression result does not replace platform-specific acceptance.
