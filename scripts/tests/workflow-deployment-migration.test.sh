@@ -39,6 +39,18 @@ PROD="$ROOT/scripts/deploy_prod.py"
 PIPELINE="$ROOT/scripts/run_deploy_pipeline.py"
 DEPLOY_CLI="$ROOT/scripts/deploy_cli.py"
 
+# This suite cements itself: deploy.md carries no gate list, so the registry that
+# `scripts/deploy gates` runs must name it exactly once with this command.
+python3 -B - "$ROOT/scripts/run-deploy-structural-gates.py" <<'PY' || fail "workflow-deployment-migration must be registered exactly once in the structural-gate registry"
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+pattern = r'Gate\(\s*"workflow-deployment-migration",\s*\("bash", "scripts/tests/workflow-deployment-migration.test.sh"\)'
+raise SystemExit(0 if len(re.findall(pattern, source)) == 1 else 1)
+PY
+
 # Classification of the merged change set: both the lane planner and the
 # production gate use the executable runtime classifier on the exact merge
 # commit's own diff, and one canonical condition drives the Fly cutover lane and

@@ -55,4 +55,15 @@ require_text "$WORKFLOW" 'timeout-minutes: 90' 'normal runner must allow time fo
 [ "$(grep -Fc 'filter: blob:none' "$WORKFLOW")" = 2 ] || fail 'deploy and recover jobs must use the blob-filtered checkout'
 [ "$(grep -Fc '!/agents/benchmarks/' "$WORKFLOW")" = 2 ] || fail 'deploy and recover checkouts must skip agents/benchmarks'
 require_text "$DRIVER" 'for_each_machine(' 'independent bank Machines must be prepared and retired concurrently'
+# This suite cements itself: deploy.md carries no gate list, so the registry that
+# `scripts/deploy gates` runs must name it exactly once with this command.
+python3 -B - "$ROOT/scripts/run-deploy-structural-gates.py" <<'PY' || fail "cooperative-cutover-monitor must be registered exactly once in the structural-gate registry"
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+pattern = r'Gate\(\s*"cooperative-cutover-monitor",\s*\("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"\)'
+raise SystemExit(0 if len(re.findall(pattern, source)) == 1 else 1)
+PY
 echo 'cooperative cutover monitor structural tests: PASS'
