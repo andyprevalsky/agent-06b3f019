@@ -60,6 +60,7 @@ import { registerCodeSessionLifecycleCases } from './code-sessions-lifecycle.cas
 import { registerCodeSessionLiveResumeCases } from './code-sessions-live-resume.cases';
 import { registerSandboxAttributionCases } from './code-sessions-sandbox-attribution.cases';
 import { registerCheckpointDeletionCases } from './code-sessions-checkpoint-deletion.cases';
+import { registerCheckpointSizeCases } from './code-sessions-checkpoint-size.cases';
 
 config();
 
@@ -622,3 +623,4 @@ registerCodeSessionLiveResumeCases({
 });
 registerSandboxAttributionCases(userA);
 registerCheckpointDeletionCases({ fixtureDir, seedWorkspace });
+registerCheckpointSizeCases({ fixtureDir });
