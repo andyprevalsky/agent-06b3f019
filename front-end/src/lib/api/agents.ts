@@ -356,6 +356,10 @@ export async function updateAgent(
     verifier_prompt?: string;
     price_limit_cents?: number; // Price limit in cents (must be >= current tree_cost_cents)
     write_lock_enabled?: boolean;
+    /** Move to a project's root (null = Home); resets the folder. */
+    project_id?: string | null;
+    /** Move into a folder (its project is derived); null = the project's root. */
+    folder_id?: string | null;
   },
 ): Promise<AgentDetail> {
   const headers = getAuthHeaders();

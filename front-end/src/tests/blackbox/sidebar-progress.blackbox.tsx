@@ -57,7 +57,7 @@ describe('Rose sidebar predicted progress', () => {
   });
   it('shows progress on the robot corner and ETA only in a hover tooltip', async () => {
     const user = userEvent.setup();
-    renderWithProviders(row());
+    renderWithProviders(row({}, false));
     expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '40');
     expect(screen.getByTestId('prediction-arc')).toHaveAttribute('stroke-dasharray', '40 100');
     expect(screen.getByTestId('agent-progress-badge')).toHaveClass(
@@ -72,6 +72,28 @@ describe('Rose sidebar predicted progress', () => {
     expect(tooltip).toHaveTextContent('Estimated time remaining: ~2m');
     expect(tooltip.closest('[data-side]')).toHaveAttribute('data-side', 'top');
     await user.unhover(screen.getByTestId('agent-working-icon'));
+  });
+  // C14 (Andy 2026-11-06): with the drawer (left bar) expanded, the robot fades out
+  // and its corner icon moves to the center of the same icon box; collapsed keeps both.
+  it.each([
+    ['ACTIVE', 'agent-progress-badge'],
+    ['COMPLETED', 'agent-status-badge'],
+    ['FAILED', 'agent-status-badge'],
+  ] as const)('%s: the expanded drawer shows only the corner icon, centered', (status, badgeId) => {
+    const view = renderWithProviders(row({ status }, false));
+    const robot = () => document.querySelector('[data-sidebar-agent-icon]')!;
+    const badge = () => screen.getByTestId(badgeId);
+    expect(screen.getByTestId('agent-working-icon')).toHaveAttribute('data-icon-only', 'false');
+    expect(robot()).not.toHaveClass('opacity-0');
+    expect(badge()).toHaveClass('-right-1.5', '-top-1');
+    view.rerender(row({ status }, true));
+    expect(screen.getByTestId('agent-working-icon')).toHaveAttribute('data-icon-only', 'true');
+    expect(robot()).toHaveClass('opacity-0');
+    expect(badge()).toHaveClass('right-1/2', 'top-1/2', 'translate-x-1/2', '-translate-y-1/2');
+    expect(badge()).not.toHaveClass('-right-1.5');
+    // The same nodes move, so the change animates instead of swapping elements.
+    expect(robot()).toHaveClass('transition-[opacity,transform]');
+    expect(badge()).toHaveClass('transition-[top,right,transform]');
   });
   it('never invents progress from legacy progress or elapsed time', () => {
     renderWithProviders(

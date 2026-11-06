@@ -4090,6 +4090,76 @@ async def test_call_llm_structured_streaming_happy_path():
     assert detected == []
 
 
+async def test_structured_streaming_records_the_first_to_last_token_generation_window():
+    """C6: usage carries the first -> last token-chunk window behind a thought's tok/s.
+
+    Queueing or a stalled failover leg before the first token, and the post-stream
+    flush/parse, are not generation: a 60 s wait + 3 s of tokens + 40 s of tail
+    must read as exactly 3 s, and a one-flush response as no window at all."""
+    from datetime import datetime, timedelta
+
+    from helpers.llm import call_llm_structured_streaming, llm_generation_metadata
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    origin = 1_793_939_000.0
+
+    async def run(gaps_between_content_chunks):
+        clock = {"now": origin}
+
+        class FakeRoseClient:
+            async def complete(self, **kwargs):
+                clock["now"] += 60.0  # queueing / a stalled failover leg before any token
+                yield StreamChunk(
+                    kind="metadata",
+                    data={"actual_model": "claude-sonnet-4-6", "pool_name": "test-pool", "pool_size": 1},
+                )
+                whole = '```json\n{"response": "hello", "tool_calls": []}\n```'
+                pieces = [whole[:26], whole[26:]] if gaps_between_content_chunks else [whole]
+                for index, piece in enumerate(pieces):
+                    if index:
+                        clock["now"] += gaps_between_content_chunks[index - 1]
+                    yield StreamChunk(kind="content", data={"text": piece})
+                clock["now"] += 40.0  # final flush / parse tail
+                yield StreamChunk(
+                    kind="usage",
+                    data={"prompt_tokens": 10, "completion_tokens": 597, "total_tokens": 607},
+                )
+                yield StreamChunk(kind="done", data={})
+
+        async def on_chunk(_text: str, _tokens: int):
+            return None
+
+        with (
+            patch("helpers.llm.RoseClient", FakeRoseClient),
+            patch("helpers.llm._safe_time", lambda: clock["now"]),
+        ):
+            _response, usage, _detected = await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "hi"}],
+                model="rose-labs/rose-1-flash",
+                temperature=0.7,
+                max_tokens=512,
+                response_model=create_agent_action_model([]),
+                on_chunk=on_chunk,
+                call_site="test",
+            )
+        return usage
+
+    usage = await run([3.0])
+    assert usage["generation_started_at_ms"] == int((origin + 60.0) * 1000)
+    assert usage["generation_ended_at_ms"] == int((origin + 63.0) * 1000)
+    generation = llm_generation_metadata(usage)
+    assert generation is not None and generation["output_tokens"] == 597
+    window = datetime.fromisoformat(generation["ended_at"].replace("Z", "+00:00")) - datetime.fromisoformat(
+        generation["started_at"].replace("Z", "+00:00")
+    )
+    assert window == timedelta(seconds=3)
+    # A single token-bearing chunk (one flush) has no measurable window: no rate, never a guess.
+    flush = await run([])
+    assert flush["generation_started_at_ms"] == flush["generation_ended_at_ms"]
+    assert llm_generation_metadata(flush) is None
+
+
 async def test_call_llm_structured_streaming_retries_malformed_output():
     """A malformed output is re-generated with validation feedback (bounded)."""
     import httpx
@@ -11161,6 +11231,10 @@ async def run_all_tests():
         test_build_llm_messages_strips_cloud_agent_lifecycle_tools,
     )
     await r.record_async("call_llm_structured_streaming_happy_path", test_call_llm_structured_streaming_happy_path)
+    await r.record_async(
+        "structured_streaming_records_the_first_to_last_token_generation_window",
+        test_structured_streaming_records_the_first_to_last_token_generation_window,
+    )
     await r.record_async(
         "call_llm_structured_streaming_retries_malformed_output",
         test_call_llm_structured_streaming_retries_malformed_output,

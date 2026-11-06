@@ -1,24 +1,40 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TrajectoryWorkGroup } from '@/features/terminal-component-group/components/TrajectoryWorkGroup';
 import { groupTrajectoryWork } from '@/features/terminal-component-group/components/trajectoryWorkGroups';
 import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
-import { ThinkingIndicator } from '@/features/terminal-component-group/components/ThinkingIndicator';
 import { makeCtx } from './browser-agent-chip.fixtures';
 import { msg } from './code-agent-steering.fixtures';
 import { renderWithProviders } from './test-wrapper';
 vi.mock('@/components/ThinkingAnimation', () => ({ default: () => null }));
 const start = Date.UTC(2026, 9, 21, 12);
-function activity(toolName: string, id = toolName, at = start) {
+function activity(toolName: string, id = toolName, at = start, toolStatus = 'IN_PROGRESS') {
   return msg(
     {
       toolName,
       toolCallId: id,
-      toolStatus: 'IN_PROGRESS',
+      toolStatus,
       title: toolName === 'cloud_agent' ? 'Creating Cloud Agent' : toolName,
     },
     { message_id: id, timestamp: new Date(at).toISOString() },
+  );
+}
+/** Rose's own inbound agent message row (`metadata.agentMessage`), USER or ASSISTANT role. */
+function fromRoot(id: string, at: number, role: 'USER' | 'ASSISTANT' = 'USER') {
+  return msg(
+    {
+      agentMessage: true,
+      messageType: 'MESSAGE',
+      fromAgentId: 'root-agent',
+      fromAgentPath: '/root',
+    },
+    {
+      message_id: id,
+      role,
+      text: `Message Type: MESSAGE\nTask name: worker\nSender: /root\nPayload:\nUpdate ${id}`,
+      timestamp: new Date(at).toISOString(),
+    },
   );
 }
 function group(messages = [activity('read_file')], status = 'ACTIVE') {
@@ -111,6 +127,61 @@ describe('current work batch elapsed time and ring semantics', () => {
     expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('41.7s');
     expect(group).toHaveAttribute('data-state', 'running');
   });
+  it('folds inbound agent messages into ONE "Worked for" batch instead of splitting it', () => {
+    // The mobile transcript: 2 activities, Message from /root, 3 activities,
+    // Message from /root, 1 activity rendered as three folds; now one.
+    const minute = 60_000;
+    const done = (toolName: string, id: string, at: number) =>
+      activity(toolName, id, at, 'FINISHED');
+    const rows = [
+      done('read_file', 'a1', start),
+      done('grep', 'a2', start + minute),
+      fromRoot('from-root-1', start + 5 * minute + 8_000),
+      done('read_file', 'a3', start + 6 * minute),
+      done('grep', 'a4', start + 7 * minute),
+      done('read_file', 'a5', start + 8 * minute),
+      fromRoot('from-root-2', start + 8 * minute + 23_000, 'ASSISTANT'),
+      done('read_file', 'a6', start + 8 * minute + 51_000),
+    ];
+    const ctx = {
+      ...makeCtx(rows),
+      agent: {
+        id: 'agent-1',
+        status: 'COMPLETED',
+        updated_at: new Date(start + 9 * minute).toISOString(),
+      } as never,
+    };
+    renderWithProviders(
+      <AgentContext.Provider value={ctx}>
+        <MessageList showThinkingIndicator={false} />
+      </AgentContext.Provider>,
+    );
+    expect(screen.getAllByTestId('trajectory-work-group')).toHaveLength(1);
+    const batch = screen.getByTestId('trajectory-work-group');
+    expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent('Worked for 9m 00s');
+    expect(batch).toHaveTextContent('8 activities');
+    expect(screen.queryByTestId('inbound-agent-row')).toBeNull();
+    fireEvent.click(within(batch).getByRole('button'));
+    const history = within(batch).getByTestId('trajectory-work-history');
+    expect(
+      within(history)
+        .getAllByTestId('inbound-agent-row-title')
+        .map((title) => title.textContent),
+    ).toEqual(['Message from /root', 'Message from /root']);
+    expect(
+      [...history.querySelectorAll('[data-message-id]')].map((el) =>
+        el.getAttribute('data-message-id'),
+      ),
+    ).toEqual(rows.map((row) => row.message_id));
+  });
+  it('shows an inbound agent message as the running batch line with its mail icon', () => {
+    const rows = [activity('read_file', 'before'), fromRoot('latest', start + 1000)];
+    const { container } = render(
+      <TrajectoryWorkGroup group={group(rows)} renderMessage={() => null} />,
+    );
+    expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent('Message from /root');
+    expect(container.querySelector('.lucide-mail')).not.toBeNull();
+  });
   it('ticks only the elapsed text while an open running batch shows its history', () => {
     vi.useFakeTimers();
     vi.setSystemTime(start + 2000);
@@ -183,28 +254,16 @@ describe('current work batch elapsed time and ring semantics', () => {
       'data-agent-start-phase',
     );
   });
-  it('thinking always shows the ↓ token counter, live before the first byte or persisted', () => {
+  it('thinking is a stock activity row and never shows a token count estimated from text', () => {
     const live = msg(
       { toolName: 'thought', title: 'Thinking', toolStatus: 'IN_PROGRESS', ephemeral: true },
       { message_id: 'streaming:thinking', timestamp: '' },
     );
-    render(
-      <TrajectoryWorkGroup
-        group={group([live])}
-        renderMessage={() => null}
-        indicator={
-          <ThinkingIndicator
-            compact
-            isClaudeStreaming={false}
-            streamingTokenCount={0}
-            animatedTokenCount={0}
-          />
-        }
-      />,
-    );
+    render(<TrajectoryWorkGroup group={group([live])} renderMessage={() => null} />);
     const line = () => screen.getByTestId('trajectory-activity-line');
-    expect(line()).toHaveTextContent(/^Thinking0 tokens$/);
-    expect(line().querySelector('.lucide-arrow-down')).not.toBeNull();
+    expect(line()).toHaveTextContent(/^Thinking$/);
+    expect(screen.getByTestId('trajectory-activity-icon')).toHaveClass('lucide-lightbulb');
+    expect(screen.queryByTestId('thinking-indicator')).toBeNull();
     cleanup();
     const thought = msg(
       {},
@@ -216,11 +275,9 @@ describe('current work batch elapsed time and ring semantics', () => {
       },
     );
     render(<TrajectoryWorkGroup group={group([thought])} renderMessage={() => null} />);
-    expect(line()).toHaveTextContent(/^Thinking100 tokens$/);
-    expect(line().querySelector('.lucide-arrow-down')).not.toBeNull();
-    expect(
-      screen.getByTestId('trajectory-work-group').querySelector('.lucide-lightbulb'),
-    ).not.toBeNull();
+    expect(line()).toHaveTextContent(/^Thinking$/);
+    expect(line().querySelector('.lucide-arrow-down')).toBeNull();
+    expect(screen.getByTestId('trajectory-activity-icon')).toHaveClass('lucide-lightbulb');
   });
   it('does not invent elapsed time for a missing timestamp', () => {
     const untimed = { ...activity('read_file'), timestamp: '' };

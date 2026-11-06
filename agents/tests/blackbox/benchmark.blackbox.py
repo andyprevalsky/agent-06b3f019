@@ -26744,6 +26744,14 @@ async def run_all_tests():
         "test_display_root_inline_html_page_is_read",
     ):
         await r.record_async(name, getattr(display_check_tests, name))
+    from benchmarks import thinking_rows_check_tests
+
+    for name in (
+        "test_thinking_rows_measured_root_and_code_agent_pass",
+        "test_thinking_rows_without_recorded_generation_fail",
+        "test_thinking_rows_cli_crash_is_a_failure_not_an_exception",
+    ):
+        r.record(name, getattr(thinking_rows_check_tests, name))
     r.record(
         "archived_diagnostic_projection_requires_authenticated_bindings",
         test_archived_diagnostic_projection_requires_authenticated_bindings,

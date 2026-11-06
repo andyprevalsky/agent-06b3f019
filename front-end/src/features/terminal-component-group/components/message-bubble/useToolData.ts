@@ -8,6 +8,7 @@ import { useMemo } from 'react';
 import { userFacingMessageText } from '@/lib/userFacingMessage';
 import type { Message } from '../../hooks';
 import { buildAgentToolData } from './agentToolData';
+import { thoughtGeneration } from '../thoughtGeneration';
 import type { ToolMessageData } from './types';
 
 interface UseToolDataArgs {
@@ -52,6 +53,7 @@ export function useToolData({
         title: 'Thought',
         status: 'FINISHED',
         message: visibleText(message),
+        generation: thoughtGeneration(message.metadata),
       };
     }
 
@@ -100,6 +102,7 @@ export function useToolData({
         (attentionMeta.simulated as boolean | undefined),
       actionType: metadata.action_type as string | undefined,
       codeProvider: metadata.code_provider === 'codex' ? 'codex' : 'claude',
+      generation: toolName === 'thought' ? thoughtGeneration(metadata) : null,
     };
   }, [isAssistant, isTool, message, isStreaming]);
 }

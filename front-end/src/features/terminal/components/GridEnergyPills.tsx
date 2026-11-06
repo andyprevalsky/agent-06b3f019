@@ -3,39 +3,45 @@
  *
  * GEOMETRY:
  * [MEASURE_VIEWPORT] --> derives visible grid-line coordinates from patternOffset
- *   |
+ *   |                    (mobile: also re-measures on window resize)
  *   v
  * [SELECT_FLOW_BUDGET] --> keeps the full desktop layer and a reduced mobile layer
  *   |
  *   v
- * [RENDER_ACTIVE_THEME_FLOWS] --> draws one SVG tree with theme-aware gradients
+ * [RENDER_ACTIVE_THEME_FLOWS] --> desktop: one SVG tree with theme-aware gradients
+ *                                 mobile: 8 absolutely positioned gradient pills
+ *                                 inside an even-odd clip-path container
  *
  * THEME:
- * [STOCK]  --> opacity prop absent: no group opacity / canvas alpha (unchanged)
+ * [STOCK]  --> opacity prop absent: no group opacity / pill opacity (unchanged)
  * [DIMMED] --> opacity prop set (Rose dark mode): SVG group opacity attribute,
- *              canvas globalAlpha for the mobile renderer
- * A theme switch repaints in the same commit: the SVG attribute updates with
- * the render and the mobile canvas paints one frame synchronously in a layout
- * effect (after html.dark has flipped), not on its next animation tick.
+ *              per-pill CSS opacity for the mobile renderer
+ * A theme switch repaints in the same commit: the SVG attribute and the mobile
+ * pill opacity update with the render, and both gradients read their stops from
+ * CSS variables keyed on html.dark, so no animation tick is involved.
  *
  * MOTION:
  * [FLOWING] --> SVG animateTransform moves each pill along a grid line
  *   |
  *   v (mobile viewport)
- * [LEAN_FLOWING] --> uses fewer flows without the desktop blur filter
+ * [LEAN_FLOWING] --> 8 flows, no blur filter; each pill is a CSS keyframe
+ *                    translate3d animation (compositor-driven, no per-frame JS)
+ *                    whose start time is pinned to the document timeline origin
  *   |
  *   v (prefers-reduced-motion: reduce)
- * [HIDDEN] --> CSS hides animated pills
- * Mobile canvas: document hidden -> cancel frame; visible -> resume at current time.
+ * [HIDDEN] --> desktop: CSS hides animated pills
+ *              mobile: unchanged, keeps flowing (as the former canvas did)
+ * Mobile: document hidden -> the browser stops animation frames; visible ->
+ * resumes at the current timeline time.
  *
  * System context:
  * BackgroundTiles / BackgroundPattern provide the grid pattern.
  * GridEnergyPills overlays desktop SVG motion using the same patternOffset.
- * MobileGridEnergyPillsCanvas keeps the mobile motion in canvas to avoid
- * WebKit's SVG animation bottleneck.
+ * MobileGridEnergyPills keeps the mobile motion off SVG animation (WebKit's
+ * bottleneck) and off a full-screen per-frame canvas redraw (iOS heat).
  */
 
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 const GRID_SIZE = 143;
 const HORIZONTAL_PILL_HEIGHT = 5;
@@ -43,7 +49,6 @@ const VERTICAL_PILL_WIDTH = 5;
 const DIAMOND_SIZE = 22;
 const DIAMOND_HALF = DIAMOND_SIZE / 2;
 const MOBILE_VIEWPORT_MAX_WIDTH = 767;
-const MOBILE_CANVAS_DPR_MAX = 2;
 const QUERY_INPUT_MOBILE_CLEARANCE = 260;
 const LANDING_CONTROLS_MOBILE_CLEARANCE = 340;
 const LARGE_TILE_MASK_SIZE = 426.8;
@@ -58,7 +63,7 @@ interface GridEnergyPillsProps {
   opacity?: number;
 }
 
-interface MobileGridEnergyPillsCanvasProps {
+interface MobileGridEnergyPillsProps {
   patternOffset: { x: number; y: number };
   selectedAgentId: string | null;
   /** Dims every pill streak (Rose dark mode); omit for the stock layer. */
@@ -248,121 +253,62 @@ export function GridEnergyPills({
   );
 }
 
-export function MobileGridEnergyPillsCanvas({
+export function MobileGridEnergyPills({
   patternOffset,
   selectedAgentId,
   opacity,
-}: MobileGridEnergyPillsCanvasProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const patternOffsetRef = useRef(patternOffset);
-  const selectedAgentIdRef = useRef(selectedAgentId);
-  const opacityRef = useRef(opacity);
-  const paintRef = useRef<((now: number) => void) | null>(null);
-
-  // Theme switch: repaint now, on the frame html.dark flips (no-op on mount).
-  useLayoutEffect(() => {
-    if (opacityRef.current === opacity) return;
-    opacityRef.current = opacity;
-    paintRef.current?.(performance.now());
-  }, [opacity]);
+}: MobileGridEnergyPillsProps) {
+  const layerRef = useRef<HTMLDivElement>(null);
+  const [{ width, height }, setViewport] = useState(viewportSize);
 
   useEffect(() => {
-    patternOffsetRef.current = patternOffset;
-  }, [patternOffset]);
-
-  useEffect(() => {
-    selectedAgentIdRef.current = selectedAgentId;
-  }, [selectedAgentId]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext('2d', { alpha: true });
-    if (!canvas || !ctx) return;
-
-    let animationFrame = 0;
-
-    const resize = () => {
-      const width = window.innerWidth;
-      const height = window.innerHeight;
-      const dpr = Math.min(window.devicePixelRatio || 1, MOBILE_CANVAS_DPR_MAX);
-      canvas.width = Math.ceil(width * dpr);
-      canvas.height = Math.ceil(height * dpr);
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    };
-
-    const paint = (now: number) => {
-      const width = window.innerWidth;
-      const height = window.innerHeight;
-      ctx.clearRect(0, 0, width, height);
-      ctx.save();
-      applyMobileEnergyMask(ctx, width, height, selectedAgentIdRef.current);
-      if (opacityRef.current !== undefined) ctx.globalAlpha = opacityRef.current;
-
-      const darkMode = document.documentElement.classList.contains('dark');
-      const softStop = darkMode ? 0.42 : 0.34;
-      const coreStop = darkMode ? 1 : 0.95;
-      const tailStop = darkMode ? 0.34 : 0.28;
-      const minX = -GRID_SIZE;
-      const minY = -GRID_SIZE;
-      const maxX = width + GRID_SIZE;
-      const maxY = height + GRID_SIZE;
-      const travelX = maxX - minX;
-      const travelY = maxY - minY;
-
-      for (const flow of MOBILE_FLOWS) {
-        drawMobileEnergyFlow(ctx, {
-          flow,
-          now,
-          width,
-          height,
-          minX,
-          minY,
-          maxX,
-          maxY,
-          travelX,
-          travelY,
-          patternOffset: patternOffsetRef.current,
-          softStop,
-          coreStop,
-          tailStop,
-        });
-      }
-
-      ctx.restore();
-    };
-
-    const draw = (now: number) => {
-      if (document.hidden) return;
-      paint(now);
-      animationFrame = window.requestAnimationFrame(draw);
-    };
-    const resume = () => {
-      window.cancelAnimationFrame(animationFrame);
-      if (!document.hidden) animationFrame = window.requestAnimationFrame(draw);
-    };
-
-    resize();
+    const resize = () =>
+      setViewport((current) => {
+        const next = viewportSize();
+        return next.width === current.width && next.height === current.height ? current : next;
+      });
     window.addEventListener('resize', resize);
-    document.addEventListener('visibilitychange', resume);
-    paintRef.current = paint;
-    resume();
-
-    return () => {
-      paintRef.current = null;
-      window.cancelAnimationFrame(animationFrame);
-      window.removeEventListener('resize', resize);
-      document.removeEventListener('visibilitychange', resume);
-    };
+    return () => window.removeEventListener('resize', resize);
   }, []);
 
+  const tracks = useMemo(
+    () => MOBILE_FLOWS.map((flow) => mobileFlowTrack(flow, width, height, patternOffset)),
+    [width, height, patternOffset],
+  );
+  const trackNames = tracks.map((track) => track.name).join(' ');
+
+  // Phase: each pill's CSS animation starts at the document timeline origin, so
+  // its progress at time t is ((t / 1000 - flow.delay) % duration) / duration
+  // (the former canvas formula). Runs once per keyframe set, never per frame.
+  useLayoutEffect(() => {
+    const layer = layerRef.current;
+    if (!layer || typeof layer.getAnimations !== 'function') return;
+    for (const animation of layer.getAnimations({ subtree: true })) animation.startTime = 0;
+  }, [trackNames]);
+
   return (
-    <canvas
-      ref={canvasRef}
+    <div
+      ref={layerRef}
       data-testid="terminal-grid-energy-canvas"
-      className="absolute inset-0 w-full h-full pointer-events-none z-[4]"
-    />
+      data-flow-count={MOBILE_FLOWS.length}
+      className="absolute inset-0 overflow-hidden pointer-events-none z-[4]"
+      style={{ width, height, clipPath: mobileEnergyClipPath(width, height, selectedAgentId) }}
+    >
+      <style>{[MOBILE_PILL_STYLES, ...tracks.map((track) => track.keyframes)].join('\n')}</style>
+      {tracks.map(({ flow, name }) => (
+        <div
+          key={flow.id}
+          data-flow-id={flow.id}
+          className={`${MOBILE_PILL_CLASS} ${MOBILE_PILL_CLASS}-${flow.axis}`}
+          style={{
+            width: flow.axis === 'x' ? flow.length : VERTICAL_PILL_WIDTH,
+            height: flow.axis === 'x' ? HORIZONTAL_PILL_HEIGHT : flow.length,
+            animation: `${name} ${flow.duration}s linear ${flow.delay}s infinite`,
+            opacity,
+          }}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -383,128 +329,94 @@ interface EnergyPillProps {
   clipId: string;
 }
 
-type MobileDrawParams = {
-  flow: Flow;
-  now: number;
-  width: number;
-  height: number;
-  minX: number;
-  minY: number;
-  maxX: number;
-  maxY: number;
-  travelX: number;
-  travelY: number;
-  patternOffset: { x: number; y: number };
-  softStop: number;
-  coreStop: number;
-  tailStop: number;
-};
+const MOBILE_PILL_CLASS = 'rose-mobile-energy-pill';
 
-const roundedRect = (
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number,
-) => {
-  const safeRadius = Math.min(radius, width / 2, height / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + safeRadius, y);
-  ctx.lineTo(x + width - safeRadius, y);
-  ctx.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
-  ctx.lineTo(x + width, y + height - safeRadius);
-  ctx.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
-  ctx.lineTo(x + safeRadius, y + height);
-  ctx.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
-  ctx.lineTo(x, y + safeRadius);
-  ctx.quadraticCurveTo(x, y, x + safeRadius, y);
-  ctx.closePath();
-};
+const pathNumber = (value: number): string => String(Number(value.toFixed(3)));
 
-const applyMobileEnergyMask = (
-  ctx: CanvasRenderingContext2D,
+const rectSubpath = (x: number, y: number, width: number, height: number): string =>
+  `M${pathNumber(x)} ${pathNumber(y)}H${pathNumber(x + width)}V${pathNumber(y + height)}H${pathNumber(x)}Z`;
+
+/**
+ * Even-odd clip of three rects (viewport, large center tile, bottom input
+ * area): a pixel shows when an odd number of rects covers it, so the tile and
+ * input cutouts hide pills and their overlap shows them again.
+ */
+const mobileEnergyClipPath = (
   width: number,
   height: number,
   selectedAgentId: string | null,
-) => {
+): string => {
   const inputClearance =
     selectedAgentId === null ? LANDING_CONTROLS_MOBILE_CLEARANCE : QUERY_INPUT_MOBILE_CLEARANCE;
   const inputAreaCutoutY = Math.max(0, height - inputClearance);
   const largeTileX = width / 2 - LARGE_TILE_MASK_HALF;
   const largeTileY = height * 0.4 - LARGE_TILE_MASK_HALF;
-
-  ctx.beginPath();
-  ctx.rect(0, 0, width, height);
-  ctx.rect(largeTileX, largeTileY, LARGE_TILE_MASK_SIZE, LARGE_TILE_MASK_SIZE);
-  ctx.rect(0, inputAreaCutoutY, width, inputClearance);
-  ctx.clip('evenodd');
+  const subpaths = [
+    rectSubpath(0, 0, width, height),
+    rectSubpath(largeTileX, largeTileY, LARGE_TILE_MASK_SIZE, LARGE_TILE_MASK_SIZE),
+    rectSubpath(0, inputAreaCutoutY, width, inputClearance),
+  ];
+  return `path(evenodd, '${subpaths.join(' ')}')`;
 };
 
-const flowProgress = (flow: Flow, now: number): number => {
-  const elapsedSeconds = now / 1000 - flow.delay;
-  return (elapsedSeconds % flow.duration) / flow.duration;
-};
-
-const addGradientStops = (
-  gradient: CanvasGradient,
-  softStop: number,
-  coreStop: number,
-  tailStop: number,
-) => {
-  gradient.addColorStop(0, 'rgba(255, 255, 255, 0)');
-  gradient.addColorStop(0.2, `rgba(255, 255, 255, ${softStop})`);
-  gradient.addColorStop(0.52, `rgba(255, 255, 255, ${coreStop})`);
-  gradient.addColorStop(0.82, `rgba(255, 255, 255, ${tailStop})`);
-  gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-};
-
-function drawMobileEnergyFlow(
-  ctx: CanvasRenderingContext2D,
-  {
-    flow,
-    now,
-    width,
-    height,
-    minX,
-    minY,
-    maxX,
-    maxY,
-    travelX,
-    travelY,
-    patternOffset,
-    softStop,
-    coreStop,
-    tailStop,
-  }: MobileDrawParams,
-) {
-  const progress = flowProgress(flow, now);
-
-  if (flow.axis === 'x') {
-    const startX = flow.reverse ? maxX : minX - flow.length;
-    const to = flow.reverse ? -travelX - flow.length : travelX + flow.length;
-    const x = startX + to * progress;
-    const lineY = gridLineAtRatio(patternOffset.y, height, flow.lineRatio);
-    const y = lineY - HORIZONTAL_PILL_HEIGHT / 2;
-    const gradient = ctx.createLinearGradient(x, lineY, x + flow.length, lineY);
-    addGradientStops(gradient, softStop, coreStop, tailStop);
-    roundedRect(ctx, x, y, flow.length, HORIZONTAL_PILL_HEIGHT, HORIZONTAL_PILL_HEIGHT / 2);
-    ctx.fillStyle = gradient;
-    ctx.fill();
-    return;
+const hashString = (text: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
   }
+  return (hash >>> 0).toString(36);
+};
 
-  const lineX = gridLineAtRatio(patternOffset.x, width, flow.lineRatio);
-  const startY = flow.reverse ? maxY : minY - flow.length;
-  const to = flow.reverse ? -travelY - flow.length : travelY + flow.length;
-  const y = startY + to * progress;
-  const x = lineX - VERTICAL_PILL_WIDTH / 2;
-  const gradient = ctx.createLinearGradient(lineX, y, lineX, y + flow.length);
-  addGradientStops(gradient, softStop, coreStop, tailStop);
-  roundedRect(ctx, x, y, VERTICAL_PILL_WIDTH, flow.length, VERTICAL_PILL_WIDTH / 2);
-  ctx.fillStyle = gradient;
-  ctx.fill();
-}
+/**
+ * One pill's keyframes: an off-screen start to an off-screen end along its
+ * flow axis (reverse flows run back), sitting on its grid line. The whole
+ * position lives in the transform, so layout never snaps the line coordinate.
+ */
+const mobileFlowTrack = (
+  flow: Flow,
+  width: number,
+  height: number,
+  patternOffset: { x: number; y: number },
+): { flow: Flow; name: string; keyframes: string } => {
+  const horizontal = flow.axis === 'x';
+  const extent = horizontal ? width : height;
+  const travel = extent + GRID_SIZE * 2;
+  const start = flow.reverse ? extent + GRID_SIZE : -GRID_SIZE - flow.length;
+  const end = start + (flow.reverse ? -travel - flow.length : travel + flow.length);
+  const line = horizontal
+    ? gridLineAtRatio(patternOffset.y, height, flow.lineRatio) - HORIZONTAL_PILL_HEIGHT / 2
+    : gridLineAtRatio(patternOffset.x, width, flow.lineRatio) - VERTICAL_PILL_WIDTH / 2;
+  const at = (along: number): string =>
+    horizontal
+      ? `translate3d(${pathNumber(along)}px, ${pathNumber(line)}px, 0)`
+      : `translate3d(${pathNumber(line)}px, ${pathNumber(along)}px, 0)`;
+  const from = at(start);
+  const to = at(end);
+  const name = `${MOBILE_PILL_CLASS}-${flow.id}-${hashString(`${from} ${to}`)}`;
+  return {
+    flow,
+    name,
+    keyframes: `@keyframes ${name} { from { transform: ${from}; } to { transform: ${to}; } }`,
+  };
+};
+
+const pillGradient = (direction: string): string =>
+  `linear-gradient(${direction}, rgba(255, 255, 255, 0) 0%, ` +
+  'rgba(255, 255, 255, var(--energy-pill-soft-stop)) 20%, ' +
+  'rgba(255, 255, 255, var(--energy-pill-core-stop)) 52%, ' +
+  'rgba(255, 255, 255, var(--energy-pill-tail-stop)) 82%, rgba(255, 255, 255, 0) 100%)';
+
+/** Theme stops match the desktop SVG gradient; html.dark switches them in CSS. */
+const MOBILE_PILL_STYLES = [
+  `.${MOBILE_PILL_CLASS} { position: absolute; left: 0; top: 0; ` +
+    `border-radius: ${HORIZONTAL_PILL_HEIGHT / 2}px; --energy-pill-soft-stop: 0.34; ` +
+    '--energy-pill-core-stop: 0.95; --energy-pill-tail-stop: 0.28; }',
+  `:root.dark .${MOBILE_PILL_CLASS} { --energy-pill-soft-stop: 0.42; ` +
+    '--energy-pill-core-stop: 1; --energy-pill-tail-stop: 0.34; }',
+  `.${MOBILE_PILL_CLASS}-x { background-image: ${pillGradient('to right')}; }`,
+  `.${MOBILE_PILL_CLASS}-y { background-image: ${pillGradient('to bottom')}; }`,
+].join('\n');
 
 function EnergyPill({
   flow,
