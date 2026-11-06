@@ -266,6 +266,19 @@ html.rose-app-shell body {
   overscroll-behavior: none;
 }
 
+/* iOS 26 installed PWA (viewport-fit=cover + black-translucent status bar):
+ * while the document is no taller than its viewport, WebKit gives the page a
+ * viewport short of the screen by the status-bar inset and paints nothing
+ * below it (WebKit 301108; device reported 894 of 956pt). A document at least
+ * that inset taller gets the full screen back, and the visual-viewport shell
+ * then fills it. Capped at 100lvh so the page never scrolls; a zero inset
+ * (opaque status bar, Android, desktop) leaves the height unchanged. */
+@media (display-mode: standalone) {
+  html {
+    min-height: min(100lvh, calc(100% + env(safe-area-inset-top, 0px)));
+  }
+}
+
 @layer components {
   .code-agent-terminal-shell {
     background:
