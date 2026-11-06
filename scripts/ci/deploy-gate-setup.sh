@@ -39,9 +39,11 @@ sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
 
 step "flyctl"
-if ! command -v flyctl >/dev/null && [ ! -x "$HOME/.fly/bin/flyctl" ]; then
-  curl -fsSL https://fly.io/install.sh | sh >/dev/null 2>&1
-fi
+for attempt in 1 2 3; do
+  command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] && break
+  curl -fsSL --retry 3 https://fly.io/install.sh | sh >/dev/null || { echo "flyctl install attempt $attempt failed" >&2; sleep 5; }
+done
+[ -x "$HOME/.fly/bin/flyctl" ] || command -v flyctl >/dev/null || { echo "flyctl unavailable" >&2; exit 1; }
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
 step "node_modules (cache hit: ${NODE_CACHE_HIT:-false})"
