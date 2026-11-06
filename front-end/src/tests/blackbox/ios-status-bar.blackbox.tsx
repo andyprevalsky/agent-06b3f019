@@ -20,11 +20,12 @@ describe('iOS standalone status bar', () => {
     document.querySelector('meta[name="theme-color"]')?.remove();
   });
 
-  it('is non-translucent with a light theme-color default', () => {
-    expect(html).toMatch(/apple-mobile-web-app-status-bar-style" content="default"/);
+  it('is opaque black (system-appearance independent) with a light theme-color default', () => {
+    expect(html).toMatch(/apple-mobile-web-app-status-bar-style" content="black"/);
     expect(html).not.toContain('black-translucent');
     expect(html).toContain(`name="theme-color" content="${THEME_COLOR_LIGHT}"`);
-    expect(manifest.theme_color).toBe(THEME_COLOR_LIGHT);
+    expect(manifest.theme_color).toBe(THEME_COLOR_DARK);
+    expect(manifest.background_color).toBe(THEME_COLOR_DARK);
   });
 
   it('theme-color matches the page background tokens', () => {
@@ -43,6 +44,31 @@ describe('iOS standalone status bar', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(meta().content).toBe(THEME_COLOR_LIGHT);
     stop();
+  });
+
+  it('pre-paint script sets html.dark + theme-color from the stored dark choice', () => {
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+      .map((m) => m[1])
+      .find((body) => body.includes('rose-theme:'))!;
+    const run = () => new Function(script)();
+    document.head.insertAdjacentHTML('beforeend', '<meta name="theme-color" content="#f9f9fb">');
+    window.localStorage.setItem('rose-theme:u1', 'light');
+    run();
+    expect(document.documentElement.classList.contains('dark')).toBe(false);
+    window.localStorage.setItem('rose-theme:u1', 'dark');
+    run();
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+    expect(document.querySelector('meta[name="theme-color"]')!.getAttribute('content')).toBe(
+      THEME_COLOR_DARK,
+    );
+    // Cookie backup alone (storage wiped) still yields dark.
+    window.localStorage.clear();
+    document.documentElement.classList.remove('dark');
+    document.cookie = 'rose-theme%3Au1=dark; Path=/';
+    run();
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+    document.cookie = 'rose-theme%3Au1=; Max-Age=0; Path=/';
+    document.documentElement.removeAttribute('data-rose-predark');
   });
 
   it('safe-area inset collapses to 0 when the bar is opaque (no double gap)', () => {
