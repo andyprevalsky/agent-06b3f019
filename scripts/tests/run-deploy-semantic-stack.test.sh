@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Regression for scripts/run-deploy-semantic-stack.sh, the versioned Group 4
-# semantic lane (deploy.md Steps 5, 6b, 6c; `run_deploy_pipeline.py plan
+# semantic lane (the former deploy.md Steps 5, 6b, 6c, kept in
+# .claude/commands/DEPRECATED_deploy.md; `run_deploy_pipeline.py plan
 # --semantic-stack` / `--e2b-smoke`, follow-up 12, 2026-10-31). The script
 # must parse, refuse to run without its required environment before any side
 # effect (no sweep, no stack, no stage record), honour its three modes, carry
-# the deploy.md semantic/E2B invariants verbatim and keep no launcher paths.
+# the semantic/E2B invariants of those steps verbatim and keep no launcher
+# paths. The lane wiring is anchored to the sources that execute it: the
+# pipeline driver's lane commands, the staged planner's flags
+# (deploy_test_plan.py) and the structural gate registry.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT_DIR/scripts/run-deploy-semantic-stack.sh"
 PIPELINE="$ROOT_DIR/scripts/run_deploy_pipeline.py"
 GATES="$ROOT_DIR/scripts/run-deploy-structural-gates.py"
-DEPLOY_MD="$ROOT_DIR/.claude/commands/deploy.md"
+PLANNER="$ROOT_DIR/scripts/deploy_test_plan.py"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -34,7 +38,7 @@ bash -n "$SCRIPT" || fail "run-deploy-semantic-stack.sh must parse"
 command -v pg_isready >/dev/null 2>&1 || fail "pg_isready is required (PostgreSQL client tools); the lane refuses without it"
 command -v jq >/dev/null 2>&1 || fail "jq is required by scripts/resolve-deploy-stack-db.sh"
 
-# ── Static invariants shared with deploy.md and the pipeline ──────────────────
+# ── Static invariants shared with the pipeline, the staged planner and the gate registry ──────────────────
 require_text "$SCRIPT" 'SEMANTIC_GREP_INVERT="chat full-lifecycle latency" SEMANTIC_WORKERS=4' "UI semantics: four workers, latency ratchet excluded"
 require_text "$SCRIPT" 'SEMANTIC_WORKERS=1 LOCAL_DB_PORT=$DBP BACKEND_PORT=$CP FRONTEND_PORT=$((CP + 1))' "latency ratchet: one worker on the live stack ports"
 require_text "$SCRIPT" 'bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh' "UI semantics keep their own stage record"
@@ -47,9 +51,9 @@ require_text "$SCRIPT" 'curl -sf --max-time 5 "$SMOKE_BASE_URL/health"' "readine
 EXPORT_LINE=$(grep -n '^export CONDUCTOR_WORKSPACE_NAME=' "$SCRIPT" | head -1 | cut -d: -f1)
 CONFIGURE_LINE=$(grep -n '^configure_deploy_local_env || exit 2' "$SCRIPT" | head -1 | cut -d: -f1)
 [ -n "$EXPORT_LINE" ] && [ -n "$CONFIGURE_LINE" ] && [ "$EXPORT_LINE" -lt "$CONFIGURE_LINE" ] || fail "CONDUCTOR_WORKSPACE_NAME fallback (line ${EXPORT_LINE:-?}) must precede configure_deploy_local_env (line ${CONFIGURE_LINE:-?})"
-require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the deploy.md Step 5 environment"
-# The worker count is overridable for memory-bounded hosts, but the deploy.md Step 5 default stays 8.
-require_text "$SCRIPT" 'SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"' "the stack must default to deploy.md's WORKER_PROCESSES=8"
+require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the Step 5 environment (DEPRECATED_deploy.md)"
+# The worker count is overridable for memory-bounded hosts, but the Step 5 default (DEPRECATED_deploy.md) stays 8.
+require_text "$SCRIPT" 'SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"' "the stack must default to the Step 5 WORKER_PROCESSES=8"
 [ "$(grep -Ec '(^|[[:space:]])WORKER_PROCESSES=' "$SCRIPT")" = 1 ] || fail "only the defaulted override may set the stack's WORKER_PROCESSES"
 require_text "$SCRIPT" 'bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &' "stack must be the Step 5 run.sh --benchmark launch"
 require_text "$SCRIPT" 'configure_deploy_local_env || exit 2' "the deploy environment library must gate every mode"
@@ -60,8 +64,12 @@ forbid_text "$SCRIPT" '/var/tmp' "no launcher-private paths"
 require_text "$PIPELINE" 'SEMANTIC_STACK_SCRIPT = "scripts/run-deploy-semantic-stack.sh"' "the plan must emit this script"
 require_text "$PIPELINE" '"--e2b-smoke-only"' "the plan's e2b-smoke lane must use the standalone mode"
 require_text "$GATES" 'scripts/tests/run-deploy-semantic-stack.test.sh' "this suite must be a registered deploy gate"
-require_text "$DEPLOY_MD" 'bash scripts/run-deploy-semantic-stack.sh --e2b-smoke-only' "deploy.md Step 6c must name the standalone E2B mode"
-require_text "$DEPLOY_MD" 'plan --live-probes --semantic-stack' "deploy.md must document the plan flags"
+# The former deploy.md Step 6c / plan-flag wording is retired with that document; the executing sources pin
+# the same facts: the driver's e2b-smoke and semantic-stack lane commands, and the staged planner behind
+# `scripts/deploy gates`, which requests the three versioned lanes from the driver's plan.
+require_text "$PIPELINE" 'SEMANTIC_STACK_COMMAND = ["bash", SEMANTIC_STACK_SCRIPT]' "the plan's semantic-stack lane must run this script"
+require_text "$PIPELINE" 'E2B_SMOKE_COMMAND = ["bash", SEMANTIC_STACK_SCRIPT, "--e2b-smoke-only"]' "the plan's e2b-smoke lane must name the standalone E2B mode"
+require_text "$PLANNER" '"--live-probes", "--semantic-stack", "--e2b-smoke"' "the staged planner must request the versioned Group 4 lanes from the driver's plan"
 
 # ── Behaviour in an isolated fixture checkout ────────────────────────────────
 # Copies keep the real worktree's .context/services.json and kill-services.sh
@@ -163,7 +171,7 @@ expect_exit 2 env CONDUCTOR_PORT="$closed_base" bash scripts/run-deploy-semantic
 expect_output "E2B smoke: Postgres is not ready on localhost:65534" "a running stack manifest supplies the database port"
 [ ! -e "$SWEEP_MARKER" ] || fail "E2B-only mode must never sweep the worktree"
 
-# 5. The E2B gate's own verdict (deploy.md 6c L2133-2148). PASS needs exit 0, the summary line
+# 5. The E2B gate's own verdict (Step 6c, DEPRECATED_deploy.md L2133-2148). PASS needs exit 0, the summary line
 #    `PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox)` and an observed CLAUDE_E2B_DONE from
 #    a real sandbox. A credential/billing block only the user can fix is a loud SKIPPED with its
 #    evidence (exit 1, never PASS); every other no-sandbox path is FAIL.
