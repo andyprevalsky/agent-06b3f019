@@ -15,16 +15,17 @@ import hashlib
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
-import httpx
 import structlog
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from domains.web_fetch import config as web_fetch_config
 from domains.web_fetch.repo import (
+    ProviderHung,
     download_files_batch,
     fetch_firecrawl_scrape,
     fetch_parallel_extract,
+    is_hang_provider_error,
     is_retryable_provider_error,
     upload_file_to_storage,
 )
@@ -110,14 +111,6 @@ def get_filename_from_url(url: str) -> str:
     return name
 
 
-class ProviderHung(TimeoutError):
-    """A scrape provider did not answer inside its share of the scrape budget."""
-
-
-def _is_hang(error: BaseException) -> bool:
-    return isinstance(error, (ProviderHung, httpx.ReadTimeout))
-
-
 async def _within(
     provider: str, call: Callable[[], Awaitable[Dict[str, Any]]], cap: float, deadline: float
 ) -> Dict[str, Any]:
@@ -171,7 +164,7 @@ async def scrape_url(url: str) -> Dict[str, Any]:
             )
         except Exception as parallel_error:
             retryable = any(
-                not _is_hang(error) and is_retryable_provider_error(provider, error)
+                not is_hang_provider_error(error) and is_retryable_provider_error(provider, error)
                 for provider, error in (("Firecrawl", firecrawl_error), ("Parallel Extract", parallel_error))
             )
             raise WebFetchProvidersFailed(

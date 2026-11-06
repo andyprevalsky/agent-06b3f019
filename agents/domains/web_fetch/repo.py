@@ -33,6 +33,15 @@ _MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _BARE_URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+")
 
 
+class ProviderHung(TimeoutError):
+    """A scrape provider did not answer inside its share of the scrape budget."""
+
+
+def is_hang_provider_error(error: BaseException) -> bool:
+    """True when the provider accepted the request but never answered in time."""
+    return isinstance(error, (ProviderHung, httpx.ReadTimeout))
+
+
 def is_retryable_provider_error(provider: str, error: BaseException) -> bool:
     """Classify an HTTP provider failure at the data-access boundary."""
     if isinstance(error, (httpx.TimeoutException, httpx.TransportError)):

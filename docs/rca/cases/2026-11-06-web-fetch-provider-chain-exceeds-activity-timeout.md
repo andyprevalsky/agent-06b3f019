@@ -94,6 +94,13 @@ cannot be forced to hit a hung page, so the unchanged-task fail-before/pass-afte
 is an open outcome-reproduction gap. The fixed revision's task result is recorded in
 the deploy report.
 
+Deploy follow-up (Gate: INTRODUCED): the first staged cycle on this fix (c8c9892a1) failed
+`deploy-command-structural` / `agents-structural` with `DATA ACCESS BOUNDARY VIOLATION in
+domains/web_fetch/service.py: Imports 'httpx'` because the first version of the hang
+classifier lived in `service.py`. The classifier and `ProviderHung` moved to `repo.py`
+(the layer allowed to know httpx); `service.py` imports them. The same cycle passed the
+cloud smoke group 9/9 on c8c9892a1, including `parallel-tool-calls`.
+
 ## Human feedback
 
 None recorded.
