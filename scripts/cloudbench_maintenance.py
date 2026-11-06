@@ -169,24 +169,109 @@ def machine(value):
             'mounts': config.get('mounts', [])}
 
 
-def observation(app, warm_id, *, native_pid=None):
-    before = machine(get(app, 'machines/' + warm_id))
-    inventory = get(app, 'machines')
-    need(isinstance(inventory, list) and len({m['id'] for m in inventory}) == len(inventory), 'inventory unreadable')
-    need(any(machine(item)==before for item in inventory), 'warm missing/changed in global inventory')
-    volumes = {}
-    for mount in before['mounts']:
-        vid = mount['volume']; volume = get(app, 'volumes/' + vid)
-        need(volume['id'] == vid and volume.get('attached_machine_id') == warm_id
-             and volume['state'] not in ('destroyed', 'pending_destroy'), 'retained volume ownership')
-        volumes[vid] = {'id': vid, 'attached_machine_id': warm_id, 'state': volume['state']}
-    need(volumes, 'retained volume missing')
-    after = machine(get(app, 'machines/' + warm_id))
-    need(before == after and before['state'] == 'stopped', 'unstable/nonstopped native partition')
-    return {'warm': before, 'volumes': volumes,
-            'inventory': {m['id']: {'name': m['name'], 'instance_id': m['instance_id'],
-                          'state': m['state'], 'config_sha256': machine(m)['config_sha256']} for m in inventory},
-            'guard': quiescent(native_pid=native_pid), 'observed_at': time.time()}
+def diagnostic_machine(value):
+    """No environment, file contents or executable command enters diagnostics."""
+    result = {k:value[k] for k in ('id','instance_id','name','state','config_sha256',
+                                  'stable_sha256','image','image_digest')}
+    guest = value.get('guest')
+    result['guest'] = {k:v for k,v in (guest if isinstance(guest,dict) else {}).items()
+                       if k in ('cpu_kind','cpus','memory_mb')}
+    result['mounts'] = [{k:v for k,v in mount.items()
+                        if k in ('volume','path','name','encrypted','size_gb')}
+                       for mount in value.get('mounts',[])]
+    return result
+
+
+def observation(app, warm_id, *, native_pid=None, failure_diagnostic=None, diagnostic_samples=None):
+    evidence = diagnostic_samples if diagnostic_samples is not None else {}
+    samples = {}
+    read_times = []
+    started = time.time()
+
+    def enrich():
+        # Defer all fallible diagnostic normalization until the original path
+        # has returned or raised. Never substitute raw data for a failed field.
+        def field(key, make):
+            try:
+                evidence[key] = make()
+            except Exception:
+                pass
+        field('started_at', lambda: started)
+        field('read_times', lambda: read_times)
+        for key in ('before', 'after'):
+            if key in samples:
+                field(key, lambda key=key: diagnostic_machine(samples[key]))
+        if 'inventory' in samples:
+            def inventory_summary():
+                result = {}
+                for item in samples['inventory']:
+                    try:
+                        result[item['id']] = {
+                            'name':item['name'], 'instance_id':item['instance_id'],
+                            'state':item['state'], 'config_sha256':machine(item)['config_sha256']}
+                    except Exception:
+                        pass
+                return result
+            field('inventory', inventory_summary)
+        if 'volumes' in samples:
+            def volume_summary():
+                result = {}
+                for vid, volume in samples['volumes'].items():
+                    try:
+                        result[vid] = {k:volume.get(k) for k in ('id','attached_machine_id','state')}
+                    except Exception:
+                        pass
+                return result
+            field('volumes', volume_summary)
+        if 'before' in samples and 'after' in samples:
+            field('comparisons', lambda: {
+                'same_machine':samples['before']==samples['after'],
+                'before_stopped':samples['before']['state']=='stopped',
+                'changed_fields':[k for k in samples['before'] if samples['before'][k]!=samples['after'].get(k)]})
+
+    try:
+        before = machine(get(app, 'machines/' + warm_id))
+        samples['before'] = before
+        read_times.append({'kind':'machine-before','at':time.time()})
+        inventory = get(app, 'machines')
+        samples['inventory'] = inventory
+        read_times.append({'kind':'inventory','at':time.time()})
+        need(isinstance(inventory, list) and len({m['id'] for m in inventory}) == len(inventory), 'inventory unreadable')
+        need(any(machine(item)==before for item in inventory), 'warm missing/changed in global inventory')
+        volumes = {}
+        for mount in before['mounts']:
+            vid = mount['volume']; volume = get(app, 'volumes/' + vid)
+            read_times.append({'kind':'volume','id':vid,'at':time.time()})
+            samples.setdefault('volumes',{})[vid] = volume
+            need(volume['id'] == vid and volume.get('attached_machine_id') == warm_id
+                 and volume['state'] not in ('destroyed', 'pending_destroy'), 'retained volume ownership')
+            volumes[vid] = {'id': vid, 'attached_machine_id': warm_id, 'state': volume['state']}
+        need(volumes, 'retained volume missing')
+        after = machine(get(app, 'machines/' + warm_id))
+        samples['after'] = after
+        read_times.append({'kind':'machine-after','at':time.time()})
+        need(before == after and before['state'] == 'stopped', 'unstable/nonstopped native partition')
+        result = {'warm': before, 'volumes': volumes,
+                  'inventory': {m['id']: {'name': m['name'], 'instance_id': m['instance_id'],
+                                'state': m['state'], 'config_sha256': machine(m)['config_sha256']} for m in inventory},
+                  'guard': quiescent(native_pid=native_pid), 'observed_at': time.time()}
+    except Exception as error:
+        try:
+            enrich()
+            if failure_diagnostic is not None:
+                evidence['finished_at'] = time.time()
+                evidence['error_type'] = type(error).__name__
+                if isinstance(error,ValueError) and str(error).startswith('native maintenance:'):
+                    evidence['reason'] = str(error)
+                failure_diagnostic(evidence)
+        except Exception:
+            pass  # Neither enrichment nor a write can replace the original refusal.
+        raise
+    try:
+        enrich()
+    except Exception:
+        pass  # Successful observations do not depend on diagnostic enrichment.
+    return result
 
 
 def debts(state, gate):
@@ -368,13 +453,42 @@ def prestart(args):
     need(digest(previous)==intent['state_sha256'], 'prestart cycle changed during native maintenance')
     need(digest(read(intent['build_path']))==intent['build_sha256'], 'prestart original build receipt')
     image_build(Path(intent['build_path']),intent['image'],root,intent['source'])
-    current=observation(intent['app'],intent['targets'][0][1],native_pid=args.pid)
-    owned_scope(current['warm'],intent['before']['warm'],app=intent['app'])
-    need(current['warm']['image']==intent['image'] and current['warm']['image_digest']==intent['image_digest'],
-         'prestart desired immutable image')
-    need(current['volumes']==intent['before']['volumes']
-         and {k:v for k,v in current['inventory'].items() if k!=current['warm']['id']}==
-             {k:v for k,v in intent['before']['inventory'].items() if k!=current['warm']['id']}, 'prestart foreign inventory/volume changed')
+    def preserve_failure(evidence, error=None):
+        if error is not None:
+            evidence['finished_at'] = time.time()
+            evidence['error_type'] = type(error).__name__
+            if isinstance(error,ValueError) and str(error).startswith('native maintenance:'):
+                evidence['reason'] = str(error)
+        comparisons=evidence.setdefault('comparisons',{})
+        if 'volumes' in evidence:
+            comparisons['retained_volumes_equal']=evidence['volumes']==intent['before']['volumes']
+        if 'inventory' in evidence:
+            warm_id=intent['targets'][0][1]
+            comparisons['foreign_inventory_equal']=(
+                {k:v for k,v in evidence['inventory'].items() if k!=warm_id} ==
+                {k:v for k,v in intent['before']['inventory'].items() if k!=warm_id})
+        write_once(directory/'prestart-observation-failure.json', {
+            'schema':'native-maintenance-observation-diagnostic-v1','diagnostic_only':True,'stage':'prestart',
+            'nonce':intent['nonce'],'source':intent['source'],'producer':intent['producer'],
+            'intent_sha256':digest(intent),'observation':evidence,
+            'cleanup_complete':False,'credit_granted':False,
+        })
+    samples={}
+    current=observation(intent['app'],intent['targets'][0][1],native_pid=args.pid,
+                        failure_diagnostic=preserve_failure, diagnostic_samples=samples)
+    try:
+        owned_scope(current['warm'],intent['before']['warm'],app=intent['app'])
+        need(current['warm']['image']==intent['image'] and current['warm']['image_digest']==intent['image_digest'],
+             'prestart desired immutable image')
+        need(current['volumes']==intent['before']['volumes']
+             and {k:v for k,v in current['inventory'].items() if k!=current['warm']['id']}==
+                 {k:v for k,v in intent['before']['inventory'].items() if k!=current['warm']['id']}, 'prestart foreign inventory/volume changed')
+    except Exception as error:
+        try:
+            preserve_failure(samples,error)
+        except Exception:
+            pass  # Diagnostics never replace the original post-observation refusal.
+        raise
     record=dict(schema=SCHEMA,nonce=intent['nonce'],intent_sha256=digest(intent),producer=intent['producer'],observation=current)
     write_once(directory/'prestart.json',record)
     # Anchor the in-memory capture before this child authorizes guest start.

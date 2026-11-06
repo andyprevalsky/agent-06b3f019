@@ -263,6 +263,125 @@ PY_TAMPER
         altered=copy.deepcopy(current);altered['config']['metadata'][key]+='x'
         with self.assertRaises(ValueError):m.owned_scope(m.machine(altered),m.machine(current),app=app)
 
+    def test_failed_prestart_retains_sanitized_samples_without_authority(self):
+        saved=self.prospective_fixture()
+        site=self.fixture/'sitecustomize.py'
+        site.write_text(site.read_text()+"""
+original_get=get
+machine_reads=0
+def get(app, resource):
+ global machine_reads
+ value=original_get(app,resource)
+ if (root/'.context/phase').read_text()=='after' and resource=='machines/warm':
+  machine_reads+=1
+  if machine_reads==2:value['instance_id']='changed-during-observation'
+ return value
+""")
+        self.provider['after']['config']['env']['SECRET']='never-copy-this-secret'
+        c.write(self.context/'provider.json',self.provider)
+        denied=self.run_native()
+        self.assertNotEqual(denied.returncode,0)
+        state=c.read(self.context/'cycle.json');record=state['native_maintenance'][-1]
+        directory=Path(record['directory']);path=directory/'prestart-observation-failure.json'
+        self.assertTrue(path.is_file(), 'rejected samples must survive the original failure')
+        diagnostic=m.read(path);intent=m.read(directory/'intent.json')
+        self.assertTrue(diagnostic['diagnostic_only'])
+        self.assertEqual(diagnostic['nonce'],record['nonce'])
+        self.assertEqual(diagnostic['producer'],record['producer'])
+        self.assertEqual(diagnostic['source'],intent['source'])
+        sample=diagnostic['observation']
+        self.assertEqual(sample['before']['instance_id'],'after-instance')
+        self.assertEqual(sample['after']['instance_id'],'changed-during-observation')
+        self.assertFalse(sample['comparisons']['same_machine'])
+        self.assertEqual(len(sample['read_times']),4)
+        self.assertNotIn('never-copy-this-secret',path.read_text())
+        self.assertFalse((directory/'prestart.json').exists())
+        self.assertFalse(record['qualified'])
+        self.assertFalse((self.context/'start-marker').exists())
+        self.assertEqual(state['native_maintenance'][0],saved)
+        # A diagnostic, even edited to claim success, is never consumed as
+        # prestart or cleanup authority by the original native validator.
+        diagnostic.update(qualified=True,diagnostic_only=False)
+        path.chmod(0o600);c.write(path,diagnostic)
+        with patch.object(m,'historical_debt_audit',return_value=[self.entry]),self.assertRaises(ValueError):
+            self.consumer()
+
+    def test_diagnostic_failure_keeps_original_observation_refusal(self):
+        before=copy.deepcopy(self.provider['before']);after=copy.deepcopy(before)
+        after['instance_id']='changed'
+        values=[before,[before],{'id':'vol-owned','attached_machine_id':'warm','state':'created'},after]
+        with patch.object(m,'get',side_effect=values) as reads:
+            with self.assertRaisesRegex(ValueError,'unstable/nonstopped native partition'):
+                m.observation('fixture','warm',failure_diagnostic=lambda _: (_ for _ in ()).throw(OSError('disk full')))
+            self.assertEqual(reads.call_count,4)
+
+    def test_diagnostic_enrichment_preserves_malformed_response_refusals(self):
+        warm={'id':'warm','instance_id':'one','name':'warm','state':'stopped',
+              'config':{'image':'immutable','guest':{'cpus':1,'memory_mb':2048},
+                        'init':{'cmd':['sleep','infinity']},'mounts':[{'volume':'volume','path':'/data'}]},
+              'image_ref':{'digest':'sha256'}}
+        foreign={'id':'foreign','name':'foreign','instance_id':'peer','state':'starting'}
+        volume={'id':'volume','attached_machine_id':'warm','state':'created'}
+        bad_mount=copy.deepcopy(warm);bad_mount['config']['mounts']=[None]
+        cases=[('warm drift',[warm,[warm,foreign],volume,{**warm,'instance_id':'two'}],
+                ValueError,'native maintenance: unstable/nonstopped native partition',4),
+               ('wrong volume',[warm,[warm,foreign],{**volume,'attached_machine_id':'foreign'},warm],
+                ValueError,'native maintenance: retained volume ownership',3),
+               ('malformed mount',[bad_mount,[bad_mount]],TypeError,"'NoneType' object is not subscriptable",2)]
+        for label,values,kind,message,count in cases:
+            for enabled in (False,True):
+                captured=[]
+                options={'failure_diagnostic':captured.append} if enabled else {}
+                with self.subTest(case=label,diagnostics=enabled), \
+                     patch.object(m,'get',side_effect=copy.deepcopy(values)) as reads, \
+                     patch.object(m,'quiescent',return_value={}):
+                    with self.assertRaises(kind) as error:m.observation('fixture','warm',**options)
+                    self.assertEqual(str(error.exception),message)
+                    self.assertEqual(reads.call_count,count)
+                if enabled:
+                    self.assertEqual(len(captured),1)
+                    self.assertEqual(len(captured[0]['read_times']),count)
+                    self.assertNotIn('config',captured[0].get('before',{}))
+        # Even a wholly broken sanitizer cannot change the original refusal.
+        with patch.object(m,'diagnostic_machine',side_effect=TypeError('bad diagnostic')), \
+             patch.object(m,'get',side_effect=copy.deepcopy(cases[0][1])) as reads:
+            with self.assertRaisesRegex(ValueError,'unstable/nonstopped native partition'):
+                m.observation('fixture','warm',failure_diagnostic=lambda _:None)
+            self.assertEqual(reads.call_count,4)
+
+    def test_post_observation_foreign_delta_retains_diagnostic_only(self):
+        saved=self.prospective_fixture()
+        site=self.fixture/'sitecustomize.py'
+        site.write_text(site.read_text()+"""
+original_get=get
+def get(app,resource):
+ value=original_get(app,resource)
+ if (root/'.context/phase').read_text()=='after' and resource=='machines':
+  foreign=json.loads(json.dumps(value[0]));foreign.update(id='foreign',name='foreign-worker')
+  return [*value,foreign]
+ return value
+""")
+        denied=self.run_native()
+        self.assertNotEqual(denied.returncode,0)
+        self.assertIn('prestart foreign inventory/volume changed',denied.stderr)
+        state=c.read(self.context/'cycle.json');record=state['native_maintenance'][-1]
+        directory=Path(record['directory']);path=directory/'prestart-observation-failure.json'
+        self.assertTrue(path.is_file(), 'post-observation rejection must retain the successful samples')
+        diagnostic=m.read(path);sample=diagnostic['observation']
+        self.assertTrue(sample['comparisons']['same_machine'])
+        self.assertTrue(sample['comparisons']['retained_volumes_equal'])
+        self.assertFalse(sample['comparisons']['foreign_inventory_equal'])
+        self.assertEqual(len(sample['read_times']),4)
+        self.assertEqual(diagnostic['nonce'],record['nonce'])
+        self.assertFalse(record['qualified'])
+        self.assertFalse((self.context/'start-marker').exists())
+        self.assertFalse((directory/'prestart.json').exists())
+        self.assertEqual(state['native_maintenance'][0],saved)
+        diagnostic.update(qualified=True,diagnostic_only=False)
+        path.chmod(0o600);c.write(path,diagnostic)
+        with patch.object(m,'historical_debt_audit',return_value=[self.entry]),self.assertRaises(ValueError):
+            self.consumer()
+
     def test_original_pin_rejects_then_native_transition_qualifies(self):
         # The exact original match body rejects the new config/incarnation.
         import ast
