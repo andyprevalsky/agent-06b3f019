@@ -133,7 +133,9 @@ def execute(v):
   save(journal/'result.json',result);return result
  finally:os.close(fd)
 """
-GUEST = D["GUEST"] + RELAY
+# Relay retirement reuses only the drain's guest core; the normal-agent capture
+# path is never executed here and pushed the exec body past its 16 KiB bound.
+GUEST = D["CORE_GUEST"] + RELAY
 
 
 def command(payload):

@@ -517,6 +517,12 @@ GATES = (
         "cloudbench-controller-orphan-drain",
         ("python3", "scripts/tests/cloudbench-controller-orphan-drain.test.py"),
     ),
+    # Relay retirement ships the drain's guest core; a drain guest change must
+    # also prove the relay exec body still fits its bound (2026-11-06, I-08).
+    Gate(
+        "cloudbench-controller-relay-retire",
+        ("python3", "scripts/tests/cloudbench-controller-relay-retire.test.py"),
+    ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
     Gate(
         "cloudbench-prelaunch-cancel",

@@ -3084,7 +3084,11 @@ def test_configured_snapshot_inventory_uses_current_donor_proof(tmp_path, case):
     def function(name):
         start=source.index(name+'() {');return source[start:source.index('\n}\n',start)+3]
     start=source.index('if { [ -n "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ]')
-    end=source.index('\nelse\n    # `|| echo', start)
+    # Run the real pin/config check, the shared retried capture definition and the
+    # whole pinned branch, ending at that branch's unpinned `else`. A configured
+    # inventory must prove the donor without any native read (FLY is forbidden).
+    pinned=source.index('\nif [ -n "${CLOUDBENCH_SNAPSHOT_ID:-}" ]; then\n', start)
+    end=source.index('\nelse\n', pinned)
     block=source[start:end]+'\nfi\n'
     node='1'*64;python='2'*64
     key='rose_cloudbench_deps_'+hashlib.sha256((node+'\0'+python).encode()).hexdigest()[:32]

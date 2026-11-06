@@ -70,3 +70,12 @@ None recorded.
 Every code path that reads the same provider listing must share one retried
 capture. A one-off live re-read reintroduces the flake the shared path already
 fixed.
+
+## Follow-up (I-08, 2026-11-06)
+
+Moving the `|| echo '[]'` comment into `capture_warm_snapshot_inventory()`
+broke `cloudbench_campaign_inventory_test.py::test_configured_snapshot_inventory_uses_current_donor_proof`
+(all 9 cases, `ValueError: substring not found`), which ended its extracted
+block at that comment. It now anchors on the pinned branch's own `else`. See
+`2026-11-06-relay-retire-guest-shipped-drain-agent-path-past-exec-bound`.
+Run the whole owning test file after restructuring extracted shell source.
