@@ -18,6 +18,7 @@ import {
 } from '../../providers/browser/captchaSolveIndicator';
 import { computeGrantBrowserProvider } from './config';
 import { persistFirstGrant } from './connectSession.grant';
+import { autofillGooglePassword } from './connectSession.googlePassword';
 import { finish, releaseBrowser } from './connectSession.lifecycle';
 import { upsertAccountConnection } from './repo';
 import type { ConnectProviderConfig, PendingConnect } from './connectSession.types';
@@ -177,6 +178,7 @@ async function watchSignInTick(
   }
   if (entry.cdp === null || entry.cdpBase === null) return;
   await syncCaptchaSolveIndicator(entry).catch(() => undefined);
+  await autofillGooglePassword(entry).catch(() => false);
   await readAccountEmail(entry);
   const minted = await mintCredentials(entry);
   if (minted === null) return;

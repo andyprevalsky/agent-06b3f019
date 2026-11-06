@@ -50,3 +50,6 @@ export const PLAID_OAUTH_REDIRECT_PATH = '/plaid-oauth-redirect';
 export const GRANOLA_CALLBACK_PATH = '/integrations/granola/callback';
 export const GRANOLA_RETURN_KEY = 'rose.granola.returnPath';
 export const GRANOLA_PUBLIC_ORIGIN = 'https://www.roselabs.ai';
+
+/** The backend redirects here after Google's consent, reopening the desktop app. */
+export const DESKTOP_OAUTH_RETURN_URL = 'roselabs://oauth-complete';

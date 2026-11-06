@@ -59,14 +59,14 @@ describe('runGateConnectAction', () => {
     expect(assign).not.toHaveBeenCalledWith(expect.stringContaining('stale=1'));
   });
 
-  it('opens the Gmail url through the Mac-app bridge when embedded (no returnUrl)', async () => {
+  it('opens the Gmail url through the Mac-app bridge, returning via the app deep link', async () => {
     startGmailOAuthApi.mockResolvedValue({ authUrl: 'https://accounts.google.com/o/oauth2/fresh' });
     const openExternal = vi.fn();
     (window as unknown as { api?: unknown }).api = { openExternal };
 
     await runGateConnectAction(sourceGate('email'), { requestId: 'req-1' });
 
-    expect(startGmailOAuthApi).toHaveBeenCalledWith(undefined);
+    expect(startGmailOAuthApi).toHaveBeenCalledWith('roselabs://oauth-complete');
     expect(openExternal).toHaveBeenCalledWith('https://accounts.google.com/o/oauth2/fresh');
   });
 

@@ -1,6 +1,5 @@
 import { createRoot } from 'react-dom/client';
 import ElectronApp from './features/electron-app';
-import ConnectivityIndicator from './features/connectivity-indicator';
 import UpdateIndicator from './features/update-indicator';
 import WhatsAppQRModal from './features/whats-app-qr-modal';
 import { Toaster } from '@/components/ui/toaster';
@@ -171,7 +170,6 @@ const Root = () => {
         <DragOverlay />
         <ElectronApp />
         <UpdateIndicator />
-        <ConnectivityIndicator />
         <QuickQueryListener />
         <WhatsAppQRModal
           isOpen={whatsApp.isModalOpen}

@@ -9,6 +9,7 @@ import { cookieSelectionWhere, domainVariants } from '../browserCookies';
 import { playwrightCookiesFromRows, storedCookieIsLive } from './injectionCookies';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
+import { fingerprintInjectionEnabled } from './fingerprintSwitch';
 import { steelCdpConnectionUrl } from './urls';
 import type { InjectedCookieBundle } from '../browser/worldStateKeepBest';
 import { createOriginPayloadWriter } from './injectionOriginPage';
@@ -72,12 +73,6 @@ interface SteelRealmCookieSummary {
  */
 function cookieDomainWhere(authRealm: string): { OR: Array<Record<string, unknown>> } {
   return cookieSelectionWhere(authRealm);
-}
-
-function envEnabled(name: string, defaultValue = true): boolean {
-  const raw = process.env[name];
-  if (raw === undefined) return defaultValue;
-  return !['0', 'false', 'no', 'off', 'disabled'].includes(raw.trim().toLowerCase());
 }
 
 export function steelCookieMatchesAuthRealm(cookieDomain: string | undefined, authRealm: string) {
@@ -460,7 +455,7 @@ export async function injectUserData(
 
   const hasCookies = cookies.length > 0;
   const fp = (integration?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;
-  const hasFingerprint = !!fp && envEnabled('BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED', true);
+  const hasFingerprint = !!fp && fingerprintInjectionEnabled();
   const hasLocalStorage = localStorageOrigins.length > 0;
   const hasIndexedDB = indexedDBOrigins.length > 0;
   const hasPermissions = permissions.length > 0;
