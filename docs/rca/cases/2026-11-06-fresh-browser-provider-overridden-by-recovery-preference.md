@@ -54,3 +54,7 @@ The user explicitly requires Tilion as the default for every fresh browser sessi
 ## Reusable lesson
 
 Keep fresh-session selection, same-session event reduction and deferred UI registration consistent with the resource identity they actually own.
+
+### Validation contract update
+
+The first complete deploy sweep exposed legacy unit and blackbox fixtures that used learned preferences as cross-provider fresh-session selectors. Those expectations predate the user's requirement. Preserve their learned proxy, promotion, auth persistence, live CDP/viewer and cleanup assertions by selecting the same provider explicitly: same-provider unit dependencies and an owned local HTTP server mounting the production browser router with its real authentication middleware. The cross-provider auth test explicitly configures Kernel, Steel/Tilion, then Kernel for its three fresh calls. No production route or request schema is changed. The original failing browser-challenge-recovery and browser-provider domains both pass after this fixture repair; original logs and full native lifecycle evidence remain in the private deploy archive.
