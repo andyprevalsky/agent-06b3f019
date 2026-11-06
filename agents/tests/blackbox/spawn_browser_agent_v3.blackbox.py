@@ -12120,6 +12120,46 @@ async def test_humanized_drag_fails_when_cdp_move_breaks_after_press():
     assert not history.get_entries()
 
 
+async def test_humanized_drag_releases_button_when_cancelled_after_press():
+    """Cancellation between press and release must still release the button.
+
+    CodeRabbit on PR #1703: the raw-CDP drag releases in a finally; the humanized
+    drag_between had no equivalent, so a cancelled step left the button held.
+    """
+    from browser_tools.humanizer import BrowserHumanizer
+
+    sent = []
+    held_move_started = asyncio.Event()
+
+    class FakeCdp:
+        async def send(self, method, params):
+            sent.append(params)
+            if params.get("type") == "mouseMoved" and params.get("buttons") == 1:
+                held_move_started.set()
+                await asyncio.Event().wait()  # never answers: the step gets cancelled here
+            return {}
+
+    page = SimpleNamespace(
+        mouse=SimpleNamespace(move=AsyncMock(), down=AsyncMock(), up=AsyncMock()),
+        keyboard=SimpleNamespace(press=AsyncMock()),
+        viewport_size={"width": 1280, "height": 800},
+        context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=FakeCdp())),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+    humanizer._cdp_mouse_transport_enabled = True
+    task = asyncio.create_task(humanizer.drag_between(10, 20, 300, 20, steps=4))
+    await asyncio.wait_for(held_move_started.wait(), timeout=10)
+    task.cancel()
+    try:
+        await task
+        raise AssertionError("cancelled drag must propagate CancelledError")
+    except asyncio.CancelledError:
+        pass
+    types = [p.get("type") for p in sent]
+    assert "mousePressed" in types
+    assert types[-1] == "mouseReleased", types
+
+
 async def test_action_history_record_action_accepts_tuple_coordinates():
     """Drag/click executors pass (x, y); record_action used to index that as a dict.
 
@@ -35875,6 +35915,10 @@ async def run_all_tests():
     await r.record_async(
         "humanized_drag_fails_when_cdp_move_breaks_after_press",
         test_humanized_drag_fails_when_cdp_move_breaks_after_press,
+    )
+    await r.record_async(
+        "humanized_drag_releases_button_when_cancelled_after_press",
+        test_humanized_drag_releases_button_when_cancelled_after_press,
     )
     await r.record_async(
         "action_history_record_action_accepts_tuple_coordinates",

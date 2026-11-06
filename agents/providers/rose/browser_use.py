@@ -98,7 +98,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "(CDP Input.dispatchMouseEvent, same path browser-use uses for Element.drag_to). "
             "The mouse button stays held for the whole movement. Use only for sliders, CAPTCHA / "
             "'Bot or Not' slide-to-verify widgets, scrubbers, and drag-and-drop; never to move the "
-            "pointer, because click and click_coordinates already move it. Both ends are "
+            "pointer: use hover to move it without clicking (click and click_coordinates move it "
+            "themselves before pressing). Both ends are "
             "required: source_index or start_x/start_y, and target_index or end_x/end_y. Prefer "
             "indexes when those nodes are indexed; otherwise use screenshot viewport coordinates."
         ),

@@ -370,6 +370,7 @@ def test_pointer_tool_descriptions_match_runtime():
     assert "same pointer movement as click" in tools["hover"]
     assert "button stays held" in tools["drag"]
     assert "never to move the" in tools["drag"]
+    assert "use hover to move it without clicking" in tools["drag"]
     assert "source_index or start_x/start_y" in tools["drag"]
     # Native hover/drag tools exist; evaluate must not route either to JavaScript.
     assert "hover" not in tools["evaluate"] and "drag" not in tools["evaluate"]
@@ -2996,7 +2997,7 @@ def test_phone_off_matches_prephone_bytes():
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('967a09355e9e7d4c23aecdc6d4a9e3105a17b447bebc5db839cbf6942265d8cd', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('bddcafef4058651312c933bd4db69038bbd09e452a4ff214cf9d505e87e1f14f', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
+    expected = {'0': ('6ffbcc0f7fcbe140cb3e16f21bed939c2c90e036cc3f90c61af1c0569c5ddfbc', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('acde06b7d166b911ac003b267c35c45e9666377be0fe8c29bec9a6d9db88c47d', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
