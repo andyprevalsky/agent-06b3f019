@@ -100,6 +100,7 @@ check('every size of a provider is built from one source and one Dockerfile', ()
 check('Claude templates pin a CLI that supports Opus 5.5', () => {
   const dockerfile = readFileSync(path.join(templatesDir, 'claude-code/e2b.Dockerfile'), 'utf8');
   const pin = dockerfile.match(/^ARG CLAUDE_CODE_VERSION=(\S+)$/m)?.[1];
+  const nodePin = dockerfile.match(/^ARG NODE_VERSION=(\S+)$/m)?.[1];
   assert.ok(
     pin && /^2\.1\.\d+$/.test(pin) && Number(pin.split('.')[2]) >= 280,
     'Opus 5.5 needs CLI >= 2.1.280'
@@ -130,8 +131,9 @@ check('Claude templates pin a CLI that supports Opus 5.5', () => {
   const size = CLAUDE_CODE_TEMPLATE.size;
   assert.strictEqual(
     CLAUDE_CODE_TEMPLATE.alias,
-    `claude-code-v${pin.replace(/\./g, '')}-c${size.cpu}-m${size.memoryGb}`
+    `claude-code-v${pin.replace(/\./g, '')}-node${nodePin?.replace(/\./g, '')}-c${size.cpu}-m${size.memoryGb}`
   );
+  assert.strictEqual(CLAUDE_CODE_TEMPLATE.nodeVersion, nodePin);
   // The built template's CPU/memory (e2b-templates/.context receipt: 2 vCPU, 4096 MB).
   assert.deepStrictEqual(size, { cpu: 2, memoryGb: 4 });
   assert.strictEqual(DEFAULT_CLAUDE_CODE_TEMPLATE_ID, CLAUDE_CODE_TEMPLATE.alias);

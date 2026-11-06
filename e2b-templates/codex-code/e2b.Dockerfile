@@ -2,6 +2,7 @@
 FROM ubuntu:22.04
 
 ARG CODEX_VERSION=0.159.0
+ARG NODE_VERSION=22.23.4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -13,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     g++ \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get install -y "nodejs=${NODE_VERSION}-1nodesource1" \
     && npm install -g "@openai/codex@$CODEX_VERSION" \
     && rm -rf /var/lib/apt/lists/*
 

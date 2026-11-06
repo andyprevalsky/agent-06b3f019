@@ -1,5 +1,7 @@
 FROM python:3.11.9-slim
 
+ARG NODE_VERSION=22.23.4
+
 # Set working directory
 WORKDIR /app
 
@@ -11,7 +13,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get install -y "nodejs=${NODE_VERSION}-1nodesource1" \
     && rm -rf /var/lib/apt/lists/*
 
 # Needed by helpers/e2b_log_collector.py for retained sandbox stdout/stderr logs.

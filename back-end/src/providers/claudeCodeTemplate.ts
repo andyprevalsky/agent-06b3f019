@@ -11,8 +11,9 @@
  * sandbox-size-templates.test.ts fails when this and the Dockerfile pin disagree.
  */
 export const CLAUDE_CODE_TEMPLATE = {
-  alias: 'claude-code-v21305-c2-m4',
+  alias: 'claude-code-v21305-node22234-c2-m4',
   claudeCodeVersion: '2.1.305',
+  nodeVersion: '22.23.4',
   /** The template's fixed size; a different configured size needs its own template. */
   size: { cpu: 2, memoryGb: 4 },
 } as const;

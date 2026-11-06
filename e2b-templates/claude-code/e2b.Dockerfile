@@ -3,6 +3,7 @@ FROM ubuntu:22.04
 
 # Opus 5.5 requires CLI >= 2.1.280; pin every template size reproducibly.
 ARG CLAUDE_CODE_VERSION=2.1.305
+ARG NODE_VERSION=22.23.4
 
 # Install Node.js, Python, build tools, Claude Code
 RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com/ubuntu|g' /etc/apt/sources.list \
@@ -17,7 +18,7 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com
     make \
     g++ \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
+    && apt-get install -y "nodejs=${NODE_VERSION}-1nodesource1" \
     && npm install -g "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" \
     && rm -rf /var/lib/apt/lists/*
 

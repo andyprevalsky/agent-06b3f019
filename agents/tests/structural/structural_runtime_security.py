@@ -44,8 +44,10 @@ def test_container_node_runtimes_and_system_ca_store_are_patched() -> None:
         "e2b-templates/codex-code/e2b.Dockerfile",
     ):
         text = _text(path)
+        assert f"ARG NODE_VERSION={NODE_FLOOR}" in text, path
         assert "setup_22.x" in text, path
         assert "setup_20.x" not in text, path
+        assert 'nodejs=${NODE_VERSION}-1nodesource1' in text, path
         assert "ca-certificates" in text, path
 
     shipper = _text("observability/fly-log-shipper/Dockerfile")

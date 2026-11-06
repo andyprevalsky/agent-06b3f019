@@ -8,8 +8,9 @@
  * alias disagree.
  */
 export const CODEX_CODE_TEMPLATE = {
-  alias: 'codex-code-v0159',
+  alias: 'codex-code-v0159-node22234',
   codexVersion: '0.159.0',
+  nodeVersion: '22.23.4',
 } as const;
 
 export const DEFAULT_CODEX_CODE_TEMPLATE_ID = CODEX_CODE_TEMPLATE.alias;
