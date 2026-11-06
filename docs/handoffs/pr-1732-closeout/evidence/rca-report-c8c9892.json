@@ -1,0 +1,23 @@
+{
+ "failures": [
+  {
+   "id": "38dbf376aca3444cad52e3e78abe7da3",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/rdw/deploy-command-structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/rdw/deploy-command-structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "c8c9892a1ff4233bea2a5f063a07687ad622eabd",
+    "digest": "408ae32cbe3dfd8ac506144e752089306ea117b99965c052c973d80d7e64d53b"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "agents-structural data_access_boundary: DATA ACCESS BOUNDARY VIOLATION in domains/web_fetch/service.py: Imports 'httpx' but only repo and handler layers may use HTTP clients. Introduced by this PR's first version of the web_fetch hang classifier (service.py `import httpx`); the gate's other suites passed. Fix: classifier and ProviderHung moved into repo.py; service.py imports them.",
+   "evidence": "worker log /var/tmp/rdw/deploy-command-structural/.context/deploy-worker/f032dd55d75ab191d01542ac2d1d3f25204f2c984711139ef81d1650b5f047ca/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log (== agents-structural: exit=1; data_access_boundary); repro: python tests/structural/structural_architecture.py in a worker checkout at c8c9892a1 fails, passes at e2894e1a3 (fix commit)"
+  }
+ ]
+}
