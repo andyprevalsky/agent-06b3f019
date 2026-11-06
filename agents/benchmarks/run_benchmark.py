@@ -12309,6 +12309,13 @@ def _compact_benchmark_state_for_judge(data: dict) -> dict:
     """Typed tree/usage only — full child transcripts 413 the judge (smoke10)."""
     raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
     compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps"}}
+    if isinstance(raw.get("display_artifacts"), list):
+        # Their bounded text is already a displayed_to_user evidence row.
+        compact["display_artifacts"] = [
+            {key: value for key, value in artifact.items() if key != "text"}
+            for artifact in raw["display_artifacts"]
+            if isinstance(artifact, dict)
+        ]
     tree = _judge_source_tree(data)
     compact_tree: dict[str, dict] = {}
     if tree:
@@ -15012,9 +15019,13 @@ async def _run_declared_evaluators(
     if needs_tree_evidence and base_url:
         await _hydrate_semantic_evaluator_tree(data, base_url)
 
-    if base_url and any(
-        _task_declares_static_check(task, check_type)
-        for check_type in ("display_media_shown", "display_artifact_figures")
+    # Displayed items are part of the answer the user saw, so semantic judges get them too.
+    if base_url and (
+        needs_tree_evidence
+        or any(
+            _task_declares_static_check(task, check_type)
+            for check_type in ("display_media_shown", "display_artifact_figures")
+        )
     ):
         await _hydrate_display_artifacts(data, base_url)
 

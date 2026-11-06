@@ -7691,6 +7691,153 @@ async def test_required_declared_evaluator_controls_pass_fail():
     ]
 
 
+DRIVE_LEASE_DISPLAY_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "benchmarks/fixtures/display_judge_evidence/google_drive_lease_recall_e4_r001_j0007.html"
+)
+
+
+def _drive_lease_displayed_run() -> dict:
+    """The /descend epoch-4 google-drive-lease-recall run (agent 987ebdab, job r001-j0007).
+
+    The agent showed the lease facts in an inline HTML card (`display`) and then
+    finished with a lossy schema card (notice_period_days: 60, pets_allowed: true).
+    """
+    usercontent = (
+        "http://localhost:3001/usercontent/display/987ebdab-28a8-46e7-99e1-c291ece49056/"
+        "47583a952e186f66307e37f9c039dbf1b8bebacdc4707bb2e477a41eee168e6c.html"
+    )
+    pointer = {
+        "id": "e25445ba-980c-894b-a77c-1d0320cc1731",
+        "kind": "page",
+        "mime_type": "text/html",
+        "original_filename": "display.html",
+        "usercontent_url": usercontent,
+    }
+    return {
+        "agent": {"agent_id": "987ebdab-28a8-46e7-99e1-c291ece49056", "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "ASSISTANT",
+                "message": "",
+                "file_pointer": pointer,
+                "metadata": {
+                    "source": "display",
+                    "excludeFromModel": True,
+                    "display": {
+                        "canonical_id": "dsp_711daa049039757caaf588aab65f4164",
+                        "kind": "media",
+                        "media_kind": "page",
+                        "mime_type": "text/html",
+                        "placement": "inline",
+                    },
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "Displayed 1 item(s) inline for the user; text/html.",
+                "metadata": {"toolName": "display", "toolStatus": "FINISHED", "title": "Displayed for the user"},
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {
+                        "summary": "I found the current lease agreement in your Google Drive and extracted the "
+                        "monthly rent, lease end date, required move-out notice, and pet policy.",
+                        "outputs": [
+                            {"key": "monthly_rent", "value": 3450},
+                            {"key": "lease_end_date", "value": "2027-08-31"},
+                            {"key": "notice_period_days", "value": 60},
+                            {"key": "pets_allowed", "value": True},
+                        ],
+                    },
+                },
+            },
+        ],
+    }
+
+
+async def test_declared_judge_sees_the_item_displayed_to_the_user():
+    """A semantic judge reads the displayed answer, not the "Displayed 1 item(s)" stub.
+
+    /descend 2026-11-06 google-drive-lease-recall: the agent showed "Written notice"
+    and "Yes, one cat" in an inline HTML card. Display content was hydrated only for
+    tasks with display static checks, so the judge saw the stub plus the lossy schema
+    card and failed a correct answer.
+    """
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.semantic_evaluator_evidence import build_agentic_evidence
+
+    task = get_task_by_name("google-drive-lease-recall")
+    judge = next(e for e in task.evaluators if e["method"] == "single_turn_llm_judge")
+    assert not any(
+        check.get("type") in {"display_media_shown", "display_artifact_figures"}
+        for evaluator in task.evaluators
+        for check in evaluator.get("checks", [])
+    ), "the regression is about judge-only tasks"
+    html = DRIVE_LEASE_DISPLAY_FIXTURE.read_bytes()
+    data = _drive_lease_displayed_run()
+    fetched: list[str] = []
+
+    class _Response:
+        status_code = 200
+        content = html
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, *args, **kwargs):
+            fetched.append(url)
+            return _Response()
+
+    captured: list[list[dict]] = []
+
+    async def fake_judge(task_arg, evaluator_arg, data_arg, evidence=None, **_kwargs):
+        if evaluator_arg["id"] == judge["id"]:
+            captured.append(evidence)
+        return {"score": 1.0, "reasoning": "captured"}
+
+    async def no_tree(data_arg, base_url):
+        data_arg.setdefault("_semantic_evaluator_tree", {})
+
+    with (
+        patch.object(bench, "_call_declared_llm_judge", fake_judge),
+        patch.object(bench, "_hydrate_semantic_evaluator_tree", no_tree),
+        patch.object(bench, "get_agent_tree", AsyncMock(return_value=[])),
+        patch.object(bench.httpx, "AsyncClient", _Client),
+    ):
+        await bench._run_declared_evaluators(task, data, base_url="http://bench-backend:3001")
+
+    assert fetched and fetched[0].endswith(
+        "47583a952e186f66307e37f9c039dbf1b8bebacdc4707bb2e477a41eee168e6c.html"
+    ), f"displayed item was never fetched for the judge: {fetched}"
+    assert len(captured) == 1
+    shown = [row for row in captured[0] if row.get("metadata", {}).get("evidence_type") == "displayed_to_user"]
+    assert len(shown) == 1, [row.get("metadata") for row in captured[0]]
+    assert shown[0]["role"] == "ASSISTANT"
+    assert "Written notice" in shown[0]["text"] and "Yes, one cat" in shown[0]["text"]
+    assert shown[0]["metadata"]["mime_type"] == "text/html"
+    # The bounded row is the only copy; benchmark_state keeps the artifact's metadata.
+    state = next(row["benchmark_state"] for row in captured[0] if "benchmark_state" in row)
+    assert all("text" not in artifact for artifact in state["display_artifacts"])
+    agentic = build_agentic_evidence(data)
+    assert any(
+        row.get("metadata", {}).get("evidence_type") == "displayed_to_user" and "Yes, one cat" in row["text"]
+        for row in agentic["messages"]
+    )
+
+
 def test_declared_evaluator_evidence_includes_payment_approval_metadata():
     """Single-turn judges must see payment-request metadata, not a stripped title-only view."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
@@ -28346,6 +28493,10 @@ async def run_all_tests():
     r.record(
         "declared_evaluator_evidence_normalized_completion_card",
         test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
+    )
+    await r.record_async(
+        "declared_judge_sees_the_item_displayed_to_the_user",
+        test_declared_judge_sees_the_item_displayed_to_the_user,
     )
     r.record(
         "declared_evaluator_evidence_includes_structured_output_first",
