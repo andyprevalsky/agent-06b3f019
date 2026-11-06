@@ -1,0 +1,605 @@
+{
+  "format": "PR1691-DELETION-READINESS-MANIFEST-V1",
+  "generated_at": "2026-11-06T02:16:43.298890+00:00",
+  "status": "PRESERVATION_VERIFIED_PUBLICATION_PENDING",
+  "deletion_ready": false,
+  "parent_final_publication_required": true,
+  "deployment_pr": 1691,
+  "preservation_followup_pr": null,
+  "deployed_source": "05826f6dd4f260fdc3602ab3e63095d13d2ddc81",
+  "validated_source": "493df34052b766e156182b7a264babaa683dcba9",
+  "factory_ledger_commit": "beb1ceecfd44045a6b4b3a25665c07d2575a5119",
+  "records_branch_base": "beb1ceecfd44045a6b4b3a25665c07d2575a5119",
+  "unique_verified_archive_objects": 6,
+  "archives": [
+    {
+      "set": "core",
+      "scope": "PR1691 core deploy/RCA/approval/production/config/db/snapshot records",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1691-05826f6d/20261106T015407Z-core-df7d02319ff1.tar.gz.aesgcm",
+      "receipt_sidecar_key": "devbox-closeout-private/pr1691-05826f6d/20261106T015407Z-core-df7d02319ff1.tar.gz.aesgcm.receipt.aesgcm",
+      "ciphertext_sha256": "717dc84bb1c6ff0a71a523b50dd617d531d70d138caf5511f75f989183a6b854",
+      "receipt_sidecar_sha256": "23c770e1451919744df05240012c94ef00616af57b996c0aaad0642a581d2781",
+      "manifest_sha256": "7d8f8fd17e5a5ed6bbb4d074824faff79b27e9f1c6c893824d3fe3803c1f7770",
+      "member_count": 14277,
+      "original_member_bytes": 766292819,
+      "ciphertext_bytes": 349752646,
+      "frames": 42,
+      "verified_at": "2026-11-06T01:55:37.398602+00:00",
+      "full_readback_verified": true,
+      "authenticated_decryption_verified": true,
+      "all_tar_members_hash_verified": true,
+      "receipt_sidecar_authenticated_readback": true,
+      "unsigned_get_http": 400,
+      "sidecar_unsigned_get_http": 400,
+      "representative_restore": {
+        "member": "home/boxes/rose/.context/deploy-runs/20261105-000044-2925067/failure-report.json",
+        "sha256": "e564a8e98b09e8dd8ac62fb51a93fb841c801d458e3bee33eb44c055789ac4a8",
+        "verified": true
+      }
+    },
+    {
+      "set": "cloud",
+      "scope": "PR1691 all 11 smoke campaign directories (.context/deploy-cloud)",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1691-05826f6d/20261106T015524Z-cloud-86675478378d.tar.gz.aesgcm",
+      "receipt_sidecar_key": "devbox-closeout-private/pr1691-05826f6d/20261106T015524Z-cloud-86675478378d.tar.gz.aesgcm.receipt.aesgcm",
+      "ciphertext_sha256": "e51ab94d72ce728b82e3c1f0f6e226008c9a2957d93e39caae518488d71eb9fc",
+      "receipt_sidecar_sha256": "f3262de628b8a7912133addf2172c77b83d14d09ffda1513782f837bf67533eb",
+      "manifest_sha256": "a6a500543b1847593999ebf2ad091f8ddf8e0bb88a517a795e8a21a3f79e3c2c",
+      "member_count": 8884,
+      "original_member_bytes": 6602979835,
+      "ciphertext_bytes": 1941034766,
+      "frames": 232,
+      "verified_at": "2026-11-06T02:04:22.432300+00:00",
+      "full_readback_verified": true,
+      "authenticated_decryption_verified": true,
+      "all_tar_members_hash_verified": true,
+      "receipt_sidecar_authenticated_readback": true,
+      "unsigned_get_http": 400,
+      "sidecar_unsigned_get_http": 400,
+      "representative_restore": {
+        "member": "home/boxes/rose/.context/deploy-cloud/97519b97391d34f06ba201c1759b3d12981178ce6c34c6b4bb556ea36e44c8e0/result.json",
+        "sha256": "2c7cf3eeb0c3f780bb57e61131b67f6f61b57d4389ef8a51dbf06544f007b39b",
+        "verified": true
+      }
+    },
+    {
+      "set": "backend",
+      "scope": "PR1691 backend-coverage worker retained runs and gate evidence",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1691-05826f6d/20261106T015524Z-backend-a2e6bcee2757.tar.gz.aesgcm",
+      "receipt_sidecar_key": "devbox-closeout-private/pr1691-05826f6d/20261106T015524Z-backend-a2e6bcee2757.tar.gz.aesgcm.receipt.aesgcm",
+      "ciphertext_sha256": "e65ea4c0d69ec59a8a1fcc0cba3900308d00a0b0ba7444421321f6b5eada004c",
+      "receipt_sidecar_sha256": "6e315f80be8097cff15b0ff92ec36e64e7edafcdb6cb66c2491a9a969b4392f3",
+      "manifest_sha256": "50f9f122065668ac2c63c67b6dd83be85ccfcbdbf95616e0a108465f02795390",
+      "member_count": 46829,
+      "original_member_bytes": 18025465599,
+      "ciphertext_bytes": 3921335941,
+      "frames": 468,
+      "verified_at": "2026-11-06T02:14:55.887318+00:00",
+      "full_readback_verified": true,
+      "authenticated_decryption_verified": true,
+      "all_tar_members_hash_verified": true,
+      "receipt_sidecar_authenticated_readback": true,
+      "unsigned_get_http": 400,
+      "sidecar_unsigned_get_http": 400,
+      "representative_restore": {
+        "member": "var/tmp/deploy-workers/backend-coverage/.context/deploy-backend/ccc3f546a3ac06da051ad3d8151325f7951b7b104f8349549295a0d51427ec0f/result.json",
+        "sha256": "4a1486d70d4bfe3be69e8ed7838f6f5795dfc76a27763d0b73314127d5fb985f",
+        "verified": true
+      }
+    },
+    {
+      "set": "workers",
+      "scope": "PR1691 10 non-backend deploy worker gate evidence",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1691-05826f6d/20261106T015407Z-workers-0770ce7cae5c.tar.gz.aesgcm",
+      "receipt_sidecar_key": "devbox-closeout-private/pr1691-05826f6d/20261106T015407Z-workers-0770ce7cae5c.tar.gz.aesgcm.receipt.aesgcm",
+      "ciphertext_sha256": "ef515670062487e235be990dbadf55ae028d8c3eb7b95faafa85ff01e5bfd218",
+      "receipt_sidecar_sha256": "4f551df829ef92357f87e7811847ef2a3309c5c4ca6e74ccd6f6fd53730fabf5",
+      "manifest_sha256": "1d3c2a919e0ec9fc0d4a9b81b9faadfccd158e81eb4e4424205d7d463e4d28e0",
+      "member_count": 35033,
+      "original_member_bytes": 569006915,
+      "ciphertext_bytes": 138921789,
+      "frames": 17,
+      "verified_at": "2026-11-06T01:55:22.910171+00:00",
+      "full_readback_verified": true,
+      "authenticated_decryption_verified": true,
+      "all_tar_members_hash_verified": true,
+      "receipt_sidecar_authenticated_readback": true,
+      "unsigned_get_http": 400,
+      "sidecar_unsigned_get_http": 400,
+      "representative_restore": {
+        "member": "var/tmp/deploy-workers/structural.prepare.json",
+        "sha256": "8d6585946e74df9fd37b50c6cf8167a69bc7579f9b4e0288023dde9d8546fbae",
+        "verified": true
+      }
+    },
+    {
+      "set": "control",
+      "scope": "PR1691 private per-path inventory, selections, capture manifests, private receipts, snapshots and closeout tooling",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1691-05826f6d/20261106T021518Z-control-ef3595944bbd.tar.gz.aesgcm",
+      "receipt_sidecar_key": "devbox-closeout-private/pr1691-05826f6d/20261106T021518Z-control-ef3595944bbd.tar.gz.aesgcm.receipt.aesgcm",
+      "ciphertext_sha256": "209c34c43b4e0843923e2748238c2ad3de9545c7e0740e84d0a75678be97afbb",
+      "receipt_sidecar_sha256": "8c6424d9e269665c62f3859228dad6bf6f237dd13be50762c10fed09fbc60bdb",
+      "manifest_sha256": "2f599262eaa54356e59653787c6a790389939b2dee5d5c949dd5d73d1a06f96e",
+      "member_count": 82,
+      "original_member_bytes": 96257033,
+      "ciphertext_bytes": 15956479,
+      "frames": 2,
+      "verified_at": "2026-11-06T02:15:24.642577+00:00",
+      "full_readback_verified": true,
+      "authenticated_decryption_verified": true,
+      "all_tar_members_hash_verified": true,
+      "receipt_sidecar_authenticated_readback": true,
+      "unsigned_get_http": 400,
+      "sidecar_unsigned_get_http": 400,
+      "representative_restore": {
+        "member": "var/tmp/pr1691-closeout-work/inventory.jsonl",
+        "sha256": "1a2382a60066992e06f3d5b86048704fc84a83802590bbb2ce4aaf61a3d29045",
+        "verified": true
+      }
+    },
+    {
+      "set": "control2",
+      "scope": "PR1691 final closeout tool versions, control receipt and pointer/recovery checks recorded after the control archive",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1691-05826f6d/20261106T021641Z-control2-9185b190f1b0.tar.gz.aesgcm",
+      "receipt_sidecar_key": "devbox-closeout-private/pr1691-05826f6d/20261106T021641Z-control2-9185b190f1b0.tar.gz.aesgcm.receipt.aesgcm",
+      "ciphertext_sha256": "66bfbd8ecb9f44a323881be09428b927ec98be5bd8ba701240bc430cdf458c58",
+      "receipt_sidecar_sha256": "934e3d8175c6b0a05a0e26b91a3b188723fe7882c97303e58fd7a9ae13d8c16c",
+      "manifest_sha256": "ed6f8ed83e950385d16183f08fd0e6337b091b6d434557406b08b01b2a85653c",
+      "member_count": 8,
+      "original_member_bytes": 59207,
+      "ciphertext_bytes": 20934,
+      "frames": 1,
+      "verified_at": "2026-11-06T02:16:42.539695+00:00",
+      "full_readback_verified": true,
+      "authenticated_decryption_verified": true,
+      "all_tar_members_hash_verified": true,
+      "receipt_sidecar_authenticated_readback": true,
+      "unsigned_get_http": 400,
+      "sidecar_unsigned_get_http": 400,
+      "representative_restore": {
+        "member": "var/tmp/pr1691-closeout-work/compose_packet.py",
+        "sha256": "e64aaefe71f0b86d5d059cc17bbf178dc43e67f6dafd1d7737db3ac946bbac0c",
+        "verified": true
+      }
+    }
+  ],
+  "aggregate_archive_statistics": {
+    "objects": 6,
+    "member_instances": 105113,
+    "original_member_bytes": 26060061408,
+    "ciphertext_bytes": 6367022555
+  },
+  "inventory": {
+    "records": 105790,
+    "dispositions": {
+      "archive": {
+        "records": 105023,
+        "bytes": 25963745168
+      },
+      "archive-set": {
+        "records": 1,
+        "bytes": 0
+      },
+      "committed": {
+        "records": 12,
+        "bytes": 0
+      },
+      "covered-by-prior-closeout": {
+        "records": 1,
+        "bytes": 0
+      },
+      "deduplicated": {
+        "records": 44,
+        "bytes": 341528
+      },
+      "managed-escrow": {
+        "records": 1,
+        "bytes": 0
+      },
+      "reproducible": {
+        "records": 265,
+        "bytes": 7097895977
+      },
+      "symlink-metadata": {
+        "records": 443,
+        "bytes": 27916
+      }
+    },
+    "archived_per_set": {
+      "backend": {
+        "files": 46829,
+        "bytes": 18025465599
+      },
+      "cloud": {
+        "files": 8884,
+        "bytes": 6602979835
+      },
+      "core": {
+        "files": 14277,
+        "bytes": 766292819
+      },
+      "workers": {
+        "files": 35033,
+        "bytes": 569006915
+      }
+    },
+    "unreadable_or_error_rows": 0,
+    "special_files": 0,
+    "window_start_for_canonical_untracked": "2026-11-04T18:00:00Z"
+  },
+  "record_groups": [
+    {
+      "record": "/var/tmp/rca-codeagent (scratch, approval packets, golden verdicts, prompts, handoffs, timings, prodq outputs, triage, smoke/image receipts)",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 2293,
+      "bytes": 260548011
+    },
+    {
+      "record": "/home/boxes/rose/.context/deploy-pipeline (cycle.json, every cycle.*.json, attempts/, attempts.*/, plan.json, plan.*.json, rca/, production.json, pr1691-13ac-report.json, report.md)",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 1147,
+      "bytes": 23492832
+    },
+    {
+      "record": "/home/boxes/rose/.context/deploy-cloud/<11 campaign hashes> (smoke campaign evidence)",
+      "disposition": "archived+verified",
+      "archive_set": "cloud",
+      "files": 8884,
+      "bytes": 6602979835
+    },
+    {
+      "record": "/home/boxes/rose/.context/deploy-runs/20261105-000044-2925067 (timing, stages, admissions, logs, passed-cache, failure-report.json) and current/factory-current pointers",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 14,
+      "bytes": 16322
+    },
+    {
+      "record": "/home/boxes/rose/.context/deploy-approval-batch.diff/.json, deploy-review-cycle.json, deploy-review-dispositions.jsonl, factory-events.jsonl and other top-level deploy files",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 12,
+      "note": "also counted in the canonical untracked group below"
+    },
+    {
+      "record": "/home/boxes/rose/.context/fleet/runs (post-deploy claude-code-agent REAL PASS 20261106-011430-4091348 and 20261106-011458-4097574)",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 530,
+      "bytes": 25689068
+    },
+    {
+      "record": "/home/boxes/rose/.context/rca_evidence/34e5cce9-d37d-4373-99ba-82cb6e4dd234 (restored trace bundle evidence)",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 1914,
+      "bytes": 220480205
+    },
+    {
+      "record": "/home/boxes/rose/.llm-dumps/<c4eaace9,b7b38748,9c84b03a,6cac9b35,c7fc277e> cited in the approval packet",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 55,
+      "bytes": 4796822
+    },
+    {
+      "record": "/tmp/pr1691-prod (production verification logs and helper scripts)",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 40,
+      "bytes": 2388873
+    },
+    {
+      "record": "/var/tmp/rca-codeagent/image-build and image-activate.log (bench image cloudbench-warm-20261105-230148-1909186 build/publication/activation receipts)",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 18,
+      "bytes": 115201
+    },
+    {
+      "record": "/var/tmp/deploy-workers/backend-coverage/.context, .llm-dumps, agents/.context, back-end/.context, coverage/logs",
+      "disposition": "archived+verified",
+      "archive_set": "backend",
+      "files": 46829,
+      "bytes": 18025465599
+    },
+    {
+      "record": "/var/tmp/deploy-workers/<10 other workers> gate evidence, logs, coverage and Playwright reports; *.prepare.json",
+      "disposition": "archived+verified",
+      "archive_set": "workers",
+      "files": 35033,
+      "bytes": 569006915
+    },
+    {
+      "record": "Local configuration (agents/back-end/front-end/mac-app/research .env, agents/.env.benchmark-temporal, .env.npm, .cloud-env)",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 8,
+      "bytes": 33951,
+      "note": "Encrypted only. All key names are also present in boxes.dev project-managed env; value equality with the managed store was not independently read back."
+    },
+    {
+      "record": "22 local PostgreSQL databases created or used in the PR1691 window, plus globals",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 68,
+      "bytes": 100322963,
+      "note": "Read-only pg_dump -Fc (default_transaction_read_only=on); every dump passed pg_restore --list. Source databases unchanged."
+    },
+    {
+      "record": "Canonical untracked/ignored files changed since 2026-11-04T18:00Z (other .llm-dumps, benchmarks, test-runs, trace-archive outbox, rendered-llm-dumps, logs, top-level deploy files)",
+      "disposition": "archived+verified",
+      "archive_set": "core",
+      "files": 10641,
+      "bytes": 364888445
+    }
+  ],
+  "not_archived_dispositions": [
+    {
+      "record": "Tracked source in /home/boxes/rose and all 11 worker clones",
+      "disposition": "committed",
+      "source": "clean at 493df34052b766e156182b7a264babaa683dcba9, ancestor of origin/main; merged as 05826f6dd4f260fdc3602ab3e63095d13d2ddc81"
+    },
+    {
+      "record": "PR1691 refs: fix/code-agent-multiday-*, fix/code-agent-resume-keeps-live-cli, fix/grep-param-contract, fix/compute-token-login-disable-writers, wip/code-agent-multiday-* (27 remote refs)",
+      "disposition": "committed",
+      "source": "git ls-remote verified; every tip is an ancestor of origin/main"
+    },
+    {
+      "record": "Frozen deploy SHAs fc12611fa, 5d0b40b22, 99f748064, 1e71a2f6b, d616db6e1, 096709cae, 7fb509f0d, 15a310c2d, 493df3405, 28a7bfc99",
+      "disposition": "committed",
+      "source": "all ancestors of origin/main"
+    },
+    {
+      "record": "14 local-only commits on backup/cerebras-chat-quota-prepush-20261002 (2026-10-02)",
+      "disposition": "archived+verified (prior closeout)",
+      "source": "Predate PR1691; preserved by the PR1634 all-refs source bundles (docs/handoffs/pr-1634-closeout). Worker clones hold the same 14 via their canonical remote, no others."
+    },
+    {
+      "record": "Worker env copies (agents/.env, back-end/.env, front-end/.env, agents/.env.benchmark-temporal) in 11 workers",
+      "disposition": "reproducible (deduplicated)",
+      "source": "byte-identical to the archived canonical configuration",
+      "records": 44
+    },
+    {
+      "record": "node_modules, back-end/front-end node_modules, agents/venv (canonical and workers; symlinks or cp -a copies)",
+      "disposition": "reproducible",
+      "source": "npm ci/npm install from committed lockfiles at 493df3405; python3.11 -m venv + pip install -r agents/requirements.txt"
+    },
+    {
+      "record": "Worker .context/experiential-venv",
+      "disposition": "reproducible",
+      "source": "bash scripts/setup-world-model.sh"
+    },
+    {
+      "record": "Worker .context/frontend-builds (semantic bundled build)",
+      "disposition": "reproducible",
+      "source": "scripts/run.sh bundled Vite build of committed front-end at 493df3405"
+    },
+    {
+      "record": "__pycache__, .pytest_cache, .context/native-pytest-cache, .context/tsbuildinfo, *.cloudbench-upsert.lock (empty)",
+      "disposition": "reproducible",
+      "source": "interpreter/test/tsc caches; regenerated on next run"
+    },
+    {
+      "record": ".git object store, reference repos (openclaw, hermes-agent, codex, prime-agent, kimi-code), claude-code-src",
+      "disposition": "reproducible",
+      "source": "GitHub origin; bash scripts/sync-reference-repos.sh; claude-code-src is tracked"
+    },
+    {
+      "record": "443 symlinks inside archived trees",
+      "disposition": "symlink metadata recorded",
+      "source": "literal targets in inventory.jsonl; every target is a directory, an archived file or tracked source at 493df3405"
+    },
+    {
+      "record": ".context/pr1634-archive-recovery.env",
+      "disposition": "managed escrow",
+      "source": "boxes.dev project-managed PR1634_ARCHIVE_RECOVERY_KEY_B64; deliberately not stored inside the archives it decrypts"
+    },
+    {
+      "record": "/var/tmp/rca-codeagent/image-activation",
+      "disposition": "empty directory (no files)",
+      "source": "activation receipt is image-activate.log in /var/tmp/rca-codeagent (archived, core)"
+    },
+    {
+      "record": "Agent 34e5cce9 .llm-dumps",
+      "disposition": "not local; archived from trace bundle",
+      "source": "no local .llm-dumps dir existed; the restored R2 trace bundle copy (approval/archive-34e5cce9) and .context/rca_evidence/34e5cce9 are archived (core); originals remain in trace-archive llm/f86cada8fec1"
+    },
+    {
+      "record": "f9212972-5765-4d73-9b9d-6d1a248a3ed7 in the approval packet",
+      "disposition": "not an agent",
+      "source": "it is a tool_call_id inside c4eaace9 explore trajectory (local isolated stack, DB dropped at teardown); dumps for c4eaace9 archived"
+    },
+    {
+      "record": "Canonical untracked/ignored files last modified before 2026-11-04T18:00Z",
+      "disposition": "archived+verified (prior closeout)",
+      "source": "predate PR1691 work; PR1634 closeout (e0d1a838, b4129175) preserved the devbox through its 2026-11-05 cutoffs"
+    }
+  ],
+  "known_historical_loss": [
+    {
+      "item": "Superseded backend-coverage test-runs/* and deploy-backend/* directories",
+      "cause": "deleted with user approval during the deploy to recover disk",
+      "recovered": false
+    },
+    {
+      "item": "backend-coverage .context/test-runs/.port-locks and browser-provider-custody journals as of the deletion",
+      "cause": "accidentally removed by that approved deletion; current directories were recreated by later runs and are archived",
+      "recovered": false
+    },
+    {
+      "item": "Temporary swapfile",
+      "cause": "deleted with user approval",
+      "recovered": false,
+      "needed": "no (runtime swap only)"
+    },
+    {
+      "item": "A scratch clone",
+      "cause": "deleted with user approval",
+      "recovered": false,
+      "needed": "source content is in Git"
+    }
+  ],
+  "resources": {
+    "observed_at": "2026-11-06T01:53:37Z",
+    "fly_bench_app": {
+      "app": "navi-whisper-lux-bench",
+      "machines": 40,
+      "states": {
+        "stopped": 7,
+        "suspended": 4,
+        "started": 29
+      },
+      "machines_referencing_pr1691_campaign_tokens_or_hashes": 0,
+      "pr1691_smoke_campaigns": "5 complete with cleanup_complete=true; 6 ended before allocation (complete=false, native_exit=1); no current Machine references any of their tokens or hashes",
+      "protected_shared_source_base": {
+        "machine": "832717a71940d8",
+        "name": "cloudbench-source-a67a0f74e9f12f9b8ab68f7f2544975c",
+        "state": "stopped",
+        "volume": "vol_r7yn2m8y78mwkx3r",
+        "volume_gb": 40,
+        "created_at": "2026-11-05T10:39:43Z",
+        "disposition": "retained: separately owned immutable fleet source base, listed in PR1691 smoke shared inventory and reused by the post-deploy fleet runs; stopped Machine rootfs and volume remain billable storage"
+      },
+      "machines_created_after_pr1691_runs": "14 started Machines created 01:40-01:48Z on 2026-11-06 are not referenced by any PR1691 run record or local process; another owner. Not touched."
+    },
+    "local_processes": "No PR1691 gate, capture or fleet controller process remains. A flyctl agent daemon (started by flyctl around 01:15Z) remains and ends with the devbox. No process was signalled by this closeout.",
+    "local_databases": "22 PR1691-window databases retained and dumped; 13 prisma_local_push_ddl_test_<pid> databases are leaked by a structural test teardown (open, not fixed here). No database was dropped.",
+    "worker_clones": "11 clones under /var/tmp/deploy-workers retained for the parent retirement decision; they use canonical .git/objects via alternates, so retire them before or with the canonical checkout.",
+    "closeout_scratch": "/var/tmp/pr1691-closeout (records clone) and /var/tmp/pr1691-closeout-work (private inventory, receipts, restore test copies); disposable after merge, with their content archived (control set) or in Git.",
+    "protected": "Freedom, protected instructions and shared Fly warm/source resources were not changed."
+  },
+  "production_verification": {
+    "fly_worker_run": 42138235262,
+    "cutover_verified_hash": "7ce4b5046f5f",
+    "render_live": {
+      "commit": "05826f6dd4f260fdc3602ab3e63095d13d2ddc81",
+      "deploy": "dep-dbmi8v3bc2fs73dem7qg",
+      "prior_failed_deploy": "dep-dbmi2p0n74is73e37img",
+      "prior_failure": "update_failed: two-instance migrate-lock deadlock on CONCURRENTLY index"
+    },
+    "backend_probes": "15/15 PASS",
+    "step_13ac": "45/45 PASS",
+    "semantic_run": {
+      "id": 42143457242,
+      "result": "5/5 PASS"
+    },
+    "post_deploy_smoke": {
+      "task": "claude-code-agent",
+      "result": "REAL PASS",
+      "window": "2026-11-06T01:39-01:40Z",
+      "run_dir": ".context/fleet/runs/20261106-011430-4091348",
+      "restored_logins_used_and_connected": [
+        "074bfdd5",
+        "88a02cdc",
+        "6a703dd4"
+      ]
+    },
+    "mac_acceptance": {
+      "result": "SKIPPED",
+      "reason": "no Mac available; LocalDevice for user 1f85ff25 returned 0 rows at 2026-11-06T01:41:42Z"
+    },
+    "evidence": [
+      ".context/deploy-pipeline/production.json",
+      ".context/deploy-pipeline/pr1691-13ac-report.json",
+      "/tmp/pr1691-prod/"
+    ]
+  },
+  "repair_handoffs": {
+    "failure_report": ".context/deploy-runs/20261105-000044-2925067/failure-report.json",
+    "repairs": [
+      {
+        "id": "pr1691-fps",
+        "thread": "ph78vk2fm4g236tzeem10cdfe18hpvdq"
+      },
+      {
+        "id": "pr1691-mass",
+        "thread": "ph79rp6vpdbew7af2hkyd505x58hq0sz"
+      },
+      {
+        "id": "pr1691-webdecoy",
+        "thread": "ph748rvfxv8j1zba79brna917s8hqvc8"
+      },
+      {
+        "id": "pr1691-structural",
+        "thread": "ph75djbchs67vxpwnr1b2kjfrx8hqsyt"
+      }
+    ],
+    "native_results": "all FAIL, attribution NOT_INTRODUCED, delegated to new Bugs devboxes; not relabeled",
+    "deferred_review_finding": {
+      "coderabbit_comment": 4487727422,
+      "topic": "__proto__ flat filter",
+      "owner_thread": "ph7c9y9h3m1pdx76hrcy7ax24d8hkd3c",
+      "followup_branch": "fix/grep-proto-flat-filter"
+    },
+    "shared_bench_image": {
+      "activated": "cloudbench-warm-20261105-230148-1909186",
+      "built_from": "493df3405"
+    }
+  },
+  "key_recovery": {
+    "independent_managed_escrow_file": ".context/pr1634-archive-recovery.env",
+    "managed_variable": "PR1634_ARCHIVE_RECOVERY_KEY_B64",
+    "project_managed_has_value": true,
+    "decoded_key_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+    "effective_archive_key_sha256_matches": true,
+    "separate_process_real_restore": {
+      "archive": "core",
+      "members": 14277,
+      "independent_member_hash_mismatches": 0
+    },
+    "adapter_sha256": "0c469e18e5b391bedc53669781e2633145d564156476955097be51ec554afe32",
+    "legacy_helper_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+    "legacy_helper_git_blob": "592c092502cae2f08015858f98cdd1b5d436310b"
+  },
+  "configuration_recovery": {
+    "managed_files": [
+      "agents/.env",
+      "back-end/.env",
+      "front-end/.env",
+      "mac-app/.env",
+      "research/.env",
+      "agents/.env.benchmark-temporal",
+      ".env.npm",
+      ".context/pr1634-archive-recovery.env"
+    ],
+    "local_key_names_missing_from_managed_env": 0,
+    "value_equality_with_managed_store_verified": false,
+    "current_bytes_archived_encrypted": true,
+    ".cloud-env": "three non-secret workspace identity variables (CONDUCTOR_*); archived and documented in CLAUDE.md"
+  },
+  "source_recovery": {
+    "deployed": "05826f6dd4f260fdc3602ab3e63095d13d2ddc81",
+    "reviewed_head": "493df34052b766e156182b7a264babaa683dcba9",
+    "factory_ledger_commit": "beb1ceecfd44045a6b4b3a25665c07d2575a5119",
+    "all_pr1691_refs_in_main": true,
+    "remote_refs_checked": 27,
+    "frozen_deploy_shas_in_main": 10,
+    "new_local_only_commits": 0,
+    "worker_unique_commits": 0,
+    "recovery": "git clone https://github.com/Rose-Ai-Labs/rose.git; git checkout 05826f6dd4f260fdc3602ab3e63095d13d2ddc81"
+  },
+  "qualification_and_limits": {
+    "privacy_control_plane_verified": false,
+    "upload_policy": "Ciphertext objects and encrypted receipt sidecars only; unsigned GET denied for every object and sidecar. Authenticated readback is not proof of bucket public-access policy.",
+    "cutoffs": "Finite per-file cutoffs; each member records size/mtime_ns at capture and capture aborts on change during read. Later writes are covered only by the delta check recorded in control-bindings-verification.json.",
+    "database_restores": "pg_restore --list passed for every dump; no application-level restore was run.",
+    "no_deletion_performed": true
+  },
+  "open_items": [],
+  "recovery_document": "RECOVERY.md",
+  "private_proof_index": "private-proof-index.json",
+  "private_verification_file": "private-preservation-verification.json",
+  "control_binding_verification_file": "control-bindings-verification.json",
+  "deletion_readiness_receipt": "deletion-readiness.json",
+  "publication_record": "publication.json"
+}

@@ -1,0 +1,33 @@
+{
+  "format": "PR1691-DELETION-READINESS-RECEIPT-V1",
+  "at": "2026-11-06T02:16:43.298890+00:00",
+  "deployed_pr": 1691,
+  "deployed_source": "05826f6dd4f260fdc3602ab3e63095d13d2ddc81",
+  "validated_source": "493df34052b766e156182b7a264babaa683dcba9",
+  "factory_ledger_commit": "beb1ceecfd44045a6b4b3a25665c07d2575a5119",
+  "records_pr": null,
+  "records_commit": "The merged commit containing this file; recorded in publication.json after merge.",
+  "final_inventory": {
+    "records": 105790,
+    "proof": "private-proof-index.json role per_path_inventory"
+  },
+  "archive_verification": {
+    "objects": 6,
+    "all_full_readback_authenticated_member_hashed": true,
+    "sidecars_authenticated": true,
+    "unsigned_access_denied": true
+  },
+  "independent_key_recovery": {
+    "escrow": "project-managed PR1634_ARCHIVE_RECOVERY_KEY_B64",
+    "fingerprint": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+    "separate_process_restore_members": 14277
+  },
+  "configuration_recovery": "All local env key names present in boxes.dev managed env; current bytes archived encrypted (core).",
+  "source_recovery": "All PR1691 source in origin/main; no new local-only commits.",
+  "resource_disposition": "No PR1691-owned Fly Machine remains; shared protected source base retained; worker clones, local test DBs and scratch retained for the parent retirement decision; no process signalled.",
+  "recoverable_without_this_machine": true,
+  "deletion_performed": false,
+  "deletion_ready": false,
+  "deletion_ready_condition": "This PR merged and linked from PR1691 (publication.json COMPLETE).",
+  "open_items": []
+}

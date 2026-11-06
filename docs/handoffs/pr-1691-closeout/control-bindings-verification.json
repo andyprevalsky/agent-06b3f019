@@ -1,0 +1,19 @@
+{
+  "at": "2026-11-06T02:15:08.727131+00:00",
+  "status": "PASS",
+  "archive_rows": 105023,
+  "bound_archive_rows": 105023,
+  "unbound_archive_rows": 0,
+  "symlink_rows_resolved": 443,
+  "symlink_rows_unresolved": 0,
+  "dedup_rows_verified": 44,
+  "dedup_rows_unverified": 0,
+  "post_capture_changed": 0,
+  "post_capture_vanished": 0,
+  "post_capture_new": 0,
+  "post_capture_delta_archived": false,
+  "method": "Every archive-disposition inventory row was matched to a member of its set capture manifest with equal size and mtime_ns; every capture manifest was authenticated by full remote readback. Symlink targets resolve to directories, archived files or tracked source. Deduplicated env copies match an archived canonical member SHA256. Archived paths were re-stated and roots rescanned after capture.",
+  "source_payload_bytes_read_by_this_check": 0,
+  "parent_publication_required": true,
+  "deletion_ready": false
+}
