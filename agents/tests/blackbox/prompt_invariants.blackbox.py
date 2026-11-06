@@ -460,9 +460,10 @@ def test_code_agent_advertises_rose_user_ui_and_agent_display():
 
 STOCK_SPAWN_CODE_LINE = (
     "- code: An agent specialized in executing code commands. It lives in a persistent E2B sandbox and uses "
-    "Anthropic's Claude Code. It syncs results to a GitHub repo initialized to this agent network after "
-    "completion. The task should be tightly scoped and self-sufficient. Send video generation or editing "
-    "to a code agent; tell it to make real footage with `rose video` and edit with ffmpeg."
+    "Anthropic's Claude Code. After completion it syncs results to the current project's GitHub repo, or "
+    "outside a project to a repo created for this agent tree. The task should be tightly scoped and "
+    "self-sufficient. Send video generation or editing to a code agent; tell it to make real footage with "
+    "`rose video` and edit with ffmpeg."
 )
 ROSE_DESKTOP_PROMPT_TERMS = ("inline_view", "rose_user_ui", "Rose app UI", "pinned", "inline view")
 
@@ -544,6 +545,111 @@ async def test_planner_tools_description_follows_the_workflow_account():
             async for _event in SetPlanManager().execute_tool(_Wf(user_id), {"tool": "set_plan"}, "call-1"):
                 pass
     assert captured == [True, True, False]
+
+
+ROSE_PROJECT = {"name": "Rose", "repo_url": "https://github.com/Rose-Ai-Labs/rose", "default_branch": "main"}
+PROJECT_REPO_RULE = "do not search for the repo URL or pass github_repo_link"
+
+
+def test_project_context_lands_once_in_the_dynamic_user_context_block():
+    """V2 (Andy, 2026-11-06): a project agent knows its synced repo (RCA 2026-11-06 root-agent-project-context).
+
+    Root 1a3d495c sat in project "Rose" (Rose-Ai-Labs/rose) yet planned a repo-URL hunt:
+    nothing in its prompts named the project. The section leads the
+    dynamic user-context block (leading it) for the PLAN/EXECUTE main loop and the planner; the
+    static block before it and everything after it stay byte-identical, so the
+    cached prefix and a Home agent's prompts are unchanged.
+    """
+    from utils.prompts import (
+        SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+        build_planner_system_prompt,
+        build_system_prompt,
+        render_project_context,
+        user_context_with_project,
+    )
+
+    user_context = "## Personal Information\nFull Name: Test User"
+    section = render_project_context(ROSE_PROJECT)
+    assert section.startswith("## Project\n"), section
+    combined = user_context_with_project(user_context, section)
+    builders = {
+        "PLAN": lambda uc: build_system_prompt("PLAN", [], user_context_section=uc),
+        "EXECUTE": lambda uc: build_system_prompt("EXECUTE", [], user_context_section=uc),
+        "planner": lambda uc: build_planner_system_prompt("tools", uc),
+    }
+    for label, build in builders.items():
+        home, placed = build(user_context), build(combined)
+        home_blocks = home.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+        placed_blocks = placed.split(SYSTEM_PROMPT_DYNAMIC_BOUNDARY)
+        assert placed_blocks[0] == home_blocks[0], f"{label}: static block changed"
+        assert placed_blocks[2:] == home_blocks[2:], f"{label}: blocks after user context changed"
+        block = placed_blocks[1]
+        for fact in ("Rose-Ai-Labs/rose", "default branch main", PROJECT_REPO_RULE, "## Project"):
+            assert placed.count(fact) == 1 and block.count(fact) == 1, f"{label}: {fact!r} not once in block 1"
+        assert block.lstrip().startswith(f"# User Context\n\n{section}\n\n"), f"{label}: section must lead block 1"
+        assert home == build(user_context_with_project(user_context, render_project_context(None)))
+
+    assert render_project_context(None) == "" and render_project_context({"name": ""}) == ""
+    assert user_context_with_project(user_context, "") == user_context, "Home agents keep today's text"
+    assert user_context_with_project("", section) == f"{section}\n\nNo additional user context."
+    no_repo = render_project_context({"name": "Scratch", "repo_url": None, "default_branch": "main"})
+    assert '"Scratch", which has no GitHub repo' in no_repo and "github_repo_link" not in no_repo
+    slug = render_project_context({**ROSE_PROJECT, "repo_url": "https://github.com/Rose-Ai-Labs/rose.git"})
+    assert slug == section, "a .git suffix names the same repo"
+
+
+def test_code_agent_repo_text_names_the_project_repo():
+    """The static spawn text no longer says every code agent gets a fresh agent-tree repo.
+
+    Backend project restore owns the checkout (claude-code/service.ts) and ignores
+    github_repo_link; the auto-created tree repo applies only outside a project.
+    """
+    from tools.prompts.spawn_agent import CODE_LINE
+    from utils.tool_schemas import SpawnAgentRoseDesktopTool, SpawnAgentTool
+
+    for model in (SpawnAgentTool, SpawnAgentRoseDesktopTool):
+        description = model.model_fields["github_repo_link"].description
+        assert "defaults to a repo automatically created for this agent tree" not in description
+        assert "current project's repo when the agent is in a project" in description, description
+    assert "initialized to this agent network" not in CODE_LINE
+    assert "the current project's GitHub repo, or outside a project to a repo" in CODE_LINE, CODE_LINE
+
+
+async def test_set_plan_passes_the_workflow_project_context_to_the_planner():
+    """set_plan hands the planner the same user context + project section as the main loop."""
+    import datetime
+    from unittest.mock import patch
+
+    from domains.set_plan.handler import SetPlanManager
+    from utils.prompts import render_project_context
+
+    captured: list = []
+
+    async def fake_attempt(**kwargs):
+        captured.append(kwargs["user_context"])
+        raise RuntimeError("stop after the planner inputs are built")
+
+    class _Wf:
+        context: list = []
+        user_context_section = "## Personal Information\nFull Name: Test User"
+        output_schema = None
+        user_id = None
+
+        def __init__(self, project_context_section):
+            self.project_context_section = project_context_section
+
+    section = render_project_context(ROSE_PROJECT)
+    for project_context_section in (section, ""):
+        with (
+            patch("domains.set_plan.handler.get_planner_tools_description", lambda **_: "tools"),
+            patch("domains.set_plan.handler.run_planner_attempt", fake_attempt),
+            patch("domains.set_plan.handler.workflow") as wf_mod,
+        ):
+            wf_mod.now.return_value = datetime.datetime(2026, 11, 6)
+            async for _event in SetPlanManager().execute_tool(_Wf(project_context_section), {"tool": "set_plan"}, "c"):
+                pass
+    assert captured[0] == f"{section}\n\n{_Wf.user_context_section}", captured[0]
+    assert captured[-1] == _Wf.user_context_section, "a Home agent's planner context is unchanged"
 
 
 def test_root_agent_routes_video_requests_to_a_code_agent():
@@ -2623,6 +2729,19 @@ async def run_all_tests():
     await r.record_async(
         "planner_tools_description_follows_the_workflow_account",
         test_planner_tools_description_follows_the_workflow_account,
+    )
+    # 23a. V2: project agents know their synced GitHub repo (RCA 2026-11-06)
+    r.record(
+        "project_context_lands_once_in_the_dynamic_user_context_block",
+        test_project_context_lands_once_in_the_dynamic_user_context_block,
+    )
+    r.record(
+        "code_agent_repo_text_names_the_project_repo",
+        test_code_agent_repo_text_names_the_project_repo,
+    )
+    await r.record_async(
+        "set_plan_passes_the_workflow_project_context_to_the_planner",
+        test_set_plan_passes_the_workflow_project_context_to_the_planner,
     )
     # 23b. Video generation/editing routes to a code agent (user-directed 2026-10-28)
     r.record(

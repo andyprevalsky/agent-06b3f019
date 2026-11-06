@@ -145,6 +145,8 @@ with workflow.unsafe.imports_passed_through():
     from utils.prompts import (
         build_system_prompt,
         build_verifier_prompt,
+        render_project_context,
+        user_context_with_project,
     )
     from utils.tool_schemas import EXECUTE_PHASE_TOOLS, PLAN_PHASE_TOOLS
     from utils.user_tool_models import is_user_tool_name
@@ -1015,6 +1017,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # User customization (fetched at workflow start for dynamic name in approvals/SMS)
         self.system_name: str = "Rose"  # Default to "Rose", fetched from user settings
         self.custom_system_prompt: Optional[str] = None  # Custom personality prompt to inject
+        # `## Project` section from the agent's project placement ("" = Home); kept
+        # apart from the per-user user_context_section and recomputed each start.
+        self.project_context_section: str = ""
 
         # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
         self.agent_source: str = "WEB"
@@ -1290,6 +1295,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             ("custom_system_prompt", "custom_system_prompt"),
             ("agent_source", "agent_source"),
             ("user_context_section", "user_context_section"),
+            ("project_context_section", "project_context_section"),
             ("fast_cache_goal", "demo_cache_goal"),
             ("root_goal", "root_goal"),
         ):
@@ -1523,6 +1529,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "custom_system_prompt": self.custom_system_prompt,
                 "agent_source": self.agent_source,
                 "user_context_section": getattr(self, "user_context_section", ""),
+                "project_context_section": self.project_context_section,
                 "fast_cache_goal": self.demo_cache_goal,
                 "root_goal": self.root_goal,
                 "cost_limit_wrapup_pending": self._cost_limit_wrapup_pending,
@@ -2534,6 +2541,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             if not (self._deployment_resume and isinstance(response_schema, dict) and response_schema.get("fields")):
                 response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
+            self._apply_agent_project(agent_config)
             self.output_schema = response_schema
             self.write_lock_enabled = agent_config.get("write_lock_enabled", True)
             workflow.logger.info(
@@ -3582,6 +3590,15 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_refresh_failed_revision = 0
         self._response_schema_refresh_error = None
 
+    def _apply_agent_project(self, agent_config: Dict[str, Any]) -> None:
+        """Derive the project section from a fetched agent config.
+
+        An empty config (failed fetch) keeps the section restored from the
+        previous run, so continue_as_new never loses or duplicates it.
+        """
+        if agent_config:
+            self.project_context_section = render_project_context(agent_config.get("project"))
+
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.
 
@@ -3592,7 +3609,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             phase=self.current_phase,
             enabled_tools=self._current_tools,
             disabled_tools=self._disabled_tools,
-            user_context_section=self.user_context_section,
+            user_context_section=user_context_with_project(self.user_context_section, self.project_context_section),
             response_schema=self.output_schema,
             tool_prompts=TOOL_PROMPTS,
         )
