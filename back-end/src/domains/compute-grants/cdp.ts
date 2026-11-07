@@ -66,17 +66,17 @@ export { cookieUrlFor, normaliseCookie };
 /** Back-compat alias; the canonical name is `normaliseCookie`. */
 export const normaliseCookieForChrome = normaliseCookie;
 
-import {
-  seedTargetSession,
-  seedVirtualPasskeys,
-  type PasskeySeed,
-  type PasskeyTargetMemo,
-} from './cdp.passkeys';
+import { createConnectPasskeys, type PasskeySeed } from './cdp.passkeys';
 export type { PasskeySeed };
 
 export interface CdpClient {
   /** Present cloud-custody passkeys via a CDP virtual authenticator (see cdp.passkeys). */
   seedPasskeys(passkeys: PasskeySeed[]): Promise<number>;
+  /**
+   * Read the pages' WebAuthn ceremony records; resolves to the relying party
+   * whose passkey request the seeded authenticator could not answer, if any.
+   */
+  syncPasskeyCeremonies(): Promise<string | undefined>;
   navigate(url: string): Promise<void>;
   getCookies(urls: string[]): Promise<CdpCookie[]>;
   /** Inject one cookie. Used to seed a cloud browser from the user's local session. */
@@ -218,43 +218,13 @@ async function setCookiesBatchImpl(send: CdpSend, cookies: CdpCookieInput[]): Pr
   return countAccepted(cookies, readBack.result?.cookies ?? []);
 }
 
-/**
- * Seed passkeys the INSTANT a new page target attaches.
- *
- * A "Continue with Google" popup runs navigator.credentials.get() within ~1s of
- * opening -- faster than any poll -- so a 2s re-seed loses the race. Auto-attach
- * fires on target creation, before the page runs its ceremony. Returns a handle
- * to arm/replace the passkeys to seed onto future targets.
- */
-function armAutoAttachSeeding(
-  ws: WebSocket,
-  send: CdpSend,
-  memo: PasskeyTargetMemo
-): { set: (p: PasskeySeed[]) => void } {
-  const armed: { passkeys: PasskeySeed[] } = { passkeys: [] };
-  ws.addEventListener('message', (e: MessageEvent) => {
-    let msg: {
-      method?: string;
-      params?: { sessionId?: string; targetInfo?: { type?: string; targetId?: string } };
-    };
-    try {
-      msg = JSON.parse(String(e.data));
-    } catch {
-      return;
-    }
-    if (msg.method !== 'Target.attachedToTarget') return;
-    const sid = msg.params?.sessionId;
-    const info = msg.params?.targetInfo;
-    if (sid === undefined || info?.type !== 'page' || info.targetId === undefined) return;
-    if (armed.passkeys.length === 0 || memo.has(info.targetId)) return;
-    memo.add(info.targetId);
-    void seedTargetSession(send, sid, armed.passkeys)
-      .then((seeded) => {
-        if (!seeded) memo.delete(info.targetId as string);
-      })
-      .catch(() => memo.delete(info.targetId as string));
-  });
-  return { set: (p) => (armed.passkeys = p) };
+/** Evaluate on the attached page's session. */
+async function evaluateOnPage<T>(send: CdpSend, expression: string): Promise<T | undefined> {
+  const out = (await send('Runtime.evaluate', { expression, returnByValue: true })) as {
+    result?: { result?: { value?: T | null } };
+  };
+  // CDP reports a JS null literally; normalise so `=== undefined` guards work.
+  return out.result?.result?.value ?? undefined;
 }
 
 /** Evaluate on every page target; first non-empty value wins. */
@@ -304,9 +274,9 @@ export async function attachCdp(cdpBase: string): Promise<CdpClient> {
   page.targetId = attachedPage.targetId;
 
   const setCookiesBatch = (cookies: CdpCookieInput[]) => setCookiesBatchImpl(send, cookies);
-  const passkeyMemo: PasskeyTargetMemo = new Set();
-
-  const armed = armAutoAttachSeeding(ws, send, passkeyMemo);
+  const passkeys = createConnectPasskeys(ws, send, page, (expression) =>
+    evaluateOnPage<string>(send, expression)
+  );
 
   return {
     async navigate(url: string) {
@@ -335,13 +305,7 @@ export async function attachCdp(cdpBase: string): Promise<CdpClient> {
       };
       return out.result?.cookies ?? [];
     },
-    async evaluate<T>(expression: string): Promise<T | undefined> {
-      const out = (await send('Runtime.evaluate', { expression, returnByValue: true })) as {
-        result?: { result?: { value?: T | null } };
-      };
-      // CDP reports a JS null literally; normalise so `=== undefined` guards work.
-      return out.result?.result?.value ?? undefined;
-    },
+    evaluate: <T>(expression: string) => evaluateOnPage<T>(send, expression),
     async armCodexCallback(expectedState: string): Promise<void> {
       await codexCallback.arm(expectedState);
     },
@@ -360,36 +324,8 @@ export async function attachCdp(cdpBase: string): Promise<CdpClient> {
       return codexCallback.showFinishingPage(callbackUrl);
     },
     evaluateAnyTarget: <T>(expression: string) => evaluateOnAllTargets<T>(send, expression),
-    async seedPasskeys(passkeys: PasskeySeed[]): Promise<number> {
-      // Seed current pages synchronously first. Enabling auto-attach can emit an
-      // immediate attached event for those same pages; doing it first made the
-      // handler reserve the target while seeding in the background, so this
-      // method returned 0 before any credential was actually present.
-      armed.set(passkeys);
-      let existing = 0;
-      if (
-        passkeys.length > 0 &&
-        page.sessionId !== undefined &&
-        page.targetId !== undefined &&
-        !passkeyMemo.has(page.targetId)
-      ) {
-        if (await seedTargetSession(send, page.sessionId, passkeys)) {
-          passkeyMemo.add(page.targetId);
-          existing += 1;
-        }
-      }
-      existing += await seedVirtualPasskeys(send, passkeys, passkeyMemo);
-      if (passkeys.length > 0) {
-        // Browser-level (raw): catches future TOP-LEVEL popup windows too, not
-        // just children of the current page. Google's sign-in can be either.
-        await send(
-          'Target.setAutoAttach',
-          { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
-          { raw: true }
-        );
-      }
-      return existing;
-    },
+    seedPasskeys: (seeds: PasskeySeed[]) => passkeys.seed(seeds),
+    syncPasskeyCeremonies: () => passkeys.syncCeremonies(),
     close: () => ws.close(),
   };
 }

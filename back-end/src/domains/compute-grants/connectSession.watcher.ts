@@ -179,6 +179,10 @@ async function watchSignInTick(
   if (entry.cdp === null || entry.cdpBase === null) return;
   await syncCaptchaSolveIndicator(entry).catch(() => undefined);
   await autofillGooglePassword(entry).catch(() => false);
+  // Informational only: a failed read must never delay capturing the sign-in.
+  entry.passkeyUnavailableFor = await entry.cdp
+    .syncPasskeyCeremonies()
+    .catch(() => entry.passkeyUnavailableFor);
   await readAccountEmail(entry);
   const minted = await mintCredentials(entry);
   if (minted === null) return;
