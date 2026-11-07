@@ -30,6 +30,9 @@ import unittest
 import types
 from unittest.mock import patch
 
+# CI's uv Python can lack pidfd; use the existing supported interpreter route.
+runpy.run_path(str(Path(__file__).with_name('pidfd_interpreter.py')))['require_pidfd_interpreter'](__file__)
+
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('operator_cli', Path(os.environ.get('PORTABLE_OPERATOR_SOURCE', ROOT/'scripts/run-original600-controller.py')))
 CLI = importlib.util.module_from_spec(SPEC)
@@ -3501,8 +3504,18 @@ HOST_GIT_SETTINGS = ('gc.auto', 'gc.autodetach', 'maintenance.auto', 'maintenanc
 
 
 def hermetic_git_env():
-    """A Git view that ignores the host's system/global configuration (hooks, filters, auto-maintenance)."""
-    return dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    """Host-independent Git whose automatic maintenance stays with its fixture owner."""
+    env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+                'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'):
+        env.pop(key, None)
+    count = int(env.get('GIT_CONFIG_COUNT', '0'))
+    for key in ('gc.autoDetach', 'maintenance.autoDetach'):
+        env[f'GIT_CONFIG_KEY_{count}'] = key
+        env[f'GIT_CONFIG_VALUE_{count}'] = 'false'
+        count += 1
+    env['GIT_CONFIG_COUNT'] = str(count)
+    return env
 
 
 def processes_naming(directory):
@@ -3775,6 +3788,241 @@ class RunBenchShardedRouting(unittest.TestCase):
             result, ops, fleets = fx.run(*names)
             self.assertEqual((result.returncode, ops), (2, []))
             self.assertIn('is not pushed to origin', result.stderr)
+
+    def test_fixture_git_lifetime_guard_preserves_inherited_config_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            foreign, repo = root/'foreign', root/'repo'
+            foreign.mkdir(); repo.mkdir()
+            (foreign/'keep').write_text('unchanged')
+            with patch.dict(os.environ, GIT_CONFIG_COUNT='2',
+                            GIT_CONFIG_KEY_0='fixture.inherited', GIT_CONFIG_VALUE_0='kept',
+                            GIT_CONFIG_KEY_1='gc.auto', GIT_CONFIG_VALUE_1='123',
+                            GIT_DIR=str(foreign/'git'), GIT_WORK_TREE=str(foreign),
+                            GIT_COMMON_DIR=str(foreign/'git'), GIT_INDEX_FILE=str(foreign/'index'),
+                            GIT_OBJECT_DIRECTORY=str(foreign/'objects'),
+                            GIT_ALTERNATE_OBJECT_DIRECTORIES=str(foreign/'alternates')):
+                env = hermetic_git_env()
+            subprocess.run(['git', '-C', str(repo), 'init', '-q'], check=True, env=env)
+            for key, expected in (('fixture.inherited', 'kept'), ('gc.auto', '123'),
+                                  ('gc.autoDetach', 'false'), ('maintenance.autoDetach', 'false')):
+                observed = subprocess.check_output(['git', '-C', str(repo), 'config', '--get', key],
+                                                   env=env, text=True).strip()
+                self.assertEqual(observed, expected)
+            self.assertEqual([p.name for p in foreign.iterdir()], ['keep'])
+            self.assertEqual((foreign/'keep').read_text(), 'unchanged')
+
+    def test_git_auto_maintenance_stays_owned_until_its_native_work_finishes(self):
+        # Force real native maintenance, hold it at a hook barrier, inspect its
+        # ancestry, then release and join exact owners even if a check fails.
+        import select
+        if not sys.platform.startswith('linux'):
+            self.skipTest('native Git ownership join uses Linux pidfds')
+        supported = subprocess.check_output(['git', 'help', '--config'], text=True)
+        self.assertIn('gc.recentObjectsHook', supported.splitlines())
+
+        def probe(control, detached_control, fault=None):
+            repo = control/'repo'; repo.mkdir()
+            ready, release = control/'ready', control/'release'
+            os.mkfifo(ready); os.mkfifo(release)
+            ready_fd = os.open(ready, os.O_RDWR | os.O_NONBLOCK)
+            release_fd = os.open(release, os.O_RDWR | os.O_NONBLOCK)
+            record, released = control/'native-pid', control/'released'
+            hook = control/'hold-native-gc.py'
+            hook.write_text('import os, select, signal, sys\nfrom pathlib import Path\n'
+                            'signal.alarm(30)\n'
+                            'try: Path(sys.argv[1]).touch(exist_ok=False)\n'
+                            'except FileExistsError: raise SystemExit(0)\n'
+                            'Path(sys.argv[4]).write_text(str(os.getpid()))\n'
+                            'fd=os.open(sys.argv[2], os.O_RDWR); os.write(fd,b"R"); os.close(fd)\n'
+                            'fd=os.open(sys.argv[3], os.O_RDWR | os.O_NONBLOCK)\n'
+                            'while not Path(sys.argv[5]).exists():\n'
+                            ' if select.select([fd],[],[],0.05)[0]: os.read(fd,1); break\n'
+                            'os.close(fd)\n')
+            env = hermetic_git_env()
+            count = int(env.get('GIT_CONFIG_COUNT', '0'))
+            settings = [('gc.auto', '1'), ('gc.recentObjectsHook',
+                         'exec ' + shlex.join([sys.executable, str(hook), str(control/'hook-started'),
+                                              str(ready), str(release), str(record), str(released)]))]
+            if detached_control:
+                settings += [('gc.autoDetach', 'true'), ('maintenance.autoDetach', 'true')]
+            for key, value in settings:
+                env[f'GIT_CONFIG_KEY_{count}'] = key
+                env[f'GIT_CONFIG_VALUE_{count}'] = value
+                count += 1
+            env['GIT_CONFIG_COUNT'] = str(count)
+            git = ['git', '-C', str(repo), '-c', 'user.name=fixture',
+                   '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false']
+            owner, handles, verified, adopted = None, {}, False, False
+
+            def adopt_native():
+                # The hook writes its own PID before publishing readiness. Its
+                # held ancestry identifies prune, GC and any detached maintenance
+                # parent. No broad process scan or signalling is used.
+                pid = int(record.read_text())
+                if os.readlink(f'/proc/{pid}/cwd') != str(repo):
+                    raise ValueError('foreign native hook cwd')
+                chain = set()
+                while pid > 1 and pid not in chain:
+                    chain.add(pid)
+                    if os.readlink(f'/proc/{pid}/cwd') != str(repo):
+                        break
+                    if pid not in handles:
+                        handles[pid] = os.pidfd_open(pid)
+                    if pid == owner.pid:
+                        break
+                    stat = Path(f'/proc/{pid}/stat').read_text()
+                    pid = int(stat[stat.rindex(')') + 2:].split()[1])
+                return owner.pid in chain
+
+            try:
+                subprocess.run(git + ['init', '-q', '--object-format=sha1'], check=True, env=env, capture_output=True)
+                found, candidate = 0, 0
+                while found < 4:
+                    data = f'owned-native-gc-{candidate}'.encode(); candidate += 1
+                    if hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest().startswith('17'):
+                        oid = subprocess.check_output(git + ['hash-object', '-w', '--stdin'], input=data,
+                                                      env=env).decode().strip()
+                        os.utime(repo/'.git/objects'/oid[:2]/oid[2:], (1, 1))
+                        found += 1
+                (repo/'tracked').write_text('committed fixture\n')
+                subprocess.run(git + ['add', 'tracked'], check=True, env=env, capture_output=True)
+                with (control/'git-output').open('wb') as output:
+                    owner = subprocess.Popen(git + ['commit', '-qm', 'fixture'], cwd=repo, env=env,
+                                             stdout=output, stderr=output)
+                    try:
+                        handles[owner.pid] = os.pidfd_open(owner.pid)
+                    except ProcessLookupError:
+                        pass  # already terminal; Popen.wait still reaps the exact child
+                    ready_now = select.select([ready_fd], [], [], 10)[0]
+                    if fault == 'ready':
+                        raise RuntimeError('injected ready timeout')
+                    self.assertTrue(ready_now, 'native GC hook never reached barrier')
+                    self.assertEqual(os.read(ready_fd, 1), b'R')
+                    if fault == 'foreign_hook':
+                        actual = record.read_text()
+                        try:
+                            record.write_text(str(os.getpid()))
+                            adopt_native()
+                        finally:
+                            record.write_text(actual)
+                        self.fail('foreign native hook was accepted')
+                    owned = adopt_native()
+                    adopted = True
+                    if not owned:
+                        self.assertEqual(owner.wait(timeout=10), 0)
+                    else:
+                        self.assertIsNone(owner.poll())
+                    return owned
+            finally:
+                try:
+                    if owner is not None:
+                        # Capture native handles before releasing the barrier when
+                        # possible. Unknown ownership still drains known owners,
+                        # fails, and retains files; it never permits rmtree.
+                        errors, forced_stop = [], False
+                        if not adopted:
+                            if not record.exists():
+                                select.select([ready_fd], [], [], 10)
+                            if record.exists():
+                                try:
+                                    adopt_native()
+                                    adopted = True
+                                except (OSError, ValueError) as error:
+                                    errors.append(error)
+                            else:
+                                errors.append(RuntimeError('native ownership unknown'))
+                        released.touch()  # also releases a hook that starts after this error path
+                        os.write(release_fd, b'G')
+                        try:
+                            if fault == 'owner_wait':
+                                raise subprocess.TimeoutExpired('injected owner wait failure', 10)
+                            owner.wait(timeout=10)
+                        except Exception as error:
+                            errors.append(error)
+                        # A raced exit or one failed signal must not skip the
+                        # remaining exact handles. ESRCH still needs terminal proof.
+                        raced = False
+                        for pid, fd in handles.items():
+                            try:
+                                terminal = bool(select.select([fd], [], [], 10)[0])
+                                inject_race = fault == 'signal_race' and not raced
+                                if not terminal or inject_race:
+                                    try:
+                                        if inject_race:
+                                            self.assertTrue(terminal)
+                                            raced = True
+                                            raise ProcessLookupError(errno.ESRCH, 'injected raced exit')
+                                        signal.pidfd_send_signal(fd, signal.SIGTERM)
+                                        forced_stop = True
+                                    except ProcessLookupError:
+                                        pass
+                                    except Exception as error:
+                                        errors.append(error)
+                                    if not select.select([fd], [], [], 5)[0]:
+                                        try:
+                                            signal.pidfd_send_signal(fd, signal.SIGKILL)
+                                            forced_stop = True
+                                        except ProcessLookupError:
+                                            pass
+                                        except Exception as error:
+                                            errors.append(error)
+                                        if not select.select([fd], [], [], 5)[0]:
+                                            errors.append(RuntimeError(f'exact native owner {pid} did not exit'))
+                            except Exception as error:
+                                errors.append(error)
+                        if fault == 'signal_race' and not raced:
+                            errors.append(RuntimeError('signal race control did not execute'))
+                        if forced_stop:
+                            errors.append(RuntimeError('native owner required termination'))
+                        try:
+                            if owner.wait(timeout=10) != 0:
+                                errors.append(RuntimeError('native Git command failed'))
+                        except Exception as error:
+                            errors.append(error)
+                        verified = adopted and not forced_stop and all(
+                            select.select([fd], [], [], 0)[0] for fd in handles.values())
+                        if errors:
+                            raise RuntimeError('native drain failed: ' + str(errors[0])) from errors[0]
+                finally:
+                    if verified:
+                        drained[control] = {pid: bool(select.select([fd], [], [], 0)[0])
+                                            for pid, fd in handles.items()}
+                    else:
+                        released.touch()
+                        os.write(release_fd, b'G')
+                    for fd in handles.values():
+                        os.close(fd)
+                    os.close(ready_fd); os.close(release_fd)
+                    if owner is not None and not verified:
+                        unsafe.add(control)
+
+        # Never remove a control whose ownership could not be drained. Such an
+        # error still fails the test and names retained evidence; no rmtree error
+        # is caught, ignored, retried, or converted to success.
+        root = Path(tempfile.mkdtemp())
+        unsafe, drained = set(), {}
+        try:
+            for label, detached in (('detached', True), ('helper', False)):
+                control = root/label; control.mkdir()
+                self.assertEqual(probe(control, detached), not detached,
+                                 'fixture helper let native auto-maintenance outlive its commit')
+            race = root/'signal_race'; race.mkdir()
+            self.assertTrue(probe(race, False, 'signal_race'))
+            self.assertTrue(all(drained[race].values()))
+            foreign = root/'foreign_hook'; foreign.mkdir()
+            with self.assertRaisesRegex(ValueError, 'foreign native hook cwd'):
+                probe(foreign, True, 'foreign_hook')
+            self.assertTrue(all(drained[foreign].values()))
+            for fault in ('ready', 'owner_wait'):
+                control = root/fault; control.mkdir()
+                with self.assertRaisesRegex(RuntimeError, 'injected'):
+                    probe(control, True, fault)
+                self.assertTrue(drained[control])
+                self.assertTrue(all(drained[control].values()))  # all exact pidfds reached terminal readiness
+        finally:
+            if not unsafe:
+                shutil.rmtree(root)
 
     def test_fixture_repository_is_built_independently_of_the_hosts_git_configuration(self):
         # A host system/global configuration (hooks, filters, auto-maintenance, LFS) must not act inside the fixture
