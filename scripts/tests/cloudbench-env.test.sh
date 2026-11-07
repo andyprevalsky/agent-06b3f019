@@ -4168,3 +4168,64 @@ assert run.index('STACK_ENV=(') < start < run.index('env "${STACK_ENV[@]}" bash 
     'the authority must be in the stack env before run.sh starts'
 PYWIRE
 ) || fail "cloud guests must delegate compute-token state to the shared authority"
+
+# The donor snapshot listing must outlast a provider window that answers a valid empty list. On 2026-11-07 one of nine
+# smoke controllers spent its 45 s budget inside such a window ("No complete snapshot"), and the campaign's 1-of-9 infra
+# stop cancelled the other eight. Execute the real function against a stubbed provider and clock.
+python3 - "$ROOT_DIR" <<'PYSNAP' || fail "donor snapshot listing must survive a minutes-long empty-list window"
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import textwrap
+from pathlib import Path
+
+root = Path(sys.argv[1])
+src = (root / "scripts/run-bench-fleet").read_text()
+match = re.search(r"^list_donor_snapshots\(\) \{\n.*?^\}\n", src, flags=re.M | re.S)
+assert match, "list_donor_snapshots helper is missing"
+function = match.group(0)
+assert src.count("list_donor_snapshots\n") >= 1 and "for _snap_attempt in 1 2 3 4 5 6" not in src, \
+    "the controller must read the donor listing through the retrying helper"
+good = json.dumps([{"id": "vs_ok", "status": "created", "created_at": "2026-11-07T07:00:00Z",
+                    "size": 123456, "digest": "ab" * 32}])
+
+
+def scenario(replies):
+    with tempfile.TemporaryDirectory() as tmp:
+        counter = Path(tmp) / "reads"
+        counter.write_text("0")
+        script = textwrap.dedent(
+            """
+            set -uo pipefail
+            %s
+            SNAPSHOT_SELECTOR_SCRIPT=%s
+            VOL_ID=vol_test APP=app_test
+            REPLIES=%s
+            FLY() {
+                local n; n="$(cat %s)"; printf '%%s' "$((n + 1))" > %s
+                python3 -c 'import json,sys; r=json.loads(sys.argv[1]); i=int(sys.argv[2]); sys.stdout.write(r[min(i, len(r)-1)])' "$REPLIES" "$n"
+            }
+            slept=0
+            sleep() { slept=$((slept + $1)); }
+            list_donor_snapshots
+            printf '%%s|%%s|%%s\\n' "$SNAPSHOT_LIST_ATTEMPTS_USED" "$slept" "$SNAPSHOTS_JSON"
+            """
+        ) % (function, root / "scripts/cloudbench-select-snapshot.py", "'" + json.dumps(replies).replace("'", "'\\''") + "'", counter, counter)
+        path = Path(tmp) / "scenario.sh"
+        path.write_text(script)
+        out = subprocess.run(["bash", str(path)], capture_output=True, text=True, timeout=60, check=True).stdout.strip()
+        attempts, slept, listing = out.split("|", 2)
+        return int(attempts), int(slept), listing
+
+
+attempts, _, listing = scenario(["[]"] * 5 + [good])
+assert (attempts, "vs_ok" in listing) == (6, True), (attempts, listing)
+attempts, _, listing = scenario(["Error: rate limit exceeded"] * 3 + [good])
+assert (attempts, "vs_ok" in listing) == (4, True), (attempts, listing)
+attempts, slept, listing = scenario(["[]"])
+assert (attempts, listing) == (12, "[]") and slept >= 240, (attempts, slept, listing)  # was 6 attempts, 45 s
+attempts, slept, listing = scenario(["Error: rate limit exceeded"])
+assert (attempts, listing) == (12, "") and slept >= 240, (attempts, slept, listing)
+PYSNAP

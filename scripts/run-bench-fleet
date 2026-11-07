@@ -1174,6 +1174,35 @@ except (OSError, ValueError, TypeError) as error:
     raise SystemExit(75)
 PYCONFIG
 }
+# Fly's snapshot listing intermittently answers a valid but empty list for minutes at a time (measured 2026-11-07:
+# eight of nine concurrent reads, then healthy again), and with several controllers one of them can spend a short
+# retry budget inside that window and take the whole campaign down with its infra stop. Retry for minutes (about four
+# with jitter) before concluding that the donor has no usable snapshot.
+# Sets SNAPSHOTS_JSON (the last valid listing, empty when no read was valid) and SNAPSHOT_LIST_ATTEMPTS_USED.
+list_donor_snapshots() {
+    local attempt candidate max_attempts=12 pause
+    SNAPSHOTS_JSON=""
+    SNAPSHOT_LIST_ATTEMPTS_USED=0
+    for attempt in $(seq 1 "$max_attempts"); do
+        SNAPSHOT_LIST_ATTEMPTS_USED="$attempt"
+        candidate="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
+        if printf '%s' "$candidate" | python3 -c 'import json,sys; sys.exit(0 if isinstance(json.load(sys.stdin), list) else 1)' 2>/dev/null; then
+            SNAPSHOTS_JSON="$candidate"
+            # Fly can briefly return a valid but empty/still-hydrating list
+            # while older completed snapshots exist. A valid JSON response is
+            # not enough to conclude that the donor has no usable snapshot.
+            if [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
+                return 0
+            fi
+        fi
+        if [ "$attempt" != "$max_attempts" ]; then
+            pause=$(( attempt * 5 ))
+            [ "$pause" -le 30 ] || pause=30
+            sleep $(( pause + RANDOM % 4 ))
+        fi
+    done
+    return 0
+}
 # ── Capture an explicit immutable fleet source ─────────────────────────────
 PRIVATE_SOURCE_FILE=""
 PRIVATE_SOURCE_SHA256="none"
@@ -16134,22 +16163,9 @@ else
     # single rate-limited read killed a healthy lane that had ten usable
     # snapshots. Retry until the listing itself is valid JSON, and only then let
     # an empty result mean absence.
-    SNAPSHOTS_JSON=""
-    for _snap_attempt in 1 2 3 4 5 6; do
-        _snapshots_candidate="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
-        if printf '%s' "$_snapshots_candidate" | python3 -c 'import json,sys; sys.exit(0 if isinstance(json.load(sys.stdin), list) else 1)' 2>/dev/null; then
-            SNAPSHOTS_JSON="$_snapshots_candidate"
-            # Fly can briefly return a valid but empty/still-hydrating list
-            # while older completed snapshots exist. A valid JSON response is
-            # not enough to conclude that the donor has no usable snapshot.
-            if [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
-                break
-            fi
-        fi
-        [ "$_snap_attempt" = "6" ] || sleep $(( _snap_attempt * 3 ))
-    done
+    list_donor_snapshots
     if [ -z "$SNAPSHOTS_JSON" ]; then
-        echo "❌ could not read volume snapshots for $VOL_ID after 6 attempts (provider read failure, not a missing snapshot)" >&2
+        echo "❌ could not read volume snapshots for $VOL_ID after $SNAPSHOT_LIST_ATTEMPTS_USED attempts (provider read failure, not a missing snapshot)" >&2
         exit 1
     fi
     hydrate_warm_deps_state
@@ -16178,6 +16194,7 @@ raise SystemExit(0 if match and str(match.get("status") or "").lower() in valid
 fi
 if [ -z "$SNAP_ID" ]; then
     echo "❌ No complete snapshot for warm volume $VOL_ID. Create one and wait for it to finish:" >&2
+    echo "   (listing read ${SNAPSHOT_LIST_ATTEMPTS_USED:-0} time(s); the last valid read held $(printf '%s' "${SNAPSHOTS_JSON:-[]}" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo unknown) snapshot(s))" >&2
     echo "   flyctl volume snapshots create $VOL_ID -a $APP   # then wait until STORED SIZE ≈ VOL SIZE" >&2
     exit 1
 fi
