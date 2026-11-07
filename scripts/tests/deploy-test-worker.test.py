@@ -1660,6 +1660,78 @@ class LocalController(unittest.TestCase):
                 if 'row' in locals() and Path(row['fixture_tmp']).exists():
                     shutil.rmtree(row['fixture_tmp'])
 
+    def test_each_case_reports_one_live_progress_row_without_changing_the_result(self):
+        """DEPLOY_GATE_PROGRESS gets one suite row per case the moment it finishes:
+        the passing case only finishes after it sees the failing case's FAIL row.
+        Exit code and output match a run without the variable, which writes nothing."""
+        progress_env, watch_env = 'DEPLOY_GATE_PROGRESS', 'CONTROLLER_PROGRESS_FIXTURE_WATCH'
+        waiter = (
+            "import json, os, sys, time\n"
+            f"if os.environ.get({progress_env!r}):\n"
+            "    sys.exit(7)\n"
+            f"watch = os.environ.get({watch_env!r})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while watch and time.monotonic() < deadline:\n"
+            "    try:\n"
+            "        rows = [json.loads(line) for line in open(watch).read().splitlines()]\n"
+            "    except (OSError, ValueError):\n"
+            "        rows = []\n"
+            "    if any(row['unit'] == 'fails' and row['status'] == 'FAIL' for row in rows):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "else:\n"
+            "    if watch:\n"
+            "        sys.exit(9)\n"
+            "print('waiter done')\n"
+        )
+        cases = [
+            ('fails', shlex.join([sys.executable, '-c', "print('controller-fail-marker'); raise SystemExit(1)"])),
+            ('waiter', shlex.join([sys.executable, '-c', waiter])),
+        ]
+        with tempfile.TemporaryDirectory(prefix='controller-progress-', dir='/var/tmp') as raw:
+            root = Path(raw)
+            progress = root / 'gate' / 'progress.jsonl'
+            progress.parent.mkdir()
+
+            def run(extra):
+                env = {key: value for key, value in os.environ.items() if key not in (progress_env, watch_env)}
+                env.update(extra)
+                stdout = io.StringIO()
+                umask = os.umask(0o022)
+                os.umask(umask)
+                argv = ['run-cloudbench-controller-local.py', '--root', str(root), '--max-workers', '2']
+                try:
+                    with patch.dict(os.environ, env, clear=True), patch.object(local_runner, 'CASES', cases), \
+                            patch.object(local_runner, 'source', lambda _root: {'head': 'fixture'}), \
+                            patch.object(sys, 'argv', argv), contextlib.redirect_stdout(stdout):
+                        code = local_runner.main()
+                finally:
+                    os.umask(umask)
+                lines = ['GATE_NATIVE_ARTIFACTS' if line.startswith('GATE_NATIVE_ARTIFACTS ') else line
+                         for line in stdout.getvalue().splitlines()]
+                return code, sorted(lines)
+
+            try:
+                reported = run({progress_env: str(progress), 'DEPLOY_GATE_CASE': 'cloudbench-controller',
+                                watch_env: str(progress)})
+                unset = run({})
+                self.assertEqual(reported[0], 1, reported)
+                self.assertEqual(reported, unset, 'reporting changed the exit code or output')
+                self.assertEqual(list(root.rglob('*.jsonl')), [progress], 'an unset variable wrote a progress file')
+                rows = [json.loads(line) for line in progress.read_text().splitlines()]
+                self.assertEqual([(row['unit'], row['status']) for row in rows], [('fails', 'FAIL'), ('waiter', 'PASS')])
+                self.assertEqual({(row['scope'], row['case']) for row in rows}, {('suite', 'cloudbench-controller')})
+                self.assertIn('controller-fail-marker', rows[0]['detail'])
+                self.assertEqual(rows[1]['detail'], '')
+                for row in rows:
+                    self.assertTrue(row['log'].endswith('/' + row['unit'] + '.log'), row)
+                    self.assertTrue(Path(row['log']).is_file(), row)
+            finally:
+                for result in root.glob('.context/cloudbench-local/*/result.json'):
+                    for case in json.loads(result.read_text())['cases']:
+                        if case.get('fixture_tmp') and Path(case['fixture_tmp']).exists():
+                            shutil.rmtree(case['fixture_tmp'])
+
     # The twelve cloud-benchmark controller suites the staged `cloudbench-controller` gate runs (the former
     # deploy.md Step 4cb inventory, preserved in .claude/commands/DEPRECATED_deploy.md at L1408). The concise
     # deploy.md no longer lists them: scripts/run-cloudbench-controller-local.py CASES is the executing
