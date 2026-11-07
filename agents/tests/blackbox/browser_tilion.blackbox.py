@@ -709,6 +709,10 @@ async def test_state_restore_relies_only_on_browser_use_attributes_that_exist():
     assert isinstance(BrowserSession.model_fields["RECONNECT_WAIT_TIMEOUT"].default, float)
     assert isinstance(BrowserSession.is_cdp_connected, property)
     assert isinstance(BrowserSession.is_reconnecting, property)
+    from cdp_use.client import CDPClient
+
+    # H-47: the restore ends a stale reader through this attribute before reconnecting.
+    assert "_message_handler_task" in vars(CDPClient("ws://127.0.0.1:9/devtools/browser/x"))
 
 
 # ----- URLs ------------------------------------------------------------------
