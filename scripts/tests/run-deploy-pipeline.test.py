@@ -2617,7 +2617,9 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         "#!/usr/bin/env bash\n"
         'echo "$*" >> "$FAKE_GH_DIR/node-calls.log"\n'
         'case " $* " in\n'
-        '  *worker-deployment-queue.ts*) cat "$FAKE_GH_DIR/job.json" ;;\n'
+        '  *worker-deployment-queue.ts*) args="$*"; id="${args##*--job-id }"; id="${id%% *}"\n'
+        '    f="$FAKE_GH_DIR/job-$id.json"\n'
+        '    [ -f "$f" ] || f="$FAKE_GH_DIR/job.json"; cat "$f" ;;\n'
         '  *monitor-cooperative-cutover.ts*) exit "${FAKE_MONITOR_EXIT:-0}" ;;\n'
         '  *) echo "unexpected node $*" >&2; exit 1 ;;\n'
         "esac\n")
@@ -2631,7 +2633,7 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     def reset(list_rows: list[dict], views: list[dict], log: str = "") -> None:
         for stale in fake.glob("view-*"):
             stale.unlink()
-        for stale in (calls, fake / "node-calls.log"):
+        for stale in (calls, fake / "node-calls.log", *fake.glob("job-*.json")):
             stale.unlink(missing_ok=True)
         (fake / "list.json").write_text(json.dumps(list_rows))
         for index, view in enumerate(views, start=1):
@@ -2768,6 +2770,69 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         text=True, timeout=120)
     assert ran.returncode == 1 and "monitor-cooperative-cutover.ts --verify failed (exit 3)" in ran.stdout, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
+
+    # 7. The merged job never cut over itself: the queue coalesced it into a
+    #    queued git descendant (SUPERSEDED). The gate opens only on that
+    #    descendant's SUCCEEDED job + monitor --verify, recorded as verified by
+    #    descendant cutover; a pending, non-descendant or unlinked one blocks.
+    head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    tree = subprocess.run([*git, "rev-parse", f"{runtime}^{{tree}}"], check=True, stdout=subprocess.PIPE,
+                          text=True).stdout.strip()
+    later = subprocess.run([*git, "commit-tree", tree, "-p", runtime, "-m", "later main merge"], check=True,
+                           stdout=subprocess.PIPE, text=True).stdout.strip()
+    descendant_id = "d" * 64
+
+    def write_superseded(descendant_stage: str, descendant_source: str, link: object = descendant_id) -> None:
+        (fake / "job.json").write_text(json.dumps({
+            "jobId": job_id, "stage": "SUPERSEDED", "identity": {"app": "app", "sourceCommit": runtime,
+                                                                  "attempt": "123-1"},
+            "evidence": {"SUPERSEDED": {"supersededBy": link}}}))
+        (fake / f"job-{descendant_id}.json").write_text(json.dumps({
+            "jobId": descendant_id, "stage": descendant_stage,
+            "identity": {"app": "app", "sourceCommit": descendant_source, "attempt": "130-1", "surfaceHash": "c0ffee"}}))
+
+    done = {"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"]}
+    reset([running], [done], log)
+    write_superseded("SUCCEEDED", later)
+    ran = run_production(runtime, tmp / "production-state-7a")
+    assert ran.returncode == 0, ran.stdout
+    assert call_lines()[-1] == "dispatch", call_lines()
+    assert f"verified_by=descendant-cutover descendant={descendant_id}" in ran.stdout, ran.stdout
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert node_calls[0].endswith(f"read --job-id {job_id}") and node_calls[1].endswith(f"read --job-id {descendant_id}")
+    assert node_calls[2].endswith(f"monitor-cooperative-cutover.ts --job-id {descendant_id} --verify"), node_calls
+    receipt = json.loads((tmp / "production-state-7a" / "production.json").read_text())
+    verified = receipt["cutover_verify"]
+    assert receipt["status"] == "passed" and receipt["fly"]["job_stage"] == "SUPERSEDED", receipt
+    assert verified["verified_by"] == "descendant-cutover" and verified["job_stage"] == "SUPERSEDED", verified
+    assert verified["descendant_job_id"] == descendant_id and verified["descendant_source_commit"] == later, verified
+    assert verified["chain"] == [job_id, descendant_id] and verified["job_id"] == job_id, verified
+    assert receipt["fly"]["verified_by_descendant"]["descendant_job_id"] == descendant_id, receipt["fly"]
+    for stage, source, link, expected in (
+            ("PREPARING", later, descendant_id, f"SUPERSEDED by {descendant_id}, which is PREPARING, not SUCCEEDED"),
+            ("SUCCEEDED", tests_only, descendant_id, f"commit {tests_only} is not a descendant of {runtime}"),
+            ("SUCCEEDED", "e" * 40, descendant_id, "could not be proven (missing history)"),
+            ("SUCCEEDED", later, None, "has no valid supersededBy link")):
+        reset([running], [done], log)
+        write_superseded(stage, source, link)
+        ran = run_production(runtime, tmp / f"production-state-7-{stage}-{source[:4]}-{link is None}")
+        assert ran.returncode == 1 and expected in ran.stdout, (expected, ran.stdout)
+        assert "dispatch" not in call_lines(), call_lines()
+        assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text(), "no monitor before proof"
+    assert subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
+                          text=True).stdout.strip() == head, "the descendant fixture must not move HEAD"
+    # 8. The queue refused an older/diverged release instead of rolling the live one
+    #    back: blocked with the refusal, no resume advice, no monitor, no dispatch.
+    reset([running], [done], log)
+    (fake / "job.json").write_text(json.dumps({
+        "jobId": job_id, "stage": "ABORTED", "identity": {"app": "app", "sourceCommit": runtime, "attempt": "123-1"},
+        "evidence": {"ABORTED": {"reason": "ROLLBACK_REFUSED", "liveJobId": descendant_id,
+                                 "message": "Refused: could roll production back"}}}))
+    ran = run_production(runtime, tmp / "production-state-8")
+    assert ran.returncode == 1 and "was refused before cutover: Refused: could roll production back" in ran.stdout, ran.stdout
+    assert "production was not rolled back" in ran.stdout and "worker_pool_cutover.py" not in ran.stdout, ran.stdout
+    assert "dispatch" not in call_lines(), call_lines()
+    assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text()
     print("production fly wait: ok")
 
 

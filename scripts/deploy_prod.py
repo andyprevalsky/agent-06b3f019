@@ -522,7 +522,7 @@ def lane_fly(ctx: Ctx) -> Result:
         receipt = ctx.production_receipt()
         fly = receipt.get('fly') or {}
         job, stage = fly.get('job_id'), fly.get('job_stage')
-        if not (job and stage and stage != 'SUCCEEDED'):
+        if not (job and stage and stage not in ('SUCCEEDED', 'ABORTED')):
             return False, f'Fly lane blocked (production exit {code}): {receipt.get("error") or "see [fly] output"}', code
         resume = show(resume_argv(job), cwd=ctx.root / 'back-end', root=ctx.root, env_file='back-end')
         if not ctx.resume_fly:
@@ -539,8 +539,10 @@ def lane_fly(ctx: Ctx) -> Result:
     fly = ctx.production_receipt().get('fly') or {}
     if fly.get('required') is False:
         return True, 'production gate open (no agent runtime change in the merge)', 0
+    carried = (fly.get('verified_by_descendant') or {}).get('descendant_job_id')
     return True, (f'deploy-agents run {fly.get("run_id")} attempt {fly.get("attempt")} job {fly.get("job_id")} '
-                  f'{fly.get("job_stage")} + monitor --verify'), 0
+                  f'{fly.get("job_stage")} + monitor --verify'
+                  + (f' (verified by descendant cutover {carried}, not its own)' if carried else '')), 0
 
 
 def lane_workflow_migration(ctx: Ctx) -> Result:

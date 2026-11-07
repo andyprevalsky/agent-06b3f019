@@ -3807,30 +3807,86 @@ def resume_command(job_id: str) -> str:
             "python3 ../scripts/worker_pool_cutover.py")
 
 
+MAX_SUPERSEDED_CHAIN = 64
+
+
+def _queue_read(job_id: str, *, backend: Path, env: dict) -> dict:
+    read = subprocess.run(["node", "--import", "tsx", "scripts/worker-deployment-queue.ts", "read", "--job-id", job_id],
+                          cwd=backend, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
+    return _parse_queue_read(read, job_id)
+
+
+def _parse_queue_read(read: subprocess.CompletedProcess, job_id: str) -> dict:
+    if read.returncode != 0:
+        raise ProductionGateError(f"worker-deployment-queue.ts read --job-id {job_id} failed: {read.stderr.strip()}")
+    try:
+        job = json.loads(read.stdout)
+        str(job["stage"]), job["identity"]["sourceCommit"], job["identity"]["attempt"]
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ProductionGateError(
+            f"worker-deployment-queue.ts read --job-id {job_id} returned no job stage/identity: {error}") from error
+    return job
+
+
+def _descendant_cutover(job: dict, merged_sha: str, *, backend: Path, env: dict, root: Path) -> dict:
+    """A SUPERSEDED job never cut over itself: a queued git descendant's cutover
+    carries its code (worker-deployment-queue.ts coalescing). Follow the durable
+    ``evidence.SUPERSEDED.supersededBy`` chain to that job and require it
+    SUCCEEDED in the same app, with the merged SHA a real ancestor of its commit."""
+    job_id = job["jobId"] if isinstance(job.get("jobId"), str) else ""
+    current, chain = job, [job_id]
+    while str(current["stage"]) == "SUPERSEDED":
+        link = ((current.get("evidence") or {}).get("SUPERSEDED") or {}).get("supersededBy")
+        if not isinstance(link, str) or link in chain or len(chain) > MAX_SUPERSEDED_CHAIN:
+            raise ProductionGateError(f"superseded job {chain[-1]} has no valid supersededBy link: {link!r}")
+        current = _queue_read(link, backend=backend, env=env)
+        chain.append(link)
+        if current["identity"].get("app") != job["identity"].get("app"):
+            raise ProductionGateError(f"superseding job {link} belongs to another app queue")
+    descendant_id, descendant_commit = chain[-1], current["identity"]["sourceCommit"]
+    if str(current["stage"]) != "SUCCEEDED":
+        raise ProductionGateError(
+            f"durable job {job_id} is SUPERSEDED by {descendant_id}, which is {current['stage']}, not SUCCEEDED; the Fly "
+            f"worker cutover carrying {merged_sha} is NOT live. Do not dispatch production semantics: resume the saved "
+            f"deployment from back-end/ with `{resume_command(job_id)}` (it follows the descendant) and rerun this gate")
+    ancestry = subprocess.run(["git", "-C", str(root), "merge-base", "--is-ancestor", merged_sha, descendant_commit],
+                              env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1"}, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=120)
+    if ancestry.returncode != 0:
+        verdict = "is not" if ancestry.returncode == 1 else "could not be proven (missing history)"
+        raise ProductionGateError(
+            f"descendant job {descendant_id} commit {descendant_commit} {verdict} a descendant of {merged_sha}; a "
+            "superseding cutover cannot verify this merge")
+    return {"descendant_job_id": descendant_id, "descendant_source_commit": descendant_commit,
+            "descendant_surface_hash": current["identity"].get("surfaceHash"), "chain": chain}
+
+
 def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path) -> dict:
     """deploy.md Step 13ab for the cooperative route: the saved job must be
     ``SUCCEEDED`` (CI cut over only when its durable job is; a green build or
     the run's conclusion is insufficient) and carry this merged SHA and
     workflow attempt, then the managed monitor ``--verify`` is authoritative
     for the job, its pointer and retained bank evidence. ``fly['job_stage']``
-    records the stage read, separately from the run's conclusion."""
+    records the stage read, separately from the run's conclusion. A
+    ``SUPERSEDED`` job is verified by its descendant's cutover instead
+    (``verified_by: descendant-cutover``), never reported as its own."""
     backend = root / "back-end"
     env = {**os.environ, **_dotenv_values(backend / ".env")}
     job_id = fly["job_id"]
     read = subprocess.run(["node", "--import", "tsx", "scripts/worker-deployment-queue.ts", "read", "--job-id", job_id],
                           cwd=backend, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=600)
-    if read.returncode != 0:
-        raise ProductionGateError(f"worker-deployment-queue.ts read --job-id {job_id} failed: {read.stderr.strip()}")
-    try:
-        job = json.loads(read.stdout)
-        stage = str(job["stage"])
-        identity = job["identity"]
-        source_commit, attempt = identity["sourceCommit"], identity["attempt"]
-    except (json.JSONDecodeError, KeyError, TypeError) as error:
-        raise ProductionGateError(
-            f"worker-deployment-queue.ts read --job-id {job_id} returned no job stage/identity: {error}") from error
+    job = _parse_queue_read(read, job_id)
+    stage, identity = str(job["stage"]), job["identity"]
+    source_commit, attempt = identity["sourceCommit"], identity["attempt"]
     fly["job_stage"] = stage
-    if stage != "SUCCEEDED":
+    refusal = ((job.get("evidence") or {}).get("ABORTED") or {}) if stage == "ABORTED" else {}
+    if refusal.get("reason") == "ROLLBACK_REFUSED":
+        raise ProductionGateError(
+            f"durable job {job_id} was refused before cutover: {refusal.get('message')} (live job "
+            f"{refusal.get('liveJobId')}); the Fly worker cutover did NOT run for {merged_sha} and production was not "
+            "rolled back. Do not dispatch production semantics or resume this job: deploy a release that contains "
+            "the live commit")
+    if stage not in ("SUCCEEDED", "SUPERSEDED"):
         raise ProductionGateError(
             f"durable job {job_id} is {stage}, not SUCCEEDED (run {fly.get('run_id')} concluded "
             f"{fly.get('conclusion')}); the Fly worker cutover is NOT live for {merged_sha}. Do not dispatch "
@@ -3842,16 +3898,28 @@ def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path
             f"job {job_id} source/attempt mismatch: job sourceCommit={source_commit} attempt={attempt}, expected "
             f"{merged_sha} / {fly['deployment_token']}; a prior rollout of the same SHA cannot authorize this deploy"
         )
-    monitor = subprocess.run(["node", "--import", "tsx", "scripts/monitor-cooperative-cutover.ts", "--job-id", job_id,
-                              "--expected-hash", expected_hash, "--verify"], cwd=backend, env=env,
+    descendant = None
+    if stage == "SUPERSEDED":
+        descendant = _descendant_cutover({**job, "jobId": job_id}, merged_sha, backend=backend, env=env, root=root)
+        fly["verified_by_descendant"] = descendant
+        # The descendant's own durable identity binds its surface; this merge's hash may legitimately differ.
+        command = ["node", "--import", "tsx", "scripts/monitor-cooperative-cutover.ts", "--job-id",
+                   descendant["descendant_job_id"], "--verify"]
+    else:
+        command = ["node", "--import", "tsx", "scripts/monitor-cooperative-cutover.ts", "--job-id", job_id,
+                   "--expected-hash", expected_hash, "--verify"]
+    monitor = subprocess.run(command, cwd=backend, env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=3600)
     tail = monitor.stdout[-2000:]
     if monitor.returncode != 0:
         raise ProductionGateError(
-            f"monitor-cooperative-cutover.ts --verify failed (exit {monitor.returncode}) for job {job_id}: {tail.strip()}"
+            f"monitor-cooperative-cutover.ts --verify failed (exit {monitor.returncode}) for job {command[6]}: {tail.strip()}"
         )
-    return {"job_id": job_id, "job_stage": stage, "source_commit": source_commit, "attempt": attempt,
-            "expected_hash": expected_hash, "queue_read": "ok", "monitor_verify_exit": 0, "monitor_tail": tail}
+    result = {"job_id": job_id, "job_stage": stage, "source_commit": source_commit, "attempt": attempt,
+              "expected_hash": expected_hash, "queue_read": "ok", "monitor_verify_exit": 0, "monitor_tail": tail}
+    if descendant:
+        result.update(verified_by="descendant-cutover", **descendant)
+    return result
 
 
 def _read_production_receipt(path: Path) -> object:
@@ -3933,8 +4001,10 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
             except ProductionGateError:
                 _write_production_receipt(receipt_path, receipt)  # keeps fly.job_stage for the operator
                 raise
+            carried = receipt["cutover_verify"].get("descendant_job_id")
             print(f"PIPELINE_PRODUCTION cutover=verified job={fly['job_id']} job_stage={fly['job_stage']} "
-                  f"hash={expected}", flush=True)
+                  f"hash={expected}" + (f" verified_by=descendant-cutover descendant={carried}" if carried else ""),
+                  flush=True)
         else:
             receipt["fly"] = {"required": False, "reason": "no agent runtime or deploy-agents.yml change in the merge"}
             print(f"PIPELINE_PRODUCTION fly=not-required head={merged_sha} ({len(changed)} changed files, "
