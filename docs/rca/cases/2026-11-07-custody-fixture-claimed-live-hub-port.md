@@ -103,13 +103,22 @@ The raw error escaped the validator.
 Repro: a child calling `prctl(PR_SET_DUMPABLE, 0)` makes the unchanged
 `namespace_quiet` raise `PermissionError`.
 
-Fix: bounded re-observation (2 s). The process is skipped only once it exits
-or is positively another user's. One that becomes readable again is
-inspected normally, and one that stays unreadable is refused as `original
-namespace process <pid> is unverifiable`: custody stays fail-closed.
-Regression: `InterruptedCustody.test_namespace_scan_reobserves_unreadable_same_user_process`
-(red on the old validator, green now). The full suite passed 5/5 under 8765
-plus connection churn.
+Fix: bounded re-observation (2 s). After a process turns unreadable, it is
+skipped only once it exits or its real uid (`/proc/<pid>/status`) is another
+user's. The `/proc/<pid>` owner alone is not enough: a setuid exec such as
+`sudo` turns the owner to root while the real uid stays ours (PR review
+finding). One that becomes readable again is inspected normally, and one that
+stays unreadable is refused as `original namespace process <pid> is
+unverifiable`: custody stays fail-closed. Regression:
+`InterruptedCustody.test_namespace_scan_reobserves_unreadable_same_user_process`
+covers transient, persistent and setuid-shaped cases (red on both earlier
+validators, green now). The full suite passed 5/5 under 8765 plus connection
+churn.
+
+Known pre-existing limit (unchanged): the upfront filter still skips a process
+already owned by another uid when the scan reaches it, including a setuid
+child that keeps our real uid. Tightening that would refuse custody for every
+live same-user `sudo`.
 
 ## Human feedback
 
