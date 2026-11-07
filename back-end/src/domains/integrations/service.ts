@@ -735,6 +735,7 @@ export async function getComputeCodeToken(
 }
 
 export { heartbeatComputeTokenLineage, releaseComputeTokenLineage };
+export { parseSubscriptionUsageReport } from '../../providers/computeSubscriptionUsage';
 
 /**
  * A worker's auth-failure report disables a login only when it names that login

@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "archive": "private encrypted trace archive (bucket named by R2_BUCKET_TRACE_ARCHIVE)",
+  "object_key": "deploy-closeout/v1/objects/708d4927f3b4490194713ad62fbd41034a03ce91d5787ad5b38f5f3237ec4fa3",
+  "scheme": "AES-256-GCM; blob = 12-byte nonce || ciphertext of gzip(JSON); AAD = the object key; key = base64 TRACE_ARCHIVE_ENCRYPTION_KEY_B64 from the managed project env; same scheme as scripts/jev_progress/store.py with PREFIX deploy-closeout/v1/",
+  "restore": "set the five R2_* / TRACE_ARCHIVE_ENCRYPTION_KEY_B64 values from the managed env, then: import sys; sys.path.insert(0,'scripts/jev_progress'); import store; store.PREFIX='deploy-closeout/v1/'; v=store.Store().get(<object_key>); base64-decode v['files'][name]",
+  "readback_all_hashes_match": true,
+  "files": {
+    "r11/backend-failed-runs-logs.tgz": {
+      "bytes": 1657033,
+      "sha256": "e708b7be6dfa6516024ed6add8f4d64e20c68c2e33914c78d018c403dbacc07f"
+    },
+    "r11/backend-planner-memory-r10.log": {
+      "bytes": 12618,
+      "sha256": "bb26986574ca71725a695611faab5fad8a6c34e3e7be30674c08a93876238003"
+    },
+    "r11/backend-units-r10.log": {
+      "bytes": 20079,
+      "sha256": "abcb5b7fe1116355da48924886096b277bfd8fe6a2ce2e7e1f3d61aec9f7fb31"
+    },
+    "r12/smoke-canary-depsync-fatal-0343.tgz": {
+      "bytes": 6773451,
+      "sha256": "e904089a8777348ef1a433a751090987a7df30a2eeb1a9efbcaa0038c83d7407"
+    },
+    "r13/agents-spawn-browser-agent-v3.log": {
+      "bytes": 2800580,
+      "sha256": "35676df4330e62bb5e394db1a41ef5277a47919743e4e17ffbfc2d31271ff8b3"
+    },
+    "r13/backend-treasury-rails.log": {
+      "bytes": 28827,
+      "sha256": "a0276eb4d07bd66882d165640d1ab0b56808cbc11addb894e5d41630c33cf9f8"
+    },
+    "r13/browser-auth-saved-password-retry-driver.log": {
+      "bytes": 16891,
+      "sha256": "3bcac7b2659d3c9271192f9e7731345552b7e7bd22039cd412f52e8eb331d205"
+    },
+    "r13/browser-doordash-food-plan-grocery-cart-reauth-driver.log": {
+      "bytes": 17098,
+      "sha256": "d9d10ab1b4bd45781183c9548927be0545f623856013c55db2f90f4f2fa65ef2"
+    },
+    "r13/smoke-r13-campaign-and-massagent-autoscaler.tgz": {
+      "bytes": 5149039,
+      "sha256": "2f46a399edd59f93bb5296392c0b9fa469aaa6c2cb35f50b8a0e385f9a19df51"
+    },
+    "r13/structural-r13.log": {
+      "bytes": 231320,
+      "sha256": "9db2ff017fa10321223c05c2408dc345a8fdb565d598bdfe25aa0f1a456d320b"
+    },
+    "r13/structural-r15.log": {
+      "bytes": 212073,
+      "sha256": "bc6a914712c91eaa945b1e3402333e6f8bb743a836957699f943dfb0869bc2e5"
+    }
+  },
+  "not_archived": {
+    "raw backend coverage worker tree (.context/deploy-backend, ~1.3 GB, from the discarded 2026-11-06 cycle)": "reproducible: deploy_test_backend.py on the frozen commit regenerates it; its outcomes are in the RCA cases",
+    "worker clones under /var/tmp/rose-deploy-workers": "reproducible from git: deploy_test_worker.py --prepare-checkout at the frozen commit",
+    "cloud smoke run trees under .context/deploy-cloud": "reproducible/unneeded: run bundles were uploaded to the Benchmark Hub; terminal summaries are in the archived campaign tarball"
+  },
+  "second_object": {
+    "object_key": "deploy-closeout/v1/objects/f72109c148ce65be1d6b1aefefcdac89305bb84a55b7336ecf3414b2ab329a4f",
+    "readback_hash_match": true,
+    "file": "staged-cycle-states.tgz",
+    "bytes": 3004357,
+    "sha256": "3922825df39fb48d97019bb3c7642f876bf6d767b9bde20e0eefdd37e2186f62",
+    "contents": "final READY cycle state and plan, production.json, every discarded cycle's state (attempt1..13) without output logs, review-ledger files (incl. rounds 1-3), approval-batch receipt and the devbox factory-events file; no env files"
+  }
+}

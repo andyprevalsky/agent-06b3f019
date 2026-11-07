@@ -36,6 +36,9 @@ model Agent {
   deletedAt                        DateTime?
   createdAt                        DateTime                    @default(now())
   updatedAt                        DateTime                    @updatedAt
+  // Newest person-authored message (UI/API post, attention answer, SMS reply).
+  // Agent-authored USER rows never set it. Null → the sidebar uses createdAt.
+  lastUserMessageAt                DateTime?
   temporalWorkflowId               String?
   temporalFirstExecutionRunId      String?
   workflowReplacementToken         String?
@@ -954,6 +957,15 @@ model Integration {
   accountId              String                       @default("")
   /// Shown on the FE chip.
   accountEmail           String?
+  /// Subscription usage windows (compute rows only), 0-100 percent USED, as the
+  /// provider reported them on a response this token served. Agents carry the
+  /// latest snapshot on the lineage heartbeat they already send per LLM call;
+  /// `usageObservedAt` orders those writes and throttles them per row.
+  usage5hUsedPct         Float?
+  usage5hResetsAt        DateTime?
+  usage7dUsedPct         Float?
+  usage7dResetsAt        DateTime?
+  usageObservedAt        DateTime?
   createdAt              DateTime                     @default(now())
   updatedAt              DateTime                     @updatedAt
   emailCredentials       EmailIntegrationCredential[]

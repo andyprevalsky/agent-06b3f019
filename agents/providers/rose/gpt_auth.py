@@ -31,6 +31,7 @@ from providers.rose.errors import (
 from providers.rose.pools import PoolSpec
 from providers.rose.speed import openai_service_tier_for
 from providers.rose.streaming import parse_responses_sse
+from providers.rose.subscription_usage import observe as observe_subscription_usage
 from providers.rose.transport import get_error_body, post_codex_stream, post_openai_responses_stream
 from providers.rose.types import GptAuthContext, StreamChunk
 from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
@@ -270,8 +271,12 @@ def _mark_completed_user_messages(items: List[Dict[str, Any]]) -> None:
 
 def _cap_prompt_cache_breakpoints(items: List[Dict[str, Any]]) -> None:
     """Reads consider the latest 50 breakpoints; drop older marks beyond that."""
-    marked = [part for item in items for part in item.get("content", []) if isinstance(item.get("content"), list)
-              and isinstance(part, dict) and "prompt_cache_breakpoint" in part]
+    marked = [
+        part
+        for item in items
+        for part in item.get("content", [])
+        if isinstance(item.get("content"), list) and isinstance(part, dict) and "prompt_cache_breakpoint" in part
+    ]
     for part in marked[: max(len(marked) - _MAX_PROMPT_CACHE_BREAKPOINTS, 0)]:
         part.pop("prompt_cache_breakpoint", None)
 
@@ -786,6 +791,7 @@ async def _attempt_with_token(
                 connect_timeout_s=ttft_timeout_s,
             ) as response:
                 status = response.status_code
+                observe_subscription_usage("gpt", auth.token, response.headers)
                 if status == 200:
                     # Spans the SSE generation phase only — separates "the model
                     # streamed slowly" (the 56→3 tok/s collapse) from connect/TTFT.

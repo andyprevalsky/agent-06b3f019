@@ -2461,6 +2461,38 @@ async def test_heartbeat_compute_token_lineage_activity_posts_lineage_key():
     assert json.loads(call["requestBody"]) == {"lineageKey": "agent:a-1"}
 
 
+async def test_heartbeat_compute_token_lineage_activity_carries_usage():
+    """The heartbeat carries the serving Integration and its usage snapshot when given."""
+    setup_mock(
+        {
+            "/api/integrations/compute-code/token/lineage-heartbeat": {
+                "status": 200,
+                "json": {"ok": True, "updated": 1},
+            },
+        }
+    )
+
+    from helpers.llm import heartbeat_compute_token_lineage_activity
+
+    usage = {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": {"usedPct": 25.0, "resetsAt": "2026-11-06T16:00:00Z"},
+        "sevenDay": None,
+    }
+    assert await heartbeat_compute_token_lineage_activity("agent:a-1", integration_id="integration-1", usage=usage)
+    assert await heartbeat_compute_token_lineage_activity("agent:a-1", integration_id="integration-1", usage=None)
+
+    calls = [
+        json.loads(call["requestBody"])
+        for call in get_captured_requests()
+        if "/api/integrations/compute-code/token/lineage-heartbeat" in call["url"]
+    ]
+    assert calls == [
+        {"lineageKey": "agent:a-1", "integrationId": "integration-1", "usage": usage},
+        {"lineageKey": "agent:a-1", "integrationId": "integration-1"},
+    ], calls
+
+
 async def test_mark_claude_token_rate_limited_user_success():
     """mark_claude_token_rate_limited_activity POSTs with user source."""
     setup_mock(
@@ -11552,6 +11584,11 @@ async def run_all_tests():
     await r.record_async(
         "heartbeat_compute_token_lineage_activity_posts_lineage_key",
         test_heartbeat_compute_token_lineage_activity_posts_lineage_key,
+    )
+    teardown_mock()
+    await r.record_async(
+        "heartbeat_compute_token_lineage_activity_carries_usage",
+        test_heartbeat_compute_token_lineage_activity_carries_usage,
     )
     await r.record_async(
         "set_response_schema_activity_cache_lookup_error_falls_through_to_live",

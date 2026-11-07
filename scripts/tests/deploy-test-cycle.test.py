@@ -622,6 +622,21 @@ class Cycle(unittest.TestCase):
         new['source'] = c.source(self.root)
         return new
 
+    def test_rotating_github_token_value_does_not_stale_runtime_config_but_other_changes_do(self):
+        with (self.root / '.git/info/exclude').open('a') as stream:
+            stream.write('.env\n')
+        env = self.root / 'back-end/.env'
+        env.parent.mkdir(exist_ok=True)
+        env.write_text('SETTING=1\nGITHUB_TOKEN=ghu_issued_first\n')
+        before = c.input_fingerprints(self.plan, self.root)
+        env.write_text('SETTING=1\nGITHUB_TOKEN=ghu_refreshed_by_the_daemon\n')
+        self.assertEqual(before, c.input_fingerprints(self.plan, self.root))
+        for changed in ('SETTING=2\nGITHUB_TOKEN=ghu_issued_first\n', 'SETTING=1\n',
+                        'SETTING=1\nGITHUB_TOKEN=ghu_issued_first\nEXTRA=1\n',
+                        'SETTING=1\nXGITHUB_TOKEN=ghu_issued_first\n'):
+            env.write_text(changed)
+            self.assertNotEqual(before, c.input_fingerprints(self.plan, self.root), changed)
+
     def test_refresh_healthy_old_full_pass_leaves_focused_but_requires_new_final_full(self):
         old, marker = self.repair_set_refresh_fixture()
         attempts = copy.deepcopy(self.state['attempts'])
@@ -3810,6 +3825,32 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
         self.physical['physical']['unknown_live_userland']=[];self.benchmark['state']='running';self.seal()
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
+
+
+@unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+class LocalCleanupQuietScan(unittest.TestCase):
+    """quiet(root) re-observes an unreadable same-user process instead of raising PermissionError."""
+
+    def test_unreadable_same_user_process_is_reobserved_then_refused(self):
+        import deploy_test_local_cleanup as local
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / '.context').mkdir()
+            (root / '.context/native-worker-admission.lock').write_text('')
+            # PR_SET_DUMPABLE=4: /proc/<pid> stays ours while cwd turns unreadable, as during a setuid exec.
+            body = ("import ctypes,sys,time;ctypes.CDLL(None).prctl(4,0,0,0,0);print('ready',flush=True);"
+                    "time.sleep(float(sys.argv[1]));ctypes.CDLL(None).prctl(4,1,0,0,0);time.sleep(30)")
+            for hidden, refused in ((0.3, False), (60, True)):
+                child = subprocess.Popen([sys.executable, '-c', body, str(hidden)], stdout=subprocess.PIPE, text=True)
+                try:
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    if refused:
+                        with self.assertRaisesRegex(ValueError, 'unverifiable'):
+                            local.quiet(root)
+                    else:
+                        local.quiet(root)
+                finally:
+                    child.kill(); child.wait(); child.stdout.close()
 
 
 if __name__ == '__main__': unittest.main()
