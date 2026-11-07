@@ -12,6 +12,7 @@ import subprocess
 import time
 
 KIND = 'native-cloud-cleanup-v1'
+ISOLATED_RENEWAL_PHASES = frozenset({'triage', 'needs-focused-plan', 'failed-gates'})
 
 # Bound raw run evidence per proof; ordinary receipts retain their existing limit.
 MAX_RAW_FORENSIC_RUN_BYTES = 128 * 1024 * 1024
@@ -1114,24 +1115,118 @@ def clean_isolated_successor(state, prior, original, successor):
          and original['finished_at'] <= successor['started_at'] <= successor['finished_at'], 'successor clocks')
 
 
+def reconciliation_occurrence(state, entry, receipt):
+    """Keep token-based interruption and failure-based reconciliation identities distinct."""
+    if entry.get('occurrence') == receipt['token']:
+        return
+    rows = [f for f in state.get('failures', []) if f.get('id') == entry.get('occurrence')]
+    need(len(rows) == 1, 'reconciliation occurrence identity')
+    failure = rows[0]
+    case = failure.get('check', '').partition('/')[2]
+    need(failure.get('gate') == receipt['gate'] and failure.get('source') == receipt['source']
+         and failure.get('evidence') == receipt['log'] and failure.get('command') == receipt['command']
+         and failure.get('worker_result') == receipt['worker_result']
+         and failure.get('native_result') == 'UNVERIFIED' and failure.get('complete') is False
+         and receipt['cases'].get(case) == 'UNVERIFIED', 'reconciliation occurrence binding')
+
+
+def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
+    """Launch-only authority from an immutable full failed cohort's strict normal reconciliation."""
+    from deploy_test_cycle import bounded_read, receipt_owner, sha_file
+    gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
+    need(successor is not None and successor.get('token') != original['token']
+         and successor.get('executed') is True and successor.get('complete') is False
+         and successor.get('status') == 'FAIL' and type(successor.get('native_exit')) is int
+         and successor['native_exit'] in (0, 1) and successor.get('timed_out') is False
+         and successor.get('cancelled') is False and successor.get('command') == gate['command'],
+         'failed successor execution')
+    rows = [(a, r) for a in state['attempts'] for r in a.get('results', []) if r is successor]
+    need(len(rows) == 1 and rows[0][0].get('phase') in {'initial', 'focused', 'failed-gates', 'final', 'triage'}
+         and not rows[0][0].get('interrupted') and not rows[0][0].get('stale')
+         and rows[0][0].get('source') == successor['source']
+         and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True),
+         'failed successor full attempt')
+    binding = successor.get('execution_binding', {})
+    # This receipt's hash-bound execution inputs are historical. Current target inputs
+    # can legitimately differ and must earn fresh full-gate credit after renewal.
+    need(isinstance(binding, dict) and set(binding) == {'contract_digest', 'environment', 'input_fingerprint'}
+         and all(isinstance(v, str) and re.fullmatch('[0-9a-f]{64}', v) for v in binding.values()),
+         'failed successor historical execution binding')
+    folder = Path(successor['log']).parent
+    need(bounded_read(folder / 'receipt.json', 'failed successor receipt') == successor,
+         'failed successor receipt changed')
+    need(successor.get('worker_result') == str(folder / 'result.json'), 'failed successor result locator')
+    request = bounded_read(folder / 'request.json', 'failed successor request')
+    need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
+         and request.get('phase') == rows[0][0]['phase']
+         and request.get('worker_recipe') == gate.get('worker_recipe'), 'failed successor request identity')
+    checks, skips = request['checks'], request['skips']
+    need(isinstance(checks, list) and checks and isinstance(skips, dict)
+         and len(set(checks)) == len(checks) and not set(checks) & set(skips)
+         and set(checks) | set(skips) == set(gate['checks'])
+         and all(isinstance(v, dict) and v.get('source') == successor['source'] for v in skips.values())
+         and set(successor.get('cases', {})) == set(gate['checks'])
+         and set(successor.get('case_complete', {})) == set(gate['checks'])
+         and all(successor['cases'].get(k) == 'SKIP' for k in skips)
+         and all(successor['cases'].get(k) in {'PASS', 'FAIL', 'UNVERIFIED'} for k in checks)
+         and all(type(v) is bool for v in successor['case_complete'].values())
+         and any(successor['cases'][k] == 'UNVERIFIED' and successor['case_complete'][k] is False for k in checks),
+         'failed successor full inventory')
+    owner = receipt_owner(prior['gate'], successor)
+    need(isinstance(owner, dict) and owner.get('worker_root') == prior['owner']['worker_root'],
+         'failed successor owner')
+    native_root = Path(owner['worker_root']) / '.context/deploy-cloud' / hashlib.sha256(successor['token'].encode()).hexdigest()
+    expected = dict(original_receipt_sha256=prior['proof']['receipt_sha256'], original_request_token=prior['token'],
+        new_request_token=successor['token'], source=successor['source'], new_native_root=str(native_root),
+        excluded_resources=prior['excluded_resources'], credit_granted=False)
+    admissions = request.get('isolated_validation')
+    need(isinstance(admissions, list) and all(isinstance(v, dict) for v in admissions)
+         and admissions == successor.get('isolated_validation')
+         and [v for v in admissions if v.get('original_request_token') == prior['token']] == [expected],
+         'failed successor original isolation binding')
+    entries = [(k, e) for k, e in state.get('reconciled_owners', {}).items()
+               if e.get('token') == successor['token']]
+    need(len(entries) == 1, 'one strict normal successor reconciliation required')
+    key, entry = entries[0]
+    normal = entry.get('proof', {})
+    need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
+         and entry.get('purpose') is None and normal.get('purpose') is None
+         and normal.get('layout') == 'campaign-v1' and key == normal.get('receipt_sha256')
+         and key == sha_file(folder / 'receipt.json') and entry.get('credit_granted') is False,
+         'strict normal successor reconciliation required')
+    reconciliation_occurrence(state, entry, successor)
+    # Re-run the unchanged normal validator: all native file hashes, audits, retained Hub custody,
+    # provider release and publication closure are required even when this result is incomplete.
+    need(still_bound(entry, successor, owner), 'strict normal successor proof changed')
+    need(finite(original.get('finished_at')) and finite(successor.get('started_at'))
+         and finite(successor.get('finished_at'))
+         and original['finished_at'] <= successor['started_at'] <= successor['finished_at'],
+         'failed successor clocks')
+
+
 def renew_isolated_validation(state, request_token, proof):
     """Renew only the next source of an already verified original operation."""
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
-    need(state.get('phase') == 'triage' and not state.get('running')
-         and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent triage required')
+    need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
+         and not state.get('running')
+         and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent repair boundary required')
     previous = [(key, entry) for key, entry in state.get('reconciled_owners', {}).items()
                 if entry.get('token') == request_token]
     need(len(previous) == 1, 'one prior reconciliation required')
     key, prior = previous[0]
     need(prior.get('kind') == KIND and prior.get('purpose') == 'isolated-validation'
-         and prior.get('occurrence') == request_token and key == proof.get('receipt_sha256'), 'original reconciliation identity')
+         and key == proof.get('receipt_sha256'), 'original reconciliation identity')
     receipts = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
                 if row.get('gate') == prior['gate'] and row.get('token') == request_token]
     need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
+    reconciliation_occurrence(state, prior, receipt)
     latest = latest_receipts(state).get(prior['gate'])
     if latest != receipt:
-        clean_isolated_successor(state, prior, receipt, latest)
+        if latest is not None and latest.get('complete') is False:
+            reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
+        else:
+            clean_isolated_successor(state, prior, receipt, latest)
     need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')
     owner = receipt_owner(prior['gate'], receipt)
     need(still_bound(prior, receipt, owner), 'prior native proof changed')
@@ -1151,7 +1246,8 @@ def reconcile(state, occurrence_id, proof):
     from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, interrupted_receipt
     try:
         failure = next((f for f in state['failures'] if f['id'] == occurrence_id), None)
-        if failure is None and state.get('phase') == 'triage' and proof.get('purpose') == 'isolated-validation':
+        if (failure is None and state.get('phase') in ISOLATED_RENEWAL_PHASES
+                and proof.get('purpose') == 'isolated-validation'):
             return renew_isolated_validation(state, occurrence_id, proof)
         if failure is None and state.get('phase') == 'stale':
             # A source refresh can finish a full attempt before its failures are

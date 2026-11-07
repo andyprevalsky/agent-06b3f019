@@ -69,6 +69,18 @@ serial fallback. An active operation on the same isolation root is refused
 before launch; its existing owner and deadline remain authoritative. A concrete
 capacity shortfall must be reported, not converted into hidden suite ordering.
 
+At a quiescent `needs-focused-plan` boundary, `repair-independent` observes
+missing complete local categories while required repairs remain in the same plan.
+Use `--include-repair-local` to include complete original local repair contracts.
+Both modes admit only `local-isolated` workers, exclude native and legacy cloud
+smoke, honor actual leased-root exclusions, and retain `ready=false`. New failures
+enter normal TRIAGE. Cloud smoke still requires its fresh native admission.
+
+```bash
+python3 scripts/deploy_test_cycle.py repair-independent --plan "$PLAN" \
+  --state-dir "$STATE" --root "$SOURCE" --include-repair-local
+```
+
 At quiescent TRIAGE, run missing independent full gates without disposing of the
 original failures:
 
