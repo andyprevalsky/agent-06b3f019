@@ -208,6 +208,20 @@ def shared_canary_env(root, environ=os.environ):
                               ('FLEET_INFRA_CANARY_LOCK', 'transaction.lock'))}
 
 
+def capacity_admission_env(now, environ=os.environ):
+    """Pass this gate's deadline to native Fly capacity admission as an explicit input.
+
+    Every devbox shares the benchmark app's DEMO/delegating/Machine/shared-CPU ceilings, so a
+    shortfall is normally another devbox's fleet that will release. The fleet's own default
+    gives up after 300 s and failed smoke; within a deploy it now keeps polling until the
+    gate's existing deadline (deploy_gates.GATE_DEADLINE_SECONDS). The ceilings are unchanged.
+    An operator's explicit deadline wins and is never extended.
+    """
+    from deploy_gates import GATE_DEADLINE_SECONDS
+    key = 'CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH'
+    return {key: environ.get(key) or str(int(now) + GATE_DEADLINE_SECONDS)}
+
+
 def execute(request, root):
     """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
     checks, skipped = request['checks'], request.get('skips', {})
@@ -227,7 +241,8 @@ def execute(request, root):
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
            'DEPLOY_NATIVE_HUB_JOIN': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
-           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root)}
+           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root),
+           **capacity_admission_env(time.time())}
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
     catalog = root / 'agents/benchmarks/tasks.json'

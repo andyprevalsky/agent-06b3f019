@@ -4362,6 +4362,7 @@ class RelayStartupEvidence(unittest.TestCase):
         namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=lambda _r:requested['source'],
                        campaign_width=lambda _c:1,hashlib=hashlib,os=os,time=time,sys=sys,
                        cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,shared_canary_env=lambda _r:{},
+                       capacity_admission_env=lambda _now:{'CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH':'fixture'},
                        run_command=lambda *a,**k:(calls.append((a,k)) or (1,False,False,False)),
                        collect_campaign=lambda *_a:({'browser-smoke':'UNVERIFIED'},{},False,'fixture'))
         exec(compile(ast.Module(body=[function],type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)
@@ -4369,6 +4370,7 @@ class RelayStartupEvidence(unittest.TestCase):
         self.assertEqual(len(calls),1)
         self.assertIs(calls[0][1].get('owned_lifecycle'),True)
         self.assertEqual(calls[0][1]['env'].get('DEPLOY_NATIVE_HUB_JOIN'),'1')
+        self.assertEqual(calls[0][1]['env'].get('CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH'),'fixture')
 
     def test_startup_only_reconciliation_retains_unverified_bytes(self):
         receipt,owner,proof=self.fixture();before=json.dumps(receipt,sort_keys=True)
