@@ -58,6 +58,7 @@ CASES = [
         'declared_patch_payload_cannot_be_missing_or_empty or '
         'empty_local_patch_cleanup_is_nounset_safe or '
         'central_hub_runs_in_own_session_after_launcher_exit or '
+        'central_hub_port_selection_skips_a_bound_port_without_a_listener or '
         'boot_launch_delivers_the_exact_worktree_patch_to_every_guest or '
         'boot_launch_runs_the_current_driver_before_applying_the_patch or '
         'boot_payload or '
