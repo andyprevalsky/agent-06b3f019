@@ -45,6 +45,7 @@ async function runAll(): Promise<void> {
   await import('./agents-batch.cases');
   await import('./agents-liveness-reconcile.cases');
   await import('./agents-stuck-bug-report.cases');
+  await import('./agents-self-bug-report.cases');
   await import('./agents-followup-cleanup-obligation.cases');
   await import('./agents-terminal-browser-release.cases');
   await import('./agents-cutover-subagent-close.cases');

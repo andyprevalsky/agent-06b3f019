@@ -2460,11 +2460,11 @@ class GenericLifecycle(unittest.TestCase):
         self.temp.cleanup()
 
     def test_default_forced_kill_refuses_resume_even_after_group_is_gone(self):
-        script = self.root / 'ignores-term.py'
-        script.write_text("import signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\ntime.sleep(30)\n")
+        # The shell ignores TERM before exec, so a slow interpreter start under
+        # load cannot let TERM land before the handler exists.
         with (self.root / 'forced.log').open('wb') as output:
             code, timed_out, cancelled, lingering = self.process.run_command(
-                [sys.executable, str(script)], cwd=self.root, env=os.environ.copy(),
+                ['/bin/sh', '-c', "trap '' TERM; exec sleep 30"], cwd=self.root, env=os.environ.copy(),
                 output=output, timeout=.2)
         self.assertEqual(-signal.SIGKILL, code)
         self.assertTrue(timed_out)

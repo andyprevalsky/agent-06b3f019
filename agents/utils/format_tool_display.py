@@ -30,6 +30,7 @@ def format_tool_display(tool_name: str, tool_args: Dict[str, Any]) -> str:
         "set_plan": lambda args: f"Planning {_truncate(args.get('title', '...'), 40)}",
         "attempt_completion": lambda args: "Completing task",
         "request_user_signup": lambda args: "Requesting signup",
+        "report_bug": lambda args: f"Reporting bug: {_truncate(args.get('description', '...'), 40)}",
         "grep": lambda args: f"Searching messages for {_truncate(args.get('pattern', '...'), 40)}",
     }
 
