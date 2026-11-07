@@ -46,6 +46,10 @@ DEFAULT_STATE_DIR = '.context/deploy-pipeline'
 OUTPUT_LEDGER = 'agents/benchmarks/history/'  # same exclusion as deploy_test_worker.prepare_checkout
 PARK_ENV = 'BENCHMARK_HISTORY_PARK_DIR'  # honoured by agents/benchmarks/timeout_history.py + span_history.py
 PARK_DIR = '.context/deploy-ledger-park'  # published by `scripts/deploy finish` (--apply-parked)
+# Only gates that run real benchmark tasks record publishable history rows. A test-suite gate's
+# ledger rows are fixtures: parking them made the agents span-history/benchmark ledger tests write
+# into this directory instead of their own files (and queued fixture rows for publication).
+PARK_GATES = frozenset({'smoke', 'agentcard-lifecycle'})
 LEDGER_KEEP = '.context/deploy-worker-ledgers'  # retire preserves pre-park worker ledger edits here
 # No standard gate declares its own deadline. Local transports need a finite one, so every
 # slot carries the existing backend handoff deadline (deploy_test_backend.handoff_recipe).
@@ -229,7 +233,8 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
         raise Blocked('workers', f'{gate}: prepared env belongs to {values["ROSE_DEPLOY_WORKTREE_PATH"]}, not {path}')
     env = {key: values[key] for key in (*SLOT_ENV, *OPTIONAL_ENV) if values.get(key)}
     env[RUN_ROOT_ENV] = str(run_root(root))
-    env[PARK_ENV] = str(root.resolve() / PARK_DIR)
+    if gate in PARK_GATES:
+        env[PARK_ENV] = str(root.resolve() / PARK_DIR)
     marker = path / SYSTEM_PG_MARKER
     if gate == BACKEND_GATE and values.get('ROSE_USE_SYSTEM_PG') == 'true' and marker.is_file():
         # run-coverage.sh refuses an isolated system-Postgres worktree without this exact prepared database.
