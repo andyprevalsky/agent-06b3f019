@@ -26,6 +26,8 @@ sources:
   - task user report 2026-11-06 iMessage connector 200k to 1; prod read-only query of integration 1a7f14fc-8481-4e4e-95d3-c4f36718cab3
   - commit 86e00bb3d (Rose Desktop integrations list started rendering config.messages)
   - commit 8be441e32 (durable messaging uploads; config.messages = per-request size)
+  - PR #1745
+  - commit 0b3fda43f21aaeae5fdac19885484aa4b5966051
 repro: back-end/src/tests/blackbox/integrations.messaging-ingestion.cases.ts testMessagingUpload_incrementalSyncKeepsTotalCount
 status: fixed
 ---
@@ -125,7 +127,9 @@ backend blackbox gate.
 ## Human feedback
 
 None recorded. (Adversarial reviewer, not the user, rejected the first count
-query's cross-user plan; see Solution.)
+query's cross-user plan; see Solution.) Shipped in PR #1745 (merge
+0b3fda43f, live on Render 2026-11-07 04:48Z); the reporting user's row
+recounts at its next finalized sync.
 
 ## Reusable lesson
 
