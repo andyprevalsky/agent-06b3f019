@@ -85,16 +85,3 @@ None recorded.
 ## Reusable lesson
 
 A test that asserts host-global listener absence must bind its fixture to ports that no concurrently running deploy claim can hold, never to a hard-coded port inside the allocator's range.
-
-## Concurrent occurrence: cloudbench fixture listener on 21136 (2026-11-07, PR #1760)
-
-The PR #1760 staged deploy cycle ran on a branch cut before this fix reached main
-(base 3e770c9e1, fixture still at 15000). Its `deploy-command-structural` gate failed
-`deploy-test-cycle` with five `ValueError: local cleanup: interrupted root listener
-remains`. That time the listener was not a deploy claim. It was the concurrent
-`cloudbench-controller` gate's multi-workstream fixture, which held 127.0.0.1:21136 and
-:21137 for 12 minutes, inside the 15000 footprint's Hub search range (20764-21264).
-A network-namespace A/B on the unchanged source passed with no listener and failed
-(errors=5) with one listener on 21136. PR #1760 briefly carried its own fix (holding a
-bound, non-listening socket on every footprint port). It took this case's
-fix at merge, because a footprint below FIRST_BASE_PORT also excludes that fixture's port.

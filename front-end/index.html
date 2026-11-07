@@ -7,34 +7,64 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, minimal-ui"
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="theme-color" content="#f9f9fb" />
     <script>
-      // Pre-paint theme: apply the persisted Rose theme (localStorage
-      // 'rose-theme:<userId>' = 'dark' | 'light') before first paint so the
-      // page and the iOS status bar never flash light for a dark account.
+      // Pre-paint theme: apply the persisted Rose theme before first paint so the
+      // page and the status bar never flash the wrong color. Prefers the
+      // last-active account ('rose-theme-active' = userId, written by
+      // RoseThemeProvider) and its 'rose-theme:<userId>' = 'dark' | 'light'
+      // (localStorage, cookie backup). Without an active account: dark only when
+      // every stored choice on the device is dark.
       (function () {
         try {
-          var dark = false;
-          var light = false;
-          var pairs = document.cookie ? document.cookie.split(';') : [];
-          for (var c = 0; c < pairs.length; c++) {
-            var part = pairs[c].trim();
-            if (part.indexOf('rose-theme%3A') === 0) {
-              var cv = part.slice(part.indexOf('=') + 1);
-              if (cv === 'dark') dark = true;
-              else if (cv === 'light') light = true;
+          var choice = function (id) {
+            var v = localStorage.getItem('rose-theme:' + id);
+            if (v === 'dark' || v === 'light') return v;
+            var pairs = document.cookie ? document.cookie.split(';') : [];
+            var name = 'rose-theme%3A' + encodeURIComponent(id) + '=';
+            for (var c = 0; c < pairs.length; c++) {
+              var part = pairs[c].trim();
+              if (part.indexOf(name) === 0) {
+                var cv = part.slice(name.length);
+                if (cv === 'dark' || cv === 'light') return cv;
+              }
             }
+            return null;
+          };
+          // Blur-lab preset A (diagnostic, only ever stored via ?blurlab=1):
+          // set the status-bar meta before parse completes so iOS can read it.
+          if (localStorage.getItem('rose.blurlab.preset') === 'A') {
+            var sb = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+            if (sb) sb.setAttribute('content', 'black-translucent');
           }
-          for (var i = 0; i < localStorage.length; i++) {
-            var key = localStorage.key(i);
-            if (key && key.indexOf('rose-theme:') === 0) {
-              var value = localStorage.getItem(key);
-              if (value === 'dark') dark = true;
-              else if (value === 'light') light = true;
+          var active = localStorage.getItem('rose-theme-active');
+          var picked = active ? choice(active) : null;
+          if (active && picked === null) picked = 'light'; // known account, nothing stored: provider default
+          var dark = picked === 'dark';
+          if (picked === null) {
+            var any = false;
+            var light = false;
+            var pairs2 = document.cookie ? document.cookie.split(';') : [];
+            for (var c2 = 0; c2 < pairs2.length; c2++) {
+              var p2 = pairs2[c2].trim();
+              if (p2.indexOf('rose-theme%3A') === 0) {
+                var v2 = p2.slice(p2.indexOf('=') + 1);
+                if (v2 === 'dark') any = true;
+                else if (v2 === 'light') light = true;
+              }
             }
+            for (var i = 0; i < localStorage.length; i++) {
+              var key = localStorage.key(i);
+              if (key && key.indexOf('rose-theme:') === 0) {
+                var v = localStorage.getItem(key);
+                if (v === 'dark') any = true;
+                else if (v === 'light') light = true;
+              }
+            }
+            dark = any && !light;
           }
-          if (dark && !light) {
+          if (dark) {
             var root = document.documentElement;
             root.classList.add('dark');
             root.setAttribute('data-rose-predark', '');

@@ -48,8 +48,8 @@ def with_report_bug(tools: Sequence[str], workflow_instance: Any) -> List[str]:
     return [*names[:at], TOOL_NAME, *names[at:]]
 
 
-def _result_text(result: Dict[str, Any]) -> str:
-    """Truthful tool result: the filed or saved report, or the run's earlier one."""
+def _result_text(result: Dict[str, Any], description: str) -> str:
+    """Truthful tool result: the filed or saved report (full description), or the run's earlier one."""
     title = str(result.get("name") or "bug report")
     run = str(result.get("run_id") or "")
     filed = (
@@ -59,9 +59,11 @@ def _result_text(result: Dict[str, Any]) -> str:
     )
     if result.get("already_reported"):
         return f"This run already reported its one bug, {filed}; this description was not sent."
+    # The title is cut at 60 chars; the tool card shows the whole report that was sent.
+    report = f"\n\nReport sent:\n{description}"
     if result.get("mode") == "launched":
-        return f"Bug report {filed}. An engineering agent will investigate it."
-    return f"Bug report {filed}."
+        return f"Bug report {filed}. An engineering agent will investigate it.{report}"
+    return f"Bug report {filed}.{report}"
 
 
 async def report_bug(workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str) -> Tuple[MessageStatus, str]:
@@ -90,7 +92,7 @@ async def report_bug(workflow_instance: Any, tool_call: Dict[str, Any], tool_cal
     if error is not None:
         status, title, text, metadata = MessageStatus.ERROR, "Bug report failed", error, None
     else:
-        status, title, text = MessageStatus.FINISHED, "Reported bug", _result_text(result)
+        status, title, text = MessageStatus.FINISHED, "Reported bug", _result_text(result, description)
         metadata = {
             "bugReportTitle": result.get("name"),
             "bugReportRunId": result.get("run_id"),
