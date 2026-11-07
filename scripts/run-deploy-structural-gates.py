@@ -405,6 +405,7 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
     ),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
+    Gate("run-bench-durable-service", ("python3", "scripts/tests/run-bench-durable-service.test.py")),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate("cloudbench-warm-pool", ("python3", "scripts/tests/cloudbench-warm-pool.test.py")),
     Gate(
