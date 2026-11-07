@@ -18333,7 +18333,9 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
 
     assert len(capture_disconnects) == 2
     assert "_pause_browser_for_approval" not in source
-    assert post_injection.count("await _disconnect_browser(dom_service)") == 6
+    # Terminal disconnects release through the bounded helper (multiplexer-close fallback).
+    assert post_injection.count("await _release_browser_client(dom_service)") == 6
+    assert "await _disconnect_browser(dom_service)" not in post_injection
     pause_helper = source.split("async def _close_browser_with_cleanup_receipt(", 1)[1].split(
         "state_prefetch =", 1
     )[0]
@@ -27566,7 +27568,7 @@ async def test_failed_activity_closes_the_multiplexer_when_its_disconnect_is_wed
     Browser setup connected and handed its clients to the activity, then credential
     setup failed. The error handler's bounded disconnect timed out; a timeout does
     not prove the loopback client detached, so the multiplexer (captured before
-    disconnect clears it) must be closed, and the service kept for the final cleanup.
+    disconnect clears it) must be closed.
     """
     from contextlib import ExitStack
 
