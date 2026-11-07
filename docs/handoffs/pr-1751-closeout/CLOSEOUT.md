@@ -2,7 +2,7 @@
 
 Status: final record written after the merge; the committed `deletion-readiness.json` receipt beside it is the record of record for deletion readiness.
 
-- Deployed PR: #1751, branch `deploy-v2-rewrite`, merged SHA: `87b887bd39f8d762976fb33511aaafcb8e023512`; records PR: RECORDS_PR_LINK.
+- Deployed PR: #1751, branch `deploy-v2-rewrite`, merged SHA: `87b887bd39f8d762976fb33511aaafcb8e023512`; records PR: [PR #1766](https://github.com/Rose-Ai-Labs/rose/pull/1766).
 - Source HEAD when the archives were taken: `27f76e593bb59838e0d2768d00dd6e87820c82a8`; the object prefix `devbox-closeout-private/pr1751-9997bca3/` uses that HEAD, not the merged SHA.
 - Inventory time: 2026-11-07T16:22:25Z (point in time; the deploy was still running when most archives were taken).
 - No credential, key, signed URL or secret value is in this record. Env files appear by name and variable count only.
