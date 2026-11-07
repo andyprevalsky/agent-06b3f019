@@ -33,8 +33,10 @@ export interface PendingConnect {
   release: (() => Promise<void>) | null;
   /** One long-lived remote CDP connection, reused by every watcher tick. */
   cdp: CdpClient | null;
-  /** Decrypted passkeys, loaded once, re-seeded onto new targets each tick. */
+  /** Decrypted passkeys, loaded once; auto-attach seeds them onto new targets. */
   passkeys?: PasskeySeed[];
+  /** Relying party whose passkey prompt Rose could not answer (see cdp.passkeys). */
+  passkeyUnavailableFor?: string;
   authVerifier?: string;
   authState?: string;
   authRedirectUri?: string;

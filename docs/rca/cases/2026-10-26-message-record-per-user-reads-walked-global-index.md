@@ -21,7 +21,9 @@ tags:
   - multi-tenant
 sources:
   - memory:scalability-audit-100-seats-20261024
-  - commit 3da991f7c
+  - PR #1581
+  - commit 79c6108cc
+  - memory:s7-migration-orphan-rows-blocked-render-20261026
 repro: back-end/src/tests/blackbox/message-record-user-scope.blackbox.ts
 status: fixed
 ---
@@ -106,6 +108,32 @@ composite-FK probe per row, on the same Person unique index the old FK used. The
 trigram GIN adds write amplification proportional to message text, and uses
 `fastupdate` batching.
 
+Shipped in PR #1581 (merge `79c6108cc`, 2026-10-26). CodeRabbit's incremental review
+found two issues, both fixed before merge. First, local `db push` databases lacked the
+trigram index; `apply-local-message-record-trgm-index.sh` now replays the migration after
+every local push. Second, the local-only writer guards trusted the URL authority even
+when a `host`/`hostaddr` query parameter redirected the connection; every guard now
+refuses one.
+
+Production rollout: `20261026160004_message_record_user_id_validate` failed its first
+`migrate deploy`. Four 2026-09-04 rows had a `personId` with no Person, so the
+backfill left their `userId` NULL and the CHECK failed validation. Render's start
+command exited 1, and that blocks every later deploy (P3009). The parent backed up and
+deleted the four orphans, ran `migrate resolve --rolled-back`, and redeployed. The
+deploy was live at 22:17Z with every migration applied. Local and CI databases have no
+orphan rows, so no gate could see this.
+
+Verified read-only in production on 2026-11-07:
+
+- 0 NULL owners, and `MessageRecord_personId_userId_fkey` is validated.
+- The index set is `(userId, timestamp)` plus the trigram index, with no global
+  timestamp indexes.
+- The 24k-message user's recent-200 query is an
+  `Index Scan Backward using MessageRecord_userId_timestamp_idx` that reads 200 rows in
+  1.5 ms. It was 34,690 rows and 45 ms.
+- `pg_stat_statements` means for the new per-user shapes are 0.3 ms over 25,055 calls
+  and 0.7 ms over 7,957 calls. The old oldest/newest lookups averaged 208 ms.
+
 Golden reference: `hermes-agent/hermes_state_common.py:616` stores the owning
 scope on each message with `messages(session_id, timestamp)`. `:785` adds a
 full-text index (`messages_fts`) for message search. That is the same shape as
@@ -115,8 +143,9 @@ openclaw, codex and prime-agent for pg_trgm and owner-scoped indexes).
 
 ## Human feedback
 
-None recorded.
+None recorded on the fix. Andy (via the parent, 2026-10-26): contain and fix only;
+no breach or exposure forensics.
 
 ## Reusable lesson
 
-Store the tenant key on every high-volume child table with a (tenant, sort-key) index and drop global sort indexes the planner can mistake for a per-tenant path; filtering through a parent join makes per-user cost grow with every user's data.
+Store the tenant key on every high-volume child table with a (tenant, sort-key) index and drop global sort indexes the planner can mistake for a per-tenant path, and have any backfill-then-validate migration repair or delete rows it cannot backfill, because only production holds them.

@@ -6,6 +6,7 @@ import { isPostgresRegexError } from './regexSafety';
 import { formatTimeAgo } from './format.snippets';
 import { sortMatches } from './grepSort';
 import {
+  DEFAULT_GREP_SOURCES,
   isCalendarOnly,
   isGoogleGrepSource,
   isMessageFamilySource,
@@ -39,6 +40,9 @@ export { getSourceStatus, type SourceStatus } from './sourceStatus';
 
 const log = createLogger('Data');
 
+export const NO_AGENT_TREE_NOTICE =
+  'agent_network: no current agent tree here, so it has nothing to search.';
+
 // Re-export domain errors so existing importers (routes, networkService,
 // agentNetworkService) keep their `from './service'` imports.
 export {
@@ -71,6 +75,13 @@ async function searchSource(
   if (source === 'transactions') return searchTransactionSource(userId, input);
   if (source === 'documents') return searchDocumentSource(userId, input);
   if (source === 'agent_trajectories') return searchTrajectorySource(userId, input, agentId);
+  // Defaulted selections carry the DEFAULT_GREP_SOURCES array itself (validate.ts).
+  if (input.sources === DEFAULT_GREP_SOURCES && (agentId === undefined || agentId === '')) {
+    // A caller with no agent tree (the SMS supervisor) still searches the
+    // documented defaults; its current tree is empty. Naming agent_network
+    // explicitly without an agent still fails with MISSING_AGENT_ID.
+    return { total: 0, matches: [], notice: NO_AGENT_TREE_NOTICE };
+  }
   return searchAgentNetworkSource(userId, input, agentId);
 }
 

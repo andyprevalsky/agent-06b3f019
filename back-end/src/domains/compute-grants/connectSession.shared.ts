@@ -38,6 +38,11 @@ export interface ConnectPollResult {
   accountEmail?: string;
   accountId?: string;
   reason?: string;
+  /**
+   * Relying party (e.g. openai.com) that asked for a passkey Rose does not hold.
+   * The browser rejects that prompt instantly and silently, so the modal says why.
+   */
+  passkeyUnavailableFor?: string;
 }
 
 interface ConnectSnapshot {
@@ -52,6 +57,7 @@ export function pollResultFor(entry: PendingConnect, now = Date.now()): ConnectP
   }
   if (entry.failed !== undefined) return { state: 'unknown', reason: entry.failed };
   if (now > entry.deadline) return { state: 'expired', reason: 'sign-in window elapsed' };
+  const passkeyUnavailableFor = entry.passkeyUnavailableFor;
   return {
     state: 'pending',
     stage: entry.stage,
@@ -59,6 +65,7 @@ export function pollResultFor(entry: PendingConnect, now = Date.now()): ConnectP
     // Known as soon as the seeded session identifies itself, so the modal can
     // show WHICH account is being connected while the user is still working.
     accountEmail: entry.accountEmail,
+    ...(passkeyUnavailableFor !== undefined ? { passkeyUnavailableFor } : {}),
   };
 }
 

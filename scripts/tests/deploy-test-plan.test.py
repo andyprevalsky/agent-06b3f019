@@ -608,6 +608,14 @@ class AgentCardElection(unittest.TestCase):
         with self.assertRaises(ValueError):
             election.accept({'elected_omissions':[{'proof':original}]}, proof)
 
+def unused_loopback_port():
+    """A loopback port no live socket holds when the fixture is built."""
+    import socket
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
 class InterruptedCustody(unittest.TestCase):
     setUp = cycle_fixture.Cycle.setUp
     tearDown = cycle_fixture.Cycle.tearDown
@@ -658,12 +666,14 @@ class InterruptedCustody(unittest.TestCase):
         else:
             base=self.root/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()
             campaign=base/'campaigns'/('deploy-'+base.name); runs=base/'runs'; fleet=runs/'20261106-223817-2147483001'
-            owner='b'*32; hub=runs/'_hub'/('agent-link-server.8765.'+'c'*32+'.owner')
+            # The custody check scans the host's live sockets: never claim a port a real Hub may hold.
+            port=str(unused_loopback_port())
+            owner='b'*32; hub=runs/'_hub'/('agent-link-server.'+port+'.'+'c'*32+'.owner')
             self.hub=hub; self.fleet=fleet; self.audit=self.root/'.git/cloudbench-fleet-audits'/owner
             self.put(hub,'version=1\npid=2147483004\npgid=2147483004\npid_start=proc-start:fixture:1\nowner_token='+ 'c'*32+
                 '\nargv_sha256='+'d'*64+'\nroot='+str(runs)+'\nruns_root='+str(runs)+'\nrepo_root='+str(self.root)+
                 '\ncontext_dir='+str(runs/'_hub')+'\ncommand='+str(self.root/'agents/benchmarks/agent_link_server.py')+
-                '\nhost=127.0.0.1\nport=8765\nstatus=live-transfer-required\n')
+                '\nhost=127.0.0.1\nport='+port+'\nstatus=live-transfer-required\n')
             self.put(base/'cli.log',str(campaign))
             log=campaign/'r001-j0001.log'
             self.put(log,str(self.root/'scripts/run-bench')+' monitor '+str(fleet))
@@ -706,7 +716,7 @@ class InterruptedCustody(unittest.TestCase):
             self.put(Path(proof['hub_consumers']),dict(runs=str(runs),owner=str(hub),owner_sha256=c.sha_file(hub),remaining_external_process_references=[],
                 consumer_disposition='All original controllers terminal; namespace closed to new borrowers.',observed_at=now+9,borrowers=[]))
             self.put(Path(proof['hub_retirement']),dict(provider_operations=False,historical_runtime_financial_obligations_unchanged=True,
-                rows=[dict(port='8765',owner=str(hub),owner_sha256=c.sha_file(hub),terminal=str(terminal),terminal_sha256=c.sha_file(terminal),native_exit=0,
+                rows=[dict(port=port,owner=str(hub),owner_sha256=c.sha_file(hub),terminal=str(terminal),terminal_sha256=c.sha_file(terminal),native_exit=0,
                            immutable_owner_unchanged=True,borrowers_terminal=1,started_at=now+10,finished_at=now+12)]))
             proof['producer_files']={n:str(self.root/n) for n in policies}
             self.reseal(proof)
@@ -762,6 +772,138 @@ class InterruptedCustody(unittest.TestCase):
                 state['plan']['gates'][0]['command']=['replacement']
                 self.assertFalse(self.m.still_bound(state,r,entry))
                 self.assertTrue(all(Path(p).read_bytes()==raw for p,raw in bytes_before.items()))
+
+    def policy_relocation_fixture(self):
+        import time
+        state, receipt, proof = self.fixture(True)
+        policy = self.root / 'scripts/lib/cloudbench-env.sh'
+        frozen = self.fleet.parent.parent / 'campaigns' / ('deploy-' + self.fleet.parent.parent.name) / 'shared-inventory/scripts/cloudbench-env.sh'
+        self.put(frozen, policy.read_text())
+        self.rebind(proof)
+        c.reconcile(state, receipt['token'], proof)
+        key = c.sha_file(Path(receipt['log']).parent / 'receipt.json')
+        previous = copy.deepcopy(state['reconciled_owners'][key])
+        policy.write_text(policy.read_text() + '\n# legitimate incoming main policy change\n')
+        subprocess.run(['git', 'add', str(policy)], cwd=self.root, check=True)
+        subprocess.run(['git', '-c', 'user.name=test', '-c', 'user.email=test@example.com',
+                        'commit', '-qm', 'incoming main'], cwd=self.root, check=True)
+        state['source'] = state['plan']['source'] = c.source(self.root)
+        state['phase'] = 'focused'
+        state.pop('resume_phase')
+        state['attempts'].append({'phase': 'quick', 'results': []})
+        renewal = {'kind': 'interrupted-policy-witness-renewal-v1', 'receipt_sha256': key,
+                   'previous_entry_sha256': c.digest(previous), 'relocations': {str(policy): str(frozen)},
+                   'confirmed_at': time.time(), 'observed_by': 'independent relocation fixture'}
+        return state, receipt, proof, previous, renewal
+
+    def test_historical_policy_drift_renews_without_changing_original_bindings(self):
+        state, receipt, proof, previous, renewal = self.policy_relocation_fixture()
+        original = copy.deepcopy(state)
+        original_bytes = {p: Path(p).read_bytes() for p in proof['files']}
+        self.assertEqual(c.retained_owners(state, ['smoke']), ['smoke'])
+        c.reconcile(state, receipt['token'], renewal)
+        entry = state['reconciled_owners'][renewal['receipt_sha256']]
+        self.assertTrue(c._reconciled(state, receipt, receipt['cleanup_owner']))
+        self.assertEqual(c.retained_owners(state, ['smoke']), [])
+        self.assertEqual(entry['proof'], proof)
+        self.assertEqual(entry['policy_witness_renewal']['previous'], previous)
+        self.assertFalse(entry['credit_granted'])
+        self.assertFalse(entry['financial_cleanup_credit'])
+        self.assertEqual(state['attempts'], original['attempts'])
+        self.assertEqual(state['failures'], original['failures'])
+        self.assertEqual(state['reconciled_owners']['older-debt'], original['reconciled_owners']['older-debt'])
+        self.assertEqual({p: Path(p).read_bytes() for p in proof['files']}, original_bytes)
+        saved = copy.deepcopy(state)
+        c.reconcile(state, receipt['token'], renewal)
+        self.assertEqual(state, saved)
+
+    def test_policy_renewal_rejects_wrong_identity_path_bytes_and_symlink(self):
+        state, receipt, proof, previous, renewal = self.policy_relocation_fixture()
+        frozen = Path(next(iter(renewal['relocations'].values())))
+        original = frozen.read_bytes()
+        for field in ('receipt_sha256', 'previous_entry_sha256'):
+            invalid = copy.deepcopy(renewal)
+            invalid[field] = '0' * 64
+            saved = copy.deepcopy(state)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                c.reconcile(state, receipt['token'], invalid)
+            self.assertEqual(state, saved)
+        invalid = copy.deepcopy(renewal)
+        invalid['relocations'] = {str(frozen): str(frozen)}
+        with self.assertRaises(ValueError): c.reconcile(state, receipt['token'], invalid)
+        unbound = frozen.with_name('unbound-identical.sh')
+        unbound.write_bytes(original)
+        invalid['relocations'] = {next(iter(renewal['relocations'])): str(unbound)}
+        with self.assertRaises(ValueError): c.reconcile(state, receipt['token'], invalid)
+        unbound.unlink()
+        frozen.write_bytes(b'wrong original bytes')
+        with self.assertRaises(ValueError): c.reconcile(state, receipt['token'], renewal)
+        frozen.unlink()
+        frozen.symlink_to(self.root / 'scripts/lib/cloudbench-env.sh')
+        with self.assertRaises(ValueError): c.reconcile(state, receipt['token'], renewal)
+        frozen.unlink()
+        frozen.write_bytes(original)
+        c.reconcile(state, receipt['token'], renewal)
+        # Rehashing a corrupt historical witness cannot replace original Git provenance.
+        bad = copy.deepcopy(state['reconciled_owners'][renewal['receipt_sha256']])
+        frozen.write_bytes(b'forged historical policy')
+        bad['proof']['files'][str(frozen)] = c.sha_file(frozen)
+        self.assertFalse(self.m.still_bound(state, receipt, bad))
+
+    def test_policy_renewal_original_git_blob_survives_incoming_fleet_policy(self):
+        state, receipt, proof, previous, renewal = self.policy_relocation_fixture()
+        policy = self.root / 'scripts/run-bench-fleet'
+        blob = subprocess.check_output(['git', 'rev-parse', receipt['source']['head'] + ':scripts/run-bench-fleet'],
+                                       cwd=self.root, text=True).strip()
+        policy.write_text(policy.read_text() + '\n# incoming main warm-source wait fix\n')
+        subprocess.run(['git', 'add', str(policy)], cwd=self.root, check=True)
+        subprocess.run(['git', '-c', 'user.name=test', '-c', 'user.email=test@example.com',
+                        'commit', '-qm', 'incoming fleet policy'], cwd=self.root, check=True)
+        state['source'] = state['plan']['source'] = c.source(self.root)
+        renewal['relocations'][str(policy)] = 'git:' + blob
+        invalid = copy.deepcopy(renewal)
+        invalid['relocations'][str(policy)] = 'git:' + '0' * 40
+        with self.assertRaisesRegex(ValueError, 'original Git blob'): c.reconcile(state, receipt['token'], invalid)
+        c.reconcile(state, receipt['token'], renewal)
+        self.assertEqual(c.retained_owners(state, ['smoke']), [])
+        self.assertEqual(state['reconciled_owners'][renewal['receipt_sha256']]['proof'], proof)
+
+    def test_policy_renewal_rechecks_evidence_allocations_consumers_and_contract(self):
+        state, receipt, proof, previous, renewal = self.policy_relocation_fixture()
+        log = Path(receipt['log'])
+        original = log.read_bytes()
+        log.write_bytes(original + b'changed original')
+        with self.assertRaisesRegex(ValueError, 'evidence changed'):
+            c.reconcile(state, receipt['token'], renewal)
+        log.write_bytes(original)
+        with patch.object(self.m, 'processes', return_value=[(2147483001, 2147483001)]), self.assertRaises(ValueError):
+            c.reconcile(state, receipt['token'], renewal)
+        with patch.object(self.m, 'namespace_quiet', side_effect=ValueError('live consumer')), self.assertRaises(ValueError):
+            c.reconcile(state, receipt['token'], renewal)
+        with (Path(proof['publication_recovery']) / 'native-publisher.private.log').open('a'):
+            with self.assertRaisesRegex(ValueError, 'writer'):
+                c.reconcile(state, receipt['token'], renewal)
+        for name in ('fresh', 'expected-fresh', 'by-machine-id', 'pool', 'pool-handoffs', 'volume-migrations', 'archived-reuse'):
+            path = self.audit / name / 'new-allocation'
+            self.put(path, 'machine=allocated')
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(state, receipt['token'], renewal)
+            path.unlink()
+        for change in ({'running': ['smoke']}, {'live_failures': []}):
+            invalid = {**state, **change}
+            with self.assertRaisesRegex(ValueError, 'quiescent'):
+                c.reconcile(invalid, receipt['token'], renewal)
+        invalid = copy.deepcopy(state)
+        invalid['plan']['gates'][0]['command'] = ['replacement']
+        with self.assertRaises(ValueError): c.reconcile(invalid, receipt['token'], renewal)
+        invalid = copy.deepcopy(state)
+        invalid['source'] = {'head': '0' * 40, 'digest': '0' * 64}
+        with self.assertRaisesRegex(ValueError, 'source binding'):
+            c.reconcile(invalid, receipt['token'], renewal)
+        c.reconcile(state, receipt['token'], renewal)
+        entry = state['reconciled_owners'][renewal['receipt_sha256']]
+        log.write_bytes(original + b'late evidence mutation')
+        self.assertFalse(self.m.still_bound(state, receipt, entry))
 
     def test_static_rejects_unknown_waits_active_targets_and_changed_contract(self):
         state,r,proof=self.fixture();path=Path(r['log']).parent/'output.log.process.json';original=path.read_bytes()
