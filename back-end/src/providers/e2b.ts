@@ -29,6 +29,7 @@ import {
   type CodeAgentSessionResult,
   createLocalCodeSessionFallback,
   recordE2bCodeSessionSandbox,
+  releaseSandboxAfterFailedRestore,
   releaseSandboxAfterFailedStart,
   stopStaleWsServer,
 } from './e2bCodeSessionSandbox';
@@ -442,7 +443,8 @@ async function createClaudeCodeSessionUnlocked(
     taskId,
     sandbox,
     projectWorkspace,
-    acquired.fromSnapshot
+    acquired.fromSnapshot,
+    (held) => releaseSandboxAfterFailedRestore(held, codeSession)
   );
   const sessionEnvs = { ...envs, ...(project.envs ?? {}) };
   const wsLaunchedAt = Date.now();
@@ -513,9 +515,12 @@ export async function createCodexCodeSession(
     roseApiBaseUrl?: string;
     memoryEnabled?: boolean;
     freshConversation?: boolean;
+    /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
+    projectWorkspace?: ProjectWorkspace | null;
   },
   codeSession: CodeSessionRow | null = null
 ): Promise<CodeAgentSessionResult> {
+  const projectWorkspace = harnessOptions?.projectWorkspace ?? null;
   log.info(`Creating Codex Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY) {
@@ -544,6 +549,7 @@ export async function createCodexCodeSession(
           branch: codeSession?.branch,
           mergeTarget: codeSession?.mergeTarget,
           ...promptFlagsForUser(userId),
+          roseRepo: isRoseRepoUrl(projectWorkspace?.project.repoUrl ?? githubRepoUrl),
         });
 
   // User OAuth → shared pool → our funded Azure Codex deployment unless it is
@@ -608,6 +614,7 @@ export async function createCodexCodeSession(
 
   const acquired = await acquireCodeSandbox(codeSession, templateId, envs, 'Codex Code', {
     provider: 'codex',
+    project: projectWorkspace?.project,
     agentId,
   });
   const { sandbox, resumedFrom, cliSessionId } = acquired;
@@ -637,18 +644,27 @@ export async function createCodexCodeSession(
     claudeTokenSource: servedBy,
     claudeTokenIntegrationId: credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
     ...codeSessionTaskFields(codeSession, 'codex'),
+    projectId: projectWorkspace?.project.id ?? null,
   };
   // A resumed sandbox may still run the paused Codex CLI: stop it before
   // starting this spawn's (live attach is Claude Code only: Codex binds the
   // handoff outputSchema to its first turn).
   if (resumedFrom === 'paused_sandbox') await stopStaleWsServer(sandbox);
+  const project = await restoreSandboxProject(
+    taskId,
+    sandbox,
+    projectWorkspace,
+    acquired.fromSnapshot,
+    (held) => releaseSandboxAfterFailedRestore(held, codeSession)
+  );
+  const sessionEnvs = { ...envs, ...(project.envs ?? {}) };
   const wsLaunchedAt = Date.now();
 
   sandbox.commands
     .run('node /home/user/ws-server.mjs', {
       background: true,
       timeoutMs: 0,
-      envs,
+      envs: sessionEnvs,
     })
     .catch((err) =>
       log.error('Failed to start Codex WS server', {
@@ -668,7 +684,11 @@ export async function createCodexCodeSession(
     await releaseSandboxAfterFailedStart(sandbox, codeSession);
     throw new Error('Codex WebSocket server failed to become ready');
   }
-  await autostartRosePreview(sandbox, { envs, repoUrl: githubRepoUrl, launchedAt: wsLaunchedAt });
+  await autostartRosePreview(sandbox, {
+    envs: sessionEnvs,
+    repoUrl: projectWorkspace?.project.repoUrl ?? githubRepoUrl,
+    launchedAt: wsLaunchedAt,
+  });
 
   await prisma.claudeCodeSession.create({ data: taskRow });
   await recordE2bCodeSessionSandbox(codeSession, sandbox.sandboxId);
@@ -682,6 +702,7 @@ export async function createCodexCodeSession(
     uploadedFiles,
     resumedFrom,
     cliSessionId,
+    projectRestore: project.report,
     previewUrl,
     sandboxSize: acquired.size,
   };

@@ -156,7 +156,7 @@ export class E2BSandboxCapacityError extends Error {
 /**
  * Who created a sandbox, carried as E2B metadata so ownership is attributable:
  * the deployment (`roseOrigin`: the Render service on Render, else this host) and the
- * stack (`roseStack`: origin + the database it records sandboxes in, or an
+ * stack (`roseStack`: origin + workspace name + the database it records sandboxes in, or an
  * explicit ROSE_SANDBOX_STACK_ID). Every sandbox of a stack is recorded in that
  * stack's database, so its teardown and its orphan reaper can act on exactly
  * its own sandboxes (codeSessions/sandboxReaper.ts). The database part is a
@@ -172,7 +172,16 @@ export function roseSandboxIdentity(): { roseOrigin: string; roseStack: string }
       : '') ||
     `host:${hostname()}`;
   const explicit = process.env.ROSE_SANDBOX_STACK_ID?.trim();
-  return { roseOrigin, roseStack: explicit || `${roseOrigin}|db:${databaseFingerprint()}` };
+  // Every boxes devbox shares hostname `boxes` and the same local DB, so host+db
+  // cannot tell workspaces apart. The workspace name (run.sh and `.cloud-env` set
+  // it, clone-unique) does. Render keeps its format; sandboxes tagged before this
+  // part existed keep their old `host:..|db:..` stack id.
+  const workspace = process.env.CONDUCTOR_WORKSPACE_NAME?.trim();
+  const workspacePart = workspace && !roseOrigin.startsWith('render:') ? `|ws:${workspace}` : '';
+  return {
+    roseOrigin,
+    roseStack: explicit || `${roseOrigin}${workspacePart}|db:${databaseFingerprint()}`,
+  };
 }
 
 function databaseFingerprint(): string {

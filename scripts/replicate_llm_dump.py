@@ -194,6 +194,16 @@ async def gpt_auth_from_dump(data: dict[str, Any]) -> Any:
     return (await direct_auth_from_dump(data)).get("gpt_auth")
 
 
+def _call_site_from_dump(data: dict[str, Any], default: str) -> str:
+    """The dumped call site, unchanged: Rose routes by it.
+
+    providers/rose/flash_agent.py grants the flash-agent subscription legs only
+    to the literal plan_loop / execute_loop / explore_agent sites, so a renamed
+    site replays on a different model. Replays are marked via dump_extra.
+    """
+    return str(data.get("call_site") or default)
+
+
 def _pool_from_dump(data: dict[str, Any]) -> str:
     config = data.get("config") if isinstance(data.get("config"), dict) else {}
     pool = config.get("pool") or data.get("model") or "rose-1-ultra"
@@ -330,7 +340,7 @@ def evaluate_assertions(plan: dict[str, Any], assertions: list[str]) -> list[dic
 
 async def replay_browser_use(data: dict[str, Any], *, exact: bool) -> dict[str, Any]:
     config = data.get("config") if isinstance(data.get("config"), dict) else {}
-    call_site = f"replicate_{data.get('call_site') or 'browser_use'}"
+    call_site = _call_site_from_dump(data, "browser_use")
     client = RoseClient()
     gpt_auth = await gpt_auth_from_dump(data)
 
@@ -404,7 +414,7 @@ async def _collect_recorded_call(
         "temperature": requested.get("temperature", default_temperature),
         "max_tokens": requested.get("max_tokens") or default_max_tokens,
         "agent_id": data.get("agent_id"),
-        "call_site": f"replicate_{data.get('call_site') or 'planner'}",
+        "call_site": _call_site_from_dump(data, "planner"),
         "dump_extra": dump_extra,
         "skip_cache_write": True,
     }
@@ -495,7 +505,8 @@ async def replay_generic(data: dict[str, Any]) -> dict[str, Any]:
         "temperature": requested.get("temperature"),
         "max_tokens": requested.get("max_tokens") or 8192,
         "agent_id": data.get("agent_id"),
-        "call_site": f"replicate_{data.get('call_site') or 'generic'}",
+        "call_site": _call_site_from_dump(data, "generic"),
+        "dump_extra": {"replicated_from": data.get("call_site"), "replication_mode": "exact"},
         "skip_cache_write": True,
     }
     if config.get("response_model") == "PlannerResponse" or data.get("call_site") == "planner":

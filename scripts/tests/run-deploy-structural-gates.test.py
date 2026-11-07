@@ -526,6 +526,75 @@ class StructuralGateRunnerTests(unittest.TestCase):
                     durations_state=module.ROOT / module.DURATIONS_STATE,
                 )
 
+    def test_exclusive_group_jobs_never_overlap_while_other_gates_keep_running(self) -> None:
+        """Suites that park or scan unreadable same-user processes must not overlap.
+
+        deploy-test-cycle's quiet() refuses on any same-user process whose cwd it cannot read
+        for 2 s. deploy-test-plan and deploy-structural-runner park exactly such processes
+        (PR_SET_DUMPABLE=0 children) as fixtures, so running beside them failed the gate on a
+        Blacksmith VM (PR 1747, run 42394708631) and on PR 1751 before it. Jobs of one group run
+        one at a time; a gate outside the group still uses the free workers.
+        """
+        module = _load_registry()
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-exclusive-") as temporary:
+            root = Path(temporary)
+
+            def gate(name: str, group: str = "") -> object:
+                code = (
+                    "import time; from pathlib import Path; "
+                    f"p = Path({str(root / name)!r}); "
+                    "p.with_suffix('.start').write_text(repr(time.monotonic())); "
+                    "time.sleep(0.4); "
+                    "p.with_suffix('.end').write_text(repr(time.monotonic()))"
+                )
+                return module.Gate(name, (sys.executable, "-c", code), exclusive=group)
+
+            gates = (gate("g0", "g"), gate("g1", "g"), gate("g2", "g"), gate("plain"))
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                result = module.run_gates(gates, max_workers=4)
+            self.assertEqual(result, 0)
+
+            def span(name: str) -> tuple[float, float]:
+                return (
+                    float((root / f"{name}.start").read_text()),
+                    float((root / f"{name}.end").read_text()),
+                )
+
+            grouped = sorted((span(name) for name in ("g0", "g1", "g2")))
+            for (_, earlier_end), (later_start, _) in zip(grouped, grouped[1:]):
+                self.assertGreaterEqual(
+                    later_start, earlier_end, "two jobs of one exclusive group overlapped"
+                )
+            plain_start, _ = span("plain")
+            first_group_end = min(end for _, end in grouped)
+            self.assertLess(
+                plain_start,
+                first_group_end,
+                "a gate outside the group waited for the exclusive group",
+            )
+
+    def test_every_suite_with_a_non_dumpable_fixture_is_in_the_proc_observation_group(self) -> None:
+        registry = _load_registry()
+        by_command = {path: gate for gate in registry.GATES for path in gate.command}
+        fixtures = [
+            path
+            for path in sorted((ROOT / "scripts" / "tests").glob("*.test.*"))
+            if "prctl(4" in path.read_text() or "PR_SET_DUMPABLE" in path.read_text()
+        ]
+        self.assertGreaterEqual(len(fixtures), 3, "the fixture scan found no suites")
+        for path in fixtures:
+            relative = str(path.relative_to(ROOT))
+            gate = by_command.get(relative)
+            self.assertIsNotNone(gate, f"{relative} builds unreadable-process fixtures but is no gate")
+            self.assertEqual(
+                gate.exclusive,
+                registry.PROC_OBSERVATION,
+                f"{gate.name} parks unreadable same-user processes; it must not overlap the scanners",
+            )
+
     def test_gates_start_under_the_documented_umask_not_the_invokers(self) -> None:
         """The deploy lane runs the registry inside a transient systemd service
         (UMask 0022) while interactive devbox shells use 077. A gate must see

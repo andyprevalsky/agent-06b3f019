@@ -12183,6 +12183,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     prepare_credentials_for_url=_prepare_credentials_for_url,
                     prefetched_browser_state=prefetched_browser_state,
                     auth_context_for_url=_auth_context_for_url,
+                    provider=browser_session_metadata.get("provider"),
                 )
             )
             try:

@@ -14,12 +14,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   CSS_EFFECTS,
+  PRESETS,
+  addCoverLayer,
+  storePreset,
+  storedPreset,
   STATUS_STYLES,
   findTopElements,
   hideElement,
   injectCss,
   setStatusBarStyle,
   topBandReport,
+  type Preset,
   type TopElement,
 } from './blurLabEffects';
 
@@ -48,6 +53,7 @@ export default function BlurLab() {
   const resetAll = useCallback(() => {
     reverts.current.forEach((revert) => revert());
     reverts.current.clear();
+    storePreset(null);
     setActive(new Set());
   }, []);
 
@@ -58,6 +64,27 @@ export default function BlurLab() {
       store.clear();
     };
   }, []);
+
+  const applyPreset = useCallback((preset: Preset) => {
+    const store = reverts.current;
+    store.get('status-preset')?.();
+    store.set('status-preset', setStatusBarStyle(preset.status));
+    const hasCover = store.has('cover');
+    if (preset.cover && !hasCover) store.set('cover', addCoverLayer());
+    if (!preset.cover && hasCover) {
+      store.get('cover')?.();
+      store.delete('cover');
+    }
+    setActive(new Set(store.keys()));
+  }, []);
+
+  // A saved preset is re-applied on every lab launch (iOS reads the status-bar
+  // meta at launch: choose a preset, fully close and reopen the app).
+  useEffect(() => {
+    const preset = storedPreset();
+    if (!preset) return;
+    applyPreset(preset);
+  }, [applyPreset]);
 
   const rescan = useCallback(() => setTops(findTopElements()), []);
 
@@ -75,6 +102,33 @@ export default function BlurLab() {
       </button>
       {open && (
         <div className="mt-2 max-h-[55vh] space-y-2 overflow-y-auto">
+          <div className="text-[11px]">
+            Presets (saved; fully close + reopen the app so iOS re-reads the status bar):
+          </div>
+          <div className="grid grid-cols-1 gap-1">
+            {PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                data-testid={`blurlab-preset-${preset.id}`}
+                className={`${buttonClass} ${storedPreset()?.id === preset.id ? 'bg-emerald-600 text-white' : 'text-white'}`}
+                onClick={() => {
+                  storePreset(preset);
+                  applyPreset(preset);
+                }}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            data-testid="blurlab-cover"
+            className={`${buttonClass} ${mark('cover')}`}
+            onClick={() => toggle('cover', addCoverLayer)}
+          >
+            Opaque cover layer over status-bar inset (page bg)
+          </button>
           <div className="grid grid-cols-2 gap-1">
             {CSS_EFFECTS.map((effect) => (
               <button
