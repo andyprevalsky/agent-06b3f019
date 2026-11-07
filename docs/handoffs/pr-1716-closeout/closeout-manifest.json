@@ -32,9 +32,9 @@
     "assignment_tokens": "UNMETERED"
   },
   "protection": {
-    "Freedom": "PRESERVE app/extension/helper/blocklists/login/automatic restore and protected instructions",
+    "Freedom": "PRESERVE app/extension/helper/blocklists/login/automatic restore and protected policy files",
     "warm_and_shared_resources": "PRESERVE; no allocation/stop/removal authorized by preparation",
-    "operations": "Read-only Git and existing evidence; writes only under final-record-prep; no tests, installs, DB, providers, signals, checkout, merge, commit, push or PR."
+    "operations": "Completed recovery artifacts retain their native receipts. This record performs no resource deletion, financial action or devbox destruction; actual Git publication is independently recorded."
   },
   "archives": 30,
   "configuration": "configuration-recovery.json",
