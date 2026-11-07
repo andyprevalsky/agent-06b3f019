@@ -28,6 +28,81 @@ from pathlib import Path
 from types import ModuleType
 
 
+def native_hub_owner_retired(owner, runs, root):
+    """Recognize current absence, never synthesize a historical Hub termination."""
+    import stat
+    if owner.is_symlink() or owner.resolve(strict=True) != owner or not owner.is_file():
+        raise ValueError('native Hub owner path changed')
+    info = owner.stat()
+    rows = [line.split('=', 1) for line in owner.read_text().splitlines()]
+    fields = dict(rows)
+    required = {'version','pid','pid_start','pgid','owner_token','command','argv_sha256',
+                'root','runs_root','repo_root','context_dir','host','port','status'}
+    if len(rows) != len(fields) or set(fields) != required:
+        raise ValueError('native Hub owner fields')
+    pid, pgid, port = (int(fields[key]) for key in ('pid','pgid','port'))
+    token = fields['owner_token']
+    expected = {'root':runs,'runs_root':runs,'repo_root':root,'context_dir':runs/'_hub',
+                'command':root/'agents/benchmarks/agent_link_server.py'}
+    if (info.st_uid != os.getuid() or pid <= 1 or pgid != pid or not 1 <= port <= 65535
+            or fields['version'] != '1' or fields['host'] != '127.0.0.1'
+            or fields['status'] not in {'starting','live-transfer-required'}
+            or not re.fullmatch('[0-9a-f]{32}', token)
+            or not re.fullmatch('[0-9a-f]{64}', fields['argv_sha256'])
+            or any(fields[key] != str(value) for key,value in expected.items())
+            or owner.parent != runs/'_hub'
+            or owner.name != f'agent-link-server.{port}.{token}.owner'
+            or stat.S_IMODE(info.st_mode) != (0o644 if fields['status']=='starting' else 0o444)):
+        raise ValueError('native Hub owner binding')
+    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    if not re.fullmatch('proc-start:'+re.escape(boot)+':[0-9]+', fields['pid_start']):
+        raise ValueError('native Hub owner boot identity')
+    try:
+        (Path('/proc')/str(pid)/'stat').read_text()
+    except FileNotFoundError:
+        pass
+    else:
+        return False  # Live or reused PID must satisfy the existing live protocol.
+    groups = subprocess.check_output(['ps','-ax','-o','pgid='],text=True)
+    if any(int(value) == pgid for value in groups.split()):
+        return False  # Never skip a remaining or reused group.
+    return True
+
+
+def join_native_hubs(root, campaign):
+    """Join only this native request's Hub through its existing exact-owner protocol."""
+    if os.environ.get('DEPLOY_NATIVE_HUB_JOIN') != '1':
+        return True
+    runs = Path(os.environ.get('CLOUDBENCH_RUNS_ROOT', ''))
+    if (not runs.is_absolute() or runs.resolve() != runs
+            or not re.fullmatch('[0-9a-f]{64}', runs.parent.name)
+            or runs != root/'.context/deploy-cloud'/runs.parent.name/'runs'
+            or campaign != runs.parent/'campaigns'/('deploy-'+runs.parent.name)):
+        raise ValueError('native Hub join root is not request-owned')
+    hub = runs/'_hub'
+    if hub.is_symlink():
+        raise ValueError('native Hub root is a symlink')
+    failures = []
+    for owner in sorted(hub.glob('agent-link-server.*.owner')):
+        try:
+            if owner.is_symlink() or owner.resolve().parent != hub:
+                raise ValueError('native Hub owner path changed')
+            rows = [line.split('=', 1) for line in owner.read_text().splitlines()]
+            fields = dict(rows)
+            if len(rows) != len(fields):
+                raise ValueError('duplicate native Hub owner fields')
+            if native_hub_owner_retired(owner, runs, root):
+                continue
+            subprocess.run(['bash', '-c', 'source "$1"; cloudbench_terminate_central_hub_owner "$2" "$3" "$4" "$5" 10',
+                            'native-hub-join', str(root/'scripts/lib/cloudbench-env.sh'), fields['port'],
+                            str(runs), str(root), str(owner)], check=True)
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+            failures.append(f'{owner.name}: {type(error).__name__}')
+    if failures:
+        raise ValueError('native Hub join incomplete: ' + '; '.join(failures))
+    return True
+
+
 def startup_deadline_monotonic(env, e2e_started_at, e2e_timeout, *, now_epoch, now_monotonic):
     """Translate the supervisor's source-bound absolute startup fence once."""
     value = env.get("RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH")
@@ -621,8 +696,8 @@ def stress_default_environment(requirements: dict[str, object], environment: dic
     if requirements["local_shared_cpu_governor_minimum"] is None or requirements["local_machine_ceiling_minimum"] is None:
         raise ValueError("unknown native baseline cannot admit stress defaults")
     result = dict(environment)
-    result.setdefault("CLOUDBENCH_SHARED_CPU_GOVERNOR", str(max(160, int(requirements["local_shared_cpu_governor_minimum"]))))
-    result.setdefault("CLOUDBENCH_APP_MACHINE_CEILING", str(max(56, int(requirements["local_machine_ceiling_minimum"]))))
+    result.setdefault("CLOUDBENCH_SHARED_CPU_GOVERNOR", str(max(1000, int(requirements["local_shared_cpu_governor_minimum"]))))
+    result.setdefault("CLOUDBENCH_APP_MACHINE_CEILING", str(max(300, int(requirements["local_machine_ceiling_minimum"]))))
     result.setdefault("CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION", "1")
     return result
 
@@ -946,6 +1021,7 @@ def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
 
 def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                         inventory: Path, deadline: float | None, peer_claim: int) -> dict:
+    """Start a request-owned relay only after provider preflight succeeds."""
     ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     checked = {}
     for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
@@ -1053,9 +1129,22 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                 process.wait()
         # Joining the bootstrap delivers EOF to its private agent, but before
         # broker readiness there is no sealed agent identity to verify retirement.
+        peer = directory / 'startup-agent.json'
+        # Keep a missing capture explicit. A later read-only reconciliation may
+        # use a captured exact peer, but cannot infer it from a vanished socket.
+        try:
+            peer_hash = hashlib.sha256(peer.read_bytes()).hexdigest() if peer.is_file() else None
+        except OSError:
+            peer_hash = None  # Preserve the original startup exception; proof stays incomplete.
         write_json_atomic(directory / 'startup-cleanup.json', {
+            'schema': 'shared-relay-startup-cleanup-v1',
+            'producer_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            'parent': {'pid': os.getpid(), 'birth': parent_start},
             'bootstrap_joined': value['bootstrap'] is not None and value['bootstrap'].returncode is not None,
             'broker_joined': value['process'] is not None and value['process'].returncode is not None,
+            'bootstrap_exit': value['bootstrap'].returncode if value['bootstrap'] is not None else None,
+            'broker_exit': value['process'].returncode if value['process'] is not None else None,
+            'agent_identity_sha256': peer_hash,
             'agent_shutdown_verified': False, 'agent_retirement_pending': value['bootstrap'] is not None})
         log.close(); bootstrap_log.close()
         try: archive_shared_relay(directory, archive)
@@ -1278,6 +1367,7 @@ def record_experiment(hooks, event: str, campaign_dir: Path, root: Path, **field
 
 
 def main() -> int:
+    """Run the immutable controller plan and join its owned resources before publication exits."""
     args = parse_args()
     if args.runs < 1 or args.concurrency < 1 or not args.task:
         raise SystemExit("runs, concurrency, and at least one task are required")
@@ -1407,6 +1497,13 @@ def main() -> int:
                 "log": str(campaign_dir / f"{job_id}.log"),
                 "attempt": 1,
                 "attempts": [],
+                "controller_command": [
+                    "bash",
+                    str(root / "scripts" / "run-bench"),
+                    str(scheduled["task"]),
+                    *args.forward_arg,
+                    "--foreground",
+                ],
             }
         )
 
@@ -2254,13 +2351,7 @@ def main() -> int:
                     environment["RUN_BENCH_CLEANUP_COHORT_ID"] = str(job["_cohort"]["cohort_id"])
                     environment["RUN_BENCH_CLEANUP_JOB"] = str(job["job_id"])
                     environment["RUN_BENCH_CLEANUP_GENERATION"] = str(job.get("attempt", 1))
-                command = [
-                    "bash",
-                    str(root / "scripts" / "run-bench"),
-                    str(job["task"]),
-                    *args.forward_arg,
-                    "--foreground",
-                ]
+                command = job["controller_command"]
                 log_handle = open(str(job["log"]), "w", encoding="utf-8")
                 process = subprocess.Popen(
                     controller_prefix + command,
@@ -2533,6 +2624,13 @@ def main() -> int:
         result = 128 + stop_signal
     if args.retry_infra and publication_attempted and not publication_completed:
         state["status"] = "failed" if not stop_signal else "cancelled"
+        result = result or 1
+    try:
+        join_native_hubs(root, campaign_dir)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        state['shared_transport_cleanup_pending'] = True
+        if state['status'] == 'passed':
+            state['status'] = 'failed'
         result = result or 1
     # Publication is part of the campaign lifetime, including cancellation
     # during its final handoff. Preserve the original child outcomes.

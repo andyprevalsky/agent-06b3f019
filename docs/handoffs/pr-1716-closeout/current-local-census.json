@@ -1,0 +1,3103 @@
+{
+  "native_raw_sha256": "6793c559c85b720755358f0d3a9c4a3b0606f537507ce9da0b3f53b5f1970bf1",
+  "payload": {
+    "age_exemption_used": false,
+    "boot_id": "6af9c450-c2c8-4647-a911-8ab19a296bbf",
+    "census1": {
+      "1": {
+        "argv_sha256": "ccd56e2d9273f61f56f91ddb3ec28db835c8841ba642ce6ab0c3b5719c530960",
+        "cgroup": "0::/init.scope\n",
+        "exe_identity": [
+          65024,
+          15093
+        ],
+        "flags": 4194560,
+        "pid": 1,
+        "ppid": 0,
+        "start_ticks": 6,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2": {
+        "flags": 2129984,
+        "pid": 2,
+        "ppid": 0,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "3": {
+        "flags": 69238880,
+        "pid": 3,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "4": {
+        "flags": 69238880,
+        "pid": 4,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "5": {
+        "flags": 69238880,
+        "pid": 5,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "6": {
+        "flags": 69238880,
+        "pid": 6,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "8": {
+        "flags": 69238880,
+        "pid": 8,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "10": {
+        "flags": 69238880,
+        "pid": 10,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "11": {
+        "flags": 2129984,
+        "pid": 11,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "12": {
+        "flags": 2129984,
+        "pid": 12,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "13": {
+        "flags": 2129984,
+        "pid": 13,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "14": {
+        "flags": 69238848,
+        "pid": 14,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "15": {
+        "flags": 2129984,
+        "pid": 15,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "16": {
+        "flags": 69238848,
+        "pid": 16,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "18": {
+        "flags": 69238848,
+        "pid": 18,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "19": {
+        "flags": 69238848,
+        "pid": 19,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "20": {
+        "flags": 69238848,
+        "pid": 20,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "21": {
+        "flags": 69238848,
+        "pid": 21,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "23": {
+        "flags": 69238880,
+        "pid": 23,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "24": {
+        "flags": 69238848,
+        "pid": 24,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "25": {
+        "flags": 69238848,
+        "pid": 25,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "26": {
+        "flags": 69238848,
+        "pid": 26,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "28": {
+        "flags": 69238880,
+        "pid": 28,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "29": {
+        "flags": 69238848,
+        "pid": 29,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "30": {
+        "flags": 69238848,
+        "pid": 30,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "31": {
+        "flags": 69238848,
+        "pid": 31,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "33": {
+        "flags": 69238880,
+        "pid": 33,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "34": {
+        "flags": 69238848,
+        "pid": 34,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "35": {
+        "flags": 69238848,
+        "pid": 35,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "36": {
+        "flags": 69238848,
+        "pid": 36,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "38": {
+        "flags": 69238880,
+        "pid": 38,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "39": {
+        "flags": 69238848,
+        "pid": 39,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "40": {
+        "flags": 69238848,
+        "pid": 40,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "41": {
+        "flags": 69238848,
+        "pid": 41,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "43": {
+        "flags": 69238880,
+        "pid": 43,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "44": {
+        "flags": 69238848,
+        "pid": 44,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "45": {
+        "flags": 69238848,
+        "pid": 45,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "46": {
+        "flags": 69238848,
+        "pid": 46,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "48": {
+        "flags": 69238880,
+        "pid": 48,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "49": {
+        "flags": 69238848,
+        "pid": 49,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "50": {
+        "flags": 69238848,
+        "pid": 50,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "51": {
+        "flags": 69238848,
+        "pid": 51,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "53": {
+        "flags": 69238880,
+        "pid": 53,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "62": {
+        "flags": 2130240,
+        "pid": 62,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "63": {
+        "flags": 69238880,
+        "pid": 63,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "64": {
+        "flags": 2097216,
+        "pid": 64,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "65": {
+        "flags": 2129984,
+        "pid": 65,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "66": {
+        "flags": 2097216,
+        "pid": 66,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "67": {
+        "flags": 69238880,
+        "pid": 67,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "68": {
+        "flags": 2097216,
+        "pid": 68,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "69": {
+        "flags": 2097216,
+        "pid": 69,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "70": {
+        "flags": 2097216,
+        "pid": 70,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "71": {
+        "flags": 69238880,
+        "pid": 71,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "72": {
+        "flags": 69238880,
+        "pid": 72,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "73": {
+        "flags": 69238880,
+        "pid": 73,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "75": {
+        "flags": 2129984,
+        "pid": 75,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "76": {
+        "flags": 69238880,
+        "pid": 76,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "78": {
+        "flags": 69238880,
+        "pid": 78,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "79": {
+        "flags": 69238880,
+        "pid": 79,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "120": {
+        "flags": 2230336,
+        "pid": 120,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "123": {
+        "flags": 69238880,
+        "pid": 123,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "126": {
+        "flags": 69238880,
+        "pid": 126,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "127": {
+        "flags": 69238880,
+        "pid": 127,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "130": {
+        "flags": 69238880,
+        "pid": 130,
+        "ppid": 2,
+        "start_ticks": 14,
+        "terminal": false
+      },
+      "136": {
+        "flags": 2129984,
+        "pid": 136,
+        "ppid": 2,
+        "start_ticks": 15,
+        "terminal": false
+      },
+      "170": {
+        "flags": 2129984,
+        "pid": 170,
+        "ppid": 2,
+        "start_ticks": 15,
+        "terminal": false
+      },
+      "191": {
+        "flags": 69238880,
+        "pid": 191,
+        "ppid": 2,
+        "start_ticks": 16,
+        "terminal": false
+      },
+      "198": {
+        "flags": 69238880,
+        "pid": 198,
+        "ppid": 2,
+        "start_ticks": 16,
+        "terminal": false
+      },
+      "223": {
+        "flags": 69238880,
+        "pid": 223,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "224": {
+        "flags": 69238880,
+        "pid": 224,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "225": {
+        "flags": 69238880,
+        "pid": 225,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "232": {
+        "argv_sha256": "a5b75507875be97fe8401bab1f8ff2a27da4ffaee06f2b68ee2d87002d599782",
+        "cgroup": "0::/init.scope\n",
+        "exe_identity": [
+          19,
+          2
+        ],
+        "flags": 4194304,
+        "pid": 232,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "233": {
+        "flags": 69238880,
+        "pid": 233,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "238": {
+        "flags": 69238880,
+        "pid": 238,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "239": {
+        "flags": 69238880,
+        "pid": 239,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "317": {
+        "flags": 2359360,
+        "pid": 317,
+        "ppid": 2,
+        "start_ticks": 39,
+        "terminal": false
+      },
+      "318": {
+        "flags": 69238880,
+        "pid": 318,
+        "ppid": 2,
+        "start_ticks": 39,
+        "terminal": false
+      },
+      "322": {
+        "flags": 69238880,
+        "pid": 322,
+        "ppid": 2,
+        "start_ticks": 207,
+        "terminal": false
+      },
+      "337": {
+        "flags": 69238880,
+        "pid": 337,
+        "ppid": 2,
+        "start_ticks": 213,
+        "terminal": false
+      },
+      "349": {
+        "flags": 69238880,
+        "pid": 349,
+        "ppid": 2,
+        "start_ticks": 308,
+        "terminal": false
+      },
+      "350": {
+        "flags": 69238880,
+        "pid": 350,
+        "ppid": 2,
+        "start_ticks": 308,
+        "terminal": false
+      },
+      "356": {
+        "flags": 69238880,
+        "pid": 356,
+        "ppid": 2,
+        "start_ticks": 308,
+        "terminal": false
+      },
+      "396": {
+        "argv_sha256": "57751e23d9848293d4c0f972c0776c582df083fdd0028f2657014ba500c4a00e",
+        "cgroup": "0::/system.slice/systemd-udevd.service/udev\n",
+        "exe_identity": [
+          65024,
+          11619
+        ],
+        "flags": 4194560,
+        "pid": 396,
+        "ppid": 1,
+        "start_ticks": 328,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "764": {
+        "argv_sha256": "8f51f2cfb9bcd14c7a379fe66e0c34330479d2e06333cb23ef08412b47cd615b",
+        "cgroup": "0::/system.slice/rpcbind.service\n",
+        "exe_identity": [
+          65024,
+          6134
+        ],
+        "flags": 4194560,
+        "pid": 764,
+        "ppid": 1,
+        "start_ticks": 338,
+        "terminal": false,
+        "uids": [
+          101,
+          101,
+          101,
+          101
+        ]
+      },
+      "822": {
+        "argv_sha256": "32c19440de98b3788928897a362b6af816e7e76120be2e6c4297b54d098d3b43",
+        "cgroup": "0::/system.slice/dbus.service\n",
+        "exe_identity": [
+          65024,
+          11490
+        ],
+        "flags": 4194560,
+        "pid": 822,
+        "ppid": 1,
+        "start_ticks": 378,
+        "terminal": false,
+        "uids": [
+          104,
+          104,
+          104,
+          104
+        ]
+      },
+      "824": {
+        "argv_sha256": "8b8c40f33a0599b43a323ab968e42c5eb6d8f0cb9a4dbd8cecb71e96cc757c3a",
+        "cgroup": "0::/system.slice/systemd-logind.service\n",
+        "exe_identity": [
+          65024,
+          5831
+        ],
+        "flags": 4194560,
+        "pid": 824,
+        "ppid": 1,
+        "start_ticks": 379,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "860": {
+        "argv_sha256": "bfdded22ba9b7a9630168217dbab58daa386a2c4c0b765474e2461c0822d9eb5",
+        "cgroup": "0::/system.slice/system-getty.slice/getty@tty1.service\n",
+        "exe_identity": [
+          65024,
+          2805
+        ],
+        "flags": 4194560,
+        "pid": 860,
+        "ppid": 1,
+        "start_ticks": 411,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "872": {
+        "argv_sha256": "b01a07e5ab431f1279c47e31faf86c5356689e103e800c05a02eefb4984e8b71",
+        "cgroup": "0::/system.slice/chrony.service\n",
+        "exe_identity": [
+          65024,
+          9445
+        ],
+        "flags": 4194624,
+        "pid": 872,
+        "ppid": 1,
+        "start_ticks": 418,
+        "terminal": false,
+        "uids": [
+          100,
+          100,
+          100,
+          100
+        ]
+      },
+      "875": {
+        "argv_sha256": "3bc4eb45b04e48e68e71fd8e2f9a9b03c375e334b52a767cd042a39721c05190",
+        "cgroup": "0::/system.slice/ssh.service\n",
+        "exe_identity": [
+          65024,
+          6510
+        ],
+        "flags": 4194560,
+        "pid": 875,
+        "ppid": 1,
+        "start_ticks": 418,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "893": {
+        "argv_sha256": "b01a07e5ab431f1279c47e31faf86c5356689e103e800c05a02eefb4984e8b71",
+        "cgroup": "0::/system.slice/chrony.service\n",
+        "exe_identity": [
+          65024,
+          9445
+        ],
+        "flags": 4194368,
+        "pid": 893,
+        "ppid": 872,
+        "start_ticks": 423,
+        "terminal": false,
+        "uids": [
+          100,
+          100,
+          100,
+          100
+        ]
+      },
+      "980": {
+        "argv_sha256": "12d45293d166852d5cf38dbfe148eaca827189a63313ae10d6a5a66c26482764",
+        "cgroup": "0::/system.slice/envd.service\n",
+        "exe_identity": [
+          65024,
+          6520
+        ],
+        "flags": 4194560,
+        "pid": 980,
+        "ppid": 1,
+        "start_ticks": 448,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "36566": {
+        "argv_sha256": "fdff3990b589d174dec4e1c7bd0c2b6660965c8f6a0b9dd4ca1ac93729b3d6a7",
+        "cgroup": "0::/system.slice/containerd.service\n",
+        "exe_identity": [
+          65024,
+          3586
+        ],
+        "flags": 4194560,
+        "pid": 36566,
+        "ppid": 1,
+        "start_ticks": 21745,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "36589": {
+        "argv_sha256": "b3fa205301c03a808e972996eaf026a30224f01be6482743feb25c4c746fe5b0",
+        "cgroup": "0::/system.slice/docker.service\n",
+        "exe_identity": [
+          65024,
+          10144
+        ],
+        "flags": 4194560,
+        "pid": 36589,
+        "ppid": 1,
+        "start_ticks": 21749,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "51240": {
+        "argv_sha256": "e618bfb5a5c5ac3e57643ec974009786141c3c551350b6386b460123de0f8908",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194304,
+        "pid": 51240,
+        "ppid": 1,
+        "start_ticks": 26394,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51241": {
+        "argv_sha256": "03895c180849cf25d86bec744516bf354373afc731170dc6a9ade057a18ad6e2",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51241,
+        "ppid": 51240,
+        "start_ticks": 26399,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51242": {
+        "argv_sha256": "ad5214aa01845bd14bc6ea25af78b0546e73ae22d2dbd85ce31ac3a07a857936",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51242,
+        "ppid": 51240,
+        "start_ticks": 26399,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51244": {
+        "argv_sha256": "b511179a64d2b227c5180dd2d1026861e4edc3767a75d6179f06ce4118cabb6a",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51244,
+        "ppid": 51240,
+        "start_ticks": 26400,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51245": {
+        "argv_sha256": "ad14d3595c6ddaa2e80b5885388719f489814461c01b3c48672589597928294c",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51245,
+        "ppid": 51240,
+        "start_ticks": 26400,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51246": {
+        "argv_sha256": "b584d4b5838f9e2f973ed2bcc7714e2e5b77bf1b5f354a644c035535646d9267",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51246,
+        "ppid": 51240,
+        "start_ticks": 26400,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "348628": {
+        "flags": 69238880,
+        "pid": 348628,
+        "ppid": 2,
+        "start_ticks": 13641357,
+        "terminal": false
+      },
+      "964795": {
+        "flags": 69238880,
+        "pid": 964795,
+        "ppid": 2,
+        "start_ticks": 13877170,
+        "terminal": false
+      },
+      "965390": {
+        "flags": 69238880,
+        "pid": 965390,
+        "ppid": 2,
+        "start_ticks": 13877302,
+        "terminal": false
+      },
+      "993494": {
+        "flags": 69238880,
+        "pid": 993494,
+        "ppid": 2,
+        "start_ticks": 13886267,
+        "terminal": false
+      },
+      "1582539": {
+        "flags": 69238880,
+        "pid": 1582539,
+        "ppid": 2,
+        "start_ticks": 13970298,
+        "terminal": false
+      },
+      "1941737": {
+        "flags": 69238880,
+        "pid": 1941737,
+        "ppid": 2,
+        "start_ticks": 14019553,
+        "terminal": false
+      },
+      "1975887": {
+        "argv_sha256": "91fa76f4bb6003bcf01c8358f63596812f4f1c4e543be66a823f66da1f8f7712",
+        "cgroup": "0::/boxes_control.slice/boxes-project-storage.service\n",
+        "exe_identity": [
+          65024,
+          2150909
+        ],
+        "flags": 4194368,
+        "pid": 1975887,
+        "ppid": 1,
+        "start_ticks": 9446249,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "1976870": {
+        "argv_sha256": "2ade5cbaf2868495a3237374497c0bfcd16029f5c379908b05e8d4b5199aa3a2",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          2151983
+        ],
+        "flags": 4194560,
+        "pid": 1976870,
+        "ppid": 1,
+        "start_ticks": 9446723,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "1977080": {
+        "argv_sha256": "da973fe2a1429186b3556699185bcb2ebe79e4aea32e65a4bb71704cc703bddc",
+        "cgroup": "0::/socats\n",
+        "exe_identity": [
+          65024,
+          508
+        ],
+        "flags": 4194304,
+        "pid": 1977080,
+        "ppid": 980,
+        "start_ticks": 9446833,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "1981604": {
+        "argv_sha256": "a56e6b8eea9e88ca01e066e1ecdfecd046bae8644402b1d7fa695d1b22a8b686",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          2151985
+        ],
+        "flags": 4194304,
+        "pid": 1981604,
+        "ppid": 1976870,
+        "start_ticks": 9449782,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "2104593": {
+        "argv_sha256": "d646599859bf2b4c09eefbc076162090d49e043315ce60d7ba309c835ef938b7",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194560,
+        "pid": 2104593,
+        "ppid": 1,
+        "start_ticks": 11823831,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104772": {
+        "argv_sha256": "d646599859bf2b4c09eefbc076162090d49e043315ce60d7ba309c835ef938b7",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194368,
+        "pid": 2104772,
+        "ppid": 2104593,
+        "start_ticks": 11824013,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104775": {
+        "argv_sha256": "65ee10d663b1bf6391d890c2ef3fc4795e0796a4668cb0e202379e8093e519cc",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194304,
+        "pid": 2104775,
+        "ppid": 2104772,
+        "start_ticks": 11824013,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104796": {
+        "argv_sha256": "d646599859bf2b4c09eefbc076162090d49e043315ce60d7ba309c835ef938b7",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194368,
+        "pid": 2104796,
+        "ppid": 2104593,
+        "start_ticks": 11824026,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104799": {
+        "argv_sha256": "55b5e948ff583b1a27444ed84f2d495cf3d6e784b3c4cdf50e2e3a7979a084cb",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194560,
+        "pid": 2104799,
+        "ppid": 2104796,
+        "start_ticks": 11824026,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104802": {
+        "argv_sha256": "c371932a322e065bdb8c0e8a458d61d55cb0f5b593823c91e235d9a7e784b66d",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          2156231
+        ],
+        "flags": 4194560,
+        "pid": 2104802,
+        "ppid": 2104593,
+        "start_ticks": 11824027,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "2104831": {
+        "argv_sha256": "a9ba60859007bbbde7f287dc97e61211fe499f3a69b4d76cccab74c7759adc3d",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          1194
+        ],
+        "flags": 4194304,
+        "pid": 2104831,
+        "ppid": 2104802,
+        "start_ticks": 11824029,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "2501376": {
+        "flags": 69238880,
+        "pid": 2501376,
+        "ppid": 2,
+        "start_ticks": 14146159,
+        "terminal": false
+      },
+      "2631654": {
+        "flags": 69238880,
+        "pid": 2631654,
+        "ppid": 2,
+        "start_ticks": 14217642,
+        "terminal": false
+      },
+      "2647256": {
+        "flags": 69238880,
+        "pid": 2647256,
+        "ppid": 2,
+        "start_ticks": 14225280,
+        "terminal": false
+      },
+      "2704941": {
+        "argv_sha256": "9af229b196db6e831e1cf4b9a10893bba77d92c967ffebda90342c507f136de0",
+        "cgroup": "0::/system.slice/systemd-networkd.service\n",
+        "exe_identity": [
+          65024,
+          15115
+        ],
+        "flags": 4194560,
+        "pid": 2704941,
+        "ppid": 1,
+        "start_ticks": 5653940,
+        "terminal": false,
+        "uids": [
+          998,
+          998,
+          998,
+          998
+        ]
+      },
+      "2704986": {
+        "argv_sha256": "65f388a1804eb5b5f4b1d349cb3c99a0d64a641104b044815a20ed0c72856527",
+        "cgroup": "0::/system.slice/systemd-journald.service\n",
+        "exe_identity": [
+          65024,
+          15108
+        ],
+        "flags": 4194560,
+        "pid": 2704986,
+        "ppid": 1,
+        "start_ticks": 5653948,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2823678": {
+        "flags": 69238880,
+        "pid": 2823678,
+        "ppid": 2,
+        "start_ticks": 14275100,
+        "terminal": false
+      },
+      "2823794": {
+        "flags": 69238880,
+        "pid": 2823794,
+        "ppid": 2,
+        "start_ticks": 14275112,
+        "terminal": false
+      },
+      "2915754": {
+        "flags": 69238880,
+        "pid": 2915754,
+        "ppid": 2,
+        "start_ticks": 14312227,
+        "terminal": false
+      },
+      "2928944": {
+        "flags": 69238880,
+        "pid": 2928944,
+        "ppid": 2,
+        "start_ticks": 14317907,
+        "terminal": false
+      },
+      "3189189": {
+        "flags": 69238880,
+        "pid": 3189189,
+        "ppid": 2,
+        "start_ticks": 14458164,
+        "terminal": false
+      },
+      "3231793": {
+        "flags": 69238880,
+        "pid": 3231793,
+        "ppid": 2,
+        "start_ticks": 14484991,
+        "terminal": false
+      },
+      "3317634": {
+        "flags": 69238880,
+        "pid": 3317634,
+        "ppid": 2,
+        "start_ticks": 14540287,
+        "terminal": false
+      },
+      "3346923": {
+        "flags": 69238880,
+        "pid": 3346923,
+        "ppid": 2,
+        "start_ticks": 14558230,
+        "terminal": false
+      },
+      "3365810": {
+        "flags": 69238880,
+        "pid": 3365810,
+        "ppid": 2,
+        "start_ticks": 14569984,
+        "terminal": false
+      },
+      "3403551": {
+        "flags": 69238880,
+        "pid": 3403551,
+        "ppid": 2,
+        "start_ticks": 14592553,
+        "terminal": false
+      },
+      "3545408": {
+        "flags": 69238880,
+        "pid": 3545408,
+        "ppid": 2,
+        "start_ticks": 13349174,
+        "terminal": false
+      },
+      "3716244": {
+        "flags": 69238880,
+        "pid": 3716244,
+        "ppid": 2,
+        "start_ticks": 14788167,
+        "terminal": false
+      },
+      "3732612": {
+        "flags": 69238880,
+        "pid": 3732612,
+        "ppid": 2,
+        "start_ticks": 14798530,
+        "terminal": false
+      },
+      "3972184": {
+        "flags": 69238880,
+        "pid": 3972184,
+        "ppid": 2,
+        "start_ticks": 14950167,
+        "terminal": false
+      },
+      "3989205": {
+        "argv_sha256": "bfc25790939ebd0dc62c5ffa47736d073a97dc44c5fd1ebde100745c6ebf9539",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194304,
+        "pid": 3989205,
+        "ppid": 1976870,
+        "start_ticks": 14961217,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "3989222": {
+        "argv_sha256": "88281e346a100b3e1e20de1071af1783d515d1279260863c37db6d7130de105b",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194304,
+        "pid": 3989222,
+        "ppid": 3989205,
+        "start_ticks": 14961237,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "3989517": {
+        "argv_sha256": "0e5799bb044f4f5096945970c0b7758a74f3a812e95db8900e2242bfb1131e99",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          9681
+        ],
+        "flags": 4194560,
+        "pid": 3989517,
+        "ppid": 3989222,
+        "start_ticks": 14961378,
+        "terminal": false,
+        "uids": [
+          1002,
+          0,
+          0,
+          0
+        ]
+      },
+      "3989524": {
+        "argv_sha256": "abc24f85df8e8c1841841e8ed5c0f7ef38588a6e295e74e799c5669201cceb24",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          3933
+        ],
+        "flags": 4194560,
+        "pid": 3989524,
+        "ppid": 3989517,
+        "start_ticks": 14961379,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "3989530": {
+        "argv_sha256": "bd7d82468ba77db9e33388b3397977df087f590f7dd6abdd4af7ab31b8ab5706",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          1180
+        ],
+        "flags": 4194304,
+        "pid": 3989530,
+        "ppid": 2104799,
+        "start_ticks": 14961380,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "3989534": {
+        "argv_sha256": "3b66775f48a1442ad6a174f1acfa7cb5f149e173ef254b47789ba6ce76d958b4",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          1180
+        ],
+        "flags": 4194304,
+        "pid": 3989534,
+        "ppid": 2104775,
+        "start_ticks": 14961382,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "census2": {
+      "1": {
+        "argv_sha256": "ccd56e2d9273f61f56f91ddb3ec28db835c8841ba642ce6ab0c3b5719c530960",
+        "cgroup": "0::/init.scope\n",
+        "exe_identity": [
+          65024,
+          15093
+        ],
+        "flags": 4194560,
+        "pid": 1,
+        "ppid": 0,
+        "start_ticks": 6,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2": {
+        "flags": 2129984,
+        "pid": 2,
+        "ppid": 0,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "3": {
+        "flags": 69238880,
+        "pid": 3,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "4": {
+        "flags": 69238880,
+        "pid": 4,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "5": {
+        "flags": 69238880,
+        "pid": 5,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "6": {
+        "flags": 69238880,
+        "pid": 6,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "8": {
+        "flags": 69238880,
+        "pid": 8,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "10": {
+        "flags": 69238880,
+        "pid": 10,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "11": {
+        "flags": 2129984,
+        "pid": 11,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "12": {
+        "flags": 2129984,
+        "pid": 12,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "13": {
+        "flags": 2129984,
+        "pid": 13,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "14": {
+        "flags": 69238848,
+        "pid": 14,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "15": {
+        "flags": 2129984,
+        "pid": 15,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "16": {
+        "flags": 69238848,
+        "pid": 16,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "18": {
+        "flags": 69238848,
+        "pid": 18,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "19": {
+        "flags": 69238848,
+        "pid": 19,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "20": {
+        "flags": 69238848,
+        "pid": 20,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "21": {
+        "flags": 69238848,
+        "pid": 21,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "23": {
+        "flags": 69238880,
+        "pid": 23,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "24": {
+        "flags": 69238848,
+        "pid": 24,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "25": {
+        "flags": 69238848,
+        "pid": 25,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "26": {
+        "flags": 69238848,
+        "pid": 26,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "28": {
+        "flags": 69238880,
+        "pid": 28,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "29": {
+        "flags": 69238848,
+        "pid": 29,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "30": {
+        "flags": 69238848,
+        "pid": 30,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "31": {
+        "flags": 69238848,
+        "pid": 31,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "33": {
+        "flags": 69238880,
+        "pid": 33,
+        "ppid": 2,
+        "start_ticks": 6,
+        "terminal": false
+      },
+      "34": {
+        "flags": 69238848,
+        "pid": 34,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "35": {
+        "flags": 69238848,
+        "pid": 35,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "36": {
+        "flags": 69238848,
+        "pid": 36,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "38": {
+        "flags": 69238880,
+        "pid": 38,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "39": {
+        "flags": 69238848,
+        "pid": 39,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "40": {
+        "flags": 69238848,
+        "pid": 40,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "41": {
+        "flags": 69238848,
+        "pid": 41,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "43": {
+        "flags": 69238880,
+        "pid": 43,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "44": {
+        "flags": 69238848,
+        "pid": 44,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "45": {
+        "flags": 69238848,
+        "pid": 45,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "46": {
+        "flags": 69238848,
+        "pid": 46,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "48": {
+        "flags": 69238880,
+        "pid": 48,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "49": {
+        "flags": 69238848,
+        "pid": 49,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "50": {
+        "flags": 69238848,
+        "pid": 50,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "51": {
+        "flags": 69238848,
+        "pid": 51,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "53": {
+        "flags": 69238880,
+        "pid": 53,
+        "ppid": 2,
+        "start_ticks": 7,
+        "terminal": false
+      },
+      "62": {
+        "flags": 2130240,
+        "pid": 62,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "63": {
+        "flags": 69238880,
+        "pid": 63,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "64": {
+        "flags": 2097216,
+        "pid": 64,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "65": {
+        "flags": 2129984,
+        "pid": 65,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "66": {
+        "flags": 2097216,
+        "pid": 66,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "67": {
+        "flags": 69238880,
+        "pid": 67,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "68": {
+        "flags": 2097216,
+        "pid": 68,
+        "ppid": 2,
+        "start_ticks": 9,
+        "terminal": false
+      },
+      "69": {
+        "flags": 2097216,
+        "pid": 69,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "70": {
+        "flags": 2097216,
+        "pid": 70,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "71": {
+        "flags": 69238880,
+        "pid": 71,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "72": {
+        "flags": 69238880,
+        "pid": 72,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "73": {
+        "flags": 69238880,
+        "pid": 73,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "75": {
+        "flags": 2129984,
+        "pid": 75,
+        "ppid": 2,
+        "start_ticks": 10,
+        "terminal": false
+      },
+      "76": {
+        "flags": 69238880,
+        "pid": 76,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "78": {
+        "flags": 69238880,
+        "pid": 78,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "79": {
+        "flags": 69238880,
+        "pid": 79,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "120": {
+        "flags": 2230336,
+        "pid": 120,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "123": {
+        "flags": 69238880,
+        "pid": 123,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "126": {
+        "flags": 69238880,
+        "pid": 126,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "127": {
+        "flags": 69238880,
+        "pid": 127,
+        "ppid": 2,
+        "start_ticks": 13,
+        "terminal": false
+      },
+      "130": {
+        "flags": 69238880,
+        "pid": 130,
+        "ppid": 2,
+        "start_ticks": 14,
+        "terminal": false
+      },
+      "136": {
+        "flags": 2129984,
+        "pid": 136,
+        "ppid": 2,
+        "start_ticks": 15,
+        "terminal": false
+      },
+      "170": {
+        "flags": 2129984,
+        "pid": 170,
+        "ppid": 2,
+        "start_ticks": 15,
+        "terminal": false
+      },
+      "191": {
+        "flags": 69238880,
+        "pid": 191,
+        "ppid": 2,
+        "start_ticks": 16,
+        "terminal": false
+      },
+      "198": {
+        "flags": 69238880,
+        "pid": 198,
+        "ppid": 2,
+        "start_ticks": 16,
+        "terminal": false
+      },
+      "223": {
+        "flags": 69238880,
+        "pid": 223,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "224": {
+        "flags": 69238880,
+        "pid": 224,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "225": {
+        "flags": 69238880,
+        "pid": 225,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "232": {
+        "argv_sha256": "a5b75507875be97fe8401bab1f8ff2a27da4ffaee06f2b68ee2d87002d599782",
+        "cgroup": "0::/init.scope\n",
+        "exe_identity": [
+          19,
+          2
+        ],
+        "flags": 4194304,
+        "pid": 232,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "233": {
+        "flags": 69238880,
+        "pid": 233,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "238": {
+        "flags": 69238880,
+        "pid": 238,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "239": {
+        "flags": 69238880,
+        "pid": 239,
+        "ppid": 2,
+        "start_ticks": 17,
+        "terminal": false
+      },
+      "317": {
+        "flags": 2359360,
+        "pid": 317,
+        "ppid": 2,
+        "start_ticks": 39,
+        "terminal": false
+      },
+      "318": {
+        "flags": 69238880,
+        "pid": 318,
+        "ppid": 2,
+        "start_ticks": 39,
+        "terminal": false
+      },
+      "322": {
+        "flags": 69238880,
+        "pid": 322,
+        "ppid": 2,
+        "start_ticks": 207,
+        "terminal": false
+      },
+      "337": {
+        "flags": 69238880,
+        "pid": 337,
+        "ppid": 2,
+        "start_ticks": 213,
+        "terminal": false
+      },
+      "349": {
+        "flags": 69238880,
+        "pid": 349,
+        "ppid": 2,
+        "start_ticks": 308,
+        "terminal": false
+      },
+      "350": {
+        "flags": 69238880,
+        "pid": 350,
+        "ppid": 2,
+        "start_ticks": 308,
+        "terminal": false
+      },
+      "356": {
+        "flags": 69238880,
+        "pid": 356,
+        "ppid": 2,
+        "start_ticks": 308,
+        "terminal": false
+      },
+      "396": {
+        "argv_sha256": "57751e23d9848293d4c0f972c0776c582df083fdd0028f2657014ba500c4a00e",
+        "cgroup": "0::/system.slice/systemd-udevd.service/udev\n",
+        "exe_identity": [
+          65024,
+          11619
+        ],
+        "flags": 4194560,
+        "pid": 396,
+        "ppid": 1,
+        "start_ticks": 328,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "764": {
+        "argv_sha256": "8f51f2cfb9bcd14c7a379fe66e0c34330479d2e06333cb23ef08412b47cd615b",
+        "cgroup": "0::/system.slice/rpcbind.service\n",
+        "exe_identity": [
+          65024,
+          6134
+        ],
+        "flags": 4194560,
+        "pid": 764,
+        "ppid": 1,
+        "start_ticks": 338,
+        "terminal": false,
+        "uids": [
+          101,
+          101,
+          101,
+          101
+        ]
+      },
+      "822": {
+        "argv_sha256": "32c19440de98b3788928897a362b6af816e7e76120be2e6c4297b54d098d3b43",
+        "cgroup": "0::/system.slice/dbus.service\n",
+        "exe_identity": [
+          65024,
+          11490
+        ],
+        "flags": 4194560,
+        "pid": 822,
+        "ppid": 1,
+        "start_ticks": 378,
+        "terminal": false,
+        "uids": [
+          104,
+          104,
+          104,
+          104
+        ]
+      },
+      "824": {
+        "argv_sha256": "8b8c40f33a0599b43a323ab968e42c5eb6d8f0cb9a4dbd8cecb71e96cc757c3a",
+        "cgroup": "0::/system.slice/systemd-logind.service\n",
+        "exe_identity": [
+          65024,
+          5831
+        ],
+        "flags": 4194560,
+        "pid": 824,
+        "ppid": 1,
+        "start_ticks": 379,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "860": {
+        "argv_sha256": "bfdded22ba9b7a9630168217dbab58daa386a2c4c0b765474e2461c0822d9eb5",
+        "cgroup": "0::/system.slice/system-getty.slice/getty@tty1.service\n",
+        "exe_identity": [
+          65024,
+          2805
+        ],
+        "flags": 4194560,
+        "pid": 860,
+        "ppid": 1,
+        "start_ticks": 411,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "872": {
+        "argv_sha256": "b01a07e5ab431f1279c47e31faf86c5356689e103e800c05a02eefb4984e8b71",
+        "cgroup": "0::/system.slice/chrony.service\n",
+        "exe_identity": [
+          65024,
+          9445
+        ],
+        "flags": 4194624,
+        "pid": 872,
+        "ppid": 1,
+        "start_ticks": 418,
+        "terminal": false,
+        "uids": [
+          100,
+          100,
+          100,
+          100
+        ]
+      },
+      "875": {
+        "argv_sha256": "3bc4eb45b04e48e68e71fd8e2f9a9b03c375e334b52a767cd042a39721c05190",
+        "cgroup": "0::/system.slice/ssh.service\n",
+        "exe_identity": [
+          65024,
+          6510
+        ],
+        "flags": 4194560,
+        "pid": 875,
+        "ppid": 1,
+        "start_ticks": 418,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "893": {
+        "argv_sha256": "b01a07e5ab431f1279c47e31faf86c5356689e103e800c05a02eefb4984e8b71",
+        "cgroup": "0::/system.slice/chrony.service\n",
+        "exe_identity": [
+          65024,
+          9445
+        ],
+        "flags": 4194368,
+        "pid": 893,
+        "ppid": 872,
+        "start_ticks": 423,
+        "terminal": false,
+        "uids": [
+          100,
+          100,
+          100,
+          100
+        ]
+      },
+      "980": {
+        "argv_sha256": "12d45293d166852d5cf38dbfe148eaca827189a63313ae10d6a5a66c26482764",
+        "cgroup": "0::/system.slice/envd.service\n",
+        "exe_identity": [
+          65024,
+          6520
+        ],
+        "flags": 4194560,
+        "pid": 980,
+        "ppid": 1,
+        "start_ticks": 448,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "36566": {
+        "argv_sha256": "fdff3990b589d174dec4e1c7bd0c2b6660965c8f6a0b9dd4ca1ac93729b3d6a7",
+        "cgroup": "0::/system.slice/containerd.service\n",
+        "exe_identity": [
+          65024,
+          3586
+        ],
+        "flags": 4194560,
+        "pid": 36566,
+        "ppid": 1,
+        "start_ticks": 21745,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "36589": {
+        "argv_sha256": "b3fa205301c03a808e972996eaf026a30224f01be6482743feb25c4c746fe5b0",
+        "cgroup": "0::/system.slice/docker.service\n",
+        "exe_identity": [
+          65024,
+          10144
+        ],
+        "flags": 4194560,
+        "pid": 36589,
+        "ppid": 1,
+        "start_ticks": 21749,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "51240": {
+        "argv_sha256": "e618bfb5a5c5ac3e57643ec974009786141c3c551350b6386b460123de0f8908",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194304,
+        "pid": 51240,
+        "ppid": 1,
+        "start_ticks": 26394,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51241": {
+        "argv_sha256": "03895c180849cf25d86bec744516bf354373afc731170dc6a9ade057a18ad6e2",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51241,
+        "ppid": 51240,
+        "start_ticks": 26399,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51242": {
+        "argv_sha256": "ad5214aa01845bd14bc6ea25af78b0546e73ae22d2dbd85ce31ac3a07a857936",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51242,
+        "ppid": 51240,
+        "start_ticks": 26399,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51244": {
+        "argv_sha256": "b511179a64d2b227c5180dd2d1026861e4edc3767a75d6179f06ce4118cabb6a",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51244,
+        "ppid": 51240,
+        "start_ticks": 26400,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51245": {
+        "argv_sha256": "ad14d3595c6ddaa2e80b5885388719f489814461c01b3c48672589597928294c",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51245,
+        "ppid": 51240,
+        "start_ticks": 26400,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "51246": {
+        "argv_sha256": "b584d4b5838f9e2f973ed2bcc7714e2e5b77bf1b5f354a644c035535646d9267",
+        "cgroup": "0::/system.slice/system-postgresql.slice/postgresql@16-main.service\n",
+        "exe_identity": [
+          65024,
+          1090537
+        ],
+        "flags": 4194368,
+        "pid": 51246,
+        "ppid": 51240,
+        "start_ticks": 26400,
+        "terminal": false,
+        "uids": [
+          105,
+          105,
+          105,
+          105
+        ]
+      },
+      "348628": {
+        "flags": 69238880,
+        "pid": 348628,
+        "ppid": 2,
+        "start_ticks": 13641357,
+        "terminal": false
+      },
+      "964795": {
+        "flags": 69238880,
+        "pid": 964795,
+        "ppid": 2,
+        "start_ticks": 13877170,
+        "terminal": false
+      },
+      "965390": {
+        "flags": 69238880,
+        "pid": 965390,
+        "ppid": 2,
+        "start_ticks": 13877302,
+        "terminal": false
+      },
+      "993494": {
+        "flags": 69238880,
+        "pid": 993494,
+        "ppid": 2,
+        "start_ticks": 13886267,
+        "terminal": false
+      },
+      "1582539": {
+        "flags": 69238880,
+        "pid": 1582539,
+        "ppid": 2,
+        "start_ticks": 13970298,
+        "terminal": false
+      },
+      "1941737": {
+        "flags": 69238880,
+        "pid": 1941737,
+        "ppid": 2,
+        "start_ticks": 14019553,
+        "terminal": false
+      },
+      "1975887": {
+        "argv_sha256": "91fa76f4bb6003bcf01c8358f63596812f4f1c4e543be66a823f66da1f8f7712",
+        "cgroup": "0::/boxes_control.slice/boxes-project-storage.service\n",
+        "exe_identity": [
+          65024,
+          2150909
+        ],
+        "flags": 4194368,
+        "pid": 1975887,
+        "ppid": 1,
+        "start_ticks": 9446249,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "1976870": {
+        "argv_sha256": "2ade5cbaf2868495a3237374497c0bfcd16029f5c379908b05e8d4b5199aa3a2",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          2151983
+        ],
+        "flags": 4194560,
+        "pid": 1976870,
+        "ppid": 1,
+        "start_ticks": 9446723,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "1977080": {
+        "argv_sha256": "da973fe2a1429186b3556699185bcb2ebe79e4aea32e65a4bb71704cc703bddc",
+        "cgroup": "0::/socats\n",
+        "exe_identity": [
+          65024,
+          508
+        ],
+        "flags": 4194304,
+        "pid": 1977080,
+        "ppid": 980,
+        "start_ticks": 9446833,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "1981604": {
+        "argv_sha256": "a56e6b8eea9e88ca01e066e1ecdfecd046bae8644402b1d7fa695d1b22a8b686",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          2151985
+        ],
+        "flags": 4194304,
+        "pid": 1981604,
+        "ppid": 1976870,
+        "start_ticks": 9449782,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "2104593": {
+        "argv_sha256": "d646599859bf2b4c09eefbc076162090d49e043315ce60d7ba309c835ef938b7",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194560,
+        "pid": 2104593,
+        "ppid": 1,
+        "start_ticks": 11823831,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104772": {
+        "argv_sha256": "d646599859bf2b4c09eefbc076162090d49e043315ce60d7ba309c835ef938b7",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194368,
+        "pid": 2104772,
+        "ppid": 2104593,
+        "start_ticks": 11824013,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104775": {
+        "argv_sha256": "65ee10d663b1bf6391d890c2ef3fc4795e0796a4668cb0e202379e8093e519cc",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194304,
+        "pid": 2104775,
+        "ppid": 2104772,
+        "start_ticks": 11824013,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104796": {
+        "argv_sha256": "d646599859bf2b4c09eefbc076162090d49e043315ce60d7ba309c835ef938b7",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194368,
+        "pid": 2104796,
+        "ppid": 2104593,
+        "start_ticks": 11824026,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104799": {
+        "argv_sha256": "55b5e948ff583b1a27444ed84f2d495cf3d6e784b3c4cdf50e2e3a7979a084cb",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194560,
+        "pid": 2104799,
+        "ppid": 2104796,
+        "start_ticks": 11824026,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2104802": {
+        "argv_sha256": "c371932a322e065bdb8c0e8a458d61d55cb0f5b593823c91e235d9a7e784b66d",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          2156231
+        ],
+        "flags": 4194560,
+        "pid": 2104802,
+        "ppid": 2104593,
+        "start_ticks": 11824027,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "2104831": {
+        "argv_sha256": "a9ba60859007bbbde7f287dc97e61211fe499f3a69b4d76cccab74c7759adc3d",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          1194
+        ],
+        "flags": 4194304,
+        "pid": 2104831,
+        "ppid": 2104802,
+        "start_ticks": 11824029,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "2501376": {
+        "flags": 69238880,
+        "pid": 2501376,
+        "ppid": 2,
+        "start_ticks": 14146159,
+        "terminal": false
+      },
+      "2631654": {
+        "flags": 69238880,
+        "pid": 2631654,
+        "ppid": 2,
+        "start_ticks": 14217642,
+        "terminal": false
+      },
+      "2647256": {
+        "flags": 69238880,
+        "pid": 2647256,
+        "ppid": 2,
+        "start_ticks": 14225280,
+        "terminal": false
+      },
+      "2704941": {
+        "argv_sha256": "9af229b196db6e831e1cf4b9a10893bba77d92c967ffebda90342c507f136de0",
+        "cgroup": "0::/system.slice/systemd-networkd.service\n",
+        "exe_identity": [
+          65024,
+          15115
+        ],
+        "flags": 4194560,
+        "pid": 2704941,
+        "ppid": 1,
+        "start_ticks": 5653940,
+        "terminal": false,
+        "uids": [
+          998,
+          998,
+          998,
+          998
+        ]
+      },
+      "2704986": {
+        "argv_sha256": "65f388a1804eb5b5f4b1d349cb3c99a0d64a641104b044815a20ed0c72856527",
+        "cgroup": "0::/system.slice/systemd-journald.service\n",
+        "exe_identity": [
+          65024,
+          15108
+        ],
+        "flags": 4194560,
+        "pid": 2704986,
+        "ppid": 1,
+        "start_ticks": 5653948,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "2823678": {
+        "flags": 69238880,
+        "pid": 2823678,
+        "ppid": 2,
+        "start_ticks": 14275100,
+        "terminal": false
+      },
+      "2823794": {
+        "flags": 69238880,
+        "pid": 2823794,
+        "ppid": 2,
+        "start_ticks": 14275112,
+        "terminal": false
+      },
+      "2915754": {
+        "flags": 69238880,
+        "pid": 2915754,
+        "ppid": 2,
+        "start_ticks": 14312227,
+        "terminal": false
+      },
+      "2928944": {
+        "flags": 69238880,
+        "pid": 2928944,
+        "ppid": 2,
+        "start_ticks": 14317907,
+        "terminal": false
+      },
+      "3189189": {
+        "flags": 69238880,
+        "pid": 3189189,
+        "ppid": 2,
+        "start_ticks": 14458164,
+        "terminal": false
+      },
+      "3231793": {
+        "flags": 69238880,
+        "pid": 3231793,
+        "ppid": 2,
+        "start_ticks": 14484991,
+        "terminal": false
+      },
+      "3317634": {
+        "flags": 69238880,
+        "pid": 3317634,
+        "ppid": 2,
+        "start_ticks": 14540287,
+        "terminal": false
+      },
+      "3346923": {
+        "flags": 69238880,
+        "pid": 3346923,
+        "ppid": 2,
+        "start_ticks": 14558230,
+        "terminal": false
+      },
+      "3365810": {
+        "flags": 69238880,
+        "pid": 3365810,
+        "ppid": 2,
+        "start_ticks": 14569984,
+        "terminal": false
+      },
+      "3403551": {
+        "flags": 69238880,
+        "pid": 3403551,
+        "ppid": 2,
+        "start_ticks": 14592553,
+        "terminal": false
+      },
+      "3545408": {
+        "flags": 69238880,
+        "pid": 3545408,
+        "ppid": 2,
+        "start_ticks": 13349174,
+        "terminal": false
+      },
+      "3716244": {
+        "flags": 69238880,
+        "pid": 3716244,
+        "ppid": 2,
+        "start_ticks": 14788167,
+        "terminal": false
+      },
+      "3732612": {
+        "flags": 69238880,
+        "pid": 3732612,
+        "ppid": 2,
+        "start_ticks": 14798530,
+        "terminal": false
+      },
+      "3972184": {
+        "flags": 69238880,
+        "pid": 3972184,
+        "ppid": 2,
+        "start_ticks": 14950167,
+        "terminal": false
+      },
+      "3989205": {
+        "argv_sha256": "bfc25790939ebd0dc62c5ffa47736d073a97dc44c5fd1ebde100745c6ebf9539",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194304,
+        "pid": 3989205,
+        "ppid": 1976870,
+        "start_ticks": 14961217,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "3989222": {
+        "argv_sha256": "88281e346a100b3e1e20de1071af1783d515d1279260863c37db6d7130de105b",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          916
+        ],
+        "flags": 4194304,
+        "pid": 3989222,
+        "ppid": 3989205,
+        "start_ticks": 14961237,
+        "terminal": false,
+        "uids": [
+          1002,
+          1002,
+          1002,
+          1002
+        ]
+      },
+      "3989517": {
+        "argv_sha256": "0e5799bb044f4f5096945970c0b7758a74f3a812e95db8900e2242bfb1131e99",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          9681
+        ],
+        "flags": 4194560,
+        "pid": 3989517,
+        "ppid": 3989222,
+        "start_ticks": 14961378,
+        "terminal": false,
+        "uids": [
+          1002,
+          0,
+          0,
+          0
+        ]
+      },
+      "3989524": {
+        "argv_sha256": "abc24f85df8e8c1841841e8ed5c0f7ef38588a6e295e74e799c5669201cceb24",
+        "cgroup": "0::/boxes_workload.slice/boxes-workload-1c5de68e4d724cecb2bacd6daa07d7fb.scope\n",
+        "exe_identity": [
+          65024,
+          3933
+        ],
+        "flags": 4194560,
+        "pid": 3989524,
+        "ppid": 3989517,
+        "start_ticks": 14961379,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "3989530": {
+        "argv_sha256": "bd7d82468ba77db9e33388b3397977df087f590f7dd6abdd4af7ab31b8ab5706",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          1180
+        ],
+        "flags": 4194304,
+        "pid": 3989530,
+        "ppid": 2104799,
+        "start_ticks": 14961380,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "3989534": {
+        "argv_sha256": "3b66775f48a1442ad6a174f1acfa7cb5f149e173ef254b47789ba6ce76d958b4",
+        "cgroup": "0::/boxes_control.slice/boxes-daemon-supervisor.service\n",
+        "exe_identity": [
+          65024,
+          1180
+        ],
+        "flags": 4194304,
+        "pid": 3989534,
+        "ppid": 2104775,
+        "start_ticks": 14961382,
+        "terminal": false,
+        "uids": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "classification": {
+      "1": "exact-observer-ancestry",
+      "10": "kernel",
+      "11": "kernel",
+      "12": "kernel",
+      "120": "kernel",
+      "123": "kernel",
+      "126": "kernel",
+      "127": "kernel",
+      "13": "kernel",
+      "130": "kernel",
+      "136": "kernel",
+      "14": "kernel",
+      "15": "kernel",
+      "1582539": "kernel",
+      "16": "kernel",
+      "170": "kernel",
+      "18": "kernel",
+      "19": "kernel",
+      "191": "kernel",
+      "1941737": "kernel",
+      "1975887": "outside-pinned-original-UID",
+      "1976870": "exact-observer-ancestry",
+      "1977080": "outside-pinned-original-UID",
+      "198": "kernel",
+      "1981604": "registered-current-harness-helper",
+      "2": "kernel",
+      "20": "kernel",
+      "21": "kernel",
+      "2104593": "systemd-managed-service",
+      "2104772": "systemd-managed-service",
+      "2104775": "systemd-managed-service",
+      "2104796": "systemd-managed-service",
+      "2104799": "systemd-managed-service",
+      "2104802": "systemd-managed-service",
+      "2104831": "systemd-managed-service",
+      "223": "kernel",
+      "224": "kernel",
+      "225": "kernel",
+      "23": "kernel",
+      "232": "outside-pinned-original-UID",
+      "233": "kernel",
+      "238": "kernel",
+      "239": "kernel",
+      "24": "kernel",
+      "25": "kernel",
+      "2501376": "kernel",
+      "26": "kernel",
+      "2631654": "kernel",
+      "2647256": "kernel",
+      "2704941": "outside-pinned-original-UID",
+      "2704986": "outside-pinned-original-UID",
+      "28": "kernel",
+      "2823678": "kernel",
+      "2823794": "kernel",
+      "29": "kernel",
+      "2915754": "kernel",
+      "2928944": "kernel",
+      "3": "kernel",
+      "30": "kernel",
+      "31": "kernel",
+      "317": "kernel",
+      "318": "kernel",
+      "3189189": "kernel",
+      "322": "kernel",
+      "3231793": "kernel",
+      "33": "kernel",
+      "3317634": "kernel",
+      "3346923": "kernel",
+      "3365810": "kernel",
+      "337": "kernel",
+      "34": "kernel",
+      "3403551": "kernel",
+      "348628": "kernel",
+      "349": "kernel",
+      "35": "kernel",
+      "350": "kernel",
+      "3545408": "kernel",
+      "356": "kernel",
+      "36": "kernel",
+      "36566": "outside-pinned-original-UID",
+      "36589": "outside-pinned-original-UID",
+      "3716244": "kernel",
+      "3732612": "kernel",
+      "38": "kernel",
+      "39": "kernel",
+      "396": "outside-pinned-original-UID",
+      "3972184": "kernel",
+      "3989205": "exact-observer-ancestry",
+      "3989222": "exact-observer-ancestry",
+      "3989517": "exact-observer-ancestry",
+      "3989524": "exact-observer-ancestry",
+      "3989530": "systemd-managed-service",
+      "3989534": "systemd-managed-service",
+      "4": "kernel",
+      "40": "kernel",
+      "41": "kernel",
+      "43": "kernel",
+      "44": "kernel",
+      "45": "kernel",
+      "46": "kernel",
+      "48": "kernel",
+      "49": "kernel",
+      "5": "kernel",
+      "50": "kernel",
+      "51": "kernel",
+      "51240": "outside-pinned-original-UID",
+      "51241": "outside-pinned-original-UID",
+      "51242": "outside-pinned-original-UID",
+      "51244": "outside-pinned-original-UID",
+      "51245": "outside-pinned-original-UID",
+      "51246": "outside-pinned-original-UID",
+      "53": "kernel",
+      "6": "kernel",
+      "62": "kernel",
+      "63": "kernel",
+      "64": "kernel",
+      "65": "kernel",
+      "66": "kernel",
+      "67": "kernel",
+      "68": "kernel",
+      "69": "kernel",
+      "70": "kernel",
+      "71": "kernel",
+      "72": "kernel",
+      "73": "kernel",
+      "75": "kernel",
+      "76": "kernel",
+      "764": "outside-pinned-original-UID",
+      "78": "kernel",
+      "79": "kernel",
+      "8": "kernel",
+      "822": "outside-pinned-original-UID",
+      "824": "outside-pinned-original-UID",
+      "860": "outside-pinned-original-UID",
+      "872": "outside-pinned-original-UID",
+      "875": "outside-pinned-original-UID",
+      "893": "outside-pinned-original-UID",
+      "964795": "kernel",
+      "965390": "kernel",
+      "980": "outside-pinned-original-UID",
+      "993494": "kernel"
+    },
+    "clock_ticks_per_second": 100,
+    "credit_granted": false,
+    "harness_agent": {
+      "pid": 1976870,
+      "start_ticks": 9446723
+    },
+    "harness_helper": {
+      "ipc": {
+        "0": {
+          "agent_fd": "53",
+          "pipe": "pipe:[23128296]"
+        },
+        "1": {
+          "agent_fd": "57",
+          "pipe": "pipe:[23128297]"
+        },
+        "2": {
+          "agent_fd": "59",
+          "pipe": "pipe:[23128298]"
+        }
+      },
+      "official_executable": "/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host",
+      "official_executable_sha256": "657f4e902726e05867c937b583049d5997e057f8cd0ab40450633c9c9ef8d630",
+      "pid": 1981604,
+      "start_ticks": 9449782
+    },
+    "historical_join_verified": false,
+    "kind": "current-local-retirement-census-v1",
+    "observed_at": 1794062202.1136289,
+    "observer_mixed_uid_policy": "only exact observer ancestry may contain privilege-delegation sudo UID transition; every other live userspace row requires 4 equal UIDs",
+    "observer_pid": 3989524,
+    "original_native_result_sha256": "9dc07f86a0f0fe75392fb5884cd872cd0f5a68409c782add031e494d18a56dd3",
+    "original_no_identity_escape_contract": "independently reviewed original pre-agent source path; no sudo, setuid or namespace transition",
+    "original_source": {
+      "digest": "560b384285ebd08dbba43b8db7e6366cb6779d15eaa8d21227cf3e7ac7e8c219",
+      "head": "099001ccebab0a1e8872bb5dead323a8f0609444"
+    },
+    "original_source_hashes": {
+      "scripts/cloudbench-campaign-inventory.sh": "e924d72f258bd5b2507348e5b53143aa4c2afa1c410cd63bdf495f27dfd2082d",
+      "scripts/cloudbench-campaign-machines.py": "e85eb826790c70e87b4d397467e01b2d1f9e805ce1efedb458edc16bff60353b",
+      "scripts/lib/cloudbench-env.sh": "fe203ad691d840b104c208d390d5185290971ac721c859f8c787a4969cabfa8c",
+      "scripts/lib/cloudbench-inventory.sh": "01dc00ebba29ea4307f78774c3d8d73fd214c64f06fda1d00fc86df24c08b8e2",
+      "scripts/run-bench": "d6a63399d3ae00ae83d469f06ad44870a57ad13a85c99703366137012fc1420e",
+      "scripts/run-bench-campaign.py": "2659729480ec12c10bac14ef264e01528b97b4efaf7b5f88cdcbf1054323c93a"
+    },
+    "original_uid": 1002,
+    "peer_lock_held_through_both_censuses": true,
+    "peer_lock_inode": 1193513,
+    "scope": "CURRENT LOCAL PROCESS CLOSURE ONLY; original native UNVERIFIED and cleanup_complete=false unchanged; remote no-allocation separately required",
+    "systemd_properties": {
+      "ControlGroup": "/boxes_control.slice/boxes-daemon-supervisor.service",
+      "ExecMainStartTimestampMonotonic": "118238311630",
+      "FragmentPath": "/etc/systemd/system/boxes-daemon-supervisor.service",
+      "MainPID": "2104593"
+    },
+    "systemd_sources": {
+      "/etc/systemd/system/boxes-daemon-supervisor.service": "ec5d1a225813bd22ca7808979c9284beaf736b23fac91ebbd7981967cf176e58",
+      "/opt/e2b-devbox/sandbox-daemon-supervisor.sh": "210485116225aabc04f18a4082c009848e9544175c3e5341561a6ef38c71f606"
+    },
+    "original_token_sha256": "085b50faaec5f5559df4d49e50a273523ae70f879680cfe9cb5510b20fd9c996"
+  },
+  "privacy": "Complete process identity/classification metadata, no plaintext argv or credentials. Original opaque request nonce is hashed; recover it from the previous encrypted census in final index, restore census1/2 PID keys to integers and serialize indent2/sort_keys plus newline to reconstruct exact original native bytes/hash.",
+  "reconstruction_verified": true,
+  "historical_join_or_execution_credit": false
+}

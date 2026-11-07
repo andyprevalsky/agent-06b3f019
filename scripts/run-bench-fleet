@@ -996,6 +996,15 @@ bench_declares_fanout() {  # bench_declares_fanout <task>; catalog min_agent_cou
     return 1
 }
 
+bench_uses_shared_demo_cache() {  # bench_uses_shared_demo_cache <task>; catalog demo_cache: on
+    [ "${INFRA_PROBE:-0}" = "1" ] && return 1
+    local demo_task
+    for demo_task in "${CATALOG_DEMO_TASKS[@]:-}"; do
+        [ "$demo_task" = "$1" ] && return 0
+    done
+    return 1
+}
+
 primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
     if [ "${INFRA_PROBE:-0}" != "1" ] && bench_simulates "$1"; then
         printf '%s\n' "$FLEET_SIM_VM_SIZE"
@@ -1576,6 +1585,7 @@ CATALOG_MODES=()
 CATALOG_TIMEOUTS=()
 CATALOG_BROWSER_REQUIRED_TASKS=()
 CATALOG_FANOUT_TASKS=()
+CATALOG_DEMO_TASKS=()
 if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
     if ! catalog_modes_output="$(_catalog_modes_for_batch "${BENCHES[@]}")"; then
         echo "❌ benchmark catalog preflight failed before Fly provisioning" >&2
@@ -1614,6 +1624,25 @@ if [ "$RECOVER_STALE_ONLY" != "1" ] && [ -z "$PROVISION_POOL" ]; then
         echo "❌ benchmark catalog preflight returned ${#CATALOG_MODES[@]}/${#BENCHES[@]} task modes" >&2
         exit 1
     fi
+    # DEMO guests replay the shared cache through the production pooler (admit_lane_capacity).
+    if ! catalog_demo_output="$(CATALOG_MODULE_DIR="$CLOUDBENCH_SCRIPT_SNAPSHOT" python3 -c '
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["CATALOG_MODULE_DIR"])
+from cloudbench_catalog import CatalogError, selected_tasks_need_shared_demo_cache
+try:
+    for task in sys.argv[2:]:
+        print(task if selected_tasks_need_shared_demo_cache(Path(sys.argv[1]), [task]) else "")
+except CatalogError as exc:
+    print(f"catalog DEMO lane preflight failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+' "$ROOT_DIR/agents/benchmarks/tasks.json" "${BENCHES[@]}")"; then
+        echo "❌ benchmark catalog DEMO lane preflight failed before Fly provisioning" >&2
+        exit 1
+    fi
+    while IFS= read -r catalog_demo_task; do
+        [ -z "$catalog_demo_task" ] || CATALOG_DEMO_TASKS+=("$catalog_demo_task")
+    done <<< "$catalog_demo_output"
 fi
 
 # Provider rate limits are shared with production. Refuse a launch wider than
@@ -16009,24 +16038,38 @@ read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
 # the whole fleet on a transient race — clones still require a stopped source.
 # Never stop the warm machine ourselves (another workspace may own an in-flight
 # prepare_warm_source); only poll via cloudbench_wait_machine_stopped.
-if [ "$warm_state" != "stopped" ]; then
+# The direct read can see the donor stopped while a shared inventory snapshot
+# still holds the generation that recorded the transient state, so re-list only
+# from a newer generation, within the same stop budget.
+await_stopped_warm_source() {  # sets warm_json warm_state warm_kind warm_cpus warm_memory
+    local warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"
+    local warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"
+    local warm_stop_deadline warm_generation warm_shape
     echo "⏳ warm source is $warm_state; waiting until stopped before fleet provisioning"
-    warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"
-    warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"
+    warm_stop_deadline=$((SECONDS + warm_stop_attempts * warm_stop_sleep))
     cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID" \
         "$warm_stop_attempts" "$warm_stop_sleep" || {
         echo "❌ warm source must be stopped before fleet provisioning (state=$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown))" >&2
-        exit 1
+        return 1
     }
-    campaign_inventory_capture warm_json fleet_admission_machines_json || exit $?
-    warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
-        echo "❌ could not re-read warm source shape after stop wait" >&2; exit 1;
-    }
-    read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
-    [ "$warm_state" = "stopped" ] || {
-        echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
-        exit 1
-    }
+    while :; do
+        warm_generation="$(machines_snapshot_identity)"
+        campaign_inventory_capture warm_json fleet_admission_machines_json || exit $?
+        warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
+            echo "❌ could not re-read warm source shape after stop wait" >&2; return 1;
+        }
+        read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+        [ "$warm_state" != "stopped" ] || return 0
+        # Only a shared snapshot can lag the direct read; a live list cannot.
+        if [ -z "${SNAPSHOT_LOOP_PID:-}" ] || [ "$SECONDS" -ge "$warm_stop_deadline" ] \
+            || ! refresh_machines_snapshot_after "$warm_generation" "$warm_stop_deadline"; then
+            echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
+            return 1
+        fi
+    done
+}
+if [ "$warm_state" != "stopped" ]; then
+    await_stopped_warm_source || exit 1
 fi
 if [ "$warm_kind/$warm_cpus/$warm_memory" != "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
     echo "🅿️  parking warm source at $WARM_PARKED_VM_SIZE/${WARM_PARKED_VM_MEMORY}MB for config headroom"
@@ -16434,11 +16477,18 @@ enforce_app_capacity_guard() {
     CAPACITY_RESERVATION_ROOT="${CAPACITY_RESERVATION_ROOT:-${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}}"
     CAPACITY_RESERVATION_TOKEN="${CAPACITY_RESERVATION_TOKEN:-$FLEET_OWNER_TOKEN-primary}"
     CAPACITY_RESERVATION_PUBLISHED="${CAPACITY_RESERVATION_PUBLISHED:-0}"
-    shared_cpu_governor="${CLOUDBENCH_SHARED_CPU_GOVERNOR:-160}"
+    # Raised 2026-11-06 from 160 / 56 after proving Fly allows far more: org settings
+    # report machines_per_org_limit=1000 and no CPU quota; the placement simulator fits
+    # 250 shared-cpu-4x (1000 units) and 300 performance-1x in iad; 60 real shared-cpu-4x
+    # creates raised the org to 313 shared units with no rejection
+    # (/project/fly-capacity-probe-20261106). Production workers are performance-1x and
+    # draw no shared units. The downstream limits these ceilings used to imply are now
+    # explicit lane ceilings (admit_lane_capacity below), not machine counts.
+    shared_cpu_governor="${CLOUDBENCH_SHARED_CPU_GOVERNOR:-1000}"
     # The shared-CPU governor is org-wide while this guard sees only the
     # benchmark app, so retain the separately established production headroom.
     shared_cpu_headroom="${CLOUDBENCH_SHARED_CPU_HEADROOM:-20}"
-    app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-56}"
+    app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-300}"
     replacement_slots="${CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT:-4}"
     case "$shared_cpu_governor:$shared_cpu_headroom:$app_machine_ceiling:$replacement_slots" in
         *[!0-9:]*)
@@ -16545,6 +16595,8 @@ except Exception as exc:
     fi
     read -r active_shared active_perf running_machines stopped_machines total_machines <<< "$capacity_counts"
 
+    admit_lane_capacity "$warm_json" || return 1
+
     reservation_status=0
     reservation_result="$(capacity_reserve_slots "$CAPACITY_RESERVATION_TOKEN" \
         "$reservation_machine_slots" "$requested_shared" \
@@ -16605,6 +16657,73 @@ except Exception as exc:
         echo "🧵 capacity admitted with $available_pool_machines stopped pool Machine(s) and $reserved_machines live cross-workstream slot(s) already accounted."
     fi
 
+    return 0
+}
+
+# Cross-workstream lane ceilings: the downstream capacity a machine count used to imply.
+#   demo:       guests replaying the shared DEMO cache hold 4 production-pooler clients
+#               each (cloudbench-run.sh). back-end/src/providers/database.ts leaves 300
+#               non-production clients; 5 dev/benchmark stacks at 20 keep 100, so 200/4 = 50.
+#   delegating: REAL/SIM primaries lease production compute tokens per LLM call (the
+#               Render backend has no rate limit and no measured ceiling) and share
+#               provider caps (Parallel 70 across launches). 70 is the widest proven run
+#               (2026-10-19 fresh 70: 0 infra). Raise it only with a measured backend load.
+# Counted from the live app inventory, so every devbox's workstreams are included.
+# Unlabelled live primaries count as delegating; performance-1x guests are autoscaler
+# workers (no pooler client, no lease of their own) and suspended warm members are idle.
+admit_lane_capacity() {  # <app machine list json>
+    [ -n "${PROVISION_POOL:-}" ] && return 0
+    [ "${INFRA_PROBE:-0}" = 1 ] && return 0
+    local demo_ceiling="${CLOUDBENCH_DEMO_GUEST_CEILING:-50}"
+    local delegating_ceiling="${CLOUDBENCH_DELEGATING_PRIMARY_CEILING:-70}"
+    case "$demo_ceiling:$delegating_ceiling" in *[!0-9:]*|:*|*:)
+        echo "❌ lane ceilings must be non-negative integers" >&2; return 1 ;;
+    esac
+    local requested_demo=0 requested_delegating=0 bench lane
+    for bench in "${BENCHES[@]}"; do
+        lane="${CLOUDBENCH_LANE:-}"
+        if [ -z "$lane" ]; then
+            if bench_uses_shared_demo_cache "$bench"; then lane=demo; else lane=delegating; fi
+        fi
+        case "$lane" in
+            demo) requested_demo=$(( requested_demo + 1 )) ;;
+            infra) ;;
+            *) requested_delegating=$(( requested_delegating + 1 )) ;;
+        esac
+    done
+    local live
+    live="$(printf '%s' "$1" | python3 -c '
+import json, sys
+machines = json.load(sys.stdin)
+demo = delegating = 0
+for m in machines:
+    if m.get("state") in ("stopped", "suspended", "destroyed", "destroying"):
+        continue
+    config = m.get("config") or {}
+    lane = (config.get("metadata") or {}).get("rose_cloudbench_lane")
+    guest = config.get("guest") or {}
+    if lane == "demo":
+        demo += 1
+    elif lane in ("infra", "worker"):
+        continue
+    elif lane == "delegating" or not (guest.get("cpu_kind") == "performance" and guest.get("cpus") == 1):
+        delegating += 1
+print(demo, delegating)
+')" || { echo "❌ App capacity guard could not classify live guest lanes; refusing to provision." >&2; return 1; }
+    local live_demo live_delegating
+    read -r live_demo live_delegating <<< "$live"
+    if [ $(( live_demo + requested_demo )) -gt "$demo_ceiling" ]; then
+        CAPACITY_ADMISSION_RETRYABLE=1
+        echo "❌ DEMO guest ceiling reached: $live_demo live + $requested_demo requested > $demo_ceiling" >&2
+        echo "   Each DEMO guest holds 4 production-pooler clients; non-production has 300 of 1000 (back-end/src/providers/database.ts)." >&2
+        return 1
+    fi
+    if [ $(( live_delegating + requested_delegating )) -gt "$delegating_ceiling" ]; then
+        CAPACITY_ADMISSION_RETRYABLE=1
+        echo "❌ Delegating-guest ceiling reached: $live_delegating live REAL/SIM primaries + $requested_delegating requested > $delegating_ceiling" >&2
+        echo "   They lease production compute tokens and shared provider capacity; $delegating_ceiling is the widest proven-safe width." >&2
+        return 1
+    fi
     return 0
 }
 
@@ -16761,7 +16880,7 @@ reserve_worker_machine_slot() {  # <unique-reservation-token>
     # autoscalers cannot refill the Machine ceiling behind the startup guard.
     local token="$1" app_machine_ceiling current_machines result status outcome
     local reserved_machines reserved_shared projected_machines projected_shared
-    app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-56}"
+    app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-300}"
     case "$app_machine_ceiling" in ''|*[!0-9]*|0) return 1 ;; esac
     local worker_inventory inventory_status=0
     if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then

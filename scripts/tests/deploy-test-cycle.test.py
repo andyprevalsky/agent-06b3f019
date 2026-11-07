@@ -27,6 +27,27 @@ class EnvironmentIdentity(unittest.TestCase):
 
 
 class Cycle(unittest.TestCase):
+    def test_native_cloud_rejects_unsupported_host_before_coordinator_admission(self):
+        plan = copy.deepcopy(self.plan)
+        plan['gates'][1].update(native_cloud=True, case_protocol=True,
+                                command=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')],
+                                worker_transport='benchmark-cloud-cli')
+        with patch.object(sys, 'platform', 'darwin'):
+            with self.assertRaisesRegex(ValueError, 'native cloud.*Linux'):
+                c.validate_plan(plan, self.root)
+
+    def test_environment_fingerprint_ignores_codex_call_identity_but_binds_launch_inputs(self):
+        with patch.dict(os.environ, {'CODEX_TOOL_CALL_ID': 'call-one', 'PATH': '/fixture/bin',
+                                     'SNAPSHOT_LOOP_TOKEN': 'original'}, clear=True):
+            original = c.environment_digest()
+            os.environ['CODEX_TOOL_CALL_ID'] = 'call-two'
+            self.assertEqual(original, c.environment_digest())
+            os.environ['PATH'] = '/changed/bin'
+            self.assertNotEqual(original, c.environment_digest())
+            os.environ['PATH'] = '/fixture/bin'
+            os.environ['SNAPSHOT_LOOP_TOKEN'] = 'inherited'
+            self.assertNotEqual(original, c.environment_digest())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -194,7 +215,7 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(admission['started']); launch.assert_not_called()
                 c.CANCEL.clear()
                 card = dict(name='card', checks=['card'], command=['must-not-launch'], case_protocol=True,
-                            category='agentcard-lifecycle', worker_transport='local-isolated', timeout_seconds=.05)
+                            category='generic', worker_transport='local-isolated', timeout_seconds=.05)
                 result = c.execute(card, self.state, self.directory, self.root)
                 self.assertEqual({'card': 'UNVERIFIED'}, result['cases'])
                 self.assertFalse(result['executed']); self.assertFalse(result['complete'])
@@ -202,7 +223,9 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(result['lingering_group']); self.assertNotIn('cleanup_owner', result)
                 launch.assert_not_called()
 
-    def test_local_slot_holds_through_native_cleanup_validation_without_cancelling_cloud(self):
+    def test_local_slot_fences_queued_locals_after_unverified_cleanup_without_cancelling_cloud(self):
+        # The only local native producer was the retired AgentCard lane (its tasks run in cloud smoke now);
+        # an ordinary owned local gate that reports unverified cleanup still fences the queued local root.
         import time
         started = self.root / '.context/first-native-started'
         forbidden = self.root / '.context/queued-native-started'
@@ -211,7 +234,7 @@ class Cycle(unittest.TestCase):
                   f"Path({str(started)!r}).touch();time.sleep(.15);"
                   "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=False,reused=False);"
                   "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
-        first = dict(name='card', category='agentcard-lifecycle', worker_transport='local-isolated',
+        first = dict(name='card', category='generic', worker_transport='local-isolated',
                      case_protocol=True, checks=['card'], timeout_seconds=2, command=[sys.executable, '-c', script])
         second = dict(name='queued', category='generic', worker_transport='local-isolated',
                       case_protocol=True, checks=['queued'], timeout_seconds=2,
@@ -225,8 +248,8 @@ class Cycle(unittest.TestCase):
             self.assertTrue(started.exists())
             two = pool.submit(c.execute, second, self.state, self.directory, self.root, local_failure=failed)
             a, b = one.result(), two.result()
-        self.assertEqual(0, a['native_exit']); self.assertTrue(a['lingering_group'])
-        self.assertIn('cleanup_owner', a); self.assertTrue(failed.is_set())
+        self.assertEqual(0, a['native_exit']); self.assertFalse(a['complete'])
+        self.assertEqual('owned', a['lifecycle']); self.assertTrue(failed.is_set())
         self.assertEqual({'queued': 'UNVERIFIED'}, b['cases'])
         self.assertFalse(b['executed']); self.assertFalse(b['complete']); self.assertFalse(forbidden.exists())
         cloud_script = ("import json,os;from pathlib import Path;"
@@ -466,7 +489,9 @@ class Cycle(unittest.TestCase):
                 'source': failure['source'], 'description': 'real failure', 'evidence': 'RCA evidence',
                 'native_result': failure['native_result'], 'command': failure.get('command'), 'attribution': attribution, **fields}]}
 
-    def triage_quick_fixture(self):
+    MAC_STATIC = ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check']
+
+    def triage_quick_fixture(self, mac=None):
         import contextlib, io
         (self.root / 'back-end').mkdir()
         (self.root / 'scripts').mkdir()
@@ -489,6 +514,11 @@ class Cycle(unittest.TestCase):
                           '--tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo']),
             dict(name='backend-structural', category='backend-structural', quick=True,
                  checks=['backend-structural'], cwd='back-end', command=['npm', 'run', 'test:structural'])]
+        if mac is not None:  # the darwin plan's conditional fifth quick gate (deploy_test_plan.MAC_APP_STATIC)
+            gate = {'name': 'mac-app-static', 'category': 'mac-app-static', 'quick': True,
+                    'checks': ['mac-app-static'], 'cwd': 'mac-app', 'command': self.MAC_STATIC, **mac}
+            (self.root / gate['cwd']).mkdir(exist_ok=True)
+            self.plan['gates'].append(gate)
         self.plan['source'] = c.source(self.root)
         self.state = c.initialize(self.plan, self.root); self.failure()
         receipt = self.state['attempts'][-1]['results'][0]
@@ -543,6 +573,32 @@ class Cycle(unittest.TestCase):
             c.write(path, value); owned = path.read_bytes()
             self.assertEqual(2, call()); self.assertEqual(owned, path.read_bytes())
             self.assertFalse((self.root / '.context/observed').exists())
+
+    def test_triage_quick_accepts_the_conditional_mac_app_static_fifth_gate(self):
+        with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
+            new, plan, path, bins, call = self.triage_quick_fixture(mac={})
+            before = c.read(path)
+            self.assertEqual(0, call())
+            after = c.read(path); observations = after['attempts'].pop()
+            self.assertEqual(before, after)
+            self.assertEqual({'eslint','format','typescript','backend-structural','mac-app-static'},
+                             {r['gate'] for r in observations['results']})
+            self.assertTrue(all(r['executed'] and r['complete'] and r['native_exit'] == 0 for r in observations['results']))
+            # 2 static checks + tsc + structural npm + the three mac-app npm scripts.
+            self.assertEqual(7, len((self.root / '.context/observed').read_text().splitlines()))
+
+    def test_triage_quick_refuses_a_substituted_mac_app_static_recipe(self):
+        variants = [dict(command=['bash', '-c', 'npm run lint']), dict(cwd='.'), dict(env={'X': '1'}),
+                    dict(checks=['mac-app-static', 'extra']), dict(command=['npm', 'run', 'test:structural'])]
+        for index, variant in enumerate(variants):
+            with self.subTest(variant=variant):
+                if index:
+                    self.tearDown(); self.setUp()
+                with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
+                    new, plan, path, bins, call = self.triage_quick_fixture(mac=variant)
+                    original = path.read_bytes()
+                    self.assertEqual(2, call()); self.assertEqual(original, path.read_bytes())
+                    self.assertFalse((self.root / '.context/observed').exists())
 
     def test_triage_quick_failure_and_changed_pending_do_not_commit(self):
         with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
@@ -631,6 +687,21 @@ class Cycle(unittest.TestCase):
         new = copy.deepcopy(old)
         new['source'] = c.source(self.root)
         return new
+
+    def test_rotating_github_token_value_does_not_stale_runtime_config_but_other_changes_do(self):
+        with (self.root / '.git/info/exclude').open('a') as stream:
+            stream.write('.env\n')
+        env = self.root / 'back-end/.env'
+        env.parent.mkdir(exist_ok=True)
+        env.write_text('SETTING=1\nGITHUB_TOKEN=ghu_issued_first\n')
+        before = c.input_fingerprints(self.plan, self.root)
+        env.write_text('SETTING=1\nGITHUB_TOKEN=ghu_refreshed_by_the_daemon\n')
+        self.assertEqual(before, c.input_fingerprints(self.plan, self.root))
+        for changed in ('SETTING=2\nGITHUB_TOKEN=ghu_issued_first\n', 'SETTING=1\n',
+                        'SETTING=1\nGITHUB_TOKEN=ghu_issued_first\nEXTRA=1\n',
+                        'SETTING=1\nXGITHUB_TOKEN=ghu_issued_first\n'):
+            env.write_text(changed)
+            self.assertNotEqual(before, c.input_fingerprints(self.plan, self.root), changed)
 
     def test_refresh_healthy_old_full_pass_leaves_focused_but_requires_new_final_full(self):
         old, marker = self.repair_set_refresh_fixture()
@@ -1543,8 +1614,9 @@ class Cycle(unittest.TestCase):
             'api': {'command': self.plan['gates'][1]['command'], 'checks': ['a']}}})
         self.assertEqual(['api'], [g['name'] for g in c.records(self.plan, self.state)])
 
-    def skipped_row(self, sha='c' * 64, reason='Compute token pool exhausted or cooling down', status='SKIPPED', passed=False):
-        return {'native_task': {'name': 'a', 'status': status, 'benchmark_status': status, 'passed': passed,
+    def skipped_row(self, sha='c' * 64, reason='Compute token pool exhausted or cooling down', status='SKIPPED', passed=False,
+                    name='a'):
+        return {'native_task': {'name': name, 'status': status, 'benchmark_status': status, 'passed': passed,
                                 'failure_reason': reason, 'agent_id': 'agent-1'}, 'path': 'native/a/cloudbench-run.json', 'sha256': sha}
 
     def resource_failure(self, **row):
@@ -1648,6 +1720,123 @@ class Cycle(unittest.TestCase):
         self.assertIn('- api/a — openai-compute-tokens: Compute token pool exhausted or cooling down [compute_quota_exhausted]'
                       ' · Evidence: native/a/cloudbench-run.json#failure_reason · Confirmed at: 1001.0 · Receipt: ' + 'c' * 64, text)
         self.assertNotIn('PASS', text.split('RESOURCE WARNINGS', 1)[1])
+
+    # The native row the 2026-11-06 cloud smoke proof recorded (agent 4f8c38c0, transfer owt_208688aafd52934f33699e9c).
+    STALL_REASON = ("AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped "
+                    "under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-"
+                    "abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected "
+                    "terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', "
+                    "got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING'")
+
+    def stall_confirmation(self, **changes):
+        return self.confirmation(**{'receipt_reason': self.STALL_REASON, 'reason_code': 'agentcard_release_stall',
+                                    'provider': 'agentcard-sandbox',
+                                    'evidence': 'native/agent-payment-abandonment/cloudbench-run.json#failure_reason',
+                                    **changes})
+
+    def test_standing_agentcard_release_stall_in_cloud_smoke_is_a_warning_not_a_pass(self):
+        # The AgentCard lifecycle tasks are smoke tasks: their standing release stall arrives as a natively SKIPPED
+        # cloud row (FAIL case) and is qualified through the same typed warning path, never PASS or pass credit.
+        runtime = (ROOT / 'agents/benchmarks/run_benchmark.py').read_text()
+        self.assertIn('"AgentCard never released the closed card\'s org transfer (consumed, releasedCents=0); "\n'
+                      '    "skipped under the standing user-approved warning policy', runtime)
+        failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment')
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.stall_confirmation()))
+        self.assertEqual('ready', self.state['phase']); self.assertTrue(self.state['ready'])
+        kept = next(f for f in self.state['failures'] if f['id'] == failure['id'])
+        self.assertEqual(('SKIPPED_WITH_WARNING', 'FAIL', 'SKIPPED'),
+                         (kept['disposition'], kept['native_result'], kept['worker_evidence']['native_task']['benchmark_status']))
+        self.assertEqual({}, self.state['skips'])  # no pass credit
+        self.assertEqual('agentcard_release_stall', self.state['resource_warnings'][0]['confirmation']['reason_code'])
+
+    def stall_run_document(self, transfer):
+        """The runner's own run.json shape for the 2026-11-06 sandbox proof (agent 4f8c38c0)."""
+        document = {'run_id': 'flt-agent-payment-abandonment-d9a38b815c82-0', 'tasks': [
+            {'name': 'agent-payment-abandonment', 'status': 'SKIPPED', 'benchmark_status': 'SKIPPED', 'passed': False,
+             'failure_reason': self.STALL_REASON, 'logs': {'agentcard_release_stall_lifecycle': {
+                 'agentCard': {'id': 'card_f82707f47089791fef514b3c', 'status': 'CLOSED', 'balanceCents': 0},
+                 'orgTransfer': transfer}}}]}
+        path = self.root / '.context/native/agent-payment-abandonment/cloudbench-run.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document))
+        return path
+
+    def stall_report_text(self, transfer):
+        import contextlib, io
+        path = self.stall_run_document(transfer)
+        sha = c.sha_file(path)
+        failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment', sha=sha)
+        failure['worker_evidence']['path'] = str(path)
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED',
+                                             resource_skip=self.stall_confirmation(receipt_sha256=sha)))
+        plan = self.directory / 'plan.json'; c.write(plan, self.plan); c.write(self.directory / 'cycle.json', self.state)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['report', '--plan', str(plan), '--state-dir', str(self.directory),
+                                        '--root', str(self.root)]))
+        return (self.directory / 'report.md').read_text().split('RESOURCE WARNINGS', 1)[1]
+
+    def test_agentcard_release_stall_warning_row_states_the_unreleased_amount(self):
+        # transferredCents 4396 / releasedCents 0 is $43.96 left unreleased in the sandbox; the row is still
+        # a warning (native FAIL retained), never a pass, and says the funds stay a followup.
+        warning = self.stall_report_text({'id': 'owt_208688aafd52934f33699e9c', 'status': 'consumed', 'livemode': False,
+                                          'amountCents': 4396, 'transferredCents': 4396, 'releasedCents': 0})
+        self.assertIn('- api/a — agentcard-sandbox: ' + self.STALL_REASON + ' [agentcard_release_stall]', warning)
+        self.assertIn(' · Native: FAIL · Unreleased: $43.96 sandbox (transferredCents 4396 / releasedCents 0)'
+                      ' (followup: unreleased funds stay open)', warning)
+        self.assertNotIn('PASS', warning)
+
+    def test_agentcard_release_stall_warning_never_invents_an_unstated_amount(self):
+        for label, transfer, mode in (('no transferred amount', {'releasedCents': 0, 'livemode': False}, None),
+                                      ('no released amount', {'transferredCents': 4396, 'livemode': False}, None),
+                                      ('non-integer', {'transferredCents': '4396', 'releasedCents': 0}, None),
+                                      ('released above transferred', {'transferredCents': 1, 'releasedCents': 5}, None),
+                                      ('live mode', {'transferredCents': 100, 'releasedCents': 25, 'livemode': True}, 'live'),
+                                      ('mode unstated', {'transferredCents': 100, 'releasedCents': 25}, 'mode UNRECORDED')):
+            with self.subTest(label):
+                self.tearDown(); self.setUp()
+                warning = self.stall_report_text(transfer)
+                if mode is None:
+                    self.assertIn(' · Unreleased: UNRECORDED (followup: unreleased funds stay open)', warning)
+                    self.assertNotIn('$', warning.split('Native:', 1)[1])
+                else:
+                    self.assertIn(f' · Unreleased: $0.75 {mode} (transferredCents 100 / releasedCents 25)', warning)
+
+    def test_agentcard_release_stall_helpers_serve_the_production_lane_without_widening_smoke(self):
+        # scripts/deploy_prod.py reuses these two helpers for the production lane (production=True); the staged
+        # smoke qualification keeps its sandbox-only default, so a production row still blocks there.
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-abandonment'))
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-production-abandonment'))
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-production-abandonment', production=True))
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', production=True))
+        self.assertFalse(c.agentcard_release_stall_task('chat-mode', production=True))
+        self.assertEqual(c.unreleased_amount_text({'transferredCents': 4396, 'releasedCents': 0, 'livemode': True}),
+                         'Unreleased: $43.96 live (transferredCents 4396 / releasedCents 0)')
+        self.assertEqual(c.unreleased_amount_text({'transferredCents': 4396, 'releasedCents': 0, 'livemode': False}),
+                         'Unreleased: $43.96 sandbox (transferredCents 4396 / releasedCents 0)')
+        for livemode in (1, 0, None, [], 'true'):  # only a real boolean names the provider mode
+            self.assertIn('mode UNRECORDED', c.unreleased_amount_text(
+                {'transferredCents': 100, 'releasedCents': 25, 'livemode': livemode}))
+        for bad in (None, [], 'x', {}, {'transferredCents': 1}, {'releasedCents': 0}, {'transferredCents': True, 'releasedCents': 0},
+                    {'transferredCents': 1, 'releasedCents': 5}, {'transferredCents': -1, 'releasedCents': 0}):
+            self.assertEqual(c.unreleased_amount_text(bad), 'Unreleased: UNRECORDED', bad)
+
+    def test_agentcard_release_stall_qualification_binds_the_exact_sandbox_row(self):
+        pristine = copy.deepcopy(self.state)
+        for label, row in {'production task': dict(name='agent-payment-production-abandonment'),
+                           'not an AgentCard lifecycle task': dict(name='chat-mode'),
+                           'other AgentCard failure': dict(name='agent-payment-abandonment',
+                                                           reason='AgentCard create_card failed: Cardholder not found'),
+                           'assertion FAIL with the stall text': dict(name='agent-payment-abandonment', status='FAILED')
+                           }.items():
+            with self.subTest(label):
+                self.state = copy.deepcopy(pristine)
+                row.setdefault('reason', self.STALL_REASON)
+                failure = self.resource_failure(**row)
+                before = copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):
+                    c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED',
+                                                         resource_skip=self.stall_confirmation(receipt_reason=row['reason'])))
+                self.assertEqual(before, self.state)
 
     def test_resource_skip_refusals_are_atomic(self):
         failure = self.resource_failure()
@@ -2211,13 +2400,27 @@ class Cycle(unittest.TestCase):
         proof.pop('controller_log')
         return state,occurrence,paths,proof,campaign
 
+    def write_reviewed_producer_fixture(self, name, expected):
+        import hashlib
+        raw = subprocess.check_output(['git', '-C', str(ROOT), 'show',
+                                       'e88057acfe64e279bf50188e3938df315e94ee49:' + name])
+        self.assertEqual(expected, hashlib.sha256(raw).hexdigest())
+        target = self.root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+        return raw
+
     def ref_preflight_campaign_state(self):
         import hashlib, shutil, time, runpy
         from datetime import datetime, timezone
         state, occurrence, paths, proof, campaign = self.prelaunch_campaign_state()
-        sources = ['scripts/run-bench', 'scripts/run-bench-fleet', 'scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-env.sh']
-        for relative in sources:
-            shutil.copyfile(ROOT / relative, self.root / relative)
+        from deploy_test_native_ref_preflight import REVIEWED_SOURCES, SOURCES
+        sources = SOURCES
+        for relative, expected in REVIEWED_SOURCES.items():
+            self.write_reviewed_producer_fixture(relative, expected)
+            target = campaign / 'shared-inventory/scripts' / Path(relative).name
+            if target.exists():
+                target.write_bytes((self.root / relative).read_bytes())
         subprocess.run(['git', '-C', str(self.root), 'add', 'scripts'], check=True)
         subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@x', 'commit', '-qm', 'ref-producer'], check=True)
         source = c.source(self.root)
@@ -2583,10 +2786,10 @@ class Cycle(unittest.TestCase):
             shutil.rmtree(fleet)
             shutil.rmtree(self.root/'.git/cloudbench-fleet-audits'/token)
         parents = parents[:10]
-        sources = ['scripts/run-bench-fleet', 'scripts/run-bench-campaign.py', 'scripts/lib/cloudbench-env.sh', 'scripts/cloudbench_execution_provenance.py']
-        for relative in sources:
-            (self.root/relative).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ROOT/relative, self.root/relative)
+        from deploy_test_native_admission import REVIEWED_SOURCES
+        sources = list(REVIEWED_SOURCES)
+        for relative, expected in REVIEWED_SOURCES.items():
+            self.write_reviewed_producer_fixture(relative, expected)
         subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
         subprocess.run(['git','-C',str(self.root),'-c','user.name=t','-c','user.email=t@x','commit','-qm','admission producer'],check=True)
         source = c.source(self.root)
@@ -2643,6 +2846,16 @@ class Cycle(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate_campaign({'source':{'head':head}}, {}, self.root, None, {}, set(), None, None)
                 io.assert_not_called()
+
+    def test_historical_admission_source_survives_current_checkout_changes(self):
+        from deploy_test_native_admission import REVIEWED_SOURCES
+        state, occurrence, paths, proof, parents = self.admission_campaign_state()
+        for relative in REVIEWED_SOURCES:
+            (self.root / relative).write_text('# newer source after the recorded run\n')
+        before = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertEqual(before, state['attempts'])
+        self.assertFalse(next(iter(state['reconciled_owners'].values()))['credit_granted'])
 
     def test_admission_rejection_retains_ten_parent_custody_without_credit(self):
         state, occurrence, paths, proof, parents = self.admission_campaign_state()
@@ -2788,10 +3001,10 @@ class Cycle(unittest.TestCase):
         import hashlib, shutil, time, runpy
         from cloudbench_execution_provenance import build_config, build_task_matrix
         state, occurrence, paths, proof, parents = self.admission_campaign_state()
-        names=('scripts/deploy_test_cloud.py','scripts/run-bench','scripts/run-bench-campaign.py','scripts/run-bench-fleet','scripts/cloudbench_execution_provenance.py','scripts/cloudbench-script-snapshot.py')
-        for name in names:
-            raw=(ROOT/name).read_bytes()
-            (self.root/name).parent.mkdir(parents=True,exist_ok=True);(self.root/name).write_bytes(raw)
+        from deploy_test_native_cancelled_parent import REVIEWED_SOURCES
+        names = list(REVIEWED_SOURCES)
+        for name, expected in REVIEWED_SOURCES.items():
+            self.write_reviewed_producer_fixture(name, expected)
         subprocess.run(['git','-C',str(self.root),'add','scripts'],check=True)
         subprocess.run(['git','-C',str(self.root),'-c','user.name=t','-c','user.email=t@x','commit','-qm','cancel producer'],check=True)
         source=c.source(self.root);campaign=Path(proof['campaign']);summary=c.read(campaign/'summary.json');runs=parents[0].parent
@@ -4413,6 +4626,37 @@ class StructuralSupervisorCleanup(unittest.TestCase):
                     self.assertEqual(before,self.state)
 
 
+def listening_ports():
+    """TCP ports in LISTEN state on this host, read the way the interrupted proof reads them."""
+    ports = set()
+    for table in ('/proc/net/tcp', '/proc/net/tcp6'):
+        for line in Path(table).read_text().splitlines()[1:]:
+            row = line.split()
+            if row[3] == '0A': ports.add(int(row[1].rsplit(':', 1)[1], 16))
+    return ports
+
+
+def interrupted_root_port():
+    """A root base port no deploy-worktree claim can share, with no listener on its footprint now.
+
+    The interrupted proof refuses while anything on the host listens on the root's
+    LISTENER_OFFSETS footprint. This suite runs beside the other deploy gates, which listen on
+    their claimed footprints, and every claimable footprint starts at FIRST_BASE_PORT: the
+    hard-coded base 15000 shared ports with the live semantic-stack claim 15100 (RCA
+    2026-11-05-interrupted-proof-fixture-port-inside-deploy-claim-range).
+    """
+    import socket
+    from deploy_test_isolation import _ports
+    listening = listening_ports()
+    for base in range(1024, _ports.FIRST_BASE_PORT - _ports.FOOTPRINT_PORTS + 1, _ports.PORTS_PER_WORKTREE):
+        if listening.isdisjoint(base + offset for offset in _ports.LISTENER_OFFSETS):
+            with socket.socket() as probe:
+                try: probe.bind(('127.0.0.1', base))
+                except OSError: continue
+            return base
+    raise AssertionError('no listener-free root footprint lies below the deploy-worktree claim range')
+
+
 class InterruptedLocalRecovery(unittest.TestCase):
     write_native = StructuralSupervisorCleanup.write_native
 
@@ -4425,7 +4669,8 @@ class InterruptedLocalRecovery(unittest.TestCase):
         subprocess.run(['git','-C',str(self.coordinator),'-c','user.name=test','-c','user.email=test@example.com','commit','-qm','old'],check=True)
         self.source=c.source(self.coordinator)
         self.gate.update(worker='independent-interrupted-worker',timeout_seconds=14400)
-        self.gate['env']={'CONDUCTOR_WORKSPACE_NAME':'interrupted-fixture','CONDUCTOR_PORT':'15000'}
+        self.port=interrupted_root_port()
+        self.gate['env']={'CONDUCTOR_WORKSPACE_NAME':'interrupted-fixture','CONDUCTOR_PORT':str(self.port)}
         self.request['source']=self.source
         self.receipt.update(source=self.source,native_exit=-9,cancelled=True,worker_result=None,
                             execution_binding={'contract_digest':c.digest(self.gate),'environment':'env','input_fingerprint':'fp'})
@@ -4448,6 +4693,16 @@ class InterruptedLocalRecovery(unittest.TestCase):
         self.proof=dict(kind=KIND,files={n:c.sha_file(p) for n,p in self.paths.items()},confirmed_at=201,observed_by='native-interrupted-review')
 
     def reconcile(self):c.reconcile(self.state,self.token,self.proof)
+
+    def test_root_footprint_shares_no_port_with_any_claimable_deploy_worktree(self):
+        # Concurrent deploy gates listen on their claims while this suite runs; a shared port makes every proof refuse.
+        from deploy_test_isolation import _ports
+        root=int(self.gate['env']['CONDUCTOR_PORT'])
+        bases=range(_ports.FIRST_BASE_PORT,_ports.LAST_BASE_PORT+1,_ports.PORTS_PER_WORKTREE)
+        shared=sorted(port for port in (root+o for o in _ports.LISTENER_OFFSETS)
+                      if any(port-o in bases for o in _ports.LISTENER_OFFSETS))
+        self.assertEqual([],shared)
+        self.assertTrue(listening_ports().isdisjoint(root+o for o in _ports.LISTENER_OFFSETS))
 
     def test_token_reconcile_and_actual_resume_branch_preserve_interrupted_receipts(self):
         original=copy.deepcopy(self.state['attempts']);raw={n:p.read_bytes() for n,p in self.paths.items()}
@@ -4551,7 +4806,7 @@ class InterruptedLocalRecovery(unittest.TestCase):
             path.unlink()
         import socket,fcntl
         with socket.socket() as listener:
-            listener.bind(('127.0.0.1',15000));listener.listen()
+            listener.bind(('127.0.0.1',self.port));listener.listen()
             with self.assertRaises(ValueError):self.reconcile()
         with (self.worker/'.context/native-worker-admission.lock').open('r') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -4601,6 +4856,19 @@ class InterruptedCardRecovery(unittest.TestCase):
         self.physical['database_status']='UNKNOWN';self.seal()
         with self.assertRaises(ValueError):c.interrupted_boundary(self.state)
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+    def test_transiently_unreadable_same_user_process_does_not_block_reconcile(self):
+        # The Blacksmith failure (PR #1751): quiet() read /proc/<pid>/cwd of a same-user process that was
+        # momentarily unreadable and the PermissionError aborted the proof as "missing or unknown evidence".
+        # A real child that clears PR_SET_DUMPABLE is unreadable to its parent exactly like that process.
+        body = ("import ctypes,time;libc=ctypes.CDLL(None);libc.prctl(4,0,0,0,0);print('ready',flush=True);"
+                "time.sleep(.4);libc.prctl(4,1,0,0,0);time.sleep(60)")
+        child = subprocess.Popen([sys.executable, '-c', body], stdout=subprocess.PIPE, text=True, cwd=self.root)
+        self.addCleanup(lambda: (child.kill(), child.wait(), child.stdout.close()))
+        self.assertEqual('ready', child.stdout.readline().strip())
+        c.reconcile(self.state, self.token, self.proof)
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
     def test_card_admission_foreign_physical_and_unknowns_refuse(self):
         for key,value in [('source','other'),('observed_at',199),('run',str(self.root)),('listeners',[123]),('database_status','PRESENT'),('canonical_reconcile_exit',True)]:
             old=self.physical[key];self.physical[key]=value;self.seal();before=copy.deepcopy(self.state)
@@ -4648,6 +4916,652 @@ class NativeJsonEvidence(unittest.TestCase):
             alias.symlink_to(path)
             with self.assertRaises(ValueError):
                 verify_native_object(alias, hashlib.sha256(b'{}').hexdigest())
+
+
+class RelayStartupEvidence(unittest.TestCase):
+    """Prospective startup custody; never upgrades an old unsealed attempt."""
+    def setUp(self):
+        import importlib.util
+        self.temp = tempfile.TemporaryDirectory(prefix='relay-startup-proof-')
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.target = Path(os.environ.get('RELAY_SOURCE_ROOT', str(ROOT))) / 'scripts'
+        spec = importlib.util.spec_from_file_location('startup_native', self.target/'deploy_test_native_cleanup.py')
+        self.native = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.native)
+
+    def test_refused_version_retains_authenticated_identity(self):
+        import asyncio,runpy,socket,struct
+        module=runpy.run_path(str(self.target/'cloudbench-shared-relay.py'))
+        address=self.base/'fly-agent.sock'
+        listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        listener.bind(str(address));address.chmod(0o600);listener.listen(1);listener.settimeout(2)
+        self.addCleanup(listener.close)
+        broker=module['Broker']({'parent_pid':os.getpid(),'parent_start':module['birth'](os.getpid()),
+                                'agent_socket':str(address)},'a'*64,self.base)
+        def respond(value):
+            errors=[]
+            def serve():
+                try:
+                    stream,_=listener.accept()
+                    with stream:
+                        stream.settimeout(2)
+                        header=stream.recv(2);size=int.from_bytes(header,'little');request=b''
+                        while len(request)<size:request+=stream.recv(size-len(request))
+                        self.assertEqual(request,b'ping')
+                        body=b'ok '+json.dumps(value).encode()
+                        stream.sendall(struct.pack('<H',len(body))+body)
+                except BaseException as error:errors.append(error)
+            thread=threading.Thread(target=serve);thread.start()
+            return thread,errors
+        def run(value,reason=None):
+            thread,errors=respond(value)
+            try:
+                if reason:
+                    with self.assertRaisesRegex(ValueError,reason):asyncio.run(broker.start_agent())
+                else:asyncio.run(broker.start_agent())
+            finally:
+                thread.join(3);self.assertFalse(thread.is_alive());self.assertEqual(errors,[])
+        run({'Version':'v0.5.5','PID':os.getpid()},'unsupported Fly agent version')
+        record=json.loads((self.base/'startup-agent.json').read_text())
+        self.assertEqual(record['agent']['pid'],os.getpid())
+        self.assertEqual(record['agent']['birth'],module['birth'](os.getpid()))
+        self.assertEqual(record['agent']['version'],'0.5.5')
+        self.assertEqual(record['agent']['socket_identity'],[address.stat().st_dev,address.stat().st_ino])
+        self.assertEqual(record['authority_sha256'],'a'*64)
+        self.assertEqual((self.base/'startup-agent.json').stat().st_mode&0o777,0o600)
+        self.assertFalse((self.base/'ready.json').exists())
+        (self.base/'startup-agent.json').unlink()
+        run({'Version':'v0.5.5','PID':os.getpid()+1},'PING peer differs')
+        self.assertFalse((self.base/'startup-agent.json').exists())
+        run({'Version':'v0.4.115','PID':os.getpid()})
+        self.assertEqual(json.loads((self.base/'startup-agent.json').read_text())['agent']['version'],'0.4.115')
+
+    def test_owned_supervisor_retains_native_failure_and_quiescence(self):
+        from deploy_test_process import run_command
+        output=self.base/'native.log'
+        with output.open('wb')as stream:
+            result=run_command([sys.executable,'-c','raise SystemExit(1)'],cwd=self.base,
+                               env=os.environ.copy(),output=stream,timeout=5,owned_lifecycle=True)
+        self.assertEqual(result,(1,False,False,False))
+        receipt=json.loads(Path(str(output)+'.process.json').read_text())
+        self.assertIs(receipt['quiescent'],True);self.assertEqual(receipt['remaining'],[])
+        self.assertFalse(Path('/proc',str(receipt['supervisor_pid'])).exists())
+        self.assertFalse(Path('/proc',str(receipt['child_pid'])).exists())
+
+    def fixture(self):
+        import hashlib,time,runpy
+        from datetime import datetime,timezone
+        token='startup-owned-token';root=self.base;key=hashlib.sha256(token.encode()).hexdigest()
+        runs=root/'.context/deploy-cloud'/key/'runs';runs.mkdir(parents=True)
+        campaign=runs.parent/'campaigns'/('deploy-'+key);relay=campaign/'shared-relay';relay.mkdir(parents=True)
+        def stamp(pid):
+            return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()[19]
+        rows=[]
+        for _ in range(5):
+            p=subprocess.run([sys.executable,'-c',"import os;from pathlib import Path;print(str(os.getpid())+' '+Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19])"],capture_output=True,text=True,check=True)
+            pid,start=p.stdout.split();rows.append({'pid':int(pid),'birth':'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+start})
+        parent,bootstrap,broker,agent,publisher=rows;self.live_stamp=stamp
+        source={'head':'a'*40,'digest':'b'*64};now=time.time()
+        request={'token':token,'source':source,'gate':'smoke','checks':['browser-smoke'],'skips':{}}
+        cases={'browser-smoke':'UNVERIFIED'}
+        adapter={**request,'cases':cases,'native_exit':1,'started_at':now-5,'runner_log':str(runs.parent/'cli.log'),
+                 'native_command':['bash','scripts/run-bench','browser-smoke','--runs','1','--concurrency','1','--retry-infra','0','--ref',source['head']]}
+        folder=root/'attempt';folder.mkdir();adapter_path=folder/'result.json'
+        def save(path,v):path.write_text(json.dumps(v));path.chmod(0o600)
+        save(adapter_path,adapter)
+        sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+        reference={'result':str(adapter_path),'result_sha256':sha(adapter_path),'native_directory':str(campaign),'cleanup_complete':False}
+        owner={'request_token':token,'worker_root':str(root),'native_cleanup_reference':reference}
+        receipt={**request,'cases':cases,'lifecycle':'native-producer','complete':False,'timed_out':False,'cancelled':False,
+                 'finished_at':now-1,'worker_result':str(adapter_path),'log':str(folder/'output.log'),'native_cleanup_reference':reference,
+                 'cleanup_owner':owner,'lingering_group':True}
+        save(folder/'receipt.json',receipt);save(folder/'request.json',request)
+        (runs.parent/'cli.log').write_text(str(campaign))
+        job={'job_id':'r001-j0001','task':'browser-smoke','run':1,'attempt':1,'attempts':[],'status':'cancelled','log':str(campaign/'r001-j0001.log')}
+        summary={'campaign_id':campaign.name,'jobs':[job],'runs':1,'retry_infra':0,'status':'failed','peak_concurrency':0,
+                 'shared_inventory_failed':True,'task_count':1,'total_jobs':1,
+                 'started_at':datetime.fromtimestamp(now-4,timezone.utc).isoformat(),'finished_at':datetime.fromtimestamp(now-2,timezone.utc).isoformat()}
+        save(campaign/'summary.json',summary)
+        private='/tmp/cb-relay-abcdefgh'
+        authority={'schema':'shared-relay-authority-v1','parent_pid':parent['pid'],'parent_start':parent['birth'],
+                   'inventory_directory':str(campaign/'shared-inventory'),'agent_socket':private+'/fly-agent.sock',
+                   'source_sha256':hashlib.sha256(b'original-broker').hexdigest()}
+        authority['inventory_owner']={'app':'fixture','pid':str(publisher['pid']),'pid_start':publisher['birth'],
+                                      'token':'b'*32,'parent_pid':str(parent['pid']),'parent_start':parent['birth']}
+        inventory=campaign/'shared-inventory';inventory.mkdir()
+        (inventory/'owner').write_text(''.join(k+'='+v+'\n'for k,v in authority['inventory_owner'].items()))
+        save(relay/'authority.private.json',authority)
+        for name,row in [('bootstrap',bootstrap),('broker',broker)]:
+            save(relay/(name+'-owner.json'),{**row,'parent_pid':parent['pid'],'parent_start':parent['birth']})
+        save(campaign/'shared-relay-location.json',{'directory':private})
+        capture={'schema':'shared-relay-startup-agent-v1','authority_sha256':sha(relay/'authority.private.json'),
+                 'parent':parent,'broker':broker,'uid':os.getuid(),'socket':authority['agent_socket'],
+                 'agent':{**agent,'version':'0.5.5','socket_identity':[3,4]}}
+        save(relay/'startup-agent.json',capture)
+        cleanup={'schema':'shared-relay-startup-cleanup-v1','parent':parent,'bootstrap_joined':True,'broker_joined':True,
+                 'bootstrap_exit':0,'broker_exit':1,'agent_identity_sha256':sha(relay/'startup-agent.json'),
+                 'producer_sha256':hashlib.sha256(b'original-campaign').hexdigest(),
+                 'agent_shutdown_verified':False,'agent_retirement_pending':True}
+        save(relay/'startup-cleanup.json',cleanup)
+        sidecar={'native_exit':1,'child_pid':parent['pid'],'supervisor_pid':999999,'quiescent':True,'orphaned_children':False,
+                 'timed_out':False,'cancelled':False,'remaining':[],'term_sent':[],'kill_sent':[],'error':None,
+                 'reaped':[{'pid':parent['pid'],'status':256}]}
+        save(runs.parent/'cli.log.process.json',sidecar)
+        save(campaign/'hub-group.json',{});save(campaign/'hub-group-publication-ack.private.json',{})
+        proof={'kind':'native-cloud-cleanup-v1','owner':owner,'request_token':token,'source':source,
+               'receipt_sha256':sha(folder/'receipt.json'),'worker_result_sha256':sha(adapter_path),'confirmed_at':now,
+               'observed_by':'fixture','layout':'campaign-startup-v1','campaign':str(campaign)}
+        self.reseal=lambda:proof.update(files={str(p):sha(p) for p in root.rglob('*')if p.is_file() and p.name not in ('receipt.json','result.json')})
+        self.reseal();self.save=save;self.relay=relay;self.campaign=campaign;self.runs=runs;self.proof=proof
+        return receipt,owner,proof
+
+    def validate_fixture(self,receipt,owner,proof):
+        import types,runpy
+        retired_hub=runpy.run_path(str(self.target/'run-bench-campaign.py'))['native_hub_owner_retired']
+        original_check_output=subprocess.check_output
+        published=types.ModuleType('deploy_test_cloud');published.campaign_published=lambda *_a:True
+        with patch.dict(sys.modules,deploy_test_cloud=published),patch.object(self.native.runpy,'run_path',return_value={'native_hub_owner_retired':retired_hub}),\
+             patch.object(self.native.subprocess,'check_output',side_effect=lambda args,**kwargs:
+                 original_check_output(args,**kwargs) if args[0]=='ps' else
+                 b'original-broker' if args[-1].endswith('cloudbench-shared-relay.py') else
+                 (ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes() if args[-1].endswith('cloudbench-campaign-inventory.sh') else b'original-campaign'):
+            state={'plan':{'gates':[{'name':'smoke','native_cloud':True}]},
+                   'attempts':[{'results':[receipt]}],
+                   'failures':[{'id':'original-failure','gate':'smoke','check':'smoke/browser-smoke',
+                                'native_result':'UNVERIFIED','complete':False}]}
+            occurrence='original-failure'
+            if getattr(self,'stale_operation',False):
+                state.update(phase='stale',source=receipt['source'],failures=[])
+                state['attempts'][-1]['stale']=True
+                occurrence=receipt['token']
+            self.native.reconcile(state,occurrence,proof)
+            return next(iter(state['reconciled_owners'].values()))
+
+    def test_native_adapter_requests_owned_supervision(self):
+        import ast,contextlib,hashlib,time
+        code=(self.target/'deploy_test_cloud.py').read_text()
+        function=next(n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name=='execute')
+        calls=[];requested={'checks':['browser-smoke'],'skips':{},'token':'owned','source':{'head':'a'*40},'gate':'smoke'}
+        namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=lambda _r:requested['source'],
+                       campaign_width=lambda _c:1,hashlib=hashlib,os=os,time=time,sys=sys,
+                       cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,shared_canary_env=lambda _r:{},
+                       run_command=lambda *a,**k:(calls.append((a,k)) or (1,False,False,False)),
+                       collect_campaign=lambda *_a:({'browser-smoke':'UNVERIFIED'},{},False,'fixture'))
+        exec(compile(ast.Module(body=[function],type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)
+        namespace['execute'](requested,self.base)
+        self.assertEqual(len(calls),1)
+        self.assertIs(calls[0][1].get('owned_lifecycle'),True)
+        self.assertEqual(calls[0][1]['env'].get('DEPLOY_NATIVE_HUB_JOIN'),'1')
+
+    def test_startup_only_reconciliation_retains_unverified_bytes(self):
+        receipt,owner,proof=self.fixture();before=json.dumps(receipt,sort_keys=True)
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted']);self.assertEqual(result['participants'],[])
+        self.assertEqual(json.dumps(receipt,sort_keys=True),before)
+        self.assertEqual(receipt['cases'],{'browser-smoke':'UNVERIFIED'})
+
+    def test_startup_publisher_exit_removes_owner_without_losing_captured_identity(self):
+        receipt,owner,proof=self.fixture()
+        inventory=self.campaign/'shared-inventory'
+        original=(inventory/'owner').read_bytes()
+        (inventory/'owner').unlink()
+        (inventory/'stop').write_bytes(b'')
+        scripts=inventory/'scripts';scripts.mkdir()
+        producer=scripts/'cloudbench-campaign-inventory.sh'
+        producer.write_bytes((ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes())
+        self.reseal()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(result['startup_processes'][-1]['pid'],int(dict(
+            line.split('=',1)for line in original.decode().splitlines())['pid']))
+        (inventory/'owner').write_bytes(original.replace(b'app=fixture',b'app=foreign'))
+        self.reseal()
+        with self.assertRaisesRegex(ValueError,'publisher binding'):
+            self.validate_fixture(receipt,owner,proof)
+        (inventory/'owner').unlink();(inventory/'stop').unlink();self.reseal()
+        with self.assertRaisesRegex(ValueError,'noncanonical proof file'):
+            self.validate_fixture(receipt,owner,proof)
+        (inventory/'stop').write_bytes(b'');producer.write_bytes(b'unsupported publisher');self.reseal()
+        with self.assertRaisesRegex(ValueError,'publisher removal contract'):
+            self.validate_fixture(receipt,owner,proof)
+
+    def test_stale_full_attempt_reconciles_exact_startup_operation_without_credit(self):
+        receipt,owner,proof=self.fixture();self.stale_operation=True
+        receipt['executed']=True
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        import hashlib
+        proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(result['occurrence'],receipt['token'])
+        proof['request_token']='foreign'
+        with self.assertRaisesRegex(ValueError,'stale operation identity'):
+            self.validate_fixture(receipt,owner,proof)
+
+    def test_original_fly_logs_allow_only_absent_same_boot_startup_agent(self):
+        import ast,datetime,hashlib
+        receipt,owner,proof=self.fixture()
+        capture=json.loads((self.relay/'startup-agent.json').read_text())
+        (self.relay/'startup-agent.json').unlink();(self.runs.parent/'cli.log.process.json').unlink()
+        self.save(self.relay/'startup-cleanup.json',dict(bootstrap_joined=True,broker_joined=True,
+                                                       agent_shutdown_verified=False,agent_retirement_pending=True))
+        (self.relay/'broker.private.log').write_text('unsupported Fly agent version\n')
+        pid=capture['agent']['pid'];socket=capture['socket']
+        native=self.base/'native';native.mkdir()
+        bootstrap=native/'bootstrap.log';(native/'agent-logs').mkdir();agent=native/'agent-logs/123.log'
+        bootstrap.write_text(f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {pid}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n')
+        when=datetime.datetime.fromisoformat(json.loads((self.campaign/'summary.json').read_text())['started_at'])+datetime.timedelta(seconds=.5)
+        stamp=when.strftime('%Y/%m/%d %H:%M:%S.%f')
+        payload=('ok '+json.dumps({'PID':pid,'Version':'0.5.5'})+'\n').encode()
+        raw=(len(payload).to_bytes(2,'little')+payload).decode('latin1')
+        import json as json_module
+        quoted=json_module.dumps(raw)
+        agent.write_text(f'{stamp} srv OK {pid}\n{stamp} #1 -> ({len(raw)}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        proof['fly_native_logs']={'bootstrap':str(bootstrap),'agent':str(agent),'timezone':'UTC'};self.reseal()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted']);self.assertTrue(result['startup_processes'][3]['native_log_identity'])
+        self.assertNotIn('birth',result['startup_processes'][3])
+        saved_logs=dict(proof['fly_native_logs'])
+        for fields,reason in [({k:v for k,v in saved_logs.items() if k!='timezone'},'timezone required'),
+                              ({**saved_logs,'timezone':'Unknown/Original'},'timezone unavailable'),
+                              ({**saved_logs,'timezone':'America/New_York'},'log clock')]:
+            proof['fly_native_logs']=fields
+            with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        foreign=native/'foreign.log';foreign.write_bytes(agent.read_bytes())
+        proof['fly_native_logs']={**saved_logs,'agent':str(foreign)};self.reseal()
+        with self.assertRaisesRegex(ValueError,'bootstrap binding'):self.validate_fixture(receipt,owner,proof)
+        foreign.unlink();proof['fly_native_logs']=saved_logs;self.reseal()
+        prior=agent.read_text()
+        for mutation,reason in [(prior.replace(str(pid),str(os.getpid())),'bootstrap|PING|shutdown'),
+                                (prior.replace('srv QUIT','missing shutdown'),'shutdown chain'),
+                                (prior.replace(socket,'/foreign/socket'),'shutdown chain')]:
+            agent.write_text(mutation);self.reseal()
+            with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        agent.write_text(prior);self.reseal()
+        live=bootstrap.read_text().replace(str(pid),str(os.getpid()))
+        bootstrap.write_text(live);agent.write_text(prior.replace(str(pid),str(os.getpid())));self.reseal()
+        with self.assertRaisesRegex(ValueError,'PID present'):self.validate_fixture(receipt,owner,proof)
+
+    def test_startup_reconciliation_rejects_missing_or_live_or_dispatched_evidence(self):
+        receipt,owner,proof=self.fixture()
+        paths=[self.relay/'startup-agent.json',self.runs.parent/'cli.log.process.json',self.campaign/'summary.json']
+        original={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        def alter(path,**kwargs):self.save(path,{**json.loads(path.read_text()),**kwargs})
+        def live_agent():
+            import hashlib
+            alter(paths[0],agent={'pid':os.getpid(),'birth':self.live_stamp(os.getpid()),'version':'0.5.5','socket_identity':[3,4]})
+            alter(self.relay/'startup-cleanup.json',agent_identity_sha256=hashlib.sha256(paths[0].read_bytes()).hexdigest())
+        def started_job():
+            summary=json.loads(paths[2].read_text());summary['jobs'][0]['started_at']='2026-01-01';self.save(paths[2],summary)
+        mutations=[('missing-capture',lambda:paths[0].unlink(),None),
+                   ('missing-sidecar',lambda:paths[1].unlink(),None),
+                   ('unjoined-supervisor',lambda:alter(paths[1],quiescent=False),'process closure'),
+                   ('forced-cleanup',lambda:alter(paths[1],term_sent=[123]),'process closure'),
+                   ('dispatched-job',lambda:alter(paths[2],peak_concurrency=1),'startup inventory'),
+                   ('started-job',started_job,'dispatched job'),
+                   ('live-agent',live_agent,'exact process remains live'),
+                   ('reached-ready',lambda:self.save(self.relay/'ready.json',{}),'reached relay admission'),
+                   ('bad-source',lambda:proof.update(source={'head':'f'*40,'digest':'b'*64}),'request identity')]
+        for name,mutate,reason in mutations:
+            with self.subTest(name=name):
+                for p in self.base.rglob('*'):
+                    if p.is_file() and p not in original:p.unlink()
+                for p,raw in original.items():p.write_bytes(raw)
+                proof['source']=receipt['source'];mutate();self.reseal()
+                if reason is None:
+                    with self.assertRaisesRegex(ValueError,'noncanonical proof file'):self.validate_fixture(receipt,owner,proof)
+                else:
+                    with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        for p,raw in original.items():p.write_bytes(raw)
+        proof['source']=receipt['source'];self.reseal()
+        proof['files'][str(paths[0])]='0'*64
+        with self.assertRaisesRegex(ValueError,'hash mismatch'):
+            self.validate_fixture(receipt,owner,proof)
+
+    def test_native_campaign_joins_exact_hub_before_supervisor_exit(self):
+        result=subprocess.run([sys.executable,str(ROOT/'scripts/tests/fixtures/native_campaign_hub_join.py'),
+                               str(self.target/'run-bench-campaign.py')],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    def test_native_retired_hub_owner_refuses_foreign_paths_live_pids_and_reused_groups(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        runs=self.base/'.context/deploy-cloud'/('a'*64)/'runs';hub=runs/'_hub';hub.mkdir(parents=True)
+        child=subprocess.run([sys.executable,'-c',
+            "import os;from pathlib import Path;print(str(os.getpid())+' '+Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19])"],
+            start_new_session=True,capture_output=True,text=True,check=True)
+        pid,ticks=child.stdout.split();token='b'*32;port='12345'
+        owner=hub/f'agent-link-server.{port}.{token}.owner'
+        boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        fields=dict(version='1',pid=pid,pgid=pid,pid_start=f'proc-start:{boot}:{ticks}',
+            owner_token=token,command=str(self.base/'agents/benchmarks/agent_link_server.py'),
+            argv_sha256='c'*64,root=str(runs),runs_root=str(runs),repo_root=str(self.base),
+            context_dir=str(hub),host='127.0.0.1',port=port,status='starting')
+        def save(values):
+            owner.write_text(''.join(k+'='+v+'\n' for k,v in values.items()));owner.chmod(0o644)
+        retired=module['native_hub_owner_retired'];save(fields)
+        self.assertTrue(retired(owner,runs,self.base))
+        with patch.object(subprocess,'check_output',return_value=pid+'\n'):
+            self.assertFalse(retired(owner,runs,self.base),'a reused or remaining group must not be skipped')
+        for key,value in [('repo_root',str(self.base/'foreign')),('command','/foreign/hub.py'),
+                          ('root','/foreign'),('owner_token','d'*32),('port','23456'),
+                          ('pgid',str(int(pid)+1)),('pid_start','unknown'),('status','unknown')]:
+            with self.subTest(key=key):
+                save({**fields,key:value})
+                with self.assertRaises(ValueError):retired(owner,runs,self.base)
+        save({**fields,'pid':str(os.getpid()),'pgid':str(os.getpid())})
+        live_owner=hub/f'agent-link-server.{port}.{token}.owner'
+        self.assertFalse(retired(live_owner,runs,self.base),'live/reused PID must use original live protocol')
+        save(fields);owner.unlink();owner.symlink_to(self.base/'foreign-owner')
+        with self.assertRaises(ValueError):retired(owner,runs,self.base)
+
+    def test_native_hub_join_attempts_later_owners_after_each_failure(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        runs=self.base/'.context/deploy-cloud'/('a'*64)/'runs'
+        hub=runs/'_hub';hub.mkdir(parents=True)
+        for index,content in enumerate(['missing=port\n','port=2\n','port=3\n']):
+            (hub/f'agent-link-server.{index}.owner').write_text(content)
+        calls=[]
+        def terminate(command,**_kwargs):
+            calls.append(command[-4])
+            if command[-4]=='2':raise subprocess.CalledProcessError(1,command)
+        with patch.dict(os.environ,{'DEPLOY_NATIVE_HUB_JOIN':'1','CLOUDBENCH_RUNS_ROOT':str(runs)}), \
+             patch.object(subprocess,'run',side_effect=terminate), \
+             patch.dict(module['join_native_hubs'].__globals__,native_hub_owner_retired=lambda *_:False):
+            with self.assertRaisesRegex(ValueError,'native Hub join incomplete'):
+                module['join_native_hubs'](self.base,runs.parent/'campaigns'/('deploy-'+runs.parent.name))
+        self.assertEqual(calls,['2','3'])
+
+    def campaign_hub_cleanup_failure(self, cancel):
+        import runpy,signal
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        namespace=module['main'].__globals__
+        scripts=self.base/'scripts';scripts.mkdir()
+        (scripts/'run-bench').write_text('exit 0\n')
+        arguments=['campaign','--root',str(self.base),'--runs','1','--concurrency','2',
+                   '--retry-infra','0','--task=fixture']
+        published=[]
+        def publish(_workspace,_directory,summary,**_kwargs):
+            if _kwargs.get('live'):return True
+            published.append(summary['status'])
+            if cancel:
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM,None)
+                return False
+            return True
+        def refuse_inventory(*_args,**_kwargs):
+            raise RuntimeError('fixture refuses before controller admission')
+        def refuse_join(*_args):raise ValueError('fixture Hub join failed')
+        replacements=dict(campaign_workspace=lambda root,_forward:(root,None),provider_capacity_refusal=lambda _n:None,
+            scorecard_hooks=lambda:None,start_shared_inventory=refuse_inventory,
+            publish_campaign_group=publish,join_native_hubs=refuse_join,
+            infra_stop_predicate=lambda:lambda *_args:False)
+        handlers={number:signal.getsignal(number)for number in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP)}
+        try:
+            with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),patch.dict(os.environ,{
+                'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'hub-failure',
+                'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY':'1' if cancel else '0','CLOUDBENCH_STRICT_BARRIER':'0',
+                'BENCHMARK_HUB_GROUP_RUN_ID':'','BENCHMARK_HUB_PARENT_RUN_ID':''}):
+                code=module['main']()
+        finally:
+            for number,handler in handlers.items():signal.signal(number,handler)
+        summary=json.loads((self.base/'campaigns/hub-failure/summary.json').read_text())
+        return code,summary,published
+
+    def test_publication_cancellation_stays_cancelled_when_hub_join_fails(self):
+        code,summary,_published=self.campaign_hub_cleanup_failure(True)
+        self.assertEqual(code,143)
+        self.assertEqual(summary['status'],'cancelled')
+        self.assertTrue(summary['shared_transport_cleanup_pending'])
+        self.assertEqual(summary['peak_concurrency'],0)
+        self.assertTrue(all(job.get('controller_pid')is None for job in summary['jobs']))
+
+    def test_successful_campaign_still_fails_when_hub_join_fails(self):
+        code,summary,published=self.campaign_hub_cleanup_failure(False)
+        self.assertEqual(published,['passed'])
+        self.assertNotEqual(code,0)
+        self.assertEqual(summary['status'],'failed')
+        self.assertTrue(summary['shared_transport_cleanup_pending'])
+
+    def test_campaign_persists_fixed_commands_before_any_controller_admission(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        namespace=module['main'].__globals__
+        tasks=['fixture-'+str(i)for i in range(600)]
+        arguments=['campaign','--root',str(self.base),'--runs','1','--concurrency','600','--retry-infra','0',
+                   '--forward-arg=--ref','--forward-arg='+'a'*40,*['--task='+name for name in tasks]]
+        def refuse_inventory(*_args,**_kwargs):raise RuntimeError('fixture refuses before controller admission')
+        replacements=dict(campaign_workspace=lambda root,_forward:(root,None),provider_capacity_refusal=lambda _n:None,
+                          scorecard_hooks=lambda:None,start_shared_inventory=refuse_inventory,
+                          publish_campaign_group=lambda *_a,**_kw:True)
+        with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),             patch.dict(os.environ,{'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'command-proof'}):
+            self.assertEqual(module['main'](),1)
+        summary=json.loads((self.base/'campaigns/command-proof/summary.json').read_text())
+        self.assertEqual(summary['peak_concurrency'],0)
+        self.assertEqual(len(summary['jobs']),600)
+        for job in summary['jobs']:
+            self.assertEqual(job.get('controller_command'),['bash',str(self.base/'scripts/run-bench'),job['task'],'--ref','a'*40,'--foreground'])
+            self.assertIsNone(job.get('controller_pid'))
+
+    def preallocation_fixture(self):
+        import hashlib,shutil,time
+        receipt,owner,proof=self.fixture()
+        (self.relay/'startup-cleanup.json').unlink()
+        capture=json.loads((self.relay/'startup-agent.json').read_text())
+        authority=json.loads((self.relay/'authority.private.json').read_text())
+        ready=dict(agent=capture['agent'],authority_sha256=capture['authority_sha256'],
+                   pid=capture['broker']['pid'],birth=capture['broker']['birth'],
+                   socket='/tmp/cb-relay-abcdefgh/control.sock')
+        self.save(self.relay/'ready.json',ready)
+        self.save(self.relay/'serve.once.json',{k:ready[k]for k in ('authority_sha256','pid','birth')})
+        (self.relay/'broker.private.log').write_text('{"stopped": true}\n')
+        def retired():
+            r=subprocess.run([sys.executable,'-c',"import os;from pathlib import Path;print(str(os.getpid())+' '+Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19])"],text=True,capture_output=True,check=True)
+            pid,start=r.stdout.split();return dict(pid=int(pid),birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+start)
+        controller,hub_process=retired(),retired()
+        hub=self.runs/'_hub';hub.mkdir()
+        hub_owner=hub/('agent-link-server.8765.'+'b'*32+'.owner')
+        fields=dict(version='1',status='live-transfer-required',pid=str(hub_process['pid']),pgid=str(hub_process['pid']),
+                    pid_start=hub_process['birth'],owner_token='b'*32,argv_sha256='c'*64,
+                    root=str(self.runs),runs_root=str(self.runs),repo_root=str(self.base),context_dir=str(hub),
+                    command=str(self.base/'agents/benchmarks/agent_link_server.py'))
+        text=lambda p,v:p.write_text(''.join(k+'='+str(x)+'\n'for k,x in v.items()))
+        text(hub_owner,fields)
+        fleet=self.runs/('20261106-090000-'+str(controller['pid']));batch=fleet/'_batch';batch.mkdir(parents=True)
+        audit=fleet/'teardown-ownership';audit.mkdir()
+        token='c'*32
+        text(audit/'meta',dict(version='1',fleet_owner_token=token,run_id=fleet.name,app='fixture',workspace_root=str(self.base),
+            status='provider-teardown-verified',hub_disposition='retained-exact-owner-transfer-required',hub_owner_file=str(hub_owner),
+            hub_owner_token='b'*32,hub_pid=fields['pid'],hub_pid_start=fields['pid_start'],hub_argv_sha256=fields['argv_sha256']))
+        (audit/'provider-teardown-verified.epoch').write_text(str(time.time()-2.8))
+        for name in ['owned-clones.ids','owned-clones.names']:(audit/name).write_bytes(b'')
+        canonical=self.base/'.git/cloudbench-fleet-audits'/token;canonical.parent.mkdir(parents=True);shutil.copytree(audit,canonical)
+        seal=hashlib.sha256()
+        for path in sorted(audit.iterdir()):
+            for raw in [path.name.encode(),path.read_bytes()]:seal.update(len(raw).to_bytes(8,'big'));seal.update(raw)
+        text(audit/'source-audit',dict(path=str(canonical),sha256=seal.hexdigest()))
+        self.save(batch/'lifecycle.json',dict(version=1,fleet_owner_token=token,run_id=fleet.name,workspace_root=str(self.base),
+            status='failed',controller_exit_code=1,audit_sha256=seal.hexdigest(),hub_publication_failed=False))
+        self.save(batch/'benches.json',[dict(name='browser-smoke',mode='REAL')])
+        self.save(batch/'run.json',dict(run_id=fleet.name,controller_exit_code=1,status='failed',tasks=[dict(name='browser-smoke',
+            status='INFRA_ERROR',passed=False,failure_reason='no current run artifact produced',lifecycle_stage='released')]))
+        self.save(batch/'disposable-cleanup.json',dict(schema='disposable-cleanup-v1',owner=token,guest_cleanup_missing=False,runtime_evidence_missing=False))
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary['jobs'][0].update(status='failed',controller_pid=controller['pid'],controller_exit_code=1,
+            controller_command=['bash',str(self.base/'scripts/run-bench'),'browser-smoke','--ref',receipt['source']['head'],'--foreground'])
+        summary['peak_concurrency']=1;summary.pop('shared_inventory_failed');self.save(self.campaign/'summary.json',summary)
+        (self.campaign/'r001-j0001.log').write_text(f'{self.base}/scripts/run-bench monitor {fleet}\nowner: {token}; private controller diagnostics stay in this run directory.\n')
+        sidecar=json.loads((self.runs.parent/'cli.log.process.json').read_text())
+        sidecar.update(orphaned_children=True,term_sent=[hub_process['pid']],reaped=[*sidecar['reaped'],dict(pid=hub_process['pid'],status=15)])
+        self.save(self.runs.parent/'cli.log.process.json',sidecar)
+        adapter_path=Path(receipt['worker_result']);adapter=json.loads(adapter_path.read_text())
+        receipt['started_at']=adapter['started_at']
+        adapter.update(fleet_directory=None,reason='cloud command interrupted or source changed');self.save(adapter_path,adapter)
+        reference=receipt['native_cleanup_reference'];reference['native_directory']=None
+        reference['result_sha256']=hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+        proof['worker_result_sha256']=reference['result_sha256'];proof['layout']='campaign-preallocation-v1'
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
+        self.reseal();return receipt,owner,proof,fleet
+
+    def pending_hub_fixture(self):
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary['shared_transport_cleanup_pending']=True;self.save(self.campaign/'summary.json',summary)
+        side=self.runs.parent/'cli.log.process.json';value=json.loads(side.read_text())
+        value.update(orphaned_children=False,term_sent=[]);self.save(side,value)
+        owners=sorted((self.runs/'_hub').glob('*.owner'))
+        for path in owners:
+            fields=dict(line.split('=',1)for line in path.read_text().splitlines())
+            fields.update(host='127.0.0.1',port='8765')
+            path.write_text(''.join(k+'='+v+'\n'for k,v in fields.items()));path.chmod(0o444)
+        proof['current_hub_retirement']={'kind':'current-native-hub-retirement-v1','owners':list(map(str,owners))}
+        self.reseal();return receipt,owner,proof,fleet
+
+    def test_pending_preallocation_hubs_require_current_exact_retirement_without_rewriting_summary(self):
+        receipt,owner,proof,fleet=self.pending_hub_fixture()
+        before=(self.campaign/'summary.json').read_bytes()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(before,(self.campaign/'summary.json').read_bytes())
+        self.assertEqual(result['current_hub_retirement'],proof['current_hub_retirement'])
+
+    def test_pending_preallocation_hubs_refuse_unbound_inventory_or_unknown_supervisor_termination(self):
+        receipt,owner,proof,fleet=self.pending_hub_fixture()
+        original=copy.deepcopy(proof['current_hub_retirement'])
+        for marker in [None,{'kind':'foreign','owners':original['owners']},
+                       {**original,'owners':[]},{**original,'owners':original['owners']*2}]:
+            proof['current_hub_retirement']=marker
+            with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+        proof['current_hub_retirement']=original
+        side=self.runs.parent/'cli.log.process.json';value=json.loads(side.read_text())
+        for change in [dict(orphaned_children=True),dict(term_sent=[os.getpid()]),dict(quiescent=False)]:
+            self.save(side,{**value,**change});self.reseal()
+            with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+        self.save(side,value);self.reseal()
+        path=Path(original['owners'][0]);content=path.read_text();path.chmod(0o644)
+        path.write_text(content.replace('repo_root='+str(self.base),'repo_root=/foreign'));path.chmod(0o444);self.reseal()
+        with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+
+    def test_preallocation_campaign_reconciliation_keeps_original_unverified(self):
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        before=json.dumps(receipt,sort_keys=True)
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertEqual(result['participants'],[str(fleet)])
+        self.assertFalse(result['credit_granted']);self.assertEqual(before,json.dumps(receipt,sort_keys=True))
+
+    def test_preallocation_campaign_refuses_execution_live_or_changed_ownership(self):
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        original={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        mutations=[('appended-foreign-ref',lambda:(self.campaign/'r001-j0001.log').write_text((self.campaign/'r001-j0001.log').read_text()+'ref : '+'f'*40+'\n'),'foreign log ref'),
+                   ('masked-foreign-ref',lambda:(self.campaign/'r001-j0001.log').write_text('ref : '+'f'*40+'\nref : '+receipt['source']['head']+'\n'+(self.campaign/'r001-j0001.log').read_text()),'foreign log ref'),
+                   ('foreign-ref',lambda:(self.campaign/'r001-j0001.log').write_text('ref : '+'f'*40+'\n'+(self.campaign/'r001-j0001.log').read_text()),'foreign log ref'),
+                   ('missing-command',lambda:self.save(self.campaign/'summary.json',{**json.loads((self.campaign/'summary.json').read_text()),'jobs':[{k:v for k,v in json.loads((self.campaign/'summary.json').read_text())['jobs'][0].items()if k!='controller_command'}]}),'unsupported historical preallocation dispatch'),
+                   ('execution',lambda:self.save(fleet/'execution-provenance.json',{}),'execution evidence present'),
+                   ('owned-clone',lambda:(fleet/'teardown-ownership/owned-clones.ids').write_text('unknown\n'),'audit seal'),
+                   ('live-relay',lambda:self.save(self.relay/'broker-owner.json',dict(pid=os.getpid(),birth=self.live_stamp(os.getpid()),parent_pid=1,parent_start='foreign')),'relay custody'),
+                   ('unknown-drain',lambda:self.save(self.runs.parent/'cli.log.process.json',{**json.loads((self.runs.parent/'cli.log.process.json').read_text()),'term_sent':[os.getpid()]}),'unexpected supervised termination')]
+        for name,change,reason in mutations:
+            with self.subTest(name=name):
+                for p in self.base.rglob('*'):
+                    if p.is_file()and p not in original:p.unlink()
+                for p,raw in original.items():p.write_bytes(raw)
+                change();self.reseal()
+                with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+
+
+
+
+class RecoveredNativeReceiptGuard(unittest.TestCase):
+    """Exercise actual full-pass admission on real files; never launch a worker."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.temp.name)
+        source = {'head': 'fixture', 'digest': 'fixture'}
+        self.gate = {'name': 'api', 'command': ['native-fixture'], 'checks': ['case']}
+        self.state = {'source': source, 'input_fingerprints': {'api': 'input'}, 'skips': {},
+                      'environment': 'env', 'attempts': [], 'failures': []}
+        self.request = {'token': 'original-token', 'source': source, 'gate': 'api', 'checks': ['case']}
+        self.worker = {**self.request, 'cases': {'case': 'PASS'}, 'complete': True,
+                       'cleanup_complete': True, 'reused': False}
+        self.receipt = {**{k: self.request[k] for k in ('token', 'source', 'gate')},
+            'status': 'PASS', 'complete': True, 'executed': True, 'native_exit': 0,
+            'cancelled': False, 'timed_out': False, 'lingering_group': False,
+            'cases': {'case': 'PASS'}, 'command': self.gate['command'],
+            'log': str(self.folder / 'output.log'), 'worker_result': str(self.folder / 'result.json'),
+            'execution_binding': {'input_fingerprint': 'input', 'contract_digest': c.digest(self.gate),
+                                  'environment': 'env'}}
+        c.write(self.folder / 'request.json', self.request)
+        c.write(self.folder / 'result.json', self.worker)
+
+    def tearDown(self): self.temp.cleanup()
+
+    def admit(self, receipt):
+        c.write(self.folder / 'receipt.json', receipt)
+        self.state['attempts'] = [{'phase': 'final', 'source': self.state['source'], 'results': [receipt]}]
+        return c.full_pass_binding(self.state, self.gate)
+
+    def test_known_native_pass_is_still_admitted(self):
+        self.assertIsNotNone(self.admit(self.receipt))
+
+    def test_unknown_lifecycle_is_never_false(self):
+        for field in ('cancelled', 'timed_out', 'lingering_group'):
+            for value in ('MISSING', None, 0, ''):
+                with self.subTest(field=field, value=value):
+                    receipt = copy.deepcopy(self.receipt)
+                    if value == 'MISSING': receipt.pop(field)
+                    else: receipt[field] = value
+                    self.assertIsNone(self.admit(receipt))
+
+    def test_recovered_type_cannot_borrow_legacy_native_flags_for_pass(self):
+        receipt = {**self.receipt, 'kind': 'recovered-native-execution-v1',
+                   'original_coordinator': {'cancelled': 'UNKNOWN', 'timed_out': 'UNKNOWN'},
+                   'native_evidence': {'cancelled': False, 'timed_out': False}}
+        self.assertIsNone(self.admit(receipt))
+
+
+
+class PendingSettlementJournalGuard(unittest.TestCase):
+    def test_normal_coordinator_refuses_uncommitted_recovery_journal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            c.write(root/'plan.json',{})
+            c.write(root/'cycle.json',{'phase':'final','ready':False,'source':{},'round':30})
+            c.write(root/'settlement-journal.json',{'kind':'native-settlement-journal-v1'})
+            original=(root/'cycle.json').read_bytes()
+            args=['status','--plan',str(root/'plan.json'),'--state-dir',str(root)]
+            self.assertEqual(c.main(args),2)
+            self.assertEqual((root/'cycle.json').read_bytes(),original)
+            c.write(root/'settlement-committed.json',{'journal_sha256':'wrong'})
+            self.assertEqual(c.main(args),2)
+            self.assertEqual((root/'cycle.json').read_bytes(),original)
+            c.write(root/'settlement-committed.json',{'journal_sha256':c.sha_file(root/'settlement-journal.json')})
+            self.assertEqual(c.main(args),0)
+
+@unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+class LocalCleanupQuietScan(unittest.TestCase):
+    """quiet(root) re-observes an unreadable same-user process instead of raising PermissionError."""
+
+    def test_unreadable_same_user_process_is_reobserved_then_refused(self):
+        import deploy_test_local_cleanup as local
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / '.context').mkdir()
+            (root / '.context/native-worker-admission.lock').write_text('')
+            # PR_SET_DUMPABLE=4: /proc/<pid> stays ours while cwd turns unreadable, as during a setuid exec.
+            body = ("import ctypes,sys,time;ctypes.CDLL(None).prctl(4,0,0,0,0);print('ready',flush=True);"
+                    "time.sleep(float(sys.argv[1]));ctypes.CDLL(None).prctl(4,1,0,0,0);time.sleep(30)")
+            for hidden, refused in ((0.3, False), (60, True)):
+                child = subprocess.Popen([sys.executable, '-c', body, str(hidden)], stdout=subprocess.PIPE, text=True)
+                try:
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    if refused:
+                        with self.assertRaisesRegex(ValueError, 'unverifiable'):
+                            local.quiet(root)
+                    else:
+                        local.quiet(root)
+                finally:
+                    child.kill(); child.wait(); child.stdout.close()
 
 
 if __name__ == '__main__': unittest.main()

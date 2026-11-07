@@ -300,6 +300,18 @@ def _browser_task_terminal_metadata(
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
 
 
+def _track_background_browser_cleanup(task: asyncio.Task) -> None:
+    """Keep a detached browser teardown owned until it finishes, for the worker's drain."""
+    _background_browser_cleanup_tasks.add(task)
+
+    def _discard(done: asyncio.Task) -> None:
+        _background_browser_cleanup_tasks.discard(done)
+        with contextlib.suppress(BaseException):
+            done.result()
+
+    task.add_done_callback(_discard)
+
+
 def build_browser_user_profile_sections(user_profile: Dict[str, Any]) -> List[str]:
     """Build the identity and delivery context supplied to a browser agent."""
     return build_user_profile_sections(user_profile)
@@ -549,6 +561,26 @@ async def _disconnect_browser(dom_service: Any) -> bool:
         timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
         timeout_message="Browser disconnect timed out; continuing terminal return",
         failure_message="Browser disconnect failed; continuing terminal return",
+    )
+
+
+async def _release_browser_client(dom_service: Any) -> bool:
+    """Bounded disconnect; when it fails, close the loopback CDP multiplexer itself.
+
+    A timed-out or failed disconnect does not prove the client detached (Tilion
+    admits one CDP client). DOMService.disconnect clears its multiplexer
+    reference, so capture it first. True only when the client was released.
+    """
+    multiplexer = getattr(dom_service, "cdp_multiplexer", None)
+    if await _disconnect_browser(dom_service):
+        return True
+    if multiplexer is None:
+        return False
+    return await _await_bounded_browser_cleanup(
+        multiplexer.close(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Browser CDP multiplexer close timed out",
+        failure_message="Browser CDP multiplexer close failed",
     )
 
 
@@ -8901,7 +8933,10 @@ async def _spawn_browser_agent_activity_v3_real(
             browser_session_metadata = session_data.get("browser_session_metadata") or {}
             if browser_session_metadata.get("provider") == "tilion":
                 tilion_creates["count"] += 1
-            user_profile = session_data.get("user_settings") or {}
+            # A reattached logical browser returns the material of the realm it
+            # is on, not the start URL's; the first step's realm transition
+            # prepares the start URL's realm.
+            user_profile, auth_realm = _resume_context_from_session_info(session_data, auth_realm)
         if approved_message_intent:
             await bind_approved_message(config, user_id, task_id, approved_message_intent)
         _record_timing("session_init", t_session)
@@ -9021,8 +9056,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     _pw_browser = await _pw_instance.chromium.connect_over_cdp(connection_cdp_url)
                 except BaseException:
                     _driver_process = _playwright_driver_process(_pw_instance)
+                    # Bounded like _stop_playwright_resources: a hung stop must not keep
+                    # the DOMService teardown below from releasing the CDP client.
                     with contextlib.suppress(Exception):
-                        await _pw_instance.stop()
+                        await asyncio.wait_for(_pw_instance.stop(), timeout=5.0)
                     await _reap_playwright_driver_process(_driver_process, agent_id)
                     _playwright_instance = None
                     raise
@@ -9087,8 +9124,9 @@ async def _spawn_browser_agent_activity_v3_real(
                         _input_page,
                     ) = await _connect_playwright()
             except BaseException:
-                with contextlib.suppress(Exception):
-                    await _dom_service.disconnect()
+                # Bounded; a wedged or failed disconnect falls back to closing the
+                # loopback multiplexer, which drops Tilion's single upstream socket.
+                await _release_browser_client(_dom_service)
                 await _stop_playwright_resources(
                     _playwright_browser,
                     _playwright_instance,
@@ -9220,10 +9258,28 @@ async def _spawn_browser_agent_activity_v3_real(
                 _realm_credential_state,
             )
 
-        browser_result, data_result = await asyncio.gather(
-            _setup_browser(),
-            _process_data(),
-        )
+        browser_setup = asyncio.create_task(_setup_browser(), name=f"browser-setup:{agent_id}")
+        data_setup = asyncio.create_task(_process_data(), name=f"browser-setup-data:{agent_id}")
+        try:
+            browser_result, data_result = await asyncio.gather(browser_setup, data_setup)
+        except BaseException:
+            # gather raises the first failure but leaves the other side running, and a
+            # cancelled activity drops a finished side's result. Hand a connected browser
+            # side to the finally-scheduled cleanup first (an orphaned client would hold
+            # Tilion's single CDP slot, even if a second cancel interrupts the wait), then
+            # stop the unfinished side; its own handler releases what it attached. A side
+            # still releasing after the wait is detached but stays owned for the drain.
+            if browser_setup.done() and not browser_setup.cancelled() and browser_setup.exception() is None:
+                dom_service, dom_page, input_page, playwright_browser, playwright_instance = browser_setup.result()
+            for side in (browser_setup, data_setup):
+                side.cancel()
+            await asyncio.wait({browser_setup, data_setup}, timeout=BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS)
+            for side in (browser_setup, data_setup):
+                if not side.done():
+                    _track_background_browser_cleanup(side)
+                elif not side.cancelled():
+                    side.exception()  # retrieved: the raised error below is the reported one
+            raise
         _record_timing("parallel_setup_total", t_parallel)
 
         (
@@ -11842,7 +11898,7 @@ async def _spawn_browser_agent_activity_v3_real(
 
                         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
                         if dom_service is not None:
-                            await _disconnect_browser(dom_service)
+                            await _release_browser_client(dom_service)
                             _tilion_leave_session()
                             dom_service = None
                         await collect_unread_user_instructions()
@@ -12461,7 +12517,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 if cleanup_failure is not None:
                     raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))
                 if dom_service:
-                    await _disconnect_browser(dom_service)
+                    await _release_browser_client(dom_service)
                     _tilion_leave_session()
                     dom_service = None
 
@@ -12625,7 +12681,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 if cleanup_failure is not None:
                     raise BrowserSessionCloseError(session_id, True, cleanup_failure.get("http_status"))
                 if dom_service:
-                    await _disconnect_browser(dom_service)
+                    await _release_browser_client(dom_service)
                     _tilion_leave_session()
                     dom_service = None
 
@@ -12920,7 +12976,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         await _close_browser_with_cleanup_receipt(session_id, pause=True, current_url=current_url)
         if dom_service is not None:
-            await _disconnect_browser(dom_service)
+            await _release_browser_client(dom_service)
             _tilion_leave_session()
             dom_service = None
         await collect_unread_user_instructions()
@@ -13046,7 +13102,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if dom_service:
             with contextlib.suppress(Exception):
-                await _disconnect_browser(dom_service)
+                await _release_browser_client(dom_service)
                 _tilion_leave_session()
                 dom_service = None
 
@@ -13113,9 +13169,11 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if dom_service:
             with contextlib.suppress(Exception):
-                await _disconnect_browser(dom_service)
+                released = await _release_browser_client(dom_service)
                 _tilion_leave_session()
-                dom_service = None
+                if released:
+                    # Kept otherwise, so the finally-scheduled cleanup retries the release.
+                    dom_service = None
 
         error_context = f"Failed during: {last_action}"
         error_message = build_context_summary(

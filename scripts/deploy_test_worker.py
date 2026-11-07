@@ -142,13 +142,34 @@ def execute(request: dict, root: Path) -> dict:
     return result
 
 
+def owned_benchmark_draining(root: Path, token: str, since: float) -> bool:
+    """A benchmark owner this cycle request started is still live under this worker root.
+
+    benchmarks/local.py can be the case's group leader while it drains its runner and stack;
+    the staged cycle's token-bound benchmark_teardown waits for it within the controller's own
+    shutdown budget. A ten-second group KILL here would skip its cleanup traps instead.
+    An unreadable inventory proves nothing, so it keeps the existing group KILL.
+    """
+    import run_deploy_pipeline as lanes
+    try:
+        owned, _ = lanes.lane_owned_processes(token)
+        records, _ = lanes.lane_owner_records(root / '.context' / 'benchmarks', since)
+    except OSError:
+        return False
+    return any(record['pid'] in owned for record in records if record['pid'] is not None)
+
+
 def run_step(name: str, spec: dict, root: Path, folder: Path) -> dict:
+    from run_deploy_pipeline import LANE_TOKEN_ENV
     log = folder / (hashlib.sha256(name.encode()).hexdigest() + '.log')
     env = {**os.environ, **spec.get('env', {}), 'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
     started = time.time()
+    token = env.get(LANE_TOKEN_ENV)
+    retain = (lambda: owned_benchmark_draining(root, token, started)) if token else None
     with log.open('wb') as stream:
         code, timeout, cancelled, lingering = run_command(command(spec['command']),
-            cwd=root / spec.get('cwd', '.'), env=env, output=stream, timeout=spec.get('timeout_seconds'))
+            cwd=root / spec.get('cwd', '.'), env=env, output=stream, timeout=spec.get('timeout_seconds'),
+            retain_owned=retain)
     status = 'PASS' if code == 0 else 'FAIL'
     if code not in (0, 1) or timeout or cancelled or lingering or (code and spec.get('aggregate')):
         status = 'UNVERIFIED'

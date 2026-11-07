@@ -211,11 +211,14 @@ SH
     printf 'fixture_children+=("$!"); AUTOSCALER_PIDS=("$!"); CHILD_OUT=("$out")\n'
     printf 'wait_for_autoscaler_finalization\n'
     printf '[ -e "$out/autoscaler.completed-after-child" ] || exit 3\n'
+    # Reap the fake autoscaler (its trailing sleep outlives the marker) so no child is orphaned.
+    printf 'wait "${AUTOSCALER_PIDS[0]}" 2>/dev/null || true\n'
     # An autoscaler that exits without a marker must not hold the wait open.
     printf 'rm -f "$out/autoscaler.completed-after-child"; ( sleep 0.3 ) &\n'
     printf 'fixture_children+=("$!"); AUTOSCALER_PIDS=("$!"); started=$SECONDS\n'
     printf 'wait_for_autoscaler_finalization\n'
     printf '[ $((SECONDS - started)) -lt 10 ] || exit 4\n'
+    printf 'wait "${AUTOSCALER_PIDS[0]}" 2>/dev/null || true\n'
 } > "$finalization_harness"
 grep -q '^wait_for_autoscaler_finalization() {' "$finalization_harness" || {
     echo "FAIL: could not extract wait_for_autoscaler_finalization from run-bench-fleet" >&2

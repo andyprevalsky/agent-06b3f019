@@ -12,6 +12,9 @@ import time
 from datetime import datetime
 
 KIND = 'interrupted-preallocation-cleanup-v1'
+RENEWAL_KIND = 'interrupted-policy-witness-renewal-v1'
+POLICIES = {'scripts/run-bench-fleet', 'scripts/lib/cloudbench-env.sh',
+            'scripts/run-bench-campaign.py', 'agents/benchmarks/hub_upload.py'}
 MARKERS = {'.cid', 'cloudbench-run.json', 'runtime-evidence.pending',
            'guest-never-started.confirmed', 'runtime-evidence.owner.json',
            'post-config-start.accepted', 'worker-runtime-evidence', 'primary.ids', 'primary.names'}
@@ -56,24 +59,21 @@ def namespace_quiet(namespace, ports):
         raw = Path('/proc', str(pid), 'stat').read_text().rsplit(') ', 1)[1].split()
         pid = int(raw[1])
     prefix = str(namespace)
-    for process in Path('/proc').iterdir():
-        if not process.name.isdigit():
-            continue
-        try:
-            if process.stat().st_uid != os.geteuid():
+
+    def inspect(process):
+        argv = (process / 'cmdline').read_bytes().decode(errors='replace')
+        cwd = str((process / 'cwd').resolve(strict=True))
+        need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
+             'original namespace has a live consumer')
+        for fd in (process / 'fd').iterdir():
+            try:
+                target = os.readlink(fd)
+            except (FileNotFoundError, ProcessLookupError):
                 continue
-            argv = (process / 'cmdline').read_bytes().decode(errors='replace')
-            cwd = str((process / 'cwd').resolve(strict=True))
-            need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
-                 'original namespace has a live consumer')
-            for fd in (process / 'fd').iterdir():
-                try:
-                    target = os.readlink(fd)
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
-                need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
-        except (FileNotFoundError, ProcessLookupError):
-            continue
+            need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
+
+    from deploy_test_process import scan_same_user_processes
+    scan_same_user_processes(inspect, lambda pid: need(False, f'original namespace process {pid} is unverifiable'))
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
         for line in Path(table).read_text().splitlines()[1:]:
             row = line.split()
@@ -83,19 +83,27 @@ def namespace_quiet(namespace, ports):
 
 
 class Evidence:
-    def __init__(self, bindings):
+    def __init__(self, bindings, relocations=None):
         need(isinstance(bindings, dict) and bindings, 'file bindings required')
         self.bindings = bindings
+        self.relocations = relocations or {}
         for path in bindings:
             self.raw(path)
 
     def raw(self, value):
         from deploy_test_cycle import MAX_RECEIPT_BYTES
-        path = Path(value)
+        original = str(value)
+        relocated = self.relocations.get(original, original)
+        if isinstance(relocated, bytes):
+            need(len(relocated) <= MAX_RECEIPT_BYTES
+                 and self.bindings.get(original) == hashlib.sha256(relocated).hexdigest(), 'original Git policy changed')
+            return relocated
+        path = Path(relocated)
         need(path.is_absolute() and path.resolve(strict=True) == path and path.is_file()
              and not path.is_symlink() and path.stat().st_size <= MAX_RECEIPT_BYTES, 'bounded original file required')
         raw = path.read_bytes()
-        need(self.bindings.get(str(path)) == hashlib.sha256(raw).hexdigest(), 'original evidence changed: ' + str(path))
+        need(self.bindings.get(original) == self.bindings.get(str(path)) == hashlib.sha256(raw).hexdigest(),
+             'original evidence changed: ' + original)
         return raw
 
     def doc(self, path):
@@ -124,7 +132,8 @@ def policy(root, receipt, proof, evidence, name):
     path = Path(proof['producer_files'][name])
     original = subprocess.check_output(['git', 'show', receipt['source']['head'] + ':' + name], cwd=root)
     need(evidence.raw(path) == original, 'original source policy changed')
-    return path, original
+    relocated = evidence.relocations.get(str(path), str(path))
+    return path if isinstance(relocated, bytes) else Path(relocated), original
 
 
 def static_worker(root, gate, receipt, folder, evidence):
@@ -361,7 +370,7 @@ def hubs(root, proof, evidence, runs, expected, lifecycles, finish):
     namespace_quiet(runs.parent, ports)
 
 
-def validate(state, receipt, proof, gate):
+def validate(state, receipt, proof, gate, *, relocations=None):
     from deploy_test_cycle import digest
     need(set(proof) <= {'kind', 'root', 'files', 'confirmed_at', 'observed_by', 'producer_files',
                         'publication_recovery', 'hub_consumers', 'hub_retirement'} and proof.get('kind') == KIND,
@@ -387,7 +396,7 @@ def validate(state, receipt, proof, gate):
          and Path(receipt['log']) == folder / 'output.log'
          and not any((folder / n).exists() or (folder / n).is_symlink() for n in ('result.json', 'output.log.process.json.watchdog.json')),
          'original adapter must remain absent')
-    evidence = Evidence(proof['files'])
+    evidence = Evidence(proof['files'], relocations)
     request = evidence.doc(folder / 'request.json')
     need(evidence.doc(folder / 'receipt.json') == receipt
          and all(request.get(k) == receipt.get(k) for k in ('token', 'source', 'gate'))
@@ -422,16 +431,101 @@ def reconcile(state, request_token, proof):
     state.setdefault('reconciled_owners', {})[key] = entry
 
 
-def still_bound(state, receipt, entry):
+def policy_relocations(entry, receipt):
+    """Only already-bound historical producer bytes may replace mutable source witnesses."""
+    from deploy_test_cycle import digest, sha_file
+    renewal = entry.get('policy_witness_renewal')
+    if renewal is None:
+        return {}
+    need(isinstance(renewal, dict) and set(renewal) == {'previous', 'request'}, 'renewal history required')
+    previous, request = renewal['previous'], renewal['request']
+    need(isinstance(previous, dict) and isinstance(request, dict)
+         and entry == {**previous, 'policy_witness_renewal': renewal}, 'original reconciliation changed')
+    need(set(request) == {'kind', 'receipt_sha256', 'previous_entry_sha256', 'relocations', 'confirmed_at', 'observed_by'}
+         and request['kind'] == RENEWAL_KIND and request['previous_entry_sha256'] == digest(previous)
+         and request['receipt_sha256'] == sha_file(Path(receipt['log']).parent / 'receipt.json')
+         and finite(request['confirmed_at']) and previous['proof']['confirmed_at'] <= request['confirmed_at'] <= time.time()
+         and isinstance(request['observed_by'], str) and request['observed_by'].strip(), 'exact historical renewal binding required')
+    relocations = policy_relocations(previous, receipt)
+    changes = request['relocations']
+    updated = dict(relocations)
+    proof, root = previous['proof'], Path(previous['proof']['root'])
+    namespace = root / '.context/deploy-cloud' / hashlib.sha256(receipt['token'].encode()).hexdigest()
+    need(previous.get('kind') == KIND and previous.get('gate') == receipt['gate'] == 'smoke'
+         and re.fullmatch('[0-9a-f]{40}', receipt.get('source', {}).get('head', ''))
+         and isinstance(changes, dict) and changes, 'cloud policy relocation required')
+    previous_time = previous.get('policy_witness_renewal', {}).get('request', {}).get('confirmed_at', proof['confirmed_at'])
+    need(previous_time <= request['confirmed_at'], 'renewal history clock changed')
+    for old, destination in changes.items():
+        need(isinstance(old, str) and isinstance(destination, str), 'policy paths required')
+        names = [name for name, path in proof['producer_files'].items() if path == old]
+        need(len(names) == 1 and names[0] in POLICIES and Path(old) == root / names[0]
+             and Path(old).resolve(strict=True) == Path(old) and not Path(old).is_symlink(), 'only original source policy may relocate')
+        revision = receipt['source']['head'] + ':' + names[0]
+        if destination.startswith('git:'):
+            from deploy_test_cycle import MAX_RECEIPT_BYTES
+            need(names[0] in {'scripts/run-bench-fleet', 'scripts/lib/cloudbench-env.sh'}, 'executed policy requires bound file')
+            blob = subprocess.check_output(['git', 'rev-parse', revision], cwd=root, text=True).strip()
+            need(re.fullmatch('[0-9a-f]{40}', blob) and destination == 'git:' + blob,
+                 'exact original Git blob required')
+            size = int(subprocess.check_output(['git', 'cat-file', '-s', blob], cwd=root))
+            need(0 <= size <= MAX_RECEIPT_BYTES, 'bounded original Git policy required')
+            raw = subprocess.check_output(['git', 'cat-file', 'blob', blob], cwd=root)
+            need(len(raw) == size and proof['files'].get(old) == hashlib.sha256(raw).hexdigest(), 'original Git policy hash differs')
+            updated[old] = raw
+            continue
+        target = Path(destination)
+        need(target.is_relative_to(namespace) and target.resolve(strict=True) == target and not target.is_symlink()
+             and old in proof['files'] and destination in proof['files']
+             and proof['files'][old] == proof['files'][destination] and old != destination,
+             'existing bound campaign policy witness required')
+        original = subprocess.check_output(['git', 'show', receipt['source']['head'] + ':' + names[0]], cwd=root)
+        need(Evidence({destination: proof['files'][destination]}).raw(target) == original,
+             'original Git policy witness differs')
+        updated[old] = destination
+    need(updated != relocations, 'policy witness already renewed')
+    return updated
+
+
+def _bound(state, receipt, entry):
     from deploy_test_result import preserve_contract
+    need(entry.get('occurrence') == receipt['token'], 'original interrupted token changed')
+    gate = entry['execution_gate']
+    current, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+    preserve_contract(gate, current)
+    need(all(gate.get(k) == current.get(k) for k in ('native_cloud', 'native_backend')), 'original native route changed')
+    need(set(gate['checks']) <= set(current['checks']), 'original checks removed')
+    actual = validate(state, receipt, entry['proof'], gate, relocations=policy_relocations(entry, receipt))
+    need(actual == {k: v for k, v in entry.items() if k not in {'occurrence', 'policy_witness_renewal'}},
+         'original reconciliation facts changed')
+    return True
+
+
+def renew_policy_witness(state, request_token, proof):
+    from deploy_test_cycle import latest_receipts, sha_file, source
+    need(state.get('phase') in {'quick', 'initial', 'focused', 'failed-gates', 'final', 'triage',
+                               'needs-focused-plan', 'ready', 'stale', 'interrupted'}
+         and not state.get('running') and 'live_failures' not in state, 'quiescent renewal boundary required')
+    rows = [r for r in latest_receipts(state).values() if r.get('token') == request_token]
+    need(len(rows) == 1, 'exact latest historical receipt required')
+    receipt = rows[0]
+    key = sha_file(Path(receipt['log']).parent / 'receipt.json')
+    previous = state.get('reconciled_owners', {}).get(key)
+    need(isinstance(previous, dict) and previous.get('kind') == KIND
+         and previous.get('token') == request_token, 'original native reconciliation required')
+    root = Path(previous['proof']['root'])
+    need(source(root) == state['source'] == state['plan']['source'], 'current source binding changed')
+    if previous.get('policy_witness_renewal', {}).get('request') == proof:
+        _bound(state, receipt, previous)
+        return  # Exact replay observes all guards without appending duplicate history.
+    entry = {**copy.deepcopy(previous), 'policy_witness_renewal':
+             {'previous': copy.deepcopy(previous), 'request': copy.deepcopy(proof)}}
+    _bound(state, receipt, entry)
+    state['reconciled_owners'][key] = entry
+
+
+def still_bound(state, receipt, entry):
     try:
-        need(entry.get('occurrence') == receipt['token'], 'original interrupted token changed')
-        gate = entry['execution_gate']
-        current, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
-        preserve_contract(gate, current)
-        need(all(gate.get(k) == current.get(k) for k in ('native_cloud', 'native_backend')), 'original native route changed')
-        need(set(gate['checks']) <= set(current['checks']), 'original checks removed')
-        actual = validate(state, receipt, entry['proof'], gate)
-        return actual == {k: v for k, v in entry.items() if k != 'occurrence'}
+        return _bound(state, receipt, entry)
     except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError):
         return False

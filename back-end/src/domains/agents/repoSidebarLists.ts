@@ -22,6 +22,7 @@ const AGENT_LIST_SELECT = {
   progressEstimate: true,
   progressEstimateGeneration: true,
   status: true,
+  userControlRevision: true,
   statusMessage: true,
   temporalWorkflowId: true,
   tokenCount: true,
@@ -37,6 +38,7 @@ const AGENT_LIST_SELECT = {
   folderId: true,
   createdAt: true,
   updatedAt: true,
+  lastUserMessageAt: true,
   deletedAt: true,
 } as const;
 

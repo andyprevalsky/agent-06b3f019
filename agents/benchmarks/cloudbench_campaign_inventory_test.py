@@ -442,10 +442,11 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         'finish() { if declare -F stop_owned_machines_snapshot_loop >/dev/null; then stop_owned_machines_snapshot_loop; else cloudbench_terminate_tree_and_wait 30 "$SNAPSHOT_LOOP_PID"; fi; touch "$FLEET_DIR/closed"; }\n'
         "trap finish EXIT\ntrap 'exit 143' TERM\n"
         + boundary
-        + 'fixture_snapshot_reads_before_start=0\n'
-        'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
-        ' fixture_snapshot_reads_before_start="$(python3 -c \'import json,os;from pathlib import Path;p=Path(os.environ["FIXTURE_CALLS"]);print(sum(row["kind"]=="machines" and row.get("job_id")==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,p.read_text().splitlines())) if p.exists() else 0)\')"\n'
-        'fi\n'
+        # Admission may already have issued this job's native reads. Join the
+        # snapshot loop's own reads relative to that baseline, not a total.
+        + "fixture_job_machine_reads() { python3 -c 'import json,os;p=os.environ[\"FIXTURE_CALLS\"];print(sum(row[\"kind\"]==\"machines\" and row.get(\"job_id\")==os.environ[\"RUN_BENCH_CAMPAIGN_JOB_ID\"] for row in map(json.loads,open(p))) if os.path.exists(p) else 0)'; }\n"
+        'fixture_reads_before_loop=0\n'
+        '[ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || fixture_reads_before_loop="$(fixture_job_machine_reads)"\n'
         + ('eval "$(declare -f machines_snapshot_loop | sed 1s/machines_snapshot_loop/fixture_original_snapshot_loop/)"\n'
            'machines_snapshot_loop() { touch "$FLEET_DIR/async-waiting"; '
            'while [ ! -e "$FLEET_DIR/async-release" ]; do command sleep 0.01; done; '
@@ -462,7 +463,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         # assertion counts that refresh; startup only joins the initial read.
         'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
         + (' touch "$FLEET_DIR/join-started"\n' if controlled_async_refresh else '')
-        + ' while [ "$(python3 -c \'import json,os;print(sum(row["kind"]=="machines" and row.get("job_id")==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,open(os.environ["FIXTURE_CALLS"]))))\')" -lt "$((fixture_snapshot_reads_before_start + 2))" ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
+        + ' while [ "$(fixture_job_machine_reads)" -lt "$((fixture_reads_before_loop + 2))" ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
         'fi\n'
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
@@ -2684,8 +2685,8 @@ def test_campaign_inventory_stress_defaults_derive_actual_vm_profiles_and_withho
     assert result['admission'] == 'local-defaults-derived-native-guards-required'
 
     env = module.stress_default_environment(result, {})
-    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '160'
-    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '56'
+    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '1000'
+    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '300'
     assert env['CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION'] == '1'
     assert module.stress_default_environment(result, {'CLOUDBENCH_APP_MACHINE_CEILING': '1'})['CLOUDBENCH_APP_MACHINE_CEILING'] == '1'
     with pytest.raises(ValueError, match='unknown native baseline'):
@@ -3608,8 +3609,9 @@ def test_campaign_inventory_full_http_auth_deadline_and_owned_join(tmp_path, can
     env=dict(os.environ, PATH=str(tmp_path)+':'+os.environ['PATH'],FLY_API_TOKEN='fm2_fixture',FLY_FLAPS_BASE_URL='http://127.0.0.1:9')
     process=subprocess.Popen([sys.executable,str(ROOT/'scripts/cloudbench-campaign-machines.py'),'fixture','1'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     until=time.monotonic()+2
-    while not pidfile.exists() and process.poll() is None and time.monotonic()<until:time.sleep(.01)
-    assert pidfile.exists()
+    # The child creates the file, then writes the pid: wait for the content, not just the name.
+    while not (pidfile.exists() and pidfile.read_text().strip()) and process.poll() is None and time.monotonic()<until:time.sleep(.01)
+    assert pidfile.exists() and pidfile.read_text().strip()
     pid=int(pidfile.read_text());birth=Path('/proc',str(pid),'stat').read_text().split(') ',1)[1].split()[19]
     if cancel: process.terminate()
     stdout,stderr=process.communicate(timeout=4)

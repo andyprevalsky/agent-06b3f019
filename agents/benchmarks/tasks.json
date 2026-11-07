@@ -8063,7 +8063,8 @@
     "tags": [
       "browser",
       "payment",
-      "agentcard-lifecycle-sandbox"
+      "agentcard-lifecycle-sandbox",
+      "smoke"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -8164,7 +8165,7 @@
       "context_notes": "Local isolated stack only. The harness runs these tasks as the default admin benchmark user 1f85ff25-6e29-4c1b-8739-f917bd101a30 so credit checks use the admin unlimited path. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 (honored only when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces resolveAndIssuePurchaseCard onto chargeAndIssueCard instead of issueAdminCompanyCard, so stripeHold / payment_approval remain reachable. back-end/scripts/setup-benchmark-payment.ts seeds that same admin user on the isolated local DB with a Stripe test customer + default card, an active subscription, and the org-managed AgentCard integration. The admin no-force path keeps its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
-    "group": "daily",
+    "group": "pre-deploy",
     "min_steps": {
       "browser": 3
     }
@@ -8354,6 +8355,7 @@
   {
     "name": "agent-payment-setup-resume",
     "title": "Agent Payment Setup And Auto Resume",
+    "group": "pre-deploy",
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -8364,7 +8366,8 @@
       "browser",
       "payment",
       "setup",
-      "agentcard-lifecycle-sandbox"
+      "agentcard-lifecycle-sandbox",
+      "smoke"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -8477,6 +8480,7 @@
   {
     "name": "agent-payment-idempotent-abandonment",
     "title": "Agent Payment Idempotent Settlement",
+    "group": "pre-deploy",
     "prompt": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against {frontend_url}/test_payment. In each browser task, select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote; prepare the visible Rose Labs Test Payment checkout; independently request a one-time payment card for the same unchanged order; and report the card last four. The first browser agent must leave checkout unsubmitted. Wait for it to finish before invoking the second browser agent. The second browser agent must independently request the same card again, verify the last four matches the first result, then submit the visible checkout and report the order confirmation. Use only the visible checkout UI; do not navigate to source files or API endpoints. After the second browser agent finishes, call attempt_completion exactly once with the grounded results. Do not call send_message_to_user_execute_phase or any progress-message tool.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -8497,7 +8501,8 @@
       "payment",
       "idempotency",
       "settlement",
-      "agentcard-lifecycle-sandbox"
+      "agentcard-lifecycle-sandbox",
+      "smoke"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -8611,6 +8616,7 @@
   {
     "name": "agent-payment-abandonment",
     "title": "Agent Payment Abandonment Compensation",
+    "group": "pre-deploy",
     "prompt": "Use one browser agent to go to {frontend_url}/test_payment?benchmark=agentcard-abandonment. Select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Prepare the visible Rose Labs Test Payment checkout and request a one-time payment card for the exact order. Do not submit payment.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -8621,7 +8627,8 @@
       "browser",
       "payment",
       "compensation",
-      "agentcard-lifecycle-sandbox"
+      "agentcard-lifecycle-sandbox",
+      "smoke"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,

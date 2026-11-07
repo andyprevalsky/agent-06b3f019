@@ -35,6 +35,7 @@ export const BACKEND_EMITTED_TOOL_NAMES = [
   'query_blueprints',
   'read_memories',
   'read_message_history_with_person',
+  'report_bug',
   'request_user_approval',
   'request_user_assistance_for_authentication',
   'request_user_signup',

@@ -282,7 +282,7 @@ router.post(
         res.status(result.status ?? 500).json({ error: result.error });
         return;
       }
-      res.json({ success: true });
+      res.json(result);
     } catch (error) {
       handleRouteError(res, error, 'Failed to pause agent', { agent_id: req.params.id });
     }

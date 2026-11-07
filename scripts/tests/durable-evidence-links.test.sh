@@ -296,14 +296,27 @@ bash "$ROOT/scripts/tests/publish_evidence_links_browser_validation.test.sh" \
 bash "$ROOT/scripts/tests/publish_evidence_links_composite.test.sh" \
   || fail "publish_evidence_links composite projection checks failed"
 
-# 4) Gate must stay wired into /deploy structural suites (both docs + registry).
-DEPLOY="$ROOT/.claude/commands/deploy.md"
+# 4) Gate must stay wired into /deploy structural suites. The concise deploy.md
+# carries no gate list; the registry is what `scripts/deploy gates` executes
+# (run-deploy-structural-gates.py), so assert each suite is registered with its
+# exact command and that the script exists.
 RUNNER="$ROOT/scripts/run-deploy-structural-gates.py"
-grep -Fq 'bash scripts/tests/durable-evidence-links.test.sh' "$DEPLOY" \
-  || fail "/deploy must list durable-evidence-links.test.sh"
-grep -Fq 'durable-evidence-links' "$RUNNER" \
-  || fail "run-deploy-structural-gates.py must register durable-evidence-links"
-grep -Fq 'publish-evidence-browser-validation' "$RUNNER" \
-  || fail "run-deploy-structural-gates.py must register publish-evidence-browser-validation"
+python3 - "$RUNNER" <<'PY' || fail "run-deploy-structural-gates.py must register the durable evidence suites with their exact commands"
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+root = Path(sys.argv[1]).resolve().parents[1]
+expected = {
+    "durable-evidence-links": "scripts/tests/durable-evidence-links.test.sh",
+    "publish-evidence-browser-validation": "scripts/tests/publish_evidence_links_browser_validation.test.sh",
+    "publish-evidence-composite-projection": "scripts/tests/publish_evidence_links_composite.test.sh",
+}
+for name, script in expected.items():
+    pattern = r'Gate\(\s*"%s",\s*\("bash", "%s"\)' % (re.escape(name), re.escape(script))
+    assert len(re.findall(pattern, source)) == 1, f"{name} must be registered exactly once with {script}"
+    assert (root / script).is_file(), script
+PY
 
 echo "All durable-evidence-links checks passed."

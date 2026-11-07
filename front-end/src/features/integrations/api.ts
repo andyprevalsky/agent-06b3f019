@@ -4,12 +4,15 @@ import { getStoredSession } from '@/lib/supabase';
 
 import { API_BASE_URL, API_BASE_WITH_PATH } from './config';
 import type {
+  ComputeAccount,
   ConnectedIntegration,
   GmailResyncResult,
   PlaidItem,
   PlaidLinkSuccessMetadata,
   PlaidLinkTokenResponse,
 } from './types';
+
+export type { ComputeAccount } from './types';
 
 export function getAuthHeaders(): Record<string, string> {
   const session = getStoredSession();
@@ -282,16 +285,6 @@ export async function completePlaidUpdateModeApi(itemId: string): Promise<{ item
 // behind them are minted and replaced automatically, so surfacing them would
 // invite users to act on something the system already heals.
 
-export interface ComputeAccount {
-  provider: string;
-  accountId: string;
-  accountEmail: string | null;
-  /** "connected" | "needs_reconnect" -- the only user-actionable state. */
-  state: string;
-  lastErrorReason: string | null;
-  connectedAt: string;
-}
-
 export interface ConnectSessionHandle {
   connectId: string;
   provider: string;
@@ -320,6 +313,12 @@ export interface ConnectPollResult {
   accountEmail?: string;
   accountId?: string;
   reason?: string;
+  /**
+   * Relying party (e.g. openai.com) that asked for a passkey Rose does not hold.
+   * The cloud browser rejects that prompt instantly with no dialog, so the modal
+   * has to say why "Use passkey" did nothing.
+   */
+  passkeyUnavailableFor?: string;
 }
 
 export async function fetchComputeAccounts(provider?: string): Promise<ComputeAccount[]> {

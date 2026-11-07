@@ -34,7 +34,7 @@ let prisma,
   inspectMode = 'exact',
   failGoto = true,
   pendingGoto,
-  onPendingGoto;
+  onGotoBlocked;
 const nativeIds = new Set(),
   receipts = [],
   releases = [];
@@ -92,7 +92,7 @@ const browser = (id) => {
           gotocalls++;
           if (!failGoto || !failGotoBeforeCommit) url = next;
           if (pendingGoto) {
-            onPendingGoto?.();
+            onGotoBlocked?.();
             await pendingGoto;
           }
           if (failGoto) {
@@ -533,28 +533,32 @@ async function run() {
   failGoto = false;
   let release;
   pendingGoto = new Promise((r) => (release = r));
-  // The hydrating phase is written before target provenance. Wait for the
-  // actual held RPC so the owner cannot overwrite expiry during test setup.
-  const enteredPromise = new Promise((r) => (onPendingGoto = r));
+  const enteredPromise = new Promise((r) => (entered = r));
+  onGotoBlocked = entered;
   const work = resumeBrowserSession(active.id);
-  await enteredPromise;
-  onPendingGoto = undefined;
-  const held = await prisma.toolSideEffect.findUniqueOrThrow({
-    where: { operationKey: key(active.id) },
-  });
-  assert.equal(held.response, null);
-  assert.equal(held.request.phase, 'hydrating');
-  assert(held.request.hydrationTargets?.length > 0, 'Held goto must have durable provenance');
-  const before = creates; // expiry is fixture setup; active owner still has its original immutable request.
-  await prisma.toolSideEffect.update({
-    where: { id: held.id },
-    data: { request: { ...held.request, expiresAt: new Date(0).toISOString() } },
-  });
-  await assert.rejects(resumeBrowserSession(active.id), /hydration outcome remains unknown/);
-  assert.equal(creates, before);
-  release();
-  pendingGoto = undefined;
-  await work;
+  try {
+    // Navigation is suspended only after hydration target provenance commits.
+    // Expiring the earlier phase write races that later provenance write.
+    await enteredPromise;
+    const held = await prisma.toolSideEffect.findUniqueOrThrow({
+      where: { operationKey: key(active.id) },
+    });
+    assert.equal(held.response, null);
+    assert.equal(held.request.phase, 'hydrating');
+    assert(held.request.hydrationTargets?.length > 0, 'Held goto must have durable provenance');
+    const before = creates; // The active owner retains its original immutable request.
+    await prisma.toolSideEffect.update({
+      where: { id: held.id },
+      data: { request: { ...held.request, expiresAt: new Date(0).toISOString() } },
+    });
+    await assert.rejects(resumeBrowserSession(active.id), /hydration outcome remains unknown/);
+    assert.equal(creates, before);
+  } finally {
+    release();
+    pendingGoto = undefined;
+    onGotoBlocked = undefined;
+    await work;
+  }
   receipts.push({ kind: 'no-ack-inflight', passed: true }); // Carried state is outside the encrypted checkpoint receipt: do not acknowledge it.
   const carried = { cookies: [], origins: [{ origin: 'https://carry.invalid', localStorage: [] }] };
   const carryPending = await fixture();

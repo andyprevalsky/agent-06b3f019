@@ -66,6 +66,15 @@ import {
 } from './code-agent-settings-smoke.support';
 import { config } from 'dotenv';
 import { assertSmokeHandoff, handoffSmokeGoal } from './code-agent-handoff-smoke.case';
+import {
+  ClaudeSmokeUserActionSkip,
+  SANDBOX_PROOF,
+  SMOKE_SKIP_BANNER,
+  type TestResult,
+  resultLine,
+  runTest,
+  summarizeResults,
+} from './claude-code-smoke-outcome.support';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
@@ -136,13 +145,6 @@ interface CapturedCall {
 
 // ==================== TEST INFRASTRUCTURE ====================
 
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-  duration: number;
-}
-
 interface TestContext {
   captureAvailable: boolean;
 }
@@ -177,21 +179,6 @@ function apiKeyHeaders(userId?: string): Record<string, string> {
   const h: Record<string, string> = { 'X-API-Key': API_KEY };
   if (userId) h['X-User-Id'] = userId;
   return h;
-}
-
-async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
-  const start = Date.now();
-  try {
-    await fn();
-    return { name, passed: true, duration: Date.now() - start };
-  } catch (error) {
-    return {
-      name,
-      passed: false,
-      error: error instanceof Error ? error.message : String(error),
-      duration: Date.now() - start,
-    };
-  }
 }
 
 function assertStatus(actual: number, expected: number, data: unknown): void {
@@ -1453,17 +1440,18 @@ async function claudeSmokeFromParent(parent: SmokeParent) {
         : typeof res.data === 'string'
           ? res.data
           : JSON.stringify(res.data ?? {});
+    // Only the user can fix these: a loud SKIP with its evidence, never a PASS.
     if (error.includes(CODE_AGENT_CREDENTIALS_UNAVAILABLE)) {
-      console.log(
-        '    [skip] Claude E2B smoke could not start: code-agent credentials unavailable (credits/cooldown/auth)'
+      throw new ClaudeSmokeUserActionSkip(
+        'credential',
+        `session create ${res.status}: code-agent credentials unavailable (credits/cooldown/auth): ${error.slice(0, 200)}`
       );
-      return;
     }
     if (isClaudeSmokeFundingFailure(error)) {
-      console.log(
-        `    [skip] Claude E2B smoke could not start: external funding/billing block (${res.status}); signal: ${error.slice(0, 200)}`
+      throw new ClaudeSmokeUserActionSkip(
+        'billing',
+        `session create ${res.status}: external funding/billing block: ${error.slice(0, 200)}`
       );
-      return;
     }
   }
   assertStatus(res.status, 200, res.data);
@@ -1482,11 +1470,14 @@ async function claudeSmokeFromParent(parent: SmokeParent) {
   let wsConnected = false;
   let wsError: string | null = null;
 
-  // eslint-disable-next-line no-control-regex
-  const ANSI_CURSOR_FWD = /\x1b\[\d*C/g;
-  const ANSI_OTHER =
-    // eslint-disable-next-line no-control-regex
-    /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][A-Z0-9]|\x1b\[[?]?[0-9;]*[hl]/g;
+  // ANSI escape (ESC) and terminator (BEL) built from char codes, so no regex literal holds a control char.
+  const ESC = String.fromCharCode(0x1b);
+  const BEL = String.fromCharCode(0x07);
+  const ANSI_CURSOR_FWD = new RegExp(`${ESC}\\[\\d*C`, 'g');
+  const ANSI_OTHER = new RegExp(
+    `${ESC}\\[[0-9;]*[a-zA-Z]|${ESC}\\][^${BEL}]*${BEL}|${ESC}[()][A-Z0-9]|${ESC}\\[[?]?[0-9;]*[hl]`,
+    'g'
+  );
 
   const ws = new (await import('ws')).default(body.ws_url);
 
@@ -1553,25 +1544,24 @@ async function claudeSmokeFromParent(parent: SmokeParent) {
     assert(wsConnected, 'WebSocket never connected');
     assert(!wsError, `WebSocket error: ${wsError}`);
     if (isClaudeSmokeCredentialFailure(finalOutput)) {
-      console.log(
-        '    [skip] Claude E2B smoke reached the SDK server, but the configured Claude credential is invalid (401)'
+      throw new ClaudeSmokeUserActionSkip(
+        'credential',
+        `sandbox ${body.sandbox_id} reached the SDK server, but the configured Claude credential is invalid (401): ${finalOutput.slice(-200)}`
       );
-      return;
     }
-    // Same credential-health class as Anthropic WARN: exhausted API / OpenRouter
-    // credits are not a harness regression. Subscription/OAuth tokens are preferred;
-    // when only a depleted funded path is available, skip rather than fail /deploy
-    // (and do not burn the 240s timeout on a known 402).
+    // Exhausted API / OpenRouter credits are a billing block only the user can fix:
+    // a loud SKIP that never counts as a pass (and does not burn the 240s timeout on a known 402).
     if (isClaudeSmokeFundingFailure(finalOutput)) {
-      console.log(
-        '    [skip] Claude E2B smoke reached the SDK server, but Claude/OpenRouter credits are exhausted'
+      throw new ClaudeSmokeUserActionSkip(
+        'billing',
+        `sandbox ${body.sandbox_id} reached the SDK server, but Claude/OpenRouter credits are exhausted: ${finalOutput.slice(-200)}`
       );
-      return;
     }
     assert(
       finalOutput.includes('CLAUDE_E2B_DONE'),
       `Claude Code output does not contain CLAUDE_E2B_DONE: ${finalOutput.slice(-300)}`
     );
+    console.log(`    ↳ ${SANDBOX_PROOF} ${body.sandbox_id}`);
     // What the run really served: the session's own effective settings.
     const proof = assertSmokeSettings(
       'claude',
@@ -1861,8 +1851,7 @@ async function runAll() {
   const parallelResults = await runPool(parallelTests, CASE_CONCURRENCY);
 
   for (const r of parallelResults) {
-    const icon = r.passed ? '  PASS' : '  FAIL';
-    console.log(`${icon}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`);
+    console.log(resultLine(r));
   }
 
   // Phase 3: Sequential boundary capture tests
@@ -1904,10 +1893,7 @@ async function runAll() {
   for (const test of sequentialTests) {
     const result = await runTest(test.name, test.fn);
     sequentialResults.push(result);
-    const icon = result.passed ? '  PASS' : '  FAIL';
-    console.log(
-      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-    );
+    console.log(resultLine(result));
   }
 
   // Phase 4: Smoke tests (real E2B sandbox)
@@ -1923,10 +1909,7 @@ async function runAll() {
     for (const test of smokeTests) {
       const result = await runTest(test.name, test.fn);
       smokeResults.push(result);
-      const icon = result.passed ? '  PASS' : '  FAIL';
-      console.log(
-        `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-      );
+      console.log(resultLine(result));
     }
   } else {
     console.log('\nSkipping Claude Code smoke tests (BLACKBOX_SMOKE!=1)');
@@ -1934,20 +1917,30 @@ async function runAll() {
 
   // Summary
   const allResults = [...parallelResults, ...sequentialResults, ...smokeResults];
-  const passed = allResults.filter((r) => r.passed).length;
-  const failed = allResults.filter((r) => !r.passed).length;
+  const summary = summarizeResults(allResults);
 
   console.log('\n' + '='.repeat(50));
-  console.log(`\nResults: ${passed} passed, ${failed} failed, ${allResults.length} total`);
+  console.log(
+    `\nResults: ${summary.passed} passed, ${summary.failed} failed, ${summary.skipped} skipped, ${allResults.length} total`
+  );
 
-  if (failed > 0) {
+  if (summary.failed > 0) {
     console.log('\nFAILURES:');
-    allResults.filter((r) => !r.passed).forEach((r) => console.log(`   ${r.name}: ${r.error}`));
-    process.exit(1);
+    allResults
+      .filter((r) => !r.passed && r.skipped === undefined)
+      .forEach((r) => console.log(`   ${r.name}: ${r.error}`));
   }
-
-  console.log('\nALL CLAUDE-CODE BLACK-BOX TESTS PASSED\n');
-  process.exit(0);
+  // A credential/billing block only the user can fix is a loud SKIP, never a pass.
+  if (summary.skipped > 0) {
+    console.log(`\n${SMOKE_SKIP_BANNER}`);
+    allResults
+      .filter((r) => r.skipped !== undefined)
+      .forEach((r) => console.log(`   ${r.name}: ${r.skipped?.kind}: ${r.skipped?.evidence}`));
+  }
+  if (summary.exitCode === 0) {
+    console.log('\nALL CLAUDE-CODE BLACK-BOX TESTS PASSED\n');
+  }
+  process.exit(summary.exitCode);
 }
 
 runAll().catch((error) => {

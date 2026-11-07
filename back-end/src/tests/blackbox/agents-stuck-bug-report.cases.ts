@@ -17,7 +17,9 @@ import {
   trackedAgentIds,
   withTransientDbRetry,
 } from './agents-blackbox-harness';
+import { reportAgentBugFromAgent } from '../../domains/agents/agentBugReportService';
 import { reportAgentBug, type ReportBugLaunchArgs } from '../../domains/agents/bugReportService';
+import { agentSelfBugReportKey } from '../../domains/agents/repoAgentSelfBugReports';
 import {
   AGENT_BUG_REPORT_OPERATION_TYPE,
   agentBugReportKey,
@@ -235,6 +237,59 @@ test('stuck-agent reports skip agents that already have a manual Report Bug', as
     assert(fake.calls.length === 0, 'a manually reported agent must be skipped');
   } finally {
     await dropClaims([agentId]);
+  }
+});
+
+test('report_bug files one report per root run against the real claim table', async () => {
+  const now = caseClock(40);
+  const agentId = await seedAgent(ANDY_ADMIN_USER_ID, 'self-report', {
+    createdAt: new Date(now.getTime() - 30 * HOUR_MS),
+  });
+  const fake = fakeLauncher({ failTimes: 1, delayMs: 50 });
+  const deps = { launch: fake.launch, now: () => now, isProduction: () => true };
+  const selfClaim = () =>
+    prisma.toolSideEffect.findUnique({ where: { operationKey: agentSelfBugReportKey(agentId) } });
+  try {
+    const first = await reportAgentBugFromAgent(ANDY_ADMIN_USER_ID, agentId, 'grep 500', deps)
+      .then(() => 'launched')
+      .catch(() => 'failed');
+    assert(first === 'failed' && (await selfClaim())?.status === 'FAILED', 'failure kept');
+    // Parallel retries with other wording re-send the frozen first request: one key.
+    const results = await Promise.all([
+      reportAgentBugFromAgent(ANDY_ADMIN_USER_ID, agentId, 'grep 500', deps),
+      reportAgentBugFromAgent(ANDY_ADMIN_USER_ID, agentId, 'web_fetch hung', deps),
+    ]);
+    const keys = new Set(fake.calls.map((call) => call.idempotencyKey));
+    assert(keys.size === 1 && keys.has(`rose-agent-report-bug-${agentId}`), [...keys].join());
+    assert(
+      fake.calls.every((call) => call.promptText === fake.calls[0].promptText) &&
+        fake.calls[0].promptText ===
+          '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful\n' +
+            `/rca the following bug for agent with ID: [${agentId}]\n` +
+            'Reported by the agent itself with its report_bug tool:\ngrep 500' &&
+        fake.calls[0].name === '--ai-- grep 500' &&
+        results[1].already_reported,
+      `every launch re-sends the first frozen request, got ${JSON.stringify(fake.calls)}`
+    );
+    const claim = await selfClaim();
+    const launches = fake.calls.length;
+    const again = await reportAgentBugFromAgent(ANDY_ADMIN_USER_ID, agentId, 'third', deps);
+    assert(claim?.status === 'SUCCEEDED' && again.run_id === claim.externalId, 'filed run');
+    assert(again.already_reported && fake.calls.length === launches, 'never launches again');
+
+    const marked = await claimOf(agentId);
+    const source = (marked?.request as { source?: string } | null)?.source;
+    assert(marked?.status === 'SUCCEEDED' && source === 'agent', `marked ${source}`);
+    const stuck = fakeLauncher();
+    await runStuckAgentBugReports(
+      { now, candidateAgentIds: [agentId], firstCreatedAt: EPOCH },
+      stuck
+    );
+    assert(stuck.calls.length === 0, 'the 24h job skips an agent that reported itself');
+  } finally {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: { in: [agentBugReportKey(agentId), agentSelfBugReportKey(agentId)] } },
+    });
   }
 });
 

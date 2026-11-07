@@ -8,7 +8,7 @@ same kind (``next`` prints it) and the entry stays in the ledger as history;
 ``--reset`` is for a new deploy, not for this case.
 
 Two versioned dispositions close an open cycle ``clean`` with evidence and a
-``TEST_REPORT`` row (deploy.md Step 9a): ``skip`` for confirmed CodeRabbit
+``TEST_REPORT`` row (deploy.md Skippable tests: CodeRabbit): ``skip`` for confirmed CodeRabbit
 usage exhaustion and ``override`` for the standing three-round deferral. Both
 refuse without the evidence and append ``deploy-review-dispositions.jsonl``.
 """
@@ -51,7 +51,7 @@ PUBLICATION_REVIEW = re.compile(
 )
 FINDINGS_COUNT = re.compile(r"actionable comments posted:\s*(\d+)", re.IGNORECASE)
 # Only these words prove usage exhaustion; "Review rate limited" / "Action not
-# completed" alone do not (deploy.md Step 9a).
+# completed" alone do not (deploy.md Skippable tests: CodeRabbit).
 USAGE_EXHAUSTED = re.compile(r"review limit reached|usage spending cap|spending cap", re.IGNORECASE)
 DEFERRED_REPLY = re.compile(r"^\s*\[(DEFERRED|FIXED)\]", re.IGNORECASE)
 ANSWERED_REPLY = re.compile(r"^\s*\[(DEFERRED|FIXED|IGNORED|NOTED)\]", re.IGNORECASE)
@@ -130,7 +130,8 @@ def next_cycle(entries: list[object]) -> dict[str, object]:
     consumed = budget_cycles(entries)
     if len(consumed) >= MAX_REVIEW_CYCLES:
         raise ReviewCycleError(
-            f"review cycle cap reached ({MAX_REVIEW_CYCLES}); stop /deploy as review-unstable"
+            f"review cycle cap reached ({MAX_REVIEW_CYCLES}); defer the remaining non-security findings with "
+            "`override` and merge, or ask the user how a security or prod-impacting fix is reviewed"
         )
     position = len(consumed) + 1
     replaces = None
@@ -348,7 +349,7 @@ def require_mergeable(path: Path, *, head: str) -> dict[str, object]:
 
 
 # ---------------------------------------------------------------------------
-# Step 9a dispositions: evidence-bound ``skip`` and ``override``
+# Quota-skip and override dispositions: evidence-bound ``skip`` and ``override``
 # ---------------------------------------------------------------------------
 
 
@@ -662,7 +663,7 @@ def skip_cycle(
     if comment is None:
         raise ReviewCycleError(
             f"no CodeRabbit comment names {head[:12]} with 'Review limit reached'/'usage spending cap'; "
-            "a rate-limited check or 'Action not completed' alone is not usage exhaustion (deploy.md Step 9a)"
+            "a rate-limited check or 'Action not completed' alone is not usage exhaustion (deploy.md Skippable tests: CodeRabbit)"
         )
     check_runs = evidence["check_runs"]
     assert isinstance(check_runs, list)
@@ -852,7 +853,7 @@ def parse_args() -> argparse.Namespace:
         )
         sub.add_argument("--receipt", type=Path, help=f"receipt ledger (default: <state dir>/{RECEIPTS_NAME})")
 
-    skip = subparsers.add_parser("skip", help="Step 9a: close clean under confirmed CodeRabbit usage exhaustion")
+    skip = subparsers.add_parser("skip", help="close clean under confirmed CodeRabbit usage exhaustion")
     add_evidence_arguments(skip)
     skip.add_argument("--reason", choices=sorted(SKIP_REASONS), required=True)
 

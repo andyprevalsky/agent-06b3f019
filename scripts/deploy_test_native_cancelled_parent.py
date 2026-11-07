@@ -22,6 +22,11 @@ def cancelled_parent_admission(receipt, proof, adapter, root, parents, participa
     for name, expected in REVIEWED_SOURCES.items():
         original = subprocess.check_output(['git', '-C', str(root), 'show', head + ':' + name])
         need(hashlib.sha256(original).hexdigest() == expected, 'cancelled parent producer changed')
+    # Preserve historical proof closure while validating source bytes at its original commit.
+    for filename in proof['files']:
+        path = Path(filename)
+        if path.is_relative_to(root / 'scripts'):
+            bound(path, historical_head=head)
     request = document(Path(receipt['log']).parent / 'request.json')
     summary = document(Path(proof['campaign']) / 'summary.json')
     width = summary['concurrency']

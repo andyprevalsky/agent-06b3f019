@@ -70,6 +70,12 @@ export function handleUpdateAgent(
   setAgent((prev) => {
     if (!prev || (updated.agentId && updated.agentId !== prev.agent_id)) return prev;
     if (predictionOnly) return applyProgressEstimateUpdate(prev, updated);
+    if (
+      updated.userControlRevision !== undefined &&
+      prev.user_control_revision !== undefined &&
+      updated.userControlRevision < prev.user_control_revision
+    )
+      return prev;
     if (updated.updatedAt && Date.parse(updated.updatedAt) < Date.parse(prev.updated_at))
       return prev;
     if (
@@ -97,6 +103,7 @@ export function handleUpdateAgent(
         updated.taskId ?? prev.task_id,
       ),
       status: updated.status ?? prev.status,
+      user_control_revision: updated.userControlRevision ?? prev.user_control_revision,
       status_message: updated.statusMessage ?? prev.status_message,
       model: updated.model ?? prev.model,
       token_count: updated.tokenCount ?? prev.token_count,

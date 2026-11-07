@@ -547,7 +547,8 @@ def route_cache_floor(task_name: str, routes: list[str]) -> Optional[float]:
     )
 
 
-CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV = "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY"
+# DEPRECATED_deploy.md L1831: Claude Code task correctness stays hard-gated, but its repeatable prompt-cache
+# telemetry floor is warn-only wherever the benchmark runs (local or cloud) and every miss is a risk.
 CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS = {"claude-code-agent"}
 GATE_FIXTURE_TASK_MODES = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
@@ -2629,10 +2630,21 @@ async def _preflight_message_person_bridge(base_url: str) -> None:
         )
 
 
+# deploy.md Step 13c's identity rules travel with the task's own fail-closed path, so an agent
+# that hits it needs no other document and never asks the user for credentials.
 PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
-    "Provision it once with: cd back-end && STRIPE_SECRET_KEY=<production sk_live_ key> "
-    "BENCHMARK_AGENTCARD_CARDHOLDER_ID=<production cardholder id> "
-    "npx tsx scripts/setup-benchmark-payment.ts --live"
+    "Provision the non-admin production identity once. Every credential it needs is already in "
+    "back-end/.env; do not ask the user for any of them. Run (DIRECT_URL: the 6543 pooler fails "
+    "with \"Can't reach database server\"):\n"
+    "  cd back-end && set -a && . ./.env && set +a && \\\n"
+    "    DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
+    "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
+    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} \\\n"
+    "    --agentcard-cardholder-id \"$DEDICATED_AGENTCARD_CARDHOLDER_ID\"\n"
+    "Guardrails: bind an EXISTING dedicated benchmark cardholder only (never Andy's or another "
+    "actor's); never create an identity automatically or bypass pending KYC; never enter a card "
+    "number. When the live customer has no saved card the script prints a one-time hosted Stripe "
+    "Checkout link: a human saves the live card there once, then re-run the command."
 )
 
 
@@ -2671,9 +2683,12 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     gap = _production_payment_identity_gap(response.json())
     if gap is None:
         return
-    raise RuntimeError(
-        f"Production payment identity {user_id} is not provisioned: {gap}. {PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
+    message = (
+        f"Production payment identity {user_id} is not provisioned: {gap}.\n"
+        f"{PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
     )
+    print(f"\n    ⛔ {message}")
+    raise RuntimeError(message)
 
 
 async def _preflight_close_purchase_reuse_gate(base_url: str) -> None:
@@ -12671,6 +12686,14 @@ async def _call_declared_agentic_llm_judge(
         gpt_token_pool_id=token_data.get("poolTokenId"),
         fast_mode_cache_enabled=False,
     )
+    # The preflight plan can still empty before the spawn leases (or the CLI hits a usage
+    # limit mid-judge). Every subscription and funded path exhausted is a compute-token
+    # SKIP (Andy 2026-10-25), never a no-verdict 0.0 task FAIL.
+    if result.get("failure_kind") == "no_credentials" or result.get("usage_limit"):
+        raise ComputeTokenUnavailable(
+            "Codex compute token unavailable for agentic benchmark judge: "
+            "the spawn found every subscription and funded credential exhausted"
+        )
 
     score, reasoning = await _parse_agentic_judge_verdict(result)
     usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
@@ -17255,33 +17278,30 @@ def cache_ratchet_failures(
     return failures
 
 
-def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
-    """Fail the benchmark when prompt-cache share regresses or its telemetry is absent."""
+def enforce_cache_ratchets(task_results: list[TaskResult]) -> list[tuple[str, str, float, float]]:
+    """Fail the benchmark when prompt-cache share regresses or its telemetry is absent.
+
+    Claude Code's floor miss is built-in warn-only: it is reported as a RISK and returned, never a
+    failure, whatever the environment. Every other task's miss exits 1.
+    """
     failures = cache_ratchet_failures(task_results)
-    if not failures:
-        return
-    warn_only_enabled = os.environ.get(CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
     hard_failures = []
     warn_only_failures = []
     for failure in failures:
         name, _agent_id, _hit_pct, _floor = failure
-        if warn_only_enabled and name in CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS:
+        if name in CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS:
             warn_only_failures.append(failure)
         else:
             hard_failures.append(failure)
 
     if warn_only_failures:
-        print("\n  ⚠ CACHE RATCHET WARN-ONLY (deploy-approved Claude Code cache telemetry floor):")
-        for name, _agent_id, hit_pct, floor in warn_only_failures:
-            print(f"    - {name}: {hit_pct}% < {floor}% ratchet")
+        print("\n  ⚠ RISK: CACHE RATCHET WARN-ONLY (deploy-approved Claude Code cache telemetry floor missed):")
+        for name, agent_id, hit_pct, floor in warn_only_failures:
+            print(f"    - {name}: {hit_pct}% < {floor}% ratchet (not a pass of the floor; task outcome unchanged)")
+            print(f"      cd agents && source venv/bin/activate && python benchmarks/agent_cache.py {agent_id}")
 
     if not hard_failures:
-        return
+        return warn_only_failures
 
     print("\n  ❌ CACHE RATCHET FAILED (per-task prompt-cache share floor):")
     for name, _agent_id, hit_pct, floor in hard_failures:
@@ -17508,6 +17528,43 @@ def _parallel_task_phases(
     exclusive = [task for task in tasks if is_exclusive(task)]
     parallel = [task for task in tasks if not is_exclusive(task)]
     return [("exclusive", exclusive), ("parallel", parallel)]
+
+
+def _refuse_queued_after_interrupt(
+    queued: list[BenchmarkTask], start: int, results: list[TaskResult], never_admitted: list[TaskResult]
+) -> None:
+    """Stop a serial batch once its coordinator was cancelled by the owner.
+
+    ``run_single_task`` returns a CANCELLED row (after collecting evidence)
+    instead of re-raising, so a loop awaiting it directly sees an ordinary
+    result. The cancellation request stays pending on the coordinator task
+    (``cancelling()``); without this check a SIGINTed run admits every queued
+    task (2026-11-05: three paid AgentCard tasks ran ~24 minutes after the
+    owner's interrupt). Each queued occurrence keeps its nonadmission proof.
+    """
+    current = asyncio.current_task()
+    if current is None or not current.cancelling():
+        return
+    for position in range(start, len(queued)):
+        refused = TaskResult(
+            name=queued[position].name,
+            passed=False,
+            agent_id="",
+            status="CANCELLED",
+            benchmark_status="CANCELLED",
+            progress_score=0,
+            duration_seconds=0,
+            cost_cents=0,
+            message_count=0,
+            failure_reason="Benchmark interrupted before task produced logs: owner interrupt before admission",
+        )
+        refused.graded_root_creation_outcome = "not_started"
+        refused.stop_metadata = {
+            "runner": "benchmark_coordinator", "admission": "not_started", "occurrence_index": position,
+        }
+        never_admitted.append(refused)
+        results.append(refused)
+    raise asyncio.CancelledError("benchmark owner interrupt; queued tasks were not admitted")
 
 
 async def main_async(args):
@@ -17999,7 +18056,7 @@ async def main_async(args):
             pending_results: dict[asyncio.Task, BenchmarkTask] = {}
             pending: set[asyncio.Task] = set()
             try:
-                for task in exclusive_db_tasks:
+                for index, task in enumerate(exclusive_db_tasks):
                     print(f"\n  Running exclusive task serially: {task.name}")
                     result = await _run_with_sandbox_payment_lock(
                         task,
@@ -18011,6 +18068,9 @@ async def main_async(args):
                     run.task_results.append(result)
                     _evaluated_task_results.pop(asyncio.current_task(), None)
                     _emit_report()
+                    _refuse_queued_after_interrupt(
+                        [*exclusive_db_tasks, *parallel_batch], index + 1, run.task_results, _never_admitted_results
+                    )
 
                 task_runners = _parallel_task_runners(
                     parallel_batch,
@@ -18084,7 +18144,7 @@ async def main_async(args):
                         run.task_results.append(cancelled_result)
                 raise
         else:
-            for task in tasks:
+            for index, task in enumerate(tasks):
                 result = await _run_with_sandbox_payment_lock(
                     task,
                     lambda: _run_reported_task(
@@ -18095,6 +18155,7 @@ async def main_async(args):
                 run.task_results.append(result)
                 _evaluated_task_results.pop(asyncio.current_task(), None)
                 _emit_report()
+                _refuse_queued_after_interrupt(tasks, index + 1, run.task_results, _never_admitted_results)
     finally:
         _report_ticker_task.cancel()
         await asyncio.gather(_report_ticker_task, return_exceptions=True)

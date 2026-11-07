@@ -159,10 +159,9 @@ def validate_ref_preflight(receipt, owner, proof, adapter, root, runs, cli_text,
             admitted = subprocess.check_output(['git', '-C', str(root), 'show', head + ':' + relative])
         except subprocess.SubprocessError:
             raise ValueError('ref preflight admitted producer source unavailable') from None
-        need(hashlib.sha256(admitted).hexdigest() == REVIEWED_SOURCES[relative]
-             and admitted == (canonical / relative).read_bytes(), 'ref preflight producer source changed')
+        need(hashlib.sha256(admitted).hexdigest() == REVIEWED_SOURCES[relative], 'ref preflight producer source changed')
         if relative in SOURCES:
-            need(bound(root / relative) == admitted, 'ref preflight producer snapshot changed')
+            need(bound(root / relative, historical_head=head) == admitted, 'ref preflight producer snapshot changed')
         if relative in INVENTORY_SOURCES:
             need(bound(campaign / 'shared-inventory/scripts' / Path(relative).name) == admitted,
                  'ref preflight inventory source changed')

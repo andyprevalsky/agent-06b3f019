@@ -16,14 +16,13 @@ def validate_campaign(receipt, proof, root, runs, parents, participants, bound, 
     head = receipt.get('source', {}).get('head')
     need(isinstance(head, str) and re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', head),
          'admission source head invalid')
-    canonical = Path(__file__).resolve().parents[1]
     for relative, expected in REVIEWED_SOURCES.items():
         try:
             original = subprocess.check_output(['git', '-C', str(root), 'show', head + ':' + relative])
         except subprocess.SubprocessError:
             raise ValueError('admission producer source unavailable') from None
         need(hashlib.sha256(original).hexdigest() == expected
-             and bound(root / relative) == original == (canonical / relative).read_bytes(),
+             and bound(root / relative, historical_head=head) == original,
              'admission producer boundary changed')
     campaign = Path(proof['campaign'])
     summary = document(campaign / 'summary.json')

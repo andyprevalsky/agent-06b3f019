@@ -310,3 +310,59 @@ test('GET /tree?busId= — FE tree nodes carry task_path', async () => {
     await deleteTree(tree);
   }
 });
+
+test('user control revision orders pause/resume independently of unrelated updates', async () => {
+  const session = await createAnonymousSession('user-control-revision');
+  const userId = session.user.id;
+  const agentId = await createWorkflowAgent(userId, 'Pause and resume ordering');
+  const route = `${BASE_URL}/api/agents/${agentId}`;
+  const get = async () => {
+    const response = await request(route, { headers: apiKeyHeaders(userId) });
+    assertStatus(response.status, 200, response.data);
+    return (response.data as { agent: { user_control_revision: number; status: string } }).agent;
+  };
+  try {
+    const baseline = (await get()).user_control_revision;
+    assert(typeof baseline === 'number', 'agent detail must expose durable user control revision');
+    const pause = await request(`${route}/pause`, {
+      method: 'POST',
+      headers: apiKeyHeaders(userId),
+    });
+    assertStatus(pause.status, 200, pause.data);
+    const paused = (pause.data as { user_control_revision: number }).user_control_revision;
+    assert(paused > baseline, 'accepted pause must acknowledge its locked revision');
+    assert(
+      (await get()).user_control_revision === paused,
+      'detail must match pause acknowledgment'
+    );
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { title: 'Unrelated title update' },
+    });
+    assert(
+      (await get()).user_control_revision === paused,
+      'unrelated writes must preserve control ordering'
+    );
+    const resume = await request(`${route}/resume`, {
+      method: 'POST',
+      headers: apiKeyHeaders(userId),
+    });
+    assertStatus(resume.status, 200, resume.data);
+    const resumed = await get();
+    assert(
+      resumed.status === 'ACTIVE' && resumed.user_control_revision > paused,
+      'external resume must outrank pause even if the client missed PAUSED'
+    );
+    const list = await request(`${BASE_URL}/api/agents`, { headers: apiKeyHeaders(userId) });
+    assertStatus(list.status, 200, list.data);
+    const row = (
+      list.data as { agents: Array<{ agent_id: string; user_control_revision: number }> }
+    ).agents.find((a) => a.agent_id === agentId);
+    assert(
+      row?.user_control_revision === resumed.user_control_revision,
+      'sidebar must carry the same durable revision'
+    );
+  } finally {
+    await deleteTestAgent(agentId, userId);
+  }
+});

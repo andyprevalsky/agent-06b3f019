@@ -193,6 +193,80 @@ export async function testLateLlmArtifactIndexesOnlyItself(
 }
 
 /**
+ * An instant compared with `pg_stat_activity.xact_start`, read from the
+ * database's own clock as text. `xact_start` has microsecond resolution; a JS
+ * `Date` (and any Date Prisma returns) truncates to the millisecond, so a
+ * transaction begun within the same millisecond that `new Date()` reads compares
+ * as newer than "now" and the observer misses a transaction it owns (31-34% of
+ * positive controls on a warm local connection). Text keeps the microseconds
+ * and takes both sides of the comparison from one clock.
+ */
+type DatabaseInstant = string;
+
+async function databaseInstant(): Promise<DatabaseInstant> {
+  const [row] = await prisma.$queryRaw<Array<{ instant: string }>>`
+    SELECT clock_timestamp()::text AS instant
+  `;
+  return row.instant;
+}
+
+function archiveDatabaseOwner(): string {
+  const databaseOwner = process.env.BLACKBOX_TEST_DATABASE_OWNER;
+  assert(databaseOwner, 'the native runner must assign the archive database owner');
+  return databaseOwner;
+}
+
+/** Backends stamped with `databaseOwner` that sit idle in a transaction begun at or before `since`. */
+async function ownedTransactionsStartedBy(databaseOwner: string, since: DatabaseInstant) {
+  return prisma.$queryRaw<Array<{ pid: number; xactStart: Date; owner: string }>>`
+    SELECT pid, xact_start AS "xactStart", application_name AS owner FROM pg_stat_activity
+    WHERE datname = current_database() AND pid <> pg_backend_pid()
+      AND application_name = ${databaseOwner}
+      AND state LIKE 'idle in transaction%' AND xact_start <= ${since}::timestamptz
+  `;
+}
+
+/**
+ * Positive control: opens a transaction, then asks the observer for owned
+ * transactions older than "now". The observer must report that very backend.
+ */
+async function observeOwnOldTransaction(databaseOwner: string) {
+  return prisma.$transaction(async (tx) => {
+    const [owned] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    const since = await databaseInstant();
+    const observed = await ownedTransactionsStartedBy(databaseOwner, since);
+    return {
+      detected: observed.some((row) => row.pid === owned.pid),
+      ownedPid: owned.pid,
+      since,
+      databaseOwner,
+      observed,
+    };
+  });
+}
+
+const OBSERVER_CONTROL_ATTEMPTS = 200;
+
+/**
+ * The observer behind the manifest-lock case must find an old owned
+ * transaction every time, not on most runs: a 28 ms intermittent miss failed
+ * the backend coverage gate on a fast CI host.
+ */
+export async function testOwnedTransactionObserverNeverMissesAnOldTransaction(): Promise<void> {
+  const databaseOwner = archiveDatabaseOwner();
+  const missed: Array<Awaited<ReturnType<typeof observeOwnOldTransaction>>> = [];
+  for (let attempt = 0; attempt < OBSERVER_CONTROL_ATTEMPTS; attempt += 1) {
+    const observation = await observeOwnOldTransaction(databaseOwner);
+    if (!observation.detected) missed.push(observation);
+  }
+  assert.strictEqual(
+    missed.length,
+    0,
+    `observer missed ${missed.length} of ${OBSERVER_CONTROL_ATTEMPTS} old owned transactions: ${JSON.stringify(missed.slice(0, 2))}`
+  );
+}
+
+/**
  * The manifest lock must not hold a pooled connection or an open transaction
  * while its operation performs storage I/O: Supavisor has 60 server
  * connections, and prod held this lock for up to 120 s per root.
@@ -201,27 +275,18 @@ export async function testManifestLockHoldsNoConnectionDuringStorageIo(
   seed: RunSeed
 ): Promise<void> {
   const { withArchiveManifestLock } = await import('../../providers/traceArchiveManifest');
-  const databaseOwner = process.env.BLACKBOX_TEST_DATABASE_OWNER;
-  assert(databaseOwner, 'the native runner must assign the archive database owner');
+  const databaseOwner = archiveDatabaseOwner();
   const [session] = await prisma.$queryRaw<Array<{ owner: string }>>`
     SELECT current_setting('application_name') AS owner
   `;
   assert.strictEqual(session.owner, databaseOwner, 'archive pool must carry its owner at connect');
-  const heldInTransaction = async (since: Date) =>
-    prisma.$queryRaw<Array<{ pid: number; xactStart: Date; owner: string }>>`
-      SELECT pid, xact_start AS "xactStart", application_name AS owner FROM pg_stat_activity
-      WHERE datname = current_database() AND pid <> pg_backend_pid()
-        AND application_name = ${databaseOwner}
-        AND state LIKE 'idle in transaction%' AND xact_start <= ${since}
-    `;
-  await prisma.$transaction(async (tx) => {
-    const [owned] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
-    const observed = await heldInTransaction(new Date());
-    assert(
-      observed.some((row) => row.pid === owned.pid),
-      'observer must detect an old owned transaction'
-    );
-  });
+  const heldInTransaction = (since: DatabaseInstant) =>
+    ownedTransactionsStartedBy(databaseOwner, since);
+  const control = await observeOwnOldTransaction(databaseOwner);
+  assert(
+    control.detected,
+    `observer must detect an old owned transaction: ${JSON.stringify(control)}`
+  );
 
   const foreignUrl = new URL(process.env.DATABASE_URL!);
   const foreignOwner = `foreign-${randomUUID()}`;
@@ -245,7 +310,7 @@ export async function testManifestLockHoldsNoConnectionDuringStorageIo(
     };
     await assertForeignHeld();
     await withArchiveManifestLock(seed.rootAgentId, async (ownership) => {
-      const operationStart = new Date();
+      const operationStart = await databaseInstant();
       // Stand-in for an R2 round trip performed under the lock.
       await new Promise((resolve) => setTimeout(resolve, 600));
       const first = await heldInTransaction(operationStart);
@@ -446,6 +511,10 @@ export function runCostCases(
     {
       name: 'manifest lock holds no connection during storage I/O',
       fn: testManifestLockHoldsNoConnectionDuringStorageIo,
+    },
+    {
+      name: 'owned-transaction observer never misses an old transaction',
+      fn: testOwnedTransactionObserverNeverMissesAnOldTransaction,
     },
     { name: 'fixture tool side effects seek by index', fn: testFixtureToolSideEffectsSeekByIndex },
     { name: 'trajectory goal stored once per agent', fn: testTrajectoryGoalStoredOncePerAgent },

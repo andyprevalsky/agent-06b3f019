@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "originating_merge": "50a582a14dd2dcec7d63e8b46c6fbbf7c0ace275",
+  "source": "all intended source is merged in PR #1726; this records-only follow-up contains the closeout evidence",
+  "configuration": "managed project environment files remain unchanged and are not copied into this record",
+  "secrets": "no credentials, tokens, signed URLs, raw environment dumps, or private transcripts are committed",
+  "recovery": "GitHub main plus the immutable registry digests, E2B template IDs, workflow run IDs, and Benchmark Hub/fleet receipts identify every released artifact without this devbox",
+  "resources": {
+    "cloud_smoke": "terminal and cleaned up",
+    "fly_agent_cutover": "terminal and verified",
+    "render_vercel_log_shipper": "terminal production deployments",
+    "warm_donor": "shared protected resource; no current ownership or cleanup claim by this deploy",
+    "rca_thread": "independent attribution complete; no outstanding repair goal"
+  },
+  "freedom": "untouched; no Freedom app, extension, helper, service, network setting, blocklist, login item, or restore file was changed",
+  "local_only_required_work": [],
+  "deletion_ready": true
+}

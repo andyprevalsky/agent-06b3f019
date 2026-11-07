@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "merge_commit": "39bcd257dc6e1d731008b46e9611ee7f1a5f1723",
+  "render": {
+    "deploy": "dep-dbndj9favr4c73abofl0",
+    "status": "live",
+    "live_at": "2026-11-07T08:03:46Z"
+  },
+  "vercel": "Vercel status success on the merge commit",
+  "mac_release": {
+    "tag": "v1.1.288",
+    "run": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42353359276",
+    "conclusion": "success"
+  },
+  "semantic": {
+    "run": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42353943646",
+    "source_sha": "39bcd257dc6e1d731008b46e9611ee7f1a5f1723",
+    "conclusion": "success",
+    "finished_at": "2026-11-07T08:10:27Z"
+  },
+  "endpoints": "prod-endpoint-smoke 15/15 healthy; /api/agents 200 with last_user_message_at on 183/183 rows; /api/agents/tree 200 with the key",
+  "logs": "post-deploy Render log scan: 100 lines, 0 error lines",
+  "fly": "not required: no agent runtime change in the merge"
+}

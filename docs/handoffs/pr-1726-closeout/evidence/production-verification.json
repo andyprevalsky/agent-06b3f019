@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "originating_pr": 1726,
+  "merge_commit": "50a582a14dd2dcec7d63e8b46c6fbbf7c0ace275",
+  "observations": {
+    "render": {
+      "deploy_id": "dep-dbn6p467bikc738f24s0",
+      "status": "live",
+      "observed_commit": "50a582a14dd2dcec7d63e8b46c6fbbf7c0ace275",
+      "health_http": 200,
+      "agents_http": 200,
+      "endpoint_smoke": "15/15 healthy",
+      "recent_error_scan": "0 matching error lines"
+    },
+    "vercel": {
+      "version_json": {"buildId": "50a582a14dd2-mw5nk5yz"},
+      "meaning": "production frontend served the exact originating merge"
+    },
+    "fly_agents": {
+      "workflow_run": 42316641508,
+      "durable_job": "4d056d971434572727a8eb36d1d520bf570fc499a65feb090881e1c3b3d4a37f",
+      "job_stage": "SUCCEEDED",
+      "image": "registry.fly.io/navi-whisper-lux@sha256:b7e15018565ff3d9c7325fd5ac5acf7ac6ac3314cef28b19da0041a1a3f754ee",
+      "surface_hash": "5a08a687714c",
+      "manual_verify": "cooperative_drain_complete; verifyOk=true; live pointer matched expected"
+    },
+    "fly_log_shipper": {
+      "workflow_run": 42316641306,
+      "conclusion": "success"
+    },
+    "production_semantics_exact_merge": {
+      "source": "50a582a14dd2dcec7d63e8b46c6fbbf7c0ace275",
+      "delivery": "run locally because the GitHub App token lacked workflow-dispatch permission",
+      "broad": "47 passed, 6 intentionally skipped, exit 0",
+      "latency": "5 passed, exit 0; worst measured full lifecycle 3093ms against 6000ms target",
+      "broad_log_sha256": "d17d9cafededbbc6609cb741c80f7e81a2d081364464c5e34be06641a848b29c",
+      "latency_log_sha256": "fd6bc79e3587003b09017db284b9cc2cfc56268f7677bfd7f3759bf078b801d6"
+    },
+    "mac_local_acceptance": {
+      "status": "SKIPPED - no Mac available",
+      "observed_at": "2026-11-07T06:08:28.680693+00:00",
+      "evidence": "read-only production transaction on LocalDevice for owner 1f85ff25-6e29-4c1b-8739-f917bd101a30 returned devices=[]"
+    },
+    "agentcard": {
+      "status": "SKIPPED - no AgentCard/payment surface changed"
+    }
+  }
+}

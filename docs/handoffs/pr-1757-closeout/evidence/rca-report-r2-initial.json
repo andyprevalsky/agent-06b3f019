@@ -1,0 +1,26 @@
+{
+ "failures": [
+  {
+   "id": "cd4b7cd2882b40d0a8e7c010d3ad502a",
+   "check": "backend-coverage-blackbox/blackbox:browser-session",
+   "gate": "backend-coverage-blackbox",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/var/tmp/rdw/backend-coverage-blackbox"
+   ],
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "browser-session approval e2e child exited 1: its resumed-task 'Fetching session info' request to the local test backend hit httpx.ReadTimeout (15s) while 10 deploy gates ran concurrently. The PR's agents changes do not touch the browser session/resume path; this exact source d3a8bd2f passed browser-session in the previous cycle's final sweep (only report-bug failed there).",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/backend-coverage-blackbox/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/backend-coverage-blackbox/result.json"
+  }
+ ]
+}

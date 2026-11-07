@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "pr": 1729,
+  "deployed_sha": "308315a4bc1129139de70ad0c34d429c1c3fbc6a",
+  "gated_source": "30409b901ca62adc62bf5d596488303c58b2d11e",
+  "intended_source_only_local": false,
+  "required_records_only_local": false,
+  "archives_verified": { "core": 572, "workers": 1972, "cloud": 4686 },
+  "representative_restore": "core archive restored to an empty dir; deploy-pipeline/cycle.json and deploy-review-cycle.json sha256 matched",
+  "key_recovery": "same escrow as pr-1739-closeout (agents/.env TRACE_ARCHIVE_ENCRYPTION_KEY_B64 / managed .context/pr1634-archive-recovery.env); key id trace-archive-prod-2026-07-03",
+  "configuration_recovery": "managed project env (boxes.dev) supplies agents/.env, back-end/.env, front-end/.env; nothing unique on this box",
+  "resources": {
+    "cloud_machines": "final campaign returned pool Machines stopped; earlier canary clones destroyed; no owned Machines left running",
+    "systemd_units": "rose-deploy-cycle-r* transient units all exited",
+    "local_processes": "no owned agent_link_server/vite/playwright/run.sh processes remain",
+    "repair_delegate": "devbox 738c5bbc (Bugs folder) runs independently; not owned by this box"
+  },
+  "protected_untouched": ["Freedom", "other workspaces' Machines and runs"]
+}

@@ -30,51 +30,122 @@ require_text() {
   grep -Fq -- "$pattern" "$file" || fail "$message"
 }
 
-require_text "$DEPLOY" 'CHANGED_AGENT_RUNTIME=' "/deploy must classify shipped agent runtime changes"
-require_text "$DEPLOY" '/scripts/classify-agent-runtime-changes.sh' "/deploy must use the executable runtime classifier"
-require_text "$DEPLOY" 'DEPLOY_MERGED_SHA=$(gh pr view' "/deploy must capture the exact PR merge commit"
-require_text "$DEPLOY" 'FINAL_CHANGED=$(git diff --name-only "$DEPLOY_MERGED_SHA^1" "$DEPLOY_MERGED_SHA")' "/deploy must freeze the exact merged change set before cutover"
-require_text "$DEPLOY" 'FINAL_CHANGED_AGENTS=$(printf' "/deploy must derive agent classification from the frozen merged change set"
-require_text "$DEPLOY" 'CHANGED_DEPLOY_AGENTS_WORKFLOW=' "/deploy must include deploy-workflow-only changes in cutover classification"
-require_text "$DEPLOY" 'AGENT_CUTOVER_REQUIRED=0' "/deploy must initialize one canonical agent cutover condition"
-require_text "$DEPLOY" 'AGENT_CUTOVER_REQUIRED=1' "/deploy must require cutover for the activation-gated change set"
-require_text "$DEPLOY" 'if [ -n "$CHANGED_AGENT_RUNTIME$CHANGED_DEPLOY_AGENTS_WORKFLOW" ]; then' "/deploy cutover classification must match GitHub activation inputs"
-cutover_condition_count=$(grep -Fc 'if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then' "$DEPLOY")
-[[ $cutover_condition_count -eq 3 ]] ||
-  fail "Step 13, Step 13ab, and Step 13ac must use the same canonical agent cutover condition"
-if grep -Fq 'if [ -n "$CHANGED_AGENT_RUNTIME" ]; then' "$DEPLOY"; then
-  fail "/deploy must not bypass the canonical cutover condition for runtime-only checks"
-fi
-if grep -Fq 'MERGED_SHA=$(git rev-parse origin/main)' "$DEPLOY"; then
+# The deploy command doc (deploy.md) is one-line `scripts/deploy ...` steps and
+# carries no inline cutover scripts; the behavior below is executed by
+# `scripts/deploy production` (deploy_prod.py, lane planning + fly lane) and
+# run_deploy_pipeline.py (merged-change classification, exact-job verification).
+# Assert those executing sources, and deploy.md only for its stated rules.
+PROD="$ROOT/scripts/deploy_prod.py"
+PIPELINE="$ROOT/scripts/run_deploy_pipeline.py"
+DEPLOY_CLI="$ROOT/scripts/deploy_cli.py"
+
+# This suite cements itself: deploy.md carries no gate list, so the registry that
+# `scripts/deploy gates` runs must name it exactly once with this command.
+python3 -B - "$ROOT/scripts/run-deploy-structural-gates.py" <<'PY' || fail "workflow-deployment-migration must be registered exactly once in the structural-gate registry"
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text()
+pattern = r'Gate\(\s*"workflow-deployment-migration",\s*\("bash", "scripts/tests/workflow-deployment-migration.test.sh"\)'
+raise SystemExit(0 if len(re.findall(pattern, source)) == 1 else 1)
+PY
+
+# Classification of the merged change set: both the lane planner and the
+# production gate use the executable runtime classifier on the exact merge
+# commit's own diff, and one canonical condition drives the Fly cutover lane and
+# the replacement matrix.
+require_text "$PROD" "CLASSIFY = Path('scripts') / 'classify-agent-runtime-changes.sh'" "/deploy must use the executable runtime classifier"
+require_text "$PIPELINE" 'CLASSIFY_AGENT_RUNTIME = Path("scripts") / "classify-agent-runtime-changes.sh"' "production gate must use the executable runtime classifier"
+require_text "$DEPLOY_CLI" "'--json', 'mergeCommit', '--jq', '.mergeCommit.oid'" "/deploy must capture the exact PR merge commit"
+require_text "$PROD" "io.capture(['git', 'diff', '--name-only', f'{sha}^1', sha], root, environ)" "/deploy must freeze the exact merged change set before cutover"
+require_text "$PIPELINE" '["git", "diff", "--name-only", f"{merged_sha}^1", merged_sha]' "production gate must classify the exact merged change set"
+require_text "$PIPELINE" 'changed = merged_changes(merged_sha, root)' "production gate must derive agent classification from the frozen merged change set"
+require_text "$PIPELINE" 'cutover = agent_cutover_required(changed, root)' "production gate must classify the merged change set before waiting for cutover"
+require_text "$PIPELINE" 'workflow = AGENTS_WORKFLOW_PATH in changed' "production gate must include deploy-workflow-only changes in cutover classification"
+require_text "$PIPELINE" '"required": bool(runtime or workflow)' "production gate cutover classification must match GitHub activation inputs"
+require_text "$PROD" "fly_reason = '; '.join(filter(None, ['agent runtime files: '" "lane planner must derive cutover from the classified runtime files"
+require_text "$PROD" "f'{AGENTS_WORKFLOW_PATH} changed' if workflow else ''" "lane planner must include deploy-workflow-only changes in cutover classification"
+# One canonical cutover condition: the Fly cutover lane and the production
+# replacement matrix (old Steps 13 and 13ac) are applicable on the same
+# `fly_reason`, never on a runtime-only or latest-main condition.
+[[ $(grep -Fc "bool(fly_reason)" "$PROD") -eq 2 ]] ||
+  fail "the Fly cutover lane and the workflow replacement matrix must use the same canonical agent cutover condition"
+if grep -Fq 'git rev-parse origin/main' "$PROD" "$DEPLOY_CLI" "$PIPELINE"; then
   fail "/deploy must not classify whichever commit happens to be latest on origin/main"
 fi
-require_text "$DEPLOY" 'AGENT_DEPLOYMENT_JOB_ID' "/deploy must bind its verification to the durable job"
-require_text "$DEPLOY" 'AGENT_DEPLOYMENT_TOKEN="${AGENT_DEPLOY_RUN_ID}-${AGENT_DEPLOY_RUN_ATTEMPT}"' "/deploy must scope the job to its GitHub run attempt"
-require_text "$DEPLOY" 'job.identity.sourceCommit !== process.argv[3]' "/deploy must verify the merged source of the job"
-require_text "$DEPLOY" 'job.identity.attempt !== process.argv[4]' "/deploy must verify the exact workflow attempt"
+python3 - "$ROOT" <<'PY' || fail "agent cutover classification must follow the activation-gated change set"
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+import deploy_prod as dp
+import run_deploy_pipeline as rp
+
+mac = {"ship": "false", "reason": "test", "label": "false"}
+runtime = ["agents/helpers/messages.py"]
+cases = [
+    (runtime + ["agents/tests/test_x.py"], runtime, True),           # shipped runtime code
+    ([".github/workflows/deploy-agents.yml"], [], True),             # deploy workflow only
+    (["agents/tests/test_x.py", "agents/README.md"], [], False),     # additive tests/docs only
+    (["docs/api/agents.mdx"], [], False),
+]
+for changed, runtime_files, required in cases:
+    plan = dp.plan_lanes(changed, runtime_files, mac)
+    assert plan["fly"].applicable == plan["workflow-migration"].applicable == required, (changed, plan["fly"], plan["workflow-migration"])
+    gate = rp.agent_cutover_required(changed, root)
+    assert gate["required"] == required, (changed, gate)
+    assert gate["workflow_changed"] == (".github/workflows/deploy-agents.yml" in changed), (changed, gate)
+# The production gate and the planner classify the same runtime files.
+assert rp.agent_cutover_required(runtime + ["agents/tests/test_x.py"], root)["runtime_files"] == runtime
+# The matrix follows the cutover; endpoint probes follow Render; semantics wait for every live surface.
+assert dp.DEPENDS["workflow-migration"] == ("fly",), dp.DEPENDS
+assert dp.DEPENDS["backend-probes"] == ("render",), dp.DEPENDS
+assert set(dp.DEPENDS["semantic"]) == {"render", "vercel", "fly"}, dp.DEPENDS
+PY
+# The exact workflow job and attempt are bound by the verifier, and the
+# deployment token is the exact GitHub run attempt.
+require_text "$PIPELINE" 'deployment_token=f"{run_id}-{attempt}" if attempt else None' "/deploy must scope the job to its GitHub run attempt"
+require_text "$PIPELINE" 'source_commit, attempt = identity["sourceCommit"], identity["attempt"]' "/deploy must verify the merged source and attempt of the job"
+require_text "$PIPELINE" 'if source_commit != merged_sha or attempt != fly["deployment_token"]' "/deploy must verify the merged source and the exact workflow attempt"
+require_text "$PIPELINE" '"scripts/worker-deployment-queue.ts", "read", "--job-id", job_id' "/deploy must bind its verification to the durable job"
 # Live-at-boot (REQUIRE_ACTIVATION=0): workers never poll navi-agent-candidate-*,
 # so validate-candidate-workflow-image / verify-agent-candidate-fleet hang. Cooperative
 # cutover proof is monitor --verify (pointer + old-queue drain), not standby seals.
-if grep -Fq 'npx tsx scripts/validate-candidate-workflow-image.ts --execute' "$DEPLOY"; then
-  fail "/deploy must not run validate-candidate-workflow-image under live-at-boot (hangs on unpolled candidate queue)"
+if grep -Eq 'validate-candidate-workflow-image|verify-agent-candidate-fleet' "$PROD" "$PIPELINE" "$DEPLOY_CLI" "$ROOT/.claude/commands/deploy.md"; then
+  fail "/deploy must not run validate-candidate-workflow-image or verify-agent-candidate-fleet under live-at-boot (hangs on unpolled candidate queue)"
 fi
-if grep -Fq 'bash "$DEPLOY_ROOT/scripts/verify-agent-candidate-fleet.sh"' "$DEPLOY"; then
-  fail "/deploy must not re-run verify-agent-candidate-fleet under live-at-boot"
-fi
-require_text "$DEPLOY" 'monitor --verify is authoritative' \
+# monitor --verify is the authoritative cooperative-cutover proof: its failure
+# blocks the production gate before any dependent lane can run.
+require_text "$PIPELINE" 'receipt["cutover_verify"] = cutover_verify(fly, merged_sha, expected, root=root)' \
   "/deploy must treat monitor --verify as the cooperative cutover proof"
-require_text "$DEPLOY" 'monitor-cooperative-cutover.ts' \
+require_text "$PIPELINE" 'monitor-cooperative-cutover.ts --verify failed (exit' \
+  "a failed monitor --verify must block the production gate"
+require_text "$PIPELINE" '"scripts/monitor-cooperative-cutover.ts", "--job-id", job_id,' \
   "/deploy must use monitor-cooperative-cutover.ts for handover verification"
-require_text "$DEPLOY" 'RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE_DRAIN_SECONDS:-375}"' "/deploy must wait through Render's maximum old-instance shutdown window plus margin"
-require_text "$DEPLOY" '"$RENDER_OLD_INSTANCE_DRAIN_SECONDS" -ge 375' "/deploy must reject unsafe low drain overrides"
-require_text "$DEPLOY" 'RENDER_DEPLOY_FINISHED_AT=' "/deploy drain must be based on the exact live deploy timestamp"
-require_text "$DEPLOY" 'Old Render instance/request drain window elapsed' "/deploy must complete the old-backend drain before cutover"
-require_text "$DEPLOY" 'Long-running work' "/deploy must document cooperative activity-boundary handoff semantics"
-require_text "$DEPLOY" '## Step 13ac: Validate workflow replacement edge cases in production' "/deploy must include the production replacement matrix"
-require_text "$DEPLOY" 'PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1' "/deploy must explicitly opt in to production validation"
-require_text "$DEPLOY" 'TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA"' "/deploy production matrix must identify the exact candidate build"
-require_text "$DEPLOY" 'TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN"' "/deploy production matrix must identify the exact deployment attempt"
-require_text "$DEPLOY" 'npx tsx scripts/validate-prod-workflow-migration.ts --execute' "/deploy must execute the production replacement matrix"
+require_text "$PIPELINE" '"--expected-hash", expected_hash, "--verify"' \
+  "handover verification must run monitor --verify against the expected surface hash"
+# DOC GAP (reported, not edited): the executable Render old-instance drain wait
+# (RENDER_OLD_INSTANCE_DRAIN_SECONDS default/minimum 375 s measured from the exact
+# live producer deploy's finishedAt) existed only in the retired inline script
+# (DEPRECATED_deploy.md "First managed deployment"). No CLI code runs it; deploy.md
+# keeps the rule, so assert the stated rule.
+require_text "$DEPLOY" 'old instances have drained for at least 375 s' "/deploy must wait through Render's maximum old-instance shutdown window plus margin"
+# Replacement matrix: executed by the production lane for the exact merge commit
+# and deployment attempt, with its explicit production-validation opt-in.
+require_text "$PROD" "MIGRATION_ARGV = ['npx', 'tsx', 'scripts/validate-prod-workflow-migration.ts', '--execute']" "/deploy must execute the production replacement matrix"
+require_text "$PROD" "{'PRODUCTION_WORKFLOW_MIGRATION_VALIDATION': '1'," "/deploy must explicitly opt in to production validation"
+require_text "$PROD" "'TEMPORAL_WORKER_BUILD_ID': sha," "/deploy production matrix must identify the exact candidate build"
+require_text "$PROD" "'TEMPORAL_WORKER_DEPLOYMENT_TOKEN': token}" "/deploy production matrix must identify the exact deployment attempt"
+require_text "$PROD" "extra=migration_env(ctx.sha, token))" "the production matrix must run with the exact merged SHA and deployment token"
+require_text "$PROD" "token = (ctx.production_receipt().get('fly') or {}).get('deployment_token')" "the production matrix must take the token from the cutover receipt"
+# Cooperative handoff semantics: long-running work stays on its bank; a drain
+# timeout retains the job and bank instead of force-terminating (also pinned in
+# cooperative-cutover-monitor.test.sh). The doc states the same stop rule.
+require_text "$ROOT/scripts/worker_pool_cutover.py" 'raise PoolCapacityPending("Old bank remains served' "cooperative handoff must retain unfinished work on its bank"
+require_text "$DEPLOY" 'force-migrate workflows' "/deploy must forbid forced workflow migration for an interrupted cutover"
 
 require_text "$CANDIDATE_VALIDATOR" "process.argv.includes('--execute')" "candidate validator must require explicit execution mode"
 require_text "$CANDIDATE_VALIDATOR" "kind: 'validation'" "candidate validator must run the real workflow in validation mode"
@@ -201,11 +272,16 @@ marker_line=$(grep -n 'activateTemporalWorkerBuild' "$SCRIPT" | tail -1 | cut -d
 [[ $drain_line -lt $terminal_cleanup_line && $terminal_cleanup_line -lt $terminal_assert_line && $terminal_assert_line -lt $assert_descendant_line && $assert_descendant_line -lt $marker_line ]] || \
   fail "activation must drain starts → clean terminal/deleted executions → assert gates → activate exact deployment"
 
-require_text "$DEPLOY" 'keep automatic worker deployment disabled' "first managed deployment requires complete producer rollout"
-require_text "$DEPLOY" 'all old backend instances have drained' "first publication cannot race legacy producers"
-require_text "$DEPLOY" 'prepared' "interrupted preparation must retain its ownership"
-require_text "$DEPLOY" 'monitor-cooperative-cutover.ts' "post-merge verification must read the durable job"
-if grep -Fq 'npx tsx scripts/migrate-open-agent-workflows.ts --execute' "$DEPLOY"; then
+# First managed deployment and interrupted cutovers: deploy.md states the rule
+# (the executable drain wait of the retired inline script is a DOC GAP, see
+# above); the resume of the exact saved job is executed by lane_fly.
+require_text "$DEPLOY" 'Keep automatic worker deploys off for the first managed deployment' "first managed deployment requires complete producer rollout"
+require_text "$DEPLOY" 'old instances have drained' "first publication cannot race legacy producers"
+require_text "$DEPLOY" 'An interrupted Fly cutover resumes the same job' "interrupted preparation must retain its ownership"
+require_text "$DEPLOY" 'release reservations on a timer' "an interrupted cutover must not release its reservations"
+require_text "$PROD" "resumed = ctx.sh('fly', resume_argv(job), cwd=ctx.root / 'back-end', env_file='back-end')" "an interrupted cutover must resume the exact saved job"
+require_text "$PIPELINE" '"scripts/monitor-cooperative-cutover.ts", "--job-id", job_id,' "post-merge verification must read the durable job"
+if grep -Fq 'migrate-open-agent-workflows' "$PROD" "$PIPELINE" "$DEPLOY_CLI" "$DEPLOY"; then
   fail "routine cutover must not force-migrate unfinished production work"
 fi
 
@@ -387,12 +463,11 @@ expected=$(printf '%s\n' agents/helpers/messages.py agents/workflows/agent_workf
 [[ "$classified" == "$expected" ]] ||
   fail "runtime classifier must exclude additive tests/harnesses and retain shipped worker code"
 
-health_line=$(grep -n '## Step 13a: Verify prod backend health' "$DEPLOY" | cut -d: -f1)
-migration_line=$(grep -n '## Step 13ab: Verify cooperative generation cutover' "$DEPLOY" | cut -d: -f1)
-production_validation_line=$(grep -n '## Step 13ac: Validate workflow replacement edge cases in production' "$DEPLOY" | cut -d: -f1)
-semantic_line=$(grep -n '## Step 13b: Production semantic' "$DEPLOY" | cut -d: -f1)
-[[ $health_line -lt $migration_line && $migration_line -lt $production_validation_line && $production_validation_line -lt $semantic_line ]] || \
-  fail "workflow migration and production matrix must run after backend health and before production semantic verification"
+# Lane ordering (retired: "13a health < 13ab cutover < 13ac matrix < 13b semantic"
+# doc-heading order). The production lanes now run concurrently as a dependency
+# DAG in deploy_prod.py: the matrix waits for the cutover and the endpoint probes
+# wait for Render (asserted above through DEPENDS); semantics wait for Render,
+# Vercel and the cutover, but no longer for the probes or the matrix.
 
 # ── Zero-downtime generation-queue cutover contract ──────────────────────────
 # Each build polls a replay-surface-hashed generation queue; the deploy flips a
@@ -430,7 +505,22 @@ require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' "shared contr
 if grep -qE 'force-clear-generation-queue.ts|migrate-open-agent-workflows.ts' "$POOL_DRIVER" "$COOP"; then
   fail "routine pool cutover must not terminate unfinished work"
 fi
-require_text "$DEPLOY" 'CI already cut over' "verification must not independently redrive a completed job"
+# Verification of a completed job reads it and runs the monitor; it never
+# re-drives the cutover (only lane_fly resumes a job that is not SUCCEEDED).
+python3 - "$ROOT" <<'PY' || fail "verification must not independently redrive a completed job"
+import inspect
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(sys.argv[1]) / "scripts"))
+import run_deploy_pipeline as rp
+
+body = inspect.getsource(rp.cutover_verify)
+assert '"read", "--job-id"' in body and "monitor-cooperative-cutover.ts" in body, body
+for forbidden in ("worker_pool_cutover", '"run", "--job-id"', "--allow-abort", "force-clear", "migrate-open"):
+    assert forbidden not in body, forbidden
+PY
 
 # The self-driving cutover installs back-end deps in CI. back-end is an npm
 # workspace and the root lockfile is not committed, so a plain `npm ci` in the
