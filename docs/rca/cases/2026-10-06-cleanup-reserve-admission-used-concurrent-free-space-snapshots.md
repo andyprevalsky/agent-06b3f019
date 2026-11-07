@@ -403,3 +403,64 @@ retained under `/var/tmp/pr1662-49-seed-ledger-isolation`. No live provider,
 production accounting cleanup, canonical state/source edit or full structural
 sweep was performed by this reduction. The parent-owned combined-source full
 gate is still required; prior round48 stop timing remains a separate UNKNOWN.
+
+## November 7 Google400: ordinary full-width campaigns omitted pending owners
+
+The ordinary 14-controller campaign `75588b14a9ecaa2a3efeb1caac10b589c1c79e3d1904977c21611f498acf3d87`
+on source `3c1f4603563862c70cb5e3eb5adbd4e21288f2c3` failed before task execution.
+Two jobs failed with `cleanup reserve admission failed: [Errno 28] insufficient
+physical cleanup floors for pending controllers`; two cancelled siblings also
+exited1 at the same floor guard or `cleanup reserve consumed controller operating
+headroom`. Other siblings exited through owned cancellation. A prior observation
+had7,758,327,808 free bytes. Fourteen preferred512MiB allocations plus256MiB
+working headroom do not fit that disk, while all32MiB minimum reserves plus the
+same working headroom do. These are unchanged policy values, not requested limits.
+
+The first bad boundary is ordinary campaign dispatch. `run-bench-campaign.py`
+prepared cleanup cohort tickets only when `strict_start` was enabled. This
+ordinary campaign had no `startup-cohorts` or cold ticket grant; its controllers
+registered as separate standalone groups. An early owner could consume its
+preferred reserve before a later owner's minimum and operating headroom became
+visible. The late failure is not evidence of cold-ticket double debit: this
+campaign never created those tickets. Physical floor checks correctly refused
+the overcommitted local disk.
+
+The owning regression uses the real campaign dispatcher, extracted native fleet
+reserve/release functions and existing cleanup-ticket helper against a finite
+8000MiB storage transport. Fourteen concurrent real child processes preserve
+512/32/256 policy, with ten allowed to admit before the last four register. The
+original dispatcher fails with the same physical-floor ENOSPC. The candidate
+passes all14, and a task-start event occurs before the final reserve attempt,
+proving this repair adds no task barrier. Sparse fixture files and bounded
+block-reporting transport model physical allocation without writing GiBs; this
+is accounting proof, not a real cloud task result.
+
+The scoped repair predeclares all known owner liabilities for ordinary schedules
+whose total job count is at most their requested concurrency. It reuses the
+existing strict-cohort budget preparation, owner assignment, claim, release and
+retirement protocol under a separate `cleanup-cohorts` directory. The strict
+startup canary, synchronization, scheduling loop, child argv and cleanup floors
+are unchanged. Rolling ordinary schedules with more jobs than concurrent slots
+retain their previous path and are explicitly outside this repair's claim.
+
+The identical final regression fails on the original producer and passes on the
+candidate. Eight campaign controls pass, including no-barrier ordering,
+preparation failure with no task dispatch, assignment failure with joined child
+and retired grant, and unchanged strict startup/failure controls. All11 existing
+cleanup-ticket tests also pass, including nested-canary ancestry and the single
+released nested slot. Original logs, exact patch hashes and commands are recorded
+in `.context/rca-google400/ordinary-cleanup-candidate/handoff.json`.
+
+The native75588 failed outcomes remain immutable. Supported normal preallocation
+reconciliation retains14 sealed zero-resource audits and two retired custody
+records with no acceptance credit. The original proof remains `still_bound`
+before and after candidate validation; no validator exception or producer proof
+rewrite was added. Fresh full-source gates and an actual14-task cloud smoke after
+integration remain pending. This recurrence therefore preserves this case's
+`mitigated` status and does not claim the deployment or Google/phone acceptance
+has completed.
+
+The user required keeping Freedom and all evidence, preserving concurrency and
+cleanup floors, and avoiding limit changes, resets or benchmark substitution.
+The accepted scope fixes cohort accounting before launch instead of deleting
+tracked history or introducing a synchronization barrier.

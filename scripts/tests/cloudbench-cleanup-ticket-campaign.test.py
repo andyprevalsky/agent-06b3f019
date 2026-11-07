@@ -51,7 +51,7 @@ class CampaignTickets(unittest.TestCase):
                 campaign=scripts/"run-bench-campaign.py"
                 injection = "\ndef released_attempt(workspace, job):\n    return dict(resources_released=True, lifecycle_verified=True, terminal_task=job['controller_exit_code']==0, infra_failure=job['controller_exit_code']==17)\n\n"
                 campaign.write_text(campaign.read_text().replace('if __name__ == "__main__":', injection+'if __name__ == "__main__":'))
-            if mode in ("ticket-prepare-fail", "ticket-assign-fail"):
+            if mode in ("ticket-prepare-fail", "ticket-assign-fail", "ordinary-prepare-fail", "ordinary-assign-fail"):
                 # Fail only the campaign parent's in-process call, as a raced
                 # child exit or a ticket refusal would, keeping child CLIs real.
                 action = mode.split("-")[1]
@@ -245,6 +245,42 @@ while not(cohort/'release.json').exists():
 READY
 """
             )
+            if mode.startswith("ordinary"):
+                child = scripts / "run-bench"
+                old = child.read_text()
+                start = old.index("reserve_cleanup_disk_space\nif [ ")
+                old = old[:start] + """
+[ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] || exit 97
+mkdir -p "$FIXTURE_ROOT/admitted" "$FIXTURE_ROOT/attempted"
+job_index="${RUN_BENCH_CAMPAIGN_JOB_ID##*-j}"
+if [ "$job_index" -gt 10 ]; then
+ python3 - "$FIXTURE_ROOT/admitted" <<'LATE'
+from pathlib import Path
+import sys,time
+end=time.monotonic()+10
+while len(list(Path(sys.argv[1]).glob('*')))<10:
+ if time.monotonic()>end:raise TimeoutError('first ten did not admit')
+ time.sleep(.01)
+LATE
+fi
+status=0
+reserve_cleanup_disk_space || status=$?
+printf 'RESERVE_ATTEMPTED %s\\n' "$RUN_BENCH_CAMPAIGN_JOB_ID" >> "$FIXTURE_ROOT/events"
+touch "$FIXTURE_ROOT/attempted/$RUN_BENCH_CAMPAIGN_JOB_ID"
+[ "$status" = 0 ] || exit "$status"
+printf 'TASK_START %s\\n' "$RUN_BENCH_CAMPAIGN_JOB_ID" >> "$FIXTURE_ROOT/events"
+touch "$FIXTURE_ROOT/admitted/$RUN_BENCH_CAMPAIGN_JOB_ID"
+python3 - "$FIXTURE_ROOT/attempted" <<'ALL'
+from pathlib import Path
+import sys,time
+end=time.monotonic()+10
+while len(list(Path(sys.argv[1]).glob('*')))<14:
+ if time.monotonic()>end:raise TimeoutError('all fourteen did not attempt')
+ time.sleep(.01)
+ALL
+exit 0
+"""
+                child.write_text(old)
             if mode.startswith(("mutation", "relay")):
                 start = source.index("FLY() {")
                 end = source.index("\nis_sim_on()", start)
@@ -307,6 +343,46 @@ def wrapper(original):
  return observed
 os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
 """)
+            if mode.startswith("ordinary"):
+                (root / "bounded-storage.json").write_text(json.dumps({"capacity_mb": 8000, "allocations": {}}))
+                with (transport / "sitecustomize.py").open("a") as stream:
+                    stream.write("""
+import json,fcntl
+from pathlib import Path
+storage=Path(os.environ['FIXTURE_ROOT'])/'bounded-storage.json'
+real_fstat=os.fstat
+real_lstat=os.lstat
+def allocation(fd,offset,size):
+ path=os.readlink('/proc/self/fd/'+str(fd))
+ with (storage.parent/'storage.lock').open('a+') as lock:
+  fcntl.flock(lock,fcntl.LOCK_EX)
+  value=json.loads(storage.read_text());value['allocations']={p:n for p,n in value['allocations'].items() if Path(p).exists()}
+  if sum(value['allocations'].values())+size>value['capacity_mb']*1048576:raise OSError(28,'bounded volume exhausted')
+  os.ftruncate(fd,size);value['allocations'][path]=size;storage.write_text(json.dumps(value))
+def file_blocks(path,*args,**kw):
+ value=real_lstat(path,*args,**kw)
+ if str(path).endswith('/cleanup-disk-reserve'):
+  with (storage.parent/'storage.lock').open('a+') as lock:
+   fcntl.flock(lock,fcntl.LOCK_SH);amount=json.loads(storage.read_text())['allocations'].get(str(path))
+  if amount is not None:return os.stat_result(tuple(value),{'st_blocks':amount//512})
+ return value
+def fd_blocks(fd):
+ value=real_fstat(fd)
+ if os.readlink('/proc/self/fd/'+str(fd)).endswith('/cleanup-disk-reserve'):
+  return os.stat_result(tuple(value),{'st_blocks':value.st_size//512})
+ return value
+os.posix_fallocate=allocation;os.fstat=fd_blocks;os.lstat=file_blocks
+""")
+                (transport / "df").write_text("""#!/usr/bin/env python3
+import os,json,fcntl
+from pathlib import Path
+p=Path(os.environ['FIXTURE_ROOT'])/'bounded-storage.json'
+with (p.parent/'storage.lock').open('a+') as lock:
+ fcntl.flock(lock,fcntl.LOCK_SH);v=json.loads(p.read_text());used=sum(n for path,n in v['allocations'].items() if Path(path).exists());free=v['capacity_mb']*1048576-used
+print('Filesystem 1024-blocks Used Available Capacity Mounted on')
+print('bounded 99999999 0',free//1024,'0% /bounded')
+""")
+                (transport / "df").chmod(0o700)
             env = dict(
                 os.environ,
                 PYTHONPATH=str(transport),
@@ -390,6 +466,10 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 "fixture-c",
                 "--forward-arg=--strict-barrier",
             ]
+            if mode.startswith("ordinary"):
+                argv = [sys.executable, str(scripts / "run-bench-campaign.py"), "--root", str(root), "--runs", "1", "--concurrency", "14"]
+                for number in range(14):argv.extend(["--task", "fixture-"+str(number)])
+                env.update(PATH=str(transport)+os.pathsep+env['PATH'], CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="512", CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB="32", CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB="256")
             if mode.startswith("startup-"):
                 epoch=time.time()-(901 if mode=="startup-expired" else 898)
                 env["RUN_BENCH_CAMPAIGN_STARTUP_DEADLINE_EPOCH"]=str(epoch+9300-7200-1200)
@@ -444,6 +524,40 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 if (root / "events").exists()
                 else []
             )
+            if mode.startswith("ordinary"):
+                self.assertEqual(len(summaries), 1)
+                summary=json.loads(summaries[0].read_text())
+                if mode != "ordinary-pass":
+                    self.assertNotEqual(result.returncode,0,result.stdout+result.stderr+details)
+                    self.assertEqual(summary['status'],'failed')
+                    self.assertNotIn('TASK_START', '\n'.join(events))
+                    self.assertEqual(summary['cleanup_ticket_failure'],mode.split('-')[1])
+                    budgets=list(summaries[0].parent.glob('cleanup-cohorts/*/cleanup-budget/budget.json'))
+                    if mode == 'ordinary-assign-fail':
+                        self.assertEqual(len(budgets),1)
+                        self.assertTrue((budgets[0].parent/'retired.json').is_file())
+                    else:
+                        self.assertEqual(budgets,[])
+                    self.assertFalse(list((root/'.git/cloudbench-fleet-ownership').glob('*/cleanup-disk-reserve')))
+                    self.assertFalse(list((Path('/tmp')/('rose-cloudbench-cleanup-admission-'+str(os.getuid()))/str(device)/'ticket-grants').glob('*.json')))
+                    return
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr+details)
+                self.assertEqual(summary['status'],'passed')
+                self.assertNotIn('startup_cohorts',summary)
+                self.assertEqual(summary['peak_concurrency'],14)
+                self.assertEqual(len([line for line in events if line.startswith('TASK_START ')]),14)
+                attempts=[i for i,line in enumerate(events) if line.startswith('RESERVE_ATTEMPTED ')]
+                starts=[i for i,line in enumerate(events) if line.startswith('TASK_START ')]
+                self.assertEqual(len(attempts),14)
+                self.assertLess(min(starts),max(attempts),events)
+                budget_file=next(summaries[0].parent.glob('cleanup-cohorts/*/cleanup-budget/budget.json'))
+                budget=json.loads(budget_file.read_text())
+                self.assertEqual((budget['preferred'],budget['minimum'],budget['headroom']),(512,32,256))
+                self.assertEqual(budget['job_count'],14)
+                self.assertGreaterEqual(budget['amount'],32);self.assertLess(budget['amount'],512)
+                self.assertTrue((budget_file.parent/'retired.json').is_file())
+                self.assertFalse(list((root/'.git/cloudbench-fleet-ownership').glob('*/cleanup-disk-reserve')))
+                return
             if mode.startswith("startup-"):
                 self.assertNotEqual(result.returncode,0,result.stdout+result.stderr+details)
                 self.assertNotIn("TASK_START",events)
@@ -494,7 +608,7 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
                 campaign=scripts/"run-bench-campaign.py"
                 injection = "\ndef released_attempt(workspace, job):\n    return dict(resources_released=True, lifecycle_verified=True, terminal_task=job['controller_exit_code']==0, infra_failure=job['controller_exit_code']==17)\n\n"
                 campaign.write_text(campaign.read_text().replace('if __name__ == "__main__":', injection+'if __name__ == "__main__":'))
-            if mode in ("ticket-prepare-fail", "ticket-assign-fail"):
+            if mode in ("ticket-prepare-fail", "ticket-assign-fail", "ordinary-prepare-fail", "ordinary-assign-fail"):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr + details)
                 self.assertNotIn("Traceback", result.stderr)
                 self.assertEqual(len(summaries), 1)
@@ -845,6 +959,15 @@ os.stat=wrapper(os.stat);os.lstat=wrapper(os.lstat)
         self,
     ):
         self.campaign_fixture()
+
+    def test_ordinary_fullwidth_budget_predeclares_all_fourteen_without_task_barrier(self):
+        self.campaign_fixture(mode="ordinary-pass")
+
+    def test_ordinary_fullwidth_prepare_failure_dispatches_no_tasks(self):
+        self.campaign_fixture(mode="ordinary-prepare-fail")
+
+    def test_ordinary_fullwidth_assignment_failure_joins_child(self):
+        self.campaign_fixture(mode="ordinary-assign-fail")
 
     def test_old_campaign_forks_workers_before_shared_preflight(self):
         self.campaign_fixture(old=True)

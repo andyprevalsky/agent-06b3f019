@@ -1535,16 +1535,20 @@ def main() -> int:
             "release_id": None,
             "abort": None,
         }
-    cleanup_identity_module = cleanup_ticket_module(root) if strict_start else None
-    cleanup_parent_birth = cleanup_identity_module.birth(os.getpid()) if strict_start else ""
+    # Full-width ordinary campaigns also know every concurrently admitted owner.
+    # Predeclare cleanup liability without introducing a task-start rendezvous.
+    ordinary_cleanup = not strict_start and len(jobs) <= args.concurrency
+    cleanup_ticketed = strict_start or ordinary_cleanup
+    cleanup_identity_module = cleanup_ticket_module(root) if cleanup_ticketed else None
+    cleanup_parent_birth = cleanup_identity_module.birth(os.getpid()) if cleanup_ticketed else ""
     cohorts: list[dict[str, object]] = []
     parent_lock = None
-    if strict_start:
-        if os.environ.get("CLOUDBENCH_SYNCHRONIZED_START", "1") != "1":
+    if cleanup_ticketed:
+        if strict_start and os.environ.get("CLOUDBENCH_SYNCHRONIZED_START", "1") != "1":
             raise SystemExit(
                 "strict campaign startup requires synchronized fleet start"
             )
-        barrier_root = campaign_dir / "startup-cohorts"
+        barrier_root = campaign_dir / ("startup-cohorts" if strict_start else "cleanup-cohorts")
         barrier_root.mkdir(mode=0o700)
         parent_lock = (barrier_root / "parent.lock").open("w")
         fcntl.flock(parent_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1572,10 +1576,11 @@ def main() -> int:
             cohorts.append(cohort)
             write_json_atomic(directory / "manifest.json", cohort["_manifest"])
             for job in members:
-                job["startup_cohort"] = cohort_id
-                job["startup_ready_at"] = None
+                if strict_start:
+                    job["startup_cohort"] = cohort_id
+                    job["startup_ready_at"] = None
                 job["_cohort"] = cohort
-        state["startup_cohorts"] = cohorts
+        state["startup_cohorts" if strict_start else "cleanup_cohorts"] = cohorts
     write_json_atomic(summary_path, state)
     print(
         f"🧪 benchmark campaign: tasks={len(args.task)} runs={args.runs} "
@@ -1678,6 +1683,23 @@ def main() -> int:
     # interrupt a running campaign.
     infra_reached = infra_stop_predicate()
     current_cohort: dict[str, object] | None = None
+
+    def prepare_cleanup_tickets(cohort: dict[str, object]) -> None:
+        common = subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()
+        reserve_root = Path(common) / "cloudbench-fleet-ownership"
+        reserve_root.mkdir(mode=0o700, exist_ok=True)
+        policy = stress_environment if stress_environment is not None else os.environ
+        cleanup_ticket_command(root, "prepare", cohort,
+            "--manifest", str(cohort["_directory"] / "manifest.json"),
+            "--reserve-root", str(reserve_root),
+            "--parent-pid", str(os.getpid()), "--parent-start", cleanup_parent_birth,
+            "--preferred", policy.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512"),
+            "--minimum", policy.get("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "32"),
+            "--headroom", policy.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256"),
+            "--canary-script", str(root / "scripts/cloudbench-infra-canary-preflight.py"),
+            "--canary-lock", policy.get("FLEET_INFRA_CANARY_LOCK", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock")),
+            "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
+        cohort["_cleanup_tickets_prepared"] = True
 
     def publish_external_barrier(cohort: dict[str, object], status: str) -> None:
         """Atomic coordinator projection, rewritten only on change; terminal is sticky."""
@@ -2042,6 +2064,14 @@ def main() -> int:
                     first_failure = first_failure or 1
                     state["stress_defaults_failed"] = True
                     write_json_atomic(summary_path, state)
+            if ordinary_cleanup and not barrier_failure and not cohorts[0].get("_cleanup_tickets_prepared"):
+                try:
+                    prepare_cleanup_tickets(cohorts[0])
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    first_failure = first_failure or 1
+                    barrier_failure = True
+                    state["cleanup_ticket_failure"] = "prepare"
+                    write_json_atomic(summary_path, state)
             if strict_start and not active and current_cohort and current_cohort.get("_cleanup_tickets_prepared") and not current_cohort.get("_cleanup_tickets_retired") and all(member["status"] not in {"queued", "running"} for member in current_cohort["_jobs"]):
                 try:
                     cleanup_ticket_command(root, "retire", current_cohort)
@@ -2054,21 +2084,7 @@ def main() -> int:
                 if current_cohort:
                     if not current_cohort.get("_cleanup_tickets_prepared"):
                         try:
-                            common = subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()
-                            reserve_root = Path(common) / "cloudbench-fleet-ownership"
-                            reserve_root.mkdir(mode=0o700, exist_ok=True)
-                            policy = stress_environment if stress_environment is not None else os.environ
-                            cleanup_ticket_command(root, "prepare", current_cohort,
-                                "--manifest", str(current_cohort["_directory"] / "manifest.json"),
-                                "--reserve-root", str(reserve_root),
-                                "--parent-pid", str(os.getpid()), "--parent-start", cleanup_parent_birth,
-                                "--preferred", policy.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512"),
-                                "--minimum", policy.get("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "32"),
-                                "--headroom", policy.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256"),
-                                "--canary-script", str(root / "scripts/cloudbench-infra-canary-preflight.py"),
-                                "--canary-lock", policy.get("FLEET_INFRA_CANARY_LOCK", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock")),
-                                "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
-                            current_cohort["_cleanup_tickets_prepared"] = True
+                            prepare_cleanup_tickets(current_cohort)
                         except (OSError, ValueError, subprocess.SubprocessError):
                             # End through normal summary/Hub finalization, never a traceback.
                             first_failure = first_failure or 1
@@ -2346,7 +2362,7 @@ def main() -> int:
                     environment.pop("RUN_BENCH_CAMPAIGN_BARRIER_DIR", None)
                     environment.pop("RUN_BENCH_CAMPAIGN_COHORT", None)
                     environment.pop("RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC", None)
-                if strict_start:
+                if cleanup_ticketed:
                     environment["RUN_BENCH_CLEANUP_COHORT_DIR"] = str(job["_cohort"]["_directory"])
                     environment["RUN_BENCH_CLEANUP_COHORT_ID"] = str(job["_cohort"]["cohort_id"])
                     environment["RUN_BENCH_CLEANUP_JOB"] = str(job["job_id"])
@@ -2369,7 +2385,7 @@ def main() -> int:
                 job["started_at"] = utc_now()
                 job["status"] = "running"
                 active[process.pid] = job
-                if strict_start:
+                if cleanup_ticketed:
                     try:
                         cleanup_ticket_command(root, "assign", job["_cohort"],
                             "--job", str(job["job_id"]), "--owner-pid", str(process.pid),
