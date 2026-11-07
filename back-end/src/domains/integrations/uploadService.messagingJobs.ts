@@ -11,7 +11,8 @@
  *                                    │ crash ──► lease expires; each claim counts an attempt
  *                                    ▼
  *                     latest client sync fully processed, none failed ──► CONNECTED
- *                     (+ cursor only once its final request arrived)
+ *                     (+ cursor only once its final request arrived; totals
+ *                      recounted from the stored MessageRecord history)
  *
  * Parts are bounded (PART_MAX_WEIGHT messages), so each parse holds a bounded
  * payload in memory and an old client's single large body becomes many parts.
@@ -20,7 +21,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { IntegrationStatus, type Prisma } from './types';
+import { IntegrationStatus, MessageChannel, type Prisma } from './types';
 import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import * as jobsRepo from './repo.messagingUploadJobs';
@@ -50,6 +51,12 @@ const PARSERS: Record<
   imessage: parseIMessageData,
   whatsapp: parseWhatsAppData,
   telegram: parseTelegramData,
+};
+
+const CHANNELS: Record<MessagingPlatform, MessageChannel> = {
+  imessage: MessageChannel.IMESSAGE,
+  whatsapp: MessageChannel.WHATSAPP,
+  telegram: MessageChannel.TELEGRAM,
 };
 
 /** Split contacts into parts of at most PART_MAX_WEIGHT messages, slicing large contacts. */
@@ -185,7 +192,12 @@ async function processClaimedPart(id: string): Promise<void> {
  * arrived (`syncComplete`) advances the incremental-read cursor. Runs from
  * every drain, so a finalization interrupted by a crash is retried.
  */
-async function finalizeIntegration(integration: { id: string; config: unknown }): Promise<void> {
+async function finalizeIntegration(integration: {
+  id: string;
+  userId: string;
+  name: string;
+  config: unknown;
+}): Promise<void> {
   if ((await jobsRepo.countPendingMessagingUploadParts(integration.id)) > 0) return;
   const latest = await jobsRepo.findLatestMessagingUploadPart(integration.id);
   if (latest === null) return;
@@ -197,11 +209,18 @@ async function finalizeIntegration(integration: { id: string; config: unknown })
   }
   if (parts.some((part) => part.processedAt === null)) return;
   const complete = parts.some((part) => part.syncComplete);
-  const config = (integration.config as Record<string, unknown> | null) ?? {};
+  const config = { ...((integration.config as Record<string, unknown> | null) ?? {}) };
+  // Retired per-part accumulators: lost updates under concurrent parts made them wrong.
+  delete config.totalMessagesProcessed;
+  delete config.batchesReceived;
+  // The connector shows these totals; an upload's own size is only a delta.
+  const totals = await jobsRepo.countMessagingHistory(
+    integration.userId,
+    CHANNELS[integration.name as MessagingPlatform]
+  );
   await jobsRepo.finalizeMessagingIntegrationIfCurrent(integration.id, latest.createdAt, {
     ...config,
-    contacts: latest.contacts,
-    messages: latest.messages,
+    ...totals,
     lastJobId: latest.uploadId,
     lastUploadedAt: new Date().toISOString(),
     ...(complete

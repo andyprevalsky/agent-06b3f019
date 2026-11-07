@@ -313,6 +313,12 @@ export interface ConnectPollResult {
   accountEmail?: string;
   accountId?: string;
   reason?: string;
+  /**
+   * Relying party (e.g. openai.com) that asked for a passkey Rose does not hold.
+   * The cloud browser rejects that prompt instantly with no dialog, so the modal
+   * has to say why "Use passkey" did nothing.
+   */
+  passkeyUnavailableFor?: string;
 }
 
 export async function fetchComputeAccounts(provider?: string): Promise<ComputeAccount[]> {

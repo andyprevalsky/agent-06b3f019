@@ -338,8 +338,8 @@
       "agent": "main_execute"
     },
     {
-      "path": "agents/tools/prompts/grep.py",
-      "anchor": "PROMPT = ",
+      "path": "agents/utils/grep_tool_contract.py",
+      "anchor": "GREP_TOOL_PROMPT = ",
       "id": "tool_grep",
       "category": "tool_description",
       "summary": "Tool: search local data \u2014 messages and contact network.",
