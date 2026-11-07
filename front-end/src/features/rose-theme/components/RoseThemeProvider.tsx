@@ -17,10 +17,20 @@
  * the new html.dark. Everything lands on one frame (no next-tick repaint).
  */
 
-import { useCallback, useInsertionEffect, useMemo, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useInsertionEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
 
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
+import { setItem } from '@/lib/storage';
+
+import { ROSE_THEME_ACTIVE_KEY } from '../config';
 import { RoseThemeContext, readStoredRoseDark, writeStoredRoseDark } from '../hooks';
 import type { RoseThemeValue } from '../types';
 import { useThemeTransition } from '../hooks/useThemeTransition';
@@ -64,6 +74,10 @@ export function RoseThemeProvider({
     setToggled({ userId: id, dark: true });
   }, []);
   useLoginDarkMode(darkOnLogin ? activeUserId : null, applyLoginDark);
+
+  useEffect(() => {
+    if (userId !== null) setItem(ROSE_THEME_ACTIVE_KEY, userId);
+  }, [userId]);
 
   useInsertionEffect(() => {
     const root = document.documentElement;

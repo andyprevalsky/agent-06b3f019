@@ -100,3 +100,11 @@ None recorded.
 ## Reusable lesson
 
 When a library silently skips handlers on a dead connection, make the owning wrapper restore or name the dead connection instead of letting a generic "no result" error reach recovery loops.
+
+
+## Recurrence of the open provider-drop item, 2026-11-07
+
+Cloud smoke on 9c6d9c3622 (fleet run 20261107-120351) lost two Tilion sessions at the same instant (`browser-smoke` and `agent-payment-abandonment`: last provider reply
+33.1 s before 12:09:20.1Z in both guests, provider close `code=1000` at 12:09:33.43Z, `code=1011` on reconnect). Here the CdpMux did record the provider close codes, but
+the cause inside Tilion is still unobserved, and this time the socket loss was not recoverable (the reconnect was closed again within 0.5 s), so the payment-card pause
+failed. See `2026-11-07-tilion-backing-host-failure-lost-payment-card-pause`, which names the one missing capture (Tilion `/status` `state`/`closed_at`/`reason`).

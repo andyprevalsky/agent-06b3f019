@@ -16880,9 +16880,8 @@ reserve_worker_machine_slot() {  # <unique-reservation-token>
     # autoscalers cannot refill the Machine ceiling behind the startup guard.
     local token="$1" app_machine_ceiling current_machines result status outcome
     local reserved_machines reserved_shared projected_machines projected_shared
-    # Same default as startup admission (raised from 56 to 300 on 2026-11-06): a
-    # stale 56 here admitted a fleet at startup and then refused its own
-    # mandatory autoscaler workers once the app passed 56 Machines.
+    # Same default as the startup admission (raised from 56 on 2026-11-06): a stale 56 denied
+    # a mass-agent worker clone at "61 app Machines" while the primaries had been admitted.
     app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-300}"
     case "$app_machine_ceiling" in ''|*[!0-9]*|0) return 1 ;; esac
     local worker_inventory inventory_status=0
