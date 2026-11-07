@@ -35,6 +35,9 @@ esac
 F
 chmod +x "$WORK/bin/docker"
 export FAKE_LOG="$WORK/log"
+# The database selection below depends on ROSE_USE_SYSTEM_PG; a runner or devbox that exports it must not
+# decide the default and Docker cases. The forced-system case sets it explicitly.
+unset ROSE_USE_SYSTEM_PG
 run() { : >"$FAKE_LOG"; PATH="$WORK/bin:$PATH" bash "$ROOT/scripts/devbox-teardown.sh" "$@"; }
 
 # 1. the explicit stack id computed by the backend function reaches the killer
