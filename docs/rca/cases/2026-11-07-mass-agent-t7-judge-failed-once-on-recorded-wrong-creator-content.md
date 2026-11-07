@@ -8,7 +8,8 @@ classification: undetermined
 problem_class: observability-trace-capture-gap
 first_bad_boundary: not established; the evaluator t7-schema-task-complete is a single-turn LLM judge over a recorded trajectory whose Michael Lustgarten card says its spawn-agent result researched a different creator
 symptoms:
-  - "Declared evaluator t7-schema-task-complete failed: FAIL T7: messages[4108], Michael Lustgarten's Task Complete card, contains empty hook_formulas, top_5_performing_pieces_last_90_days, and content_gaps outputs"
+  - "Declared evaluator t7-schema-task-complete failed: FAIL T7: messages[4108]"
+  - "contains empty hook_formulas, top_5_performing_pieces_last_90_days, and content_gaps outputs"
 tags:
   - mass-agent
   - llm-judge
