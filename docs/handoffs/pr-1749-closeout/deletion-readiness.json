@@ -14,35 +14,32 @@
  "source": "merged on main (3e770c9e1); branch fix/linkedin-export-agent-live pushed; follow-up branches followup/pr1749-release-retention (d09ce26d4) and followup/backend-blackbox-heap-growth (85a2e2706) pushed with the same SHAs as the scratch clone; the scratch clone's other refs (li-work 79e007df4, fix/linkedin-export-agent-live 22711f595) are ancestors of the merged head",
  "resources": {
   "fly": "no Fly Machines or volumes owned by this deploy's smoke campaigns remain: all 9 cloud smoke campaigns (7 archived tar.gz + 2 live dirs) have result.json cleanup_complete true except c7716de8 (infra stop 1/10, cancelled through owned teardown), and every fleet run of the live campaigns (11 + 11) and of c7716de8 (10) has teardown-ownership/provider-teardown-verified.epoch; claimed-pool ids 0; the worker bank cutover is managed by the deploy-agents job",
-  "local_retained_open": "scratch clone /var/tmp/li-fix-clone (its .context evidence archived as scratch; refs pushed or ancestors of the merged head) and the 11 worker roots under /var/tmp/rdw (evidence archived in workers) remain until the live production LinkedIn verification completes; owner deploy owner",
   "local_retained": "/home/boxes/rose checkout and .context (archived in core/cloud), shared victoria development database, browser-use temp directories and test scratch under /var/tmp not created by a gate of this deploy",
   "local_removed_by_closeout": "/home/boxes/pr1749-closeout-staging (10854 hard links plus one copied file; originals untouched) and /var/tmp/pr1749-restore-test",
   "closeout_scratch_retained": "/home/boxes/pr1749-closeout-control (capture lists, receipts, logs; archived as control except its own receipt, which is reproduced in the manifest), /var/tmp/pr1749-closeout-work (scripts) and the records clone /var/tmp/pr1749-records-clone (shares objects with /home/boxes/rose); safe to delete once this records PR merges",
-  "processes": "agent_link_server.py pid 1936216 (127.0.0.1:8768, root .context/deploy-cloud/ff2cbc640d80.../runs, started 11:18Z by the run2 cloud smoke campaign) is still running; it was not started by the closeout agent and was left for the deploy owner to stop by exact PID"
+  "processes": "agent_link_server.py pid 1936216 (started 11:18Z by the run2 cloud smoke campaign) stopped by exact PID by the deploy owner; not running at 2026-11-07T15:45Z",
+  "local_removed_after_verification": "scratch clone /var/tmp/li-fix-clone, /var/tmp/li-records and the 11 worker roots under /var/tmp/rdw removed at 2026-11-07T15:39:19Z after the live production verification completed (evidence already archived as scratch and workers); 73,626,107,904 bytes reclaimed"
  },
  "freedom": "untouched",
- "open_items": [
+ "open_items": [],
+ "non_pass_items_disclosed": "see closeout-manifest.json non_pass_items_disclosed",
+ "resolved_items": [
   {
    "item": "live production LinkedIn verification agent 5357f72b-bf67-44f8-bd66-8963e46a487f",
-   "state": "in progress at closeout (status ACTIVE, 357 messages at 2026-11-07T15:08:22Z); final outcome reported by the deploy owner",
-   "owner": "deploy owner",
-   "condition": "final outcome reported by the deploy owner"
+   "resolution": "COMPLETED; integration CONNECTED 2026-11-07T15:31:59Z, 375 contacts, 480 messages (re-observed 15:45:01Z)"
   },
   {
    "item": "retain /var/tmp/li-fix-clone and /var/tmp/rdw",
-   "owner": "deploy owner",
-   "condition": "after live prod LinkedIn verification completes"
+   "resolution": "removed 2026-11-07T15:39:19Z after verification; 73,626,107,904 bytes reclaimed"
   },
   {
    "item": "stop leftover agent_link_server.py pid 1936216 by exact PID",
-   "owner": "deploy owner",
-   "condition": "now (no consumer; its campaign finished 11:58:30Z)"
+   "resolution": "stopped; pid absent at 15:45Z"
   },
   {
    "item": "publish the production-verify factory events and completed outcome (Step 15)",
-   "owner": "deploy owner",
-   "condition": "at deploy completion"
+   "resolution": "published on main in 4a122373e (outcome completed 15:39:27Z); smoke ledger rows in d3eda0e5b"
   }
  ],
- "non_pass_items_disclosed": "see closeout-manifest.json non_pass_items_disclosed"
+ "ready_for_deletion": "yes, once this records PR merges: source is on main, private archives verified, no retained resource or process remains for this deploy; closeout scratch (/home/boxes/pr1749-closeout-control, /var/tmp/pr1749-closeout-work, /var/tmp/pr1749-records-clone) may be deleted after the merge"
 }
