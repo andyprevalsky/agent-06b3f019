@@ -3216,7 +3216,7 @@ assert len(list(p.iterdir()))==2
         early = self.state['early_failures']
         request = self.directory / 'rca' / (early[0]['id'] + '.json')
         self.assertEqual('DEPLOY_GATE_EARLY_FAILURE gate=api test=a status=FAIL check=api/a '
-                         f"id={early[0]['id']} rca={request}", notices[0])
+                         f"id={early[0]['id']} rca={request}: start /RCA on this request now", notices[0])
         self.assertTrue(request.is_file())
         self.assertEqual([('api/a', 'reused by final FAIL')], [(f['check'], f['settled']) for f in early])
         failure = next(f for f in self.state['failures'] if f['check'] == 'api/a')
@@ -3231,6 +3231,21 @@ assert len(list(p.iterdir()))==2
         self.assertEqual(1, len(list((self.directory / 'rca').glob('*.launch.json'))))  # one RCA, not two
         failure = next(f for f in self.state['failures'] if f['check'] == 'api/a')
         self.assertEqual(self.state['early_failures'][0]['id'], failure['id'])
+
+    def test_with_a_cycle_launcher_a_passing_check_prints_no_stop_request(self):
+        printed, notices, worker = self.early_failure_fixture('PASS', launcher_exit=0)
+        self.assertEqual('superseded: final PASS', self.state['early_failures'][0]['settled'])
+        self.assertNotIn('DEPLOY_GATE_EARLY_SUPERSEDED', printed)  # the agent started nothing to stop
+
+    def test_early_occurrences_per_gate_are_capped_and_the_rest_wait_for_the_result(self):
+        gate = {'name': 'backend', 'checks': [f'blackbox:d{i}' for i in range(15)]}
+        self.state['round'] = 1
+        rows = [progress.row(f'd{i}', 'FAIL', scope='domain') for i in range(12)]
+        opened = c.early_failures(self.state, gate, rows, self.directory)
+        self.assertEqual(c.EARLY_LIMIT, len(opened))
+        self.assertEqual([f'backend/blackbox:d{i}' for i in range(c.EARLY_LIMIT)], [o['check'] for o, _p, _r in opened])
+        self.assertEqual([], c.early_failures(self.state, gate, [progress.row('d14', 'FAIL', scope='domain')],
+                                              self.directory))
 
     def test_a_failed_cycle_launch_is_kept_with_the_other_launch_errors(self):
         printed, notices, worker = self.early_failure_fixture('FAIL', launcher_exit=3)

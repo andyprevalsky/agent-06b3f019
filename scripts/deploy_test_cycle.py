@@ -1376,6 +1376,7 @@ RCA_INSTRUCTION = ("/RCA: diagnose this occurrence; return the evidence-backed "
                    "UNKNOWN blocks. Group with an existing root cause only after reading evidence. "
                    "Do not deploy or weaken assertions/timeouts. Independent failures run concurrently.")
 EARLY_POLL_SECONDS = 10.0
+EARLY_LIMIT = 10  # early occurrences per gate per round; later failures arrive with the gate's result
 
 
 def rca_request(directory: Path, failure: dict) -> Path:
@@ -1397,7 +1398,7 @@ def early_check(gate: dict, row: dict) -> str | None:
     """The gate check a progress row belongs to, so its early occurrence and the final failure match.
 
     None for a row naming no check of this gate: an early occurrence exists only for a check the
-    final result can fail, so early RCAs are always a subset of the end-of-gate ones, never extra.
+    final result can fail. The final result reuses it, or supersedes it when that check passes.
     """
     for candidate in (row["unit"], "blackbox:" + row["unit"], row.get("case") or ""):
         if candidate in gate["checks"]:
@@ -1405,7 +1406,8 @@ def early_check(gate: dict, row: dict) -> str | None:
     return gate["checks"][0] if len(gate["checks"]) == 1 else None
 
 
-def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path) -> list[tuple[dict, Path, dict]]:
+def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path,
+                   limit: int | None = None) -> list[tuple[dict, Path, dict]]:
     """Open one occurrence (and RCA request) per newly failing check of a still-running gate.
 
     Progress rows are advisory: they open an occurrence early, the gate's final result decides it
@@ -1413,8 +1415,11 @@ def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path) -
     Later rows for an already-open check open nothing and print nothing.
     """
     seen = {(f["gate"], f["check"]) for f in state.get("early_failures", []) if f.get("round") == state["round"]}
+    limit = EARLY_LIMIT if limit is None else limit
     opened = []
     for row in progress.failures(rows):
+        if len(seen) >= limit:
+            break  # bounded like a notice budget: the gate's final result reports the rest
         mapped = early_check(gate, row)
         if mapped is None:
             continue
@@ -1580,8 +1585,9 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                 results.append(result)
                 fresh = failed_cases(state, [result])
                 for match in settle_early(state, result, fresh):
-                    print(f"DEPLOY_GATE_EARLY_SUPERSEDED gate={match['gate']} check={match['check']} "
-                          f"id={match['id']} {match['settled']}", flush=True)
+                    if not launcher:  # only the agent started an RCA it must stop
+                        print(f"DEPLOY_GATE_EARLY_SUPERSEDED gate={match['gate']} check={match['check']} "
+                              f"id={match['id']} {match['settled']}: stop its /RCA", flush=True)
                 state["live_failures"].extend(fresh)
                 write(directory / "cycle.json", state)
                 # Publish and dispatch each failure while healthy siblings run.
@@ -1608,7 +1614,12 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                                 launched.append(rc_pool.submit(launch_rca, path, launcher))
                         else:
                             print(progress.describe(gate["name"], row, check=occurrence["check"],
-                                                    occurrence=occurrence["id"], request=str(path)), flush=True)
+                                                    occurrence=occurrence["id"], request=str(path))
+                                  + ": start /RCA on this request now", flush=True)
+                    if not launcher and opened and len([f for f in state.get("early_failures", [])
+                                                        if f["gate"] == gate["name"] and f.get("round") == state["round"]]) >= EARLY_LIMIT:
+                        print(f"DEPLOY_GATE_EARLY_LIMIT gate={gate['name']} limit={EARLY_LIMIT}: "
+                              "further failures of this gate arrive with its result", flush=True)
 
             futures = {submit(gate): gate for gate in selected if gate is not held}
             pending = set(futures)
