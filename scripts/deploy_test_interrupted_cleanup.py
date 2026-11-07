@@ -66,15 +66,23 @@ def namespace_quiet(namespace, ports):
             if process.stat().st_uid != os.geteuid():
                 continue
             argv = (process / 'cmdline').read_bytes().decode(errors='replace')
-            cwd = str((process / 'cwd').resolve(strict=True))
-            need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
-                 'original namespace has a live consumer')
-            for fd in (process / 'fd').iterdir():
-                try:
-                    target = os.readlink(fd)
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
-                need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
+            ancestor = int(process.name) in ancestors
+            need(ancestor or prefix not in argv, 'original namespace has a live consumer')
+            try:
+                cwd = str((process / 'cwd').resolve(strict=True))
+                need(ancestor or (cwd != prefix and not cwd.startswith(prefix + '/')),
+                     'original namespace has a live consumer')
+                for fd in (process / 'fd').iterdir():
+                    try:
+                        target = os.readlink(fd)
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+                    need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
+            except PermissionError:
+                # A non-dumpable same-uid process (setuid exec, PR_SET_DUMPABLE=0) keeps a
+                # readable cmdline but hides cwd/fd; like another user's process it cannot
+                # be inspected further.
+                continue
         except (FileNotFoundError, ProcessLookupError):
             continue
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):

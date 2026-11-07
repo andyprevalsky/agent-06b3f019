@@ -840,4 +840,45 @@ class InterruptedCustody(unittest.TestCase):
         proof['confirmed_at']=r['finished_at']
         with self.assertRaises(ValueError):c.reconcile(state,r['token'],proof)
 
+class NamespaceQuietUninspectableProcess(unittest.TestCase):
+    """A same-uid process whose cwd/fd turn unreadable is not inspected further, not fatal.
+
+    PR #1749's final sweep: a process went non-dumpable while namespace_quiet
+    read it. PermissionError on /proc/<pid>/fd then failed every cloud custody
+    reconcile on the host. Its cmdline stays readable and is still checked.
+    """
+
+    def setUp(self):
+        import deploy_test_interrupted_cleanup as m
+        self.m = m
+        self.namespace = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__('shutil').rmtree(self.namespace, ignore_errors=True))
+
+    def run_hidden_child(self, argv):
+        child = subprocess.Popen(argv)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        hidden = Path('/proc', str(child.pid))
+        for _ in range(200):  # until exec has published the argv
+            if (hidden / 'cmdline').read_bytes().split(b'\0')[0] == argv[0].encode():
+                break
+            __import__('time').sleep(0.01)
+        real_resolve = Path.resolve
+
+        def resolve(path, *args, **kwargs):
+            if path == hidden / 'cwd':
+                raise PermissionError(13, 'Permission denied', str(path))
+            return real_resolve(path, *args, **kwargs)
+        return patch.object(Path, 'resolve', resolve)
+
+    def test_process_with_hidden_cwd_and_fds_is_not_inspected_further(self):
+        with self.run_hidden_child(['sleep', '30']):
+            self.m.namespace_quiet(self.namespace, set())
+
+    def test_hidden_process_naming_the_namespace_in_argv_is_still_a_consumer(self):
+        with (self.run_hidden_child(['sh', '-c', 'sleep 30', str(self.namespace)]),
+              self.assertRaisesRegex(ValueError, 'live consumer')):
+            self.m.namespace_quiet(self.namespace, set())
+
+
 if __name__=='__main__':unittest.main()
