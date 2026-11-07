@@ -107,6 +107,14 @@ export async function startFakeGithub(
   const requests: RecordedRequest[] = [];
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://github.test');
+    // The devbox's sprite-daemon probes every new local listener with an unsolicited `HEAD /` (its port
+    // detection). No GitHub client sends it, and recording it breaks the exact request counts the tests assert.
+    if (req.method === 'HEAD' && url.pathname === '/') {
+      req.resume();
+      res.statusCode = 200;
+      res.end();
+      return;
+    }
     const request: RecordedRequest = {
       method: req.method ?? 'GET',
       path: url.pathname,

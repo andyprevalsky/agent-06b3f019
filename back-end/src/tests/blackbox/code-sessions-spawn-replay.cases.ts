@@ -21,6 +21,7 @@ import { test } from 'node:test';
 import { prisma } from '../../providers/database';
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 import { withClaudeCodeCreateSlot } from '../../providers/e2bCreateSlot';
+import { putEphemeral } from '../../providers/sharedState';
 import type { SpawnCodeSession } from '../../providers/codeSessions/usageLimit';
 
 interface FakeTask {
@@ -139,6 +140,34 @@ export function registerSpawnReplayCases(userId: string): void {
       assert.equal(retried.session.taskId, first.session.taskId);
       assert.equal(retried.session.wsUrl, first.session.wsUrl);
       assert.equal(retried.fields.branch, first.fields.branch);
+    } finally {
+      await cleanup(agentId);
+    }
+  });
+
+  test('a stored create that cannot name its task is not replayed, and the create runs', async () => {
+    // Stored rows outlive a run (6 h) and a create may return no task id; a unique lookup on it threw a Prisma
+    // validation error out of every later retry of the same lease owner.
+    const agentId = await spawnAgent(userId, 'nameless');
+    const leaseOwner = `tool:${agentId}:toolu_replay_nameless`;
+    const params = {
+      agentId,
+      userId,
+      repoUrl: null,
+      codeProvider: 'claude' as const,
+      leaseOwner,
+    };
+    const fake = fakeCreate(agentId, 10);
+    try {
+      await putEphemeral(
+        'code-spawn-create',
+        leaseOwner,
+        { session: { resumedFrom: 'checkpoint' }, fields: { code_provider: 'claude' } },
+        60_000
+      );
+      const created = await createWithCodeSession(params, fake.create);
+      assert.equal(fake.calls.length, 1, 'the create ran');
+      assert.ok(created.session.taskId, 'and returned its task');
     } finally {
       await cleanup(agentId);
     }

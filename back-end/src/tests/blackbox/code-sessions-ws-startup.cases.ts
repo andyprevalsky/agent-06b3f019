@@ -252,6 +252,9 @@ export function registerWsStartupCases(ctx: Pick<CodeSessionLifecycleContext, 'f
         'the clone to start',
         async () => (await probeWsServer(sandbox, port)).state === 'cloning'
       );
+      // `cloning` is reported before git is spawned; interrupt only a clone that has reached git, or the
+      // restart is the first clone, not the repeat of one (the count below is of started clones).
+      await until('the interrupted clone to reach git', async () => cloneCount(fx) === 1);
       first.kill('SIGTERM');
       assert.equal(await exitsWithin(first, 10_000), true, 'the server stops mid-clone');
       assert.equal(existsSync(join(fx.home, 'workspace')), false, 'no half-written workspace');

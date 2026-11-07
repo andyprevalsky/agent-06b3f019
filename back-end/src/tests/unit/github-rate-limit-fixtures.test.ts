@@ -95,6 +95,19 @@ async function main(): Promise<void> {
   assert.deepEqual(diff.map(([name]) => name).sort(), ['retry-after', 'x-ratelimit-reset']);
   assert.equal(moved.body, baseline.body);
 
+  // The devbox daemon's `HEAD /` port probe is not a GitHub call and must never reach the request log.
+  const probed = await startFakeGithub(() => ({ status: 200, json: {} }));
+  try {
+    await fetch(`${probed.baseUrl}/`, { method: 'HEAD' });
+    await fetch(`${probed.baseUrl}/repos/o/r`);
+    assert.deepEqual(
+      probed.requests.map((request) => `${request.method} ${request.path}`),
+      ['GET /repos/o/r']
+    );
+  } finally {
+    await probed.close();
+  }
+
   process.stdout.write(
     'github rate-limit fixtures: fake matches the recorded responses byte for byte\n'
   );

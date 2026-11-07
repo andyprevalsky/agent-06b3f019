@@ -190,9 +190,13 @@ async function replayedSpawnCreate<T extends SpawnCreateResult>(
     SPAWN_CREATE_NAMESPACE,
     key
   );
-  if (stored === undefined || stored.fields.code_provider !== codeProvider) return null;
+  if (stored === undefined || stored.fields?.code_provider !== codeProvider) return null;
+  // A record that cannot name its task (an older shape, or a create that returned none) has nothing to replay;
+  // a unique lookup on an undefined id is a Prisma validation error, not an absent task.
+  const taskId: unknown = stored.session?.taskId;
+  if (typeof taskId !== 'string' || taskId === '') return null;
   const task = await prisma.claudeCodeSession.findUnique({
-    where: { id: stored.session.taskId },
+    where: { id: taskId },
     select: { status: true },
   });
   if (task?.status !== 'ACTIVE') return null;
