@@ -1,0 +1,34 @@
+{
+ "schema_version": 1,
+ "pr": 1735,
+ "deployed_sha": "259b9dcb37946346156b35342cbb533952528af1",
+ "gated_source": "86951126e96cf7f01b269156cb26c52f55d62979",
+ "ledger_commit_on_main": "409e6087d1 (local control 97aa455f + merged-main cloud pass d5672824 rows; span_durations.20261106.main.jsonl sha256 23824daac398b1920a155a954a5af2c1677460e3c6535a687d71a870bbdbd4d7)",
+ "factory_commit_on_main": "e399a077c0",
+ "staged_cycle": {"result": "ready, 0 failures", "gates_pass": ["eslint", "typescript", "backend-structural", "format", "deploy-command-structural"],
+   "verify": "deploy_test_cycle.py verify exit 0; run_deploy_pipeline.py verify --require-staged bound-staged exit 0",
+   "interrupted_attempts": "5 earlier cycles on superseded heads (7bfbe321d, 6f0f9da4a, a1a4d9625, fcd16f694, 109d6b6a6) were operator-interrupted when the source changed; every non-PASS receipt is cancelled=true (deploy-command-structural native_exit 1 'worker exit and test results disagree', backend-structural native_exit -15)"},
+ "review": {"coderabbit": "skipped by repo path filters on every head (docs only); not quota exhaustion",
+   "substantive": "independent adversarial fact-checks; 10 findings fixed; final pre-check of 86951126e REVIEW: CLEAN",
+   "ledger": "first deploy attempt reached cycle 3 with findings (review-unstable, outcome blocked); fresh /deploy cycle 1 clean"},
+ "production": {"fly": "not required (no agent runtime change)", "render": "not required (no back-end change)", "vercel": "not required (no front-end change)",
+   "mac_release": "not applicable", "agentcard": "not selected (no payment paths)",
+   "semantic": "chat-lifecycle-ratchet.yml run 42233161178 on source_sha 259b9dcb3: all jobs success, 14:21:14-14:29:45Z",
+   "mac_local_execution_acceptance": "SKIPPED - no Mac available: read-only production query 2026-11-06T14:22:21Z returned 0 LocalDevice rows for owner 1f85ff25-6e29-4c1b-8739-f917bd101a30 (GET /api/local-devices with API key returned 401, so not used as evidence)"},
+ "repair_outcome": "original cloud command scripts/run-bench browser-biometrics-webdecoy --ref fa676edc7 --wait PASS (run 20261106-131544-295004, risk 0.0906 < 0.163); see ../evidence/cloud-pass-fa676edc7.json",
+ "resources": {
+   "fleet_run_1": "20261106-130054-65322 (boot-refused): clone 84eee55cd45658 destroyed; volume vol_vjy236qzypyw2exv pending_destroy; owner 018d12afcdba4d538ffd871369e8b9c7 reconciled by scripts/run-bench --recover-stale-owner (2026-11-06 ~14:31Z); lifecycle.json kept status failed",
+   "fleet_run_2": "20261106-131544-295004 and canary 20261106-131645-307923: lifecycle verified, controller exit 0",
+   "fleet_ownership_records_remaining": 0,
+   "processes": "agent_link_server.py (pids 65540, 295220) and monitor tails (68531, 299881) owned by this repair were TERMed and exited; no deploy worker/structural processes remain",
+   "worktrees": "/var/tmp/wd-1703 and /var/tmp/wd-ledger removed; /var/tmp/rdw..rdw6 worker clones removed; /var/tmp/wd-bench deregistered and trimmed to its sealed teardown-ownership records (269 KB, retained: controller-sealed read-only evidence, owners already released)"
+ },
+ "archives": [
+  {"path": "/project/run-evidence/pr1735-wd-bench-fleet-evidence.tar.gz", "sha256_prefix": "ee8e21872fee63ead6f1", "bytes": 31114227, "verified": "520 files == 520 tar entries"},
+  {"path": "/project/run-evidence/pr1735-repair-evidence.tar.gz", "sha256_prefix": "387abeb9398cb6a351ae03e3", "bytes": 46675589, "contents": "/var/tmp/wd-repair working evidence, all deploy-cycle state dirs, run-1 fleet dirs, review ledger, deploy timing runs", "secret_scan": "0 credential-pattern matches"}
+ ],
+ "durable_copies": "prod Benchmark Hub runs 20261106-103815-953003-m7cf1c7ff9d3f, 20261106-095657-2926622-mc29e58eff36d, 20261106-130054-65322, 20261106-131544-295004 (agent d5672824 readback 200, 81 messages)",
+ "local_only_after_deletion": "nothing required: source is merged; records are in git; raw exports are reproducible from the Hub; /project archives are convenience copies",
+ "scorecard": "postmerge/scorecard.html (snapshot rendered before this records PR merged; the published visual is the final render)",
+ "freedom": "untouched"
+}

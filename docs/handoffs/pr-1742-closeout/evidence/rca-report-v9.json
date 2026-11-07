@@ -1,0 +1,93 @@
+{
+ "failures": [
+  {
+   "id": "a8952b04fcd94cb8af6c79a7bcf13285",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "gate": "cloudbench-controller",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/cbcontroller/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/cbcontroller",
+    "--stdio"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "multi-workstream step 'readiness active-retry must preserve completed task and exact worker retirement' failed during the concurrent sweep (same failure as v8 initial). The PR diff touches no cloudbench code or tests; this gate passed on this exact source 337aa6318 in v6 attempt 9 and v8 attempt 3.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/3/focused/cloudbench-controller/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/3/focused/cloudbench-controller/result.json"
+  },
+  {
+   "id": "173f4f2af1824532b387d947b3b7a040",
+   "check": "backend-coverage-blackbox/blackbox:browser-session",
+   "gate": "backend-coverage-blackbox",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/home/boxes/deploy-workers/backend"
+   ],
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "browser-session resume-custody timing race ('Browser resume is still in progress' vs /hydration outcome remains unknown/) during the concurrent sweep. PR touches no browser-session code; the backend gate passed 250/250 on this exact source in v8 initial, and the domain passes in isolation (run-blackbox-tests.sh browser-session exit 0).",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/2/initial/backend-coverage-blackbox/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/2/initial/backend-coverage-blackbox/result.json"
+  },
+  {
+   "id": "1753c9a11b8f454aba974c10f9ddae1a",
+   "check": "backend-coverage-blackbox/units",
+   "gate": "backend-coverage-blackbox",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/home/boxes/deploy-workers/backend"
+   ],
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "units: src/tests/unit/error-alert.test.ts:194 'a non-2xx Slack response remains immediately retryable' (1 !== 2) during the concurrent sweep. PR touches no error-alert/Slack code or that test; the backend gate passed 250/250 (including units) on this exact source in v8 initial.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/2/initial/backend-coverage-blackbox/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/2/initial/backend-coverage-blackbox/result.json"
+  },
+  {
+   "id": "9604a73e1ee144ab99fcf83867d72f3e",
+   "check": "backend-coverage-blackbox/coverage-threshold",
+   "gate": "backend-coverage-blackbox",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/home/boxes/deploy-workers/backend"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "coverage-threshold UNVERIFIED only because the units/browser-session failures stopped report work ('Backend test phase failed ... skipping report work'). Not a coverage regression; it passed on this exact source in v8 initial.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/2/initial/backend-coverage-blackbox/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/2/initial/backend-coverage-blackbox/result.json"
+  }
+ ]
+}

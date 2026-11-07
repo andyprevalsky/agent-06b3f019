@@ -64,3 +64,7 @@ canonical-fixture guard or smoke gate was waived.
 
 After schema changes, migrate and validate the reviewed canonical seed under
 its new immutable key; never relabel an older dump or silently cold-sync prod.
+
+## November 6 recurrence: additive user-control revision
+
+The additive userControlRevision column re-keyed the cloud PG15 fixture to 6369a5ab0d13ed9d85b7dbeec1a8b23107b788d6. A nine-task smoke campaign refused before allocation because that immutable key was absent. The supported migrate-canonical-seed workflow restored the previous reviewed PG15 fixture b44a9d9a7f00521d4fd427f40b4ce8ec36362ba7 and applied only migration 20261106060000_agent_user_control_revision. Both content validations, the second-database restore, every-table row-count comparison and R2 byte comparison passed; the published dump is 31,152,810 bytes. The exact unique scratch container and its unreferenced anonymous volume were retired using the recorded Docker mount identity. The failed smoke attempt and its original receipts remain unchanged; fixture publication grants no task-verdict credit.

@@ -11,6 +11,10 @@ export function isHiddenTrajectoryRow(message: Message): boolean {
   if (message.role !== 'TOOL') return false;
   // Agent-specific routes take precedence over generic approval/gate placeholders.
   const tool = metadata?.toolName;
+  // The display itself is the row the user sees ("Displayed for the user" adds
+  // nothing); a failed or rejected display keeps its error row.
+  if (tool === 'display')
+    return !metadata?.error && !/failed|error/i.test(String(metadata?.toolStatus ?? ''));
   if (
     [
       'spawn_general_purpose_agent',

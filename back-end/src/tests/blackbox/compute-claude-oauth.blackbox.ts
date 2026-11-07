@@ -99,6 +99,7 @@ async function runWatcherTick(options: {
       }) as T | null | undefined;
       return value ?? undefined;
     },
+    syncPasskeyCeremonies: async () => undefined,
     close: () => {
       browserClosed += 1;
     },

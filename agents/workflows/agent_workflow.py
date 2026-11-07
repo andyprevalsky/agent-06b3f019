@@ -27,6 +27,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
     from domains.agent_messaging.handler import kill_agent, send_message_to_agent
+    from domains.report_bug.handler import report_bug, with_report_bug
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
@@ -259,6 +260,7 @@ TOOL_EXECUTORS = {
     "grep": grep,
     "send_message_to_agent": send_message_to_agent,
     "kill_agent": kill_agent,
+    "report_bug": report_bug,
 }
 
 # Tools requiring user approval before execution
@@ -813,6 +815,10 @@ CONTINUATION_BACKGROUND_SETTLE_SECONDS = 180.0
 # these history bounds (Temporal hard limits: 51,200 events / 50 MB).
 OVERFLOW_DEFER_MAX_HISTORY_EVENTS = 30_000
 OVERFLOW_DEFER_MAX_HISTORY_BYTES = 30 * 1024 * 1024
+# Temporal rejects a command whose payloads exceed ~2 MiB (TMPRL1103) and retries the
+# failed workflow task forever, so a continuation that big can never hand off. Warn well
+# before the limit so a growing context is visible instead of wedging a cutover.
+CONTINUATION_PAYLOAD_WARN_BYTES = 1_500_000
 
 
 @workflow.defn
@@ -1401,8 +1407,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if isinstance(price_limit, int) and not isinstance(price_limit, bool) and price_limit > 0:
             self.price_limit_cents = price_limit
 
-    def _continuation_resume_state(self, context: Optional[List[Dict]]) -> Dict[str, Any]:
-        """Snapshot every mutable value needed after a continue-as-new boundary."""
+    def _continuation_resume_state(self) -> Dict[str, Any]:
+        """Snapshot every mutable value needed after a continue-as-new boundary.
+
+        The conversation is NOT part of this snapshot: it travels once as the
+        continuation's ``context`` argument. Carrying a second copy doubled the
+        payload, and Temporal fails the workflow task (TMPRL1103) when a command's
+        payloads exceed ~2 MB, which wedged a cooperative cutover for a 1 MB agent.
+        """
         # Tree totals are derived state. Recompute at the serialization boundary
         # so even a zero-cost/direct-token call cannot leave the durable tree
         # snapshot behind the own counters.
@@ -1487,7 +1499,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                    if self._browser_activity_cleanup_unknown else {}),
                 "signup_completed": self._signup_completed,
                 "signup_dismissed": self._signup_dismissed,
-                "context": list(context or self.context),
                 "cloud_agent_lifecycle_tool_call_id": self._cloud_agent_lifecycle_tool_call_id,
                 "cloud_agent_lifecycle_start_phase": self._cloud_agent_lifecycle_start_phase,
                 "cloud_agent_lifecycle_updates_sent": sorted(self._cloud_agent_lifecycle_updates_sent),
@@ -1541,7 +1552,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self.model,
             self.reasoning_max_tokens,
             self.verifier,
-            context,
+            # None means "the live conversation": run() adopts a list argument over restored state.
+            context if isinstance(context, list) else list(self.context),
             self.parent_workflow_id,
             self.parent_agent_id,
             self.depth,
@@ -1555,10 +1567,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # self.fast_mode_cache_enabled here or a button-on non-DEMO segment
             # loses provider_fast_mode across continue_as_new.
             self.provider_fast_mode,
-            self._continuation_resume_state(context),
+            self._continuation_resume_state(),
         ]
         if self.world_model_mode != "real":
             args.append(self.world_model_mode)
+        payload_bytes = len(_json.dumps(args, default=str))
+        if payload_bytes > CONTINUATION_PAYLOAD_WARN_BYTES:
+            workflow.logger.warning(
+                f"Continuation payload is {payload_bytes} bytes "
+                f"(Temporal rejects ~2 MiB); context messages={len(args[6] or [])}"
+            )
         return args
 
     def _iteration_resume_kwargs(self) -> Dict[str, int]:
@@ -2643,10 +2661,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # =====================================================================
         # Tool lists from centralized source of truth
         # =====================================================================
-        plan_tools = PLAN_PHASE_TOOLS
-        execute_tools = (
-            ["google_workspace_run", "attempt_completion"] if matches_demo_goal(self.goal) else EXECUTE_PHASE_TOOLS
-        )
+        plan_tools, execute_tools = self._phase_tool_lists()
 
         # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
         # is a local checkpoint/debug phase: it keeps the persisted plan, marks
@@ -3565,6 +3580,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_applied_revision = target_revision
         self._response_schema_refresh_failed_revision = 0
         self._response_schema_refresh_error = None
+
+    def _phase_tool_lists(self) -> Tuple[List[str], List[str]]:
+        """(PLAN tools, EXECUTE tools) for this agent; root-only tools join for eligible roots."""
+        if matches_demo_goal(self.goal):
+            return list(PLAN_PHASE_TOOLS), ["google_workspace_run", "attempt_completion"]
+        return with_report_bug(PLAN_PHASE_TOOLS, self), with_report_bug(EXECUTE_PHASE_TOOLS, self)
 
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.

@@ -1,0 +1,31 @@
+{
+ "recorded_at": "2026-11-06T07:47:49Z",
+ "cycle": ".context/deploy-pipeline-bc31eb4",
+ "source": {
+  "head": "bc31eb4c937ef18e166de341ca7ebe03e2700f4b",
+  "digest": "0aaf66afd8aa7b8188300e98d56ce122fda9eed673858369b72513a907db8a55"
+ },
+ "passed": [
+  "format",
+  "eslint",
+  "typescript",
+  "backend-structural",
+  "canonical-seed-whatsapp-content",
+  "seed-cache-decision",
+  "e2b-smoke",
+  "live-probes",
+  "seed-memory-ratchet",
+  "deploy-command-structural",
+  "agents-coverage-blackbox",
+  "frontend-coverage-blackbox",
+  "backend-coverage-blackbox (249 cases)"
+ ],
+ "failed": {
+  "smoke": "9/9 UNVERIFIED: shared warm-source donor 683e47df5094d8 held by another owner fleet (07:03-07:13Z); NOT_INTRODUCED shared-resource contention; triaged assigned_repair",
+  "semantic-stack": "setup refused: stale deploy timing run from the e51b568 interruption; NOT_INTRODUCED; triaged assigned_repair",
+  "cloudbench-controller": "same stale timing run; NOT_INTRODUCED; triaged assigned_repair"
+ },
+ "focused_rerun": "r6 refused at launch 07:42:07Z: \"gates still own unreconciled cleanup; refuse launch: smoke\" (campaign f4850a7b\u2026 retains a native-producer owner)",
+ "closure": "superseded by parent source change to bf81ac6 (CodeRabbit cycle-2 fixes); cycle left in phase focused with history intact; bf81ac6 validated in a fresh cycle .context/deploy-pipeline-bf81ac6",
+ "foreign_fleet": "navi-whisper-lux-bench Machines created 07:36:32-33Z by another owner running the same 9 smoke tasks at REF 3cc23b99f10e6d458411a332b9c22b0f8c01f664 (hub parent runs 20261106-072445-*); two started test-mass-agent-run-0 Machines from 05:08/05:18Z (ref 05826f6d, hub run 20261106-044813-1612148). Untouched."
+}

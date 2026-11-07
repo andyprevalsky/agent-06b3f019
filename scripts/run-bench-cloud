@@ -1340,25 +1340,37 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
 # Never return an unvalidated token: an invalid PAT is worse than a missing one
 # because callers treat non-empty as "auth is configured".
 github_token_can_fetch_repo() {
-    local token="$1" code cfg
+    local token="$1" cfg header
     [ -n "$token" ] || return 1
-    # Metadata-only fine-grained PATs can pass GET /repos while lacking Contents
-    # and failing git clone/fetch. Probe the contents root (no trailing slash) so
-    # acceptance requires Contents: read — the permission git operations need.
-    # Keep the PAT out of curl argv (ps/audit) via a mode-0600 curl config file.
+    # Validate the operation this token is actually used for. The GitHub REST
+    # contents probe used here previously consumes the API rate window; once the
+    # shared credential hit that limit, a still-valid Git credential was falsely
+    # rejected and --refresh-deps failed before its git fetch. A metadata-only
+    # PAT cannot read the private Git remote, so ls-remote preserves the required
+    # Contents permission check without depending on REST quota.
+    # Keep the PAT out of argv and the ambient git config via a mode-0600 config.
     cfg="$(mktemp)"
-    printf 'header = "Authorization: Bearer %s"\n' "$token" >"$cfg"
-    chmod 600 "$cfg"
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
-        --config "$cfg" \
-        -H 'Accept: application/vnd.github+json' \
-        -H 'User-Agent: cloudbench' \
-        'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' 2>/dev/null)" || {
+    header="$(token_to_git_auth_header "$token")" || {
         rm -f "$cfg"
         return 1
     }
+    printf '[http]\n\textraheader = %s\n' "$header" >"$cfg"
+    chmod 600 "$cfg"
+    if ! (
+        trap 'rm -f "$cfg"' EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+            GIT_CONFIG_GLOBAL="$cfg" GIT_CONFIG_NOSYSTEM=1 \
+            git -c credential.helper= ls-remote --exit-code \
+            'https://github.com/Rose-Ai-Labs/rose.git' HEAD >/dev/null 2>&1
+    ); then
+        rm -f "$cfg"
+        return 1
+    fi
     rm -f "$cfg"
-    [ "$code" = "200" ]
+    return 0
 }
 
 # Long-lived token for Fly app secrets. Never use `gh auth token` here — those
@@ -1396,6 +1408,8 @@ resolve_github_token() {
         decoded="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
         [ -n "$decoded" ] && candidates+=("$decoded")
     fi
+    t="$(cloudbench_git_credential_github_token "$ROOT_DIR" 2>/dev/null || true)"
+    [ -n "$t" ] && candidates+=("$t")
     # gh prefers ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST over hosts.yml — unset them
     # so a stale env override cannot mask a working CLI login for github.com.
     gh_tok="$(env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com 2>/dev/null || true)"
@@ -5326,6 +5340,17 @@ CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$
 # Persist capture authority before boot configuration can launch guest writers.
 # A crash anywhere after admission leaves exact evidence ownership recoverable.
 cloudbench_prepare_runtime_evidence || { echo "❌ could not persist runtime evidence ownership" >&2; exit 70; }
+# demo: reads the shared DEMO cache through the production pooler (4 clients per guest).
+# delegating: a REAL/SIM guest that leases production compute tokens and third-party
+# providers. infra: a substrate probe with neither. Unknown catalogs stay delegating.
+cloudbench_guest_lane() {
+    [ "${CLOUDBENCH_INFRA_PROBE:-0}" = 1 ] && { echo infra; return 0; }
+    case "${CLOUDBENCH_LANE:-}" in demo|delegating|infra) echo "$CLOUDBENCH_LANE"; return 0 ;; esac
+    local lane_status=0
+    python3 -B "$ROOT_DIR/scripts/cloudbench_catalog.py" needs-shared-demo-cache \
+        "$ROOT_DIR/agents/benchmarks/tasks.json" "${BENCH_TASKS[@]}" >/dev/null 2>&1 || lane_status=$?
+    if [ "$lane_status" = 0 ]; then echo demo; else echo delegating; fi
+}
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
@@ -5593,6 +5618,9 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         stage_explicit_codex_auth /cloudbench-codex-auth.py || exit 1
     else
     boot_config_payload_guard "${_boot_file_args[@]}" || exit 1
+    # Cross-workstream admission label: run-bench-fleet counts live labelled primaries
+    # against the production pooler (demo) and delegating-guest (REAL/SIM) ceilings.
+    _lane_args=(--metadata "rose_cloudbench_lane=$(cloudbench_guest_lane)")
     echo "🚀 boot-launch: injecting boot script + setting env/command on $mid (no ssh) ..."
     _upd=0
     _update_log="$OUT_DIR/cloudbench-boot-update.log"
@@ -5605,7 +5633,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER="$OUT_DIR/boot-config-host-unresponsive" \
         boot_update_with_capacity_recovery "$_update_log" \
           flyctl machine update "$mid" -a "$APP" "${_pool_shape_args[@]}" "${_envargs[@]}" \
-          "${_boot_file_args[@]}" \
+          "${_lane_args[@]}" "${_boot_file_args[@]}" \
           --command "$_boot_command" --skip-health-checks --skip-start --yes; then
         _upd=1
     fi

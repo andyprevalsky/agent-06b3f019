@@ -40,3 +40,16 @@ None recorded.
 ## Reusable lesson
 
 When a main merge fails untouched e2e specs, confirm on clean main first, then update specs to the intended UI; run semantic specs on UI-changing merges.
+
+## Recurrence — 2026-11-07
+
+PR #1726's production-semantic fallback was first executed from its stale
+second-parent branch tip instead of the exact merge. That branch still expected
+an inline display to start collapsed, while the merge correctly retained PR
+#1725's expanded-by-default implementation and matching test from main. The
+stale-source run failed with `Expected: "Expand display: Orbit Runner";
+Received: "Collapse display: Orbit Runner"`; the identical focused command and
+the complete production semantic suite passed from merge
+`50a582a14dd2dcec7d63e8b46c6fbbf7c0ace275`. The guardrail failure was source
+selection: a post-merge fallback must check out the merge SHA before invoking
+the workflow's local commands.

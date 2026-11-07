@@ -186,7 +186,12 @@ async function appendOccurrence(
     return { action: 'counted', ...ids };
   }
   try {
-    await deliverToAgent(incident, buildOccurrenceMessage(alert), { slackTs: alert.messageTs });
+    await deliverToAgent(
+      incident,
+      buildOccurrenceMessage(alert),
+      { slackTs: alert.messageTs },
+      false
+    );
   } catch (error) {
     await repo.releaseAppendSlot(incident.id);
     throw error;
@@ -199,17 +204,21 @@ async function appendOccurrence(
   return { action: 'appended', ...ids };
 }
 
+/** `personAuthored`: a person's thread feedback, not a bot-relayed error occurrence. */
 async function deliverToAgent(
   incident: SlackAutoRcaIncidentRow,
   message: string,
-  metadata: Record<string, string>
+  metadata: Record<string, string>,
+  personAuthored = true
 ): Promise<void> {
   const { postMessage } = await import('../agents/agentMessageService');
   const result = await postMessage(
     incident.agentId,
     { message, metadata: { source: 'slack_auto_rca', ...metadata } },
     false,
-    incident.ownerUserId
+    incident.ownerUserId,
+    undefined,
+    { personAuthored }
   );
   if ('error' in result) {
     throw new SlackAutoRcaError(

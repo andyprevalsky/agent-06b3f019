@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "node": "22.23.4",
+  "certifi": "2026.10.23",
+  "revocation_probes": {
+    "dv-g3b-emudhra.we-have-a-problem.com": "CERT_REVOKED",
+    "dv-g3b-aaa-emudhra.we-have-a-problem.com": "CERT_REVOKED"
+  },
+  "warm_image": {
+    "ref": "registry.fly.io/navi-whisper-lux-bench:cloudbench-warm-20261106-085142-2305504@sha256:24c8db086636630c0ff5b49bcb52d1878938b0e634386626d12c629704335141",
+    "receipt_sha256": "068754eb0061e728b7ffbe73b8b7cd0ab12d957d65179ce2bdbd5fe5916320db",
+    "snapshot": "vs_m4ZRVozYK9kUX6Dx3b2q",
+    "node_dependency_fingerprint": "e60e30a2f3dbb00c6d343a2ce7ede8848f16f47efe1f896f7a495874063374ae",
+    "python_dependency_fingerprint": "0c5b7ef2ccac8ee7daf75c6ed63f6d2aff3ab2689982d92c0f44f36663588a99"
+  },
+  "e2b": {
+    "claude_template": "en2yp4ckgo42isbperl2",
+    "claude_build": "2901127d-30c1-4ae3-b71a-4e9e2ed66aac",
+    "codex_extra_template": "girzpdupgxwf9gw3o78k",
+    "codex_extra_build": "455845cb-981a-40f3-88ab-c4252e49e0e5",
+    "size_grid": "8/8 templates built and boot verified"
+  },
+  "cloud_smoke": {
+    "run": "20261106-091803-2769709",
+    "result": "9 passed, 0 failed, controller exit 0",
+    "cost_usd": 0.37,
+    "fast_cache_hit_rate": 0.997,
+    "report_sha256": "9e52d60dd5f64733fd2f6c79e66f0799efbc01ff81eee05769d33319b1ccc9a9",
+    "cleanup": "adapter cleanup verified; no retained task or worker Machines"
+  },
+  "structural": "92/92 deploy structural gates passed on final branch head",
+  "docker_images_verified": [
+    "rose-agents:emudhra-final",
+    "rose-e2b-claude:emudhra-final",
+    "rose-e2b-codex:emudhra-final"
+  ]
+}

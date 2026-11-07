@@ -11,7 +11,8 @@
  *
  * ENERGY RENDERER:
  *   DESKTOP → SVG energy pills
- *   MOBILE  → canvas energy pills to avoid iOS WebKit SVG animation jank
+ *   MOBILE  → CSS-animated (compositor) energy pills: no iOS WebKit SVG
+ *             animation jank and no full-screen per-frame canvas redraw
  *
  * SMALL TILE ANIMATION:
  *   DESKTOP → render decorative square/dot animation canvas
@@ -27,7 +28,8 @@
  *           tile border + sparkle circles + small diamonds one neutral silver
  *           (never blue) at the same low opacity, energy pills dimmed
  *   SWITCH → instant: every layer changes in the commit that flips html.dark
- *            (no CSS fades; canvases repaint synchronously, not on the next tick)
+ *            (no CSS fades; canvases repaint synchronously and the mobile
+ *            energy pills restyle from html.dark, not on the next tick)
  *
  * LAYER CONTRACT:
  * [CANVAS_ANIMATION z-2] -> [GRID_BACKGROUND z-3] -> [ENERGY_PILLS z-4]
@@ -43,7 +45,7 @@ import {
   STOCK_GRID_TONE,
   type GridTone,
 } from './backgroundGridTone';
-import { GridEnergyPills, MobileGridEnergyPillsCanvas } from './GridEnergyPills';
+import { GridEnergyPills, MobileGridEnergyPills } from './GridEnergyPills';
 import { LargeTileBorder, LargeTileCorners } from './LargeTileDecorations';
 
 const QUERY_INPUT_CLEARANCE = {
@@ -99,7 +101,7 @@ export function BackgroundPattern({
       </svg>
 
       {isMobileViewport ? (
-        <MobileGridEnergyPillsCanvas
+        <MobileGridEnergyPills
           patternOffset={patternOffset}
           selectedAgentId={selectedAgentId}
           opacity={energyOpacity}

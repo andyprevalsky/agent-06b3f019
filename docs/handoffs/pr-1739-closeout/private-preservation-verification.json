@@ -1,0 +1,72 @@
+{
+ "format": "PR1739-PRIVATE-PRESERVATION-VERIFICATION-V1",
+ "bucket": "trace-archive",
+ "archives": {
+  "core": {
+   "key": "devbox-closeout-private/pr1739-58e2f7ef/20261106T192643Z-core.tar.gz.aesgcm",
+   "ciphertext_sha256": "9cf49c85f1b820a0f7fa36b0c8ad52b24c8a7a986d839452d4ed0243147fd609",
+   "gzip_sha256": "8657197f9af6a755e99c499a67f7fc52e5c256bc3d5b699e8ce11fd326926e9c",
+   "manifest_sha256": "b5c550e1bd9b68c5b9c79308ca6aec87fa9fee2966653a29633955b63b32eb62",
+   "stored_bytes": 5809926,
+   "files": 719,
+   "original_bytes": 28193153,
+   "frames": 1,
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "full_readback_verified": true,
+   "independent_verify_authenticated_files": 719
+  },
+  "workers": {
+   "key": "devbox-closeout-private/pr1739-58e2f7ef/20261106T192643Z-workers.tar.gz.aesgcm",
+   "ciphertext_sha256": "3d93ded646eef323663b2c54b80426c6427f3d5f0afcdd563aa08970318cf3b2",
+   "gzip_sha256": "b55c26a6a068f434c1a05fcc0df455cbb40e5e185cc00ad2913d92311b414eba",
+   "manifest_sha256": "b3af80fd30aab4a82fe61bf82c2efd084879d342be091e7f7f1ef4960ceac58e",
+   "stored_bytes": 385285992,
+   "files": 23932,
+   "original_bytes": 809408611,
+   "frames": 46,
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "full_readback_verified": true,
+   "independent_verify_authenticated_files": 23932
+  },
+  "cloud": {
+   "key": "devbox-closeout-private/pr1739-58e2f7ef/20261106T192643Z-cloud.tar.gz.aesgcm",
+   "ciphertext_sha256": "104ca1538d425e05d93e576e8b45122ca6e38d32f87758f0da1ce0b2f17d7e38",
+   "gzip_sha256": "b0ef09c70478411eb5026e90f7598a28b4bd3659ce909ec60941d224259f1e73",
+   "manifest_sha256": "7d015a8ae0b645bafd1293a0acb673b4b0a05db4adcce7e6c022a32019fd5e26",
+   "stored_bytes": 783259671,
+   "files": 2631,
+   "original_bytes": 2495327107,
+   "frames": 94,
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "full_readback_verified": true,
+   "independent_verify_authenticated_files": 2631
+  },
+  "control": {
+   "key": "devbox-closeout-private/pr1739-58e2f7ef/20261106T192643Z-control.tar.gz.aesgcm",
+   "ciphertext_sha256": "4d3dc7f9d48545c823ee92f5eed45a69d36c2aecbc50bf67eed6ed65ee1f1de5",
+   "gzip_sha256": "d5e696474a638a90637407c9195e6e37faef4c5300fd29d46016a204f0ec1ad9",
+   "manifest_sha256": "cebf89ecb88ac43407f22d9713bc19fa186c79fa7ef815b9410dc83c947f2a34",
+   "stored_bytes": 362551,
+   "files": 12,
+   "original_bytes": 4815271,
+   "frames": 1,
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "full_readback_verified": true,
+   "independent_verify_authenticated_files": 12
+  }
+ },
+ "restore_test": {
+  "archive": "core",
+  "files_restored": 719,
+  "files_compared_to_originals": 583,
+  "mismatches": 0,
+  "destination": "/home/boxes/pr1739-restore-test (removed after the check)"
+ },
+ "key": {
+  "escrow": ".context/pr1634-archive-recovery.env (PR1634_ARCHIVE_RECOVERY_KEY_B64) and agents/.env TRACE_ARCHIVE_ENCRYPTION_KEY_B64, both project-managed (dvb-onbox env list)",
+  "decoded_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "escrow_equals_live_key": true
+ },
+ "not_archived": "the escrow key file itself; symlinks are listed with targets in list-skipped.json inside the control archive; caches/dependencies (node_modules, venvs, tsbuildinfo) are reproducible",
+ "verified_at": "2026-11-06T19:40Z"
+}

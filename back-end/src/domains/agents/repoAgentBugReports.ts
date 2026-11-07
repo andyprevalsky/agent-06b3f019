@@ -8,9 +8,12 @@
  *   request       the launch name + prompt frozen at the first claim, so every retry
  *                 sends boxes.dev the identical request under the same idempotency key
  *
- * The manual Report Bug button and the 24h stuck-agent job both write it, so an
- * agent that already has either report is never reported again. A STARTED claim
- * whose owner died mid-launch becomes reclaimable after `staleBefore`.
+ * The manual Report Bug button, the root agent's report_bug tool and the 24h
+ * stuck-agent job all write it, so an agent that already has any report is never
+ * reported again by the job. A STARTED claim whose owner died mid-launch becomes
+ * reclaimable after `staleBefore`.
+ *
+ * The report_bug tool also holds its own per-run claim: repoAgentSelfBugReports.ts.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -24,7 +27,7 @@ import {
 
 export const AGENT_BUG_REPORT_OPERATION_TYPE = 'AGENT_BUG_REPORT';
 
-export type AgentBugReportSource = 'manual' | 'stuck_24h';
+export type AgentBugReportSource = 'manual' | 'agent' | 'stuck_24h';
 
 export function agentBugReportKey(agentId: string): string {
   return `agent-bug-report:${agentId}`;
@@ -187,10 +190,14 @@ export async function countStuckAgentBugReportsBetween(since: Date, until: Date)
   });
 }
 
-/** A manual Report Bug launch also marks the agent reported. */
-export async function recordManualAgentBugReport(agentId: string, runId: string): Promise<void> {
+/** A manual Report Bug or report_bug tool launch also marks the agent reported. */
+export async function recordManualAgentBugReport(
+  agentId: string,
+  runId: string,
+  source: Exclude<AgentBugReportSource, 'stuck_24h'> = 'manual'
+): Promise<void> {
   const now = new Date();
-  const request = { agentId, source: 'manual', runId };
+  const request = { agentId, source, runId };
   await prisma.$executeRaw(Prisma.sql`
     INSERT INTO "ToolSideEffect"
       (id, "operationKey", "operationType", status, "externalId", request, "createdAt", "updatedAt")

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -878,27 +880,60 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"number": 1, "kind": "initial", "replaces": HEAD_C})
 
-    def test_deploy_step10_derives_the_kind_from_next(self) -> None:
-        """deploy.md Step 10 must take the kind from ``next``: a count of ledger
-        entries says ``verification`` after [findings, unavailable], which the
-        ledger refuses for the superseding HEAD (PR 1656, 2026-10-31)."""
+    def test_deploy_review_next_derives_the_kind_from_next(self) -> None:
+        """``scripts/deploy review-next`` (deploy.md step 10) must take the kind
+        from ``next``: a count of ledger entries says ``verification`` after
+        [findings, unavailable], which the ledger refuses for the superseding
+        HEAD (PR 1656, 2026-10-31)."""
         deploy_md = (ROOT / ".claude" / "commands" / "deploy.md").read_text()
-        step10 = deploy_md.split("## Step 10: Handle review results", 1)[1].split("\n# Phase 3", 1)[0]
-        self.assertIn("REVIEW_NEXT=$(python3 scripts/deploy_review_cycle.py next)", step10)
-        self.assertNotIn('len(json.load(sys.stdin)["cycles"])', step10)
-        derivation = step10.split("REVIEW_NEXT=", 1)[1]
-        derivation = "REVIEW_NEXT=" + derivation.split("python3 scripts/deploy_review_cycle.py start", 1)[0]
-        derivation = derivation.replace("{\n", "{ exit 9\n", 1)  # never run the blocked branch here
+        self.assertIn("`scripts/deploy review-next`", deploy_md)
+        cli_source = (ROOT / "scripts" / "deploy_cli.py").read_text()
+        body = cli_source.split("def cmd_review_next(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("'scripts/deploy_review_cycle.py', 'next'", body)
+        self.assertIn("json.loads(nxt.stdout)['kind']", body)
+        self.assertNotIn("['cycles']", body)
+        self.assertNotIn("len(", body)
+
         MODULE.finish_cycle(self.state_path, head=HEAD_C, result="findings")
         MODULE.start_cycle(self.state_path, head="b" * 40, kind="incremental")
         MODULE.finish_cycle(self.state_path, head="b" * 40, result="unavailable")
-        cwd = self.root / "step10"
+        # The ledger refuses the count-derived kind for the superseding HEAD.
+        counted = self.run_cli("start", "--kind", "verification", "--head", "d" * 40)
+        self.assertNotEqual(counted.returncode, 0)
+        self.assertIn("must be incremental, not verification", counted.stderr)
+
+        # Execute the real cmd_review_next against the real ``next`` and ledger.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import deploy_cli
+        finally:
+            sys.path.remove(str(ROOT / "scripts"))
+        cwd = self.root / "review-next"
         (cwd / ".context").mkdir(parents=True)
         (cwd / "scripts").symlink_to(ROOT / "scripts")
         (cwd / ".context" / "deploy-review-cycle.json").write_bytes(self.state_path.read_bytes())
-        result = subprocess.run(["bash", "-c", derivation + 'printf %s "$REVIEW_KIND"'], cwd=cwd,
-                                capture_output=True, text=True, check=False)
-        self.assertEqual((result.returncode, result.stdout), (0, "incremental"), result.stderr)
+        calls: list[list[str]] = []
+        patches = [
+            patch.object(deploy_cli, "ROOT", cwd),
+            patch.object(deploy_cli, "read_json", return_value={"pr": 1656}),
+            patch.object(deploy_cli, "write_json"),
+            patch.object(deploy_cli, "uncommitted", return_value=[]),
+            patch.object(deploy_cli, "unapplied_ledger_rows", return_value=[]),
+            patch.object(deploy_cli, "head", return_value="d" * 40),
+            patch.object(deploy_cli, "factory"),
+            patch.object(deploy_cli, "run", side_effect=lambda argv, **_: calls.append(argv) or 0),
+        ]
+        for item in patches:
+            item.start()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = deploy_cli.cmd_review_next(type("Args", (), {"verification_approval": None})())
+        finally:
+            for item in patches:
+                item.stop()
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0][1:], ["scripts/deploy_review_cycle.py", "start", "--kind", "incremental",
+                                        "--head", "d" * 40])
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@ from tools.prompts.message_person import PROMPT as message_person_prompt
 from tools.prompts.people_search import PROMPT as people_search_prompt
 from tools.prompts.read_tool_output import PROMPT as read_tool_output_prompt
 from tools.prompts.reasoning import PROMPT as reasoning_prompt
+from tools.prompts.report_bug import PROMPT as report_bug_prompt
 from tools.prompts.send_message_to_agent import PROMPT as send_message_to_agent_prompt
 from tools.prompts.send_message_to_user import PROMPT as send_message_to_user_prompt
 from tools.prompts.send_message_to_user_execute_phase import (
@@ -48,6 +49,7 @@ TOOL_PROMPTS: dict[str, str] = {
     "list_agents": list_agents_prompt,
     "send_message_to_agent": send_message_to_agent_prompt,
     "kill_agent": kill_agent_prompt,
+    "report_bug": report_bug_prompt,
     "read_tool_output": read_tool_output_prompt,
     # Research
     "grep": grep_prompt,

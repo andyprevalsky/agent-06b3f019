@@ -3,7 +3,11 @@ import { Prisma, type Agent, type AgentStatus } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import type { TemporalWorkflowExecutionRef } from './temporal';
-import { savedResumeState, type WorkflowResumeState } from './workflowReplacementResumeState';
+import {
+  booleanRecord,
+  savedResumeState,
+  type WorkflowResumeState,
+} from './workflowReplacementResumeState';
 
 export type { WorkflowResumeState } from './workflowReplacementResumeState';
 export {
@@ -85,14 +89,6 @@ interface UsageAccountingRow {
   tokensInCheckpoint: number | null;
   tokensOutCheckpoint: number | null;
   ownCostCheckpointCents: number | null;
-}
-
-function booleanRecord(value: Prisma.JsonValue | null): Record<string, boolean> | null {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
-  const entries = Object.entries(value).filter((entry): entry is [string, boolean] => {
-    return typeof entry[1] === 'boolean';
-  });
-  return Object.fromEntries(entries);
 }
 
 function durableOwnAccounting(
@@ -563,6 +559,8 @@ export async function claimWorkflowReplacement(
         temporalFirstExecutionRunId: null,
         toolsInUse: [],
         status: 'STARTING_UP',
+        userControlPaused:
+          agent.userControlPaused && !['COMPLETED', 'FAILED'].includes(agent.status),
         statusMessage: 'Updating agent code',
       },
     });

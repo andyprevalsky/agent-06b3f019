@@ -37,7 +37,7 @@ import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { isRoseDevUser } from '../../utils/roseDevAccess';
 import type { CodeSessionRow } from './store';
-import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
+import { CODEX_CODE_TEMPLATE, DEFAULT_CODEX_CODE_TEMPLATE_ID } from '../codexTemplate';
 import { CLAUDE_CODE_TEMPLATE, DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from '../claudeCodeTemplate';
 
 const log = createLogger('CodeSandboxSize');
@@ -185,7 +185,11 @@ export function resizeReverseWindowMs(): number {
 
 /** Template name the sized build config gives a grid point. */
 export function sizedTemplateName(provider: SandboxProvider, size: SandboxSize): string {
-  return `${provider === 'codex' ? 'codex-code' : 'claude-code'}-c${size.cpu}-m${size.memoryGb}`;
+  const prefix =
+    provider === 'codex'
+      ? CODEX_CODE_TEMPLATE.sizedAliasPrefix
+      : CLAUDE_CODE_TEMPLATE.sizedAliasPrefix;
+  return `${prefix}-c${size.cpu}-m${size.memoryGb}`;
 }
 
 type TemplateMap = Partial<Record<SandboxProvider, Record<string, string>>>;

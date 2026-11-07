@@ -3,6 +3,7 @@
 
 import importlib.util
 import contextlib
+import hashlib
 import io
 import os
 import json
@@ -10,6 +11,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -40,7 +42,7 @@ class ContainerOwnership(unittest.TestCase):
             ):
                 binary = Path(temporary)
                 versions = {
-                    "node": "v22.13.0",
+                    "node": "v22.23.4",
                     "bash": "GNU bash, version 5.2.0",
                     "npm": "10.9.2",
                     "npx": "10.9.2",
@@ -504,6 +506,99 @@ class ContainerOwnership(unittest.TestCase):
             docker.assert_not_called()
             launch.assert_not_called()
             retire.assert_not_called()
+
+    def test_wedged_docker_client_fails_by_step_name_instead_of_hanging(self):
+        # PR #1751: one docker client call never returned, so this runner sat in
+        # the controller gate for 70 minutes with an empty case log. Drive the
+        # real runner and real subprocesses against a fake docker that wedges at
+        # exactly one pre-container step; each must fail by name, promptly, and
+        # announce the step it was in so the next hang is diagnosable.
+        fake_docker = (
+            "#!" + sys.executable + "\n"
+            "import json, os, sys, time\n"
+            "state = os.environ['FAKE_DOCKER_STATE']\n"
+            "mode = os.environ['FAKE_DOCKER_HANG']\n"
+            "argv = sys.argv[1:]\n"
+            "open(state + '/calls', 'a').write(json.dumps(argv) + '\\n')\n"
+            "built = os.path.exists(state + '/built')\n"
+            "def hang():\n"
+            "    time.sleep(6)\n"
+            "if argv[:2] == ['image', 'inspect']:\n"
+            "    if any('Labels' in value for value in argv):\n"
+            "        if mode == 'label':\n"
+            "            hang()\n"
+            "        print(os.environ['FAKE_DOCKER_FINGERPRINT'])\n"
+            "    elif mode == 'inspect':\n"
+            "        hang()\n"
+            "    elif built:\n"
+            "        print('sha256:' + 'a' * 64)\n"
+            "    else:\n"
+            "        sys.exit(1)\n"
+            "elif argv[:1] == ['build']:\n"
+            "    if mode == 'build':\n"
+            "        hang()\n"
+            "    open(state + '/built', 'w').close()\n"
+            "elif argv[:1] == ['run'] and mode == 'run':\n"
+            "    hang()\n"
+        )
+        for hung, step, calls in (
+            ("inspect", "image inspect", 1),
+            ("build", "build", 2),
+            ("label", "image label inspect", 4),
+            ("run", "toolchain preflight run", 5),
+        ):
+            with (
+                self.subTest(hung=hung),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary) / "repo"
+                (root / "scripts/tests").mkdir(parents=True)
+                recipe = root / "scripts/tests/cloudbench-controller-linux.Dockerfile"
+                recipe.write_text("FROM fixture\n")
+                binary = Path(temporary) / "bin"
+                binary.mkdir()
+                docker = binary / "docker"
+                docker.write_text(fake_docker)
+                docker.chmod(0o700)
+                state = Path(temporary) / "state"
+                state.mkdir()
+                stderr = io.StringIO()
+                started = time.monotonic()
+                with (
+                    patch.object(
+                        runner,
+                        "__file__",
+                        str(root / "scripts/tests/run-cloudbench-controller-linux.py"),
+                    ),
+                    patch.object(runner.sys, "platform", "linux"),
+                    patch.object(runner.os, "geteuid", return_value=1000),
+                    patch.object(runner.sys, "argv", ["runner"]),
+                    patch.dict(
+                        os.environ,
+                        {
+                            "PATH": str(binary),
+                            "FAKE_DOCKER_STATE": str(state),
+                            "FAKE_DOCKER_HANG": hung,
+                            "FAKE_DOCKER_FINGERPRINT": hashlib.sha256(
+                                recipe.read_bytes()
+                            ).hexdigest(),
+                        },
+                        clear=True,
+                    ),
+                    patch.object(runner, "DOCKER_QUERY_TIMEOUT_SECONDS", 1),
+                    patch.object(runner, "DOCKER_BUILD_TIMEOUT_SECONDS", 1),
+                    patch.object(runner, "DOCKER_PREFLIGHT_TIMEOUT_SECONDS", 1),
+                    contextlib.redirect_stderr(stderr),
+                    self.assertRaisesRegex(
+                        RuntimeError, "docker " + step + " did not finish within 1s"
+                    ),
+                ):
+                    runner.main()
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertIn("docker step: " + step, stderr.getvalue())
+                # Nothing after the wedged step ran, and no container was created.
+                recorded = (state / "calls").read_text().splitlines()
+                self.assertEqual(len(recorded), calls, recorded)
 
     def test_cancellation_joins_owned_client_before_export_retirement(self):
         self.assertEqual(

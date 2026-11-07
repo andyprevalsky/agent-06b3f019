@@ -1,0 +1,50 @@
+{
+ "failures": [
+  {
+   "id": "b3a672dc40bb4a3586e6d86d24dc0a9f",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "gate": "deploy-command-structural",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/structural",
+    "--stdio"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "benchmark-live-results[4/6] and [5/6] failed in cloudbench_dependency_sync_test.py (fake Machine deadbeef000001 'reads started, not verified stopped' and a JSONDecodeError in test_guest_shutdown_child_confirmation_native_stop_success_is_verified_in_last_budget_tick[True]) during the concurrent 12-gate sweep with live cloud smoke. The PR diff touches no cloudbench code or these tests; the same structural gate passed on this exact source 337aa6318 in v6 attempt 9 (all suites passed) and the same test family passes in isolation.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline-v6/attempts/9/focused/deploy-command-structural/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline-v6/attempts/9/focused/deploy-command-structural/result.json"
+  },
+  {
+   "id": "965458cc40cd4fbcbf084d9580b722e7",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "gate": "cloudbench-controller",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/cbcontroller/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/cbcontroller",
+    "--stdio"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "multi-workstream step 'readiness active-retry must preserve completed task and exact worker retirement' failed during the concurrent sweep. The PR diff touches no cloudbench code or tests; the same cloudbench-controller gate passed on this exact source 337aa6318 in v6 attempt 9.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline-v6/attempts/9/focused/cloudbench-controller/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline-v6/attempts/9/focused/cloudbench-controller/result.json"
+  }
+ ]
+}

@@ -88,11 +88,12 @@ class FailurePolicyTest(unittest.TestCase):
         self.assertEqual(MODULE.render({"failures": [entry]}, "Existing scorecard\n"), "Existing scorecard\n")
 
     def test_external_outage_and_credit_exhaustion_never_require_or_accept_handoff(self):
-        for reason in ["outage", "credits exhausted"]:
+        for reason in ["outage", "credits exhausted", "credential or billing change"]:
             e = self.occurrence(attribution="NOT_INTRODUCED", external_provider={"name": "Example", "reason": reason})
             self.assertEqual(MODULE.decision(e), "external / waived")
             with self.assertRaises(ValueError): MODULE.decision({**e, "repair_agent": "https://www.roselabs.ai/?agent-id=x"})
             with self.assertRaises(ValueError): MODULE.decision({**e, "attribution": "INTRODUCED"})
+            with self.assertRaises(ValueError): MODULE.decision({**e, "external_provider": {"name": "Example", "reason": "flaky"}})
 
     def test_report_survives_resume_retains_original_results_and_alert_is_last(self):
         with tempfile.TemporaryDirectory(prefix="rose-deploy-report-") as d:
@@ -203,7 +204,17 @@ class FailurePolicyTest(unittest.TestCase):
         deploy = (ROOT / ".claude/commands/deploy.md").read_text()
         policy = (ROOT / ".claude/shared/deploy-failure-policy.md").read_text()
         self.assertIn("rose-agent-spawn: false", deploy)
-        self.assertIn("Controlling failure policy", deploy)
+        self.assertIn("deploy-failure-policy.md", deploy)
+        triage = deploy.split("## When a gate fails: triage and parallelize", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("Details: `.claude/shared/deploy-failure-policy.md`", triage)
+        for rule in [
+            "`Gate: INTRODUCED` or `Gate: NOT_INTRODUCED`",
+            "UNKNOWN: blocking until attributed",
+            "An assigned repair (the failure your `/goal` targets) stays yours whatever the attribution says",
+            "Provider outage or exhausted credits with evidence: external exception, no handoff",
+            "new devbox in the Bugs folder at high effort and standard speed",
+        ]:
+            self.assertIn(rule, triage)
         self.assertNotIn("report and retry every 10 minutes", deploy)
         self.assertNotIn("spawn ONE `general-purpose` agent", deploy)
         for name in ["CLAUDE.md", ".claude/commands/rca.md", ".claude/commands/push.md", "docs/testing.md", "docs/root-cause-analysis.md", ".claude/shared/report-display-format.md"]:

@@ -7,7 +7,45 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, minimal-ui"
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="theme-color" content="#f9f9fb" />
+    <script>
+      // Pre-paint theme: apply the persisted Rose theme (localStorage
+      // 'rose-theme:<userId>' = 'dark' | 'light') before first paint so the
+      // page and the iOS status bar never flash light for a dark account.
+      (function () {
+        try {
+          var dark = false;
+          var light = false;
+          var pairs = document.cookie ? document.cookie.split(';') : [];
+          for (var c = 0; c < pairs.length; c++) {
+            var part = pairs[c].trim();
+            if (part.indexOf('rose-theme%3A') === 0) {
+              var cv = part.slice(part.indexOf('=') + 1);
+              if (cv === 'dark') dark = true;
+              else if (cv === 'light') light = true;
+            }
+          }
+          for (var i = 0; i < localStorage.length; i++) {
+            var key = localStorage.key(i);
+            if (key && key.indexOf('rose-theme:') === 0) {
+              var value = localStorage.getItem(key);
+              if (value === 'dark') dark = true;
+              else if (value === 'light') light = true;
+            }
+          }
+          if (dark && !light) {
+            var root = document.documentElement;
+            root.classList.add('dark');
+            root.setAttribute('data-rose-predark', '');
+            var meta = document.querySelector('meta[name="theme-color"]');
+            if (meta) meta.setAttribute('content', '#272725');
+          }
+        } catch (e) {
+          /* storage unavailable: stay light until React mounts */
+        }
+      })();
+    </script>
     <meta name="apple-mobile-web-app-title" content="Rose" />
     <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -37,18 +75,6 @@
       content="Rose is a personal AI assistant by Rose Labs that connects to your accounts, including Gmail, Google Calendar, Google Drive, and your bank via Plaid, to answer questions and take actions you ask for."
     />
     <meta name="author" content="Rose" />
-
-    <!-- Preload critical hero image for fastest initial render -->
-    <link
-      rel="preload"
-      as="image"
-      href="/navi-midnight-black-hero-background-low.png"
-      fetchpriority="high"
-    />
-
-    <!-- Preload feature master videos to accelerate non-linear seeking -->
-    <link rel="preload" as="video" href="/navi-features-hevc.mov" />
-    <link rel="preload" as="video" href="/navi-features.webm" />
 
     <meta property="og:title" content="Rose | Personal AI assistant by Rose Labs" />
     <meta
@@ -122,6 +148,58 @@
           false,
         );
       }
+    </script>
+    <script>
+      // STATE MACHINE: entry-load recovery (before the bundle, so it survives its loss)
+      // [LOADING] --entry module script loads--> [MOUNTED] (appVersion.ts owns later reloads)
+      // [LOADING] --entry module graph fails (error event)--> [WAITING] 0.5s/1s/2s backoff
+      // [WAITING] --timer fires online--> [RELOADING] (charges 1 of 3 attempts per entry URL)
+      // [WAITING] --timer fires offline--> [OFFLINE] --online event--> [RELOADING]
+      // [LOADING] --budget for this entry URL spent--> [STATIC] (links only)
+      // A document can outlive its deploy (edge-cached HTML across a production alias
+      // switch); its hashed entry chunks then 404 and React never mounts, leaving only
+      // the static links above. src/lib/appVersion.ts runs inside that bundle, so the
+      // recovery must live here. Reloading fetches the live build's HTML.
+      (function () {
+        var scheduled = false;
+        function attemptsFor(key) {
+          try {
+            return Number(sessionStorage.getItem(key)) || 0;
+          } catch (_) {
+            // Storage disabled: window.name survives a same-tab reload (one attempt).
+            return window.name.indexOf('[' + key + ']') === -1 ? 0 : 3;
+          }
+        }
+        function reload(key, attempts) {
+          // Charge the attempt only when the reload runs; an offline reload would replace
+          // the static links with the browser's offline page.
+          if (navigator.onLine === false) {
+            window.addEventListener('online', reload.bind(null, key, attempts), { once: true });
+            return;
+          }
+          try {
+            sessionStorage.setItem(key, String(attempts + 1));
+          } catch (_) {
+            window.name += '[' + key + ']';
+          }
+          location.reload();
+        }
+        window.addEventListener(
+          'error',
+          function (event) {
+            var script = event.target;
+            if (!(script instanceof HTMLScriptElement) || script.type !== 'module' || !script.src)
+              return;
+            var key = 'rose:entry-reload:' + script.src;
+            var attempts = attemptsFor(key);
+            if (scheduled || attempts >= 3) return;
+            scheduled = true;
+            console.warn('[EntryLoad] ' + script.src + ' failed to load; reloading');
+            setTimeout(reload.bind(null, key, attempts), 500 * Math.pow(2, attempts));
+          },
+          true,
+        );
+      })();
     </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

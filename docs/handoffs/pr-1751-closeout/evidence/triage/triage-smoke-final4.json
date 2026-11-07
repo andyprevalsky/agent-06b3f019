@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "98ed49a54a4541ea9935342dd485fbc7",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "27f76e593bb59838e0d2768d00dd6e87820c82a8",
+    "digest": "dedc9c19f97c385cd84107c364d9b2fa58ff80c9790956e731b139479ef6fc60"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-abandonment ended natively SKIPPED: the standing AgentCard sandbox release stall (closed card, balance 0, org transfer consumed, releasedCents=0); the other 14 smoke tasks, including the three other AgentCard lifecycle tasks, passed",
+   "evidence": "NOT_INTRODUCED. Replay of agents/benchmarks/run_benchmark.py _agentcard_release_stalled on this native record returns True (purchase HELD, walletFunding RECLAIMING, card CLOSED balance 0, orgTransfer owt_e15dfc9ac228cfa44eb29960 consumed, transferredCents 4396, releasedCents 0, livemode false); the row matches AGENTCARD_RELEASE_STALL_REASON and agentcard_release_stall_task; the other 14 smoke tasks passed. Same boundary as RCA aa757abed1831025a (earlier occurrences owt_b4dfa680d08414baf5d64fae, owt_7fcedea82dcfd940779214ce, owt_a7a6e4d436f773176c26acd6): this PR changes no release-path code, its only backend runtime change is the sandbox float floor (100 to 1000 dollars, a read-only wallet precondition), and the stall also occurred on 2026-11-06 under the old floor and in docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md. Unreleased: 43.96 dollars sandbox plus a captured Stripe test charge (test mode).",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "6aa13cb6ac1b2aa8f60485e7b1ad4ea2742df4e44fe2fa17acb8518d2f044305",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_e15dfc9ac228cfa44eb29960\", \"cardId\": \"card_63d6e55cd7067b76759f6984\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 8fb2ca5c-74c6-435c-bf81-d0a912d69122 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard",
+    "evidence": "NOT_INTRODUCED. Replay of agents/benchmarks/run_benchmark.py _agentcard_release_stalled on this native record returns True (purchase HELD, walletFunding RECLAIMING, card CLOSED balance 0, orgTransfer owt_e15dfc9ac228cfa44eb29960 consumed, transferredCents 4396, releasedCents 0, livemode false); the row matches AGENTCARD_RELEASE_STALL_REASON and agentcard_release_stall_task; the other 14 smoke tasks passed. Same boundary as RCA aa757abed1831025a (earlier occurrences owt_b4dfa680d08414baf5d64fae, owt_7fcedea82dcfd940779214ce, owt_a7a6e4d436f773176c26acd6): this PR changes no release-path code, its only backend runtime change is the sandbox float floor (100 to 1000 dollars, a read-only wallet precondition), and the stall also occurred on 2026-11-06 under the old floor and in docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md. Unreleased: 43.96 dollars sandbox plus a captured Stripe test charge (test mode).",
+    "confirmed_at": 1794065964.3959072
+   }
+  }
+ ]
+}

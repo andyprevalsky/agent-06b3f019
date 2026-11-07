@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Run the catalog's Pre-Deploy/smoke group on the LOCAL isolated benchmark stack
 # (per-run backend + worker + WMH + Postgres on this machine, concurrency capped at 2) and
-# require every task to pass. This is the DEFAULT pre-deploy smoke path: the shared
-# cloud fleet (`run-predeploy-cloud`) leaks paid Fly machines when killed and is
-# frequently rate-limited / volume-capacity-starved, so local is the reliable gate.
+# require every task to pass. This is the opt-in local alternative: the default smoke
+# path is the cloud fleet (`run-predeploy-cloud`, via deploy_test_cloud.py); use this when
+# the fleet is unavailable or a task must be reproduced locally.
 #
 # Task set comes from `agents/benchmarks/select_predeploy_benches.py` — existing
 # smoke always runs; last-3-eligibility-pass gate applies only to added floor

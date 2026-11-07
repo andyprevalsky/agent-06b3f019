@@ -20,7 +20,7 @@ import uuid
 
 TOOL_CHECK = """import re,shutil,subprocess,sys
 assert sys.platform=='linux' and sys.version_info[:3]==(3,11,9), 'requires Linux Python3.11.9'
-assert subprocess.check_output(['node','--version'],text=True).strip()=='v22.13.0', 'requires Node22.13.0'
+assert subprocess.check_output(['node','--version'],text=True).strip()=='v22.23.4', 'requires Node22.23.4'
 assert int(subprocess.check_output(['bash','--version'],text=True).split('version ',1)[1].split('.',1)[0])>=5, 'requires Bash5+'
 assert all(shutil.which(name) for name in ('git','curl','ps','rg')), 'requires git/curl/procps/ripgrep'
 assert all(shutil.which(name) for name in ('npm','npx')), 'requires npm/npx'
@@ -28,6 +28,25 @@ package_runner_versions = [subprocess.check_output([name,'--version'],text=True)
 assert all(re.fullmatch(r'[0-9]+\\.[0-9]+\\.[0-9]+',version) for version in package_runner_versions), 'requires executable npm/npx version commands'
 assert len(set(package_runner_versions))==1, 'requires npm/npx from the same package'
 """
+
+# Every docker client call made before the fixture container exists is bounded.
+# A wedged daemon or client otherwise holds the whole controller gate silently
+# until its outer deadline (PR #1751: 70 minutes with an empty case log). The
+# passing path takes seconds: inspect <1s, cold build ~25s, preflight run ~1s.
+DOCKER_QUERY_TIMEOUT_SECONDS = 120
+DOCKER_BUILD_TIMEOUT_SECONDS = 1200
+DOCKER_PREFLIGHT_TIMEOUT_SECONDS = 300
+
+
+def bounded_docker(step, timeout, call, *args, **kwargs):
+    """Announce one docker client step, then fail it by name if it does not return."""
+    print(f"docker step: {step}", file=sys.stderr, flush=True)
+    try:
+        return call(*args, timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"docker {step} did not finish within {timeout:g}s"
+        ) from None
 
 
 def retire_owned_container(
@@ -176,7 +195,7 @@ def main() -> int:
                 return 0
             os.execvp("bash", ["bash", str(root / fixture)])
         print(
-            "host toolchain is not pinned Python3.11.9/Node22.13.0; "
+            "host toolchain is not pinned Python3.11.9/Node22.23.4; "
             "using offline controller image",
             flush=True,
         )
@@ -184,7 +203,10 @@ def main() -> int:
     fingerprint = hashlib.sha256(recipe.read_bytes()).hexdigest()
     configured = os.environ.get("CLOUDBENCH_CONTROLLER_TEST_IMAGE", "")
     image = configured or f"rose-cloudbench-controller-tests:{fingerprint[:16]}"
-    inspection = subprocess.run(
+    inspection = bounded_docker(
+        "image inspect",
+        DOCKER_QUERY_TIMEOUT_SECONDS,
+        subprocess.run,
         ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
         capture_output=True,
         text=True,
@@ -197,7 +219,10 @@ def main() -> int:
         with tempfile.TemporaryDirectory(
             prefix="cloudbench-controller-image-"
         ) as context:
-            subprocess.run(
+            bounded_docker(
+                "build",
+                DOCKER_BUILD_TIMEOUT_SECONDS,
+                subprocess.run,
                 [
                     "docker",
                     "build",
@@ -211,7 +236,10 @@ def main() -> int:
                 ],
                 check=True,
             )
-        inspection = subprocess.run(
+        inspection = bounded_docker(
+            "image inspect after build",
+            DOCKER_QUERY_TIMEOUT_SECONDS,
+            subprocess.run,
             ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
             capture_output=True,
             text=True,
@@ -221,7 +249,10 @@ def main() -> int:
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError("controller image identity is invalid")
     if not configured:
-        label = subprocess.check_output(
+        label = bounded_docker(
+            "image label inspect",
+            DOCKER_QUERY_TIMEOUT_SECONDS,
+            subprocess.check_output,
             [
                 "docker",
                 "image",
@@ -234,7 +265,10 @@ def main() -> int:
         ).strip()
         if label != fingerprint:
             raise RuntimeError("cached controller image does not match its recipe")
-    subprocess.run(
+    bounded_docker(
+        "toolchain preflight run",
+        DOCKER_PREFLIGHT_TIMEOUT_SECONDS,
+        subprocess.run,
         [
             "docker",
             "run",

@@ -1923,10 +1923,14 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
                   wait_seconds: float | None = None, kill_after: tuple[float, str] | None = None,
                   context_root: Path | None = None, proc: Path | None = None,
                   kill_wait_seconds: float = TEARDOWN_KILL_WAIT_SECONDS,
-                  poll_seconds: float = TEARDOWN_POLL_SECONDS) -> dict:
+                  poll_seconds: float = TEARDOWN_POLL_SECONDS, reconcile_runs: bool = True) -> dict:
     """Wait for, then reap, every stack/benchmark owner the terminated lane left
     behind (see the section comment) and write the receipt to
-    ``<state_dir>/teardown/attempt-<attempt>-<lane>.json``."""
+    ``<state_dir>/teardown/attempt-<attempt>-<lane>.json``.
+
+    ``reconcile_runs=False`` leaves the lane's run directories in place for a
+    caller with its own sealed recovery protocol (the staged deploy cycle's
+    interrupted-worker recovery binds them by path); signalling is unchanged."""
     wait_seconds = teardown_wait_seconds() if wait_seconds is None else wait_seconds
     context_root = benchmark_context_root() if context_root is None else context_root
     started = time.monotonic()
@@ -2013,7 +2017,8 @@ def teardown_lane(name: str, *, attempt: int, token: str, started_epoch: float, 
     # inside the bootstrap grace is left for the next attempt's preflight.
     receipt["owner_runs"] = reconcile_owner_runs(
         context_root, state_dir, stage=f"attempt-{attempt}-teardown-{name}", proc=proc,
-        run_ids={record["run_id"] for record in records})
+        run_ids={record["run_id"] for record in records}) if reconcile_runs else {
+        "skipped": "caller owns run-directory reconciliation"}
     receipt.update(outcome=outcome, survivors=alive, finished_at=_now(),
                    wall_s=round(time.monotonic() - started, 2))
     path = state_dir / "teardown" / f"attempt-{attempt}-{name}.json"
@@ -2489,7 +2494,9 @@ def reconcile_owner_runs(context_root: Path, state_dir: Path, *, stage: str, wai
     lane's own). Returns ``{"stage", "counts", "runs", "set_aside", "foreign",
     "waited_s", "refused"}``: ``refused`` names every ``unknown`` run (fail
     closed) and the own runs still ``bootstrapping`` after the wait; ``live``,
-    ``finished``, ``stranded`` and another session's runs are reported and left."""
+    ``finished``, ``stranded`` and another session's runs are reported and left.
+    ``waited_s`` is the time spent waiting on own bootstrapping runs: 0.0 when
+    no wait happened, however long a single classification pass took."""
     grace_seconds = bootstrap_grace_seconds() if grace_seconds is None else grace_seconds
 
     def own(run: dict) -> bool:
@@ -2500,11 +2507,13 @@ def reconcile_owner_runs(context_root: Path, state_dir: Path, *, stage: str, wai
                                    run_ids=only)
 
     started = time.monotonic()
+    waited = False
     while True:
         runs = classify(run_ids)
         bootstrapping = [run for run in runs if run["classification"] == OWNER_RUN_BOOTSTRAPPING and own(run)]
         if not bootstrapping or time.monotonic() - started >= wait_seconds:
             break
+        waited = True
         time.sleep(poll_seconds)
     set_aside: list[dict] = []
     foreign: list[str] = []
@@ -2534,7 +2543,7 @@ def reconcile_owner_runs(context_root: Path, state_dir: Path, *, stage: str, wai
                or (run["own"] and (run["classification"] == OWNER_RUN_BOOTSTRAPPING or run["action"] == "set-aside-failed"))]
     counts = {name: sum(1 for run in runs if run["classification"] == name) for name in OWNER_RUN_CLASSES}
     summary = {"stage": stage, "context_root": str(context_root), "grace_seconds": grace_seconds,
-               "waited_s": round(time.monotonic() - started, 2), "counts": counts, "runs": runs,
+               "waited_s": round(time.monotonic() - started, 2) if waited else 0.0, "counts": counts, "runs": runs,
                "set_aside": set_aside, "foreign": foreign, "refused": refused}
     state_dir.mkdir(parents=True, exist_ok=True)
     with (state_dir / OWNER_RUNS_RECEIPT_NAME).open("a") as handle:
@@ -4155,7 +4164,7 @@ def render_wait(merged_sha: str, *, root: Path, state: dict, fetch, timeout: flo
                 raise ProductionGateError(
                     f"Render deploy {status} for {merged_sha[:7]} (deploy {mine.get('id')}); fetch its logs "
                     f"(GET /v1/services/<service>/deploys/{mine.get('id')} or the Render dashboard), fix, new PR, "
-                    "continue from deploy.md Step 9")
+                    "continue per deploy.md (Review)")
         else:
             last_seen = f"no deploy for {merged_sha[:7]}"
             log(f"  Render: no deploy for {merged_sha[:7]}; live commit={live_commit[:7] or 'none'}", flush=True)
