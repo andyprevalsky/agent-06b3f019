@@ -102,13 +102,21 @@ def failures(rows: list[dict]) -> list[dict]:
     return [r for r in rows if r['status'] != 'PASS']
 
 
-def describe(gate: str, failure: dict) -> str:
-    """The one-line early-failure notice the cycle prints for the deploy agent."""
+def describe(gate: str, failure: dict, *, check: str | None = None, request: str | None = None,
+             launched: bool | None = None) -> str:
+    """The one-line notice the cycle prints once per opened early occurrence (one per failing check)."""
     unit = failure['unit']
     case = failure.get('case') or ''
     # Single-case gates name their only case after the gate itself; repeating it adds nothing.
     where = unit if case in ('', unit, gate) else f'{case} :: {unit}'
-    return f"DEPLOY_GATE_EARLY_FAILURE gate={gate} {failure['scope']}={where} status={failure['status']}"
+    line = f"DEPLOY_GATE_EARLY_FAILURE gate={gate} {failure['scope']}={where} status={failure['status']}"
+    if check is not None:
+        line += f' check={check}'
+    if request is not None:
+        line += f' rca={request}'
+    if launched is not None:
+        line += f" launched={'yes' if launched else 'no'}"
+    return line
 
 
 def ensure_parent(path: str | os.PathLike) -> Path:

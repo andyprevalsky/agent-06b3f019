@@ -54,7 +54,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Never fire and forget: every background command has an owner that watches it until exit and cleanup.
 - Every lane owns its own setup, cleanup and teardown; never kill processes you did not start.
 - A Blacksmith gate's result and logs come back over the R2 result channel (and its GitHub Actions artifact); RCA reads the local copies in that gate's evidence and its run URL.
-- A `DEPLOY_GATE_EARLY_FAILURE` line names a still-running gate's first failing test; start its `/RCA` then (the cycle has already opened the occurrence; the gate's final result reuses it or marks it superseded on PASS).
+- `DEPLOY_GATE_EARLY_FAILURE` (one line per failing check of a still-running gate) names its `rca=` request: start `/RCA` on it now unless the line says `launched=yes`; the gate's final result keeps that occurrence if the check fails, otherwise marks it superseded.
 - "Pre-existing", "flaky", "resource contention", "doesn't touch agent code" and "agents timing out" are never evidence for an exception or attribution.
 - Never change assertions, timeouts, concurrency, task definitions or coverage thresholds to get green.
 - Never disable a linter or type checker.

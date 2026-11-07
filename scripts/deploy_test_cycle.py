@@ -1401,16 +1401,16 @@ def early_check(gate: dict, row: dict) -> str:
     return row.get("case") or row["unit"]
 
 
-def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path) -> list[tuple[dict, Path]]:
-    """Record each newly failing check of a still-running gate and write its RCA request.
+def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path) -> list[tuple[dict, Path, dict]]:
+    """Open one occurrence (and RCA request) per newly failing check of a still-running gate.
 
     Progress rows are advisory: they open an occurrence early, the gate's final result decides it
-    (the final failure reuses this id; a final PASS marks it superseded). One occurrence per check.
+    (a final failure of the same check reuses this id; a final PASS or an omitted check supersedes it).
+    Later rows for an already-open check open nothing and print nothing.
     """
     seen = {(f["gate"], f["check"]) for f in state.get("early_failures", []) if f.get("round") == state["round"]}
     opened = []
     for row in progress.failures(rows):
-        print(progress.describe(gate["name"], row), flush=True)
         check = gate["name"] + "/" + early_check(gate, row)
         if (gate["name"], check) in seen:
             continue
@@ -1421,7 +1421,7 @@ def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path) -
                       "source": state["source"], "phase": state["phase"], "round": state["round"],
                       "complete": False, "detected_at": time.time(), "unit_finished_at": row["at"]}
         state.setdefault("early_failures", []).append(occurrence)
-        opened.append((occurrence, rca_request(directory, occurrence)))
+        opened.append((occurrence, rca_request(directory, occurrence), row))
     return opened
 
 
@@ -1433,10 +1433,11 @@ def settle_early(state: dict, result: dict, fresh: list[dict]) -> None:
         match = early.pop(failure["check"], None)
         if match is not None:
             failure.update(id=match["id"], early_detected_at=match["detected_at"], early_unit=match["unit"])
-            match["settled"] = "final " + failure["native_result"]
+            match["settled"] = "reused by final " + failure["native_result"]
     for match in early.values():
         verdict = result["cases"].get(match["check"].split("/", 1)[1])
-        match["settled"] = f"final {verdict}" if verdict else "final result omitted this check"
+        match["settled"] = (f"superseded: final {verdict}" if verdict
+                            else "superseded: final result omitted this check")
 
 
 def launch_rca(path: Path, launcher: list[str]) -> None:
@@ -1588,8 +1589,11 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                     opened = early_failures(state, gate, rows, directory)
                     if opened:
                         write(directory / "cycle.json", state)
-                    for _occurrence, path in opened:
-                        if launcher and not CANCEL.is_set():
+                    for occurrence, path, row in opened:
+                        dispatch = bool(launcher) and not CANCEL.is_set()
+                        print(progress.describe(gate["name"], row, check=occurrence["check"], request=str(path),
+                                                launched=dispatch), flush=True)
+                        if dispatch:
                             launched.append(rc_pool.submit(launch_rca, path, launcher))
 
             futures = {submit(gate): gate for gate in selected if gate is not held}

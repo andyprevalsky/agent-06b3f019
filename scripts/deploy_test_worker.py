@@ -106,10 +106,7 @@ def execute(request: dict, root: Path) -> dict:
     with cancellation_handlers():
         try:
             if recipe.get('setup'):
-                setup = run_step('setup', recipe['setup'], root, folder)
-                setup_ok = setup['status'] == 'PASS'
-                if not setup_ok:
-                    report_case('setup', setup, folder)
+                setup_ok = run_step('setup', recipe['setup'], root, folder)['status'] == 'PASS'
             for name in selected:
                 if not setup_ok or CANCEL.is_set():
                     rows[name] = {'status': 'UNVERIFIED', 'reason': 'setup failed or worker interrupted'}
