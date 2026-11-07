@@ -7,8 +7,11 @@ import { SMS_SURFACE_OVERLAY } from '../../providers/smsSupervisor/contextBuilde
 import { SUPERVISOR_RESPONSE_SCHEMA } from '../../providers/smsSupervisor/schema';
 import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
 
-import { grep as userDataGrep } from '../../domains/data/service';
-import { executeGrepTool } from '../../providers/smsSupervisor/supervisorTools.grep';
+import {
+  testGrep_fanOutPaginationMetadataAligns,
+  testGrep_priorAgentTrajectoryFromSms,
+  testGrep_smsRunsTheSharedGrepTool,
+} from './sms-supervisor.grep.behavior';
 import {
   appendLifecycleSms,
   appendOutboundSms,
@@ -16,7 +19,6 @@ import {
   parseSmsSessionMessages,
   recordInboundSms,
 } from '../../providers/smsSupervisor/sessionStore';
-import { registerUserDataGrep } from '../../providers/userDataSearch';
 import {
   BASE_URL,
   assertStatus,
@@ -307,165 +309,6 @@ export async function testSendUserMessage_rejectedBodyFeedsErrorToNextModelRound
   }
 }
 
-export async function testGrep_fanOutPaginationMetadataAligns(prisma: PrismaClient) {
-  const phone = uniqueSmsPhone();
-  const userId = await provisionUserWithPhone(prisma, phone);
-  const person = await prisma.person.create({
-    data: { userId, firstName: 'Pager', lastName: 'Fixture' },
-  });
-
-  try {
-    await prisma.messageRecord.createMany({
-      data: [1, 2, 3].map((index) => ({
-        personId: person.id,
-        userId,
-        channel: 'IMESSAGE',
-        from: index % 2 === 0 ? 'me' : phone,
-        to: index % 2 === 0 ? phone : 'me',
-        timestamp: new Date(Date.now() + index * 1000),
-        message: `Metadata page ${index}`,
-        externalId: `metadata-page-${userId}-${index}`,
-      })),
-    });
-    registerUserDataGrep(userDataGrep);
-    const toolResult = await executeGrepTool(
-      {
-        pattern: 'Metadata page',
-        source: null,
-        '-B': null,
-        '-A': null,
-        '-C': null,
-        context: null,
-        '-n': null,
-        '-i': null,
-        head_limit: 1,
-        offset: 1,
-        multiline: null,
-        filters: null,
-        person: null,
-        since: null,
-      },
-      userId
-    );
-    if (!toolResult.success) throw new Error(`Expected grep success: ${toolResult.error}`);
-    const payload = JSON.parse(toolResult.result) as {
-      applied_offset: number;
-      returned: number;
-      has_more: boolean;
-      next_offset: number | null;
-    };
-    if (
-      payload.applied_offset !== 1 ||
-      payload.returned !== 1 ||
-      payload.has_more !== true ||
-      payload.next_offset !== 2
-    ) {
-      throw new Error(`Expected aligned fan-out pagination metadata, got ${toolResult.result}`);
-    }
-  } finally {
-    await prisma.person.deleteMany({ where: { userId } });
-    await cleanupSessionScopedUser(prisma, userId);
-  }
-}
-
-export async function testGrep_priorAgentTrajectoryFromSms(prisma: PrismaClient) {
-  const userId = await provisionUserWithPhone(prisma, uniqueSmsPhone());
-  const token = captureToken('sms-prior-agent-trajectory');
-  try {
-    const prior = await prisma.agent.create({
-      data: { userId, goal: 'Prior SMS agent decision', source: 'SMS', status: 'COMPLETED' },
-    });
-    await prisma.message.create({
-      data: { agentId: prior.id, role: 'ASSISTANT', text: `Earlier decision ${token}` },
-    });
-    await prisma.message.create({
-      data: { agentId: prior.id, role: 'USER', text: `Earlier request ${token}` },
-    });
-    await prisma.message.create({
-      data: { agentId: prior.id, role: 'SYSTEM', text: `Earlier system ${token}` },
-    });
-    registerUserDataGrep(userDataGrep);
-    const result = await executeGrepTool(
-      { pattern: token, source: 'agent_trajectories', filters: { surface: 'SMS' } },
-      userId
-    );
-    if (!result.success) throw new Error(`Expected SMS trajectory grep success: ${result.error}`);
-    const payload = JSON.parse(result.result) as {
-      matches: Array<{ path: string; content: string }>;
-    };
-    if (
-      payload.matches.length !== 2 ||
-      !payload.matches[0].path.startsWith(`agent_trajectories/${prior.id}/`) ||
-      !payload.matches[0].content.includes(token)
-    ) {
-      throw new Error(`SMS supervisor did not retrieve the prior agent message: ${result.result}`);
-    }
-    const metadataOnly = await executeGrepTool(
-      { role: 'USER', record_kind: 'message', surface: 'SMS', trace_path: prior.id },
-      userId
-    );
-    if (!metadataOnly.success) {
-      throw new Error(`Expected SMS metadata grep success: ${metadataOnly.error}`);
-    }
-    const userMessages = JSON.parse(metadataOnly.result) as {
-      matches: Array<{ role: string; content: string }>;
-    };
-    if (
-      userMessages.matches.length !== 1 ||
-      userMessages.matches[0].role !== 'USER' ||
-      !userMessages.matches[0].content.includes(`Earlier request ${token}`)
-    ) {
-      throw new Error(`SMS metadata grep did not filter by role: ${metadataOnly.result}`);
-    }
-    let systemRejected = false;
-    try {
-      await executeGrepTool({ role: 'SYSTEM', trace_path: prior.id, pattern: token }, userId);
-    } catch {
-      systemRejected = true;
-    }
-    if (!systemRejected) throw new Error('SMS grep accepted a SYSTEM role');
-    const firstPage = await executeGrepTool(
-      {
-        source: 'agent_trajectories',
-        trace_path: prior.id,
-        pattern: token,
-        record_kind: 'message',
-        order: 'oldest_first',
-        head_limit: 1,
-      },
-      userId
-    );
-    const firstData = JSON.parse(firstPage.result) as {
-      next_page_after: string;
-      matches: Array<{ path: string }>;
-    };
-    const secondPage = await executeGrepTool(
-      {
-        source: 'agent_trajectories',
-        trace_path: prior.id,
-        pattern: token,
-        record_kind: 'message',
-        order: 'oldest_first',
-        head_limit: 1,
-        page_after: firstData.next_page_after,
-      },
-      userId
-    );
-    const secondData = JSON.parse(secondPage.result) as { matches: Array<{ path: string }> };
-    if (
-      !firstPage.success ||
-      !secondPage.success ||
-      !firstData.next_page_after ||
-      secondData.matches.length !== 1 ||
-      firstData.matches[0].path === secondData.matches[0].path
-    ) {
-      throw new Error(`SMS grep did not advance the trajectory page: ${secondPage.result}`);
-    }
-  } finally {
-    await cleanupAgentScopedUser(prisma, userId);
-  }
-}
-
 /**
  * Regression: a lifecycle SMS a spawned agent sent must show up on the
  * supervisor's own transcript, otherwise the supervisor re-narrates progress the
@@ -623,6 +466,10 @@ export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
     {
       name: 'grep -- mixed-source pagination metadata stays aligned',
       fn: () => testGrep_fanOutPaginationMetadataAligns(prisma),
+    },
+    {
+      name: 'grep -- SMS supervisor runs the shared grep tool',
+      fn: () => testGrep_smsRunsTheSharedGrepTool(prisma),
     },
     {
       name: 'grep -- SMS supervisor can retrieve a prior agent trajectory',

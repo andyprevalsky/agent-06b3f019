@@ -6,7 +6,7 @@
  * drain the same queue without processing a part twice concurrently.
  */
 
-import { Prisma } from '@prisma/client';
+import { Prisma, type MessageChannel } from '@prisma/client';
 import { prisma } from '../../providers/database';
 
 export interface MessagingUploadPartInput {
@@ -145,9 +145,32 @@ export async function markMessagingUploadJobFailed(id: string, error: string): P
 export async function findSyncingMessagingIntegrations(platforms: string[], take: number) {
   return prisma.integration.findMany({
     where: { name: { in: platforms }, accountId: '', status: 'SYNCING' },
-    select: { id: true, config: true },
+    select: { id: true, userId: true, name: true, config: true },
     take,
   });
+}
+
+/**
+ * A user's stored history on one messaging channel: the connector's totals.
+ * Derived from MessageRecord (deduplicated on insert), never accumulated from
+ * upload sizes, so an incremental or re-sent upload cannot change it wrongly.
+ * Counted per person on (personId, channel): reads only this user's rows,
+ * never the whole channel across users.
+ */
+export async function countMessagingHistory(
+  userId: string,
+  channel: MessageChannel
+): Promise<{ messages: number; contacts: number }> {
+  const [row] = await prisma.$queryRaw<Array<{ messages: number; contacts: number }>>`
+    SELECT COALESCE(SUM(c."n"), 0)::int AS "messages",
+           COUNT(*) FILTER (WHERE c."n" > 0)::int AS "contacts"
+    FROM "Person" p
+    CROSS JOIN LATERAL (
+      SELECT COUNT(*) AS "n" FROM "MessageRecord" m
+      WHERE m."personId" = p."id" AND m."channel" = ${channel}::"MessageChannel"
+    ) c
+    WHERE p."userId" = ${userId}`;
+  return row ?? { messages: 0, contacts: 0 };
 }
 
 /** Parts of an integration that can still run (not processed, not failed). */

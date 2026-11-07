@@ -23,6 +23,7 @@ sources:
   - PR #924
   - PR #1299
   - commit 2b5c803e4b41f9869427d7c093c2abfb78b1f258
+  - PR #1745
 repro: agents/tests/blackbox/benchmark.blackbox.py test_local_start_services_reaps_only_its_real_process_group
 status: fixed
 ---
@@ -172,6 +173,22 @@ lists the same native command explicitly. Independent review verified the
 identical native fixture bindings and separately exercised the actual server's
 publication controls and rejection of an invalid existing token. This focused
 regression provides no cloud-fleet acceptance credit.
+
+### Recurrence 2026-11-07 (PR #1745 deploy, deploy-command-structural)
+
+`benchmark-live-results[3/6]` failed
+`test_fleet_cleanup_releases_emergency_disk_reserve_nested_liability_owner_fences[unrelated-descendant]`
+with `ValueError: invalid literal for int() with base 10: ''` at
+`nested_pid = int(ready.read_text())`. Its canary callback published readiness
+with a plain `printf ... > "$RESERVE_READY"`, which creates the path before the
+PID is written, while the test parses on existence. The earlier fix covered the
+boot/benchmark fixtures only; this fixture in
+`agents/benchmarks/cloudbench_dependency_sync_test.py` was a sibling it missed.
+Mechanism repro (`/var/tmp/rca-imsg/race2.py`): plain redirect with a delay →
+`FAIL invalid literal for int() with base 10: ''`; write-then-rename → PID read.
+Fix: the callback writes `$RESERVE_READY.tmp` and renames it onto the readiness
+path; all 7 parametrizations pass. Gate: NOT_INTRODUCED (the PR changed no
+cloudbench code; the failure needs only scheduling delay).
 
 ## Human feedback
 

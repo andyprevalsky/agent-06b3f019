@@ -13,6 +13,7 @@
  *                                                   refresh chips
  *
  *   [signing_in] --cancel/unmount--> releases the remote browser --> [idle]
+ *   [signing_in] --poll names passkeyUnavailableFor--> [signing_in] + passkey notice
  *
  * Lives in the hooks layer because it owns the API calls; the components layer
  * may not reach into `../api` directly.
@@ -38,6 +39,7 @@ export function useComputeAccounts(provider: string) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [error, setError] = useState<string | null>(null);
   const [liveViewUrl, setLiveViewUrl] = useState<string | null>(null);
+  const [passkeyUnavailableFor, setPasskeyUnavailableFor] = useState<string | null>(null);
   const [stage, setStage] = useState<string | null>(null);
   const [connectingAs, setConnectingAs] = useState<string | null>(null);
   // Bumped on every connect attempt. The progress bar keys off this so
@@ -85,6 +87,7 @@ export function useComputeAccounts(provider: string) {
           // on a poll rather than from the initial POST.
           if (result.liveViewUrl != null) setLiveViewUrl(result.liveViewUrl);
           if (result.accountEmail != null) setConnectingAs(result.accountEmail);
+          setPasskeyUnavailableFor(result.passkeyUnavailableFor ?? null);
           if (result.state === 'connected') {
             connectIdRef.current = null;
             setPhase('idle');
@@ -112,6 +115,7 @@ export function useComputeAccounts(provider: string) {
     setPhase('starting');
     setStage('creating_browser');
     setConnectingAs(null);
+    setPasskeyUnavailableFor(null);
     setRunId((n) => n + 1);
     try {
       const handle = await startComputeConnect(provider);
@@ -152,6 +156,7 @@ export function useComputeAccounts(provider: string) {
     liveViewUrl,
     stage,
     connectingAs,
+    passkeyUnavailableFor,
     runId,
     removing,
     connect: handleConnect,

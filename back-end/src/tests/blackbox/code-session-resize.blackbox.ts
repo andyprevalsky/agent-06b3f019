@@ -39,6 +39,7 @@ import {
   DEFAULT_SANDBOX_GRID,
   resolveSpawnSandbox,
   sandboxGrid,
+  sizedTemplateName,
 } from '../../providers/codeSessions/sandboxSize';
 import { keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import {
@@ -501,7 +502,7 @@ test('the default grid offers 4 and 8 GB and refuses 16 GB (E2B team cap of 8192
     });
     assert.deepEqual(await resolveSpawnSandbox(fresh, 'codex', null), {
       size: { cpu: 2, memoryGb: 4 },
-      templateId: 'codex-code-c2-m4',
+      templateId: sizedTemplateName('codex', { cpu: 2, memoryGb: 4 }),
     });
   } finally {
     process.env.E2B_SANDBOX_TEMPLATES = JSON.stringify(TEMPLATES);

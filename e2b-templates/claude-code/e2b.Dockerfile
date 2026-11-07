@@ -3,6 +3,7 @@ FROM ubuntu:22.04
 
 # Opus 5.5 requires CLI >= 2.1.280; pin every template size reproducibly.
 ARG CLAUDE_CODE_VERSION=2.1.305
+ARG NODE_VERSION=22.23.4
 
 # gh (GitHub CLI) comes from GitHub's own signed apt repository so code agents can run
 # `gh pr list` / `gh api` against the attached repo. The repository publishes only the
@@ -21,8 +22,8 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://ubuntu.mirror.constant.com
     python3-pip \
     make \
     g++ \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y "nodejs=${NODE_VERSION}-1nodesource1" \
     && install -d -m 755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
