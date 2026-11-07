@@ -47,6 +47,7 @@ from helpers.context_pointers import annotate_with_pointer, resolve_pointers_in_
 from helpers.context_scope import is_internal_subagent_message
 from helpers.environment_context import is_environment_context_row
 from helpers.environment_tail import append_environment_tail, build_environment_tail_text
+from helpers.http_client import get_http_client
 from helpers.messages import (
     CoalescingStreamBroadcaster,
     stream_assistant_chunk,
@@ -7484,64 +7485,64 @@ async def fetch_compute_token_activity(
         return None
 
     try:
-        async with httpx.AsyncClient() as client:
-            params: Dict[str, str] = {}
-            if lineage_key:
-                params["lineageKey"] = lineage_key
-            if agent_id:
-                params["agentId"] = agent_id
-            if root_agent_id:
-                params["rootAgentId"] = root_agent_id
-            if demo_cache_affinity_key:
-                params["fastCacheAffinityKey"] = demo_cache_affinity_key
-            if pinned_benchmark_type:
-                # Pin wins over callers (including _rotate_compute_token).
-                params["tokenType"] = pinned_benchmark_type
-            elif token_type in ("claude", "gpt"):
-                params["tokenType"] = token_type
-            elif anthropic_family_excluded():
-                params["tokenType"] = "gpt"
-            response = await client.get(
-                f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
-                headers={
-                    "X-API-Key": config.backend.api_key or "",
-                    "X-User-Id": user_id,
-                },
-                params=params,
-                timeout=15.0,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                token = data.get("accessToken")
-                provider_type = data.get("type")
-                if token and provider_type in ("claude", "gpt"):
-                    if pinned_benchmark_type and provider_type != pinned_benchmark_type:
-                        logger.warning(
-                            "Rejecting compute token type=%s under BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
-                            provider_type,
-                            pinned_benchmark_type,
-                        )
-                        return None
-                    logger.info(
-                        "✅ Compute token fetched",
-                        user_id=user_id,
-                        type=provider_type,
-                        source=data.get("source", "user"),
+        client = get_http_client()
+        params: Dict[str, str] = {}
+        if lineage_key:
+            params["lineageKey"] = lineage_key
+        if agent_id:
+            params["agentId"] = agent_id
+        if root_agent_id:
+            params["rootAgentId"] = root_agent_id
+        if demo_cache_affinity_key:
+            params["fastCacheAffinityKey"] = demo_cache_affinity_key
+        if pinned_benchmark_type:
+            # Pin wins over callers (including _rotate_compute_token).
+            params["tokenType"] = pinned_benchmark_type
+        elif token_type in ("claude", "gpt"):
+            params["tokenType"] = token_type
+        elif anthropic_family_excluded():
+            params["tokenType"] = "gpt"
+        response = await client.get(
+            f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "X-User-Id": user_id,
+            },
+            params=params,
+            timeout=15.0,
+        )
+        if response.status_code == 200:
+            data = response.json()
+            token = data.get("accessToken")
+            provider_type = data.get("type")
+            if token and provider_type in ("claude", "gpt"):
+                if pinned_benchmark_type and provider_type != pinned_benchmark_type:
+                    logger.warning(
+                        "Rejecting compute token type=%s under BENCHMARK_COMPUTE_TOKEN_TYPE=%s",
+                        provider_type,
+                        pinned_benchmark_type,
                     )
-                    return {
-                        "type": provider_type,
-                        "accessToken": token,
-                        "accountId": data.get("accountId"),
-                        "source": data.get("source", "user"),
-                        "poolTokenId": data.get("poolTokenId"),
-                        "integrationId": data.get("integrationId"),
-                        "lineageKey": data.get("lineageKey"),
-                        "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or demo_cache_affinity_key,
-                    }
-            elif response.status_code == 404:
-                logger.info(f"Compute credentials not found for user {user_id}")
-            else:
-                logger.warning(f"Compute token fetch failed: {response.status_code}")
+                    return None
+                logger.info(
+                    "✅ Compute token fetched",
+                    user_id=user_id,
+                    type=provider_type,
+                    source=data.get("source", "user"),
+                )
+                return {
+                    "type": provider_type,
+                    "accessToken": token,
+                    "accountId": data.get("accountId"),
+                    "source": data.get("source", "user"),
+                    "poolTokenId": data.get("poolTokenId"),
+                    "integrationId": data.get("integrationId"),
+                    "lineageKey": data.get("lineageKey"),
+                    "fastCacheAffinityKey": data.get("fastCacheAffinityKey") or demo_cache_affinity_key,
+                }
+        elif response.status_code == 404:
+            logger.info(f"Compute credentials not found for user {user_id}")
+        else:
+            logger.warning(f"Compute token fetch failed: {response.status_code}")
     except Exception as e:
         logger.warning(f"Failed to fetch compute token: {e}")
 
@@ -7569,17 +7570,17 @@ async def heartbeat_compute_token_lineage_activity(
     if usage:
         body["usage"] = usage
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{config.backend.api_url}/api/integrations/compute-code/token/lineage-heartbeat",
-                headers={
-                    "X-API-Key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-                timeout=5.0,
-            )
-            return response.status_code == 200
+        client = get_http_client()
+        response = await client.post(
+            f"{config.backend.api_url}/api/integrations/compute-code/token/lineage-heartbeat",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=5.0,
+        )
+        return response.status_code == 200
     except Exception as e:
         logger.warning(f"Compute token lineage heartbeat failed: {e}")
         return False

@@ -1,0 +1,60 @@
+{
+  "observed_at": "2026-11-07T13:28:58.322490+00:00",
+  "files": [
+    {
+      "member_path": "rose/CLAUDE.md",
+      "sha256": "1b0cf805b708b0456e10c999afa0243f56319d9cc0b7b9723e88b2d88ec158a2",
+      "bytes": 146681
+    },
+    {
+      "member_path": "rose/.claude/commands/deploy.md",
+      "sha256": "e795663c8096ac4a4f32e7e303c19f14baaa76ff9acb613bedd2018a550172da",
+      "bytes": 235566
+    },
+    {
+      "member_path": "rose/.claude/shared/deploy-failure-policy.md",
+      "sha256": "10ea5cf9537cd68d4ea7469c54de277bff39ddeffa48e60beb6b02cc9a0d7500",
+      "bytes": 17958
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/public/RECOVERY.md",
+      "sha256": "3cfd79fdb8a26a87f094d926a3cc31005cd1376d963505ad47078ad1171aa660",
+      "bytes": 3735
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/public/archive-receipts.json",
+      "sha256": "42647ff8668a069850226a828200ef291c1f97816d3bb09969a83bf076ec1c95",
+      "bytes": 11557
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/public/source-bundles.json",
+      "sha256": "d263e6f725a0bfc887b196aac9a3fe0e4ab32060fb756a04d6092d103e34b57e",
+      "bytes": 13379
+    },
+    {
+      "member_path": "rose/.context/pause-rca/local-source-recovery-audit/recovery-manifest.json",
+      "sha256": "5496d826f48b6443a6bfb1fb5d27491e33c42703b67ce535fa562b36afa2a081",
+      "bytes": 35976
+    },
+    {
+      "member_path": "rose/.context/deploy-pipeline/validated/cycle.json",
+      "sha256": "255e2052e3c999d370797794bcec1954a2e0632af864a1c63264ffce44af7d37",
+      "bytes": 5253827
+    },
+    {
+      "member_path": "rose/.context/deploy-pipeline/validated/production.json",
+      "sha256": "3c62969a3fcff1d1675c06de3c7589bf0cdddddbc5095cad3b63384b947c09f6",
+      "bytes": 4174
+    },
+    {
+      "member_path": "rose/.context/deploy-pipeline/validated/failure-report.json",
+      "sha256": "b78cb4fe05d467af666ce2e843d21ca2d58591d1afea252cc1d51b612f54d5da",
+      "bytes": 721
+    }
+  ],
+  "source_behavior": {
+    "commit": "060fa655d16476e0ff84727bef5b4e188bee349d",
+    "path": "docs/rca/cases/2026-11-06-pause-ui-waited-for-canonical-terminal-events.md",
+    "blob_oid": "a457d8b5c1855edb41bbed2c6e00b8d23559c17c"
+  }
+}
