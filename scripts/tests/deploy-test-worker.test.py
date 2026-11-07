@@ -13,6 +13,7 @@ import signal
 import threading
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -461,6 +462,8 @@ class Cloud(unittest.TestCase):
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
+        # Offline: these fixtures never read the shared Tilion account (see CloudSharedProviderHeadroom).
+        offline=patch.object(cloud.provider_headroom,'live_probes',return_value={});offline.start();self.addCleanup(offline.stop)
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.runs=self.root/'runs';self.fleet=self.runs/'native-run'
         self.request={'token':'token','source':{'head':'a'*40,'digest':'frozen'},
@@ -2850,6 +2853,203 @@ class WorkerBenchmarkControllerKill(unittest.TestCase):
         self.assertFalse(self.alive(self.pid))
         self.assertFalse(self.marker.exists())
         self.assertEqual('UNVERIFIED', row['status']); self.assertTrue(row['lingering_group'])
+
+
+class FakeTilionListing:
+    """Offline stand-in for Tilion GET /v1/sessions at the urllib boundary (no provider call)."""
+    def __init__(self, *live_counts, status=200, body=None):
+        self.live_counts=list(live_counts);self.status=status;self.body=body;self.requests=[]
+
+    def open(self, _director, request, data=None, timeout=None):
+        self.requests.append((request.full_url,request.get_method(),dict(request.header_items()),timeout))
+        count=self.live_counts.pop(0) if len(self.live_counts)>1 else self.live_counts[0]
+        body=self.body if self.body is not None else json.dumps(
+            [{'session_id':f'sess-{i}','state':'running','created_at':1} for i in range(count)]).encode()
+        status=self.status
+
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*_exc):return False
+            def read(self,_limit=-1):return body
+        response=Response();response.status=status
+        return response
+
+
+class CloudSharedProviderHeadroom(unittest.TestCase):
+    """Two deploys and production share ONE 20-browser Tilion account: size smoke from its live usage."""
+    KEY='fixture-tilion-key-not-real'
+
+    def setUp(self):
+        import deploy_test_cloud as cloud
+        self.cloud=cloud;self.now=[1_000.0];self.sleeps=[]
+        env={'CLOUDBENCH_BROWSER_PROVIDER':'tilion','TILION_API_KEY':self.KEY,
+             'TILION_BASE_URL':'https://tilion.fixture.invalid',
+             'CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}
+        for patcher in (patch.dict(os.environ,env),patch('time.time',side_effect=lambda:self.now[0]),
+                        patch('time.sleep',side_effect=self.sleep)):
+            patcher.start();self.addCleanup(patcher.stop)
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds);self.now[0]+=seconds
+
+    def width(self, listing, count=17):
+        stderr=io.StringIO()
+        with patch('urllib.request.OpenerDirector.open',new=lambda director,request,data=None,timeout=None:
+                   listing.open(director,request,data,timeout)), contextlib.redirect_stderr(stderr):
+            try:
+                return self.cloud.campaign_width([f'task-{i}' for i in range(count)]),stderr.getvalue()
+            finally:
+                self.assertNotIn(self.KEY,stderr.getvalue())
+
+    def test_live_account_sessions_narrow_the_smoke_width(self):
+        listing=FakeTilionListing(5)  # production + another deploy hold five browsers right now
+        width,output=self.width(listing)
+        self.assertEqual(11,width)  # floor(20 * 0.8 - 5), not the solo registry cap 16
+        url,method,headers,timeout=listing.requests[0]
+        self.assertEqual(('https://tilion.fixture.invalid/v1/sessions','GET'),(url,method))
+        self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
+        self.assertLessEqual(timeout,15)
+        self.assertIn('5 live account-wide of 20 (20% reserved for production)',output)
+        self.assertEqual([],self.sleeps)
+
+    def test_idle_account_still_honours_the_registry_cap_and_request(self):
+        self.assertEqual(16,self.width(FakeTilionListing(0))[0])
+        self.assertEqual(3,self.width(FakeTilionListing(0),count=3)[0])
+
+    def test_second_deploy_waits_while_the_first_holds_the_pool_then_starts(self):
+        # Deploy A's 16 smoke browsers are live; production keeps its four-browser reserve.
+        listing=FakeTilionListing(16,17,9)
+        width,output=self.width(listing)
+        self.assertEqual(7,width)
+        self.assertEqual(3,len(listing.requests))
+        self.assertEqual([30.0,30.0],self.sleeps)
+        self.assertEqual(2,output.count('⏳ waiting for shared provider headroom'))
+        self.assertIn('16 live of 20, 20% reserved for production',output)
+
+    def test_full_account_until_the_deadline_refuses_before_any_launch(self):
+        launched=[]
+        with patch.object(self.cloud,'run_command',side_effect=lambda *a,**k:launched.append(a)):
+            with self.assertRaises(ValueError) as refused:
+                self.width(FakeTilionListing(16))
+        self.assertIn('cannot admit one smoke task by the deadline',str(refused.exception))
+        self.assertEqual([],launched)
+        self.assertAlmostEqual(900.0,sum(self.sleeps))
+        self.assertTrue(all(0<pause<=30 for pause in self.sleeps))
+
+    def test_unreadable_listing_never_admits_and_refuses_at_the_deadline(self):
+        for listing in (FakeTilionListing(0,status=500),FakeTilionListing(0,body=b'<html>'),
+                        FakeTilionListing(0,body=b'{"sessions":[]}')):
+            with self.subTest(status=listing.status,body=listing.body):
+                self.now[0]=1_000.0;self.sleeps.clear()
+                with self.assertRaises(ValueError) as refused:
+                    self.width(listing)
+                self.assertIn('live usage unreadable',str(refused.exception))
+
+    def test_devbox_without_tilion_credential_is_unmeasured_not_silent(self):
+        import cloudbench_provider_headroom as headroom
+        probes=headroom.live_probes(environ={},env_file=Path(tempfile.mkdtemp(prefix='no-env-'))/'.env')
+        self.assertIsNone(probes['tilion-browser-sessions']())
+        capacity=runpy.run_path(str(ROOT/'scripts/cloudbench-provider-capacity.py'))
+        registry=capacity['for_browser_provider'](capacity['load_registry'](),'tilion')
+        stderr=io.StringIO()
+        width=headroom.admitted_width(17,registry,probes=probes,deadline=0,stream=stderr)
+        self.assertEqual(16,width)
+        self.assertIn('live account usage UNMEASURED',stderr.getvalue())
+
+    def test_plain_http_base_url_never_receives_the_key(self):
+        import cloudbench_provider_headroom as headroom
+        with self.assertRaises(headroom.HeadroomUnavailable):
+            headroom.tilion_live_sessions(self.KEY,'http://tilion.fixture.invalid',
+                                          opener=lambda *_a:self.fail('plain-HTTP request was sent'))
+
+
+class FakeCerebrasProbe:
+    """Offline stand-in for one 1-token Cerebras completion at the opener boundary."""
+    def __init__(self, *answers):
+        self.answers=list(answers);self.requests=[]
+
+    def __call__(self, request, timeout):
+        self.requests.append((request.full_url,request.get_method(),dict(request.header_items()),json.loads(request.data)))
+        status,headers=self.answers.pop(0) if len(self.answers)>1 else self.answers[0]
+        if status!=200:
+            import urllib.error
+            raise urllib.error.HTTPError(request.full_url,status,'limited',headers,io.BytesIO(b'{}'))
+
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*_exc):return False
+            def read(self,_limit=-1):return b'{}'
+        response=Response();response.status=status;response.headers=headers
+        return response
+
+
+class CerebrasRatchetHeadroom(unittest.TestCase):
+    """The latency ratchet waits on the Cerebras org quota that every deploy and production spend."""
+    KEY='fixture-cerebras-key-not-real'
+
+    def setUp(self):
+        import cloudbench_provider_headroom as headroom
+        from fractions import Fraction
+        self.headroom=headroom;self.reserve=Fraction(1,5);self.now=[0.0];self.sleeps=[]
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds);self.now[0]+=seconds
+
+    def wait(self, probe, deadline=600):
+        out,err=io.StringIO(),io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ready=self.headroom.wait_for_cerebras(self.KEY,reserve=self.reserve,deadline=deadline,opener=probe,
+                                                  clock=lambda:self.now[0],sleep=self.sleep,stream=out)
+        self.assertNotIn(self.KEY,out.getvalue()+err.getvalue())
+        return ready,out.getvalue(),err.getvalue()
+
+    @staticmethod
+    def window(remaining, limit=300, reset=17):
+        return {'x-ratelimit-limit-requests-minute':str(limit),'x-ratelimit-remaining-requests-minute':str(remaining),
+                'x-ratelimit-reset-requests-minute':str(reset),'x-ratelimit-remaining-requests-day':'0'}
+
+    def test_ample_shared_quota_starts_immediately_with_one_tiny_probe(self):
+        probe=FakeCerebrasProbe((200,self.window(240)))
+        ready,out,_=self.wait(probe)
+        self.assertTrue(ready);self.assertEqual([],self.sleeps)
+        url,method,headers,body=probe.requests[0]
+        self.assertEqual(('https://api.cerebras.ai/v1/chat/completions','POST'),(url,method))
+        self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
+        self.assertEqual(1,body['max_completion_tokens']);self.assertEqual('qwen-3.8-27b',body['model'])
+        self.assertIn('requests-minute 240/300',out)  # a daily window never holds a per-minute ratchet
+
+    def test_other_deploys_draining_the_minute_window_hold_the_ratchet_until_reset(self):
+        probe=FakeCerebrasProbe((200,self.window(12,reset=23)),(429,{'retry-after':'9'}),(200,self.window(290)))
+        ready,out,_=self.wait(probe)
+        self.assertTrue(ready);self.assertEqual([23.0,9.0],self.sleeps)
+        self.assertIn('requests-minute 12 of 300 remaining',out);self.assertIn('probe answered 429',out)
+
+    def test_quota_still_short_at_the_deadline_fails_closed(self):
+        ready,_,err=self.wait(FakeCerebrasProbe((429,{})),deadline=150)
+        self.assertFalse(ready);self.assertAlmostEqual(150.0,sum(self.sleeps))
+        self.assertTrue(all(0<pause<=60 for pause in self.sleeps))
+        self.assertIn('FAIL: Cerebras shared quota still short at the deadline',err)
+
+    def test_unexpected_probe_status_is_not_headroom(self):
+        ready,_,err=self.wait(FakeCerebrasProbe((401,{})),deadline=40)
+        self.assertFalse(ready);self.assertIn('answered HTTP 401',err)
+
+    def test_cli_without_any_cerebras_key_reports_unmeasured(self):
+        env={k:v for k,v in os.environ.items() if not k.startswith('CEREBRAS')}
+        out=io.StringIO()
+        with patch.dict(os.environ,env,clear=True), \
+             patch.object(self.headroom,'BACKEND_ENV_FILE',Path(tempfile.gettempdir())/'missing-provider-headroom.env'), \
+             patch.object(self.headroom,'wait_for_cerebras',side_effect=AssertionError('probed without a key')), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(0,self.headroom.main(['cerebras-wait','--timeout-seconds','0']))
+        self.assertIn('UNMEASURED',out.getvalue())
+
+    def test_cli_prefers_a_dedicated_ratchet_key_and_fails_closed_on_timeout(self):
+        seen=[]
+        with patch.dict(os.environ,{'CEREBRAS_RATCHET_API_KEY':'dedicated','CEREBRAS_API_KEY':'shared'}), \
+             patch.object(self.headroom,'wait_for_cerebras',side_effect=lambda key,**kw:seen.append((key,kw['reserve'])) or False):
+            self.assertEqual(1,self.headroom.main(['cerebras-wait','--timeout-seconds','5']))
+        self.assertEqual([('dedicated',self.reserve)],seen)  # registry production_reserve_fraction 0.2
 
 
 if __name__=='__main__': unittest.main()
