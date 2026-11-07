@@ -39,6 +39,8 @@ passing stages do not discharge this failure.
 
 ## Diagnosis
 
+### Original investigation — October 16, 2026
+
 The actual path is fixture readiness publication, SIGTERM to its unreaped proof
 Popen, outer forward_proof_cancellation, exact active waiter, tracked detached
 producer group drain, and recover_proof_slice's exact durable recovery call.
@@ -101,6 +103,8 @@ owns this exact cancellation/recovery boundary; its assertions and deadlines
 are unchanged and the deploy structural runner continues to execute it.
 
 ## Solution
+
+### Original investigation — October 16, 2026 (superseded below)
 
 No runtime or fixture repair is proposed. The RCA remains open. Preserve the
 original private fixture tree, output, calls, owner records, source hashes and
