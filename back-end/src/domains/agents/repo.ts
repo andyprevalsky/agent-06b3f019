@@ -69,6 +69,7 @@ export async function findAgentsByBusId(busId: string) {
       taskPath: true,
       createdAt: true,
       updatedAt: true,
+      lastUserMessageAt: true,
     },
   });
 }

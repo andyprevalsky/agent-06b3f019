@@ -129,6 +129,20 @@ def environment_digest() -> str:
     return digest({k: v for k, v in os.environ.items() if k not in transient})
 
 
+ROTATING_CREDENTIAL = re.compile(rb"(?m)^([ \t]*(?:export[ \t]+)?GITHUB_TOKEN[ \t]*=).*$")
+
+
+def runtime_config_sha256(path: Path) -> str:
+    """Digest a runtime config file, ignoring only the rotating GitHub user token's value.
+
+    The devbox daemon rewrites ``GITHUB_TOKEN`` in the managed env files every time it refreshes
+    that short-lived credential (observed 3 times in 40 minutes on 2026-11-07), which made any
+    staged cycle longer than the refresh interval go stale. The key's presence and every other
+    byte stay bound, so adding, removing or changing any other setting still invalidates a cycle.
+    """
+    return hashlib.sha256(ROTATING_CREDENTIAL.sub(rb"\1<rotating-credential>", path.read_bytes())).hexdigest()
+
+
 def input_fingerprints(plan: dict, root: Path) -> dict:
     paths = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                            cwd=root, check=True, capture_output=True).stdout.split(b"\0")
@@ -154,7 +168,7 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
     for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "agents/.env.benchmark-temporal",
                 "front-end/.env", "front-end/.env.local"]:
         if (root / rel).is_file():
-            runtime_config[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+            runtime_config[rel] = runtime_config_sha256(root / rel)
     return {g["name"]: digest({"files": {p: h for p, h in files.items()
                             if any(fnmatchcase(p, glob) for glob in g.get("input_paths", ["*"]))},
                             "runtime_config": runtime_config,
@@ -1532,7 +1546,7 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                     'front-end/.env', 'front-end/.env.local'):
             origin, destination = root / rel, Path(after['worker_root']) / rel
             if (origin.is_file() != destination.is_file()
-                    or origin.is_file() and sha_file(origin) != sha_file(destination)):
+                    or origin.is_file() and runtime_config_sha256(origin) != runtime_config_sha256(destination)):
                 raise ValueError('local worker runtime configuration differs from the frozen inputs')
         changed.append(name)
     if not changed:
