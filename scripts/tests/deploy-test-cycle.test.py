@@ -3211,6 +3211,38 @@ class Cycle(unittest.TestCase):
         ordinary = copy.deepcopy(proof); ordinary.pop('purpose')
         with self.assertRaises(ValueError): c.reconcile(copy.deepcopy(original), failure['id'], ordinary)
 
+    def test_isolated_next_inventory_may_add_cases_without_releasing_original_debt(self):
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        c.reconcile(state, failure['id'], proof)
+        state['source'] = proof['validation_source']
+        before = copy.deepcopy(state)
+        extended = copy.deepcopy(gate)
+        extended['checks'] += ['added-payment-' + str(i) for i in range(4)]
+        request = dict(token='new-extended-isolated-token', source=state['source'],
+                       checks=extended['checks'], skips={})
+        bindings = c.isolated_request(state, extended, request, self.root, {})
+        entry = next(iter(state['reconciled_owners'].values()))
+        self.assertEqual(1, len(bindings))
+        self.assertEqual(entry['excluded_resources'], bindings[0]['excluded_resources'])
+        self.assertEqual(entry['token'], bindings[0]['original_request_token'])
+        self.assertFalse(bindings[0]['credit_granted'])
+        self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before, state)
+        # Every selected old and added case remains mandatory in the fresh request.
+        for candidate in [dict(request, checks=gate['checks']),
+                          dict(request, checks=extended['checks'][1:]),
+                          dict(request, token=entry['token']),
+                          dict(request, source=dict(head='e'*40, digest='f'*64))]:
+            with self.subTest(candidate=candidate), self.assertRaises(ValueError):
+                c.isolated_request(state, extended, candidate, self.root, {})
+        # A coherently narrowed gate/request cannot silently omit an old case.
+        narrowed = copy.deepcopy(extended); narrowed['checks'] = extended['checks'][1:]
+        with self.assertRaisesRegex(ValueError, 'next source/inventory binding'):
+            c.isolated_request(state, narrowed, dict(request, checks=narrowed['checks']), self.root, {})
+        with self.assertRaisesRegex(ValueError, 'fresh native adapter'):
+            c.isolated_request(state, extended, request, self.root, {'CLOUDBENCH_ARCHIVED_REUSE_REQUEST':'old'})
+        self.assertEqual(before, state)
+
     def test_isolated_native_validation_preserves_original_debt_and_requires_new_full_request(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         before = copy.deepcopy(state['attempts'])
