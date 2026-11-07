@@ -64,6 +64,25 @@ def job(index, status, verdict, infra, *, run_id=None, fleet=None, pid=None, att
                 lifecycle_verified=released if status in ("passed", "failed") else None)
 
 
+def boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip() if Path("/proc/self/stat").exists() else "none"
+
+
+def process_birth(pid: int) -> str:
+    """The identity form cloudbench-campaign-inventory.sh records (Linux proc-start, else ps lstart)."""
+    if Path("/proc/self/stat").exists():
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        return f"proc-start:{boot_id()}:{fields[19]}"
+    return subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="], text=True).strip()
+
+
+def reaped_pid() -> int:
+    """A guaranteed-exited, already-reaped PID."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
 class Fixtures:
     def __init__(self, base: Path):
         self.base = base
@@ -83,7 +102,7 @@ class Fixtures:
                          run_dir=str(run), triggered_at=T0)
         return run
 
-    def campaign(self) -> Path:
+    def campaign(self, controller="live") -> Path:
         directory = self.base / "campaigns/campaign-20261018-192852-7"
         fleet = self.base / "fleet/runs/20261018-193000-11"
         write(fleet / "_batch/report-card.json", card(fleet.name, [task("task-2", "failed", reason="Expected tool 'spawn_browser_agent' not found in messages")]))
@@ -92,7 +111,17 @@ class Fixtures:
                 job(5, "queued", None, None)]
         write(directory / "summary.json", {"campaign_id": directory.name, "started_at": "2026-10-18T19:28:52+00:00",
                                            "e2e_started_at_epoch": T0, "status": "running", "runs": 1, "task_count": 5,
-                                           "total_jobs": 5, "jobs": jobs})
+                                           "total_jobs": 5, "jobs": jobs,
+                                           "shared_inventory": {"directory": str(directory / "shared-inventory"),
+                                                                "publisher_pid": 1}})
+        if controller:
+            # The campaign inventory publisher records its parent controller's PID + birth.
+            pid, start = {"live": (os.getpid(), process_birth(os.getpid())),
+                          "dead": (reaped_pid(), process_birth(os.getpid())),
+                          "reused": (os.getpid(), "proc-start:" + boot_id() + ":1" if Path("/proc/self/stat").exists()
+                                     else "Thu Jan  1 00:00:00 1970")}[controller]
+            write(directory / "shared-inventory/owner", f"app=navi-whisper-lux-bench\npid=1\npid_start=x\n"
+                  f"token=t\nparent_pid={pid}\nparent_start={start}\n")
         LEDGER["record"]("launch", directory.name, ledger=self.ledger, goal="campaign-goal", slice="mixed5",
                          kind="campaign", run_dir=str(directory), triggered_at=T0)
         return directory
@@ -209,6 +238,52 @@ class Scorecard(unittest.TestCase):
                          "retained retry attempts stay in the infra denominator; the job counts once")
         self.assertEqual(exp["state"], "RUNNING")
         self.assertEqual(exp["reasons"][0][1], "Expected tool 'spawn_browser_agent' not found in messages")
+        self.valid(data)
+
+    def test_campaign_with_live_controller_renders_running(self):
+        data = render(self.f.campaign("live"), self.f)
+        self.assertEqual((data["experiment"]["state"], data["since"]), ("RUNNING", {"state": "RUNNING"}))
+        self.assertIn("QUEUED 1 · IN_PROGRESS 1 · COMPLETED 3/5", CARD["render_text"](data))
+
+    def test_campaign_with_lost_controller_never_renders_running(self):
+        for controller in ("dead", "reused"):
+            with self.subTest(controller=controller):
+                self.tmp = Path(tempfile.mkdtemp(prefix="scorecard-test-"))
+                self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+                self.f = Fixtures(self.tmp)
+                directory = self.f.campaign(controller)
+                os.utime(directory / "summary.json", (T0 + 1800, T0 + 1800))
+                data = render(directory, self.f)
+                exp = data["experiment"]
+                self.assertEqual(exp["state"], "CONTROLLER LOST")
+                self.assertEqual(exp["progress"], {"queued": 1, "in_progress": 1, "completed": 3, "unobserved": 0},
+                                 "every recorded count is preserved")
+                self.assertEqual(exp["outcomes"]["PASS"], 1)
+                self.assertNotEqual(data["since"], {"state": "RUNNING"})
+                text = CARD["render_text"](data)
+                lines = text.splitlines()
+                self.assertTrue(lines[0].startswith("🧪 EXPERIMENT #1 · 🔴 CONTROLLER LOST · last update Oct 18, 12:58:52 PM PDT"), lines[0])
+                self.assertNotIn("RUNNING", text)
+                self.assertNotIn("IN_PROGRESS 1", text)
+                self.assertIn("QUEUED 1 · INTERRUPTED/UNRECONCILED 1 · COMPLETED 3/5", text)
+                lost = [i for i in data["issues"] if i["text"].startswith("Campaign controller lost")]
+                self.assertEqual(len(lost), 1, data["issues"])
+                self.assertEqual(lost[0]["severity"], "red")
+                self.assertIn("exact-owner recovery", lost[0]["action"])
+                document = self.valid(data)
+                self.assertNotIn("RUNNING", document.split('id="scorecard-data"')[0])
+                self.assertIn("CONTROLLER LOST", document)
+
+    def test_campaign_without_controller_identity_is_unverified_not_running(self):
+        data = render(self.f.campaign(None), self.f)
+        exp = data["experiment"]
+        self.assertEqual(exp["state"], "UNVERIFIED")
+        self.assertEqual(exp["progress"]["in_progress"], 1)
+        text = CARD["render_text"](data)
+        self.assertTrue(text.startswith("🧪 EXPERIMENT #1 · 🟠 UNVERIFIED · last update "), text.splitlines()[0])
+        self.assertNotIn("RUNNING", text)
+        self.assertIn("IN_PROGRESS (UNVERIFIED) 1", text)
+        self.assertTrue(any(i["text"].startswith("Campaign controller liveness UNVERIFIED") for i in data["issues"]))
         self.valid(data)
 
     def test_sharded_golden_audit_and_history(self):
