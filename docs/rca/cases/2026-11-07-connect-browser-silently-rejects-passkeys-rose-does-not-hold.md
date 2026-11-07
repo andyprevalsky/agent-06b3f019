@@ -23,6 +23,7 @@ tags:
   - observability
 sources:
   - commit 00e9ca6991adee1483001ae36f54393dab41744d
+  - commit 308260b04747e70435eab7b9670a4579b8e2061a
 repro: back-end/src/tests/blackbox/compute-connect-passkeys.blackbox.ts
 status: fixed
 ---
