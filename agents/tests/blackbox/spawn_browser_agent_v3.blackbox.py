@@ -27352,6 +27352,72 @@ async def test_credential_setup_failure_disconnects_the_connected_browser_client
     fake_browser.close.assert_awaited()
 
 
+@_in_browser_activity_context
+async def test_sealed_generation_outranks_an_ordinary_browser_setup_error():
+    """A sealed generation from credential setup stops the activity despite a browser error.
+
+    Both parallel setup sides can fail together. The control error must win
+    regardless of argument order; otherwise the activity runs its ordinary
+    failure path (session close, failure writes) for a replaced generation.
+    """
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from helpers.workflow_generation import WorkflowGenerationSealed
+
+    class _UnreachableDomService(_FakeDomService):
+        async def connect(self):
+            raise RuntimeError("CDP endpoint unreachable")
+
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.build_realm_credential_state",
+            AsyncMock(side_effect=WorkflowGenerationSealed("generation replaced")),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _UnreachableDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+    ):
+        with pytest.raises(WorkflowGenerationSealed):
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Check the inbox",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+
+
 async def _run_browser_activity_cancelled_mid_step(cancellation_details):
     """Run the real browser activity and cancel it mid-step with ``cancellation_details``.
 
@@ -37548,6 +37614,10 @@ async def run_all_tests():
     await r.record_async(
         "credential_setup_failure_disconnects_connected_browser_clients",
         test_credential_setup_failure_disconnects_the_connected_browser_clients,
+    )
+    await r.record_async(
+        "sealed_generation_outranks_ordinary_browser_setup_error",
+        test_sealed_generation_outranks_an_ordinary_browser_setup_error,
     )
     await r.record_async(
         "timed_out_browser_activity_leaves_the_tool_result_to_the_workflow",

@@ -653,6 +653,10 @@ class BrowserDownloadPersister:
                 file_path=file_path,
                 filename=filename,
             )
+        # A blob: download is read in the focused page before the site revokes it.
+        # When that fails (revoked first, or created in another frame), providers
+        # with a session file API recover the completed native download above.
+        # Tilion has no reachable copy while the worker holds its only CDP client.
         if not result:
             result = await persist_navigation_download_via_page_fetch(
                 session=self.browser_session,

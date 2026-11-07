@@ -9228,8 +9228,16 @@ async def _spawn_browser_agent_activity_v3_real(
             _process_data(),
             return_exceptions=True,
         )
+        setup_errors = [result for result in (browser_result, data_result) if isinstance(result, BaseException)]
+        # A sealed generation or cancellation must stop the activity even when the
+        # other side failed with an ordinary error.
         setup_error = next(
-            (result for result in (browser_result, data_result) if isinstance(result, BaseException)), None
+            (
+                error
+                for error in setup_errors
+                if isinstance(error, WorkflowGenerationSealed) or not isinstance(error, Exception)
+            ),
+            setup_errors[0] if setup_errors else None,
         )
         if setup_error is not None:
             if not isinstance(browser_result, BaseException):
