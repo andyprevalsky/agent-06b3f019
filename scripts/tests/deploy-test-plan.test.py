@@ -747,6 +747,19 @@ class InterruptedCustody(unittest.TestCase):
         with patch.object(Path, 'stat', owner_turns_root), self.assertRaisesRegex(ValueError, 'unverifiable'):
             m.namespace_quiet(namespace, {port})
         child.kill(); child.wait(); child.stdout.close()
+        # An unreadable /proc/<pid>/status is unverifiable too: refused by the deadline, never a raw crash.
+        child = subprocess.Popen([sys.executable, '-c', body, '60'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.kill)
+        self.assertEqual(child.stdout.readline().strip(), 'ready')
+        status, real_read_text = f'/proc/{child.pid}/status', Path.read_text
+
+        def status_unreadable(path, *args, **kwargs):
+            if str(path) == status:
+                raise PermissionError(13, 'Permission denied', status)
+            return real_read_text(path, *args, **kwargs)
+        with patch.object(Path, 'read_text', status_unreadable), self.assertRaisesRegex(ValueError, 'unverifiable'):
+            m.namespace_quiet(namespace, {port})
+        child.kill(); child.wait(); child.stdout.close()
 
     def test_historical_policy_drift_renews_without_changing_original_bindings(self):
         state, receipt, proof, previous, renewal = self.policy_relocation_fixture()

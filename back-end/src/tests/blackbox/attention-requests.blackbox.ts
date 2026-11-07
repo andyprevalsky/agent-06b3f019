@@ -17,6 +17,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 import { appendGateWaiter, findPendingByGateKey } from '../../domains/attention-requests/repo';
 import { resolveAndSignal } from '../../providers/gateResolution';
 import { getTemporalClient } from '../../providers/temporal';
@@ -1418,6 +1419,27 @@ async function testRespond_authoredMessagePersistsExactlyOnceWithOriginalBytes()
   assert(
     messages[0].text === text,
     'Authored attention response must preserve every original byte'
+  );
+  // The authored reply is a person's message: it moves the sidebar recency key
+  // (stamped after commit, so read until it lands).
+  const stamped = await retryWithBackoff(
+    async () =>
+      (
+        await prisma.agent.findUnique({
+          where: { id: fixture.realAgentId },
+          select: { lastUserMessageAt: true },
+        })
+      )?.lastUserMessageAt ?? null,
+    {
+      maxRetries: 8,
+      initialBackoffMs: 100,
+      shouldRetryResult: (at) => at === null,
+      component: 'AttentionReplyStamp',
+    }
+  );
+  assert(
+    stamped?.getTime() === messages[0].timestamp.getTime(),
+    `Authored reply should stamp lastUserMessageAt, got ${stamped?.toISOString() ?? 'null'}`
   );
 }
 

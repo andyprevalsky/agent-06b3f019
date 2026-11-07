@@ -48,6 +48,8 @@ def scan_same_user_processes(inspect, refuse, grace=2.0):
                         break
                 except (FileNotFoundError, ProcessLookupError):
                     break
+                except PermissionError:
+                    pass  # An unreadable status proves nothing either; keep re-observing to the deadline.
                 if time.monotonic() >= deadline:
                     refuse(process.name)
                     raise PermissionError(f'/proc/{process.name}: unverifiable')  # refuse must raise

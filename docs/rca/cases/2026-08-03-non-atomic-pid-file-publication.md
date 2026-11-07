@@ -198,9 +198,9 @@ failed twice under the concurrent structural gate with `ValueError: invalid
 literal for int() with base 10: ''` at `pid=int(pidfile.read_text())`. Its fake
 `flyctl` child published its PID with `Path.write_text`, and the test polls on
 existence. Mechanism repro: the same write shape with a widened create-to-write
-window reads `''`. Fix: the child writes `auth.pid.tmp` and `os.replace`s it.
-Both parametrizations passed 5/5 and the whole file passed 381/381. Gate:
-NOT_INTRODUCED.
+window reads `''`. Fix (landed on main as 6670d5723 in parallel; this PR's
+equivalent writer-side change was dropped at merge): the reader waits for the
+file's content, not just its name. Gate: NOT_INTRODUCED.
 
 ## Human feedback
 

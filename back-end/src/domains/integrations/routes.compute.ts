@@ -137,7 +137,10 @@ router.get(
   })
 );
 
-/** POST /api/integrations/compute-code/token/lineage-heartbeat */
+/** POST /api/integrations/compute-code/token/lineage-heartbeat
+ *  Optional `integrationId` + `usage` ({ observedAt, fiveHour?, sevenDay? }, each
+ *  window `{ usedPct, resetsAt }`): the subscription usage the worker last saw
+ *  for this token, recorded on that Integration row. */
 router.post(
   '/compute-code/token/lineage-heartbeat',
   authenticate,
@@ -147,7 +150,12 @@ router.post(
     }
     const body = (req.body as Record<string, unknown> | undefined) ?? {};
     const lineageKey = typeof body.lineageKey === 'string' ? body.lineageKey : '';
-    return res.json(await service.heartbeatComputeTokenLineage(lineageKey));
+    return res.json(
+      await service.heartbeatComputeTokenLineage(
+        lineageKey,
+        service.parseSubscriptionUsageReport(body)
+      )
+    );
   })
 );
 
