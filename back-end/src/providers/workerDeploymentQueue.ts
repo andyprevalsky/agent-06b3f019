@@ -1,4 +1,5 @@
 export * from './workerDeploymentMachineAdmission';
+export * from './workerDeploymentSupersession';
 import {
   installWorkerRouteRetention,
   requireWorkerMachineNotRetained,
@@ -25,8 +26,20 @@ export const WORKER_DEPLOYMENT_STAGES = [
   'DRAINING',
   'SUCCEEDED',
   'ABORTED',
+  // Terminal for a never-started QUEUED job whose code ships in a queued git
+  // descendant's cutover (evidence.SUPERSEDED.supersededBy names that job).
+  'SUPERSEDED',
 ] as const;
 export type WorkerDeploymentStage = (typeof WORKER_DEPLOYMENT_STAGES)[number];
+export const TERMINAL_WORKER_DEPLOYMENT_STAGES: readonly WorkerDeploymentStage[] = [
+  'SUCCEEDED',
+  'ABORTED',
+  'SUPERSEDED',
+];
+const terminal = (stage: WorkerDeploymentStage) =>
+  TERMINAL_WORKER_DEPLOYMENT_STAGES.includes(stage);
+/** FIFO coalescing reads at most this many pending jobs per app. */
+const MAX_PENDING_JOBS = 64;
 export interface WorkerDeploymentIdentity {
   app: string;
   sourceCommit: string;
@@ -126,10 +139,33 @@ async function head(
   app: string
 ): Promise<WorkerDeploymentJob | null> {
   const row = await tx.toolSideEffect.findFirst({
-    where: { operationType: JOB, externalId: app, status: { notIn: ['SUCCEEDED', 'ABORTED'] } },
+    where: {
+      operationType: JOB,
+      externalId: app,
+      status: { notIn: [...TERMINAL_WORKER_DEPLOYMENT_STAGES] },
+    },
     orderBy: [{ createdAt: 'asc' }, { operationKey: 'asc' }],
   });
   return row ? decode(row.request) : null;
+}
+export async function readPendingWorkerDeployments(
+  tx: Pick<Transaction, 'toolSideEffect'>,
+  app: string
+): Promise<WorkerDeploymentJob[]> {
+  const rows = await tx.toolSideEffect.findMany({
+    where: {
+      operationType: JOB,
+      externalId: app,
+      status: { notIn: [...TERMINAL_WORKER_DEPLOYMENT_STAGES] },
+    },
+    orderBy: [{ createdAt: 'asc' }, { operationKey: 'asc' }],
+    take: MAX_PENDING_JOBS,
+  });
+  return rows.map((row) => decode(row.request));
+}
+/** Non-terminal jobs for one app in FIFO order (head first, bounded). */
+export async function readWorkerDeploymentQueue(app: string): Promise<WorkerDeploymentJob[]> {
+  return readPendingWorkerDeployments(prisma, app);
 }
 export async function readWorkerDeploymentHead(app: string): Promise<WorkerDeploymentJob | null> {
   return head(prisma, app);
@@ -184,10 +220,7 @@ async function mutation(
     if (!row || row.operationType !== JOB) throw new Error('Deployment job does not exist');
     const job = decode(row.request);
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${appLock(job.identity.app)}))`;
-    if (
-      !['SUCCEEDED', 'ABORTED'].includes(job.stage) &&
-      (await head(tx, job.identity.app))?.jobId !== jobId
-    )
+    if (!terminal(job.stage) && (await head(tx, job.identity.app))?.jobId !== jobId)
       throw new Error('FIFO predecessor must complete before this deployment');
     const result = await fn(tx, job);
     await tx.toolSideEffect.update({
@@ -319,7 +352,8 @@ export async function transitionWorkerDeployment(
     if (
       next === 'ABORTED' ||
       expected === 'ABORTED' ||
-      job.stage === 'SUCCEEDED' ||
+      next === 'SUPERSEDED' ||
+      terminal(job.stage) ||
       job.stage !== expected ||
       WORKER_DEPLOYMENT_STAGES.indexOf(next) !== WORKER_DEPLOYMENT_STAGES.indexOf(expected) + 1
     )
@@ -378,7 +412,7 @@ export async function recordWorkerDeploymentFailure(
   ownerId: string
 ): Promise<WorkerDeploymentJob> {
   return mutation(jobId, ownerId, async (tx, job) => {
-    if (['SUCCEEDED', 'ABORTED'].includes(job.stage)) return job;
+    if (terminal(job.stage)) return job;
     return {
       ...job,
       ownerId,
@@ -477,8 +511,7 @@ export async function claimWorkerDeployment(
   ownerId: string
 ): Promise<WorkerDeploymentJob> {
   return mutation(jobId, ownerId, async (_tx, job) => {
-    if (['SUCCEEDED', 'ABORTED'].includes(job.stage))
-      throw new Error('Terminal deployment cannot be claimed');
+    if (terminal(job.stage)) throw new Error('Terminal deployment cannot be claimed');
     return { ...job, ownerId };
   });
 }
@@ -494,10 +527,7 @@ export async function assertWorkerDeploymentOwned(
     if (!row || row.operationType !== JOB) throw new Error('Deployment job does not exist');
     const job = decode(row.request);
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${appLock(job.identity.app)}))`;
-    if (
-      ['SUCCEEDED', 'ABORTED'].includes(job.stage) ||
-      (await head(tx, job.identity.app))?.jobId !== jobId
-    )
+    if (terminal(job.stage) || (await head(tx, job.identity.app))?.jobId !== jobId)
       throw new Error('FIFO head no longer owns native admission');
     return job;
   });
@@ -511,6 +541,8 @@ export async function abortWorkerDeployment(
 ): Promise<WorkerDeploymentJob> {
   return mutation(jobId, ownerId, async (tx, job) => {
     if (job.stage === 'ABORTED') return job;
+    if (job.stage === 'SUPERSEDED')
+      throw new Error('Superseded deployment is already terminal; its descendant owns the cutover');
     if (job.stage !== 'QUEUED' || job.candidateMachineIds.length)
       throw new Error(
         'Prepared or activated deployment requires explicit native reconciliation before abort'

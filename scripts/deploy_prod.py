@@ -522,8 +522,10 @@ def lane_fly(ctx: Ctx) -> Result:
     fly = ctx.production_receipt().get('fly') or {}
     if fly.get('required') is False:
         return True, 'production gate open (no agent runtime change in the merge)', 0
+    carried = (fly.get('verified_by_descendant') or {}).get('descendant_job_id')
     return True, (f'deploy-agents run {fly.get("run_id")} attempt {fly.get("attempt")} job {fly.get("job_id")} '
-                  f'{fly.get("job_stage")} + monitor --verify'), 0
+                  f'{fly.get("job_stage")} + monitor --verify'
+                  + (f' (verified by descendant cutover {carried}, not its own)' if carried else '')), 0
 
 
 def lane_workflow_migration(ctx: Ctx) -> Result:
