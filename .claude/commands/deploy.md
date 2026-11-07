@@ -128,7 +128,9 @@ The PR is merged, every applicable production lane is verified or has a recorded
 
 Stop and ask the user only for a prompt, agent-behavior or trajectory-injection approval the golden-reference review did not clear; gates keep running, only the merge waits.
 
-Stop immediately when the user says stop. Credential or billing changes only the user can make, review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
+Two more decisions are reserved to the user by the review ledger, not by this skill: the verification-cycle approval id, and a security or prod-impacting finding still open after cycle 3 (see **Review**).
+
+Stop immediately when the user says stop. Provider credit exhaustion, review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
 
 ## Skippable tests
 
@@ -136,7 +138,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 
 | Test | Skip when | Note |
 |------|-----------|------|
-| Any test | A third-party provider is out of credits or storage, or needs a credential or billing change only the user can make (user decision, 2026-11-06), with explicit evidence | Never top up or wait; report it at the end of the scorecard |
+| Any test | A third-party provider is out of credits or storage, or down (user decision, 2026-11-06: skip and report), with explicit evidence; record it as an external-provider waiver (`credits exhausted` or `outage`) | Never top up or wait; report it at the end of the scorecard |
 | Treasury test failures | Always (the test still runs; its original FAIL stays on record) | Never mutate treasury records to pass |
 | AgentCard, production lane | The user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy production`), or the exact release stall | The stall proven from the run's native record is recorded `SKIPPED-stall` (satisfied, never PASS, unreleased amount stated); any other outcome fails |
 | AgentCard, smoke tasks | The exact release stall (closed card, zero balance, transfer `consumed`, `releasedCents=0`) | Triage the native SKIPPED row as `resource_skip` with `reason_code: agentcard_release_stall`; never PASS; unreleased funds stay a followup |
@@ -172,11 +174,11 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 ## Review
 
 - Cycle 1 starts when the PR opens; cycle 2 is one batched incremental review; cycle 3 only when cycle 2 found a valid issue; the ledger refuses a 4th.
-- After a clean cycle 2, gate fixes that changed source need a verification cycle, which takes the user's approval id: ask for it in the pending approval packet, then `scripts/deploy review-next --verification-approval <id>`.
+- After a clean cycle 2, gate fixes that changed source need a verification cycle, which the ledger only starts with the user's explicit approval id (`scripts/deploy review-next --verification-approval <id>`); batch every source fix into cycle 2 where possible, and ask for the id in the same message as any other pending question.
 - Read the reviews for the exact HEAD from the reviews, inline comments and issue comments endpoints; a green check is not a review.
 - Fix every valid finding, including pre-existing ones; ignore only pure style nits.
-- Reply to every comment with `[FIXED]`, `[IGNORED]`, `[DELEGATED]` or `[POST-MERGE REPAIR]`.
-- If cycle 3 still has valid findings, defer the non-security ones with `deploy_review_cycle.py override` and merge; security or prod-impacting findings block.
+- Reply to every comment with `[FIXED]`, `[DEFERRED]`, `[IGNORED]`, `[DELEGATED]` or `[POST-MERGE REPAIR]`; `override` requires `[DEFERRED]` or `[FIXED]` on each deferred finding.
+- If cycle 3 still has valid findings, defer the non-security ones with `deploy_review_cycle.py override` and merge; fix security or prod-impacting ones, then ask the user how the fix is reviewed (the ledger refuses a 4th cycle).
 - A false-green or bot-posted request gets one `@coderabbitai full review` from the user's account.
 - Over 150 files: add the canonical path filters in a later stabilized commit; never weaken the review.
 - Main moved after a clean final review: `deploy_review_cycle.py inherit-sync --head "$(git rev-parse HEAD)" --base origin/main`.
