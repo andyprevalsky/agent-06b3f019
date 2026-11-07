@@ -2729,19 +2729,33 @@ async def test_archive_retains_completed_snapshot_before_gather_resumes():
 @async_case
 async def test_archive_timeout_retains_only_completed_snapshots():
     snapshot = {"messages": browser_rows(attached=False)}
+    loop = asyncio.get_running_loop()
     for return_root in (True, False):
         logs = {"messages": [{"text": "pre-pause snapshot"}]}
         pending_cancelled = set()
+        pending_started = set()
+        clock = loop.time()
+
+        def fixture_time():
+            return clock
 
         async def fetch(_url, aid):
+            nonlocal clock
             if return_root and aid == ROOT:
                 return snapshot
             try:
+                pending_started.add(aid)
+                if pending_started == ({CHILD} if return_root else {ROOT, CHILD}):
+                    # Expire the unchanged deadline only after the scenario's
+                    # completed and pending fetches exist. Setup latency must
+                    # not turn this into a tree-fetch timeout instead.
+                    clock += 0.01
                 await asyncio.Event().wait()
             finally:
                 pending_cancelled.add(aid)
 
         with (
+            patch.object(loop, "time", fixture_time),
             patch.object(bench, "get_agent_tree", AsyncMock(return_value=[{"agent_id": ROOT}, {"agent_id": CHILD}])),
             patch.object(bench, "get_agent", fetch),
         ):
@@ -2750,7 +2764,7 @@ async def test_archive_timeout_retains_only_completed_snapshots():
                     "http://localhost:1", ROOT, {}, logs, timeout_seconds=0.01
                 )
         observation = logs["browser_archive_observation"]
-        assert observation["snapshots"] == ({ROOT: snapshot} if return_root else {})
+        assert observation["snapshots"] == ({ROOT: snapshot} if return_root else {}), (return_root, observation)
         assert set(observation["completed_agent_ids"]) == ({ROOT} if return_root else set())
         assert pending_cancelled == ({CHILD} if return_root else {ROOT, CHILD})
         assert observation["ready"] is False

@@ -109,6 +109,7 @@ export async function getAgentDetailForPreview(agentId: string) {
       taskProgressEstimates: agent.taskProgressEstimates ?? {},
       status: agent.status,
       status_message: agent.statusMessage,
+      user_control_revision: agent.userControlRevision,
       temporal_workflow_id: agent.temporalWorkflowId,
       token_count: agent.tokenCount,
       tokens_in: agent.tokensIn,

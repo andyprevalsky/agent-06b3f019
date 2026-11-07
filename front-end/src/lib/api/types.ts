@@ -59,6 +59,8 @@ export interface Agent {
     | 'FAILED'
     | 'COST_LIMIT_REACHED';
   status_message: string | null;
+  /** Durable user pause/resume ordering; unrelated updates preserve it. */
+  user_control_revision?: number;
   temporal_workflow_id: string | null;
   token_count: number;
   tokens_in: number;

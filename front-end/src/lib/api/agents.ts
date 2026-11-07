@@ -240,18 +240,48 @@ export async function getTools(): Promise<Tool[]> {
   return data.tools;
 }
 
-// Pause agent
-export async function pauseAgent(agentId: string): Promise<void> {
+const PAUSE_ACK_BODY_TIMEOUT_MS = 3_000;
+
+/** Pause an agent, bounding optional metadata reads after HTTP acceptance. */
+export async function pauseAgent(agentId: string): Promise<{ user_control_revision?: number }> {
   const headers = getAuthHeaders();
+  const controller = new AbortController();
 
   const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/pause`, {
     method: 'POST',
     headers,
+    signal: controller.signal,
   });
 
   if (!response.ok) {
     throw new Error('Failed to pause agent');
   }
+  // HTTP acceptance owns the pause even if optional metadata cannot be read.
+  let bodyTimeout: ReturnType<typeof setTimeout> | undefined;
+  let data: unknown;
+  try {
+    data = await Promise.race([
+      response.json().catch(() => null),
+      new Promise<null>((resolve) => {
+        bodyTimeout = setTimeout(() => {
+          controller.abort();
+          resolve(null);
+        }, PAUSE_ACK_BODY_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(bodyTimeout);
+  }
+  const revision =
+    data && typeof data === 'object' && 'user_control_revision' in data
+      ? data.user_control_revision
+      : undefined;
+  return {
+    user_control_revision:
+      typeof revision === 'number' && Number.isSafeInteger(revision) && revision >= 0
+        ? revision
+        : undefined,
+  };
 }
 
 // Resume agent

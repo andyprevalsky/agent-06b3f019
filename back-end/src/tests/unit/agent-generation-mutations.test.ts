@@ -8,6 +8,7 @@ import * as agentRepo from '../../domains/agents/repo';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
 import { claimWorkflowReplacement } from '../../providers/workflowReplacementState';
+import { testAgentControlIntentCases } from './agent-control-intent.cases';
 import { createTestHarness } from './trace-archive-test-utils';
 
 const { test, finish } = createTestHarness('agent generation mutation fence unit tests');
@@ -160,7 +161,8 @@ async function main(): Promise<void> {
       );
 
       const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(accountingAccepted, true);
+      assert.strictEqual(accountingAccepted.accepted, true);
+      assert.strictEqual(accountingAccepted.agent?.ownCostCents, 52);
       assert.strictEqual(stored.status, 'ACTIVE');
       assert.strictEqual(stored.progress, 0.8);
       assert.strictEqual(stored.messageCount, 12);
@@ -174,6 +176,8 @@ async function main(): Promise<void> {
       await prisma.agent.deleteMany({ where: { id: agentId } });
     }
   });
+
+  await testAgentControlIntentCases(test, createAgent);
 
   await test('generated titles apply once to root agents without overwriting human renames', async () => {
     const rootAgentId = await createAgent();
