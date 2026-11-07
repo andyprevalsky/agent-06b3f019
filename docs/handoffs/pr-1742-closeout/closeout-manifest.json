@@ -96,14 +96,24 @@
    "detail": "approved hunks are in the merged source; decision recorded in the approval batch"
   },
   {
-   "path": "/var/tmp/*.log (isolation reruns)",
-   "disposition": "reproducible-unneeded",
-   "detail": "diagnostic reruns; commands recorded in the RCA reports"
-  },
-  {
    "path": "/project/.claude/memory (deploy learnings)",
    "disposition": "committed",
    "detail": "persistent agent memory outside the repo"
+  },
+  {
+   "path": "/var/tmp/*.log (isolation reruns)",
+   "disposition": "reproducible-unneeded",
+   "detail": "deleted after this record; commands recorded in the RCA reports"
+  },
+  {
+   "path": "agent_link_server processes for this deploy's smoke campaigns",
+   "disposition": "retired",
+   "detail": "TERM'd exact PIDs 617253, 2392411, 2581281, 3989067 (and earlier 2862864, 3898612, 3826243, 860113)"
+  },
+  {
+   "path": "flyctl agent daemon (pid 525539)",
+   "disposition": "shared-retained",
+   "detail": "shared Fly agent used by every flyctl call on this devbox; not owned by this deploy, left running"
   }
  ],
  "files": {
@@ -119,5 +129,8 @@
   "evidence/review-ledger-pre-5239b7aee.json": "60e550e1d4edc0fc09f96ff31ecce42999feb114a4b846c32664c0fa870ae4b6",
   "evidence/review-ledger.json": "aba7a9b18157f09924ee0b48c094d45d5ace91c17e8357fabdbae8a8176a2377",
   "evidence/warm-image-build-receipt.json": "84a2216471c5bc23779ce5359be11222d0bdd3cebf17be0b17915559da3ef064"
- }
+ },
+ "factory_ledger_commit": "f6b393b440 (37 factory timing rows for this deploy)",
+ "closeout_commit": "3982510d56",
+ "scorecard": "https://boxes.dev/visuals/vis_5f4a7f4418d616f6eab9f4e49ece051b"
 }
