@@ -9,8 +9,9 @@ import assert from 'node:assert/strict';
 import { mock } from 'node:test';
 
 let failing = false;
-let row: { project: { name: string; repoUrl: string | null; defaultBranch: string } | null } | null =
-  null;
+let row: {
+  project: { name: string; repoUrl: string | null; defaultBranch: string } | null;
+} | null = null;
 const lookups: string[] = [];
 
 async function main(): Promise<void> {
@@ -39,7 +40,11 @@ async function main(): Promise<void> {
   row = { project: null };
   assert.equal(await loadRouterProjectContext('agent-home'), '');
   row = {
-    project: { name: 'Rose', repoUrl: 'https://github.com/Rose-Ai-Labs/rose', defaultBranch: 'main' },
+    project: {
+      name: 'Rose',
+      repoUrl: 'https://github.com/Rose-Ai-Labs/rose',
+      defaultBranch: 'main',
+    },
   };
   assert.match(
     await loadRouterProjectContext('agent-project'),
