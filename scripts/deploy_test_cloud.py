@@ -179,6 +179,25 @@ def collect_campaign(request, root, runs, campaign, started, native_exit, width)
     return cases, details, cleaned, str(campaign)
 
 
+def shared_canary_env(root, environ=os.environ):
+    """One infra-canary stamp and lock per repository, not per deploy worktree.
+
+    The fleet keeps its fail-closed canary gate and 1 h TTL; it only stops treating each fresh
+    deploy worktree's empty .context as "never proven". On 2026-11-06 that re-ran the
+    2-machine canary for 11.3 min before any smoke Machine was requested. Explicit overrides win.
+    """
+    try:
+        common = Path(subprocess.check_output(['git', 'rev-parse', '--git-common-dir'], cwd=root,
+                                              text=True, stderr=subprocess.DEVNULL).strip())
+    except (OSError, subprocess.CalledProcessError):
+        return {}  # Not a Git checkout: the fleet keeps its own per-checkout stamp and lock.
+    directory = (common if common.is_absolute() else Path(root) / common).resolve() / 'cloudbench-infra-canary'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    return {key: environ.get(key) or str(directory / leaf)
+            for key, leaf in (('FLEET_INFRA_CANARY_STAMP', 'last-pass'),
+                              ('FLEET_INFRA_CANARY_LOCK', 'transaction.lock'))}
+
+
 def execute(request, root):
     """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
     checks, skipped = request['checks'], request.get('skips', {})
@@ -198,7 +217,7 @@ def execute(request, root):
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
            'DEPLOY_NATIVE_HUB_JOIN': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
-           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
+           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root)}
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
     catalog = root / 'agents/benchmarks/tasks.json'

@@ -1236,7 +1236,7 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
 
 25. **No benchmark reward hacking** - Never change benchmark task definitions, prompts, expected tools, pass criteria, load sizes, timeouts, concurrency limits, or production behavior just to make a benchmark pass. Do not raise a benchmark/tool timeout as a workaround for a timeout failure. First prove why it timed out with diagnostics: resource contention, memory growth, blocked external tool/session, retry loop, verifier/schema issue, slow database/API calls, or an unintended parameter/config change. Then reduce the underlying resource use, remove the stall, or fix the broken flow. Get explicit approval before changing any benchmark definition or timeout. General reliability rule: any Temporal activity wrapper that calls an LLM must allow at least 60 seconds; sub-60-second verifier/LLM activity timeouts are product bugs, not benchmark tuning.
 
-25a. **Never add runtime nudges to the harness** — synthetic user/tool messages injected into the planning LLM's trajectory (network monitors that fabricate tool failures, supervisor recovery nudges, skip-recovery guards, OTP/handoff autofill, classifier recovery constraints wired into message assembly, etc.) are almost always overfitting. Let the model act on real tool results. Deploy Step 0c requires human approval (or a `GROUNDED` golden-reference review, rule 26a) if you touch harness trajectory-injection sites.
+25a. **Never add runtime nudges to the harness** — synthetic user/tool messages injected into the planning LLM's trajectory (network monitors that fabricate tool failures, supervisor recovery nudges, skip-recovery guards, OTP/handoff autofill, classifier recovery constraints wired into message assembly, etc.) are almost always overfitting. Let the model act on real tool results. The deploy trajectory-injection guard requires human approval (or a `GROUNDED` golden-reference review, rule 26a) if you touch harness trajectory-injection sites.
 
 25b. **Avoid string-matching classifiers in our harness** — that is an ANTI-PATTERN.
 
@@ -1606,7 +1606,8 @@ one batched incremental review, and at most one verification review. Never
 review every intermediate push or use `gh pr checks --watch`; use
 `scripts/wait-for-code-review` for the exact immutable HEAD, batch all valid
 findings before pushing, and require `deploy_review_cycle.py require-mergeable`
-before merge. A fourth cycle blocks the deploy as review-unstable.
+before merge. The ledger refuses a fourth cycle: defer the remaining non-security findings with
+`deploy_review_cycle.py override` and merge (`.claude/commands/deploy.md` Review).
 
 ## Ralph Instructions
 

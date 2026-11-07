@@ -419,7 +419,20 @@ async function testImpersonate_mintsWorkingTargetSession() {
   }
 }
 
+// The admin-target case switches into Andy's real account. A long-lived workspace database
+// keeps that row from earlier runs, but a fresh one (an ephemeral CI VM) has none until some
+// other domain creates it, so this suite owns the row it needs. An existing row is untouched.
+async function ensureAdminTargetAccount() {
+  await prisma.user.upsert({
+    where: { userId: ANDY_USER_ID },
+    // No phone: User.phone is unique and other suites own the shared test number.
+    create: { userId: ANDY_USER_ID, name: 'Andy Prevalsky', isAnonymous: false },
+    update: {},
+  });
+}
+
 async function testImpersonate_adminTargetReportsAdmin() {
+  await ensureAdminTargetAccount();
   const res = await request(`${BASE_URL}/api/admin-health/impersonate`, {
     method: 'POST',
     headers: adminHeaders(),
