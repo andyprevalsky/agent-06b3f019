@@ -147,8 +147,13 @@
  },
  "live_prod_linkedin_verification": {
   "agent_id": "5357f72b-bf67-44f8-bd66-8963e46a487f",
-  "state": "in progress at closeout (status ACTIVE, 357 messages at 2026-11-07T15:08:22Z); final outcome reported by the deploy owner",
-  "observed_at": "2026-11-07T15:08:22Z",
+  "state": "COMPLETED: integration 0e41a4d5-46db-4ce1-a17f-d3435c881edc (linkedin) CONNECTED at 2026-11-07T15:31:59Z from Basic_LinkedInDataExport_11-06-2026.zip.zip, totalContactsProcessed 375, totalMessagesProcessed 480, failureReason null",
+  "observed_at": "2026-11-07T15:45:01Z",
+  "observed_by": "read-only production query by the deploy owner (status CONNECTED, lastSuccessfulSyncAt 2026-11-07T15:31:59.730Z)",
+  "gaps_observed": [
+   "the request_linkedin_export browser task retried LinkedIn's requestDataExport (HTTP 412, a recent full-archive request) until its 30-minute StartToClose timeout at about 15:07Z; the agent uploaded the already-downloaded Basic archive instead",
+   "after that timeout the root's _browser_activity_cleanup_unknown flag stayed set although background cleanup finished at 15:08:09Z, so later browser spawns failed 'Previous browser activity cleanup is unconfirmed' (pre-existing since 659203815; not a failed test, no repair handoff)"
+  ],
   "local_live_run": "ae7983a2-1636-4eed-b908-69bd4dd6f470 completed before merge: 170,039-byte archive from a blob URL, Claude Code upload HTTP 200, 227 connections and 480 messages imported, integration CONNECTED (local recordings and trace outbox in the core archive)"
  },
  "delegated_repairs": [
@@ -277,7 +282,8 @@
   "RECOVERY.md"
  ],
  "factory_history": {
-  "published_through": "08b4b13364e642e2ca791942c9d5b7ec1b7286c0 (chore(factory-history) 13:00:10Z, before the merge)",
-  "pending": "production-verify events after 14:24:56Z and the completed outcome are published by the deploy owner at Step 15 (factory_ledger.py publish)"
- }
+  "published_through": "4a122373e chore(factory-history): record 14 factory timing row(s) on main, including stage-finish production-verify 15:37:38Z and outcome completed 15:39:27Z for deploy run 20261107-064130-2393987",
+  "pending": "none"
+ },
+ "benchmark_history": "d3eda0e5b chore(benchmark-history): PR #1749 deploy smoke rows on main: 10 attempt and 10 duration rows from final campaign deploy-8d13a0ad on 79e007df4 (10/10 passed); earlier sweeps are pre-merge iterations (latest-only)"
 }
