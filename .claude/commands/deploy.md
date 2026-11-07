@@ -128,7 +128,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 
 Stop and ask the user only for a prompt, agent-behavior or trajectory-injection approval the golden-reference review did not clear; gates keep running, only the merge waits.
 
-Two more decisions are reserved to the user by the review ledger, not by this skill: the verification-cycle approval id, and a security or prod-impacting finding still open after cycle 3 (see **Review**).
+Two more decisions stay with the user, though this skill adds no stop of its own: the verification-cycle approval id (the review ledger will not start that cycle without it), and a security or prod-impacting finding still open after cycle 3 (the user's answer of 2026-11-05; the ledger refuses a 4th cycle). See **Review**.
 
 Stop immediately when the user says stop. Credential or billing changes only the user can make, provider credit exhaustion, review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
 
