@@ -1945,6 +1945,79 @@ def replace_prepared_tmpdirs(state, old, new, root, directory, proof):
         state.clear(); state.update(candidate)
 
 
+def recover_interrupted_triage_refresh(state: dict, old: dict, new: dict, root: Path, directory: Path) -> None:
+    """No-launch source refresh after a reconciled interrupted independent observation."""
+    if (read(directory / 'cycle.json') != state or old != state.get('plan')
+            or old.get('source') != state.get('source') or digest(old) != state.get('plan_digest')
+            or state.get('phase') != 'interrupted' or state.get('resume_phase') != 'triage'
+            or not state.get('pending') or state.get('ready')
+            or state.get('environment') != environment_digest()):
+        raise ValueError('interrupted TRIAGE refresh requires the exact saved source/plan/environment')
+    interrupted_boundary(state)
+    last = state['attempts'][-1]
+    if (last.get('phase') not in {'initial', 'final'} or last.get('independent_full') is not True
+            or state.get('failure_phase') != last['phase']):
+        raise ValueError('interrupted TRIAGE refresh requires the original independent observation')
+    validate_plan(new, root)
+    if new['source'] != source(root) or new['source'] == state['source']:
+        raise ValueError('interrupted TRIAGE refresh requires actual changed current source')
+    if ({k:v for k,v in old.items() if k not in {'source','gates'}} !=
+            {k:v for k,v in new.items() if k not in {'source','gates'}}
+            or [g['name'] for g in old['gates']] != [g['name'] for g in new['gates']]):
+        raise ValueError('interrupted TRIAGE refresh must preserve the complete selection')
+    workers = []
+    for before, after in zip(old['gates'], new['gates']):
+        preserve_contract(before, after)
+        if before['checks'] != after['checks']:
+            raise ValueError('interrupted TRIAGE refresh must preserve every check')
+        if not after.get('quick') and after.get('worker_transport') == 'local-isolated':
+            worker = Path(after['worker_root'])
+            if source(worker) != new['source']:
+                raise ValueError('interrupted TRIAGE refresh requires prepared current-source workers')
+            workers.append(worker)
+    if retained_owners(state, [g['name'] for g in old['gates']]):
+        raise ValueError('interrupted TRIAGE refresh has retained ownership')
+    records = {r.get('token'): r for a in state['attempts'] for r in a.get('results', []) if r.get('token')}
+    for path in (directory / 'attempts').glob('**/request.json'):
+        request = bounded_read(path, 'original request')
+        receipt = bounded_read(path.parent / 'receipt.json', 'original receipt')
+        if (records.get(request.get('token')) != receipt
+                or any(request.get(k) != receipt.get(k) for k in ('token','source','gate'))):
+            raise ValueError('interrupted TRIAGE refresh has unknown request ownership')
+        owner = receipt_owner(receipt['gate'], receipt)
+        if owner and not (local_reconciliation_bound(state, receipt) or _reconciled(state, receipt, owner)):
+            raise ValueError('interrupted TRIAGE refresh has unreconciled historical ownership')
+    from deploy_test_process_scan import prepared_workers_idle
+    if workers:
+        prepared_workers_idle(workers, birth_guard=True)
+    candidate = copy.deepcopy(state)
+    candidate['phase'] = 'triage'
+    candidate.pop('resume_phase')
+    candidate.pop('resume_independent', None)
+    refresh(candidate, old, new, root, directory=directory)
+    # Nothing has been published yet. Recheck the original custody and new inputs.
+    interrupted_boundary(state)
+    if (read(directory / 'cycle.json') != state or environment_digest() != state['environment']
+            or source(root) != new['source'] or input_fingerprints(new, root) != candidate['input_fingerprints']
+            or any(source(worker) != new['source'] for worker in workers)):
+        raise ValueError('interrupted TRIAGE refresh changed during validation')
+    if workers:
+        prepared_workers_idle(workers, birth_guard=True)
+    if (CANCEL.is_set() or read(directory / 'cycle.json') != state
+            or source(root) != new['source'] or environment_digest() != state['environment']
+            or any(source(worker) != new['source'] for worker in workers)):
+        raise ValueError('interrupted TRIAGE refresh changed before publication')
+    candidate.setdefault('interrupted_triage_refresh_history', []).append({
+        'kind': 'interrupted-pending-triage-refresh-v1', 'at': time.time(), 'credit_granted': False,
+        'from_source': copy.deepcopy(state['source']), 'to_source': copy.deepcopy(new['source']),
+        'from_plan_digest': state['plan_digest'], 'to_plan_digest': digest(new),
+        'round': state.get('round'), 'resume_phase': state['resume_phase'],
+        'resume_independent': state.get('resume_independent'), 'interruption_digest': digest(last),
+        'original_pending': list(state['pending'])})
+    state.clear()
+    state.update(candidate)
+
+
 def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | None = None, _tmpdir_gates=frozenset()) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
@@ -2146,6 +2219,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "prepare-bindings", "triage-quick", "triage-independent", "initial-independent", "final-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "collect-backend"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
+    parser.add_argument('--recover-interrupted-triage', action='store_true',
+                        help='refresh only: no-launch source recovery for reconciled interrupted pending TRIAGE')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -2158,6 +2233,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rca-launcher", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
+        if args.recover_interrupted_triage and args.action != 'refresh':
+            raise ValueError('--recover-interrupted-triage is only valid for refresh')
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
@@ -2216,7 +2293,10 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "refresh":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
-                refresh(state, read(args.input), plan, args.root, directory=directory)
+                if args.recover_interrupted_triage:
+                    recover_interrupted_triage_refresh(state, read(args.input), plan, args.root, directory)
+                else:
+                    refresh(state, read(args.input), plan, args.root, directory=directory)
             elif args.action == 'rebind-local':
                 if args.input is None:
                     raise ValueError('--input previous frozen plan required')

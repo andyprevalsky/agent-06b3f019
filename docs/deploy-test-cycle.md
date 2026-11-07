@@ -105,6 +105,15 @@ saved cycle and no active or unknown owner. It preserves history, revalidates
 input/contract carry, and returns to quick checks; changed inputs get no old
 execution credit.
 
+If a reconciled interrupted independent INITIAL/FINAL observation is waiting to
+resume into TRIAGE but its source has changed, explicitly use
+`refresh --recover-interrupted-triage --input <old-plan>` with the current plan.
+This no-launch transition requires the exact saved interruption, unchanged
+private environment, complete original selection and current-source prepared
+local workers. It preserves pending failures and original receipts, records the
+interruption, and returns to QUICK with TRIAGE next. Ordinary `resume` remains
+strict; unknown ownership or changed contracts still refuse the refresh.
+
 At quiescent TRIAGE, run missing independent full gates without disposing of the
 original failures:
 

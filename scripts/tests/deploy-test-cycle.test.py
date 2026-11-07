@@ -1024,6 +1024,98 @@ class Cycle(unittest.TestCase):
     def test_final_independent_cancel_resume_never_launches_deferred_work(self):
         self.assert_final_observation_resume(False)
 
+    def interrupted_triage_refresh_fixture(self):
+        plan,state,_,_=self.final_cancelled_observation(True)
+        for gate in plan['gates']:
+            if not gate.get('quick'):gate['worker_root']=gate['cwd']
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        (self.root/'code').write_text('reviewed cleanup repair')
+        subprocess.run(['git','-C',str(self.root),'add','code'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com','commit','-qm','repair'],check=True)
+        new=copy.deepcopy(plan);new['source']=c.source(self.root)
+        for gate in plan['gates']:
+            if gate.get('quick'):continue
+            worker=Path(gate['worker_root'])
+            subprocess.run(['git','init','-q',str(worker)],check=True)
+            subprocess.run(['git','-C',str(worker),'fetch','-q',str(self.root),'HEAD'],check=True)
+            subprocess.run(['git','-C',str(worker),'checkout','-q','--detach','FETCH_HEAD'],check=True)
+            (worker/'.git/info/exclude').write_text('.context/\n')
+        old_path=self.directory/'old.json';new_path=self.directory/'new.json'
+        c.write(old_path,plan);c.write(new_path,new);c.write(self.directory/'cycle.json',state)
+        def invoke(action='refresh',flag=True,owners=(),scan=None):
+            import contextlib,io
+            argv=[action,'--plan',str(new_path),'--state-dir',str(self.directory),'--root',str(self.root),'--input',str(old_path)]
+            if flag:argv.append('--recover-interrupted-triage')
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()), \
+                 patch.object(c,'retained_owners',return_value=list(owners)), \
+                 patch('deploy_test_process_scan.prepared_workers_idle',side_effect=scan), \
+                 patch.object(c,'run_phase',side_effect=AssertionError('refresh must not launch')):
+                try:return c.main(argv)
+                except SystemExit as error:return error.code
+        return plan,state,new,old_path,new_path,invoke
+
+    def test_explicit_interrupted_triage_refresh_cli_preserves_pending(self):
+        old,before,new,old_path,new_path,invoke=self.interrupted_triage_refresh_fixture()
+        raw=(self.directory/'cycle.json').read_bytes()
+        self.assertEqual(2,invoke(flag=False))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        self.assertEqual(2,invoke(action='resume',flag=False))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        self.assertEqual(0,invoke())
+        after=c.read(self.directory/'cycle.json')
+        for key in ('pending','failures','attempts','reconciled_owners'):
+            self.assertEqual(before.get(key),after.get(key),key)
+        self.assertEqual(('quick','triage',False),(after['phase'],after['next_after_quick'],after['ready']))
+        self.assertNotIn('resume_phase',after);self.assertNotIn('resume_independent',after)
+        self.assertEqual(new['source'],after['source'])
+        self.assertEqual(before['source'],after['interrupted_triage_refresh_history'][-1]['from_source'])
+        self.assertFalse(c.reusable_full_pass(after,new['gates'][1]))
+        c.run_phase(new,after,self.directory,self.root)
+        self.assertEqual('triage',after['phase']);self.assertEqual(before['pending'],after['pending'])
+        self.assertEqual(2,invoke())
+
+    def test_interrupted_triage_refresh_rejections_leave_saved_state_identical(self):
+        old,before,new,old_path,new_path,invoke=self.interrupted_triage_refresh_fixture()
+        for field,value in [('resume_phase','focused'),('pending',[]),('running',True),('live_failures',[]),('environment','changed')]:
+            bad=copy.deepcopy(before);bad[field]=value;c.write(self.directory/'cycle.json',bad)
+            raw=(self.directory/'cycle.json').read_bytes()
+            with self.subTest(field=field):self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(self.directory/'cycle.json',before)
+        for field,value in [('command',['other']),('checks',['removed']),('cwd',str(self.root)),('timeout_seconds',1)]:
+            bad=copy.deepcopy(new);bad['gates'][1][field]=value;c.write(new_path,bad)
+            raw=(self.directory/'cycle.json').read_bytes()
+            with self.subTest(field=field):self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(new_path,new)
+        bad=copy.deepcopy(before);bad['failures'][0]['source']={'head':'0'*40,'digest':'0'*64};c.write(self.directory/'cycle.json',bad)
+        raw=(self.directory/'cycle.json').read_bytes();self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(self.directory/'cycle.json',before)
+        worker=Path(new['gates'][1]['worker_root']);(worker/'code').write_text('not prepared')
+        raw=(self.directory/'cycle.json').read_bytes();self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+
+    def test_interrupted_triage_refresh_owners_unknown_requests_and_late_cancel(self):
+        old,before,new,old_path,new_path,invoke=self.interrupted_triage_refresh_fixture()
+        raw=(self.directory/'cycle.json').read_bytes()
+        self.assertEqual(2,invoke(owners=['api']))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        unknown=self.directory/'attempts/99/final/api/request.json'
+        c.write(unknown,dict(token='unknown',gate='api',source=before['source']))
+        self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(unknown.parent/'receipt.json',c.read(unknown))
+        self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        unknown.unlink();(unknown.parent/'receipt.json').unlink()
+        calls=[]
+        def cancel_on_second_scan(*args,**kwargs):
+            calls.append(1)
+            if len(calls)==2:c.CANCEL.set()
+        try:
+            self.assertEqual(2,invoke(scan=cancel_on_second_scan))
+            self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        finally:c.CANCEL.clear()
+        self.assertEqual(2,invoke(action='status'))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(new_path,old)
+        self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+
     def test_final_independent_interrupted_refresh_invalidates_old_credit(self):
         plan,state,_,_=self.final_cancelled_observation(False)
         original=copy.deepcopy(state['attempts'])
