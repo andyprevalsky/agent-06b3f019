@@ -649,6 +649,84 @@ class ResultChannel(unittest.TestCase):
             self.assertEqual(1, json.loads((out / 'timing.json').read_text())['worker_exit'])
 
 
+class RestQuota(unittest.TestCase):
+    """A shared-token rate limit waits for the reset GitHub reports, never a fixed 300 s, and never past the deadline."""
+
+    def limited(self, headers: dict, body: bytes = b'{"message": "API rate limit exceeded for user"}'):
+        from email.message import Message
+        message = Message()
+        for key, value in headers.items():
+            message[key] = value
+        return gh.urllib.error.HTTPError('https://api.github.com/x', 403, 'Forbidden', message, io.BytesIO(body))
+
+    def run_request(self, client, outcomes, now=1_000_000.0):
+        class Response:
+            status, headers = 200, {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        class Opener:
+            def open(self, req, timeout):
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return Response()
+
+        pauses = []
+        with patch.object(gh.urllib.request, 'build_opener', return_value=Opener()), \
+             patch.object(gh.time, 'time', return_value=now), patch.object(gh.STOP, 'wait', side_effect=pauses.append), \
+             redirect_stdout(io.StringIO()) as out:
+            result = client.request('GET', '/actions/runs/1')
+        return result, pauses, out.getvalue()
+
+    def test_waits_until_the_reported_primary_reset_not_a_fixed_300_seconds(self):
+        client = gh.GitHub('t', 'acme/rose')
+        (status, _, _), pauses, out = self.run_request(
+            client, [self.limited({'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1001234'}), None])
+        self.assertEqual(status, 200)
+        self.assertEqual(pauses, [1235.0])
+        self.assertEqual(client.rate_limited_seconds, 1235.0)
+        self.assertIn('DEPLOY_GATE_RATE_LIMITED waiting 1235s (until 1970-01-12T14:07:15Z)', out)
+
+    def test_a_secondary_limit_waits_for_its_retry_after(self):
+        client = gh.GitHub('t', 'acme/rose')
+        secondary = self.limited({'Retry-After': '7'}, b'{"message": "You have exceeded a secondary rate limit"}')
+        _, pauses, _ = self.run_request(client, [secondary, None])
+        self.assertEqual(pauses, [7.0])
+        _, pauses, _ = self.run_request(client, [self.limited({}), None])
+        self.assertEqual(pauses, [60.0], 'a limit naming no reset waits the documented minute')
+
+    def test_the_wait_is_capped_by_the_callers_deadline_and_then_raises(self):
+        client = gh.GitHub('t', 'acme/rose', deadline=1_000_100.0)
+        reset = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1003600'}
+        _, pauses, _ = self.run_request(client, [self.limited(reset), None])
+        self.assertEqual(pauses, [100.0])
+        with self.assertRaises(gh.urllib.error.HTTPError):
+            self.run_request(client, [self.limited(reset)], now=1_000_100.0)
+
+    def test_the_cancel_poll_is_conditional(self):
+        polled = []
+
+        class Fake:
+            def request(self, method, path, **kwargs):
+                return 202, {}, b''
+
+            def json(self, path, conditional=False):
+                polled.append(conditional)
+                return {'status': 'completed' if len(polled) > 2 else 'in_progress'}
+
+        with patch.object(gh.time, 'sleep'):
+            self.assertEqual(gh.cancel_run(Fake(), 1)['status'], 'completed')
+        self.assertEqual(polled, [True, True, True])
+
+
 class TagPush(unittest.TestCase):
     def test_a_transient_remote_rejection_is_retried_with_the_same_tag_object(self):
         calls = []

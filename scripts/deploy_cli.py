@@ -271,14 +271,33 @@ def coderabbit_check(sha: str) -> tuple[str, str]:
     return conclusion.lower(), title
 
 
+# The same check titles deploy_review_cycle.skip accepts as CodeRabbit's quota.
+RATE_LIMITED_CHECK = re.compile(r'rate limited|review limit', re.IGNORECASE)
+
+
 def cmd_review_wait(args: argparse.Namespace) -> int:
     pr = read_json(PR_FILE, 'open-pr')['pr']
     review_head = review_state()['cycles'][-1]['head']
-    if code := run(['bash', 'scripts/wait-for-code-review', '--pr', str(pr), '--head', review_head,
-                    '--timeout', str(args.timeout), '--poll', '5']):
+    waiter = ['bash', 'scripts/wait-for-code-review', '--pr', str(pr), '--head', review_head,
+              '--timeout', str(args.timeout), '--poll', '5']
+    code = run(waiter)
+    if code not in (0, 1):
         return code
     # The waiter treats a finished neutral check as success; a finished check is not a delivered review.
     conclusion, title = coderabbit_check(review_head)
+    if conclusion not in ('success', 'error') and RATE_LIMITED_CHECK.search(title) and args.rate_limit_max_wait > 0:
+        # CodeRabbit's quota is per account, so parallel deploys rate-limit each other. The waiter waits out
+        # the window its exact-HEAD comment names, posts one receipted re-request and waits again; exit 3
+        # means it could not do so safely and posted nothing.
+        rerequested = run([*waiter, '--after-rate-limit', '--rate-limit-max-wait', str(args.rate_limit_max_wait),
+                           '--receipt-dir', str(CONTEXT)])
+        if rerequested not in (0, 1, 3):
+            return rerequested
+        if rerequested != 3:
+            code = rerequested
+            conclusion, title = coderabbit_check(review_head)
+    if code:
+        return code
     if conclusion != 'success':
         print(f'DEPLOY_REVIEW_WAIT NOT-A-REVIEW: CodeRabbit check is "{conclusion or "missing"}"'
               f'{f" ({title})" if title else ""} on {review_head[:12]}. Read its comment: for a quota limit, '
@@ -642,6 +661,8 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser('gates', help='run every selected gate in parallel (scripts/deploy_gates.py)', add_help=False)
     waited = sub.add_parser('review-wait', help='wait for CodeRabbit on the open cycle head')
     waited.add_argument('--timeout', type=int, default=600)
+    waited.add_argument('--rate-limit-max-wait', type=int, default=3600,
+                        help='longest CodeRabbit quota window to wait out before one re-request (0: never re-request)')
     ended = sub.add_parser('review-finish', help='close the open review cycle and its timing boundary')
     ended.add_argument('--result', choices=['clean', 'findings'], required=True)
     nxt = sub.add_parser('review-next', help='open the next bounded review cycle on the pushed stabilization batch')
