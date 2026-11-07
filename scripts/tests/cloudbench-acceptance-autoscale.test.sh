@@ -200,6 +200,8 @@ finalization_harness="$TMP_ROOT/finalization-harness.sh"
     printf 'AUTOSCALER_PIDS=("$!"); started=$SECONDS\n'
     printf 'wait_for_autoscaler_finalization\n'
     printf '[ $((SECONDS - started)) -lt 10 ] || exit 4\n'
+    # Reap the simulated autoscalers: the first one outlives its marker by 0.5 s.
+    printf 'wait\n'
 } > "$finalization_harness"
 grep -q '^wait_for_autoscaler_finalization() {' "$finalization_harness" || {
     echo "FAIL: could not extract wait_for_autoscaler_finalization from run-bench-fleet" >&2
