@@ -1,4 +1,4 @@
-import { MessageChannel, Prisma } from '@prisma/client';
+import { MessageChannel } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
 import { upsertPersonAndMessageRecords, ContactToUpsert } from './personMessageManager';
@@ -133,23 +133,6 @@ export async function parseIMessageData(
     undefined,
     { throwOnChunkError: true }
   );
-
-  // Update Integration metadata
-  const existingConfig =
-    (integration.config as Prisma.JsonObject | null) || ({} as Prisma.JsonObject);
-  const existingTotalMessages = Number(existingConfig.totalMessagesProcessed ?? 0);
-  const existingBatches = Number(existingConfig.batchesReceived ?? 0);
-  await prisma.integration.update({
-    where: { id: integration.id },
-    data: {
-      config: {
-        ...existingConfig,
-        lastUploadedAt: new Date().toISOString(),
-        totalMessagesProcessed: existingTotalMessages + totalMessages,
-        batchesReceived: existingBatches + 1,
-      },
-    },
-  });
 
   log.info('iMessage sync complete', {
     jobId,

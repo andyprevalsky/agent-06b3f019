@@ -2,7 +2,6 @@
 import copy
 import json
 import os
-import socket
 import subprocess
 from types import SimpleNamespace
 from pathlib import Path
@@ -489,6 +488,14 @@ class AgentCardElection(unittest.TestCase):
         with self.assertRaises(ValueError):
             election.accept({'elected_omissions':[{'proof':original}]}, proof)
 
+def unused_loopback_port():
+    """A loopback port no live socket holds when the fixture is built."""
+    import socket
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
 class InterruptedCustody(unittest.TestCase):
     setUp = cycle_fixture.Cycle.setUp
     tearDown = cycle_fixture.Cycle.tearDown
@@ -539,9 +546,8 @@ class InterruptedCustody(unittest.TestCase):
         else:
             base=self.root/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()
             campaign=base/'campaigns'/('deploy-'+base.name); runs=base/'runs'; fleet=runs/'20261106-223817-2147483001'
-            # A free port: custody checks live host sockets, so a real Hub on 8765 must not collide.
-            with socket.socket() as probe:
-                probe.bind(('127.0.0.1', 0)); port=str(probe.getsockname()[1])
+            # The custody check scans the host's live sockets: never claim a port a real Hub may hold.
+            port=str(unused_loopback_port())
             owner='b'*32; hub=runs/'_hub'/('agent-link-server.'+port+'.'+'c'*32+'.owner')
             self.hub=hub; self.fleet=fleet; self.audit=self.root/'.git/cloudbench-fleet-audits'/owner
             self.put(hub,'version=1\npid=2147483004\npgid=2147483004\npid_start=proc-start:fixture:1\nowner_token='+ 'c'*32+

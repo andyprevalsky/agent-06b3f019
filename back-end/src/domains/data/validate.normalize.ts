@@ -69,10 +69,16 @@ function sameValue(a: unknown, b: unknown): boolean {
 }
 
 function dropNulls(value: FilterObject): FilterObject {
-  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== null));
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== null && entry !== undefined)
+  );
 }
 
-/** Null-valued top-level params are absent, as the tool schema marks them optional. */
+/**
+ * Null- or undefined-valued params are absent, as the tool schema marks them
+ * optional: strict calls spell absence null, and a Zod-parsed call (the SMS
+ * supervisor's) carries undefined for those keys.
+ */
 export function dropNullParams(params: GrepParams): GrepParams {
   return dropNulls(params as FilterObject) as GrepParams;
 }
