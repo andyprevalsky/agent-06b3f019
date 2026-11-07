@@ -16880,7 +16880,9 @@ reserve_worker_machine_slot() {  # <unique-reservation-token>
     # autoscalers cannot refill the Machine ceiling behind the startup guard.
     local token="$1" app_machine_ceiling current_machines result status outcome
     local reserved_machines reserved_shared projected_machines projected_shared
-    app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-56}"
+    # Same default as enforce_app_capacity_guard: this copy kept 56 after the 2026-11-06 raise
+    # to 300 and refused mass-agent's worker clones at 66 app Machines (2026-11-07).
+    app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-300}"
     case "$app_machine_ceiling" in ''|*[!0-9]*|0) return 1 ;; esac
     local worker_inventory inventory_status=0
     if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then

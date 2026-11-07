@@ -25844,6 +25844,38 @@ reserve_worker_machine_slot test-worker
     assert result.returncode == 0, result.stderr
 
 
+def test_worker_capacity_reservation_uses_the_startup_guard_machine_ceiling() -> None:
+    """Autoscaler worker clones and the startup guard admit against one default ceiling.
+
+    2026-11-07: reserve_worker_machine_slot kept its own 56 default after the startup guard
+    moved to 300, so mass-agent's mandatory autoscaler was refused at 66 app Machines.
+    """
+    fleet = fleet_source_text()
+    defaults = set(re.findall(r"CLOUDBENCH_APP_MACHINE_CEILING:-(\d+)\}", fleet))
+    assert defaults == {"300"}, f"every Machine-ceiling default must agree: {defaults}"
+    reserve_worker = _extract_fleet_function(fleet, "reserve_worker_machine_slot() {")
+    script = f"""set -u
+APP=fixture-bench-app
+unset CLOUDBENCH_APP_MACHINE_CEILING
+FLY() {{
+  python3 -c 'import json; print(json.dumps([{{"id": "m%d" % i, "state": "started"}} for i in range(66)]))'
+}}
+capacity_reserve_slots() {{ printf 'ceiling=%s current=%s\\n' "$4" "$6" >&2; printf '%s\\n' 'OK 0 0 67 0'; }}
+{reserve_worker}
+reserve_worker_machine_slot test-worker
+"""
+    result = subprocess.run(
+        ["bash", "-c", ("machine_creation_admission() { return 0; }\n" + script)],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "ceiling=300 current=66" in result.stderr, result.stderr
+
+
 def test_pool_shape_normalization_unexports_full_provider_inventory_buffers(
     tmp_path: Path,
 ) -> None:
