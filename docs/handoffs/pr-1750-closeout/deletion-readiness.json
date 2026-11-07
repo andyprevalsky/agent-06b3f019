@@ -1,0 +1,34 @@
+{
+ "schema_version": 1,
+ "pr": 1750,
+ "deployed_sha": "6e67bded0a4ceff14782a3b40520f80de4a2c42e",
+ "gated_sha": "6a85668c164fda5d6534ea758bd7267c5c76a2d7",
+ "ledger_commit": "5807c0edf19ab7fe7fda9b059701426872e18d0c",
+ "records": "this directory (closeout-manifest.json, RECOVERY.md, scorecard.html) on main via the records-only follow-up PR",
+ "archives_verified": {
+  "core": "632 files, read back + every frame authenticated, restore 632/632 identical",
+  "workers": "25478 files, read back + authenticated",
+  "cloud": "2465 files, read back + authenticated"
+ },
+ "key_recovery": "archives use encryption_key_id trace-archive-prod-2026-07-03 = TRACE_ARCHIVE_ENCRYPTION_KEY_B64 in the project-managed agents/.env (boxes managed environment), not a key that exists only on this devbox",
+ "configuration_recovery": "all env files are project-managed; this deploy added no keys and changed no production env",
+ "source": "no intended source is local-only: feature + fixes merged (6e67bded0), ledger rows on main (5807c0edf); branch feat/compute-usage-bars pushed",
+ "resources": {
+  "worker_checkouts": "11 removed (/var/tmp/cu-deploy/workers)",
+  "scratch_worktrees": "2 removed (merged-wt, ledger-wt); git worktree list = canonical only",
+  "staging_and_restore_copies": "removed",
+  "swapfile": "/swapfile-deploy swapoff + removed",
+  "benchmark_hub": "exact-owned agent_link_server pid 3915223 (:8765) TERMed after start-time + argv check; exited",
+  "systemd_units": "all cu-* units completed (none active)",
+  "fly": "cloud smoke campaigns and both infra canaries destroyed their owned clones and volumes (receipts in the cloud/core archives)",
+  "freedom": "untouched"
+ },
+ "remaining_on_box": [
+  "canonical checkout /home/boxes/rose (clean)",
+  ".context evidence (archived in core/cloud)",
+  "/var/tmp/cu-deploy scripts and logs (archived in core)",
+  "local victoria DB rows used only for screenshots (reproducible, unneeded)"
+ ],
+ "deletion_ready": true,
+ "checked_at": "2026-11-07T16:24:13+00:00"
+}

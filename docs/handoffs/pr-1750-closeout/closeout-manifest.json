@@ -1,0 +1,105 @@
+{
+ "schema_version": 1,
+ "pr": 1750,
+ "title": "Compute screen: per-account usage bars fed by the lease heartbeat",
+ "assignment": "user: update the compute screen with per-account remaining-usage bars (one account per row), agents auto-update usage via an existing roundtrip; keep needs-reconnect status; ⋯ menu = Re-authenticate / Remove; then /deploy",
+ "merge_commit": "6e67bded0a4ceff14782a3b40520f80de4a2c42e",
+ "gated_source": "6a85668c164fda5d6534ea758bd7267c5c76a2d7",
+ "branch_commits": [
+  "6a85668c1 fix: address review — no second sign-in while one runs; unreadable /proc status is unverifiable",
+  "a32dec2fb fix(deploy): decide unreadable custody-scan processes by real uid (cherry-pick of PR #1752 f6c37707db)",
+  "8e0c3c79c fix(deploy): custody scan re-observes unreadable same-user processes; dual-stack port hold (cherry-pick dd12c14bb6)",
+  "706aa5990 test(deploy): hold the custody fixture's Hub port reserved for the whole test (cherry-pick 94c63b11a4)",
+  "9f7b1dc05 Merge remote-tracking branch 'origin/main' into feat/compute-usage-bars",
+  "16a037394 feat(compute): per-account usage bars fed by the lease heartbeat"
+ ],
+ "ledger_commit": "5807c0edf19ab7fe7fda9b059701426872e18d0c (9 cloud smoke rows, latest run per task)",
+ "canonical_seed": "published 4ae541ae86f07da37171aef8eb409a72ad9b91bd-pg15/pg16-victoria-prod-sync-v1-whatsapp-v2 via scripts/migrate-canonical-seed.sh (3825 WhatsApp messages, 241 trajectory rows preserved; dump/restore round trip)",
+ "review": {
+  "coderabbit": "cycle 1 initial on 9f7b1dc: unavailable (spending cap, superseded before review); cycle 1 on a32dec2fb: full review, 2 minor findings, both fixed with regressions in 6a85668c1; cycle 2 incremental on 6a85668c1: usage-cap skip (comment 6703082067, check run 128356921985)",
+  "graphide": "skipped: free review quota exhausted"
+ },
+ "staged_cycle": {
+  "final": "ready=true on 6a85668c1 (run_deploy_pipeline verify --require-staged exit 0): 16 gates; smoke 9/9 cloud; backend 251/251; agents, frontend, semantic, structural, live probes 4/4, E2B, seed gates PASS; cloudbench PASS on owned focused re-run",
+  "re_executed": [
+   "cloudbench-controller (sweep load flakes: multi-workstream Hub-stub port race / readiness 5s budget, autoscale fixture orphan) — owned re-run PASS"
+  ],
+  "aborted_cycles": [
+   "9f7b1dc0 (.context/deploy-pipeline.attempt1-9f7b1dc): deploy-test-plan InterruptedCustody failed on host /proc EACCES (fixed by cherry-picked PR #1752 + follow-up); stale after source change"
+  ],
+  "skipped": [
+   "agentcard-lifecycle 6a/13c: deploy-operator election (deploy.md AgentCard classifier empty)",
+   "mac-app-coverage-blackbox: Linux platform exclusion (unverified)"
+  ]
+ },
+ "production": {
+  "render": "merge's own deploy dep-dbnehb942hec73cbte6g canceled by Render for descendant 43bb8f30b (PR #1742); verified live on 43bb8f30b: health, /api/agents, /api/compute-accounts (new usage/rateLimitedUntil fields on 8 accounts), prod-endpoint-smoke, 0 error log lines",
+  "fly": "deploy-agents run 42357851184 success; job 254ec1495ad2… SUCCEEDED; live pointer verified 4f4f12fd8401; 13ac 45/45 PASS; later superseded by descendant cutover dcb19cdb5e86 (verified)",
+  "vercel": "dpl_85GStq9er9AYWHVNKEyGrjw6WW2x READY for 6e67bded0 (Vercel API; GitHub deployments API unavailable: REST quota 0)",
+  "mac_release": "v1.1.289 release-mac-app run 42357877231 success",
+  "semantic": "chat-lifecycle-ratchet run 42360382376 PASS on source 43bb8f30b (descendant containing the merge)",
+  "mac_local_acceptance": "SKIPPED — no Mac available (0 LocalDevice rows for the owner at 09:41Z)"
+ },
+ "private_archives": {
+  "core": {
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1750-6e67bded/core.tar.gz.gcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "ciphertext_sha256": "14bf42c2c3b88de6829ecd059495f6deebb30acec482f9e80703f8e006a06d26",
+   "gzip_sha256": "e606794c7813ebbe45bc75b427eaa2a7f90d0e1b47042c69fdc0eb429941c7cc",
+   "manifest_sha256": "f127a56b2ff9f0f5f0ee9ea31cb039a9cc20a16bfc08a1f4d9b636ff06af9921",
+   "frames": 3,
+   "files": 632,
+   "stored_bytes": 16887999,
+   "original_bytes": 38347092,
+   "full_readback_verified": true
+  },
+  "workers": {
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1750-6e67bded/workers.tar.gz.gcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "ciphertext_sha256": "166a1905c85221ed63da1fc9727329a36f34a47bce042eee49bebdddedefe4fc",
+   "gzip_sha256": "03cccb666e014c537b07576d7b0d03094ebf291c379395cc390f4a6c47a379e8",
+   "manifest_sha256": "017a29d5c93359c6be44930c4fdce22f5c584123f5012751f48d032b20fd621e",
+   "frames": 44,
+   "files": 25478,
+   "stored_bytes": 368378945,
+   "original_bytes": 857712842,
+   "full_readback_verified": true
+  },
+  "cloud": {
+   "format": "ROSE-PRIVATE-TAR-GCM-V1",
+   "bucket": "trace-archive",
+   "key": "devbox-closeout-private/pr1750-6e67bded/cloud.tar.gz.gcm",
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "ciphertext_sha256": "e95bde01a37c248299fbb6fa907035423f2ad21b15bbaf99a9d94c012f363775",
+   "gzip_sha256": "a35fd9d3e8e55b4daf15b894770d25fbed5a758b72ef535a702e98e19a34f004",
+   "manifest_sha256": "51bf4fd830c85107e251761c4dc7eb9faf4b2212b422a452de1f1ee653a69df4",
+   "frames": 84,
+   "files": 2465,
+   "stored_bytes": 704597537,
+   "original_bytes": 2450915610,
+   "full_readback_verified": true
+  }
+ },
+ "archive_contents": {
+  "core": "all three staged-cycle state dirs, deploy timing run, review ledger + dispositions, approval batch, factory events, scorecard pointer, canary fleet runs + Hub records, local screenshots/e2e evidence (.context/compute-usage), /var/tmp/cu-deploy (worker/inventory/template/cycle scripts, RCA repro logs, production lane logs + receipts)",
+  "workers": "the eleven worker .context evidence roots (raw coverage temp data excluded)",
+  "cloud": ".context/deploy-cloud (both cloud smoke campaigns)"
+ },
+ "restore_check": "core restored into an empty directory: 632/632 files byte-identical",
+ "scorecard_sha256": "2accf23e6868691a40d8fd4959d1e19caa35dde84c257e3a9c08af449f9000cc",
+ "dispositions": {
+  "source": "everything committed and merged (6e67bded0) plus ledger 5807c0edf",
+  "local_config": "env files are project-managed (boxes managed env); no new keys",
+  "excluded_reproducible": "worker checkouts and dependency trees (re-creatable from the gated commit), raw coverage temp data, local victoria DB fixture edits used only for screenshots"
+ },
+ "followups": [
+  "usage bars fill in as agents report; at verification 8/8 accounts were rate-limited with no usage reported yet",
+  "PR #1752 still open (owner notified by PR comment)",
+  "cloudbench multi-workstream Hub-stub port race / 5s readiness budget and autoscale orphan fixture remain load flakes",
+  "backend (TS) chat path does not report usage"
+ ]
+}
