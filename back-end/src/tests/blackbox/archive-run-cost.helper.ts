@@ -192,11 +192,22 @@ export async function testLateLlmArtifactIndexesOnlyItself(
   );
 }
 
-/** An instant compared with `pg_stat_activity.xact_start`. */
-type DatabaseInstant = Date;
+/**
+ * An instant compared with `pg_stat_activity.xact_start`, read from the
+ * database's own clock as text. `xact_start` has microsecond resolution; a JS
+ * `Date` (and any Date Prisma returns) truncates to the millisecond, so a
+ * transaction begun within the same millisecond that `new Date()` reads compares
+ * as newer than "now" and the observer misses a transaction it owns (31-34% of
+ * positive controls on a warm local connection). Text keeps the microseconds
+ * and takes both sides of the comparison from one clock.
+ */
+type DatabaseInstant = string;
 
 async function databaseInstant(): Promise<DatabaseInstant> {
-  return new Date();
+  const [row] = await prisma.$queryRaw<Array<{ instant: string }>>`
+    SELECT clock_timestamp()::text AS instant
+  `;
+  return row.instant;
 }
 
 function archiveDatabaseOwner(): string {
@@ -211,7 +222,7 @@ async function ownedTransactionsStartedBy(databaseOwner: string, since: Database
     SELECT pid, xact_start AS "xactStart", application_name AS owner FROM pg_stat_activity
     WHERE datname = current_database() AND pid <> pg_backend_pid()
       AND application_name = ${databaseOwner}
-      AND state LIKE 'idle in transaction%' AND xact_start <= ${since}
+      AND state LIKE 'idle in transaction%' AND xact_start <= ${since}::timestamptz
   `;
 }
 
