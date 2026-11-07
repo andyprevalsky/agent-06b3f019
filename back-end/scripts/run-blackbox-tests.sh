@@ -228,12 +228,18 @@ if ! $STACK_DB_EXPECTED && [[ "$USE_EXISTING_BACKEND" == "1" && -f "$STACK_MANIF
   MANIFEST_BACKEND_URL=$(jq -r '.urls.backend // empty' "$STACK_MANIFEST")
   if [[ "${TEST_BASE_URL%/}" == "${MANIFEST_BACKEND_URL%/}" ]]; then
     STACK_DB_EXPECTED=true
+    # Fixtures seeded through Prisma must land in the database this backend reads.
+    if ! STACK_DB_NAME="$(stack_manifest_db_name "$STACK_MANIFEST")"; then
+      echo "❌ $STACK_MANIFEST names no valid stack database (.database.name)." >&2
+      exit 1
+    fi
     USE_MANIFEST_SYSTEM_PG=$(jq -r '.database.use_system_postgres // false' "$STACK_MANIFEST")
     if [[ "$USE_MANIFEST_SYSTEM_PG" == "true" ]]; then
       LOCAL_DB_PORT=$(jq -r '.database.runtime_port // 5432' "$STACK_MANIFEST")
       if pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -q 2>/dev/null; then
+        SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$STACK_DB_NAME"
         DB_FOUND=true
-        echo "Using existing stack Postgres (system) at localhost:$LOCAL_DB_PORT"
+        echo "Using existing stack Postgres (system) at localhost:$LOCAL_DB_PORT, database $STACK_DB_NAME"
       fi
     else
       MANIFEST_DB_CONTAINER=$(jq -r '.database.container // empty' "$STACK_MANIFEST")
@@ -244,8 +250,9 @@ if ! $STACK_DB_EXPECTED && [[ "$USE_EXISTING_BACKEND" == "1" && -f "$STACK_MANIF
       ACTUAL_PORT=$(docker_quick port "$DB_CONTAINER" 5432 | head -1 | sed 's/.*://') || true
       LOCAL_DB_PORT="${ACTUAL_PORT:-$MANIFEST_DB_PORT}"
       if [[ -n "$LOCAL_DB_PORT" ]] && docker_quick exec "$DB_CONTAINER" pg_isready -U postgres -q >/dev/null; then
+        SELECTED_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/$STACK_DB_NAME"
         DB_FOUND=true
-        echo "Using existing stack Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
+        echo "Using existing stack Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT, database $STACK_DB_NAME"
       fi
     fi
   fi
