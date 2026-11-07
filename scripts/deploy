@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-line /deploy steps (.claude/commands/deploy-v2.md → Process). `scripts/deploy --help` lists them.
+# One-line /deploy steps (.claude/commands/deploy.md → Process). `scripts/deploy --help` lists them.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Non-interactive tool shells miss these: the agents venv (python-dotenv, pinned deps), uv and flyctl.

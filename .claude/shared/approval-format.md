@@ -32,7 +32,7 @@ terminal; it does not render Markdown, so write every field as a plain label
 (`What failed:`, not bold) and never put headings, tables, or Markdown links
 inside it. The sections below show field labels in bold only to define them.
 
-Use the same visual styling as `/deploy` Step 15 and the benchmark scorecard:
+Use the same visual styling as the `/deploy` scorecard and the benchmark scorecard:
 64-column `━` outer borders, `─` section separators, a `🔐 APPROVAL` header,
 the approval ID/subject, and `⏳ AWAITING DECISION`. Keep the seven required labels
 and their order exactly; the frame is decoration, not another content section.

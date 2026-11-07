@@ -1,5 +1,5 @@
 ---
-description: "Push current branch, obtain a CodeRabbit review, merge, and wait for deploy to complete."
+description: "DEPRECATED: superseded by /deploy (.claude/commands/deploy.md). Do not use."
 rose-agent-spawn: false
 ---
 

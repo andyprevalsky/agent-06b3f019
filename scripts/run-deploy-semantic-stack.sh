@@ -85,7 +85,7 @@ require_postgres() {
     local port="$1" what="$2"
     require_command pg_isready || return 2
     if ! pg_isready -h localhost -p "$port" -U postgres -q 2>/dev/null; then
-        echo "$what: Postgres is not ready on localhost:$port (start the workspace database first; deploy.md Step 5)." >&2
+        echo "$what: Postgres is not ready on localhost:$port (start the workspace database first: bash scripts/prepare-deploy-worktree.sh)." >&2
         return 2
     fi
 }

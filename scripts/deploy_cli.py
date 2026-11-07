@@ -245,7 +245,7 @@ def cmd_open_pr(args: argparse.Namespace) -> int:
             print('DEPLOY_OPEN_PR BLOCKED: a new PR needs --title (and --body-file)', file=sys.stderr)
             return 1
         body = ['--body-file', str(args.body_file)] if args.body_file else ['--body', '']
-        created = subprocess.run(['gh', 'pr', 'create', '--base', 'main', '--title', args.title, *body],
+        created = subprocess.run(['gh', 'pr', 'create', '--base', 'main', '--head', branch, '--title', args.title, *body],
                                  cwd=ROOT, capture_output=True, text=True)
         print(created.stdout + created.stderr, end='')
         match = re.search(r'/pull/(\d+)', created.stdout)
@@ -405,7 +405,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f'DEPLOY_MERGE BLOCKED: approvals are not clear for this HEAD (exit {code})', file=sys.stderr)
         return 1
     if (state := mergeable(pr)) != 'MERGEABLE':
-        hint = 'run /sync, rerun the affected gates, then merge' if state == 'CONFLICTING' else 'retry shortly'
+        hint = 'run `scripts/deploy sync`, rerun the affected gates, then merge' if state == 'CONFLICTING' else 'retry shortly'
         print(f'DEPLOY_MERGE BLOCKED: GitHub reports PR {pr} as {state or "unknown"}; {hint}', file=sys.stderr)
         return 1
     factory('stage-start', 'production-verify')

@@ -136,9 +136,10 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 
 | Test | Skip when | Note |
 |------|-----------|------|
-| Any test | A third-party provider is out of credits or storage, or needs a credential or billing change only the user can make, with explicit evidence | Never top up or wait; report it at the end of the scorecard |
-| Treasury tests | Always | Never mutate treasury records to pass |
-| AgentCard | Production lane: the user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy production`); any lifecycle task, smoke included: the exact release stall (closed card, zero balance, transfer `consumed`, `releasedCents=0`) | Triage the native SKIPPED smoke row as `resource_skip` with `reason_code: agentcard_release_stall`; never PASS; unreleased funds stay a followup. Production lane: the exact stall proven from the run's native record is recorded `SKIPPED-stall` (satisfied, never PASS, unreleased amount stated); any other outcome fails |
+| Any test | A third-party provider is out of credits or storage, or needs a credential or billing change only the user can make (user decision, 2026-11-06), with explicit evidence | Never top up or wait; report it at the end of the scorecard |
+| Treasury test failures | Always (the test still runs; its original FAIL stays on record) | Never mutate treasury records to pass |
+| AgentCard, production lane | The user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy production`), or the exact release stall | The stall proven from the run's native record is recorded `SKIPPED-stall` (satisfied, never PASS, unreleased amount stated); any other outcome fails |
+| AgentCard, smoke tasks | The exact release stall (closed card, zero balance, transfer `consumed`, `releasedCents=0`) | Triage the native SKIPPED row as `resource_skip` with `reason_code: agentcard_release_stall`; never PASS; unreleased funds stay a followup |
 | Claude Code smoke | Preflight proves no synced Claude credential and no pool token | Task failures still block |
 | Codex E2B smoke | Every Codex credential path is out of credits (the test skips itself) | Never use `BLACKBOX_TEST_SKIP_DOMAINS` |
 | Benchmark judge | Confirmed third-party compute quota | |
@@ -171,7 +172,7 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 ## Review
 
 - Cycle 1 starts when the PR opens; cycle 2 is one batched incremental review; cycle 3 only when cycle 2 found a valid issue; the ledger refuses a 4th.
-- After a clean cycle 2, gate fixes that changed source get a verification cycle: `scripts/deploy review-next --verification-approval <id>`.
+- After a clean cycle 2, gate fixes that changed source need a verification cycle, which takes the user's approval id: ask for it in the pending approval packet, then `scripts/deploy review-next --verification-approval <id>`.
 - Read the reviews for the exact HEAD from the reviews, inline comments and issue comments endpoints; a green check is not a review.
 - Fix every valid finding, including pre-existing ones; ignore only pure style nits.
 - Reply to every comment with `[FIXED]`, `[IGNORED]`, `[DELEGATED]` or `[POST-MERGE REPAIR]`.

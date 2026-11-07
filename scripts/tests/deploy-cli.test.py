@@ -188,7 +188,7 @@ class OpenPrAndMerge(Repo):
              patch.object(d, 'approvals_clear', return_value=0), patch.object(d, 'mergeable', return_value='CONFLICTING'):
             code, _, err = self.call(d.cmd_merge)
         self.assertEqual(code, 1)
-        self.assertIn('run /sync, rerun the affected gates', err)
+        self.assertIn('run `scripts/deploy sync`, rerun the affected gates', err)
         self.assertFalse(any('merge' in argv and 'pr' in argv for argv in [c.args[0] for c in runner.call_args_list]))
         event.assert_not_called()
 

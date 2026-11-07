@@ -4164,7 +4164,7 @@ def render_wait(merged_sha: str, *, root: Path, state: dict, fetch, timeout: flo
                 raise ProductionGateError(
                     f"Render deploy {status} for {merged_sha[:7]} (deploy {mine.get('id')}); fetch its logs "
                     f"(GET /v1/services/<service>/deploys/{mine.get('id')} or the Render dashboard), fix, new PR, "
-                    "continue from deploy.md Step 9")
+                    "continue per deploy.md (Review)")
         else:
             last_seen = f"no deploy for {merged_sha[:7]}"
             log(f"  Render: no deploy for {merged_sha[:7]}; live commit={live_commit[:7] or 'none'}", flush=True)
