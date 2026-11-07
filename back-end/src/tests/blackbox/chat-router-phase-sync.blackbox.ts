@@ -145,6 +145,24 @@ const tests: Array<[string, () => Promise<void> | void]> = [
     },
   ],
   [
+    'router Mode Selection prefers execute when in doubt and allows coding in execute',
+    () => {
+      for (const [name, prompt] of ROUTER_STAGE_PROMPTS) {
+        for (const needle of [
+          'When in doubt, prefer "execute".',
+          'Research, browsing, coding, and multi-step work are fine in execute',
+        ]) {
+          if (!prompt.includes(needle)) {
+            throw new Error(`${name} missing Mode Selection rule: ${needle}`);
+          }
+        }
+        if (prompt.includes('prefer "plan"')) {
+          throw new Error(`${name} still prefers plan when in doubt`);
+        }
+      }
+    },
+  ],
+  [
     'router prompt defines closed output media and satisfaction as emission',
     () => {
       for (const [name, prompt] of ROUTER_STAGE_PROMPTS) {

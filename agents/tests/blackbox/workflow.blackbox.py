@@ -658,9 +658,11 @@ async def mock_mark_compute_token_rate_limited_activity(
     source: str,
     user_id: str,
     pool_token_id: Optional[str] = None,
+    integration_id: Optional[str] = None,
     cooldown_seconds: int = 5 * 60,
     rate_limited_until: Optional[str] = None,
     failure_reason: Optional[str] = None,
+    credential: Optional[str] = None,
 ) -> None:
     return None
 
@@ -3027,9 +3029,11 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored.compute_token_fetched_at is None
     assert restored.start_time == wf.start_time
     assert restored.user_context_section == "cached user context"
-    assert restored.context == context
+    # The conversation rides in the context argument, which run() adopts after restore.
+    assert "context" not in state["runtime_state"]
+    assert args[6] == context
     assert restored.simulated_clock_offset_seconds == -1_209_600
-    assert restored._continuation_resume_state(context) == state
+    assert restored._continuation_resume_state() == state
     # Button (LLM speed) must survive continue_as_new even when DEMO cache is off.
     wf.provider_fast_mode = True
     wf.fast_mode_cache_enabled = False
@@ -3056,6 +3060,51 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     }
     restored.max_iterations = 80
     assert restored._iteration_resume_kwargs()["max_iterations"] == 80
+
+
+def test_workflow_continuation_carries_the_context_once_so_large_agents_hand_off():
+    """Temporal rejects a command whose payloads exceed ~2 MB (TMPRL1103), and the failed
+    workflow task retries forever. A 1 MB / 384-message agent (the production probe that
+    wedged a cooperative cutover) sent its context twice (arg 6 and runtime_state), so
+    the handoff payload doubled past the limit. The conversation must travel exactly once."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-large-context"
+    wf.user_id = "user-large-context"
+    wf.goal = "DEMO fleet concurrency probe"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 512
+    wf.verifier = None
+    wf.parent_workflow_id = None
+    wf.parent_agent_id = None
+    wf.depth = 0
+    wf.bus_id = None
+    wf.max_iterations = None
+    wf.price_limit_cents = 500
+    wf.context_gates = {}
+    context = [
+        {
+            "role": "ASSISTANT" if index % 3 == 0 else "TOOL",
+            "text": f"message {index} " + "x" * 2_600,
+            "metadata": {"toolCallId": f"tc-{index}"},
+        }
+        for index in range(384)
+    ]
+    context_bytes = len(json.dumps(context))
+    assert context_bytes > 1_000_000
+
+    args = wf._continuation_args(context)
+
+    assert args[6] == context
+    assert "context" not in args[16]["runtime_state"]
+    # Context plus bounded runtime state, never a second copy of the conversation.
+    assert len(json.dumps(args)) < context_bytes + 200_000
+    # run() adopts the context argument after restoring runtime state.
+    restored = _bare_workflow_instance()
+    restored.max_iterations = args[12]
+    restored._restore_deployment_state(json.loads(json.dumps(args[16])))
+    restored.context = list(args[6])
+    assert restored.context == context
+    assert restored._continuation_resume_state() == args[16]
 
 
 def test_pending_tool_records_copy_args_and_respect_the_handoff_budget():
@@ -3139,7 +3188,7 @@ def test_workflow_continuation_carries_parked_tools_and_drops_malformed_records(
     }
     wf._pending_tool_resumes = [parked]
 
-    state = wf._continuation_resume_state([{"role": "USER", "text": "buy socks"}])
+    state = wf._continuation_resume_state()
     assert state["runtime_state"]["pending_tool_resumes"] == [parked]
 
     state["runtime_state"]["pending_tool_resumes"] += [
@@ -3165,7 +3214,7 @@ def test_workflow_continuation_backfills_task_name_for_legacy_parked_spawns():
         wf.context_gates = {}
         wf._pending_tool_resumes = records
         restored = _bare_workflow_instance()
-        restored._restore_deployment_state(wf._continuation_resume_state([{"role": "USER", "text": "buy socks"}]))
+        restored._restore_deployment_state(wf._continuation_resume_state())
         return restored._pending_tool_resumes
 
     legacy = {
@@ -4187,6 +4236,24 @@ async def test_pause_episode_preserves_user_intent_across_automatic_signals():
     await prove_pause_episode_ordering()
 
 
+async def test_pause_provenance_fixture_restores_network_after_its_proof():
+    """The fixture forbids network calls only while it runs, never for later domains.
+
+    Importing it patched socket.socket.connect for the whole process, so every
+    domain after ``workflow`` in one run lost local loopback (rose
+    rose_local_loopback_no_fallback: "provider/network calls prohibited in pause
+    provenance fixture").
+    """
+    import socket
+
+    original = (socket.socket.connect, socket.socket.connect_ex)
+    from pause_control_provenance import prove_pause_episode_ordering
+
+    assert (socket.socket.connect, socket.socket.connect_ex) == original, "import patched the process socket"
+    await prove_pause_episode_ordering()
+    assert (socket.socket.connect, socket.socket.connect_ex) == original, "the proof left the socket patched"
+
+
 async def test_pause_intent_ends_with_recovered_episode():
     from unittest.mock import AsyncMock
     wf = _bare_workflow_instance()
@@ -4681,7 +4748,7 @@ async def test_workflow_keyed_rejection_admits_already_polled_durable_feedback()
         wf.max_iterations = 30
         wf.context_gates = {}
         resumed = _bare_workflow_instance()
-        resumed._restore_deployment_state(wf._continuation_resume_state(wf.context))
+        resumed._restore_deployment_state(wf._continuation_resume_state())
         resumed.agent_id = wf.agent_id
         resumed.goal = wf.goal
         resumed.demo_cache_goal = wf.goal
@@ -5029,7 +5096,7 @@ async def test_workflow_attention_event_ledger_survives_continue_as_new():
         wf.max_iterations = 30
         wf.context_gates = {}
         resumed = _bare_workflow_instance()
-        resumed._restore_deployment_state(wf._continuation_resume_state(wf.context))
+        resumed._restore_deployment_state(wf._continuation_resume_state())
         resumed.agent_id, resumed.goal, resumed.demo_cache_goal = wf.agent_id, wf.goal, wf.goal
         # A producer retry can redeliver the same event under another Message ID.
         fake.activity_returns["poll_new_messages"] = [{**row, "id": "retry-message-id"}]
@@ -5371,7 +5438,7 @@ async def test_workflow_valid_unchanged_schema_is_accepted_before_persistence_ac
         assert await wf._make_response_schema_getter()() == wf.output_schema
         wf.max_iterations, wf.context_gates = 30, {}
         resumed = _bare_workflow_instance()
-        resumed._restore_deployment_state(wf._continuation_resume_state(wf.context))
+        resumed._restore_deployment_state(wf._continuation_resume_state())
         assert resumed._response_schema_accepted_revision == 1, "continuation discarded native contract acceptance"
     finally:
         persistence_ack.set()
@@ -5463,7 +5530,7 @@ async def test_workflow_failed_schema_continuation_retries_original_input_withou
             await wf._wait_for_response_schema_refresh()
         except RuntimeError as error:
             assert "set_response_schema_activity failed" in str(error)
-        state = json.loads(json.dumps(wf._continuation_resume_state(wf.context)))
+        state = json.loads(json.dumps(wf._continuation_resume_state()))
         assert state["runtime_state"]["response_schema_applied_revision"] == 0
         assert state["runtime_state"]["response_schema_feedback"] == [authored]
         assert "response_schema_refresh_exception" not in state["runtime_state"]
@@ -5774,7 +5841,7 @@ async def _exercise_schema_refresh_persistence(
                 assert "latest schema generation failed" in str(error)
 
             accepted_schema = copy.deepcopy(wf.output_schema)
-            state = wf._continuation_resume_state(wf.context)
+            state = wf._continuation_resume_state()
             fake.activity_returns.update(
                 {
                     "fetch_agent_config": {
@@ -6360,7 +6427,7 @@ async def test_workflow_signal_child_progress_keeps_parent_usage_own_only():
         assert (wf.tree_tokens_in, wf.tree_tokens_out) == (310, 135)
 
         # Continue-as-new preserves both views without folding the tree into own.
-        state = wf._continuation_resume_state([])
+        state = wf._continuation_resume_state()
         restored = _bare_workflow_instance()
         restored._restore_deployment_state(state)
         assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (75, 60, 15)
@@ -8560,6 +8627,7 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
             "accountId": "acct-1",
             "source": "pool",
             "poolTokenId": "pool-1",
+            "integrationId": None,
             "lineageKey": "agent:agent-run-1",
             "agentId": "agent-run-1",
             "rootAgentId": "agent-run-1",
@@ -9314,7 +9382,7 @@ async def test_workflow_fresh_task_boundary_preserves_source_identity_and_contin
     revision = wf._response_schema_revision
     wf._record_response_schema_feedback(previous["text"], request_id="prior-request", authored=True)
     assert wf._response_schema_revision == revision, "past attention signal retry became fresh feedback"
-    carried = wf._continuation_resume_state(wf.context)
+    carried = wf._continuation_resume_state()
     restored = _bare_workflow_instance()
     restored._restore_deployment_state(carried)
     assert restored._response_schema_task_base == base
@@ -9398,7 +9466,7 @@ async def test_workflow_fresh_boundary_filters_only_proven_queued_feedback_sourc
             json.dumps({"request_id": "old-request", "response": "RESOLVED", "user_message": text_a})
         )
         assert wf._response_schema_revision == revision
-        carried = wf._continuation_resume_state(wf.context)
+        carried = wf._continuation_resume_state()
         restored = _bare_workflow_instance()
         restored._restore_deployment_state(carried)
         assert await restored._response_schema_user_messages() == requirements
@@ -9555,7 +9623,7 @@ async def test_workflow_fresh_start_unchanged_schema_is_accepted_before_persiste
         assert wf.output_schema is replacement
         assert any(name == "persist_response_schema_activity" for name, _args in fake.activity_calls)
         restored = _bare_workflow_instance()
-        restored._restore_deployment_state(wf._continuation_resume_state(wf.context))
+        restored._restore_deployment_state(wf._continuation_resume_state())
         assert restored.output_schema == replacement
         assert restored._response_schema_accepted_revision == wf._response_schema_accepted_revision
         persistence_ack.set()
@@ -12431,7 +12499,7 @@ async def test_workflow_armed_browser_wrapup_keeps_refreshed_credit_pause_across
         fake.activity_returns["check_user_usage"] = {"has_credits": True, "tier": "paid"}
         await wf._check_credits()
         assert wf._has_credits and wf.is_paused and wf._cost_limit_wrapup_pending
-        state = json.loads(json.dumps(wf._continuation_resume_state(wf.context)))
+        state = json.loads(json.dumps(wf._continuation_resume_state()))
         restored = _bare_workflow_instance()
         restored._restore_deployment_state(state)
         assert restored._has_credits and restored._cost_limit_wrapup_pending
@@ -13187,7 +13255,7 @@ async def test_workflow_rotate_compute_token_releases_lineage_and_refetches():
 
 async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
     """When claude_token is set but actual_model is non-claude and error=auth_error,
-    _on_tokens marks the token rate-limited and clears it."""
+    _on_tokens re-leases and clears it; RoseClient reported the failed attempt."""
     wf = _bare_workflow_instance()
     wf.agent_id = "a1"
     wf.user_id = "user-1"
@@ -13216,14 +13284,61 @@ async def test_workflow_on_tokens_rotates_claude_token_on_auth_error():
         assert wf.claude_max_token_source is None
         # mark activity executed
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "mark_compute_token_rate_limited_activity" in activity_names
-        mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
-        assert mark_call[1] == ["claude", "pool", "user-1", "pool-id-1", 5 * 60, None, "auth_error"]
+        # RoseClient reports the failed attempt with its own login; the
+        # workflow only re-leases (T7 / CodeRabbit 4475152998).
+        assert "mark_compute_token_rate_limited_activity" not in activity_names
         assert "release_compute_token_lineage_activity" in activity_names
         fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
         assert fetch_call[1][-1] == "gpt"
     finally:
         _restore_workflow(original)
+
+
+async def test_workflow_never_reports_its_cached_login_for_a_call_failure():
+    """T7 / CodeRabbit 4475152998: a token failure inside a Rose call is
+    reported by RoseClient for the attempt that failed, with that attempt's
+    login (rose.blackbox ``rotated_attempt_failures_are_reported_with_their_own_login``).
+    The usage the workflow receives names only the last error, so after an
+    in-call rotation its cached lease is not the failed one: reporting it would
+    disable a healthy login. The workflow only re-leases.
+    """
+    for token_type, error_kw in (("claude", "claude_token_error"), ("gpt", "gpt_token_error")):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "a-t7"
+        wf.user_id = "user-t7"
+        wf.input_cents_per_1k = 0.0
+        wf.output_cents_per_1k = 0.0
+        fake = _FakeWorkflowModule()
+        fake.activity_returns["fetch_compute_token_activity"] = None
+        original = _patch_workflow(fake)
+        try:
+            # The workflow leased A; inside the call A was rate-limited, RoseClient
+            # rotated to B, and B was rejected (auth_error).
+            assert wf._remember_compute_token(
+                {
+                    "type": token_type,
+                    "accessToken": f"lease-a-{token_type}",
+                    "source": "user",
+                    "integrationId": f"integration-a-{token_type}",
+                    "lineageKey": "agent:a-t7",
+                }
+            )
+            await wf._on_tokens(
+                tokens_in_delta=1,
+                tokens_out_delta=1,
+                actual_model="google/gemini-3-flash-preview",
+                call_site="test",
+                **{error_kw: "auth_error"},
+            )
+            names = [c[0] for c in fake.activity_calls]
+            assert "mark_compute_token_rate_limited_activity" not in names, (
+                f"{token_type}: the workflow reported its cached lease for a failure it cannot attribute: "
+                f"{[c for c in fake.activity_calls if c[0] == 'mark_compute_token_rate_limited_activity']}"
+            )
+            assert "release_compute_token_lineage_activity" in names, f"{token_type}: {names}"
+            assert "fetch_compute_token_activity" in names, f"{token_type}: {names}"
+        finally:
+            _restore_workflow(original)
 
 
 async def test_workflow_on_tokens_transient_error_keeps_claude_token():
@@ -13373,9 +13488,9 @@ async def test_workflow_on_tokens_rotates_gpt_token_on_auth_error():
         assert wf.compute_token_provider == "claude"
         assert wf.claude_max_token == "next-claude-token"
         activity_names = [c[0] for c in fake.activity_calls]
-        assert "mark_compute_token_rate_limited_activity" in activity_names
-        mark_call = next(c for c in fake.activity_calls if c[0] == "mark_compute_token_rate_limited_activity")
-        assert mark_call[1] == ["gpt", "pool", "user-1", "gpt-pool-1", 5 * 60, None, "auth_error"]
+        # RoseClient reports the failed attempt with its own login; the
+        # workflow only re-leases (T7 / CodeRabbit 4475152998).
+        assert "mark_compute_token_rate_limited_activity" not in activity_names
         assert "release_compute_token_lineage_activity" in activity_names
         fetch_call = next(c for c in fake.activity_calls if c[0] == "fetch_compute_token_activity")
         assert fetch_call[1][-1] == "claude"
@@ -13613,6 +13728,10 @@ async def run_all_tests():
         "wf_continuation_state_round_trip",
         test_workflow_continuation_state_round_trips_complete_runtime,
     )
+    r.record(
+        "wf_continuation_carries_context_once",
+        test_workflow_continuation_carries_the_context_once_so_large_agents_hand_off,
+    )
     r.record("pending_tool_records_budget", test_pending_tool_records_copy_args_and_respect_the_handoff_budget)
     r.record("wf_parks_only_live_run_agent_calls", test_workflow_parks_only_live_run_agent_tool_calls_within_budget)
     r.record(
@@ -13719,6 +13838,7 @@ async def run_all_tests():
     await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
     await r.record_async("pause_intent_ends_with_recovered_episode", test_pause_intent_ends_with_recovered_episode)
     await r.record_async("pause_episode_ordering", test_pause_episode_preserves_user_intent_across_automatic_signals)
+    await r.record_async("pause_provenance_fixture_restores_network", test_pause_provenance_fixture_restores_network_after_its_proof)
     await r.record_async("wf_signal_pause_cascade", test_workflow_signal_pause_cascades_to_children)
     await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
     await r.record_async(
@@ -14353,6 +14473,10 @@ async def run_all_tests():
     )
     await r.record_async("wf_get_model_pricing_default", test_workflow_get_model_pricing_unknown_uses_default)
     await r.record_async("wf_on_tokens_rotates_claude", test_workflow_on_tokens_rotates_claude_token_on_auth_error)
+    await r.record_async(
+        "wf_never_reports_cached_login_for_call_failure",
+        test_workflow_never_reports_its_cached_login_for_a_call_failure,
+    )
     await r.record_async(
         "wf_rotate_compute_token_releases_lineage",
         test_workflow_rotate_compute_token_releases_lineage_and_refetches,

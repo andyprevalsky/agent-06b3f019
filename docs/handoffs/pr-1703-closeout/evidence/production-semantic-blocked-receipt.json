@@ -1,0 +1,141 @@
+{
+  "agent_cutover": {
+    "required": true,
+    "runtime_files": [
+      "agents/browser_tools/humanizer.py",
+      "agents/browser_tools/schemas.py",
+      "agents/browser_tools/tool_executor_v2.py",
+      "agents/domains/spawn_browser_agent_v3/handler.py",
+      "agents/domains/spawn_browser_agent_v3/service_actions.py",
+      "agents/domains/spawn_browser_agent_v3/state_prefetch.py",
+      "agents/providers/rose/browser_use.py",
+      "agents/providers/rose/client.py"
+    ],
+    "workflow_changed": false
+  },
+  "changed_files": 13,
+  "cutover_verify": {
+    "attempt": "42221949310-1",
+    "expected_hash": "f8c85da67cfd",
+    "job_id": "4c7309dce95df87de7c13a385d0c1197fc2d14b20df710fa9a70788914ef1fae",
+    "job_stage": "SUCCEEDED",
+    "monitor_tail": "\u001b[36m[2026-11-06T13:13:05.111Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=ToolSideEffect operation=findUnique duration_ms=671 status=ok\u001b[0m\n\u001b[36m[2026-11-06T13:13:05.397Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=AgentQueuePointer operation=findUnique duration_ms=283 status=ok\u001b[0m\n\u001b[36m[2026-11-06T13:13:05.682Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=ToolSideEffect operation=findUnique duration_ms=285 status=ok\u001b[0m\nCooperative cutover phase: cooperative_drain_complete\n  live pointer: hash=f8c85da67cfd queue=navi-agent-tasks-pool-648c5ce9fa7d@f8c85da67cfd\n  expected:     hash=f8c85da67cfd queue=navi-agent-tasks-pool-648c5ce9fa7d@f8c85da67cfd\n  old queue:    navi-agent-tasks-pool-3b52997e7a0a@6ebf74419565 open=?\n  \u2192 Durable job 4c7309dce95df87de7c13a385d0c1197fc2d14b20df710fa9a70788914ef1fae: SUCCEEDED.\n  \u2192 A managed predecessor requires its durable qualified retirement certificate.\n",
+    "monitor_verify_exit": 0,
+    "queue_read": "ok",
+    "source_commit": "fa676edc7e68cdf13616f945f8362c06f6cbf417"
+  },
+  "finished_at": "2026-11-06T13:13:05Z",
+  "fly": {
+    "attempt": "1",
+    "conclusion": "success",
+    "deployment_token": "42221949310-1",
+    "job_id": "4c7309dce95df87de7c13a385d0c1197fc2d14b20df710fa9a70788914ef1fae",
+    "job_stage": "SUCCEEDED",
+    "required": true,
+    "run_id": "42221949310",
+    "status": "completed",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42221949310"
+  },
+  "github_waits": [
+    {
+      "head": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+      "kind": "run-start",
+      "outcome": "found",
+      "polls": 1,
+      "run_id": "42221949310",
+      "waited_s": 1.3,
+      "workflow": "deploy-agents.yml"
+    },
+    {
+      "attempt": "1",
+      "conclusion": "success",
+      "kind": "run-complete",
+      "outcome": "completed",
+      "polls": 1,
+      "run_id": "42221949310",
+      "status": "completed",
+      "waited_s": 0.5,
+      "workflow": "deploy-agents.yml"
+    },
+    {
+      "head": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+      "kind": "run-start",
+      "outcome": "found",
+      "polls": 2,
+      "run_id": "42223715662",
+      "waited_s": 12.2,
+      "workflow": "chat-lifecycle-ratchet.yml"
+    }
+  ],
+  "merged_sha": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+  "schema_version": 1,
+  "semantic": {
+    "attempt": 1,
+    "completed_at": null,
+    "conclusion": null,
+    "created_at": "2026-11-06T13:13:07Z",
+    "dispatch": {
+      "at": "2026-11-06T13:13:05Z",
+      "inputs": {
+        "backend_url": "https://navi-j9a9.onrender.com",
+        "frontend_url": "https://www.roselabs.ai",
+        "source_sha": "fa676edc7e68cdf13616f945f8362c06f6cbf417"
+      },
+      "ref": "main"
+    },
+    "display_title": "Production semantic gate source_sha=fa676edc7e68cdf13616f945f8362c06f6cbf417",
+    "error": "gh run view 42223715662 failed: failed to get run: Get \"https://api.github.com/repos/Rose-Ai-Labs/rose/actions/runs/42223715662?exclude_pull_requests=true\": read tcp 169.254.0.21:58910->140.82.116.6:443: read: connection reset by peer",
+    "finished_at": "2026-11-06T14:36:00Z",
+    "head_sha": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+    "jobs": [
+      {
+        "conclusion": "",
+        "name": "Semantic frontend flows",
+        "status": "in_progress",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42223715662/job/127911783643"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_execute)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42223715662/job/127911783679"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (web_search)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42223715662/job/127911783732"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (direct_answer)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42223715662/job/127911783881"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_plan)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42223715662/job/127911783958"
+      }
+    ],
+    "merged_sha": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+    "outcome": "failed",
+    "retry": null,
+    "run_id": "42223715662",
+    "source_sha": "fa676edc7e68cdf13616f945f8362c06f6cbf417",
+    "started_at": "2026-11-06T13:13:05Z",
+    "status": "in_progress",
+    "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42223715662",
+    "wall_s": 4974.5,
+    "workflow": "chat-lifecycle-ratchet.yml"
+  },
+  "semantic_dispatch": {
+    "command": null,
+    "gate": "open"
+  },
+  "started_at": "2026-11-06T13:12:58Z",
+  "started_epoch": 1793970778.1992834,
+  "status": "passed",
+  "wall_s": 7.5
+}

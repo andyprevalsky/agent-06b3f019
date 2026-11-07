@@ -53,6 +53,8 @@ export class FakeGranola {
   revoked = false;
   email: string | null = 'andy@example.com';
   listPageSize = 2;
+  /** Free-plan history start (YYYY-MM-DD): older windows get Granola's plan-limit notice. */
+  historyStart: string | null = null;
   transcriptPageChars = 25;
   calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
   tokenRequests: URLSearchParams[] = [];
@@ -91,8 +93,10 @@ export class FakeGranola {
   private listMeetings(args: Record<string, unknown>): string {
     const from = String(args.custom_start);
     const to = String(args.custom_end);
+    const limited = this.historyStart !== null && from < this.historyStart;
+    const floor = limited && this.historyStart !== null ? this.historyStart : from;
     const hits = [...this.meetings.values()]
-      .filter((m) => m.meetingAt.slice(0, 10) >= from && m.meetingAt.slice(0, 10) <= to)
+      .filter((m) => m.meetingAt.slice(0, 10) >= floor && m.meetingAt.slice(0, 10) <= to)
       .sort((a, b) => a.id.localeCompare(b.id));
     const start = Number(args.cursor ?? 0);
     const page = hits.slice(start, start + this.listPageSize);
@@ -108,7 +112,12 @@ export class FakeGranola {
     const remaining = Math.max(0, hits.length - start - page.length);
     const cursor = more ? ` next_cursor="${start + this.listPageSize}"` : '';
     const pagination = `<pagination has_more="${more}" total_count="${hits.length}" remaining_count="${remaining}"${cursor} />`;
-    return `<requested_range from="${from}" to="${to}">custom</requested_range>\n${WARNING}\n\n${body}\n\n${pagination}`;
+    // Wording and layout as served to a free-plan account (captured 2026-11-05).
+    const notice = limited
+      ? `<access_notice>The free Granola plan only includes the last 30 days of meeting history. Only notes whose creation date and meeting date are within that limit are returned. Providing a topic or note link to another Granola tool cannot bypass this MCP history limit. Review your Granola plan: https://notes.granola.ai/settings/team-and-billing?tab=billing&amp;utm_content=history-limit.</access_notice>\n\n`
+      : '';
+    const range = `<requested_range time_range="custom" timezone="America/Los_Angeles" start="${from}T00:00:00-07:00" end="${to}T00:00:00-07:00" end_inclusive="false">Requested meetings from ${from} through ${to}.${limited ? ` Meetings before ${this.historyStart} fall outside the plan's meeting history window.` : ''}</requested_range>`;
+    return `${notice}${range}\n\n${WARNING}\n\n${body}\n\n${pagination}`;
   }
 
   private tool(name: string, args: Record<string, unknown>): { text: string; isError?: boolean } {

@@ -928,6 +928,7 @@ def _preserve_observed_interaction_for_verifier(
         "input_text",
         "select_dropdown",
         "drag",
+        "hover",
         "press_keys",
         "press_key",
         "upload_file",
@@ -1165,6 +1166,7 @@ def _model_visible_browser_message(
                 "upload_file": ("index",),
                 "click_coordinates": ("x", "y"),
                 "drag": ("source_index", "target_index", "start_x", "start_y", "end_x", "end_y"),
+                "hover": ("index", "x", "y"),
             }
             if isinstance(original, dict) and isinstance(payload, dict):
                 for key in target_fields.get(action_name, ()):

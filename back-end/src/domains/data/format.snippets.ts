@@ -160,8 +160,18 @@ export function metadataString(metadata: unknown, key: string): string | undefin
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }
 
+/**
+ * `value` without trailing `/`. A backward scan, not /\/+$/: that regex backtracks
+ * quadratically on a long slash run that is not at the end ("////…a").
+ */
+export function stripTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return value.slice(0, end);
+}
+
 export function pathSegment(value: string): string {
-  return value.replace(/^\/+|\/+$/g, '').replace(/[?#]/g, '_');
+  return stripTrailingSlashes(value.replace(/^\/+/, '')).replace(/[?#]/g, '_');
 }
 
 export function decimalToString(value: { toString(): string } | number | string): string {

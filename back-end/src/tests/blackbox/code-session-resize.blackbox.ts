@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { Sandbox } from 'e2b';
+import { Sandbox, SandboxNotFoundError } from 'e2b';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import { NO_CODE_RESOURCES } from '../../providers/codeSessions/sandboxResources';
@@ -39,6 +39,7 @@ import {
   DEFAULT_SANDBOX_GRID,
   resolveSpawnSandbox,
   sandboxGrid,
+  sizedTemplateName,
 } from '../../providers/codeSessions/sandboxSize';
 import { keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import {
@@ -299,7 +300,7 @@ test('resize round trip: new sandbox from the size template keeps branch, files 
     async (id) => {
       if (id === sandboxId) return held.sandbox;
       if (id === next.sandbox.sandboxId) return next.sandbox;
-      throw new Error(`sandbox ${id} not found`);
+      throw new SandboxNotFoundError(`Paused sandbox ${id} not found`);
     },
     async (templateId) => {
       clock.create = performance.now();
@@ -501,7 +502,7 @@ test('the default grid offers 4 and 8 GB and refuses 16 GB (E2B team cap of 8192
     });
     assert.deepEqual(await resolveSpawnSandbox(fresh, 'codex', null), {
       size: { cpu: 2, memoryGb: 4 },
-      templateId: 'codex-code-c2-m4',
+      templateId: sizedTemplateName('codex', { cpu: 2, memoryGb: 4 }),
     });
   } finally {
     process.env.E2B_SANDBOX_TEMPLATES = JSON.stringify(TEMPLATES);

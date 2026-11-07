@@ -1,0 +1,17 @@
+# Unfixed fixture on main 0ee70b27c with holder delayed 1.5 s (DELAY=1.5 keep.py 2): iter 0/1 FAIL KeyError: 'tree_peak_anon_mb'; fails=2/2
+# receipt (margin.py): joiner_headroom 300 first_defer_headroom None peak None (both iterations)
+# 1706-base bytes without the sampler gate, load 28 (v2-1.log):
+Traceback (most recent call last):
+  File "/home/boxes/rose/scripts/tests/run-deploy-pipeline.test.py", line 4887, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/boxes/rose/scripts/tests/run-deploy-pipeline.test.py", line 2460, in main
+    check_materialized_reservation_credit(tmp / "inherited-flag", env, holder_start_delay_s=1.5)
+  File "/home/boxes/rose/scripts/tests/run-deploy-pipeline.test.py", line 694, in check_materialized_reservation_credit
+    assert lanes["joiner"]["admission"]["reserved_live_mb"] < 60, lanes["joiner"]["admission"]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'accounting': 'unmaterialized', 'at': '2026-11-06T09:18:32Z', 'budget_mb': 300, 'credit': 'enabled', 'decision': 'admitted', 'deferred': None, 'headroom_mb': 120, 'memory_mb': 60, 'reserved_declared_mb': 100, 'reserved_live_mb': 60, 'reserved_static_mb': 60, 'running': {'holder': {'memory_mb': 100, 'observation': 'fresh', 'observed_age_s': 0.21, 'tree_anon_mb': 40.8, 'tree_pss_mb': 43.3}}}
+# main bytes, load 12-16 (full-1.log / full-2.log): check_observation_validity line 944
+    assert first["observation"] == "stale" and first["observed_age_s"] > pipeline.OBSERVATION_MAX_AGE_SECONDS, first
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'memory_mb': 100, 'observation': 'unknown', 'observed_age_s': 0.0, 'tree_anon_mb': None, 'tree_pss_mb': None}

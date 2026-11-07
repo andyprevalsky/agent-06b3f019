@@ -6,9 +6,15 @@
  * [CLOSED] --right-click an agent row--> [OPEN]
  * [OPEN] --any item--> parent handler --> [CLOSED]
  * [OPEN] --Copy ›--> [COPY SUBMENU OPEN] --Copy link | Copy agent ID--> [CLOSED]
+ * [OPEN] --Move to… ›--> [MOVE SUBMENU OPEN] (every project, its folders indented
+ *   below it, then Home; the current location is checked and disabled)
+ *   --pick a destination--> actions.move.onMove(target) --> [CLOSED]
+ *   (the parent moves the row optimistically; see useAgentPlacementMoves)
+ * Keyboard: ArrowRight/Enter opens a submenu, arrows move, Enter picks, Escape closes.
  *
  * Order (boxes.dev thread-menu style: icon + label rows, dividers, destructive red):
- *   Archive agent | Pin/Unpin agent · Rename agent | Copy ›
+ *   Archive agent | Pin/Unpin agent · Rename agent · Move to… ›¹ | Copy ›
+ *   ¹ only where the caller supplies `move` (the desktop bar).
  * (UI #26 removed New agent in this branch, Mark unread, Mute notifications,
  * Share agent, Delete agent and Schedule a prompt…; Archive agent calls the
  * same delete endpoint. The stock Agent Settings gear keeps Delete Agent; the
@@ -18,22 +24,37 @@
 import * as ContextMenuPrimitive from '@radix-ui/react-context-menu';
 import {
   Archive,
+  Check,
   ChevronRight,
   Copy,
+  Folder,
+  FolderInput,
   Hash,
+  Home,
   Link2,
   Pencil,
   Pin,
   PinOff,
   type LucideIcon,
 } from 'lucide-react';
+import type { ReactNode } from 'react';
 
 import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
 } from '@/components/ui/context-menu';
+import type { Project } from '@/lib/api/projects';
 import { cn } from '@/lib/utils';
+
+import type { AgentPlacement } from './useAgentPlacementMoves';
+
+export interface AgentMoveMenu {
+  /** Destinations in sidebar order (each project's folders follow it); Home last. */
+  projects: Project[];
+  current: AgentPlacement;
+  onMove: (target: AgentPlacement) => void;
+}
 
 export interface RoseAgentMenuActions {
   onArchive: () => void;
@@ -41,6 +62,7 @@ export interface RoseAgentMenuActions {
   onRename: () => void;
   onCopyLink: () => void;
   onCopyId: () => void;
+  move?: AgentMoveMenu;
 }
 
 /** z-[220] is the shared menu/popover layer (ui/context-menu, ui/popover): above
@@ -57,14 +79,24 @@ function Row({
   label,
   onSelect,
   destructive = false,
+  checked,
+  inset = false,
 }: {
   icon: LucideIcon;
   label: string;
   onSelect: () => void;
   destructive?: boolean;
+  /** Move destinations: the current location is checked and cannot be picked. */
+  checked?: boolean;
+  inset?: boolean;
 }) {
   return (
-    <ContextMenuItem onSelect={onSelect} className={cn(ROW, destructive && DESTRUCTIVE)}>
+    <ContextMenuItem
+      onSelect={onSelect}
+      disabled={checked === true}
+      aria-current={checked === true ? 'location' : undefined}
+      className={cn(ROW, destructive && DESTRUCTIVE, inset && 'pl-[33px]')}
+    >
       <Icon
         className={cn(
           'h-[17px] w-[17px] flex-none',
@@ -72,7 +104,13 @@ function Row({
         )}
         strokeWidth={1.7}
       />
-      <span>{label}</span>
+      <span className={cn(checked !== undefined && 'min-w-0 flex-1 truncate')}>{label}</span>
+      {checked === true && (
+        <Check
+          aria-hidden="true"
+          className="h-4 w-4 flex-none text-[hsl(240_6%_45%)] dark:text-[#a3a39d]"
+        />
+      )}
     </ContextMenuItem>
   );
 }
@@ -81,10 +119,15 @@ function Divider() {
   return <ContextMenuSeparator className="mx-1.5 my-1 bg-gray-200/95 dark:bg-white/[0.07]" />;
 }
 
-function CopySubmenu({
-  onCopyLink,
-  onCopyId,
-}: Pick<RoseAgentMenuActions, 'onCopyLink' | 'onCopyId'>) {
+function Submenu({
+  icon: Icon,
+  label,
+  children,
+}: {
+  icon: LucideIcon;
+  label: string;
+  children: ReactNode;
+}) {
   return (
     <ContextMenuPrimitive.Sub>
       <ContextMenuPrimitive.SubTrigger
@@ -94,20 +137,58 @@ function CopySubmenu({
           'data-[state=open]:bg-[hsl(240_10%_96%)] dark:data-[state=open]:bg-white/[0.06]',
         )}
       >
-        <Copy
+        <Icon
           className="h-[17px] w-[17px] flex-none text-[hsl(240_6%_45%)] dark:text-[#a3a39d]"
           strokeWidth={1.7}
         />
-        <span>Copy</span>
+        <span>{label}</span>
         <ChevronRight className="ml-auto h-4 w-4 text-[hsl(240_6%_55%)] dark:text-[#a3a39d]" />
       </ContextMenuPrimitive.SubTrigger>
       <ContextMenuPrimitive.Portal>
-        <ContextMenuPrimitive.SubContent className={MENU_SURFACE} style={NO_BLUR}>
-          <Row icon={Link2} label="Copy link" onSelect={onCopyLink} />
-          <Row icon={Hash} label="Copy agent ID" onSelect={onCopyId} />
+        <ContextMenuPrimitive.SubContent
+          className={cn(MENU_SURFACE, 'max-h-[420px] max-w-[300px] overflow-y-auto')}
+          style={NO_BLUR}
+        >
+          {children}
         </ContextMenuPrimitive.SubContent>
       </ContextMenuPrimitive.Portal>
     </ContextMenuPrimitive.Sub>
+  );
+}
+
+function MoveSubmenu({ projects, current, onMove }: AgentMoveMenu) {
+  const at = (project_id: string | null, folder_id: string | null) =>
+    current.project_id === project_id && current.folder_id === folder_id;
+  return (
+    <Submenu icon={FolderInput} label="Move to…">
+      {projects.map((project) => (
+        <ContextMenuPrimitive.Group key={project.id} aria-label={project.name}>
+          <Row
+            icon={Folder}
+            label={project.name}
+            checked={at(project.id, null)}
+            onSelect={() => onMove({ project_id: project.id, folder_id: null })}
+          />
+          {(project.folders ?? []).map((folder) => (
+            <Row
+              key={folder.id}
+              icon={Folder}
+              label={folder.name}
+              inset
+              checked={at(project.id, folder.id)}
+              onSelect={() => onMove({ project_id: project.id, folder_id: folder.id })}
+            />
+          ))}
+        </ContextMenuPrimitive.Group>
+      ))}
+      {projects.length > 0 && <Divider />}
+      <Row
+        icon={Home}
+        label="Home"
+        checked={at(null, null)}
+        onSelect={() => onMove({ project_id: null, folder_id: null })}
+      />
+    </Submenu>
   );
 }
 
@@ -128,8 +209,12 @@ export default function RoseAgentRowMenu({
         onSelect={actions.onTogglePin}
       />
       <Row icon={Pencil} label="Rename agent" onSelect={actions.onRename} />
+      {actions.move !== undefined && <MoveSubmenu {...actions.move} />}
       <Divider />
-      <CopySubmenu onCopyLink={actions.onCopyLink} onCopyId={actions.onCopyId} />
+      <Submenu icon={Copy} label="Copy">
+        <Row icon={Link2} label="Copy link" onSelect={actions.onCopyLink} />
+        <Row icon={Hash} label="Copy agent ID" onSelect={actions.onCopyId} />
+      </Submenu>
     </ContextMenuContent>
   );
 }

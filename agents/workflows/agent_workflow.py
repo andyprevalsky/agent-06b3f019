@@ -71,7 +71,6 @@ with workflow.unsafe.imports_passed_through():
     from helpers.llm import (
         call_llm_activity,
         fetch_compute_token_activity,
-        mark_compute_token_rate_limited_activity,
         persist_response_schema_activity,
         release_compute_token_lineage_activity,
         set_response_schema_activity,
@@ -814,6 +813,10 @@ CONTINUATION_BACKGROUND_SETTLE_SECONDS = 180.0
 # these history bounds (Temporal hard limits: 51,200 events / 50 MB).
 OVERFLOW_DEFER_MAX_HISTORY_EVENTS = 30_000
 OVERFLOW_DEFER_MAX_HISTORY_BYTES = 30 * 1024 * 1024
+# Temporal rejects a command whose payloads exceed ~2 MiB (TMPRL1103) and retries the
+# failed workflow task forever, so a continuation that big can never hand off. Warn well
+# before the limit so a growing context is visible instead of wedging a cutover.
+CONTINUATION_PAYLOAD_WARN_BYTES = 1_500_000
 
 
 @workflow.defn
@@ -996,6 +999,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id: Optional[str] = None
         self.gpt_code_token_source: Optional[str] = None
         self.gpt_code_token_pool_id: Optional[str] = None
+        # The exact Integration row the active compute token was leased from;
+        # failure reports name it so they never reach the user's other logins.
+        self.compute_token_integration_id: Optional[str] = None
         self.compute_token_lineage_key: Optional[str] = None
         self.compute_token_demo_cache_affinity_key: Optional[str] = None
         self.compute_token_fetched_at: Optional[datetime] = None  # For 5-min TTL refresh
@@ -1399,8 +1405,14 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         if isinstance(price_limit, int) and not isinstance(price_limit, bool) and price_limit > 0:
             self.price_limit_cents = price_limit
 
-    def _continuation_resume_state(self, context: Optional[List[Dict]]) -> Dict[str, Any]:
-        """Snapshot every mutable value needed after a continue-as-new boundary."""
+    def _continuation_resume_state(self) -> Dict[str, Any]:
+        """Snapshot every mutable value needed after a continue-as-new boundary.
+
+        The conversation is NOT part of this snapshot: it travels once as the
+        continuation's ``context`` argument. Carrying a second copy doubled the
+        payload, and Temporal fails the workflow task (TMPRL1103) when a command's
+        payloads exceed ~2 MB, which wedged a cooperative cutover for a 1 MB agent.
+        """
         # Tree totals are derived state. Recompute at the serialization boundary
         # so even a zero-cost/direct-token call cannot leave the durable tree
         # snapshot behind the own counters.
@@ -1485,7 +1497,6 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                    if self._browser_activity_cleanup_unknown else {}),
                 "signup_completed": self._signup_completed,
                 "signup_dismissed": self._signup_dismissed,
-                "context": list(context or self.context),
                 "cloud_agent_lifecycle_tool_call_id": self._cloud_agent_lifecycle_tool_call_id,
                 "cloud_agent_lifecycle_start_phase": self._cloud_agent_lifecycle_start_phase,
                 "cloud_agent_lifecycle_updates_sent": sorted(self._cloud_agent_lifecycle_updates_sent),
@@ -1539,7 +1550,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self.model,
             self.reasoning_max_tokens,
             self.verifier,
-            context,
+            # None means "the live conversation": run() adopts a list argument over restored state.
+            context if isinstance(context, list) else list(self.context),
             self.parent_workflow_id,
             self.parent_agent_id,
             self.depth,
@@ -1553,10 +1565,16 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             # self.fast_mode_cache_enabled here or a button-on non-DEMO segment
             # loses provider_fast_mode across continue_as_new.
             self.provider_fast_mode,
-            self._continuation_resume_state(context),
+            self._continuation_resume_state(),
         ]
         if self.world_model_mode != "real":
             args.append(self.world_model_mode)
+        payload_bytes = len(_json.dumps(args, default=str))
+        if payload_bytes > CONTINUATION_PAYLOAD_WARN_BYTES:
+            workflow.logger.warning(
+                f"Continuation payload is {payload_bytes} bytes "
+                f"(Temporal rejects ~2 MiB); context messages={len(args[6] or [])}"
+            )
         return args
 
     def _iteration_resume_kwargs(self) -> Dict[str, int]:
@@ -3959,6 +3977,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self.gpt_code_account_id = None
         self.gpt_code_token_source = None
         self.gpt_code_token_pool_id = None
+        self.compute_token_integration_id = None
         self.compute_token_fetched_at = None
         self.claude_max_token_fetched_at = None
 
@@ -3968,6 +3987,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         now = workflow.now()
         self._clear_compute_token()
         self.compute_token_provider = token.get("type")
+        self.compute_token_integration_id = token.get("integrationId")
         if token.get("lineageKey"):
             self.compute_token_lineage_key = token.get("lineageKey")
         if self.compute_token_provider == "claude":
@@ -4070,6 +4090,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "userId": self.user_id,
                 "source": self.claude_max_token_source,
                 "poolTokenId": self.claude_max_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -4083,6 +4104,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 "accountId": self.gpt_code_account_id,
                 "source": self.gpt_code_token_source,
                 "poolTokenId": self.gpt_code_token_pool_id,
+                "integrationId": self.compute_token_integration_id,
                 "lineageKey": self.compute_token_lineage_key,
                 "agentId": self.agent_id,
                 "rootAgentId": self.agent_id,
@@ -5415,30 +5437,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if claude_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ Claude token {claude_token_error}: actual_model={actual_model}, "
-                        f"marking {self.claude_max_token_source} token rate-limited and rotating"
+                        f"re-leasing after the {self.claude_max_token_source} token failed"
                     )
-                    # Mark the offending token rate-limited in DB so the next fetch rotates:
-                    #   source='user' → next fetch falls back to pool
-                    #   source='pool' → fetchPoolToken skips this ID and returns a different pool token
-                    # The cooldown is time-windowed (5 min); token auto-heals after rateLimitedUntil.
-                    if self.claude_max_token_source and self.user_id:
-                        try:
-                            await workflow.execute_activity(
-                                mark_compute_token_rate_limited_activity,
-                                args=[
-                                    "claude",
-                                    self.claude_max_token_source,
-                                    self.user_id,
-                                    self.claude_max_token_pool_id,
-                                    5 * 60,
-                                    None,
-                                    claude_token_error,
-                                ],
-                                start_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=2),
-                            )
-                        except Exception as mark_error:
-                            workflow.logger.warning(f"Failed to mark Claude token rate-limited: {mark_error}")
+                    # RoseClient already reported each failed attempt with that
+                    # attempt's own login (provider cool-down / stall mark). This
+                    # usage names only the last error, and after an in-call
+                    # rotation the cached lease is not the failed one, so the
+                    # workflow never reports it: it only re-leases (T7).
                     if self.user_id:
                         try:
                             await self._rotate_compute_token(self.user_id)
@@ -5474,26 +5479,13 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                 if gpt_token_error in ("auth_error", "rate_limit", "stall"):
                     workflow.logger.warning(
                         f"⚠️ GPT token {gpt_token_error}: actual_model={actual_model}, "
-                        f"marking {self.gpt_code_token_source} token rate-limited and rotating"
+                        f"re-leasing after the {self.gpt_code_token_source} token failed"
                     )
-                    if self.gpt_code_token_source and self.user_id:
-                        try:
-                            await workflow.execute_activity(
-                                mark_compute_token_rate_limited_activity,
-                                args=[
-                                    "gpt",
-                                    self.gpt_code_token_source,
-                                    self.user_id,
-                                    self.gpt_code_token_pool_id,
-                                    5 * 60,
-                                    None,
-                                    gpt_token_error,
-                                ],
-                                start_to_close_timeout=timedelta(seconds=10),
-                                retry_policy=RetryPolicy(maximum_attempts=2),
-                            )
-                        except Exception as mark_error:
-                            workflow.logger.warning(f"Failed to mark GPT token rate-limited: {mark_error}")
+                    # RoseClient already reported each failed attempt with that
+                    # attempt's own login (provider cool-down / stall mark). This
+                    # usage names only the last error, and after an in-call
+                    # rotation the cached lease is not the failed one, so the
+                    # workflow never reports it: it only re-leases (T7).
                     if self.user_id:
                         try:
                             await self._rotate_compute_token(self.user_id)

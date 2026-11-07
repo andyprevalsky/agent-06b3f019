@@ -113,7 +113,9 @@ def test_validate_seconds_too_high():
     from domains.wait_seconds.config import MAX_WAIT
 
     err = validate_seconds(MAX_WAIT + 1)
-    assert err is not None
+    assert err == f"Wait duration must be between 1 second and 31 days (got {MAX_WAIT + 1} seconds)", err
+    # Anything inside the real bounds is valid (the text used to claim 3600s was the max).
+    assert validate_seconds(7200) is None
 
 
 # -------------------- handler.py tests --------------------

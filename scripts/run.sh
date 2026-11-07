@@ -88,7 +88,7 @@ if $BENCHMARK_MODE; then
 fi
 # End people credential authority.
 
-# mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
+# mac-app is Electron + requires the repository's pinned Node; only runs on macOS.
 IS_MAC=false
 [ "$(uname)" = "Darwin" ] && IS_MAC=true
 
@@ -2742,6 +2742,15 @@ cleanup() {
     if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
         bash "$SCRIPT_DIR/kill-services.sh" || true
     fi
+    # The database this stack records its E2B sandboxes in is about to go:
+    # kill every sandbox tagged with this stack first, or they stay paused and
+    # unattributable forever (back-end/scripts/kill-stack-sandboxes.ts).
+    # Same condition as the drops below: a normal dev stack keeps its database,
+    # so its paused sessions (and their sandboxes) stay resumable.
+    if { $DB_OWNED_BY_US && ! $USE_SYSTEM_PG && [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; } \
+        || { $USE_SYSTEM_PG && $SYSTEM_DB_OWNED_BY_US; }; then
+        (cd "$SCRIPT_DIR/../back-end" && timeout 60 npx tsx scripts/kill-stack-sandboxes.ts) || true
+    fi
     if $DB_OWNED_BY_US && ! $USE_SYSTEM_PG; then
         run_cleanup_owned_db_container \
             "$DB_OWNED_CONTAINER_ID" "$DB_CONTAINER" "$DB_VOLUME" "$BENCHMARK_ISOLATED_RUN"
@@ -3057,7 +3066,7 @@ fi
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
-    run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 20.10.0 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
+    run_service "mac-app" bash -c 'set -eo pipefail; cd mac-app && source ~/.nvm/nvm.sh && nvm use 22.23.4 && rm -f mac-app-console-logs.log mac-app-ipc-logs.log && VITE_BACKEND_API_URL=http://localhost:$BACKEND_PORT npm run dev 2>&1 | tee mac-app-console-logs.log' &
     PIDS+=($!); NAMES+=("mac-app")
 fi
 

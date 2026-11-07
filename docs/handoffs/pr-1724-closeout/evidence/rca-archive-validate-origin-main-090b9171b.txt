@@ -1,0 +1,12 @@
+ERROR docs/rca/cases/2026-11-06-mac-app-indexeddb-scan-blocked-main-process-beachball.md: `problem_class` 'synchronous-cpu-work-on-ui-owning-event-loop' not in ['concurrency-inefficiency', 'fixture-environment-data-mismatch', 'logical-inconsistency-in-harness-contracts', 'model-intelligence-limitation', 'new-tool-or-capability-required', 'observability-trace-capture-gap', 'other', 'timeout-too-aggressive', 'uncaptured-user-preference']
+ERROR docs/rca/cases/2026-11-06-mac-app-indexeddb-scan-blocked-main-process-beachball.md: `status` 'fixed (main-process stall); Mac-side confirmation pending' not in ['fixed', 'mitigated', 'open', 'superseded', 'wontfix']
+ERROR docs/rca/cases/2026-11-06-mac-app-indexeddb-scan-blocked-main-process-beachball.md: `symptoms` must contain 2–5 literal search strings
+ERROR docs/rca/cases/2026-11-06-mac-app-indexeddb-scan-blocked-main-process-beachball.md: source 'user report 2026-11-06' must use a documented provenance prefix
+ERROR docs/rca/cases/2026-11-06-mac-app-indexeddb-scan-blocked-main-process-beachball.md: source 'local repro .context/beachball-rca (headless Chromium profile, 20,000 Gmail-like IndexedDB records)' must use a documented provenance prefix
+ERROR docs/rca/cases/2026-11-06-mac-app-indexeddb-scan-blocked-main-process-beachball.md: missing required `## Solution` section
+ERROR docs/rca/cases/2026-11-06-mac-app-indexeddb-scan-blocked-main-process-beachball.md: missing required `## Human feedback` section
+ERROR docs/rca/cases/2026-11-06-mac-app-indexeddb-scan-blocked-main-process-beachball.md: missing required `## Reusable lesson` section
+ERROR docs/rca/INDEX.md is stale — run `python3 scripts/rca_archive.py reindex`
+
+9 archive error(s)
+exit=1

@@ -12488,12 +12488,34 @@ and `reasoning` fields, then validate that file exists before finishing.
 """
 
 
-async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> dict[str, Any] | None:
-    """A synced GPT/Codex subscription token for the benchmark judge harness, or None.
+async def _agentic_judge_code_provider(user_id: str) -> str:
+    """The code harness the judge runs on, in the spawn's C15 credential order.
 
-    None is not a failure: the judge then spawns Codex without a token and the
-    backend's own resolver chooses, subscriptions first and then the funded Azure
-    fallback (resolveCodexSpawnAuth), so an exhausted pool no longer breaks judging.
+    Codex is preferred; the backend plan (credentialOrder.ts) lists every
+    subscription before any funded key, so a cooled-down Codex login still
+    leaves a Claude subscription or the funded Azure / Anthropic path. Only an
+    empty plan is an exhausted pool (SKIPPED); a failed lookup stays an error.
+    """
+    from domains.spawn_claude_code_agent.repo import fetch_code_credential_availability
+    from domains.spawn_claude_code_agent.service import _next_code_credential
+
+    available = await fetch_code_credential_availability(user_id, prefer="codex")
+    if available is None:
+        raise RuntimeError("Code credential availability lookup failed for agentic benchmark judge")
+    provider, _tier = _next_code_credential(available, "codex")
+    if provider is None:
+        raise ComputeTokenUnavailable(
+            "Codex compute token unavailable for agentic benchmark judge: "
+            "no Codex or Claude Code subscription or funded key is leasable"
+        )
+    return provider
+
+
+async def _fetch_agentic_judge_compute_token(user_id: str, agent_id: str) -> Optional[dict[str, Any]]:
+    """A synced GPT/Codex compute token for the Codex judge's verifier, when one is leasable.
+
+    The sandbox CLI credential is leased by the spawn itself (own login, pool,
+    then funded Azure), so a missing token here does not block the judge.
     """
     from config import load_config
     from helpers.llm import fetch_gpt_code_token_activity
@@ -12578,7 +12600,7 @@ async def _call_declared_agentic_llm_judge(
     evaluator: dict,
     data: dict,
 ) -> dict:
-    """Execute one catalog-declared agentic judge via the Codex code harness."""
+    """Execute one catalog-declared agentic judge on the code harness its credential plan selects."""
     from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
     from helpers.attachments import upload_to_storage
 
@@ -12587,7 +12609,14 @@ async def _call_declared_agentic_llm_judge(
     user_id = _current_benchmark_user_id()
     judge_agent_id = str(uuid.uuid4())
     tool_call_id = str(uuid.uuid4())
-    token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) or {}
+    code_provider = await _agentic_judge_code_provider(user_id)
+    token_data: dict[str, Any] = {}
+    if code_provider == "codex":
+        try:
+            token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) or {}
+        except httpx.HTTPError as exc:
+            # Optional verifier auth: the spawn leases the CLI credential itself.
+            print(f"    ⚠ Agentic judge GPT token fetch failed ({type(exc).__name__}); continuing without it")
 
     if getattr(task, "process_spec", None) is not None:
         from benchmarks.process_bench import process_evidence
@@ -12610,18 +12639,20 @@ async def _call_declared_agentic_llm_judge(
         tool_call_id=tool_call_id,
         output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
         attachments=[attachment],
-        code_provider="codex",
+        code_provider=code_provider,
         gpt_token=token_data.get("accessToken"),
         gpt_account_id=token_data.get("accountId"),
         gpt_token_source=token_data.get("source"),
         gpt_token_pool_id=token_data.get("poolTokenId"),
         fast_mode_cache_enabled=False,
     )
-    # Only when every funded path (subscriptions and the Azure fallback) is exhausted
-    # does judging stop; that stays a compute-token SKIP, never a task FAIL.
+    # The preflight plan can still empty before the spawn leases (or the CLI hits a usage
+    # limit mid-judge). Every subscription and funded path exhausted is a compute-token
+    # SKIP (Andy 2026-10-25), never a no-verdict 0.0 task FAIL.
     if result.get("failure_kind") == "no_credentials" or result.get("usage_limit"):
         raise ComputeTokenUnavailable(
-            "No Codex subscription or funded Azure credential available for agentic benchmark judge"
+            "Codex compute token unavailable for agentic benchmark judge: "
+            "the spawn found every subscription and funded credential exhausted"
         )
 
     score, reasoning = await _parse_agentic_judge_verdict(result)

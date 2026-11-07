@@ -5849,9 +5849,10 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     asked for a lease, so both copies ended ERROR and the campaign counted them INFRA.
     Per Andy, an exhausted or cooled-down token pool is a skipped test: the run record,
     CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR.
-    Andy 2026-11-06: a missing Codex token must not break the judge at once; it falls back
-    through the backend resolver (subscriptions, then the funded Azure key). Only when every
-    funded path is exhausted is the judge a compute-token SKIP."""
+    Andy 2026-11-06: a missing Codex token must not break the judge at once; the spawn leases
+    its own credential (subscriptions, then the funded Azure key). Only when every funded path
+    is exhausted, at the credential-plan preflight or inside the spawn itself, is the judge a
+    compute-token SKIP."""
     import importlib.util
     from dataclasses import replace
     from benchmarks import run_benchmark as bench
@@ -5879,80 +5880,161 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     task = get_task_by_name("test-mass-agent-run-0")
     evaluator = next(e for e in task.evaluators if e.get("id") == "t7-schema-task-complete")
     judged_task = replace(task, evaluators=[{**evaluator, "method": "agentic_llm_judge"}])
-    spawn = AsyncMock(
-        return_value={"structured_response": {"score": 1.0, "reasoning": "grounded in the evidence"}, "usage_items": []}
-    )
+    nothing_leasable = AsyncMock(return_value={"claude": False, "codex": False, "next_credential": None})
     with (
         patch.object(bench, "_sync_compute_tokens", lambda **_: None),
         patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
+        patch("domains.spawn_claude_code_agent.repo.fetch_code_credential_availability", nothing_leasable),
         patch.object(bench.httpx, "AsyncClient", _Client),
-        patch(
-            "helpers.attachments.upload_to_storage",
-            AsyncMock(return_value={"id": "evidence-1", "storage_path": "judge/benchmark_evidence.json"}),
-        ),
-        patch("domains.spawn_claude_code_agent.service.spawn_claude_code_activity", spawn),
     ):
-        # No synced Codex token: the judge still runs Codex with no token, so the backend
-        # resolver picks a subscription or the funded Azure fallback.
-        verdict = await bench._call_declared_agentic_llm_judge(
-            judged_task, {**evaluator, "method": "agentic_llm_judge"}, {"messages": []}
-        )
-        assert verdict["score"] == 1.0, verdict
-        spawn_kwargs = spawn.await_args.kwargs
-        assert spawn_kwargs["code_provider"] == "codex" and spawn_kwargs["gpt_token"] is None, spawn_kwargs
+        try:
+            await bench._run_declared_evaluators(judged_task, {"messages": []})
+        except Exception as error:  # the real judge path owns the raised type
+            preflight_error = error
+        else:
+            raise AssertionError("judge must not succeed without a compute token")
+    assert isinstance(preflight_error, bench.ComputeTokenUnavailable), preflight_error
+    assert "Codex compute token unavailable for agentic benchmark judge" in str(preflight_error)
 
-        # Every funded path exhausted (no subscription and no Azure credential): SKIP, not FAIL.
-        spawn.return_value = {
+    # The plan still had a credential at preflight but the spawn found every subscription and
+    # funded path exhausted (or hit a usage limit): the judge ran, returned no verdict and must
+    # still be a compute-token SKIP, never a no-verdict 0.0 task FAIL.
+    codex_funded = {"claude": False, "codex": True, "next_credential": {"provider": "codex", "tier": "funded"}}
+    exhausted_at_spawn = AsyncMock(
+        return_value={
             "failure_kind": "no_credentials",
             "usage_limit": {"provider": "codex"},
             "structured_response": None,
             "output_files": [],
         }
+    )
+    with (
+        patch.object(bench, "_sync_compute_tokens", lambda **_: None),
+        patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
+        patch(
+            "domains.spawn_claude_code_agent.repo.fetch_code_credential_availability",
+            AsyncMock(return_value=codex_funded),
+        ),
+        patch.object(bench.httpx, "AsyncClient", _Client),
+        patch(
+            "helpers.attachments.upload_to_storage",
+            AsyncMock(return_value={"id": "evidence-1", "storage_path": "judge/benchmark_evidence.json"}),
+        ),
+        patch("domains.spawn_claude_code_agent.service.spawn_claude_code_activity", exhausted_at_spawn),
+    ):
         try:
             await bench._run_declared_evaluators(judged_task, {"messages": []})
         except Exception as error:  # the real judge path owns the raised type
-            judge_error = error
+            spawn_error = error
         else:
             raise AssertionError("judge must not succeed with every funded credential exhausted")
-    assert isinstance(judge_error, bench.ComputeTokenUnavailable), judge_error
-    assert "No Codex subscription or funded Azure credential available for agentic benchmark judge" in str(judge_error)
+    exhausted_at_spawn.assert_awaited_once()
+    assert isinstance(spawn_error, bench.ComputeTokenUnavailable), spawn_error
+    assert "Codex compute token unavailable for agentic benchmark judge" in str(spawn_error)
 
-    logs = {"failure_evidence": {"errors": []}}
-    with contextlib.ExitStack() as stack:
-        for name in (
-            "_apply_live_fixtures",
-            "_apply_memory_fixtures",
-            "_apply_auth_test_site",
-            "_restore_live_fixture_scenarios_async",
-            "_release_auth_test_site",
-        ):
-            stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
-        for name, replacement in {
-            "create_agent": AsyncMock(return_value="ddc1c122-6786-4501-b0c9-dcdbe0b69718"),
-            "_run_with_agent_execution_backstop": AsyncMock(side_effect=judge_error),
-            "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": []}, logs)),
-            "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None)),
-            "ensure_payment_lifecycle_cleanup": AsyncMock(return_value=None),
-            "delete_agent": AsyncMock(return_value=None),
-        }.items():
-            stack.enter_context(patch.object(bench, name, replacement))
-        result = await bench._run_single_task_as_run_user(
-            "https://fixture.invalid", task, False, None, "", None, None, None
+    for judge_error in (preflight_error, spawn_error):
+        logs = {"failure_evidence": {"errors": []}}
+        with contextlib.ExitStack() as stack:
+            for name in (
+                "_apply_live_fixtures",
+                "_apply_memory_fixtures",
+                "_apply_auth_test_site",
+                "_restore_live_fixture_scenarios_async",
+                "_release_auth_test_site",
+            ):
+                stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+            for name, replacement in {
+                "create_agent": AsyncMock(return_value="ddc1c122-6786-4501-b0c9-dcdbe0b69718"),
+                "_run_with_agent_execution_backstop": AsyncMock(side_effect=judge_error),
+                "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": []}, logs)),
+                "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None)),
+                "ensure_payment_lifecycle_cleanup": AsyncMock(return_value=None),
+                "delete_agent": AsyncMock(return_value=None),
+            }.items():
+                stack.enter_context(patch.object(bench, name, replacement))
+            result = await bench._run_single_task_as_run_user(
+                "https://fixture.invalid", task, False, None, "", None, None, None
+            )
+        assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
+        assert result.failure_reason.startswith(
+            f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
+            "failed: Codex compute token unavailable for agentic benchmark judge"
+        ), result.failure_reason
+        assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
+
+        spec = importlib.util.spec_from_file_location(
+            "run_bench_campaign_skip", Path(__file__).parents[3] / "scripts" / "run-bench-campaign.py"
         )
-    assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
-    assert result.failure_reason.startswith(
-        f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
-        "failed: No Codex subscription or funded Azure credential available for agentic benchmark judge"
-    ), result.failure_reason
-    assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
+        campaign = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(campaign)
+        verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
+        assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
 
-    spec = importlib.util.spec_from_file_location(
-        "run_bench_campaign_skip", Path(__file__).parents[3] / "scripts" / "run-bench-campaign.py"
-    )
-    campaign = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(campaign)
-    verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
-    assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
+
+async def test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_codex_login():
+    """RCA 2026-11-05 mass-agent judge Codex token unavailable: the only Codex login was
+    cooling down (prod: until 2026-11-10), so the judge's GPT-token preflight SKIPPED
+    test-mass-agent-run-0 although the spawn it guarded leases own → pool → funded Azure
+    and the C15 plan still had a credential. The judge must run on the plan's provider
+    and skip only when the plan is empty; a failed plan lookup is an error, not a skip."""
+    from dataclasses import replace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("test-mass-agent-run-0")
+    evaluator = next(e for e in task.evaluators if e.get("id") == "t7-schema-task-complete")
+    judged_task = replace(task, evaluators=[{**evaluator, "method": "agentic_llm_judge"}])
+    verdict = {"structured_response": {"score": 1.0, "reasoning": "every card shows real outputs"}}
+
+    spawns: list[AsyncMock] = []
+
+    async def judge(plan, gpt_token=None, token_error=None):
+        spawn = AsyncMock(return_value=verdict)
+        spawns.append(spawn)
+        token = AsyncMock(
+            side_effect=token_error, return_value={"accessToken": gpt_token} if gpt_token else None
+        )
+        with (
+            patch.object(bench, "_sync_compute_tokens", lambda **_: True),
+            patch.object(bench, "_fetch_agentic_judge_compute_token", token),
+            patch("domains.spawn_claude_code_agent.repo.fetch_code_credential_availability", AsyncMock(return_value=plan)),
+            patch("domains.spawn_claude_code_agent.service.spawn_claude_code_activity", spawn),
+            patch("helpers.attachments.upload_to_storage", AsyncMock(return_value={"id": "evidence"})),
+        ):
+            passed, reason, results = await bench._run_declared_evaluators(judged_task, {"messages": []})
+        return passed, reason, results, spawn, token
+
+    codex_funded = {"claude": False, "codex": True, "next_credential": {"provider": "codex", "tier": "funded"}}
+    passed, reason, results, spawn, token = await judge(codex_funded)
+    assert (passed, reason) == (True, None), reason
+    assert results[0]["score"] == 1.0
+    kwargs = spawn.await_args.kwargs
+    assert (kwargs["code_provider"], kwargs["gpt_token"]) == ("codex", None), kwargs
+    token.assert_awaited_once()
+
+    _, _, _, spawn, _ = await judge(codex_funded, gpt_token="pool-login")
+    assert spawn.await_args.kwargs["gpt_token"] == "pool-login"
+
+    _, _, _, spawn, _ = await judge(codex_funded, token_error=bench.httpx.ConnectTimeout("token fetch"))
+    assert (spawn.await_args.kwargs["code_provider"], spawn.await_args.kwargs["gpt_token"]) == ("codex", None)
+
+    claude_sub = {"claude": True, "codex": False, "next_credential": {"provider": "claude", "tier": "subscription"}}
+    passed, _, _, spawn, token = await judge(claude_sub)
+    assert passed is True
+    assert (spawn.await_args.kwargs["code_provider"], spawn.await_args.kwargs["gpt_token"]) == ("claude", None)
+    token.assert_not_awaited()
+
+    # An older backend without next_credential: the spawn's own fallback reads the provider flags.
+    passed, _, _, spawn, _ = await judge({"claude": True, "codex": False})
+    assert passed is True and spawn.await_args.kwargs["code_provider"] == "claude"
+
+    try:
+        await judge(None)
+    except RuntimeError as lookup_failed:
+        assert not isinstance(lookup_failed, bench.ComputeTokenUnavailable), lookup_failed
+    else:
+        raise AssertionError("a failed credential-plan lookup must not run the judge")
+    spawns[-1].assert_not_awaited()
 
 
 def test_ci_permits_only_the_opt_in_agentcard_release_skip():
@@ -14532,6 +14614,40 @@ async def test_codex_runner_harness_error_has_explicit_error_outcome():
         )
     assert result.passed is False
     assert result.benchmark_status == "ERROR", result.benchmark_status
+
+
+async def test_codex_runner_poll_returns_output_after_exit():
+    """The Codex runner's ws poll returns the output and exit code once the session exits.
+
+    Its cleanup called ``client.close()``, which ClaudeCodeWsClient does not have
+    (it has ``disconnect()``), so every finished run raised AttributeError.
+    """
+    from aiohttp import web
+    import benchmarks.codex_runner as codex
+
+    async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_str(json.dumps({"type": "stdout", "data": "collatz steps: 111\n"}))
+        await ws.send_str(json.dumps({"type": "exit", "code": 0}))
+        await asyncio.sleep(5)
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", ws_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        output, exit_code = await asyncio.wait_for(
+            codex._poll_codex_ws_until_exit(f"ws://127.0.0.1:{port}/", timeout_seconds=10), 15
+        )
+    finally:
+        await runner.cleanup()
+    assert exit_code == 0, exit_code
+    assert "collatz steps: 111" in output, output
 
 
 async def test_codex_runner_creates_session_on_mounted_internal_route():
@@ -26730,6 +26846,10 @@ async def run_all_tests():
         test_judge_compute_token_unavailable_is_a_skipped_test_not_infra,
     )
     await r.record_async(
+        "agentic_judge_follows_c15_credential_order",
+        test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_codex_login,
+    )
+    await r.record_async(
         "agentcard_release_skip_execution_cleanup",
         test_agentcard_release_skip_retires_execution_without_repeating_financial_cleanup,
     )
@@ -27078,6 +27198,7 @@ async def run_all_tests():
     await r.record_async(
         "codex_runner_mounted_internal_route", test_codex_runner_creates_session_on_mounted_internal_route
     )
+    await r.record_async("codex_runner_poll_returns_after_exit", test_codex_runner_poll_returns_output_after_exit)
     await r.record_async(
         "minted_child_harness_outcomes",
         test_minted_benchmark_preserves_child_harness_outcomes,

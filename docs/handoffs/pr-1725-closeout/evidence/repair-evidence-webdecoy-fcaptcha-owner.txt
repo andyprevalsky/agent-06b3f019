@@ -1,0 +1,6 @@
+New evidence for your repair of webdecoy FCaptcha risk 0.164 > 0.163 (smoke/browser-biometrics-webdecoy): the same native FAIL reproduced in the PR #1725 deploy on a tree with no agents/ or scripts/ change.
+
+Failed source: 2731bfe53f7ace99196021906b423b2a6296766a (PR #1725 sync head); originating merge on main: d5d852e5b0c8beb12e1d215c2c8bfa88fe416046 (2026-11-06 ~11:31Z). Please bring your work onto current main containing that merge.
+Exact error: FCaptcha captured API risk score 0.164 exceeds ratchet 0.163 (lower = more human; this gate only ratchets down, never up) [FCaptcha engine v1.46.2; ...] [detections: vision_ai: Click injected with no pointer trajectory (3 teleport clicks); datacenter: Request from known datacenter IP range; headless: Very few speech voices available (3); bot: Windows UA but Segoe UI font not detected; browser tilion/tilion_direct_country]
+Evidence: Benchmark Hub run 20261106-095657-2926622-mc29e58eff36d (task run_id 24fe74ba-c387-4ea2-aa3f-2771189e98d2, agent c19b68c8-5306-4f81-ab50-9fee95a7760d, 174s). The same task passed on the previous tree of that deploy, so this is a second observation of the margin, not a new cause.
+No reply is needed; this is evidence for your existing goal. Originating devbox: c8cc9f58-7058-4394-a3b3-c8c96d57208c.

@@ -1,0 +1,127 @@
+{
+ "schema_version": 1,
+ "pr": 1724,
+ "title": "Ledger records every run of merged code, wherever it ran (+ backfill)",
+ "merge_commit": "0ee70b27c83a9ac586a958fb3db4df8f5e5d9c32",
+ "gated_source": "bf81ac6a48871d10d973cd443ce4b31175975a47",
+ "production": {
+  "fly": "not required (no agents runtime change; classify-agent-runtime-changes empty)",
+  "render": "not required (no back-end change in merged diff)",
+  "vercel": "not required (no front-end change)",
+  "semantic": "chat-lifecycle-ratchet run 42191005446 source_sha=0ee70b27: attempt 1 'Semantic frontend flows' FAILED (mobile-adversarial-trajectories.spec.ts:327 'Open menu' click timeout, NOT_INTRODUCED: no front-end change since green run 42168007805); same-source --retry-failed-once attempt 2 PASSED all 5 jobs (2026-11-06T09:07Z)",
+  "agentcard": "SKIPPED by deploy-operator election: diff touches no AgentCard/payment code; sandbox stalled since ~2026-11-03; user excluded AgentCard tasks on 2026-11-06",
+  "mac_local_acceptance": "SKIPPED - no Mac available: owner-scoped GET /api/local-devices returned HTTP 200 devices=[] at 2026-11-06T09:08:01Z",
+  "phone_callee_mapping": "local back-end/.env only (BENCHMARK_CALLEE_PHONE_NUMBER_IDS adds phone-call-ivr-dtmf -> new free Vapi number rose-benchmark-callee-ivr and phone-call-hold-queue -> rose-benchmark-callee-hold); managed project env not updated (edit-project-settings request expired twice); bench app BACKEND_ENV_B64 not restaged"
+ },
+ "branch_commits": [
+  "1420ae557d feat(bench-history): ledger records every run of merged code, wherever it ran",
+  "bc31eb4c93 fix(bench-history): backfill skips pre-merge groups with no parseable timestamp",
+  "bf81ac6a48 fix(bench-history): bind backfilled Hub runs only to their own source identity"
+ ],
+ "review": {
+  "cycles": "808042e skipped (CodeRabbit usage cap); e51b568 initial: 1 finding fixed in bc31eb4; bc31eb4 incremental: 2 findings fixed in bf81ac6; bf81ac6 verification: 1 minor finding deferred (3 delivered rounds, standing authorization)",
+  "deferred_to": "branch fix/backfill-owed-duration-validation (fix + regression, unmerged)",
+  "ledger": "evidence/review-ledger.json"
+ },
+ "staged_cycle": {
+  "final": "ready on bf81ac6 (evidence/final-plan-bf81ac6.json.gz, evidence/final-cycle-bf81ac6.json.gz); PIPELINE_VERIFY status=bound-staged exit=0",
+  "rca_reports": [
+   "evidence/rca-report-bf81ac6.json",
+   "evidence/rca-report-bc31eb4.json"
+  ],
+  "notes": "Earlier cycles on e51b568 and bc31eb4 failed on: main's invalid RCA case file (fixed on main a5f2de326e; evidence/rca-archive-validate-origin-main-090b9171b.txt), smoke ref not yet pushed, host missing lsof, frontend worker symlinked node_modules, warm-source donor held by another owner's fleet, open timing runs after interruption, GitHub REST quota exhaustion, and a load-dependent run-deploy-pipeline sampler assertion (evidence/attempt6-final-e51b568-infra-failures.json, evidence/closure-bc31eb4.json)."
+ },
+ "repair_handoffs": [
+  {
+   "test": "scripts/tests/run-deploy-pipeline.test.py::check_materialized_reservation_credit (inherited-flag)",
+   "thread": "https://boxes.dev/thread/thr_0deca843c8a14884b20b23bd5b856513",
+   "devbox": "80412093-97ba-491d-ade5-b2df24f7ef5b",
+   "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1)",
+   "goal": "evidence/repair-goal-run-deploy-pipeline.txt",
+   "requested": "claude-opus-5-5, reasoning high, speed standard (effective settings not exposed by the platform listing)"
+  },
+  {
+   "test": "front-end/tests-e2e/mobile-adversarial-trajectories.spec.ts:327 (10k copy menus)",
+   "thread": "https://boxes.dev/thread/thr_ea75a3483c68428a829d85c113ff1611",
+   "devbox": "4b7127d7-b06a-49f8-ad84-a0da957c6d96",
+   "folder": "Bugs (z57k17gzz4egv17ag6qqtasexs8h273j, revision 1)",
+   "goal": "evidence/repair-goal-mobile-adversarial.txt",
+   "requested": "claude-opus-5-5, reasoning high, speed standard (effective settings not exposed by the platform listing)"
+  }
+ ],
+ "followups": [
+  "Deferred CodeRabbit finding 4490523435 (owed-duration rows missing task/timestamp/duration): branch fix/backfill-owed-duration-validation",
+  "Ledger producers: cloud fleet / campaign guests record attempts only in their throwaway checkout; only the Hub keeps them, and 15,040 Hub rows carry no source identity (stamp `code` on every Hub bundle so future runs can be backfilled)",
+  "Persist BENCHMARK_CALLEE_PHONE_NUMBER_IDS to the managed project env and restage bench app secrets (--refresh-secrets) before cloud phone tasks run",
+  "GitHub REST quota for the repo token was exhausted twice during this deploy (shared with other devboxes); deploy tooling (wait-for-code-review, production-semantic poller, cloudbench resolve_github_token) fails closed instead of waiting for the reset",
+  "Shared warm-source donor contention between concurrent smoke fleets on navi-whisper-lux-bench",
+  "Two test-mass-agent-run-0 Machines (8d96719f3690e8, 82dd310c797ed8, ref 05826f6d, started 05:08/05:18Z) look stale; not owned by this deploy, untouched"
+ ],
+ "inventory": [
+  {
+   "path": "PR #1724 source",
+   "disposition": "committed",
+   "detail": "all branch commits merged in 0ee70b27"
+  },
+  {
+   "path": "branch fix/backfill-owed-duration-validation",
+   "disposition": "committed",
+   "detail": "pushed to origin; deferred review fix"
+  },
+  {
+   "path": "/home/boxes/deploy-workers/* (11 gate clones)",
+   "disposition": "reproducible-unneeded",
+   "detail": "clones of committed source + test caches; regenerate with scripts/deploy_test_worker.py --prepare-checkout; retired after this record lands"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-pipeline{,-bc31eb4,-bf81ac6}",
+   "disposition": "committed-summary",
+   "detail": "final plan/cycle, RCA reports, closure and infra-failure notes committed here; superseded attempt dirs are diagnostic only"
+  },
+  {
+   "path": "/var/tmp/ledger-backfill (saved Hub index, dry-run reports)",
+   "disposition": "reproducible-unneeded",
+   "detail": "re-fetch with scripts/benchmark-history-backfill.py (read-only Hub GET)"
+  },
+  {
+   "path": "/var/tmp/deploy-1724 (cycle env wrapper, run logs, handoff prompts)",
+   "disposition": "committed-summary",
+   "detail": "handoff goals committed under evidence/; logs are diagnostic only"
+  },
+  {
+   "path": "/swapfile-deploy (16 GB swap) and vm.swappiness=150",
+   "disposition": "host-runtime",
+   "detail": "non-persistent host tuning for concurrent gates; not a record"
+  },
+  {
+   "path": "host package lsof",
+   "disposition": "host-runtime",
+   "detail": "installed via apt for deploy-command-structural"
+  },
+  {
+   "path": "repo-local secrets (agents/.env, back-end/.env)",
+   "disposition": "unchanged-except-noted",
+   "detail": "managed project env; only BENCHMARK_CALLEE_PHONE_NUMBER_IDS edited locally (see production.phone_callee_mapping); nothing minted or rotated except one new free Vapi callee number"
+  },
+  {
+   "path": "minted owner session for /api/local-devices check",
+   "disposition": "destroyed",
+   "detail": "shredded immediately after the read"
+  }
+ ],
+ "files": {
+  "evidence/attempt6-final-e51b568-infra-failures.json": "43cbfe4709f9b318b84bd0dcfa41df1c0b1bef28d63bbdcc44f20e14bf075bbb",
+  "evidence/closure-bc31eb4.json": "47be5f29706c348d69b821c86a1fe87d48af5519203e75560f2b3768809ebac6",
+  "evidence/final-cycle-bf81ac6.json.gz": "0f08f4e58aa5ea0c906792de8e70faaaa6bfd72709a922c8e5aad7c852e56e96",
+  "evidence/final-plan-bf81ac6.json.gz": "d5af3ab7af2d22be50888357e7e32ec68994750d787167eace9a98dbce83fd0d",
+  "evidence/post-merge-packet-run-deploy-pipeline-tree-peak-anon.json": "bd06265cc6e8756be728e0776f0320bb029c81ff4a797f779e2f7afb989a5e35",
+  "evidence/production-semantic-42191005446-attempt1-failure.log": "85f01d42d01466396b37c09a59dc70a25c74e5b1c137b699f784f2cda11bcff0",
+  "evidence/production-semantic-42191005446.log": "7d7c1b29f4ff59bd5236b75e239f0776a3fd14e4a8d248c0646d87437e64f933",
+  "evidence/rca-archive-validate-origin-main-090b9171b.txt": "205dabdbf76517cc761417003f5442d1b8170dd9465a3982d9a7f2badb5d7ead",
+  "evidence/rca-report-bc31eb4.json": "706350b33747860b383cccd95849ac4d4be39d2eee9e83d109b29ae028402f2b",
+  "evidence/rca-report-bf81ac6.json": "07a77348fe2e3c827cedce0ca8a71eb9fb1b6391a57624570f7a9170f2782127",
+  "evidence/repair-goal-mobile-adversarial.txt": "474211b5fb7b6da5e0bbf85c14513834e13882ed5708bb5a645a49e04e9bf0ca",
+  "evidence/repair-goal-run-deploy-pipeline.txt": "a54dd03ea7998ddaf47ea2d8f6d930f4c1a8bcac8d9afb98e371119bc0fe665d",
+  "evidence/review-ledger.json": "68e3b5301e62c8649f102099357e858df5dee5e4d538f45d7b2f10ea5975afc3"
+ }
+}

@@ -655,8 +655,19 @@ def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "sam
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}\n")
-    (root / "package-lock.json").write_text(lock)
-    (root / "back-end/package-lock.json").write_text(lock)
+    # The production dependency fingerprint parses the tracked backend lockfile
+    # so it can normalize only the root runtime-policy fields. Keep these test
+    # fixtures valid npm lock documents while retaining the compact string
+    # labels used to exercise matching and mismatching dependency graphs.
+    lock_document = json.dumps(
+        {
+            "name": "cloudbench-fixture",
+            "lockfileVersion": 3,
+            "packages": {"": {"name": lock}},
+        }
+    )
+    (root / "package-lock.json").write_text(lock_document)
+    (root / "back-end/package-lock.json").write_text(lock_document)
     helper = root / "scripts/lib/cloudbench-env.sh"
     helper.parent.mkdir(parents=True, exist_ok=True)
     helper.write_text(ENV_HELPER_SCRIPT.read_text())
@@ -980,8 +991,7 @@ elif name == 'rsync':
         assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text() == old_python_marker
         assert str(repo / "agents/venv") in (repo / "agents/venv/bin/activate").read_text()
         (commands / "python3").unlink()
-        _write_manifests(repo)
-        (repo / "back-end/package-lock.json").write_text("different revision")
+        _write_manifests(repo, lock="different revision")
         rejected = subprocess.run(
             ["bash", str(SCRIPT), str(donor), str(repo)],
             env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}"),

@@ -22,7 +22,7 @@ jobs:
   review:
     # Retired by user decision. Keep inert even if dispatched or labeled.
     if: ${{ false }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
       contents: read
@@ -48,14 +48,14 @@ jobs:
           fi
 
       - name: Checkout reviewed commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: useblacksmith/checkout@v1 # v4
         with:
           ref: ${{ env.PR_HEAD_SHA }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout trusted diagnostics
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: useblacksmith/checkout@v1 # v4
         with:
           ref: ${{ github.event.repository.default_branch }}
           path: .trusted-review

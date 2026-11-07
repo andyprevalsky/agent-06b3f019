@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+  "base_ref": "origin/main",
+  "merge_base": "7b15b3e06b77b57529cc868b2da50450f933180b",
+  "frozen_at": "2026-11-06T04:19:43Z",
+  "guards": {
+    "prompt-approval": [
+      "agents/browser_tools/schemas.py",
+      "agents/providers/rose/browser_use.py"
+    ],
+    "agent-behavior-approval": [],
+    "llm-trajectory-injection-approval": []
+  },
+  "files": {
+    "agents/browser_tools/schemas.py": "6650f256c6842c2afa36a501c3544b2ae3223f359e0e93ce79e811132c21a96c",
+    "agents/providers/rose/browser_use.py": "73d4810250d910cf8710ea6cc64e1d17f023a7059ccb917298866b9f98dc1d31"
+  },
+  "decision": "grounded",
+  "decided_at": "2026-11-06T04:22:27Z",
+  "evidence": "RCA-WEBDECOY-POINTER-1 reviewer thread ph7ert71ewq2nh4q0pzp64gjj58hqads GROUNDED @ 052ac6ce7 (/var/tmp/webdecoy-rca/golden-review-v4.md); prior GROUNDED ph779x2jpeh185k9t8ktqp9jb18hp5v3 @ 584cf4076"
+}
