@@ -952,6 +952,61 @@ async def test_a_foreground_task_name_is_reusable_once_its_agent_finished_and_re
         assert not any(wf._retired_task_names), "a finished foreground agent never reserves its name"
 
 
+async def test_sequential_foreground_spawns_sharing_a_task_name_each_return_their_own_result():
+    """Two foreground spawns that repeat one task_name never swap results.
+
+    The cached July mass-agent trajectory has 19 agents that each issue the same explore spawn twice
+    under one task_name. The foreground record keys its path by task_name, so the result handed back
+    to a spawn call (and the row posted for it) must still be the one its own run produced, in both
+    the live path and the DEMO-cache replay path.
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    for replay in (False, True):
+        harness = _Harness()
+
+        async def executor(wf, tool_call, call_id):
+            text = f"result produced by {call_id}"
+            await wf._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Finished",
+                    message=text,
+                    status=MessageStatus.FINISHED,
+                    data={"result": text},
+                ),
+                call_id,
+                "spawn_agent",
+            )
+            return MessageStatus.FINISHED, text
+
+        with (
+            _workflow_env(harness),
+            patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+            patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+            patch.object(temporal_workflow, "info", lambda: SimpleNamespace(workflow_id="agent-parent")),
+        ):
+            wf = _workflow(harness)
+            wf.current_phase = "EXECUTE"
+            wf.fast_mode_cache_enabled = replay
+            args = {
+                **FOREGROUND_SPAWNS["explore"],
+                "task_name": "research_creator_shared_1a2b3c4d",
+                "run_in_background": False,
+            }
+            results = {}
+            for call_id in ("toolu_one", "toolu_two"):
+                results[call_id] = await wf._execute_tool("spawn_agent", dict(args), call_id)
+                assert results[call_id].get("success") is True, (replay, call_id, results[call_id])
+            for call_id, other in (("toolu_one", "toolu_two"), ("toolu_two", "toolu_one")):
+                assert f"result produced by {call_id}" in str(results[call_id]), (replay, call_id, results[call_id])
+                assert f"result produced by {other}" not in str(results[call_id]), (replay, call_id, results[call_id])
+                rows = [row for row in harness.rows if row["metadata"].get("toolCallId") == call_id]
+                assert rows and all(other not in row["text"] for row in rows), (replay, call_id, rows)
+
+
 async def test_demo_cache_replay_accepts_a_recorded_foreground_spawn_that_repeats_its_task_name():
     """A DEMO-cache replay of a recorded foreground trajectory is never failed by task_name bookkeeping.
 
@@ -2763,6 +2818,10 @@ async def run_all_tests():
     await r.record_async(
         "foreground_task_name_reusable_once_finished_refused_while_running",
         test_a_foreground_task_name_is_reusable_once_its_agent_finished_and_refused_while_it_runs,
+    )
+    await r.record_async(
+        "sequential_foreground_spawns_sharing_a_task_name_return_their_own_results",
+        test_sequential_foreground_spawns_sharing_a_task_name_each_return_their_own_result,
     )
     await r.record_async(
         "demo_replay_accepts_recorded_foreground_spawn_repeating_task_name",
