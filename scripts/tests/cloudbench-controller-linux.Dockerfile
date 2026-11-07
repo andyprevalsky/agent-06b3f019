@@ -1,4 +1,4 @@
-FROM node:22.13.0-bookworm-slim AS node
+FROM node:22.23.4-bookworm-slim AS node
 FROM python:3.11.9-slim-bookworm
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 RUN apt-get update \
