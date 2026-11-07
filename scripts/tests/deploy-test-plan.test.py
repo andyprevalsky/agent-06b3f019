@@ -630,6 +630,42 @@ class InterruptedCustody(unittest.TestCase):
         state,r,proof=self.fixture(cloud=True)
         with self.assertRaises(TypeError):native.validate(r,r['cleanup_owner'],{'kind':native.KIND,'owner':r['cleanup_owner'],'request_token':r['token'],'source':r['source']})
 
+    def test_custody_scan_reobserves_a_process_that_is_briefly_unreadable(self):
+        """A same-uid process changing credentials refuses /proc/<pid>/fd for a moment (seen 1 in 12 under load):
+        that is a failed read, so re-read it, skip it once gone, and still fail closed while it stays unreadable."""
+        import deploy_test_interrupted_cleanup as ic
+
+        class Proc:
+            def __init__(self, refusals, alive=True):
+                self.refusals, self.alive, self.reads = refusals, alive, 0
+
+            def __truediv__(self, name):
+                owner = self
+                if name == 'cmdline':
+                    return SimpleNamespace(read_bytes=lambda: b'sleep\x001\x00')
+                if name == 'cwd':
+                    return SimpleNamespace(resolve=lambda strict=True: Path('/'))
+
+                def entries():
+                    owner.reads += 1
+                    if owner.reads <= owner.refusals:
+                        raise PermissionError(13, 'Permission denied')
+                    return iter([])
+                return SimpleNamespace(iterdir=entries)
+
+            def exists(self):
+                return self.alive
+
+        with patch.object(ic.time, 'sleep') as pause:
+            recovering = Proc(refusals=2)
+            self.assertEqual(ic.observe_process(recovering), ('sleep\x001\x00', '/', []))
+            self.assertEqual((recovering.reads, pause.call_count), (3, 2))
+            stuck = Proc(refusals=99)
+            with self.assertRaises(PermissionError):
+                ic.observe_process(stuck)
+            self.assertEqual(stuck.reads, ic.OBSERVE_ATTEMPTS)
+            self.assertIsNone(ic.observe_process(Proc(refusals=99, alive=False)))
+
     def test_static_and_cloud_reconcile_preserve_originals_and_history(self):
         for cloud in (False,True):
             with self.subTest(cloud=cloud):

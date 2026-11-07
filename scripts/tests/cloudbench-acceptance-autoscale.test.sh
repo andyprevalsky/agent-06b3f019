@@ -200,6 +200,9 @@ finalization_harness="$TMP_ROOT/finalization-harness.sh"
     printf 'AUTOSCALER_PIDS=("$!"); started=$SECONDS\n'
     printf 'wait_for_autoscaler_finalization\n'
     printf '[ $((SECONDS - started)) -lt 10 ] || exit 4\n'
+    # Reap the fixtures (the first one is still inside its trailing sleep when the marker is seen) so no
+    # child outlives the harness: the deploy supervisor reports a surviving child as UNVERIFIED.
+    printf 'wait\n'
 } > "$finalization_harness"
 grep -q '^wait_for_autoscaler_finalization() {' "$finalization_harness" || {
     echo "FAIL: could not extract wait_for_autoscaler_finalization from run-bench-fleet" >&2

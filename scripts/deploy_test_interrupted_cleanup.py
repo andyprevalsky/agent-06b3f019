@@ -51,6 +51,35 @@ def no_holders(paths):
     need(result.returncode == 1 and not result.stdout and not result.stderr, 'log writer or unknown holder remains')
 
 
+OBSERVE_ATTEMPTS, OBSERVE_DELAY = 5, 0.2
+
+
+def observe_process(process):
+    """argv, cwd and fd targets of a same-uid process, or None once it has exited.
+
+    A process that is changing credentials (exec, sudo) is unreadable for a moment, which is a failed
+    read, not evidence about the namespace: re-read a bounded number of times, skip the process once it
+    is gone, and still fail closed while it stays unreadable and alive.
+    """
+    for attempt in range(OBSERVE_ATTEMPTS):
+        try:
+            argv = (process / 'cmdline').read_bytes().decode(errors='replace')
+            cwd = str((process / 'cwd').resolve(strict=True))
+            targets = []
+            for fd in (process / 'fd').iterdir():
+                try:
+                    targets.append(os.readlink(fd))
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+            return argv, cwd, targets
+        except PermissionError:
+            if not process.exists():
+                return None
+            if attempt + 1 == OBSERVE_ATTEMPTS:
+                raise
+            time.sleep(OBSERVE_DELAY)
+
+
 def namespace_quiet(namespace, ports):
     """Observe only the old namespace; other legitimate source workers stay untouched."""
     ancestors, pid = set(), os.getpid()
@@ -65,15 +94,13 @@ def namespace_quiet(namespace, ports):
         try:
             if process.stat().st_uid != os.geteuid():
                 continue
-            argv = (process / 'cmdline').read_bytes().decode(errors='replace')
-            cwd = str((process / 'cwd').resolve(strict=True))
+            seen = observe_process(process)
+            if seen is None:
+                continue
+            argv, cwd, targets = seen
             need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
                  'original namespace has a live consumer')
-            for fd in (process / 'fd').iterdir():
-                try:
-                    target = os.readlink(fd)
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
+            for target in targets:
                 need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
         except (FileNotFoundError, ProcessLookupError):
             continue
