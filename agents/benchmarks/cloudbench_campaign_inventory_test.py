@@ -3579,7 +3579,9 @@ def test_campaign_inventory_full_http_auth(tmp_path, monkeypatch, token, refresh
 @pytest.mark.parametrize('cancel', (False, True))
 def test_campaign_inventory_full_http_auth_deadline_and_owned_join(tmp_path, cancel):
     pidfile=tmp_path/'auth.pid';cli=tmp_path/'flyctl'
-    child="import os,time;from pathlib import Path;Path("+repr(str(pidfile))+").write_text(str(os.getpid()));time.sleep(10)"
+    # Publish the pid atomically: the poll below can see a created-but-empty file (2026-08-03 RCA).
+    child=("import os,time;from pathlib import Path;t=Path("+repr(str(pidfile)+'.tmp')+");t.write_text(str(os.getpid()));"
+           "os.replace(t,"+repr(str(pidfile))+");time.sleep(10)")
     cli.write_text('#!/bin/bash\nexec '+shlex.quote(sys.executable)+' -c '+shlex.quote(child)+'\n');cli.chmod(0o755)
     env=dict(os.environ, PATH=str(tmp_path)+':'+os.environ['PATH'],FLY_API_TOKEN='fm2_fixture',FLY_FLAPS_BASE_URL='http://127.0.0.1:9')
     process=subprocess.Popen([sys.executable,str(ROOT/'scripts/cloudbench-campaign-machines.py'),'fixture','1'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)

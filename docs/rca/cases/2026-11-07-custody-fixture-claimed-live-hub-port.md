@@ -115,6 +115,14 @@ covers transient, persistent and setuid-shaped cases (red on both earlier
 validators, green now). The full suite passed 5/5 under 8765 plus connection
 churn.
 
+The sibling scanner `deploy_test_local_cleanup.quiet()` hit the same
+`PermissionError: /proc/<pid>/cwd` in `deploy-test-cycle` (three
+`InterruptedLocalRecovery` tests) during the PR #1752 gate. Both scanners now
+use one helper, `deploy_test_process.scan_same_user_processes`, with the same
+bounded, real-uid re-observation. Regression:
+`LocalCleanupQuietScan.test_unreadable_same_user_process_is_reobserved_then_refused`
+(red on the old scanner with the raw `PermissionError`, 5/5 green now).
+
 Known pre-existing limit (unchanged): the upfront filter still skips a process
 already owned by another uid when the scan reaches it, including a setuid
 child that keeps our real uid. Tightening that would refuse custody for every

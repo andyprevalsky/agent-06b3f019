@@ -24,6 +24,7 @@ sources:
   - PR #1299
   - commit 2b5c803e4b41f9869427d7c093c2abfb78b1f258
   - PR #1745
+  - PR #1752
 repro: agents/tests/blackbox/benchmark.blackbox.py test_local_start_services_reaps_only_its_real_process_group
 status: fixed
 ---
@@ -189,6 +190,17 @@ Mechanism repro (`/var/tmp/rca-imsg/race2.py`): plain redirect with a delay →
 Fix: the callback writes `$RESERVE_READY.tmp` and renames it onto the readiness
 path; all 7 parametrizations pass. Gate: NOT_INTRODUCED (the PR changed no
 cloudbench code; the failure needs only scheduling delay).
+
+### Recurrence 2026-11-07 (PR #1752 deploy, benchmark-live-results[4/6])
+
+`agents/benchmarks/cloudbench_campaign_inventory_test.py::test_campaign_inventory_full_http_auth_deadline_and_owned_join[True]`
+failed twice under the concurrent structural gate with `ValueError: invalid
+literal for int() with base 10: ''` at `pid=int(pidfile.read_text())`. Its fake
+`flyctl` child published its PID with `Path.write_text`, and the test polls on
+existence. Mechanism repro: the same write shape with a widened create-to-write
+window reads `''`. Fix: the child writes `auth.pid.tmp` and `os.replace`s it.
+Both parametrizations passed 5/5 and the whole file passed 381/381. Gate:
+NOT_INTRODUCED.
 
 ## Human feedback
 
