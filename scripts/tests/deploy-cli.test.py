@@ -423,14 +423,19 @@ class ReviewApprovalLedger(Repo):
 
 
 class HarnessProcesses(unittest.TestCase):
-    def test_only_the_devbox_daemon_and_runtime_executables_are_harness(self):
+    def test_only_the_devbox_daemon_helpers_are_harness(self):
         home = str(Path.home())
-        for exe in (f'{home}/.devbox/daemon/bundle/bin/pidfd-janitor', '/opt/devbox-runtime/node/current/bin/node',
-                    '/opt/devbox-tools/bin/gh'):
-            self.assertTrue(d.is_harness_executable(exe), exe)
-        for exe in (None, '', '/usr/bin/bash', f'{home}/rose/agents/venv/bin/python3', '/opt/devbox-runtime-evil/node',
-                    f'{home}/.devbox/daemon-lookalike/bin/x', '/usr/bin/node'):
-            self.assertFalse(d.is_harness_executable(exe), exe)
+        daemon_script = f'/opt/devbox-runtime/node/current/bin/node {home}/.devbox/daemon/bundle/wrappers/boxes-github-credential.mjs'
+        for exe, argv in ((f'{home}/.devbox/daemon/bundle/bin/pidfd-janitor', ''), ('/opt/devbox-tools/bin/gh', ''),
+                          ('/opt/devbox-runtime/node/current/bin/node', daemon_script)):
+            self.assertTrue(d.is_harness_process(exe, argv), exe)
+        for exe, argv in ((None, ''), ('', ''), ('/usr/bin/bash', ''), (f'{home}/rose/agents/venv/bin/python3', ''),
+                          ('/opt/devbox-runtime-evil/node', ''), (f'{home}/.devbox/daemon-lookalike/bin/x', ''), ('/usr/bin/node', ''),
+                          # other threads' agent sessions and project scripts on the shared runtime are live work
+                          ('/opt/devbox-tools/claude/current/bin/claude', '--settings x'),
+                          ('/opt/devbox-tools/codex/versions/0.166.0/bin/codex', ''),
+                          ('/opt/devbox-runtime/node/current/bin/node', 'node /home/boxes/rose/back-end/src/server.js')):
+            self.assertFalse(d.is_harness_process(exe, argv), (exe, argv))
 
 
 class DeletionCheck(Repo):

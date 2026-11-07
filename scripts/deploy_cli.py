@@ -459,12 +459,25 @@ def own_pids() -> set[int]:
     return pids
 
 
-HARNESS_PREFIXES = (str(Path.home() / '.devbox' / 'daemon'), '/opt/devbox-runtime', '/opt/devbox-tools')
+DAEMON_DIR = str(Path.home() / '.devbox' / 'daemon')
+HARNESS_BINARIES = (DAEMON_DIR, '/opt/devbox-tools/bin')
 
 
-def is_harness_executable(exe: str | None) -> bool:
-    """The devbox daemon's own helpers (e.g. pidfd-janitor) keep the agent's cwd; they hold no workspace state."""
-    return bool(exe) and any(exe == prefix or exe.startswith(prefix + '/') for prefix in HARNESS_PREFIXES)
+def under(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(prefix + '/')
+
+
+def is_harness_process(exe: str | None, argv: str = '') -> bool:
+    """The devbox daemon's own helpers (pidfd-janitor, credential wrappers) keep the agent's cwd; they hold no workspace state.
+
+    Narrow on purpose: another thread's agent session (claude, codex) or an arbitrary process on the shared node runtime
+    with its cwd in this checkout is live work and must still block deletion.
+    """
+    if not exe:
+        return False
+    if any(under(exe, prefix) for prefix in HARNESS_BINARIES):
+        return True
+    return under(exe, '/opt/devbox-runtime') and f'{DAEMON_DIR}/' in argv
 
 
 def live_processes(root: Path) -> list[dict]:
@@ -481,7 +494,7 @@ def live_processes(root: Path) -> list[dict]:
             continue
         if cwd == root or root in cwd.parents:
             try:
-                if is_harness_executable(os.readlink(entry / 'exe')):
+                if is_harness_process(os.readlink(entry / 'exe'), argv):
                     continue
             except OSError:
                 pass
