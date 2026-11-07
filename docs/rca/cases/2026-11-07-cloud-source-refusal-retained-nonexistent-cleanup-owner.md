@@ -2,7 +2,7 @@
 id: 2026-11-07-cloud-source-refusal-retained-nonexistent-cleanup-owner
 date: 2026-11-07
 title: A pre-admission source refusal retained an unreconcilable smoke cleanup owner
-surface: scripts
+surface: harness
 component: staged-deploy-cloud-admission
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
@@ -16,7 +16,7 @@ tags:
   - admission
   - cleanup-custody
 sources:
-  - PR 1770
+  - commit 3043c89624e3d1994adaad6c1131290266086868 PR1770 source-refusal custody repair
   - commit b544c29434ccbb5075952850b7701ffec14545c9
 repro: scripts/tests/deploy-test-cycle.test.py
 status: fixed
