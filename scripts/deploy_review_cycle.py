@@ -130,7 +130,8 @@ def next_cycle(entries: list[object]) -> dict[str, object]:
     consumed = budget_cycles(entries)
     if len(consumed) >= MAX_REVIEW_CYCLES:
         raise ReviewCycleError(
-            f"review cycle cap reached ({MAX_REVIEW_CYCLES}); stop /deploy as review-unstable"
+            f"review cycle cap reached ({MAX_REVIEW_CYCLES}); defer the remaining non-security findings with "
+            "`override` and merge, or ask the user how a security or prod-impacting fix is reviewed"
         )
     position = len(consumed) + 1
     replaces = None
