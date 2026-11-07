@@ -51,6 +51,27 @@ def no_holders(paths):
     need(result.returncode == 1 and not result.stdout and not result.stderr, 'log writer or unknown holder remains')
 
 
+OBSERVE_ATTEMPTS = 5
+OBSERVE_DELAY_SECONDS = 0.2
+
+
+def observe_process(process, observe):
+    """Run one /proc observation; a process that is mid-exec or credential change is re-read, not trusted.
+
+    A process that exits during the read is gone (skipped). One that stays unreadable while alive
+    cannot be proven outside the original namespace, so it fails closed after the bounded re-reads.
+    """
+    for attempt in range(OBSERVE_ATTEMPTS):
+        try:
+            return observe(process)
+        except (FileNotFoundError, ProcessLookupError):
+            return None
+        except PermissionError as error:
+            if attempt + 1 == OBSERVE_ATTEMPTS:
+                raise ValueError('interrupted custody: cannot observe live process ' + process.name) from error
+            time.sleep(OBSERVE_DELAY_SECONDS)
+
+
 def namespace_quiet(namespace, ports):
     """Observe only the old namespace; other legitimate source workers stay untouched."""
     ancestors, pid = set(), os.getpid()
@@ -59,24 +80,24 @@ def namespace_quiet(namespace, ports):
         raw = Path('/proc', str(pid), 'stat').read_text().rsplit(') ', 1)[1].split()
         pid = int(raw[1])
     prefix = str(namespace)
-    for process in Path('/proc').iterdir():
-        if not process.name.isdigit():
-            continue
-        try:
-            if process.stat().st_uid != os.geteuid():
+
+    def holds_namespace(process):
+        if process.stat().st_uid != os.geteuid():
+            return
+        argv = (process / 'cmdline').read_bytes().decode(errors='replace')
+        cwd = str((process / 'cwd').resolve(strict=True))
+        need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
+             'original namespace has a live consumer')
+        for fd in (process / 'fd').iterdir():
+            try:
+                target = os.readlink(fd)
+            except (FileNotFoundError, ProcessLookupError):
                 continue
-            argv = (process / 'cmdline').read_bytes().decode(errors='replace')
-            cwd = str((process / 'cwd').resolve(strict=True))
-            need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
-                 'original namespace has a live consumer')
-            for fd in (process / 'fd').iterdir():
-                try:
-                    target = os.readlink(fd)
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
-                need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
-        except (FileNotFoundError, ProcessLookupError):
-            continue
+            need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
+
+    for process in Path('/proc').iterdir():
+        if process.name.isdigit():
+            observe_process(process, holds_namespace)
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
         for line in Path(table).read_text().splitlines()[1:]:
             row = line.split()

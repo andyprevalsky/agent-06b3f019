@@ -840,4 +840,56 @@ class InterruptedCustody(unittest.TestCase):
         proof['confirmed_at']=r['finished_at']
         with self.assertRaises(ValueError):c.reconcile(state,r['token'],proof)
 
+
+class ProcessObservation(unittest.TestCase):
+    """The custody scan re-reads a process that is mid-exec instead of aborting on one EACCES."""
+
+    def setUp(self):
+        import deploy_test_interrupted_cleanup as custody
+        self.custody = custody
+        self.process = SimpleNamespace(name='4242')
+        patcher = patch.object(custody, 'OBSERVE_DELAY_SECONDS', 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_transiently_unreadable_process_is_reread_and_accepted(self):
+        calls = []
+
+        def observe(process):
+            calls.append(process.name)
+            if len(calls) < 3:
+                raise PermissionError(13, 'Permission denied', '/proc/4242/fd')
+            return 'quiet'
+        self.assertEqual(self.custody.observe_process(self.process, observe), 'quiet')
+        self.assertEqual(len(calls), 3)
+
+    def test_process_that_exits_while_unreadable_is_skipped(self):
+        calls = []
+
+        def observe(process):
+            calls.append(1)
+            raise PermissionError(13, 'Permission denied', '/proc/4242/cwd') if len(calls) == 1 else FileNotFoundError()
+        self.assertIsNone(self.custody.observe_process(self.process, observe))
+        self.assertEqual(len(calls), 2)
+
+    def test_process_that_stays_unreadable_and_alive_fails_closed(self):
+        calls = []
+
+        def observe(process):
+            calls.append(1)
+            raise PermissionError(13, 'Permission denied', '/proc/4242/fd')
+        with self.assertRaisesRegex(ValueError, 'cannot observe live process 4242'):
+            self.custody.observe_process(self.process, observe)
+        self.assertEqual(len(calls), self.custody.OBSERVE_ATTEMPTS)
+
+    def test_live_consumer_is_never_retried_or_swallowed(self):
+        calls = []
+
+        def observe(process):
+            calls.append(1)
+            raise ValueError('original namespace has a live consumer')
+        with self.assertRaisesRegex(ValueError, 'live consumer'):
+            self.custody.observe_process(self.process, observe)
+        self.assertEqual(len(calls), 1)
+
 if __name__=='__main__':unittest.main()
