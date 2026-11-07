@@ -159,6 +159,34 @@ class Worker(unittest.TestCase):
         self.assertTrue(result['complete'])
         self.assertEqual(1,result['evidence']['first']['native_exit'])
 
+    def test_each_case_reports_progress_as_it_finishes_and_runners_get_the_case(self):
+        sys.path.insert(0, str(Path(worker.__file__).resolve().parent))
+        import deploy_gate_progress as progress
+        runner = ("import os,sys; sys.path.insert(0,%r); import deploy_gate_progress as p; "
+                  "assert os.environ[p.CASE_ENV]=='first'; p.report('t1','FAIL',detail='boom'); raise SystemExit(1)"
+                  % str(Path(worker.__file__).resolve().parent))
+        self.recipe['cases']['first']['command'] = [sys.executable, '-c', runner]
+        target = self.root / '.context' / 'progress.jsonl'
+        with patch.dict(os.environ, {progress.ENV: str(target)}):
+            result = worker.execute(self.request, self.root)
+        self.assertEqual({'first': 'FAIL', 'second': 'PASS'}, result['cases'])  # the verdict is unchanged
+        rows, _ = progress.read_new(target)
+        self.assertEqual([('test', 'first', 't1', 'FAIL'), ('case', 'first', 'first', 'FAIL'),
+                          ('case', 'second', 'second', 'PASS')],
+                         [(r['scope'], r['case'], r['unit'], r['status']) for r in rows])
+        self.assertIn('boom', rows[0]['detail'])
+        self.assertEqual(result['evidence']['first']['log'], rows[1]['log'])
+
+    def test_without_a_coordinator_progress_path_rows_land_beside_the_worker_evidence(self):
+        sys.path.insert(0, str(Path(worker.__file__).resolve().parent))
+        import deploy_gate_progress as progress
+        environ = {k: v for k, v in os.environ.items() if k != progress.ENV}
+        with patch.dict(os.environ, environ, clear=True):
+            result = worker.execute(self.request, self.root)
+        folder = Path(result['evidence']['first']['log']).parent
+        rows, _ = progress.read_new(folder / 'progress.jsonl')
+        self.assertEqual(['first', 'second'], [r['unit'] for r in rows])
+
     def test_aggregate_failure_cannot_prove_all_constituents_completed(self):
         self.recipe['cases']['first']['aggregate']=True
         result=worker.execute(self.request,self.root)

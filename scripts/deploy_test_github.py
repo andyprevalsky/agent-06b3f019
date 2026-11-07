@@ -632,9 +632,10 @@ def remote_extract(args) -> int:
 class ProgressStreamer(threading.Thread):
     """Puts the gate's growing progress file to the R2 channel while the worker runs (advisory)."""
 
-    def __init__(self, channel: 'Channel', name: str, path: Path, interval: float = STREAM_SECONDS):
+    def __init__(self, channel: 'Channel', name: str, path: Path, interval: float | None = None):
         super().__init__(daemon=True)
-        self.channel, self.name, self.path, self.interval = channel, name, Path(path), interval
+        self.channel, self.name, self.path = channel, name, Path(path)
+        self.interval = STREAM_SECONDS if interval is None else interval
         self.done = threading.Event()
         self.sent = 0
         self.failed = False
