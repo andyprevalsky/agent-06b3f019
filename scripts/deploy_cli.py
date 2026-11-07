@@ -257,13 +257,35 @@ def cmd_open_pr(args: argparse.Namespace) -> int:
     return 0
 
 
+def coderabbit_check(sha: str) -> tuple[str, str]:
+    """(conclusion, title) of CodeRabbit's check run on a commit; ('error', why) when gh could not answer."""
+    result = subprocess.run(['gh', 'api', f'repos/{{owner}}/{{repo}}/commits/{sha}/check-runs', '--jq',
+                             '[.check_runs[] | select(.name | test("(?i)coderabbit"))] | last | '
+                             '"\\(.conclusion // "")\\t\\(.output.title // "")"'],
+                            cwd=ROOT, capture_output=True, text=True)
+    if result.returncode:
+        lines = (result.stderr or result.stdout).strip().splitlines()
+        return 'error', f'gh failed: {lines[0][:160]}' if lines else 'gh failed'
+    conclusion, _, title = result.stdout.strip().partition('\t')
+    return conclusion.lower(), title
+
+
 def cmd_review_wait(args: argparse.Namespace) -> int:
     pr = read_json(PR_FILE, 'open-pr')['pr']
-    state = json.loads(subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'status'], cwd=ROOT,
-                                      check=True, capture_output=True, text=True).stdout)
-    review_head = state['cycles'][-1]['head']
-    return run(['bash', 'scripts/wait-for-code-review', '--pr', str(pr), '--head', review_head,
-                '--timeout', str(args.timeout), '--poll', '5'])
+    review_head = review_state()['cycles'][-1]['head']
+    if code := run(['bash', 'scripts/wait-for-code-review', '--pr', str(pr), '--head', review_head,
+                    '--timeout', str(args.timeout), '--poll', '5']):
+        return code
+    # The waiter treats a finished neutral check as success; a finished check is not a delivered review.
+    conclusion, title = coderabbit_check(review_head)
+    if conclusion != 'success':
+        print(f'DEPLOY_REVIEW_WAIT NOT-A-REVIEW: CodeRabbit check is "{conclusion or "missing"}"'
+              f'{f" ({title})" if title else ""} on {review_head[:12]}. Read its comment: for a quota limit, '
+              're-request after the window it names, or record the skip with `deploy_review_cycle.py skip`; '
+              'for a false-green, post `@coderabbitai full review` from the user\'s account.', file=sys.stderr)
+        return 3
+    print(f'DEPLOY_REVIEW_WAIT delivered head={review_head[:12]}')
+    return 0
 
 
 def review_state() -> dict:
@@ -436,6 +458,14 @@ def own_pids() -> set[int]:
     return pids
 
 
+HARNESS_PREFIXES = (str(Path.home() / '.devbox' / 'daemon'), '/opt/devbox-runtime', '/opt/devbox-tools')
+
+
+def is_harness_executable(exe: str | None) -> bool:
+    """The devbox daemon's own helpers (e.g. pidfd-janitor) keep the agent's cwd; they hold no workspace state."""
+    return bool(exe) and any(exe == prefix or exe.startswith(prefix + '/') for prefix in HARNESS_PREFIXES)
+
+
 def live_processes(root: Path) -> list[dict]:
     found, mine, proc = [], own_pids(), Path('/proc')
     if not proc.is_dir():
@@ -449,6 +479,11 @@ def live_processes(root: Path) -> list[dict]:
         except OSError:
             continue
         if cwd == root or root in cwd.parents:
+            try:
+                if is_harness_executable(os.readlink(entry / 'exe')):
+                    continue
+            except OSError:
+                pass
             found.append({'pid': int(entry.name), 'cwd': str(cwd), 'argv': argv[:200]})
     return found
 

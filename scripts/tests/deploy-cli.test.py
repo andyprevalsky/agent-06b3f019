@@ -268,6 +268,58 @@ class Sync(Repo):
         self.assertEqual('x = "dirty"\n', (self.root / 'app.py').read_text())
 
 
+class ReviewWait(Repo):
+    def wait(self, wait_code, check):
+        d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'feature', 'head': 'a' * 40})
+        with patch.object(d, 'review_state', return_value={'cycles': [{'head': 'b' * 40}]}), \
+             patch.object(d, 'run', return_value=wait_code) as runner, patch.object(d, 'coderabbit_check', return_value=check):
+            return (*self.call(d.cmd_review_wait, timeout=600), runner)
+
+    def test_a_delivered_review_passes(self):
+        code, out, _, runner = self.wait(0, ('success', 'Review completed'))
+        self.assertEqual(code, 0)
+        self.assertIn('DEPLOY_REVIEW_WAIT delivered head=bbbbbbbbbbbb', out)
+        self.assertEqual(runner.call_args[0][0][:2], ['bash', 'scripts/wait-for-code-review'])
+
+    def test_a_neutral_rate_limited_check_is_not_a_review(self):
+        code, _, err, _ = self.wait(0, ('neutral', 'Review rate limited'))
+        self.assertEqual(code, 3)
+        self.assertIn('NOT-A-REVIEW: CodeRabbit check is "neutral" (Review rate limited)', err)
+        self.assertIn('deploy_review_cycle.py skip', err)
+
+    def test_a_missing_check_is_not_a_review(self):
+        code, _, err, _ = self.wait(0, ('', ''))
+        self.assertEqual(code, 3)
+        self.assertIn('is "missing"', err)
+
+    def test_a_gh_failure_is_reported_not_read_as_a_missing_check(self):
+        limited = subprocess.CompletedProcess([], 1, stdout='', stderr="gh: GitHub's API rate limit was reached; try again in 15 minutes.\n")
+        with patch.object(d.subprocess, 'run', return_value=limited):
+            conclusion, why = d.coderabbit_check('c' * 40)
+        self.assertEqual('error', conclusion)
+        self.assertIn('rate limit was reached', why)
+        code, _, err, _ = self.wait(0, (conclusion, why))
+        self.assertEqual(code, 3)
+        self.assertIn('is "error" (gh failed: gh: GitHub', err)
+
+    def test_the_check_run_listing_is_parsed(self):
+        ok = subprocess.CompletedProcess([], 0, stdout='neutral\tReview rate limited\n', stderr='')
+        with patch.object(d.subprocess, 'run', return_value=ok):
+            self.assertEqual(('neutral', 'Review rate limited'), d.coderabbit_check('c' * 40))
+        none = subprocess.CompletedProcess([], 0, stdout='\t\n', stderr='')
+        with patch.object(d.subprocess, 'run', return_value=none):
+            self.assertEqual(('', ''), d.coderabbit_check('c' * 40))
+
+    def test_a_failed_wait_propagates_without_reading_the_check(self):
+        with patch.object(d, 'coderabbit_check') as check:
+            d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'feature', 'head': 'a' * 40})
+            with patch.object(d, 'review_state', return_value={'cycles': [{'head': 'b' * 40}]}), \
+                 patch.object(d, 'run', return_value=124):
+                code, _, _ = self.call(d.cmd_review_wait, timeout=600)
+        self.assertEqual(code, 124)
+        check.assert_not_called()
+
+
 class ReviewApprovalLedger(Repo):
     def opened(self):
         sh('git', 'checkout', '-qb', 'feature', cwd=self.root)
@@ -366,6 +418,17 @@ class ReviewApprovalLedger(Repo):
         self.assertEqual(code, 1)
         self.assertIn('parked benchmark-history rows are not in the reviewed batch', err)
         runner.assert_not_called()
+
+
+class HarnessProcesses(unittest.TestCase):
+    def test_only_the_devbox_daemon_and_runtime_executables_are_harness(self):
+        home = str(Path.home())
+        for exe in (f'{home}/.devbox/daemon/bundle/bin/pidfd-janitor', '/opt/devbox-runtime/node/current/bin/node',
+                    '/opt/devbox-tools/bin/gh'):
+            self.assertTrue(d.is_harness_executable(exe), exe)
+        for exe in (None, '', '/usr/bin/bash', f'{home}/rose/agents/venv/bin/python3', '/opt/devbox-runtime-evil/node',
+                    f'{home}/.devbox/daemon-lookalike/bin/x', '/usr/bin/node'):
+            self.assertFalse(d.is_harness_executable(exe), exe)
 
 
 class DeletionCheck(Repo):
