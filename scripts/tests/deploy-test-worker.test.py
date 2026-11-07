@@ -2538,8 +2538,10 @@ class GenericLifecycle(unittest.TestCase):
         with (self.root / 'outer.log').open('wb') as output:
             result = self.process.run_command(
                 [sys.executable, str(worker_path), str(child), str(ready), str(self.root / 'inner.log')],
-                cwd=self.root, env=os.environ.copy(), output=output, timeout=.2,
-                owned_lifecycle=True)
+                cwd=self.root, env=os.environ.copy(), output=output,
+                # The child sleeps 30 s, so this deadline always fires; it only has to outlast the
+                # worker's startup and the child's ready marker (0.2 s lost that race under load).
+                timeout=5, owned_lifecycle=True)
         self.assertTrue(ready.exists())
         pid = int(ready.read_text())
         if Path(f'/proc/{pid}').exists():
