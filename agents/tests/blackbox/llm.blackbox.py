@@ -2337,6 +2337,132 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
     _assert_private_credential_capture(path, payload["accessToken"])
 
 
+async def test_repeated_history_render_redacts_and_projects_each_input_once():
+    """2026-11-07 mass-agent recurrence: post_agent_message expired before its
+    request left a CPU-saturated cloud worker (t10-no-tool-failures).
+
+    Every model turn re-renders the whole history. Each render re-ran secret
+    redaction over every earlier tool result and rebuilt both provider schema
+    projections of the action model: ~29% of the single fan-out worker's CPU.
+    A history that was already rendered must not be redacted again, and the
+    projections are derived once per compiled model class. Redaction itself
+    must still apply.
+    """
+    import uuid
+
+    from pydantic import BaseModel
+
+    from helpers.attachment_context import attachment_request_overhead
+    from helpers.llm import build_llm_messages
+    from utils import secret_text_redaction
+    from utils.tool_schemas import create_agent_action_model
+
+    run = uuid.uuid4().hex  # unique texts: earlier tests cannot pre-warm anything
+    action_model = create_agent_action_model(["web_search", "web_fetch", "attempt_completion"])
+    history = [{"role": "USER", "text": f"Research one creator {run}"}]
+    for i in range(6):
+        call_id = f"tc-{run}-{i}"
+        history += [
+            {"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
+                {"tool": "web_search", "tool_call_id": call_id, "query": f"creator {i}"}]}},
+            {"role": "TOOL", "text": f"result {i} {run} api_key=sk-live-{i:04d}-secretvalue " + "page text " * 200,
+             "metadata": {"toolCallId": call_id, "toolName": "web_search", "toolStatus": "FINISHED"}},
+        ]
+
+    pattern_passes = 0
+    real_patterns = secret_text_redaction._redact_patterns
+
+    def counting_patterns(text):
+        nonlocal pattern_passes
+        pattern_passes += 1
+        return real_patterns(text)
+
+    schema_builds = 0
+    real_schema = BaseModel.model_json_schema.__func__
+
+    def counting_schema(cls, *args, **kwargs):
+        nonlocal schema_builds
+        schema_builds += 1
+        return real_schema(cls, *args, **kwargs)
+
+    with (
+        patch.object(secret_text_redaction, "_redact_patterns", counting_patterns),
+        patch.object(BaseModel, "model_json_schema", classmethod(counting_schema)),
+    ):
+        first = await build_llm_messages(
+            history, "system", request_overhead=attachment_request_overhead(action_model, "finish")
+        )
+        first_passes, first_builds = pattern_passes, schema_builds
+        for _turn in range(4):  # every later turn carries the same history again
+            again = await build_llm_messages(
+                history, "system", request_overhead=attachment_request_overhead(action_model, "finish")
+            )
+            assert again == first, "rendering must stay byte-identical"
+
+    rendered = json.dumps(first)
+    assert "secretvalue" not in rendered and "[REDACTED]" in rendered, "tool results must stay redacted"
+    assert first_passes > 0, "the first render must redact the tool results"
+    repeated = {
+        "extra redaction pattern passes": pattern_passes - first_passes,
+        "extra schema builds for one compiled model class": schema_builds - first_builds,
+    }
+    assert not any(repeated.values()), f"4 re-renders of a seen history repeated work: {repeated}"
+
+
+async def test_per_turn_compute_lease_calls_reuse_the_pooled_client():
+    """The explore loop leases and heartbeats a compute token every turn.
+
+    A fresh httpx.AsyncClient per call builds a new SSLContext (parses the CA
+    bundle): ~6% of the mass-agent fan-out worker's CPU. Both calls must ride
+    the process-wide pooled client (helpers/http_client.py).
+    """
+    import httpx
+
+    payload = {"type": "gpt", "accessToken": "gpt-token", "source": "pool", "lineageKey": "agent:a-1"}
+    seen = []
+
+    def handler(request: httpx.Request):
+        seen.append(request.url.path)
+        if request.url.path.endswith("/credentials/token"):
+            return httpx.Response(200, json=payload)
+        if request.url.path.endswith("/token/lineage-heartbeat"):
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(500, text="unexpected route")
+
+    teardown_mock()
+    setup_mock_fn(handler)
+    config = SimpleNamespace(
+        backend=SimpleNamespace(api_url="https://credentials.example.test", api_key="fixture-backend-key")
+    )
+    clients_built = 0
+    real_init = httpx.AsyncClient.__init__
+
+    def counting_init(self, *args, **kwargs):
+        nonlocal clients_built
+        clients_built += 1
+        return real_init(self, *args, **kwargs)
+
+    from helpers.http_client import get_http_client
+    from helpers.llm import fetch_compute_token_activity, heartbeat_compute_token_lineage_activity
+
+    get_http_client()  # the worker's pooled client exists before its first turn
+    with (
+        patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "", "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "0"}),
+        patch("helpers.llm.load_config", return_value=config),
+        patch("temporalio.activity.heartbeat"),
+        patch.object(httpx.AsyncClient, "__init__", counting_init),
+    ):
+        for _turn in range(3):
+            assert await fetch_compute_token_activity("user-1", lineage_key="agent:a-1") == {
+                **payload, "accountId": None, "poolTokenId": None, "integrationId": None,
+                "fastCacheAffinityKey": None,
+            }
+            assert await heartbeat_compute_token_lineage_activity("agent:a-1") is True
+    teardown_mock()
+    assert len(seen) == 6, seen
+    assert clients_built == 0, f"{clients_built} per-call AsyncClient(s) built for 6 per-turn lease calls"
+
+
 async def test_fetch_compute_token_activity_pins_benchmark_provider():
     """The provider pin reaches the backend without entering captures."""
     path = "/api/integrations/compute-code/credentials/token"
@@ -11040,6 +11166,14 @@ async def run_all_tests():
     await r.record_async(
         "fetch_compute_token_activity_passes_lineage_params",
         test_fetch_compute_token_activity_passes_lineage_params,
+    )
+    await r.record_async(
+        "repeated_history_render_redacts_and_projects_each_input_once",
+        test_repeated_history_render_redacts_and_projects_each_input_once,
+    )
+    await r.record_async(
+        "per_turn_compute_lease_calls_reuse_the_pooled_client",
+        test_per_turn_compute_lease_calls_reuse_the_pooled_client,
     )
     await r.record_async(
         "fetch_compute_token_activity_pins_benchmark_provider",
