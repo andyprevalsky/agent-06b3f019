@@ -34162,7 +34162,9 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_nested_liability_owner_fe
     os.mkfifo(release, 0o600)
     release_fd = os.open(release, os.O_RDWR)
     callback = tmp_path/'canary.sh'
-    callback.write_text('printf "%s\\n" "$$" > "$RESERVE_READY"\nread -r release < "$RESERVE_RELEASE"\n')
+    # Publish readiness atomically: the reader parses the PID as soon as the path exists.
+    callback.write_text('printf "%s\\n" "$$" > "$RESERVE_READY.tmp" && mv "$RESERVE_READY.tmp" "$RESERVE_READY"\n'
+                        'read -r release < "$RESERVE_RELEASE"\n')
     monkeypatch.setattr(sys, 'argv', ['reserve', str(tmp_path/'reserve'), '512', '256', '32', '', '', '', str(os.getpid()), str(helper), str(transaction)])
     subject = {}; exec(compile(definitions, str(FLEET_SCRIPT)+':reserve', 'exec'), subject)
     barrier = tmp_path/'barriers/cohort'; barrier.mkdir(parents=True)
