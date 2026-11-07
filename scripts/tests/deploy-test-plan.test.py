@@ -960,4 +960,136 @@ class InterruptedCustody(unittest.TestCase):
         proof['confirmed_at']=r['finished_at']
         with self.assertRaises(ValueError):c.reconcile(state,r['token'],proof)
 
+class InterruptedProcessObservation(unittest.TestCase):
+    """The old-namespace scan cannot read every same-uid process at every instant.
+
+    An exiting process answers EACCES for its fd table for a few milliseconds before it disappears (the Blacksmith
+    failure: PermissionError on /proc/<pid>/fd). That is a read failure, never proof of absence or of a leak: it is
+    re-observed a bounded number of times, skipped once the process is gone and refused, naming the pid, only while
+    it stays unreadable and alive. A genuinely held namespace is still refused. The real Linux process is the
+    fixture: a child that clears PR_SET_DUMPABLE is unreadable to its same-uid parent exactly like an exiting one.
+    """
+    CHILD = """
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+def dumpable(flag):
+    assert libc.prctl(4, flag, 0, 0, 0) == 0  # PR_SET_DUMPABLE
+held = open(os.environ['HELD']) if os.environ.get('HELD') else None
+dumpable(sys.argv[1] == 'open')
+print('ready', flush=True)
+for line in sys.stdin:
+    dumpable(line.strip() == 'open')
+    print('ack', flush=True)
+"""
+
+    def setUp(self):
+        import deploy_test_interrupted_cleanup as m
+        self.m = m
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.namespace = Path(self.tmp.name) / 'old-namespace'
+        self.elsewhere = Path(self.tmp.name) / 'elsewhere'
+        self.namespace.mkdir()
+        self.elsewhere.mkdir()
+        self.sleeps = []
+
+    def child(self, state, cwd=None, held='', label=''):
+        proc = subprocess.Popen([sys.executable, '-c', self.CHILD, state, label], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, text=True, cwd=cwd or self.elsewhere,
+                                env={**os.environ, 'HELD': held})
+        self.addCleanup(self.reap, proc)
+        self.assertEqual(proc.stdout.readline().strip(), 'ready')
+        return proc
+
+    @staticmethod
+    def reap(proc):
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        proc.stdin.close()
+        proc.stdout.close()
+
+    def switch(self, proc, state):
+        proc.stdin.write(state + '\n')
+        proc.stdin.flush()
+        self.assertEqual(proc.stdout.readline().strip(), 'ack')
+
+    def scan(self, while_waiting=None):
+        def sleep(seconds):
+            self.sleeps.append(seconds)
+            if while_waiting:
+                while_waiting()
+        with patch.object(self.m.time, 'sleep', sleep):
+            self.m.namespace_quiet(self.namespace, set())
+
+    def test_process_that_becomes_readable_while_waiting_is_reobserved(self):
+        child = self.child('sealed')
+        self.scan(lambda: self.switch(child, 'open'))
+        self.assertTrue(self.sleeps)
+
+    def test_fd_table_denied_after_cwd_was_read_is_reobserved(self):
+        for site in ('listing', 'link'):
+            with self.subTest(site):
+                child = self.child('open')
+                denied = [1, 2]
+                real_iterdir, real_readlink = Path.iterdir, os.readlink
+
+                def iterdir(path):
+                    if site == 'listing' and str(path) == '/proc/%d/fd' % child.pid and denied:
+                        denied.pop()
+                        raise PermissionError(13, 'Permission denied', str(path))
+                    return real_iterdir(path)
+
+                def readlink(path, *args, **kwargs):
+                    if site == 'link' and str(path).startswith('/proc/%d/fd/' % child.pid) and denied:
+                        denied.pop()
+                        raise PermissionError(13, 'Permission denied', str(path))
+                    return real_readlink(path, *args, **kwargs)
+
+                with patch.object(Path, 'iterdir', iterdir), patch.object(os, 'readlink', readlink):
+                    self.scan()
+                self.assertEqual(denied, [])
+                self.assertGreaterEqual(len(self.sleeps), 2)
+
+    def test_process_that_exits_while_unreadable_is_not_a_holder(self):
+        child = self.child('sealed')
+        self.scan(lambda: (child.kill(), child.wait()))
+        self.assertTrue(self.sleeps)
+
+    def test_process_that_changes_owner_while_unreadable_is_another_users(self):
+        child = self.child('sealed')
+        owner = {'uid': os.geteuid()}
+        real_stat = Path.stat
+
+        def stat(path, *args, **kwargs):
+            if str(path) == '/proc/%d' % child.pid:
+                return SimpleNamespace(st_uid=owner['uid'])
+            return real_stat(path, *args, **kwargs)
+
+        with patch.object(Path, 'stat', stat):
+            self.scan(lambda: owner.update(uid=os.geteuid() + 1))
+        self.assertTrue(self.sleeps)
+
+    def test_process_that_stays_unreadable_and_alive_fails_closed_naming_it(self):
+        child = self.child('sealed')
+        with self.assertRaisesRegex(ValueError, r'cannot observe pid %d: EACCES' % child.pid) as raised:
+            self.scan()
+        self.assertNotRegex(str(raised.exception), 'live consumer|holder remains')
+        self.assertGreaterEqual(len(self.sleeps), self.m.OBSERVATION_ATTEMPTS - 1)
+        self.assertLessEqual(self.m.OBSERVATION_ATTEMPTS * self.m.OBSERVATION_DELAY, 2)
+
+    def test_a_held_namespace_is_still_refused(self):
+        held = self.namespace / 'held.log'
+        held.write_text('original')
+        for name, kwargs, message in (
+                ('cwd', dict(cwd=self.namespace), 'live consumer'),
+                ('open file', dict(held=str(held)), 'file holder remains'),
+                ('argv of an unreadable process', dict(label=str(self.namespace)), 'live consumer')):
+            with self.subTest(name):
+                child = self.child('sealed' if name.startswith('argv') else 'open', **kwargs)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.scan()
+                self.reap(child)
+
+
 if __name__=='__main__':unittest.main()
