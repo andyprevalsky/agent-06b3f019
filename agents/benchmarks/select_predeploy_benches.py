@@ -705,7 +705,6 @@ def scream_if_cap_hit(selection: Selection, stream=None) -> None:
         if selection.total == selection.cap:
             msg = f"*** PREDEPLOY BENCH COUNT AT HARD CAP: {selection.total}/{selection.cap} ***"
             print(msg, file=stream)
-            print(msg, file=sys.stdout)
         return
     text = CAP_SCREAM.format(
         selected=selection.total,
@@ -714,7 +713,6 @@ def scream_if_cap_hit(selection: Selection, stream=None) -> None:
         dropped=", ".join(selection.dropped) or "(none)",
     )
     print(text, file=stream)
-    print(text, file=sys.stdout)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

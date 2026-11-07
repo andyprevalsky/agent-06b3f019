@@ -11139,6 +11139,7 @@ def _worker_cleanup_bundle(source: str) -> str:
                     "worker_is_tracked() {",
                     "worker_ledger_lock_acquire() {",
                     "worker_ledger_lock_release() {",
+                    "reconcile_worker_ready_outcomes() {",
                     "cloudbench_preserve_unlaunched_worker() {",
                     "cleanup_failed_worker() {",
                 )
