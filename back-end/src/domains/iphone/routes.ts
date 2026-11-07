@@ -14,8 +14,6 @@ import * as operations from './service.operations';
 import type { PhoneClientFactory } from './types.operations';
 import { interaction } from './service.interactions';
 import * as connection from './service.connection';
-import { launchSetupAgent } from './service.connectionAgent';
-import { availability } from './repo.availability';
 
 const log = createLogger('IPhone');
 
@@ -177,7 +175,7 @@ interface IPhoneRouterOptions {
   credentialVerifier?: CredentialVerifier;
   beforeSavedExecute?: () => Promise<void>;
   messageVerifier?: MessageVerifier;
-  setupAgentLauncher?: connection.SetupAgentLauncher;
+  setupAgentLauncher: connection.SetupAgentLauncher;
   authLossVerifier?: ImessageAuthLossVerifier;
 }
 function phoneOperationHandler(
@@ -198,7 +196,7 @@ function phoneOperationHandler(
 function mountConnectionRoutes(router: ReturnType<typeof Router>, options: IPhoneRouterOptions) {
   router.get(
     '/availability/:taskId',
-    handle((req, userId) => availability(userId, req.params.taskId))
+    handle((req, userId) => connection.availability(userId, req.params.taskId))
   );
   router.get(
     '/connection',
@@ -219,13 +217,13 @@ function mountConnectionRoutes(router: ReturnType<typeof Router>, options: IPhon
         userId,
         body.expectedRevision,
         text(body, 'requestKey'),
-        options.setupAgentLauncher ?? launchSetupAgent
+        options.setupAgentLauncher
       );
     })
   );
 }
 
-export function createIPhoneRouter(options: IPhoneRouterOptions = {}) {
+export function createIPhoneRouter(options: IPhoneRouterOptions) {
   const router = Router();
   const clientFactory = options.phoneClient ?? operations.defaultPhoneClient;
   router.use(asyncHandler(hybridAuth));
@@ -304,4 +302,3 @@ export function createIPhoneRouter(options: IPhoneRouterOptions = {}) {
   );
   return router;
 }
-export default createIPhoneRouter();

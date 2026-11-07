@@ -1,13 +1,13 @@
 /** Only this trusted backend caller reserves phone boot authority; request bodies cannot. */
-import { prisma } from '../../providers/database';
-import { createAgent } from '../agents/agentLifecycleService';
-import { resumeIndependentRootStart } from '../agents/agentDirectStartService';
-import { createAgentSchema } from '../agents/types';
+import * as repo from './repoPhoneConnection';
+import { createAgent } from './agentLifecycleService';
+import { resumeIndependentRootStart } from './agentDirectStartService';
+import { createAgentSchema } from './types';
 import {
   connectionAgentHash,
   type PhoneConnectionReservation,
 } from '../../providers/phoneConnectionState';
-import { IPhoneError } from './types';
+import { PhoneInteractionError as IPhoneError } from '../../providers/phoneInteractionError';
 
 export const PHONE_CONNECTION_GOAL =
   'Connect my existing account iPhone using the standard iPhone setup and verification flow through the normal phone harness, including portrait orientation lock. Complete supported native Apple and Google sign-in with user authentication assistance when required. Do not reset the phone, allocate another device, send messages, switch unrelated accounts, or change Freedom.';
@@ -22,9 +22,7 @@ export async function launchSetupAgent(
     goal: PHONE_CONNECTION_GOAL,
     start_phase: 'execute',
   });
-  let agent = await prisma.agent.findFirst({
-    where: { id: reservation.agentId, userId, deletedAt: null },
-  });
+  let agent = await repo.ownedSetupAgent(reservation.agentId, userId);
   if (agent === null) {
     try {
       await createAgent(body, userId, false, null, false, {
@@ -33,17 +31,11 @@ export async function launchSetupAgent(
       return;
     } catch (error) {
       // Recover only the same owned durable root after a concurrent/ambiguous launch.
-      agent = await prisma.agent.findFirst({
-        where: { id: reservation.agentId, userId, deletedAt: null },
-      });
+      agent = await repo.ownedSetupAgent(reservation.agentId, userId);
       if (agent === null) throw error;
     }
   }
-  const first = await prisma.message.findFirst({
-    where: { agentId: agent.id, role: 'USER' },
-    orderBy: { timestamp: 'asc' },
-    select: { metadata: true },
-  });
+  const first = await repo.firstSetupGoal(agent.id);
   if (
     agent.parentAgentId !== null ||
     agent.goal !== PHONE_CONNECTION_GOAL ||

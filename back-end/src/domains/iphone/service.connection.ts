@@ -21,3 +21,5 @@ export async function connect(
   }
   return repo.connection(userId);
 }
+
+export { availability } from './repo.availability';

@@ -1,5 +1,7 @@
 /** Task-scoped discovery is database-only and cannot create a lease or provider session. */
-import * as leases from './repo';
+import { runTransactionWithRetry } from '../../providers/database';
+import { accountPermitted } from './repo.account';
+import { databaseNow } from './repo.clock';
 import { getNativePhoneTarget } from '../../providers/nativePhoneAttention';
 import { setupState, type SetupState } from '../../providers/phoneSetupState';
 import {
@@ -10,7 +12,7 @@ import {
 import { IPhoneError, type Transaction } from './types';
 
 export async function availability(userId: string, taskId: string) {
-  return leases.transaction((tx) => availabilityInTransaction(tx, userId, taskId));
+  return runTransactionWithRetry((tx) => availabilityInTransaction(tx, userId, taskId));
 }
 
 export async function availabilityInTransaction(tx: Transaction, userId: string, taskId: string) {
@@ -27,7 +29,7 @@ export async function availabilityInTransaction(tx: Transaction, userId: string,
   const disabled = { enabled: false, source: null } as const;
   if (
     device?.enabled !== true ||
-    !(await leases.accountPermitted(tx, userId)) ||
+    !(await accountPermitted(tx, userId)) ||
     ['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED'].includes(agent.status)
   )
     return disabled;
@@ -87,7 +89,7 @@ export async function availabilityInTransaction(tx: Transaction, userId: string,
       providerEpoch: device.providerEpoch,
       active:
         pendingAuth ||
-        (lease.leaseExpiresAt !== null && lease.leaseExpiresAt > (await leases.databaseNow(tx))),
+        (lease.leaseExpiresAt !== null && lease.leaseExpiresAt > (await databaseNow(tx))),
     })
   )
     return { enabled: true, source: 'continuation' } as const;

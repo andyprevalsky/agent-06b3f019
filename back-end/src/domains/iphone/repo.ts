@@ -1,5 +1,7 @@
 /** Durable admission: device FOR UPDATE -> reconcile -> mutate -> FIFO admit.
  * Every process uses this lock order. Transactions perform database I/O only. */
+import { accountPermitted } from './repo.account';
+export { accountPermitted } from './repo.account';
 import { ensureSetup } from './repo.setup';
 import { availabilityInTransaction } from './repo.availability';
 import { nativeControlError } from './repo.attention';
@@ -56,9 +58,6 @@ export async function bind(userId: string, providerDeviceId: string) {
   }
 }
 export const transaction = runTransactionWithRetry;
-export async function accountPermitted(tx: Transaction, userId: string) {
-  return permitted(await tx.user.findUnique({ where: { userId } }));
-}
 export async function readLease(tx: Transaction, id: string, userId?: string) {
   return tx.iPhoneLease.findFirst({ where: { id, userId } });
 }
