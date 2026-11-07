@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "pr": 1729,
+  "title": "fix(front-end): recover when the entry chunk 404s after a production deploy switch",
+  "assignment": "/goal: fix front-end/tests-e2e/mobile-adversarial-trajectories.spec.ts:327 '10k message details, source links and mobile/desktop copy menus remain usable' in the production semantic gate (run 42191005446), make it pass reliably, finish /deploy",
+  "merge_commit": "308315a4bc1129139de70ad0c34d429c1c3fbc6a",
+  "gated_source": "30409b901ca62adc62bf5d596488303c58b2d11e",
+  "branch_commits": [
+    "30409b901c Merge origin/main (sync; regenerated docs/rca/INDEX.md)",
+    "68a09c7ffa test: keep the deploy-test-plan fixture fix out of this PR",
+    "50639d26f5 test: target the real entry script and keep fixtures off the live Hub port",
+    "9e769324ec fix(front-end): charge entry-reload attempts only when the reload runs (CodeRabbit finding)",
+    "d2fd1113a8 Merge origin/main",
+    "1b2adbc90e fix(front-end): reload when the entry chunk fails to load after a deploy switch"
+  ],
+  "assigned_fix": {
+    "root_cause": "The failing page was the static index.html shell (footer links only): React never mounted. The test loaded www.roselabs.ai 6 s after Vercel switched production to 0ee70b27c (READY 08:59:10Z). Entry chunk hashes change every build and the project has no skew protection, so a document held across the switch requested an /assets/index-*.js that now 404s; the only stale-build recovery (src/lib/appVersion.ts) lives inside the bundle that failed to load.",
+    "fix": "Inline guard in front-end/index.html ahead of the module entry: on a module-script load error reload with 0.5/1/2 s backoff, at most 3 times per entry URL (sessionStorage, window.name fallback); attempts are charged only when the reload runs and an offline page waits for the online event.",
+    "regression": "front-end/tests-e2e/entry-load-recovery.spec.ts (semantic suite): recovery after an entry 404, reload bound, offline-during-backoff",
+    "pre_fix": "original test body + injected entry 404 on the prod build: identical TimeoutError at select() and identical footer-only snapshot; new spec fails on prod (no mount; 1 load instead of 4)",
+    "post_fix": "original test x5 + injected variant x5 10/10; new spec 15/15 on prod, E2E-fixture and dev builds",
+    "prod_outcome": "production semantic run 42344595604 attempt 2 on 308315a4bc: 10k copy-menus test PASS, entry-load-recovery 3/3 PASS, 50 passed, 0 failed"
+  },
+  "rca_cases": [
+    "docs/rca/cases/2026-11-06-entry-chunk-404-after-deploy-switch-stranded-static-shell.md"
+  ],
+  "review": {
+    "coderabbit": "attempt 1: cycle 1 findings on 1b2adbc90 (1 Minor: recheck connectivity before reloading) -> fixed in 9e769324ec; cycle 2 clean on 9e769324ec; attempt closed blocked because the later required test fix needed a third review (no verification approval). Attempt 2: cycle 1 clean on 50639d26f5 (path filters excluded both test files), cycle 2 clean on 68a09c7ffa, sync-inherited on 30409b901c",
+    "graphide": "not requested"
+  },
+  "staged_cycle": {
+    "final": "ready=true on 30409b901c: quick 4/4, deploy-command-structural PASS, frontend-coverage-blackbox PASS, semantic-stack PASS (56 UI + latency ratchet), cloud smoke 9/9 PASS (campaign deploy-8244eaf3)",
+    "aborted_cycles": [
+      "r1 1b2adbc90: frontend worker symlinked node_modules (patch-ui-lifecycle guard refused), semantic worker lacked a timing run, smoke INFRA stop (warm image deps mismatch, canary); structural PASS",
+      "r2 9e769324ec: smoke admission denied (bench app at 56-machine ceiling); structural deploy-test-plan fixture collided with a leaked Hub on 8765; new spec targeted a modulepreloaded chunk in the E2E-fixture build; frontend PASS",
+      "r3a 68a09c7ffa: smoke FATAL commit not yet pushed (operator error); structural/frontend/semantic PASS",
+      "r3b 68a09c7ffa: smoke 9/9 PASS; structural deploy-test-plan Hub-port collision; focused rerun passed but orphaned-children receipt could not be reconciled",
+      "r4 68a09c7ffa: interrupted (TERM) to sync after main made docs/rca/INDEX.md conflict; all gates incl. smoke 9/9 had passed natively"
+    ],
+    "skipped": [
+      "agentcard-lifecycle: not selected (no payment paths)",
+      "mac-app-coverage-blackbox: Linux platform exclusion"
+    ]
+  },
+  "infra_actions": [
+    "smoke lane command-scoped CLOUDBENCH_APP_MACHINE_CEILING=72 after verifying org 81/1000 Machines and 101/140 shared units",
+    "smoke lane CLOUDBENCH_DASH_BASE=30765 so its central Hub cannot occupy 8765 during the concurrent structural gate",
+    "terminated leaked agent_link_server.py owned by this deploy's cancelled campaigns (exact PIDs)",
+    "cancelled and re-ran auto-tag run 42344221684 (hung 17 min in checkout); re-ran production semantic once (attempt 1 hung 30 min in checkout, no tests ran)"
+  ],
+  "production": {
+    "vercel": "READY 308315a4bc (buildId 308315a4bc11-mw5zkzjk), live HTML contains the guard",
+    "mac_release": "tag v1.1.287 -> release-mac-app run 42345549076 success",
+    "semantic": "chat-lifecycle-ratchet run 42344595604 attempt 2 passed on source 308315a4bc",
+    "render": "not required (no back-end change)",
+    "fly": "not required",
+    "agentcard_production": "not selected",
+    "wmh": "not applicable"
+  },
+  "ledger": "commit c550dc15e0: 9 smoke attempt/duration rows for the merged source (+1 merged-code Hub row found by the backfill tool)",
+  "delegated": [
+    {
+      "failure": "scripts/tests/deploy-test-plan.test.py InterruptedCustody cloud fixture fails when a real Hub holds 8765",
+      "repair": "https://boxes.dev/thread/ph74j909h8kdv3pwqbjtg95dvs8hsmjm",
+      "note": "already fixed on main by 824df87a1f (PR #1745) before this handoff; delegate was told to verify and stop"
+    }
+  ],
+  "followups": [
+    "Staged cycle binds the whole os.environ: init/run/verify must run under one fixed environment (used scripts wrapper env -i).",
+    "A smoke gate that dies before provisioning (commit not pushed) leaves a cleanup owner and blocks reexecute; only a fresh init recovers.",
+    "deploy-command-structural focused rerun exited 0 with orphaned children and no supported reconcile path for native_exit 0."
+  ],
+  "preservation": {
+    "archives": {
+      "core": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr1729-308315a4/20261107T063806Z-core.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "1c105aa5b963efbabc4a54bf3d6fe7444ace6dfbe507736d122d8665a3fa3334",
+        "manifest_sha256": "908b2bbf105149b50113a433d8205c09269908790c148fce0089bd7bcd30dddf",
+        "gzip_sha256": "06cf2ef1a569ebd82dc4fffba2ccc8d0cd97eaedf2ab5fa95248cd26b9bb0962",
+        "frames": 2,
+        "files": 572,
+        "stored_bytes": 9206818,
+        "original_bytes": 16997815,
+        "full_readback_verified": true
+      },
+      "workers": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr1729-308315a4/20261107T063806Z-workers.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "e52b09ccae471106d6c4e129c03c5236b9155aecb818f7254f23a889e23b6d74",
+        "manifest_sha256": "308e9f8896b21f8760e85ef31fa49b4d4739c384bdabdcb954cdfc766b3b3496",
+        "gzip_sha256": "4035f7bbfe12d660edb9eaf20f3baa32007ff9be55510c75f6a66b52d3d98e1b",
+        "frames": 106,
+        "files": 1972,
+        "stored_bytes": 887379985,
+        "original_bytes": 1021482245,
+        "full_readback_verified": true
+      },
+      "cloud": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr1729-308315a4/20261107T063806Z-cloud.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "9193cecb77e0f9a801fb58d2b7b384a408ef55504aae0b4f4ac6f3bfb2f7abc7",
+        "manifest_sha256": "88d64d6e940ae15a39722d0c1e6b5adcd7ca7d85ac4e155bb8e0e890f716d7da",
+        "gzip_sha256": "e7459ca2b2f0541cbf31fe3281530065911f518d7472f09b0b8b84b06ffc16cc",
+        "frames": 128,
+        "files": 4686,
+        "stored_bytes": 1069715133,
+        "original_bytes": 3651948004,
+        "full_readback_verified": true
+      }
+    },
+    "excluded_reproducible": [
+      "/var/tmp/mobadv-rca/dist, dist2, dist-e2e: vite builds of the committed source (VITE_ENABLE_REACT_GRAB=false [ROSE_E2E_FIXTURES=true] vite build)",
+      "worker checkouts and copied node_modules: deploy_test_worker.py --prepare-checkout from the commit",
+      "agents/venv, root/package node_modules: CLAUDE.md setup"
+    ],
+    "symlinks": "384 symlinks recorded with targets in pr1729-closeout-staging/list-skipped.json (core archive)"
+  },
+  "factory_history": "commit b7eb5eaadf: 13 /deploy factory timing rows incl. outcome completed (attempt 1 outcome blocked published earlier)"
+}

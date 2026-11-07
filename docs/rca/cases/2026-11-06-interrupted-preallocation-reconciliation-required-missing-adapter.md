@@ -97,3 +97,53 @@ that the canceled producer did not emit.
 ## Reusable lesson
 
 Reconcile interrupted launch custody from positive terminal ownership evidence without inventing the missing execution receipt.
+
+## November 7 recurrence: historical policy witness followed the mutable checkout
+
+Focused round21 at `b02ee99ce2ae236c7a985eb72c2419be84b0141d` refused before
+any new gate/adapter/resource: `gates still own unreconciled cleanup; refuse
+launch: smoke`. The original smoke token remains
+`698a468a1d46401f897851ae6b9d7e30`, from interrupted round16/source f271.
+Read-only native replay returned `_reconciled=false` and retained `smoke`.
+Exactly one original binding drifted: the working checkout's cloudbench-env.sh
+changed from SHA256 fe203ad6... to 84a70f7b... during legitimate main integration
+at 08518097. Its exact original frozen bytes were already bound in the original
+campaign's shared-inventory/scripts/cloudbench-env.sh. All other 392 files
+remained intact. Eager Evidence validation treated that mutable policy witness
+as evidence corruption; ordinary reconcile also required an interrupted current
+phase and refused replacing an accepted entry. No existing normal renewal could
+resolve both constraints without altering the original proof.
+
+The permanent regression
+`python3 -B scripts/tests/deploy-test-plan.test.py InterruptedCustody.test_historical_policy_drift_renews_without_changing_original_bindings`
+failed on unchanged native code with `reconcile proof is missing a required
+field`, then passed unchanged with typed policy-witness renewal. Native buggy
+module bytes are identical at e7c and incoming b67. The actual retained-state
+replay now clears only that owner latch on a deep copy, preserving the original
+proof's 393 bindings, prior entry, all other reconciliations, attempts, failures,
+canonical cycle bytes and false test/financial credit. Private evidence lives
+under `.context/rca-browser-4f77/interrupted-policy-drift-rca/`.
+
+The normal `deploy_test_cycle.py reconcile --occurrence <original-token>
+--proof <typed-renewal.json>` accepts `interrupted-policy-witness-renewal-v1`
+only for an already reconciled exact latest historical smoke receipt at a
+quiescent, current-source-bound boundary. It binds the receipt and prior-entry
+hash and retains the complete previous entry as append-only nested history.
+Every original proof field/hash stays unchanged. Only original named producer
+policies may resolve to an already-bound canonical original campaign copy.
+For byte-inspected fleet/env policies, an existing immutable Git blob may also
+be identified by its full object ID: it must equal the original receipt's exact
+source/path object and original SHA256, with the existing receipt size bound.
+An executed policy still requires a bound file. This covers b67's subsequent
+legitimate fleet-policy change without creating a historical file or restoring
+old code over the checkout. All nonpolicy files, original Git provenance,
+zero-allocation/terminal/publication/Hub consumers and current contract guards
+are rechecked on renewal and later launch. Unknown bytes, paths, identities,
+symlinks, changed evidence, allocations, consumers and contracts still refuse.
+
+This is Gate INTRODUCED by owner source integration, not a financial/runtime
+cleanup or outcome repair. The original interruption, null adapter, UNVERIFIED
+cases and original clocks remain unchanged. Parent owns independent review,
+normal main delivery/source integration, official CLI application and the
+original full phase/all16 gates/full9 smoke. Those runtime outcomes remain
+unverified; this case remains open until the owning validation completes.

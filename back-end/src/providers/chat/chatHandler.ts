@@ -4,9 +4,11 @@ import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
  * Implements the fixed LLM call sequence based on Manus architecture:
  *
  * - direct_answer: Router → Generator (2 LLM calls)
- * - web_search: Router → parallel searches → Router → … → Generator or escalation
- *   (up to MAX_CHAT_SEARCH_ROUNDS search rounds; the Generator overlaps each
- *   after-search Router and is committed only when that Router answers)
+ * - web_search / grep: Router → search round → Router → … → Generator or escalation
+ *   (up to MAX_CHAT_SEARCH_ROUNDS search rounds shared by both kinds; the
+ *   Generator overlaps each after-search Router and is committed only when
+ *   that Router answers). A grep round runs the shared grep tool definition
+ *   on the user's own data (chatGrepRound.ts).
  * - agent_start_task: Router only → start Temporal (1 LLM call, exit)
  *
  * Both Router and Generator stream their reasoning as ASSISTANT_STREAM (thinking).
@@ -25,10 +27,11 @@ import { isWorkflowStartAdmissionPending } from '../workflowQueueAdmission';
  *                             ├─ direct_answer ──> reuse initial message snapshot
  *                             │    └─ Router-start Generator ──> buffered until commit
  *                             ├─ web_search ──> round: 1+ queries in parallel ──> reload
+ *                             ├─ grep ───────> round: one grep tool call ───────> reload
  *                             │    └─ closed action ──> abort/discard speculation
  *                             └─ round results ──> Router (after_search; the last
  *                                  │                round's route cannot search)
- *                                  ├─ web_search ──> next round
+ *                                  ├─ web_search | grep ──> next round
  *                                  ├─ direct_answer ──> commit overlapped Generator
  *                                  └─ escalation ──> discard Generator, Temporal
  *
@@ -47,6 +50,7 @@ import { terminateStaleTemporalWorkflow } from '../workflowReplacement';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { MAX_CHAT_SEARCH_ROUNDS, type RouterStage } from './routerDecision';
 import { runChatWebSearchRound, type WebSearchDecision } from './chatWebSearchRound';
+import { runChatGrepRound, type GrepDecision } from './chatGrepRound';
 import { callGeneratorLlm, type GeneratorResponse } from './generatorLlm';
 import { selectChatPhaseModels, type ChatPhaseModels } from './phaseModels';
 import { startInitialChatContext, loadChatModelMessages, type ChatMessage } from './initialContext';
@@ -270,24 +274,33 @@ export async function handleChatMessage(config: {
   }
 
   // ============================================
-  // BRANCH: web_search → search, then route again with the results.
+  // BRANCH: web_search or grep → search, then route again with the results.
   // The Router owns escalation; the Generator can only reply. After each
-  // round the Router answers, searches again, or escalates; once the turn's
-  // rounds are spent it can only answer or escalate.
+  // round the Router answers, searches again (either kind), or escalates;
+  // once the turn's rounds are spent it can only answer or escalate.
   // ============================================
   let generatorMessages = messages;
   let earlyGeneratorResponse: GeneratorResponse | null;
-  if (decision.action === 'web_search') {
-    let search: WebSearchDecision = decision;
+  if (decision.action === 'web_search' || decision.action === 'grep') {
+    let search: WebSearchDecision | GrepDecision = decision;
     let earlyToolCallId = webSearchToolCallId;
     let searchRouterStreamId = routerStreamId;
     for (let round = 1; ; round += 1) {
-      await runChatWebSearchRound({
-        agentId: config.agentId,
-        decision: search,
-        earlyToolCallId,
-        routerStreamId: searchRouterStreamId,
-      });
+      if (search.action === 'web_search') {
+        await runChatWebSearchRound({
+          agentId: config.agentId,
+          decision: search,
+          earlyToolCallId,
+          routerStreamId: searchRouterStreamId,
+        });
+      } else {
+        await runChatGrepRound({
+          agentId: config.agentId,
+          userId: config.userId,
+          decision: search,
+          routerStreamId: searchRouterStreamId,
+        });
+      }
       generatorMessages = await loadChatModelMessages(chatContextConfig);
       const next = await routeAfterSearch({
         agentId: config.agentId,
@@ -316,7 +329,7 @@ export async function handleChatMessage(config: {
   // ============================================
   // Generator - Create response
   // Streams reasoning as thinking, returns response for true message
-  // (Called for direct_answer, and for web_search the Router answered)
+  // (Called for direct_answer, and for a search the Router answered)
   // ============================================
   log.info('[ChatHandler] Generating response', { agentId: config.agentId });
 
@@ -372,7 +385,7 @@ export async function handleChatMessage(config: {
 }
 
 // ============================================
-// Helper: Route again after a round of web searches
+// Helper: Route again after a search round (web searches or grep)
 // ============================================
 /**
  * Most searches answer the question, so the Generator overlaps this route
