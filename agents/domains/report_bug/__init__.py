@@ -9,7 +9,7 @@
             │     → boxes.dev Bug Report automation (`--ai--` thread, /goal … /deploy + /rca)
             │     otherwise saved (RECORDED) for /rca: GET …/report-bug/by-agent
             ▼
-    FINISHED "Bug report filed/saved …" (metadata keeps the description) | ERROR
+    FINISHED "Bug report filed/saved … Report sent: <full description>" (metadata keeps it too) | ERROR
 
 The tool is exposed only by ``with_report_bug``; the backend re-checks every gate.
 """

@@ -42,11 +42,17 @@ clone_or_refresh() {
   rm -rf "$dir/.git"
 }
 
-clone_or_refresh openclaw https://github.com/openclaw/openclaw.git
-clone_or_refresh hermes-agent https://github.com/nousresearch/hermes-agent.git
-clone_or_refresh codex https://github.com/openai/codex.git
-clone_or_refresh prime-agent https://github.com/PrimeIntellect-ai/prime-agent.git
-clone_or_refresh kimi-code https://github.com/MoonshotAI/kimi-code.git
+# The five clones are independent and network-bound (1.3 GB, ~2.5 min serially on
+# an E2B sandbox), so run them concurrently: a failed clone fails the script.
+clone_pids=()
+clone_or_refresh openclaw https://github.com/openclaw/openclaw.git & clone_pids+=($!)
+clone_or_refresh hermes-agent https://github.com/nousresearch/hermes-agent.git & clone_pids+=($!)
+clone_or_refresh codex https://github.com/openai/codex.git & clone_pids+=($!)
+clone_or_refresh prime-agent https://github.com/PrimeIntellect-ai/prime-agent.git & clone_pids+=($!)
+clone_or_refresh kimi-code https://github.com/MoonshotAI/kimi-code.git & clone_pids+=($!)
+clone_failed=0
+for pid in "${clone_pids[@]}"; do wait "$pid" || clone_failed=1; done
+[ "$clone_failed" = 0 ] || { echo "[sync-ref] a reference clone failed" >&2; exit 1; }
 
 # Refuse to rewrite the tip-record file unless every clone has .ref-sha.
 for dir in openclaw hermes-agent codex prime-agent kimi-code; do

@@ -286,7 +286,6 @@ describe('subtle dark dividers (Andy: separators white .07, outer borders <= .10
   ];
   const FILES = [
     'features/terminal-component-group/components/codeAgentChip.desktop.tsx',
-    'features/terminal-component-group/components/codeAgentChip.steer.tsx',
     'features/terminal-component-group/components/claudeCodeChip.shared.tsx',
     'features/terminal-component-group/components/claudeCodeChip.renderers.tsx',
     'features/terminal-component-group/components/PinnedQuestion.tsx',

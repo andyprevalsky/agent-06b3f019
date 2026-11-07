@@ -143,7 +143,7 @@ describe('actively working row header', () => {
     expect(within(button).getByTestId('trajectory-activity-icon')).toBeInTheDocument();
   });
 
-  it('a live thinking stream keeps the arrow left of its animated indicator', () => {
+  it('a live thinking stream keeps the arrow left of its stock activity icon (no animated blob)', () => {
     const live = msg(
       { toolName: 'thought', title: 'Thinking', toolStatus: 'IN_PROGRESS', ephemeral: true },
       { message_id: 'streaming:thinking', timestamp: at(4) },
@@ -152,14 +152,13 @@ describe('actively working row header', () => {
       createElement(TrajectoryWorkGroup, {
         group: runningGroup([live]),
         renderMessage: () => null,
-        indicator: createElement('span', { 'data-testid': 'live-indicator' }, 'Thinking'),
       }),
     );
     const arrow = screen.getByTestId('trajectory-disclosure');
-    const indicator = screen.getByTestId('live-indicator');
-    expect(
-      arrow.compareDocumentPosition(indicator) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    const icon = screen.getByTestId('trajectory-activity-icon');
+    expect(icon).toHaveClass('lucide-lightbulb');
+    expect(arrow.compareDocumentPosition(icon) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByTestId('thinking-indicator')).toBeNull();
   });
 });
 

@@ -4,11 +4,13 @@
  * Thin wrapper that normalizes LLM-escape-sequence input and dispatches to one
  * of two render paths:
  *
- *   !shouldAnimate  -> ReactMarkdown (+ remarkBreaks when breaks=true).
- *                      Static FYI / tool / plan bubbles keep every GFM node,
- *                      including photos. FadeInMarkdown's word extractor is
- *                      text-only and must not own the static path.
- *   shouldAnimate   -> FadeInMarkdown (word-by-word fade-in, including images)
+ *   !shouldAnimate  -> ReactMarkdown
+ *   shouldAnimate   -> FadeInMarkdown (word-by-word fade-in)
+ *   breaks=true     -> both paths add remarkBreaks (single newlines stay line breaks)
+ *
+ * Both paths render the same ReactMarkdown tree with MARKDOWN_COMPONENTS, so a
+ * reply keeps every GFM node (tables in a scroll container, nested lists,
+ * code, links, photos) whether it is fading in, streaming or settled.
  *
  * STATE MACHINE:
  *   [STATIC]     -- shouldAnimate=false --> ReactMarkdown
@@ -23,12 +25,7 @@ import remarkBreaks from 'remark-breaks';
 
 import { cn } from '@/lib/utils';
 
-import {
-  FadeInMarkdown,
-  MarkdownImage,
-  MarkdownLink,
-  normalizeMarkdownText,
-} from './markdown-text';
+import { FadeInMarkdown, MARKDOWN_COMPONENTS, normalizeMarkdownText } from './markdown-text';
 import { MarkdownStyles } from './markdown-text/MarkdownStyles';
 
 interface MarkdownTextProps {
@@ -54,7 +51,7 @@ export const MarkdownText = memo(function MarkdownText({
         <MarkdownStyles />
         <ReactMarkdown
           remarkPlugins={breaks ? [remarkGfm, remarkBreaks] : [remarkGfm]}
-          components={{ a: MarkdownLink, img: MarkdownImage }}
+          components={MARKDOWN_COMPONENTS}
         >
           {normalizedText}
         </ReactMarkdown>
@@ -68,6 +65,7 @@ export const MarkdownText = memo(function MarkdownText({
       onComplete={onComplete}
       className={className}
       shouldAnimate={shouldAnimate}
+      breaks={breaks}
     />
   );
 });

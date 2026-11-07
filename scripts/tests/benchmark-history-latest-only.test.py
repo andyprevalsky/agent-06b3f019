@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "benchmark-history-latest-only.py"
@@ -32,7 +32,7 @@ def span(benchmark, agent, stamp):
             "span_name": "n", "status": "ok", "timestamp": stamp}
 
 
-class LatestOnlyTests(unittest.TestCase):
+class LedgerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.repo = Path(self.tmp.name)
@@ -100,6 +100,8 @@ class LatestOnlyTests(unittest.TestCase):
             span("smoke-a", "br-a2", "2026-10-21T11:01:00+00:00"),
         ])
 
+
+class LatestOnlyTests(LedgerCase):
     def test_write_keeps_only_latest_branch_run_and_all_base_rows(self):
         self.branch_iteration()
         code, out = self.run_tool("--write")
@@ -280,6 +282,92 @@ class LatestOnlyTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual([r["agent_id"] for r in self.read("task_attempts.jsonl")[2:]], ["park-b1", "park-c1"])
         self.assertEqual([r["agent_id"] for r in self.read("task_durations.jsonl")], ["main-2", "park-b1", "park-c1"])
+
+
+class QualificationTests(LedgerCase):
+    """--qualify TASK=N: a committed streak of N passes survives; iterations still do not."""
+
+    TASK = "code-agent-rose-repo"
+
+    def qualified(self, task, passed, end, agent, counts=True):
+        row = attempt(task, passed, end, 300, agent)
+        return {**row, "counts_for_deploy_eligibility": counts, "suite": "local"}
+
+    def streak(self, outcomes=(True,) * 5, counts=True):
+        hours = ["10", "11", "12", "13", "14"]
+        # A failed attempt before the streak is a fix-and-rerun iteration; smoke-a is another task.
+        rows = [self.qualified(self.TASK, False, "2026-10-21T08:05:00+00:00", "iter-0")]
+        rows += [self.qualified(self.TASK, ok, f"2026-10-21T{h}:05:00+00:00", f"q-{i}", counts)
+                 for i, (h, ok) in enumerate(zip(hours, outcomes), 1)]
+        rows += [attempt("smoke-a", False, "2026-10-21T09:05:00+00:00", 300, "a-1"),
+                 attempt("smoke-a", True, "2026-10-21T14:30:00+00:00", 300, "a-2")]
+        self.write("task_attempts.jsonl", rows, append=True)
+        self.write("task_durations.jsonl", [
+            {"task": self.TASK, "duration_seconds": 300, "timestamp": f"2026-10-21T{h}:05:00+00:00", "agent_id": f"q-{i}"}
+            for i, h in enumerate(hours, 1)] + [
+            {"task": self.TASK, "duration_seconds": 300, "timestamp": "2026-10-21T08:05:00+00:00", "agent_id": "iter-0"}],
+            append=True)
+        self.write("span_durations.jsonl", [span(self.TASK, "iter-0", "2026-10-21T08:01:00+00:00")]
+                   + [span(self.TASK, f"q-{i}", f"2026-10-21T{h}:01:00+00:00") for i, h in enumerate(hours, 1)],
+                   append=True)
+
+    def test_without_the_flag_only_the_latest_run_of_the_streak_survives(self):
+        self.streak()
+        code, out = self.run_tool("--write")
+        self.assertEqual(code, 0, out)
+        kept = [r["agent_id"] for r in self.read("task_attempts.jsonl")[2:] if r["task"] == self.TASK]
+        self.assertEqual(kept, ["q-5"])
+
+    def test_qualify_keeps_the_streak_and_still_drops_iterations_and_other_tasks(self):
+        self.streak()
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=5")
+        self.assertEqual(code, 0, out)
+        attempts = self.read("task_attempts.jsonl")
+        self.assertEqual(attempts[:2], self.base_attempts)
+        self.assertEqual([r["agent_id"] for r in attempts[2:] if r["task"] == self.TASK],
+                         ["q-1", "q-2", "q-3", "q-4", "q-5"])
+        self.assertEqual([r["agent_id"] for r in attempts[2:] if r["task"] == "smoke-a"], ["a-2"])
+        durations = [r["agent_id"] for r in self.read("task_durations.jsonl") if r["task"] == self.TASK]
+        self.assertEqual(durations, ["q-1", "q-2", "q-3", "q-4", "q-5"])
+        spans = [r["agent_id"] for r in self.read("span_durations.jsonl") if r["benchmark"] == self.TASK]
+        self.assertEqual(spans, ["q-1", "q-2", "q-3", "q-4", "q-5"])
+        self.assertEqual(self.run_tool("--check", "--qualify", f"{self.TASK}=5")[0], 0)
+
+    def test_unmet_qualification_exits_one_and_rewrites_nothing(self):
+        for outcomes, counts in (((True, True, False, True, True), True), ((True,) * 5, False)):
+            self.git("checkout", "--", HISTORY.as_posix())
+            self.streak(outcomes, counts)
+            before = {n: (self.repo / HISTORY / n).read_bytes() for n in ("task_attempts.jsonl", "task_durations.jsonl")}
+            code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=5")
+            self.assertEqual(code, 1, out)
+            self.assertIn("qualification not met", out)
+            self.assertEqual(before, {n: (self.repo / HISTORY / n).read_bytes() for n in before})
+        self.git("checkout", "--", HISTORY.as_posix())
+        self.streak()
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=6")
+        self.assertEqual(code, 1, out)
+        self.assertIn("did not pass", out)  # the 6th-latest is the failed iteration
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=7")
+        self.assertEqual(code, 1, out)
+        self.assertIn("6 deploy-eligible branch attempt(s), qualification needs 7", out)
+
+    def test_a_later_predeploy_attempt_does_not_displace_the_streak(self):
+        self.streak()
+        deploy_run = {**self.qualified(self.TASK, True, "2026-10-21T16:05:00+00:00", "deploy-1", counts=False),
+                      "suite": "predeploy"}
+        self.write("task_attempts.jsonl", [deploy_run], append=True)
+        code, out = self.run_tool("--write", "--qualify", f"{self.TASK}=5")
+        self.assertEqual(code, 0, out)
+        kept = [r["agent_id"] for r in self.read("task_attempts.jsonl")[2:] if r["task"] == self.TASK]
+        self.assertEqual(kept, ["q-1", "q-2", "q-3", "q-4", "q-5", "deploy-1"])
+        self.assertEqual(self.run_tool("--check", "--qualify", f"{self.TASK}=5")[0], 0)
+
+    def test_qualify_rejects_a_malformed_or_duplicate_task_spec(self):
+        for spec in ("code-agent-rose-repo", "code-agent-rose-repo=0", "=3", "code-agent-rose-repo=x"):
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                self.run_tool("--qualify", spec)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            self.run_tool("--qualify", "t=1", "--qualify", "t=2")
 
 
 if __name__ == "__main__":

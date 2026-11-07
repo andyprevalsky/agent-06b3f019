@@ -116,8 +116,14 @@ export function buildBugReportPrompt(agentId: string, description: string): stri
 export const BUG_REPORT_GOAL_LINE =
   '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful';
 
+// Bug threads run in parallel; mirrors the deploy repair-delegation rule
+// (.claude/shared/deploy-failure-policy.md: read existing repair agents, match by
+// actual work and evidence, reconcile before duplicate repair edits).
+export const BUG_REPORT_DEDUP_LINE =
+  'Before editing a fix, read the other active bug threads in this project (boxes-read-threads; the Bugs folder and other Bug Report runs) and match by their actual work and evidence, not titles. If one already owns this failure, send it your evidence (boxes-message-agents) and reconcile instead of duplicating its repair.';
+
 export function buildManualBugReportPrompt(agentId: string, description: string): string {
-  return `${BUG_REPORT_GOAL_LINE}\n${buildBugReportPrompt(agentId, description)}`;
+  return `${BUG_REPORT_GOAL_LINE}\n${BUG_REPORT_DEDUP_LINE}\n${buildBugReportPrompt(agentId, description)}`;
 }
 
 /**

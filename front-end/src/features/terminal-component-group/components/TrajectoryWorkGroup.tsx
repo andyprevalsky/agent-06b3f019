@@ -12,9 +12,10 @@
  * RUNNING header: fixed-height live carousel: disclosure chevron (→ collapsed,
  *   ↓ expanded), then the latest activity icon + label and the live elapsed; no
  *   spinner. An inbound agent message is an ordinary activity ("Message from …",
- *   mail icon); it never ends or re-keys the batch. Thinking always shows the ↓
- *   token counter: the live stream's indicator, or the persisted thought's own
- *   size until the next stream starts.
+ *   mail icon); it never ends or re-keys the batch. Thinking is a stock activity
+ *   like any tool (lightbulb + "Thinking"), never an animated indicator; a
+ *   finished thought appends its recorded generation (duration · ↓ tokens ·
+ *   tok/s, thoughtGeneration). Nothing is estimated from text length.
  *   When the latest activity is a spawned agent, a smaller line beneath rotates
  *   through the tool(s) it is using now (SpawnedAgentToolLine).
  * DONE header: chevron + "Worked for Xs" + activity count.
@@ -26,9 +27,9 @@
 import { useId, useMemo, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, Lightbulb, MessagesSquare } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
-import { useAnimatedCounter } from '@/hooks/useAnimatedCounter';
 import { useBatchElapsed } from './useBatchElapsed';
-import { StreamingMetric } from './StreamingMetric';
+import { thoughtGeneration } from './thoughtGeneration';
+import { ThoughtGenerationMetric } from './ThoughtGenerationMetric';
 import type { Message } from '../hooks';
 import type { TrajectoryWorkGroup as Group } from './trajectoryWorkGroups';
 import type { ExploreStep } from '../types';
@@ -40,19 +41,14 @@ const PAGE_SIZE = 20;
 function BatchElapsed({ startedAt }: { startedAt: number | null }) {
   return <span data-testid="trajectory-batch-elapsed">{useBatchElapsed(startedAt, true)}</span>;
 }
-/** A persisted thought between streams keeps the ↓ counter, sized by its own text. */
-function PersistedThinking({ message, label }: { message: Message; label: string }) {
-  const tokens = Math.round(message.text.length / 4);
+/** A thought with a recorded generation shows it beside the label; otherwise just the label. */
+function ThinkingLabel({ message, label }: { message: Message; label: string }) {
+  const generation = thoughtGeneration(message.metadata);
+  if (!generation) return <>{label}</>;
   return (
     <span className="flex items-center gap-2">
       {label}
-      <StreamingMetric
-        tokenCount={tokens}
-        animatedTokenCount={useAnimatedCounter(tokens, 0.3)}
-        className="text-xs"
-        iconClassName="h-3 w-3"
-        showZeroTokens
-      />
+      <ThoughtGenerationMetric generation={generation} />
     </span>
   );
 }
@@ -77,12 +73,10 @@ function toolIdentity(group: Group) {
 export function TrajectoryWorkGroup({
   group,
   renderMessage,
-  indicator,
   exploreStepMap,
 }: {
   group: Group;
   renderMessage: (message: Message) => ReactNode;
-  indicator?: ReactNode;
   exploreStepMap?: ReadonlyMap<string, ExploreStep[]>;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -105,7 +99,6 @@ export function TrajectoryWorkGroup({
   const activePage = Math.min(page, lastPage);
   const label = running ? latest.label : workLabel(group);
   const thinking = running && latest.kind === 'thinking';
-  const liveThinking = thinking && indicator;
   return (
     <div
       data-testid="trajectory-work-group"
@@ -141,7 +134,7 @@ export function TrajectoryWorkGroup({
             className="shrink-0"
           />
         )}
-        {running && !liveThinking && (
+        {running && (
           <Icon data-testid="trajectory-activity-icon" size={14} aria-hidden className="shrink-0" />
         )}
         <span
@@ -153,13 +146,7 @@ export function TrajectoryWorkGroup({
             data-activity-key={latest.key}
             className={running ? 'trajectory-activity-enter block truncate' : 'block truncate'}
           >
-            {liveThinking ? (
-              indicator
-            ) : thinking ? (
-              <PersistedThinking message={latest.message} label={label} />
-            ) : (
-              label
-            )}
+            {thinking ? <ThinkingLabel message={latest.message} label={label} /> : label}
           </span>
         </span>
         <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs">

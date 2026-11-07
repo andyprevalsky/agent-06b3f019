@@ -7,9 +7,10 @@
  *     ├─ each provider: every size uses the same source dir and the same Dockerfile,
  *     │    differing only in cpu / memory; names == sizedTemplateName(provider, size)
  *     ├─ no per-size copies are committed (extra e2b*.toml / *.Dockerfile under e2b-templates)
+ *     ├─ both Dockerfiles install gh from GitHub's signed apt repository and bake no credential
  *     └─ --execute --via sdk (E2B_API_KEY, no CLI login), run against a stand-in e2b module:
  *          Template.build gets each plan entry's source dir, Dockerfile, name, cpu and memory;
- *          every size is booted and checked (nproc, MemTotal, provider CLI) and its sandbox
+ *          every size is booted and checked (nproc, MemTotal, provider CLI, gh) and its sandbox
  *          killed; one wrong-sized template fails the run and withholds the grid go-ahead;
  *          --missing builds only the absent sizes and still verifies every size
  *
@@ -186,6 +187,52 @@ check('a stale per-environment Claude template id cannot override the pinned tem
   assert.deepStrictEqual(readers, [], `providers reading the env template id: ${readers}`);
 });
 
+check(
+  'both code-agent Dockerfiles install gh from the official signed apt repo and bake no token',
+  () => {
+    for (const source of ['claude-code', 'codex-code']) {
+      const dockerfile = readFileSync(path.join(templatesDir, source, 'e2b.Dockerfile'), 'utf8');
+      const where = `${source}/e2b.Dockerfile`;
+      // GitHub's keyring + apt source (signed-by), gh installed and run once at build time.
+      for (const needle of [
+        'https://cli.github.com/packages/githubcli-archive-keyring.gpg',
+        'signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg',
+        'https://cli.github.com/packages stable main',
+        'apt-get install -y --no-install-recommends gh',
+        '&& gh --version',
+      ]) {
+        assert.ok(dockerfile.includes(needle), `${where} is missing: ${needle}`);
+      }
+      // Never a piped installer for gh, and the apt lists are still cleaned after the install.
+      assert.doesNotMatch(
+        dockerfile,
+        /cli\.github\.com[^\n]*\|\s*(sudo\s+)?(ba)?sh\b/,
+        `${where} pipes the gh installer into a shell`
+      );
+      // The RUN instruction that installs gh (the blank-line separated block) cleans its own apt lists.
+      const installBlock = dockerfile
+        .split(/\n\s*\n/)
+        .find((block) => block.includes('apt-get install -y --no-install-recommends gh'));
+      assert.ok(installBlock, `${where} has no RUN block that installs gh`);
+      assert.ok(
+        installBlock.indexOf('rm -rf /var/lib/apt/lists/*') >
+          installBlock.indexOf('apt-get install -y --no-install-recommends gh'),
+        `${where} must clean the apt lists in the same RUN, after installing gh`
+      );
+      // No credential is baked into the image: gh reads GITHUB_TOKEN / GH_TOKEN at run time.
+      assert.doesNotMatch(
+        dockerfile,
+        /^\s*(ENV|ARG)\s+\S*(TOKEN|SECRET|PASSWORD)\S*/im,
+        `${where} bakes a credential variable`
+      );
+      assert.doesNotMatch(
+        dockerfile,
+        /gh auth (login|token)|x-access-token|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_/
+      );
+    }
+  }
+);
+
 check('no per-size template copies are committed', () => {
   for (const spec of Object.values(config.providers)) {
     const files = readdirSync(path.join(templatesDir, spec.source));
@@ -203,7 +250,8 @@ check('no per-size template copies are committed', () => {
 /**
  * Stand-in for the e2b SDK: records Template.build / Sandbox.create / kill calls and
  * boots "sandboxes" that report the size the template was built with
- * (FAKE_E2B_BAD_NPROC=<name> makes that one report 1 vCPU; FAKE_E2B_BUILD_FAIL=<name>
+ * (FAKE_E2B_BAD_NPROC=<name> makes that one report 1 vCPU; FAKE_E2B_NO_GH=<name> makes that
+ * one lack the GitHub CLI; FAKE_E2B_BUILD_FAIL=<name>
  * rejects that build the way E2B rejects a size over the team's memory limit;
  * FAKE_E2B_EXISTING=<name,…> are templates that already exist).
  */
@@ -249,6 +297,12 @@ export const Sandbox = {
           if (cmd.includes('/proc/meminfo')) return ok('MemTotal: ' + Math.round(size.memoryMB * 1024 * 0.97) + ' kB');
           if (cmd === 'command -v ' + cli) return ok('/usr/bin/' + cli);
           if (cmd === cli + ' --version') return ok(cli + ' 1.0.0');
+          if (cmd === 'gh --version') {
+            if (process.env.FAKE_E2B_NO_GH === name) {
+              throw Object.assign(new Error('exit 127: gh'), { exitCode: 127, stdout: '', stderr: '' });
+            }
+            return ok('gh version 2.103.3 (fake)');
+          }
           if (cmd.includes('ws-server.mjs')) return ok('ok');
           throw Object.assign(new Error('exit 127: ' + cmd), { exitCode: 127, stdout: '', stderr: '' });
         },
@@ -368,6 +422,26 @@ check('a wrong-sized template fails the SDK run and withholds the grid go-ahead'
     'the wrong-sized sandbox is still killed'
   );
   assert.doesNotMatch(run.stdout, /Set E2B_SANDBOX_TEMPLATES=grid/);
+});
+
+check('a template without gh fails the SDK run and withholds the grid go-ahead', () => {
+  const bad = plan[0].name;
+  const run = runSdkBuild({ FAKE_E2B_NO_GH: bad });
+  assert.strictEqual(run.status, 1, run.stdout);
+  assert.strictEqual(run.receipt.allVerified, false);
+  const record = run.receipt.entries.find((entry) => entry.name === bad);
+  assert.strictEqual(record?.verified, false);
+  assert.match(record?.problems?.join('; ') ?? '', /gh --version failed/);
+  assert.ok(
+    run.events.some((event) => event.type === 'kill' && event.name === bad),
+    'the sandbox without gh is still killed'
+  );
+  assert.doesNotMatch(run.stdout, /Set E2B_SANDBOX_TEMPLATES=grid/);
+  // every other size still verifies, with its gh version recorded
+  for (const other of run.receipt.entries.filter((entry) => entry.name !== bad)) {
+    assert.strictEqual(other.verified, true, other.name);
+    assert.match(other.ghVersion ?? '', /^gh version \d/, other.name);
+  }
 });
 
 check('a size E2B refuses to build fails the run but every other size is still built', () => {

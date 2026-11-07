@@ -214,12 +214,17 @@ export function buildRouterCompletionOptions(
   };
 }
 
+/** Static stage prompt (cached prefix), then the agent's project section (projectContext.ts). */
+export const buildRouterSystemMessage = (stage: RouterStage, projectContext = '') =>
+  markCacheable(ROUTER_STAGES[stage].systemPrompt, projectContext);
+
 export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
   model: string;
   providerRoute?: ChatProviderRoute;
   stage?: RouterStage;
+  projectContext?: string; // `## Project` section; '' or omitted = Home
   onRouterStarted?: () => void;
   onActionDetected?: (action: ClosedRouterAction) => void;
 }): Promise<RouterResponse> {
@@ -234,7 +239,7 @@ export async function callRouterLlm(params: {
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [markCacheable(routerStage.systemPrompt)];
+  }> = [buildRouterSystemMessage(stage, params.projectContext)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {

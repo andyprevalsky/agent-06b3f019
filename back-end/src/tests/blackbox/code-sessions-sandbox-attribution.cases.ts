@@ -100,6 +100,42 @@ export function registerSandboxAttributionCases(userId: string): void {
     }
   });
 
+  test('stack identity is unique per workspace on a shared host+db, and unchanged on Render or with an explicit id', async () => {
+    const mod = await reaper();
+    const keys = [
+      'RENDER',
+      'RENDER_SERVICE_ID',
+      'CONDUCTOR_WORKSPACE_NAME',
+      'ROSE_SANDBOX_STACK_ID',
+      'ROSE_SANDBOX_ORIGIN',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    try {
+      for (const key of keys) delete process.env[key];
+      const bare = mod.roseSandboxIdentity().roseStack;
+      assert.doesNotMatch(bare, /\|ws:/);
+      process.env.CONDUCTOR_WORKSPACE_NAME = 'devbox-a';
+      const a = mod.roseSandboxIdentity().roseStack;
+      process.env.CONDUCTOR_WORKSPACE_NAME = 'devbox-b';
+      const b = mod.roseSandboxIdentity().roseStack;
+      assert.match(a, /\|ws:devbox-a\|db:/);
+      assert.notEqual(a, b, 'two workspaces on one host+db must not share a stack id');
+      process.env.ROSE_SANDBOX_STACK_ID = 'explicit-stack';
+      assert.equal(mod.roseSandboxIdentity().roseStack, 'explicit-stack');
+      delete process.env.ROSE_SANDBOX_STACK_ID;
+      process.env.RENDER = 'true';
+      process.env.RENDER_SERVICE_ID = 'srv-prod';
+      assert.doesNotMatch(mod.roseSandboxIdentity().roseStack, /\|ws:/);
+      assert.match(mod.roseSandboxIdentity().roseStack, /^render:srv-prod\|db:/);
+    } finally {
+      for (const key of keys) {
+        const value = saved[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   test('stack teardown kills only this stack’s sandboxes recorded in its database; the reaper kills only attributable orphans, page by page', async () => {
     const mod = await reaper();
     const { roseStack, roseOrigin } = mod.roseSandboxIdentity();

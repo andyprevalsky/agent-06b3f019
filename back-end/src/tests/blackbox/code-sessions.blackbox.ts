@@ -54,10 +54,13 @@ import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
 import { acquireCodeSessionSandbox } from '../../providers/e2bCodeSessionSandbox';
 import { testResumableCloseListsPaused } from './code-sessions-list.cases';
 import { registerFailedStartPauseCases } from './code-sessions-failed-start.cases';
+import { registerSpawnReplayCases } from './code-sessions-spawn-replay.cases';
+import { registerWsStartupCases } from './code-sessions-ws-startup.cases';
 import { registerCodeSessionLifecycleCases } from './code-sessions-lifecycle.cases';
 import { registerCodeSessionLiveResumeCases } from './code-sessions-live-resume.cases';
 import { registerSandboxAttributionCases } from './code-sessions-sandbox-attribution.cases';
 import { registerCheckpointDeletionCases } from './code-sessions-checkpoint-deletion.cases';
+import { registerCheckpointSizeCases } from './code-sessions-checkpoint-size.cases';
 
 config();
 
@@ -600,6 +603,8 @@ test('keepalive extends an attached sandbox and its lease; retire deletes checkp
 });
 
 registerFailedStartPauseCases(userA, rootAgentId);
+registerSpawnReplayCases(userA);
+registerWsStartupCases({ fixtureDir });
 registerCodeSessionLifecycleCases({
   userA,
   fixtureDir,
@@ -618,3 +623,4 @@ registerCodeSessionLiveResumeCases({
 });
 registerSandboxAttributionCases(userA);
 registerCheckpointDeletionCases({ fixtureDir, seedWorkspace });
+registerCheckpointSizeCases({ fixtureDir });

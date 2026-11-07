@@ -5,6 +5,7 @@
  */
 
 import { WebSocketServer } from "ws";
+import { createServer } from "http";
 import { execFileSync, execSync, spawn } from "child_process";
 import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import {
@@ -15,6 +16,7 @@ import {
   readdirSync,
   renameSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
@@ -107,17 +109,63 @@ const clients = new Set();
 // on its E2B idle window and the result is still here when it resumes.
 // Closing the session (SIGTERM / sandbox pause or kill) exits immediately.
 
-// Create WebSocket server
-const wss = new WebSocketServer({ port: PORT });
-
-wss.on("listening", () => {
-  log("info", "Server listening", {
-    port: wss.address().port,
-    ...(process.env.ROSE_LOCAL_WS_READINESS_TOKEN
-      ? { readinessToken: process.env.ROSE_LOCAL_WS_READINESS_TOKEN }
-      : {}),
+// The port is bound first and answers plain HTTP with the startup state, so a
+// probe can tell a server that is cloning from one that serves. A bound socket
+// whose event loop is blocked answers nothing, which the backend's old
+// `netstat | grep :3000` probe called ready. WebSocket handshakes are refused
+// with 503 until the server serves, so no connection handler runs before the
+// module's state exists. "Server listening" is logged once it serves.
+//
+//   starting ─▶ cloning ─▶ starting ─▶ ready      GET / : 503 {state} … 200 {state:"ready"}
+const startup = {
+  state: "starting",
+  phase: "init",
+  startedAt: Date.now(),
+  cloneMs: null,
+  cloneChild: null,
+};
+const httpServer = createServer((req, res) => {
+  const ready = startup.state === "ready";
+  res.writeHead(ready ? 200 : 503, {
+    "content-type": "application/json",
+    ...(ready ? {} : { "retry-after": "2" }),
   });
+  res.end(
+    JSON.stringify({
+      state: startup.state,
+      phase: startup.phase,
+      elapsed_ms: Date.now() - startup.startedAt,
+      clone_ms: startup.cloneMs,
+    }),
+  );
 });
+
+// Create WebSocket server
+const wss = new WebSocketServer({ noServer: true });
+httpServer.on("upgrade", (req, socket, head) => {
+  if (startup.state !== "ready") {
+    socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+});
+httpServer.listen(PORT);
+
+function markServing() {
+  startup.state = "ready";
+  startup.phase = "serving";
+  const announce = () =>
+    log("info", "Server listening", {
+      port: httpServer.address().port,
+      startup_ms: Date.now() - startup.startedAt,
+      clone_ms: startup.cloneMs,
+      ...(process.env.ROSE_LOCAL_WS_READINESS_TOKEN
+        ? { readinessToken: process.env.ROSE_LOCAL_WS_READINESS_TOKEN }
+        : {}),
+    });
+  if (httpServer.listening) announce();
+  else httpServer.once("listening", announce);
+}
 
 // A control connection that only sends a turn (`?replay=0`) skips the history
 // replay: a long session's buffer is megabytes, and the turn ack would queue
@@ -372,6 +420,8 @@ function announceExit(exitCode) {
   if (exitAnnounced) return;
   exitAnnounced = true;
   finalExitCode = exitCode;
+  dropStartupTurns("session_ended");
+  resolveTaskPrompt();
   appendEvent({
     type: "final",
     status: exitCode === 0 ? "completed" : "failed",
@@ -396,12 +446,24 @@ async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   log("info", "Starting graceful shutdown", { exitCode });
+  if (startup.state !== "ready") {
+    // Signalled while cloning or configuring: the session state below does not
+    // exist yet. Stop the clone (its temp dir is removed by the next start).
+    startup.cloneChild?.kill("SIGTERM");
+    httpServer.close(() => {
+      log("info", "Shutdown complete");
+      process.exit(exitCode);
+    });
+    setTimeout(() => process.exit(exitCode), 5000);
+    return;
+  }
   endNativeTurn("interrupted");
   if (cliChild && !processExited) cliChild.kill("SIGTERM");
 
   announceExit(exitCode);
 
   // Close server
+  httpServer.close();
   wss.close(() => {
     log("info", "Shutdown complete");
     process.exit(exitCode);
@@ -476,6 +538,63 @@ writeFileSync(settingsPath, JSON.stringify(settings));
 
 log("info", "Configuration written");
 
+// A startup phase is one named, timed step of getting the session ready. It
+// is logged and kept in the event buffer, so a benchmark can read how long the
+// clone took from the sandbox log or the replayed events.
+function recordStartupPhase(name, status, startedAt) {
+  const durationMs = Date.now() - startedAt;
+  log("info", "Startup phase", { name, status, duration_ms: durationMs });
+  appendEvent({ type: "startup_phase", name, status, duration_ms: durationMs });
+  return durationMs;
+}
+
+// `git clone` runs as a child process, not on the event loop, so the server
+// keeps answering "cloning" while a large repo downloads. It clones into a
+// sibling temp dir and renames it into place: a clone that is interrupted (a
+// restart, a pause) never leaves a half-written workspace that the next start
+// would take for a resumable repo ("HEAD is not a commit"). A finished clone
+// is found by RESUMING_REPO below and never repeated.
+const CLONE_TMP_PREFIX = ".workspace-cloning-";
+async function cloneRepoAtomically(authUrl, destDir) {
+  for (const name of readdirSync(home)) {
+    // Left behind by a server that was killed mid-clone.
+    if (name.startsWith(CLONE_TMP_PREFIX))
+      rmSync(join(home, name), { recursive: true, force: true });
+  }
+  const tmpDir = join(home, `${CLONE_TMP_PREFIX}${process.pid}`);
+  const startedAt = Date.now();
+  startup.state = "cloning";
+  startup.phase = "clone";
+  let status = "completed";
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn("git", ["clone", authUrl, tmpDir], {
+        stdio: "inherit",
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      });
+      startup.cloneChild = child;
+      child.once("error", reject);
+      child.once("exit", (code, signal) =>
+        code === 0
+          ? resolve()
+          : reject(new Error(`git clone exited with ${code ?? signal}`)),
+      );
+    });
+    renameSync(tmpDir, destDir);
+  } catch (err) {
+    status = "failed";
+    rmSync(tmpDir, { recursive: true, force: true });
+    throw err;
+  } finally {
+    startup.cloneChild = null;
+    startup.state = "starting";
+    startup.phase = "configure";
+    const durationMs = recordStartupPhase("clone", status, startedAt);
+    // A failed clone is not a clone time: the failure is in the log and the event.
+    startup.cloneMs = status === "completed" ? durationMs : null;
+  }
+}
+
 // Clone GitHub repo if specified
 let workDir = home;
 const REPO_WORKDIR = join(home, "workspace");
@@ -528,7 +647,10 @@ if (projectMode) {
     writeFileSync(settingsPath, JSON.stringify(settings));
     console.log(`[Setup] Resuming existing repo at ${workDir}`);
   } catch (err) {
-    console.error(`[Setup] Failed to refresh resumed repo:`, err.message);
+    console.error(
+      `[Setup] Failed to refresh resumed repo:`,
+      redactCredentials(err.message),
+    );
   }
 } else if (GITHUB_REPO_URL) {
   console.log(`[Setup] Cloning GitHub repo: ${GITHUB_REPO_URL}`);
@@ -549,11 +671,8 @@ if (projectMode) {
     : GITHUB_REPO_URL;
 
   try {
-    // Clone repo
-    execSync(`git clone ${authUrl} ${workDir}`, {
-      stdio: "inherit",
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-    });
+    // Clone repo (off the event loop, atomically: see cloneRepoAtomically)
+    await cloneRepoAtomically(authUrl, workDir);
 
     // Configure git for commits
     execSync(`git config user.name "Rose Agent"`, { cwd: workDir });
@@ -572,7 +691,10 @@ if (projectMode) {
 
     console.log(`[Setup] Repo cloned to ${workDir}`);
   } catch (err) {
-    console.error(`[Setup] Failed to clone repo:`, err.message);
+    console.error(
+      `[Setup] Failed to clone repo:`,
+      redactCredentials(err.message),
+    );
     // Continue without clone - Claude will see the error in goal context
   }
 }
@@ -588,6 +710,14 @@ if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
 // pushed branch, else cut it from CODE_AGENT_BASE_BRANCH (the parent agent's
 // branch for sub-agents) or, when that is empty, the repo's default branch.
 // A base that is not on the remote is reported, never silently replaced.
+// Credentials never leave the server in text: a URL's userinfo and the token
+// itself are masked in every error that reaches a log, an event or the output.
+function redactCredentials(text) {
+  let out = String(text ?? "").replace(/(https?:\/\/)[^@\s/]+@/g, "$1***@");
+  if (GITHUB_TOKEN) out = out.split(GITHUB_TOKEN).join("***");
+  return out;
+}
+
 function gitRun(args, cwd) {
   try {
     const stdout = execFileSync("git", args, {
@@ -599,8 +729,26 @@ function gitRun(args, cwd) {
     });
     return { ok: true, out: String(stdout).trim() };
   } catch (err) {
-    return { ok: false, out: String(err?.stderr || err?.message || "").trim() };
+    return {
+      ok: false,
+      status: err?.status ?? null,
+      out: redactCredentials(String(err?.stderr || err?.message || "").trim()),
+    };
   }
+}
+
+// A base that cannot be fetched is "not on the remote" only when the remote
+// answers that no such branch exists (`git ls-remote --exit-code` exits 2). Any
+// other failure (GitHub refusing with a rate limit, an outage, no network) is
+// reported with git's own output, so the agent is not told to fix a branch that
+// is fine. git exposes no reset time for a refusal.
+function baseFetchError(base, repoDir, fetched) {
+  const probe = gitRun(
+    ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${base}`],
+    repoDir,
+  );
+  if (probe.status === 2) return `base branch ${base} is not on the remote`;
+  return `could not fetch base branch ${base}: ${(fetched.out || probe.out).slice(0, 300)}`;
 }
 
 function prepareCodeSessionBranch(repoDir) {
@@ -654,7 +802,7 @@ function prepareCodeSessionBranch(repoDir) {
         start = `origin/${base}`;
         result.source = "base";
       } else {
-        result.error = `base branch ${base} is not on the remote`;
+        result.error = baseFetchError(base, repoDir, fetched);
       }
     } else {
       gitRun(["remote", "set-head", "origin", "-a"], repoDir);
@@ -868,6 +1016,8 @@ function emitClaudeMessage(message) {
       session_id: message.session_id,
       cwd: message.cwd,
       model: message.model,
+      speed: effectiveSettings.speed,
+      ...(effectiveSettings.effort ? { effort: effectiveSettings.effort } : {}),
       tools: message.tools || [],
       permission_mode: message.permissionMode,
       prompt_version: promptVersion(),
@@ -964,7 +1114,7 @@ function emitClaudeMessage(message) {
   }
 
   if (message.type === "result") {
-    emitNativeUsage(message.usage, true);
+    emitNativeUsage(message.usage, true, message.modelUsage);
     const isSuccess = message.subtype === "success";
     appendEvent({
       type: "result",
@@ -1089,6 +1239,20 @@ let directHold = false;
 let directHoldTimer = null;
 const deliveredTurnIds = new Map();
 const pendingDeliveries = new Map();
+// Startup window: from the server answering until the CLI is launched (project
+// startup runs first and can take minutes). An agent turn that arrives in it is
+// acked `queued` and, once the CLI exists, written right after the task prompt in
+// arrival order, so a message to a code agent that is still starting is not
+// refused (a user's direct turn is told `session_starting` and retries). From the
+// launch on, a turn waits for the task prompt (taskPromptReady) before it is
+// written. The queue lives and dies with this server: announceExit clears it.
+const MAX_STARTUP_TURNS = 20;
+const startupTurnQueue = [];
+const queuedTurnAcks = new Map();
+let resolveTaskPrompt = () => {};
+const taskPromptReady = new Promise((resolve) => {
+  resolveTaskPrompt = resolve;
+});
 const controlRequests = new Map();
 let controlSerial = Promise.resolve();
 let effectiveSettings = {
@@ -1111,9 +1275,23 @@ function startNativeTurn(id = randomUUID()) {
   });
   return activeTurn;
 }
-function emitNativeUsage(usage, final = false) {
+// The model's context window, from the latest result's modelUsage (Claude
+// reports it per model); carried on every later usage sample.
+let contextWindow = null;
+const CONTEXT_INPUT_FIELDS = [
+  "input_tokens",
+  "cache_read_input_tokens",
+  "cache_creation_input_tokens",
+];
+function emitNativeUsage(usage, final = false, modelUsage = null) {
   if (!activeTurn || !usage || typeof usage !== "object") return;
   const fields = {};
+  const windows = Object.values(
+    modelUsage && typeof modelUsage === "object" ? modelUsage : {},
+  )
+    .map((entry) => entry?.contextWindow)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (windows.length) contextWindow = Math.max(...windows);
   const mapping = {
     output_tokens: "output_tokens",
     input_tokens: "input_tokens",
@@ -1136,6 +1314,15 @@ function emitNativeUsage(usage, final = false) {
           ? usage[mapping[name]]
           : values.reduce((sum, value) => sum + value, 0);
   }
+  // One model call's prompt (uncached + cache read + cache write) is the
+  // context it used; a result's usage is the turn's total, never a context.
+  const context = CONTEXT_INPUT_FIELDS.map((name) => usage[name]).filter(
+    (value) => Number.isFinite(value) && value >= 0,
+  );
+  const contextTokens = context.reduce((sum, value) => sum + value, 0);
+  if (!final && contextTokens > 0) fields.context_tokens = contextTokens;
+  if (contextWindow && Object.keys(fields).length)
+    fields.context_window = contextWindow;
   if (Object.keys(fields).length)
     appendEvent({ type: "usage", usage_scope: "turn", ...fields });
 }
@@ -1469,30 +1656,86 @@ async function deliverTurnOnce(id, msg) {
       .then((ack) =>
         ack.status === "delivered" ? { ...ack, status: "duplicate" } : ack,
       );
+  if (queuedTurnAcks.has(id)) return { ...queuedTurnAcks.get(id) };
+  const invalid = invalidTurn(id, msg);
+  if (invalid) return invalid;
+  // Decided here, at arrival, not inside the serial chain: a turn that arrives
+  // as the prompt is written must queue behind the earlier queued turns.
+  if (!cliChild && !exitAnnounced) {
+    // Only agent messages wait: a user's direct turn carries settings and
+    // attachments that must be confirmed at once, so it is told to retry.
+    return msg.sender === "agent"
+      ? queueStartupTurn(id, msg)
+      : turnAck(id, "rejected", "session_starting");
+  }
+  return startSerialDelivery(id, msg);
+}
+function startSerialDelivery(id, msg) {
   const promise = controlSerial.then(() => deliverNativeTurn(msg));
   controlSerial = promise.catch(() => {});
   pendingDeliveries.set(id, promise);
-  try {
-    return await promise;
-  } finally {
-    pendingDeliveries.delete(id);
+  const done = () => pendingDeliveries.delete(id);
+  promise.then(done, done);
+  return promise;
+}
+function queueStartupTurn(id, msg) {
+  if (startupTurnQueue.length >= MAX_STARTUP_TURNS) {
+    return turnAck(id, "rejected", "startup_queue_full");
   }
+  startupTurnQueue.push({ id, msg });
+  const ack = {
+    ...turnAck(id, "queued"),
+    queue_position: startupTurnQueue.length,
+  };
+  queuedTurnAcks.set(id, ack);
+  appendEvent({
+    type: "user_turn_queued",
+    client_message_id: id,
+    sender: msg.sender === "agent" ? "agent" : "user",
+    queue_position: ack.queue_position,
+  });
+  log("info", "Queued user turn until the CLI starts", {
+    id,
+    queue_position: ack.queue_position,
+  });
+  return ack;
+}
+/**
+ * The CLI is launched: queued turns enter the delivery chain, ahead of any later
+ * arrival. Each waits for the task prompt (deliverNativeTurn), so they follow it.
+ */
+function releaseStartupTurns() {
+  for (const { id, msg } of startupTurnQueue.splice(0)) {
+    startSerialDelivery(id, msg).then((ack) => {
+      queuedTurnAcks.delete(id);
+      if (ack.status !== "delivered" && ack.status !== "duplicate") {
+        appendEvent({
+          type: "user_turn_undelivered",
+          turn_ids: [id],
+          reason: ack.reason || "rejected",
+        });
+      }
+    });
+  }
+}
+/** The session ended before the CLI took the queued turns: say which were lost. */
+function dropStartupTurns(reason) {
+  if (startupTurnQueue.length === 0) return;
+  appendEvent({
+    type: "user_turn_undelivered",
+    turn_ids: startupTurnQueue.map((turn) => turn.id),
+    reason,
+  });
+  startupTurnQueue.length = 0;
+  queuedTurnAcks.clear();
 }
 async function deliverNativeTurn(msg) {
   const id = typeof msg.id === "string" ? msg.id : "";
-  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
-  if (!id || id.length > MAX_TURN_ID_CHARS) {
-    return turnAck(id, "rejected", "invalid_id");
-  }
+  const invalid = invalidTurn(id, msg);
+  if (invalid) return invalid;
   if (deliveredTurnIds.has(id))
     return { ...deliveredTurnIds.get(id), status: "duplicate" };
   const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
-  if (
-    (!text.trim() && !msg.attachments?.length) ||
-    text.length > MAX_TURN_TEXT_CHARS
-  ) {
-    return turnAck(id, "rejected", "invalid_text");
-  }
   if (exitAnnounced || !cliStdinOpen || !cliChild) {
     return turnAck(id, "rejected", "session_ended");
   }
@@ -1502,6 +1745,7 @@ async function deliverNativeTurn(msg) {
   }
   try {
     if (nativeInitialization) await nativeInitialization;
+    await taskPromptReady;
     await applyTurnSettings(msg.settings);
   } catch (error) {
     return turnAck(id, "rejected", error.message);
@@ -1563,6 +1807,21 @@ async function deliverNativeTurn(msg) {
   return ack;
 }
 
+/** The refusal for a turn that can never be delivered, or null when it is well formed. */
+function invalidTurn(id, msg) {
+  if (!tokenMatches(msg.token)) return turnAck(id, "rejected", "unauthorized");
+  if (!id || id.length > MAX_TURN_ID_CHARS) {
+    return turnAck(id, "rejected", "invalid_id");
+  }
+  const text = typeof msg.text === "string" ? msg.text.replace(/\0/g, "") : "";
+  if (
+    (!text.trim() && !msg.attachments?.length) ||
+    text.length > MAX_TURN_TEXT_CHARS
+  ) {
+    return turnAck(id, "rejected", "invalid_text");
+  }
+  return null;
+}
 function handleHandBack(msg) {
   if (!tokenMatches(msg.token)) {
     return {
@@ -1584,6 +1843,33 @@ function startupBudgetMs() {
   } catch {
     return 150 * 1000;
   }
+}
+
+/**
+ * The runner's report: the last stdout line with the report prefix, parsed.
+ * Returns { report } or { problem: "missing" | "malformed" }, so a crash that
+ * wrote nothing is told apart from a report that cannot be read.
+ */
+function parseProjectStartupReport(output) {
+  const line = output
+    .split("\n")
+    .reverse()
+    .find((l) => l.startsWith(PROJECT_STARTUP_REPORT_PREFIX));
+  if (line === undefined) return { problem: "missing" };
+  try {
+    const report = JSON.parse(line.slice(PROJECT_STARTUP_REPORT_PREFIX.length));
+    if (
+      report !== null &&
+      typeof report === "object" &&
+      !Array.isArray(report) &&
+      typeof report.status === "string"
+    ) {
+      return { report };
+    }
+  } catch {
+    // Not JSON: reported as malformed below.
+  }
+  return { problem: "malformed" };
 }
 
 /** Run the project's startup script (bounded); resolves its report or null. */
@@ -1648,6 +1934,11 @@ function runProjectStartup() {
     child.stderr.on("data", (chunk) =>
       appendOutput("stderr", chunk.toString("utf8")),
     );
+    // Backstop only: the runner enforces the script's own timeout (SIGTERM then
+    // SIGKILL of the script's process group, which it spawns detached) well
+    // inside this budget. Daemons the script starts (Postgres, dev servers)
+    // are meant to outlive startup (startupRunner.ts contract), and they are
+    // not in the runner's group, so killing more than the runner is wrong.
     guard = setTimeout(() => {
       try {
         child.kill("SIGKILL");
@@ -1657,16 +1948,24 @@ function runProjectStartup() {
       done(fallback("timeout", "startup runner did not finish"));
     }, startupBudgetMs());
     child.on("error", (err) => done(fallback("failed", err.message)));
-    child.on("exit", () => {
-      const line = stdout
-        .split("\n")
-        .reverse()
-        .find((l) => l.startsWith(PROJECT_STARTUP_REPORT_PREFIX));
-      try {
-        done(JSON.parse(line.slice(PROJECT_STARTUP_REPORT_PREFIX.length)));
-      } catch {
-        done(fallback("failed", "startup runner produced no report"));
+    // "close", not "exit": "exit" can fire before the last stdout chunk (the
+    // report line) is read. The runner is the only holder of its stdout pipe
+    // (the script runs on pipes of its own), so close follows its exit.
+    child.on("close", (code, signal) => {
+      const ended = signal ? `signal ${signal}` : `exit code ${code}`;
+      const parsed = parseProjectStartupReport(stdout);
+      if (parsed.report) {
+        done(parsed.report);
+        return;
       }
+      done(
+        fallback(
+          "failed",
+          parsed.problem === "malformed"
+            ? `startup runner wrote a malformed report (${ended})`
+            : `startup runner produced no report (${ended})`,
+        ),
+      );
     });
   });
 }
@@ -1816,6 +2115,7 @@ async function runClaudeCli(startupReport = null) {
   });
   cliChild = child;
   cliStdinOpen = true;
+  releaseStartupTurns();
   // Attach output/control handlers before negotiating settings or writing a turn.
 
   let stdoutRemainder = "";
@@ -1900,6 +2200,7 @@ async function runClaudeCli(startupReport = null) {
     pendingTurns = 1;
     startNativeTurn();
     child.stdin.write(prompt);
+    resolveTaskPrompt();
   } catch (error) {
     appendEvent({ type: "error", message: error.message });
     endCliStdin("native settings unconfirmed");
@@ -1908,3 +2209,4 @@ async function runClaudeCli(startupReport = null) {
 }
 
 runProjectStartup().then((report) => runClaudeCli(report));
+markServing();

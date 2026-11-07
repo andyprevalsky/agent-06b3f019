@@ -26,7 +26,7 @@
  *   pinned question (display.placement 'pinned') → not inline; PinnedQuestionMount shows it
  *   metadata.a2a (USER or TOOL agent_message row) → AgentToAgentRow, never a user bubble
  */
-import { Fragment, useEffect, type ReactNode } from 'react';
+import { Fragment, useEffect } from 'react';
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
@@ -62,7 +62,6 @@ interface MessageListItemsProps {
   compressWork?: boolean;
   workStatus?: string;
   workEndedAt?: string;
-  activityIndicator?: ReactNode;
   agentExchangeProjection?: ReturnType<typeof useAgentExchangeGroups> & { viewerId?: string };
   filteredMessages: Message[];
   streamingMessageIds?: ReadonlySet<string>;
@@ -285,7 +284,6 @@ export function MessageListItems({
         <TrajectoryWorkGroup
           key={workGroup.key}
           group={workGroup}
-          indicator={itemProps.activityIndicator}
           exploreStepMap={itemProps.exploreStepMap}
           renderMessage={(row) => (
             <MessageListItem message={row} {...itemProps} currentAnimatingId={null} />

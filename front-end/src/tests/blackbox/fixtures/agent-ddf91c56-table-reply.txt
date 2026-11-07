@@ -1,0 +1,23 @@
+Use the official form at https://basisfellowship.org/apply. The following plan separates supplied facts, public evidence, and unanswered personal questions.
+
+| Field | Response plan |
+|---|---|
+| First/last name | **Andy / Prevalsky** (user-supplied). |
+| Age | **Unknown. Do not infer from education dates.** Seek a reliable source if the form requires it. |
+| Email | **founder@example.com** (user-supplied). |
+| City | **Unknown.** LinkedIn references New York and the San Francisco Bay Area, but neither establishes a current city. |
+| Country | **United States** (user context). |
+| Orgs/schools | **Rose Labs; Hotplate; The University of Texas at Austin; Y Combinator (S20)** (Rose Labs site and public LinkedIn). Add Vapi if useful. |
+| LinkedIn/social | **https://www.linkedin.com/in/andyprevalsky** (linked by Rose Labs). |
+| Phone (optional) | **+1 555 010 0100** (user-supplied). |
+| Work category | **Engineer** is supported by his software-engineering roles; he is also a founder/operator. |
+| Portfolio/GitHub/website | **https://roselabs.ai/** or **https://roselabs.ai/about**. No verified personal GitHub or portfolio was found. |
+| Uploads | No verified files are available; use the Rose Labs URL rather than uploading invented or unrelated materials. |
+| Best thing built/discovered/pulled off | Suggested wording: **“One significant thing I built is Hotplate, which I co-founded and served as CTO from 2019 to 2023. My public profile reports that the platform processed more than $50 million in total transactions; I led product, distribution, and strategy.”** The volume is self-reported on LinkedIn, not independently verified. Do not claim others deemed it impossible. |
+| Belief almost nobody else holds | Personal conviction and its rarity are **not verified**. A restrained, project-grounded answer, if needed: **“The thesis I’m pursuing at Rose Labs is that personal AI can move beyond answering questions to taking useful actions across a person’s tools, with their authorization.”** Do not claim uniqueness as fact. |
+| Obsession unrelated to the above | **Unknown.** No credible personal hobby or unrelated obsession was established; do not fabricate one. |
+| Doing now/what’s next | Suggested wording: **“I’m the solo founder and builder of Rose Labs, working on Rose, a personal AI assistant designed to connect to user-authorized services, answer questions, and take actions. The company is building in AI agents and recruiting in frontier AI, agents, and hardware.”** This describes publicly stated work and direction, without inventing a future milestone. |
+| Who are you? (optional) | **“I’m a software engineer, artist, creator, and founder/builder of Rose Labs. Previously I co-founded Hotplate and worked as a staff software engineer at Vapi.”** Based on Rose Labs’ About page and LinkedIn. May leave blank if redundant. |
+| How did you hear about this? | **Unknown from the user.** If required, transparently state that the application was found through the public Basis Fellowship website during preparation; do not imply a referral. |
+
+Evidence: https://basisfellowship.org/apply (form); https://roselabs.ai/about (current venture and self-description); https://www.linkedin.com/in/andyprevalsky (career, education, Hotplate claim). Any mandatory age or personally subjective answer without reliable evidence remains a blocker to a fully evidenced application; prioritize checking the actual form and credible user data rather than guessing.
