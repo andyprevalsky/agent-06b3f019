@@ -27418,6 +27418,154 @@ async def test_sealed_generation_outranks_an_ordinary_browser_setup_error():
             )
 
 
+def _parallel_setup_patches(session_data, fake_browser, dom_service_class, **overrides):
+    """Patches for driving the real activity through its parallel browser/data setup."""
+    targets = {
+        "domains.spawn_browser_agent_v3.handler.load_config": dict(return_value=_fake_config()),
+        "domains.spawn_browser_agent_v3.handler.activity.heartbeat": dict(),
+        "domains.spawn_browser_agent_v3.handler.init_browser_session": dict(new=AsyncMock(return_value=session_data)),
+        "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(
+            new=AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0})
+        ),
+        "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials": dict(
+            new=AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})
+        ),
+        "domains.spawn_browser_agent_v3.handler.close_browser_session": dict(new=AsyncMock()),
+        "domains.spawn_browser_agent_v3.handler.save_browser_action_message": dict(new=AsyncMock()),
+        "domains.spawn_browser_agent_v3.handler.save_browser_assistant_message": dict(new=AsyncMock()),
+        "browser_tools.dom_service.DOMService": dict(new=dom_service_class),
+        "browser_tools.humanizer.BrowserHumanizer": dict(new=_FakeHumanizer),
+        "playwright.async_api.async_playwright": dict(return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))),
+    }
+    targets.update(overrides)
+    return [patch(target, **kwargs) for target, kwargs in targets.items()]
+
+
+_PARALLEL_SETUP_SESSION = {
+    "task_id": "task-1",
+    "session_id": "session-1",
+    "debug_url": "https://steel.example/debug",
+    "ws_url": "ws://live",
+    "fingerprint_injection": None,
+    "passwords": [],
+    "auth_options": {"realm": "example.com"},
+    "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+    "user_settings": {},
+}
+
+
+@_in_browser_activity_context
+async def test_activity_cancelled_mid_setup_releases_the_connected_browser_clients():
+    """Cancelling the activity after the browser connected still releases its CDP clients.
+
+    Credential setup is still running when the activity is cancelled (user pause,
+    heartbeat cancel). The browser side already attached DOMService and
+    Playwright; those handles must reach the finally-scheduled cleanup instead
+    of being dropped with the cancelled gather.
+    """
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    connected = asyncio.Event()
+
+    class _ConnectingDomService(_FakeDomService):
+        async def connect(self):
+            connected.set()
+
+    async def credential_setup_never_finishes(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(
+            dict(_PARALLEL_SETUP_SESSION),
+            fake_browser,
+            _ConnectingDomService,
+            **{
+                "domains.spawn_browser_agent_v3.handler.build_realm_credential_state": dict(
+                    new=credential_setup_never_finishes
+                ),
+                "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
+                    new=AsyncMock(return_value=[native_start])
+                ),
+            },
+        ):
+            stack.enter_context(target)
+        run = asyncio.create_task(
+            spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Check the inbox",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+        )
+        await asyncio.wait_for(connected.wait(), timeout=10)
+        for _ in range(100):  # until the browser side has returned its handles
+            if fake_browser.contexts and _FakeDomService.last_instance is not None:
+                await asyncio.sleep(0.05)
+                break
+            await asyncio.sleep(0.01)
+        run.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await run
+        if handler._background_browser_cleanup_tasks:
+            await asyncio.wait_for(
+                asyncio.gather(*list(handler._background_browser_cleanup_tasks), return_exceptions=True), timeout=10
+            )
+    _FakeDomService.last_instance.disconnect.assert_awaited()
+    fake_browser.close.assert_awaited()
+
+
+@_in_browser_activity_context
+async def test_cancellation_inside_one_setup_side_does_not_hide_an_ordinary_error():
+    """A CancelledError raised inside credential setup does not mask the browser failure.
+
+    The activity was not cancelled; reporting "cancelled" would drop the real
+    setup error, so the ordinary error is what surfaces.
+    """
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    class _UnreachableDomService(_FakeDomService):
+        async def connect(self):
+            raise RuntimeError("CDP endpoint unreachable")
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(
+            dict(_PARALLEL_SETUP_SESSION),
+            fake_browser,
+            _UnreachableDomService,
+            **{
+                "domains.spawn_browser_agent_v3.handler.build_realm_credential_state": dict(
+                    new=AsyncMock(side_effect=asyncio.CancelledError())
+                ),
+                "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
+                    new=AsyncMock(return_value=[native_start])
+                ),
+            },
+        ):
+            stack.enter_context(target)
+        with pytest.raises(RuntimeError, match="CDP endpoint unreachable"):
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Check the inbox",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+
+
 async def _run_browser_activity_cancelled_mid_step(cancellation_details):
     """Run the real browser activity and cancel it mid-step with ``cancellation_details``.
 
@@ -37618,6 +37766,14 @@ async def run_all_tests():
     await r.record_async(
         "sealed_generation_outranks_ordinary_browser_setup_error",
         test_sealed_generation_outranks_an_ordinary_browser_setup_error,
+    )
+    await r.record_async(
+        "activity_cancelled_mid_setup_releases_connected_browser_clients",
+        test_activity_cancelled_mid_setup_releases_the_connected_browser_clients,
+    )
+    await r.record_async(
+        "cancellation_inside_one_setup_side_does_not_hide_ordinary_error",
+        test_cancellation_inside_one_setup_side_does_not_hide_an_ordinary_error,
     )
     await r.record_async(
         "timed_out_browser_activity_leaves_the_tool_result_to_the_workflow",
