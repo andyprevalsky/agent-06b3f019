@@ -192,19 +192,24 @@ def renew(state, proof, root):
         raise ValueError('read observation predates native execution or is in future')
     if time.time() - proof['started_at'] > 300:
         raise ValueError('stale read-only confirmation')
-    if proof['observations'] != {
-        'card': {'id': expected['card_id'], 'status': 'CLOSED', 'balanceCents': 0, 'livemode': False},
+    observations = proof['observations']
+    if not isinstance(observations, dict) or not isinstance(observations.get('card'), dict):
+        raise ValueError('missing card observation')
+    expected_card = {'id': expected['card_id'], 'status': 'CLOSED', 'balanceCents': 0}
+    # Card mode is optional metadata, never inferred from the transfer. If the
+    # vendor supplies it, only an explicit boolean false is acceptable.
+    if 'livemode' in observations['card']:
+        if observations['card']['livemode'] is not False:
+            raise ValueError('invalid or live card mode')
+        expected_card['livemode'] = False
+    expected_observations = {
+        'card': expected_card,
         'transfer': {'id': expected['transfer_id'], 'cardId': expected['card_id'], 'status': 'consumed',
                      'amountCents': expected['amount_cents'], 'transferredCents': expected['amount_cents'],
-                     'releasedCents': 0, 'livemode': False}}:
+                     'releasedCents': 0, 'livemode': False}}
+    # Exact shape and types: bool/number equality cannot admit malformed JSON.
+    if c.digest(observations) != c.digest(expected_observations):
         raise ValueError('provider observation no longer proves original sandbox stall')
-    # bool and number equality must not let malformed JSON pass the exact schema.
-    if c.digest(proof['observations']) != c.digest({
-        'card': {'id': expected['card_id'], 'status': 'CLOSED', 'balanceCents': 0, 'livemode': False},
-        'transfer': {'id': expected['transfer_id'], 'cardId': expected['card_id'], 'status': 'consumed',
-                     'amountCents': expected['amount_cents'], 'transferredCents': expected['amount_cents'],
-                     'releasedCents': 0, 'livemode': False}}):
-        raise ValueError('provider observation types mismatch')
     warning = next(w for w in reversed(state['superseded_resource_warnings']) if w['id'] == expected['occurrence'])
     entry = {k: copy.deepcopy(v) for k, v in warning.items() if k != 'superseded'}
     entry.update(source=state['source'], original_source=failure['source'],

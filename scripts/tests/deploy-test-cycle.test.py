@@ -2144,6 +2144,45 @@ class Cycle(unittest.TestCase):
         self.assertEqual('SKIP', result['cases']['a'])
         self.assertEqual('SKIPPED_WITH_WARNING', request['skips']['a']['disposition'])
 
+    def test_renewal_accepts_absent_card_mode_without_fabrication(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        proof['observations']['card'].pop('livemode')
+        native = path.read_bytes()
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            renewal.renew(self.state, proof, self.root)
+        self.assertNotIn('livemode', self.state['resource_warnings'][0]['renewal']['observations']['card'])
+        self.assertIs(False, self.state['resource_warnings'][0]['renewal']['observations']['transfer']['livemode'])
+        self.assertEqual(original, self.state['failures'])
+        self.assertEqual(native, path.read_bytes())
+        self.assertFalse(self.state['ready'])
+
+    def test_optional_card_mode_preserves_strict_transfer_and_explicit_mode_guards(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            for value in (True, None, 0, 1, 'false', [], {}):
+                state, changed = copy.deepcopy(self.state), copy.deepcopy(proof)
+                changed['observations']['card']['livemode'] = value
+                with self.assertRaises(ValueError):
+                    renewal.renew(state, changed, self.root)
+                self.assertEqual(self.state, state)
+            for include_card_mode in (True, False):
+                for value in (True, None, 0, 1, 'false', [], {}):
+                    state, changed = copy.deepcopy(self.state), copy.deepcopy(proof)
+                    if not include_card_mode:
+                        changed['observations']['card'].pop('livemode')
+                    changed['observations']['transfer']['livemode'] = value
+                    with self.assertRaises(ValueError):
+                        renewal.renew(state, changed, self.root)
+                    self.assertEqual(self.state, state)
+                state, changed = copy.deepcopy(self.state), copy.deepcopy(proof)
+                if not include_card_mode:
+                    changed['observations']['card'].pop('livemode')
+                changed['observations']['transfer'].pop('livemode')
+                with self.assertRaises(ValueError):
+                    renewal.renew(state, changed, self.root)
+                self.assertEqual(self.state, state)
+        self.assertEqual(original, self.state['failures'])
+
     def test_changed_source_renewal_fail_closed(self):
         renewal, task, proof, original, path = self.renewal_fixture()
         mutations = [lambda s, p: p['binding'].update(native_sha256='0' * 64),

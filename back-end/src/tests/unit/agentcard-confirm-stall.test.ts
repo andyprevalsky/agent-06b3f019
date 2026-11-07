@@ -51,7 +51,26 @@ test('confirmation calls only two allowlisted reads with one retry deadline and 
   assert.ok(!JSON.stringify(result).includes('SECRET'));
   assert.ok(result.started_at <= result.finished_at);
   assert.equal(result.observations.transfer.amountCents, 1234);
+  assert.equal(result.observations.card.livemode, false);
 });
+test('confirmation accepts absent card mode without fabricating it', async () => {
+  const f = fixture();
+  Reflect.deleteProperty(f.card, 'livemode');
+  const result = await confirmStall(binding, f.call);
+  assert.equal(Object.hasOwn(result.observations.card, 'livemode'), false);
+  assert.deepEqual(result.observations.card, {
+    id: 'card_fixture',
+    status: 'CLOSED',
+    balanceCents: 0,
+  });
+  assert.equal(result.observations.transfer.livemode, false);
+  assert.ok(!JSON.stringify(result).includes('SECRET'));
+  assert.deepEqual(
+    f.calls.map((c) => c.name),
+    ['get_card', 'list_transfers']
+  );
+});
+
 test('confirmation fails closed on live, released, wrong identity and malformed metadata', async () => {
   for (const mutate of [
     (f: ReturnType<typeof fixture>) => {
@@ -72,6 +91,26 @@ test('confirmation fails closed on live, released, wrong identity and malformed 
   ]) {
     const f = fixture();
     mutate(f);
+    await assert.rejects(confirmStall(binding, f.call));
+  }
+});
+
+test('optional card mode cannot hide explicit live or malformed card or transfer mode', async () => {
+  for (const value of [true, null, undefined, 0, 1, 'false', [], {}]) {
+    const f = fixture();
+    Reflect.set(f.card, 'livemode', value);
+    await assert.rejects(confirmStall(binding, f.call));
+  }
+  for (const includeCardMode of [true, false]) {
+    for (const value of [true, null, undefined, 0, 1, 'false', [], {}]) {
+      const f = fixture();
+      if (!includeCardMode) Reflect.deleteProperty(f.card, 'livemode');
+      Reflect.set(f.transfer, 'livemode', value);
+      await assert.rejects(confirmStall(binding, f.call));
+    }
+    const f = fixture();
+    if (!includeCardMode) Reflect.deleteProperty(f.card, 'livemode');
+    Reflect.deleteProperty(f.transfer, 'livemode');
     await assert.rejects(confirmStall(binding, f.call));
   }
 });

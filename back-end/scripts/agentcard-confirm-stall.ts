@@ -35,6 +35,10 @@ export async function confirmStall(binding: Binding, call: Caller = callOrgTool)
     await call('get_card', { card_id: binding.card_id }, deadline)
   );
   const card = (cardResult.card ?? cardResult) as Record<string, unknown>;
+  // get_card does not always report mode. Preserve its absence; the exact
+  // linked transfer must independently prove sandbox mode below.
+  const hasCardMode = Object.hasOwn(card, 'livemode');
+  if (hasCardMode && card.livemode !== false) throw new Error('Invalid or live card mode');
   const rows = mcpResultRows(
     await call('list_transfers', { status: 'consumed', limit: 100 }, deadline),
     'transfers'
@@ -48,7 +52,7 @@ export async function confirmStall(binding: Binding, call: Caller = callOrgTool)
       id: card.id,
       status: typeof card.status === 'string' ? card.status.toUpperCase() : card.status,
       balanceCents: integer(card.balanceCents ?? card.balance_cents),
-      livemode: card.livemode,
+      ...(hasCardMode ? { livemode: card.livemode } : {}),
     },
     transfer: {
       id: transfer.id,
@@ -64,7 +68,6 @@ export async function confirmStall(binding: Binding, call: Caller = callOrgTool)
     observations.card.id !== binding.card_id ||
     observations.card.status !== 'CLOSED' ||
     observations.card.balanceCents !== 0 ||
-    observations.card.livemode !== false ||
     observations.transfer.cardId !== binding.card_id ||
     observations.transfer.status !== 'consumed' ||
     observations.transfer.livemode !== false ||

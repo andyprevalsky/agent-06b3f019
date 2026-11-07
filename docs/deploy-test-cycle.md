@@ -378,10 +378,13 @@ contains `kind: agentcard-release-stall-renewal-v1`, occurrence, original warnin
 and native-file SHA256, original/current source, plan/input/environment digests,
 unchanged task/payment/assertion contract digest, producer SHA256, original
 resource IDs, amount and `prepared_at`. Observation contains only card
-`id/status/balanceCents/livemode` and transfer
+`id/status/balanceCents` (plus `livemode: false` only when the vendor supplies
+that field) and transfer
 `id/cardId/status/amountCents/transferredCents/releasedCents/livemode`. It must
-show the original CLOSED zero-balance sandbox card and consumed transfer with
-its original transferred amount and zero released. Preparation precedes both
+show the original CLOSED zero-balance card and its exact linked consumed transfer
+with `livemode: false`, the original transferred amount and zero released. An
+absent card mode stays absent; an explicit live or malformed card mode is
+rejected. Sandbox mode must always be proved by the linked transfer. Preparation precedes both
 fresh read timestamps; admission requires a read started within five minutes.
 An exact accepted proof is idempotent. All remaining current-source checks run
 under the existing full-plan, source, cleanup and deadline rules.

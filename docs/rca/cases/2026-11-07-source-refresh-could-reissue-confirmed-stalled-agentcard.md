@@ -83,11 +83,19 @@ implementation or independent review.
 The unchanged owning regression fails on the frozen original CLI and passes
 on the repaired coordinator. Its mocked request then excludes only the
 confirmed case while the peer executes, and the original native bytes and
-failure history remain identical. The full coordinator suite passes 195 tests;
-the read-only producer passes two tests covering its exact tool whitelist,
+failure history remain identical. The full coordinator suite passes 197 tests;
+the read-only producer passes four tests covering its exact tool whitelist,
 shared deadline, redaction and unsafe resource controls. Contract controls
 reject changed task, payment code, predicate dependencies and cleanup helpers.
 Independent read-only review found no blocking correctness objection.
+
+The first fresh vendor read exposed an incorrect helper assumption: get_card
+omits livemode, while the exact linked transfer supplies it. The unchanged new
+regressions failed on that producer/schema and passed after preserving absent
+card mode as absent. Explicit live or malformed card modes still refuse, and
+the transfer must independently prove sandbox mode. A target-only read verified
+the original consumed transfer remains 4396 cents transferred and zero released;
+that diagnostic does not replace the required frozen-source proof.
 
 Actual source-bound vendor reconfirmation and the new combined-source full
 sweep are separate required deployment steps; these tests do not claim either
