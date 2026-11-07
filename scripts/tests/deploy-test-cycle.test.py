@@ -3649,6 +3649,62 @@ class StructuralSupervisorCleanup(unittest.TestCase):
         self.assertEqual([self.gate['name']],c.retained_owners(self.state,[self.gate['name']]))
 
 
+def reserved_listener_footprint(test, first=15000):
+    """A CONDUCTOR_PORT whose whole listener footprint no live socket can take during the test.
+
+    Interrupted local cleanup refuses while any listener sits on the gate's footprint
+    (base + LISTENER_OFFSETS, which includes the 500-port Hub search range). With a fixed
+    base, a concurrent deploy gate's fixture listening inside that window (21136, cloudbench
+    multi-workstream, 2026-11-07) failed every case. Each footprint port gets a bound,
+    non-listening dual-stack socket: it never appears as a listener and refuses explicit
+    IPv4 and IPv6 binds of that port until cleanup. The held sockets are kept on
+    ``test.listener_footprint`` by port."""
+    import resource
+    import socket
+    from deploy_test_isolation import _ports
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = len(_ports.LISTENER_OFFSETS) + 256
+    if soft != resource.RLIM_INFINITY and soft < wanted:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (wanted if hard == resource.RLIM_INFINITY else min(hard, wanted), hard))
+
+    def hold(port):
+        try:
+            sock = socket.socket(socket.AF_INET6)
+        except OSError:
+            sock = None
+        if sock is not None:
+            try:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                sock.bind(('::', port))
+                return sock
+            except OSError:
+                sock.close()
+                return None
+        sock = socket.socket()  # host without IPv6: an IPv4 wildcard bind still blocks IPv4 binds
+        try:
+            sock.bind(('', port))
+            return sock
+        except OSError:
+            sock.close()
+            return None
+
+    for base in range(first, _ports.MAX_PORT - _ports.FOOTPRINT_PORTS, 10):
+        held = []
+        for offset in _ports.LISTENER_OFFSETS:
+            sock = hold(base + offset)
+            if sock is None:
+                break
+            held.append(sock)
+        else:
+            for sock in held:
+                test.addCleanup(sock.close)
+            test.listener_footprint = {sock.getsockname()[1]: sock for sock in held}
+            return base
+        for sock in held:
+            sock.close()
+    raise RuntimeError('no free listener footprint to reserve')
+
+
 class InterruptedLocalRecovery(unittest.TestCase):
     write_native = StructuralSupervisorCleanup.write_native
 
@@ -3661,7 +3717,8 @@ class InterruptedLocalRecovery(unittest.TestCase):
         subprocess.run(['git','-C',str(self.coordinator),'-c','user.name=test','-c','user.email=test@example.com','commit','-qm','old'],check=True)
         self.source=c.source(self.coordinator)
         self.gate.update(worker='independent-interrupted-worker',timeout_seconds=14400)
-        self.gate['env']={'CONDUCTOR_WORKSPACE_NAME':'interrupted-fixture','CONDUCTOR_PORT':'15000'}
+        self.gate['env']={'CONDUCTOR_WORKSPACE_NAME':'interrupted-fixture',
+                          'CONDUCTOR_PORT':str(reserved_listener_footprint(self))}
         self.request['source']=self.source
         self.receipt.update(source=self.source,native_exit=-9,cancelled=True,worker_result=None,
                             execution_binding={'contract_digest':c.digest(self.gate),'environment':'env','input_fingerprint':'fp'})
@@ -3785,10 +3842,11 @@ class InterruptedLocalRecovery(unittest.TestCase):
             path=self.folder/name;c.write(path,{})
             with self.assertRaises(ValueError):self.reconcile()
             path.unlink()
-        import socket,fcntl
-        with socket.socket() as listener:
-            listener.bind(('127.0.0.1',15000));listener.listen()
-            with self.assertRaises(ValueError):self.reconcile()
+        import fcntl
+        listener=self.listener_footprint.pop(int(self.gate['env']['CONDUCTOR_PORT']))
+        listener.listen()
+        with self.assertRaises(ValueError):self.reconcile()
+        listener.close()
         with (self.worker/'.context/native-worker-admission.lock').open('r') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             with self.assertRaises(ValueError):self.reconcile()
