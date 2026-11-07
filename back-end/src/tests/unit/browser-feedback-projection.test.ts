@@ -16,6 +16,7 @@ async function main(): Promise<void> {
               id: 'parent',
               userId: 'owner',
               parentAgentId: null,
+              project: null,
               tools: [],
               verifier: null,
             };
