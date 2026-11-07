@@ -1,0 +1,19 @@
+Original failing command shape on merged main fa676edc7 (PR #1703 merge):
+  scripts/run-bench browser-biometrics-webdecoy --ref fa676edc7e68cdf13616f945f8362c06f6cbf417 --wait
+
+Attempt 1, fleet controller log detached-20261106-130054-64870:
+  The controller first ran its infra canary preflight (fleet run 20261106-130123-71359:
+  browser-auth-saved-password-retry and browser-doordash-food-plan-grocery-cart-reauth, 2/2 REAL PASS;
+  their clones e82dd66dc75468/82dd324c79e478 and volumes vol_vjy236yg286e97pv/vol_4y8l2o8xml31jper were
+  torn down by the controller).
+  The webdecoy task (fleet run 20261106-130054-65322) never started: run-bench-cloud exited 125 with
+  "execution provenance rejected: execution provenance workspace patch does not match the staged guest
+  patch". Cause: operator error. I edited the RCA doc in the launch checkout (/home/boxes/rose) after
+  launch, so the guest patch staged later no longer matched the launch provenance. The guest status proxy
+  never came up, so guest cleanup was NOT confirmed ("no status proxy for guest cleanup acknowledgement";
+  "guest shutdown was not delivered"). The controller stopped and then destroyed clone 84eee55cd45658
+  (flyctl: destroyed). Its volume vol_vjy236qzypyw2exv was pending_destroy, unattached, at 13:16Z and
+  14:05Z. Controller exit status 1. No webdecoy task executed, so it is not recorded as a task attempt.
+
+Attempt 2, fleet run 20261106-131544-295004 (controller log detached-20261106-131544-294592), from a clean
+detached worktree at fa676edc7: REAL PASS, controller exit 0. See cloud-pass-fa676edc7.json.

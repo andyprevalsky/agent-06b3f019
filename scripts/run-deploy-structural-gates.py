@@ -310,6 +310,10 @@ GATES = (
         ("python3", "scripts/tests/benchmark-history-latest-only.test.py"),
     ),
     Gate(
+        "benchmark-history-backfill",
+        ("python3", "scripts/tests/benchmark-history-backfill.test.py"),
+    ),
+    Gate(
         "cloudbench-full-selection",
         ("python3", "scripts/tests/cloudbench-full-selection.test.py"),
     ),

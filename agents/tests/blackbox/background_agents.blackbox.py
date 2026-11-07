@@ -1445,7 +1445,7 @@ async def test_dag_planned_spawn_handoff_carries_record_across_continue_as_new()
         assert wf._background_tasks[task_id]["resume"] == {"step": 2}
 
         wf.max_iterations, wf.price_limit_cents, wf.context_gates = None, 100, {}
-        state = json.loads(json.dumps(wf._continuation_resume_state(list(harness.rows))))
+        state = json.loads(json.dumps(wf._continuation_resume_state()))
         restored = _workflow(harness)
         restored._restore_deployment_state(state)
         assert restored._pending_background_ids() == [task_id]

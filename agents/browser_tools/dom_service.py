@@ -174,6 +174,13 @@ def drop_browser_use_serial_dom_probes() -> None:
 
 
 VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS = 10.0
+# browser-use's socket-drop callback starts its own reconnect once the CDP
+# reader exits. Wait this long for it before starting that same reconnect here.
+CDP_RECONNECT_START_GRACE_SECONDS = 1.0
+
+
+class BrowserCdpConnectionLost(RuntimeError):
+    """The browser's CDP socket is down and browser-use could not restore it."""
 
 
 def browser_downloads_path_for_provider(provider: Optional[str] = None) -> str:
@@ -2471,6 +2478,62 @@ class DOMService:
             "title": str(await self._session.get_current_page_title() or ""),
         }
 
+    async def _browser_state_summary(self, *, include_screenshot: bool) -> Any:
+        """browser-use state fetch that survives a CDP socket drop.
+
+        While the socket is down and no reconnect is running, browser-use's
+        handlers skip silently and the fetch fails with a bare "no handler
+        returned a result" ValueError, which callers would otherwise treat as a
+        page problem. A failed fetch on a dead socket restores the connection
+        through browser-use's own reconnect and retries once.
+        """
+        session = self._session
+        try:
+            return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+        except Exception:
+            if session.is_cdp_connected or not await self._restore_cdp_connection(session):
+                raise
+        return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+
+    async def _restore_cdp_connection(self, session: Any) -> bool:
+        """Wait for or start browser-use's reconnect; True once the socket is open.
+
+        Raises BrowserCdpConnectionLost, naming the session flags and the
+        provider's close code, when the socket is still down afterwards.
+        """
+        if session._intentional_stop:
+            return False
+        flags = (
+            f"intentional_stop={session._intentional_stop} reconnecting={session.is_reconnecting} "
+            f"reconnect_pending={session._reconnect_pending}"
+        )
+        started_here = False
+        deadline = time.monotonic() + session.RECONNECT_WAIT_TIMEOUT
+        while not session.is_cdp_connected and time.monotonic() < deadline:
+            if session.is_reconnecting:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(session._reconnect_event.wait(), timeout=deadline - time.monotonic())
+                continue
+            # browser-use's own callback, or a reconnect it left pending, may be about to start one.
+            grace = time.monotonic() + CDP_RECONNECT_START_GRACE_SECONDS
+            while not (session.is_cdp_connected or session.is_reconnecting) and time.monotonic() < grace:
+                await asyncio.sleep(0.05)
+            if session.is_cdp_connected or session.is_reconnecting:
+                continue
+            if started_here:
+                break
+            started_here = True
+            logger.warning(f"CDP socket is down and no reconnect is running ({flags}); starting browser-use reconnect")
+            await session._auto_reconnect()
+        if not session.is_cdp_connected:
+            multiplexer = self.cdp_multiplexer
+            raise BrowserCdpConnectionLost(
+                f"Browser CDP connection lost and not restored ({flags}, "
+                f"provider close={getattr(multiplexer, 'last_upstream_close', None)})"
+            )
+        self._selector_map = {}
+        return True
+
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
 
@@ -2494,7 +2557,7 @@ class DOMService:
 
         capture_screenshot = include_screenshot
         capture_started_at = time.time() if capture_screenshot else None
-        state = await self._session.get_browser_state_summary(include_screenshot=capture_screenshot)
+        state = await self._browser_state_summary(include_screenshot=capture_screenshot)
         self._runtime_current_url = str(state.url or "")
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
@@ -2676,7 +2739,7 @@ class DOMService:
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        state = await self._session.get_browser_state_summary(include_screenshot=False)
+        state = await self._browser_state_summary(include_screenshot=False)
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
         current = self._remember_rendered_image_urls(state)
@@ -2802,7 +2865,7 @@ class DOMService:
         stable_hash = None
         with contextlib.suppress(Exception):
             stable_hash = element.compute_stable_hash()
-        state = await self._session.get_browser_state_summary(include_screenshot=False)
+        state = await self._browser_state_summary(include_screenshot=False)
         selector_map = getattr(getattr(state, "dom_state", None), "selector_map", None) or {}
         if selector_map:
             self._selector_map = selector_map

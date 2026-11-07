@@ -1,0 +1,26 @@
+{
+ "failures": [
+  {
+   "id": "3cd235b6b282446ead690fe8ccef7920",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/cloudbench/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/cloudbench",
+    "--stdio"
+   ],
+   "source": {
+    "head": "4b79be50e644aab2aceb399c1f106b97708f5a2e",
+    "digest": "8186aeab3ffb2ab6609024dcfc7f97007845d2057134912221a78129b712bb58"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloudbench-controller environment step: intermittent live GitHub API check in the token resolver",
+   "evidence": "Focused run at 4b79be50e (load ~2): only step environment failed, 'resolve_github_token returned empty despite available controller credentials'. The resolver validates each candidate via a live api.github.com call (GitHub returned HTTP 503 and rate-limit errors to this user earlier in the deploy). The identical step passes twice in the same worker under the same env -i environment minutes later (/var/tmp/webdecoy-rca/worker-env-test-1.log, -2.log: rc=0), and the full gate passes in isolation (/var/tmp/webdecoy-rca/branch-cloudbench.log GATE_RESULT exit=0). Worker agents/.env and back-end/.env are byte-identical to the coordinator's. This diff touches no cloudbench or GitHub-token code.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged gate; no waiver",
+   "assigned_evidence": "Focused run at 4b79be50e (load ~2): only step environment failed, 'resolve_github_token returned empty despite available controller credentials'. The resolver validates each candidate via a live api.github.com call (GitHub returned HTTP 503 and rate-limit errors to this user earlier in the deploy). The identical step passes twice in the same worker under the same env -i environment minutes later (/var/tmp/webdecoy-rca/worker-env-test-1.log, -2.log: rc=0), and the full gate passes in isolation (/var/tmp/webdecoy-rca/branch-cloudbench.log GATE_RESULT exit=0). Worker agents/.env and back-end/.env are byte-identical to the coordinator's. This diff touches no cloudbench or GitHub-token code."
+  }
+ ]
+}

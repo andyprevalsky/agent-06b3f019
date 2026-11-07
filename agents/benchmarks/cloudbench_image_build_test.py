@@ -223,7 +223,7 @@ def test_cloudbench_image_build_preserves_donor_paths_and_runtime_contract(image
     )
     assert install < source
     assert any(kind == "USER" and value == "rose" for kind, value in final.instructions[:install])
-    assert list(stages.values())[0].parent == "node:20-bookworm"
+    assert list(stages.values())[0].parent == "node:22.23.4-bookworm"
     assert ("WORKDIR", "/app") in list(stages.values())[0].instructions
     assert ("USER", "root") in final.instructions
     assert ("ENV", "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1") in final.instructions

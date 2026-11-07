@@ -130,6 +130,20 @@ def environment_digest() -> str:
     return digest({k: v for k, v in os.environ.items() if k not in transient})
 
 
+ROTATING_CREDENTIAL = re.compile(rb"(?m)^([ \t]*(?:export[ \t]+)?GITHUB_TOKEN[ \t]*=).*$")
+
+
+def runtime_config_sha256(path: Path) -> str:
+    """Digest a runtime config file, ignoring only the rotating GitHub user token's value.
+
+    The devbox daemon rewrites ``GITHUB_TOKEN`` in the managed env files every time it refreshes
+    that short-lived credential (observed 3 times in 40 minutes on 2026-11-07), which made any
+    staged cycle longer than the refresh interval go stale. The key's presence and every other
+    byte stay bound, so adding, removing or changing any other setting still invalidates a cycle.
+    """
+    return hashlib.sha256(ROTATING_CREDENTIAL.sub(rb"\1<rotating-credential>", path.read_bytes())).hexdigest()
+
+
 def input_fingerprints(plan: dict, root: Path) -> dict:
     paths = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
                            cwd=root, check=True, capture_output=True).stdout.split(b"\0")
@@ -155,7 +169,7 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
     for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "agents/.env.benchmark-temporal",
                 "front-end/.env", "front-end/.env.local"]:
         if (root / rel).is_file():
-            runtime_config[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+            runtime_config[rel] = runtime_config_sha256(root / rel)
     return {g["name"]: digest({"files": {p: h for p, h in files.items()
                             if any(fnmatchcase(p, glob) for glob in g.get("input_paths", ["*"]))},
                             "runtime_config": runtime_config,
@@ -1042,6 +1056,9 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        if entry and entry.get('kind') == 'interrupted-preallocation-cleanup-v1':
+            from deploy_test_interrupted_cleanup import still_bound
+            return still_bound(state, receipt, entry)
         if entry and entry.get("kind") == "native-cloud-cleanup-v1":
             from deploy_test_native_cleanup import still_bound
             return still_bound(entry, receipt, owner)
@@ -1130,6 +1147,14 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'interrupted-policy-witness-renewal-v1':
+        from deploy_test_interrupted_cleanup import renew_policy_witness
+        renew_policy_witness(state, occurrence_id, proof)
+        return
+    if proof.get('kind') == 'interrupted-preallocation-cleanup-v1':
+        from deploy_test_interrupted_cleanup import reconcile as reconcile_interrupted
+        reconcile_interrupted(state, occurrence_id, proof)
+        return
     if proof.get('kind') == 'local-supervisor-cleanup-v1':
         from deploy_test_local_cleanup import reconcile as reconcile_local
         reconcile_local(state, occurrence_id, proof)
@@ -1707,7 +1732,7 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                     'front-end/.env', 'front-end/.env.local'):
             origin, destination = root / rel, Path(after['worker_root']) / rel
             if (origin.is_file() != destination.is_file()
-                    or origin.is_file() and sha_file(origin) != sha_file(destination)):
+                    or origin.is_file() and runtime_config_sha256(origin) != runtime_config_sha256(destination)):
                 raise ValueError('local worker runtime configuration differs from the frozen inputs')
         changed.append(name)
     if not changed:
@@ -2018,7 +2043,7 @@ def recover_interrupted_triage_refresh(state: dict, old: dict, new: dict, root: 
     state.update(candidate)
 
 
-def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | None = None, _tmpdir_gates=frozenset()) -> None:
+def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | None = None, _tmpdir_gates=frozenset(), election_proof: dict | None = None) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
@@ -2050,9 +2075,14 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | 
         raise ValueError("new plan is not bound to current source")
     old_gates = {g["name"]: g for g in old["gates"]}
     new_gates = {g["name"]: g for g in new["gates"]}
-    if not old_gates.keys() <= new_gates.keys():
+    from deploy_test_election import prepare as prepare_election
+    election = prepare_election(state, old, new, election_proof)
+    removed = {election['gate']} if election else set()
+    if not old_gates.keys() <= new_gates.keys() | removed:
         raise ValueError("repair cannot silently remove originally selected gates")
     for name, gate in old_gates.items():
+        if name in removed:
+            continue
         if name in _tmpdir_gates:
             comparison = copy.deepcopy(new_gates[name])
             comparison['env']['TMPDIR'] = gate['env']['TMPDIR']
@@ -2072,6 +2102,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | 
     pending_gates.update(state.get('triage_repair_gates', []))
     if state['environment'] == environment_digest():
         for name, gate in old_gates.items():
+            if name in removed:
+                continue
             binding = full_pass_binding(state, gate)
             if (binding and (binding['native_source'] == state['source'] or carried_pass(state, gate))
                     and digest(gate) == digest(new_gates[name])):
@@ -2092,6 +2124,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | 
     carry, revisit, superseded_pending = {}, [], []
     for key, skip in state["skips"].items():
         gate = key.split("/", 1)[0]
+        if gate in removed:
+            continue  # Original qualification remains in superseded_skips below.
         if skip.get("input_fingerprint") == fingerprints.get(gate):
             carry[key] = {**skip, "source": new["source"], "original_source": skip["source"]}
         elif skip.get("disposition") == "pending post-merge":
@@ -2136,6 +2170,8 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | 
         state.setdefault('pass_carryover_history', []).append(copy.deepcopy(carried))
     state['repair_gates'] = [name for name in state['repair_gates']
                             if name not in carried and name not in completed_repairs]
+    from deploy_test_election import apply as apply_election
+    apply_election(state, election)
     if interrupted_refresh:
         state.pop('resume_phase')
         state.pop('resume_independent', None)
@@ -2167,6 +2203,10 @@ def pending_completion_block(state: dict) -> str | None:
     if state.get("initial_pending") or state.get("final_pending"):
         return "full gates remain pending; deferral grants no completion credit"
     try:
+        from deploy_test_election import completion_block as election_block
+        blocked = election_block(state)
+        if blocked:
+            return blocked
         for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
                      if e.get('purpose') == 'isolated-validation'}:
             isolated_admissions(state, gate)
@@ -2203,6 +2243,8 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
                 or (expect_head is not None and state["source"]["head"] != expect_head)):
             return 5  # Same stale-source result as the existing pipeline verifier.
         revalidate_standing_skips(state)
+        from deploy_test_election import verify as verify_elections
+        verify_elections(state)
         for gate in plan['gates']:
             if gate['name'] in state.get('carried_passes', {}) and not carried_pass(state, gate):
                 return 5
@@ -2216,7 +2258,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "prepare-bindings", "triage-quick", "triage-independent", "initial-independent", "final-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "collect-backend"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "prepare-bindings", "triage-quick", "triage-independent", "initial-independent", "final-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "collect-backend", "accept-omitted-custody"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument('--recover-interrupted-triage', action='store_true',
@@ -2294,9 +2336,12 @@ def main(argv: list[str] | None = None) -> int:
                 if args.input is None:
                     raise ValueError("--input previous plan required")
                 if args.recover_interrupted_triage:
+                    if args.proof is not None:
+                        raise ValueError('interrupted TRIAGE recovery cannot change gate election')
                     recover_interrupted_triage_refresh(state, read(args.input), plan, args.root, directory)
                 else:
-                    refresh(state, read(args.input), plan, args.root, directory=directory)
+                    refresh(state, read(args.input), plan, args.root, directory=directory,
+                            election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None)
             elif args.action == 'rebind-local':
                 if args.input is None:
                     raise ValueError('--input previous frozen plan required')
@@ -2316,6 +2361,11 @@ def main(argv: list[str] | None = None) -> int:
                         job.result()
             elif args.action == "resolve":
                 resolve_post_merge(state, args.occurrence, args.repair_agent)
+            elif args.action == 'accept-omitted-custody':
+                if args.input is None:
+                    raise ValueError('--input native operational acceptance required')
+                from deploy_test_election import accept
+                accept(state, bounded_read(args.input, 'omitted operational acceptance'))
             elif args.action == "reexecute":
                 reexecute(state, args.occurrence)
             elif args.action == "standing-skip":
@@ -2333,6 +2383,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"DEPLOY_CYCLE INCOMPLETE: {blocked}", file=sys.stderr)
                     return 1
             elif args.action == "verify":
+                from deploy_test_election import verify as verify_elections
+                verify_elections(state)
                 if args.require_resolved and pending_completion_block(state):
                     raise ValueError(pending_completion_block(state))
                 if (not state["ready"] or state["phase"] != "ready"
@@ -2350,6 +2402,10 @@ def main(argv: list[str] | None = None) -> int:
                           f"Resource warnings: {len(state.get('resource_warnings', []))}\n")
                 # The header is not a scorecard: pass none so BLOCKING failures render (finding 4447557591).
                 text = header + render({"failures": failures})
+                for election in state.get('elected_omissions', []):
+                    text += ('\nOPTIONAL COVERAGE SKIPPED (no task or cleanup credit)\n'
+                             + election['reason'] + '\nNative: ' + election['native_result']
+                             + '\nOriginal financial/custody obligations remain recorded.\n')
                 warnings = state.get("resource_warnings", [])
                 if warnings:
                     text += "\nRESOURCE WARNINGS (third-party resource skipped with warning; no pass credit)\n"

@@ -1696,6 +1696,21 @@ class Cycle(unittest.TestCase):
         new['source'] = c.source(self.root)
         return new
 
+    def test_rotating_github_token_value_does_not_stale_runtime_config_but_other_changes_do(self):
+        with (self.root / '.git/info/exclude').open('a') as stream:
+            stream.write('.env\n')
+        env = self.root / 'back-end/.env'
+        env.parent.mkdir(exist_ok=True)
+        env.write_text('SETTING=1\nGITHUB_TOKEN=ghu_issued_first\n')
+        before = c.input_fingerprints(self.plan, self.root)
+        env.write_text('SETTING=1\nGITHUB_TOKEN=ghu_refreshed_by_the_daemon\n')
+        self.assertEqual(before, c.input_fingerprints(self.plan, self.root))
+        for changed in ('SETTING=2\nGITHUB_TOKEN=ghu_issued_first\n', 'SETTING=1\n',
+                        'SETTING=1\nGITHUB_TOKEN=ghu_issued_first\nEXTRA=1\n',
+                        'SETTING=1\nXGITHUB_TOKEN=ghu_issued_first\n'):
+            env.write_text(changed)
+            self.assertNotEqual(before, c.input_fingerprints(self.plan, self.root), changed)
+
     def test_refresh_healthy_old_full_pass_leaves_focused_but_requires_new_final_full(self):
         old, marker = self.repair_set_refresh_fixture()
         attempts = copy.deepcopy(self.state['attempts'])

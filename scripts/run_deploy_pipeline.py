@@ -2489,7 +2489,9 @@ def reconcile_owner_runs(context_root: Path, state_dir: Path, *, stage: str, wai
     lane's own). Returns ``{"stage", "counts", "runs", "set_aside", "foreign",
     "waited_s", "refused"}``: ``refused`` names every ``unknown`` run (fail
     closed) and the own runs still ``bootstrapping`` after the wait; ``live``,
-    ``finished``, ``stranded`` and another session's runs are reported and left."""
+    ``finished``, ``stranded`` and another session's runs are reported and left.
+    ``waited_s`` is the time spent waiting on own bootstrapping runs: 0.0 when
+    no wait happened, however long a single classification pass took."""
     grace_seconds = bootstrap_grace_seconds() if grace_seconds is None else grace_seconds
 
     def own(run: dict) -> bool:
@@ -2500,11 +2502,13 @@ def reconcile_owner_runs(context_root: Path, state_dir: Path, *, stage: str, wai
                                    run_ids=only)
 
     started = time.monotonic()
+    waited = False
     while True:
         runs = classify(run_ids)
         bootstrapping = [run for run in runs if run["classification"] == OWNER_RUN_BOOTSTRAPPING and own(run)]
         if not bootstrapping or time.monotonic() - started >= wait_seconds:
             break
+        waited = True
         time.sleep(poll_seconds)
     set_aside: list[dict] = []
     foreign: list[str] = []
@@ -2534,7 +2538,7 @@ def reconcile_owner_runs(context_root: Path, state_dir: Path, *, stage: str, wai
                or (run["own"] and (run["classification"] == OWNER_RUN_BOOTSTRAPPING or run["action"] == "set-aside-failed"))]
     counts = {name: sum(1 for run in runs if run["classification"] == name) for name in OWNER_RUN_CLASSES}
     summary = {"stage": stage, "context_root": str(context_root), "grace_seconds": grace_seconds,
-               "waited_s": round(time.monotonic() - started, 2), "counts": counts, "runs": runs,
+               "waited_s": round(time.monotonic() - started, 2) if waited else 0.0, "counts": counts, "runs": runs,
                "set_aside": set_aside, "foreign": foreign, "refused": refused}
     state_dir.mkdir(parents=True, exist_ok=True)
     with (state_dir / OWNER_RUNS_RECEIPT_NAME).open("a") as handle:

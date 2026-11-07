@@ -7514,6 +7514,265 @@ async def test_rotated_attempt_failures_are_reported_with_their_own_login():
     ), reports
 
 
+def test_subscription_usage_parses_claude_unified_headers():
+    """Claude's unified 5h/7d utilization (0-1) and reset epochs become a usage snapshot."""
+    from datetime import datetime, timezone
+
+    from providers.rose.subscription_usage import parse_usage_headers
+
+    now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+    headers = httpx.Headers(
+        {
+            "Anthropic-Ratelimit-Unified-5h-Utilization": "0.425",
+            "anthropic-ratelimit-unified-5h-reset": "1762444800",
+            "anthropic-ratelimit-unified-7d-utilization": "1.0",
+            "anthropic-ratelimit-unified-7d-reset": "1762992000",
+        }
+    )
+    assert parse_usage_headers("claude", headers, now) == {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": {"usedPct": 42.5, "resetsAt": "2025-11-06T16:00:00Z"},
+        "sevenDay": {"usedPct": 100.0, "resetsAt": "2025-11-13T00:00:00Z"},
+    }
+    # Only the weekly window reported: the 5h slot stays empty, not zero.
+    weekly = parse_usage_headers("claude", {"anthropic-ratelimit-unified-7d-utilization": "0.1"}, now)
+    assert weekly == {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": None,
+        "sevenDay": {"usedPct": 10.0, "resetsAt": None},
+    }
+    # No usage headers (e.g. API-key traffic, an older proxy) record nothing.
+    assert parse_usage_headers("claude", {"anthropic-ratelimit-unified-reset": "1762444800"}, now) is None
+    assert parse_usage_headers("claude", {"anthropic-ratelimit-unified-5h-utilization": "nan"}, now) is None
+
+
+def test_subscription_usage_maps_codex_windows_by_length():
+    """Codex primary/secondary windows map to 5h/7d by their reported length, not slot."""
+    from datetime import datetime, timezone
+
+    from providers.rose.subscription_usage import parse_usage_headers
+
+    now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+    standard = {
+        "x-codex-primary-used-percent": "12.5",
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-reset-at": "1762444800",
+        "x-codex-secondary-used-percent": "87",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-secondary-reset-at": "1762992000",
+    }
+    assert parse_usage_headers("gpt", standard, now) == {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": {"usedPct": 12.5, "resetsAt": "2025-11-06T16:00:00Z"},
+        "sevenDay": {"usedPct": 87.0, "resetsAt": "2025-11-13T00:00:00Z"},
+    }
+    # A weekly-only plan reports its 7-day window in the primary slot.
+    weekly_primary = {
+        "x-codex-primary-used-percent": "40",
+        "x-codex-primary-window-minutes": "10080",
+        "x-codex-primary-reset-after-seconds": "3600",
+    }
+    assert parse_usage_headers("gpt", weekly_primary, now) == {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": None,
+        "sevenDay": {"usedPct": 40.0, "resetsAt": "2026-11-06T13:00:00Z"},
+    }
+    # Without window lengths the slots keep Codex's convention: primary 5h, secondary 7d.
+    unlabeled = {"x-codex-primary-used-percent": "5", "x-codex-secondary-used-percent": "150"}
+    snapshot = parse_usage_headers("gpt", unlabeled, now)
+    assert snapshot is not None
+    assert snapshot["fiveHour"] == {"usedPct": 5.0, "resetsAt": None}
+    assert snapshot["sevenDay"] == {"usedPct": 100.0, "resetsAt": None}, "clamped to 100"
+    # A window that is neither ~5h nor ~7d is not mislabeled.
+    daily = {"x-codex-primary-used-percent": "5", "x-codex-primary-window-minutes": "1440"}
+    assert parse_usage_headers("gpt", daily, now) is None
+    assert parse_usage_headers("gpt", {}, now) is None
+
+
+def test_subscription_usage_take_pops_and_store_is_bounded():
+    """Snapshots are sent once, keyed by fingerprint (never the token), and capped."""
+    from providers.rose import subscription_usage as usage
+
+    usage.clear()
+    try:
+        headers = {"anthropic-ratelimit-unified-7d-utilization": "0.5"}
+        usage.observe("claude", "sk-ant-oat-secret", headers)
+        assert "sk-ant-oat-secret" not in repr(usage._snapshots), "the raw token must never be stored"
+        first = usage.take("sk-ant-oat-secret")
+        assert first is not None and first["sevenDay"]["usedPct"] == 50.0, first
+        assert usage.take("sk-ant-oat-secret") is None, "a snapshot is sent once"
+        usage.observe("claude", "", headers)
+        usage.observe("claude", "token-without-usage", {})
+        assert usage.tracked_count() == 0
+
+        for index in range(usage.MAX_TRACKED_TOKENS + 25):
+            usage.observe("gpt", f"token-{index}", {"x-codex-primary-used-percent": str(index % 100)})
+        assert usage.tracked_count() == usage.MAX_TRACKED_TOKENS, "the store must stay bounded at 10k agents"
+        assert usage.take("token-0") is None, "least recently observed tokens are evicted first"
+        assert usage.take(f"token-{usage.MAX_TRACKED_TOKENS + 24}") is not None
+    finally:
+        usage.clear()
+
+
+async def test_claude_usage_limit_429_records_exhausted_window():
+    """A usage-window 429 still reports how much of the window is used (all of it)."""
+    from providers.rose import subscription_usage as usage
+
+    usage.clear()
+
+    def handler(req):
+        return httpx.Response(
+            429,
+            json={"error": {"type": "rate_limit_error", "message": "Claude usage limit reached."}},
+            headers={
+                "anthropic-ratelimit-unified-7d-utilization": "1.0",
+                "anthropic-ratelimit-unified-7d-reset": "1762992000",
+                "anthropic-ratelimit-unified-reset": "1762992000",
+            },
+        )
+
+    set_mock_handler(handler)
+    auth = ClaudeAuthContext(token="limited-claude-token", source="user", user_id="u-usage", max_rotations=0)
+    try:
+        await _drain(
+            claude_auth_complete(
+                pool_spec=get_pool("rose-1-ultra"),
+                messages=[{"role": "user", "content": "hi"}],
+                auth=auth,
+                request_id="r-usage-429",
+            )
+        )
+    except Exception:
+        pass  # the rotation/fall-through error is covered elsewhere; usage is what matters here
+    snapshot = usage.take("limited-claude-token")
+    usage.clear()
+    assert snapshot is not None, "the 429's usage headers were not recorded"
+    assert snapshot["sevenDay"] == {"usedPct": 100.0, "resetsAt": "2025-11-13T00:00:00Z"}, snapshot
+
+
+async def test_lease_heartbeat_carries_subscription_usage_without_extra_requests():
+    """Usage from a subscription response rides the existing lease heartbeat.
+
+    The real lease closures + RoseClient: the first call's heartbeat precedes any
+    response, so it carries only the lease and serving Integration; the second
+    call's heartbeat carries the usage the first response reported. No request
+    other than the provider call and the heartbeat is made.
+    """
+    from helpers.llm import _build_compute_auth_context
+    from providers.rose import subscription_usage as usage
+
+    claude_sse = "\n".join(
+        _ev("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 3}}})
+        + _ev(
+            "content_block_start",
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        )
+        + _ev(
+            "content_block_delta",
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+        )
+        + _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+        + _ev(
+            "message_delta",
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+        )
+        + _ev("message_stop", {"type": "message_stop"})
+    )
+    codex_sse = "\n".join(
+        [
+            "event: response.output_text.delta",
+            'data: {"type":"response.output_text.delta","delta":"ok"}',
+            "",
+            "event: response.completed",
+            'data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}',
+            "",
+            "data: [DONE]",
+            "",
+        ]
+    )
+    provider_headers = {
+        "claude": {
+            "Content-Type": "text/event-stream",
+            "anthropic-ratelimit-unified-5h-utilization": "0.25",
+            "anthropic-ratelimit-unified-5h-reset": "1762444800",
+            "anthropic-ratelimit-unified-7d-utilization": "0.6",
+            "anthropic-ratelimit-unified-7d-reset": "1762992000",
+        },
+        "gpt": {
+            "Content-Type": "text/event-stream",
+            "x-codex-primary-used-percent": "25",
+            "x-codex-primary-window-minutes": "300",
+            "x-codex-primary-reset-at": "1762444800",
+            "x-codex-secondary-used-percent": "60",
+            "x-codex-secondary-window-minutes": "10080",
+            "x-codex-secondary-reset-at": "1762992000",
+        },
+    }
+    expected_usage = {
+        "fiveHour": {"usedPct": 25.0, "resetsAt": "2025-11-06T16:00:00Z"},
+        "sevenDay": {"usedPct": 60.0, "resetsAt": "2025-11-13T00:00:00Z"},
+    }
+
+    for token_type in ("claude", "gpt"):
+        usage.clear()
+        heartbeats: list[dict] = []
+        other_requests: list[str] = []
+
+        def handler(req, token_type=token_type):
+            url = str(req.url)
+            if "token/lineage-heartbeat" in url:
+                heartbeats.append(json.loads(req.content))
+                return httpx.Response(200, json={"ok": True, "updated": 1})
+            if "api.anthropic.com" in url and token_type == "claude":
+                return httpx.Response(200, text=claude_sse, headers=provider_headers["claude"])
+            if "chatgpt.com/backend-api/codex/responses" in url and token_type == "gpt":
+                return httpx.Response(200, text=codex_sse, headers=provider_headers["gpt"])
+            other_requests.append(url)
+            return httpx.Response(500, text="unexpected route")
+
+        set_mock_handler(handler)
+        auth = _build_compute_auth_context(
+            {
+                "type": token_type,
+                "accessToken": f"{token_type}-usage-token",
+                "accountId": "acct-usage" if token_type == "gpt" else None,
+                "source": "user",
+                "integrationId": f"integration-{token_type}-usage",
+                "lineageKey": f"lineage-usage-{token_type}",
+            },
+            "user-usage",
+        )
+        assert auth is not None and auth.heartbeat_lease is not None
+        auth_kwarg = {"claude_auth": auth} if token_type == "claude" else {"gpt_auth": auth}
+        client = RoseClient(openrouter_key="ork-x")
+        for _call in range(2):
+            async for _chunk in client.complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                call_site="test-subscription-usage-heartbeat",
+                **auth_kwarg,
+            ):
+                pass
+            for _ in range(5):
+                await asyncio.sleep(0)  # let the fire-and-forget heartbeat land
+
+        assert not other_requests, f"{token_type}: usage must not add requests: {other_requests}"
+        assert len(heartbeats) == 2, f"{token_type}: one heartbeat per attempt: {heartbeats}"
+        assert heartbeats[0] == {
+            "lineageKey": f"lineage-usage-{token_type}",
+            "integrationId": f"integration-{token_type}-usage",
+        }, heartbeats[0]
+        second = heartbeats[1]
+        assert second["lineageKey"] == f"lineage-usage-{token_type}", second
+        assert second["integrationId"] == f"integration-{token_type}-usage", second
+        sent = dict(second["usage"])
+        assert sent.pop("observedAt").endswith("Z"), second
+        assert sent == expected_usage, f"{token_type}: {second}"
+        pending = usage.take(f"{token_type}-usage-token")
+        assert pending is not None, "the second response's usage waits for the next heartbeat"
+    usage.clear()
+
+
 async def test_client_foundry_server_error_falls_through_to_openrouter():
     """A Foundry failure before output must preserve the Ultra waterfall."""
     sse_ok = "\n".join(
@@ -13270,6 +13529,26 @@ async def run_all_tests():
     await r.record_async(
         "rotated_attempt_failures_are_reported_with_their_own_login",
         test_rotated_attempt_failures_are_reported_with_their_own_login,
+    )
+    r.record(
+        "subscription_usage_parses_claude_unified_headers",
+        test_subscription_usage_parses_claude_unified_headers,
+    )
+    r.record(
+        "subscription_usage_maps_codex_windows_by_length",
+        test_subscription_usage_maps_codex_windows_by_length,
+    )
+    r.record(
+        "subscription_usage_take_pops_and_store_is_bounded",
+        test_subscription_usage_take_pops_and_store_is_bounded,
+    )
+    await r.record_async(
+        "claude_usage_limit_429_records_exhausted_window",
+        test_claude_usage_limit_429_records_exhausted_window,
+    )
+    await r.record_async(
+        "lease_heartbeat_carries_subscription_usage_without_extra_requests",
+        test_lease_heartbeat_carries_subscription_usage_without_extra_requests,
     )
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",

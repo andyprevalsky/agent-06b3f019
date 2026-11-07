@@ -10,18 +10,22 @@ This module owns the two side-effecting steps that don't need LLM tokens:
   2. Batch file download + Supabase upload after Haiku picks the file URLs.
 """
 
+import asyncio
 import hashlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
 import structlog
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from domains.web_fetch import config as web_fetch_config
 from domains.web_fetch.repo import (
+    ProviderHung,
     download_files_batch,
     fetch_firecrawl_scrape,
     fetch_parallel_extract,
+    is_hang_provider_error,
     is_retryable_provider_error,
     upload_file_to_storage,
 )
@@ -107,19 +111,42 @@ def get_filename_from_url(url: str) -> str:
     return name
 
 
+async def _within(
+    provider: str, call: Callable[[], Awaitable[Dict[str, Any]]], cap: float, deadline: float
+) -> Dict[str, Any]:
+    """Await one provider call, bounded by ``cap`` and the shared scrape deadline."""
+    remaining = deadline - asyncio.get_running_loop().time()
+    timeout = min(cap, remaining)
+    if timeout <= 0:
+        raise ProviderHung(f"{provider} had no scrape budget left")
+    try:
+        return await asyncio.wait_for(call(), timeout=timeout)
+    except asyncio.TimeoutError as e:
+        raise ProviderHung(f"{provider} did not answer within {timeout:.0f}s") from e
+
+
 async def scrape_url(url: str) -> Dict[str, Any]:
     """Fetch a URL and return ``{markdown, links, metadata}``.
 
     Firecrawl is primary. Parallel Extract is the public-page fallback when
-    Firecrawl rejects a site, times out, or otherwise fails.
+    Firecrawl rejects a site, times out, or otherwise fails. The whole chain is
+    bounded by ``WEB_FETCH_SCRAPE_BUDGET_SECONDS`` (below the activity timeout),
+    and a page that hangs both providers is reported non-retryable: retrying the
+    same hung page only repeats the full budget.
     """
     # Guard the provider boundary: a non-fetchable string must never cost a
     # Firecrawl + Parallel Extract round trip.
     assert_fetchable_url(url)
 
+    deadline = asyncio.get_running_loop().time() + web_fetch_config.WEB_FETCH_SCRAPE_BUDGET_SECONDS
     activity.heartbeat(f"Firecrawl scrape: {url[:80]}")
     try:
-        return await fetch_firecrawl_scrape(url)
+        return await _within(
+            "Firecrawl",
+            lambda: fetch_firecrawl_scrape(url),
+            web_fetch_config.FIRECRAWL_SCRAPE_TIMEOUT_SECONDS,
+            deadline,
+        )
     except Exception as firecrawl_error:
         logger.warning(
             "[web_fetch] Firecrawl scrape failed; falling back to Parallel Extract",
@@ -129,10 +156,16 @@ async def scrape_url(url: str) -> Dict[str, Any]:
 
         activity.heartbeat(f"Parallel Extract fallback: {url[:80]}")
         try:
-            return await fetch_parallel_extract(url)
+            return await _within(
+                "Parallel Extract",
+                lambda: fetch_parallel_extract(url),
+                web_fetch_config.PARALLEL_EXTRACT_TIMEOUT_SECONDS,
+                deadline,
+            )
         except Exception as parallel_error:
-            retryable = is_retryable_provider_error("Firecrawl", firecrawl_error) or is_retryable_provider_error(
-                "Parallel Extract", parallel_error
+            retryable = any(
+                not is_hang_provider_error(error) and is_retryable_provider_error(provider, error)
+                for provider, error in (("Firecrawl", firecrawl_error), ("Parallel Extract", parallel_error))
             )
             raise WebFetchProvidersFailed(
                 "web_fetch failed with Firecrawl and Parallel Extract. "

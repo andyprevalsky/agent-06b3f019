@@ -787,7 +787,7 @@ else: print('origin/fixture')
         env = {**os.environ, "PATH": str(transport)+os.pathsep+os.environ["PATH"],
                "FLY_API_TOKEN":"offline-fixture", "GITHUB_TOKEN":"offline-fixture",
                "CLOUDBENCH_GATE_REF":"a"*40, "WARM_IMAGE_REF":"fixture/immutable@sha256:"+"b"*64,
-               "CLOUDBENCH_GATE_NODE_VERSION":"v24.21.0", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
+               "CLOUDBENCH_GATE_NODE_VERSION":"v24.22.1", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
                "CLOUDBENCH_GATE_TIMEOUT_S":"0" if outcome=="timeout" else "30",
                "CLOUDBENCH_GATE_RETAIN_HOST":retain, "CLOUDBENCH_GATE_ROOTFS_SIZE_GB":size,
                "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE":keep_tmp,

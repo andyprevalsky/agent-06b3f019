@@ -144,7 +144,7 @@ def test_explore_agent_action_model_accepts_documents_grep():
 
     assert instance.tool_calls[0].tool == "grep"
     assert instance.tool_calls[0].source == "documents"
-    assert instance.tool_calls[0].filters == {"document_source": "obsidian"}
+    assert instance.tool_calls[0].model_dump()["filters"] == {"document_source": "obsidian"}
 
 
 def test_explore_agent_action_model_accepts_summary_grep():

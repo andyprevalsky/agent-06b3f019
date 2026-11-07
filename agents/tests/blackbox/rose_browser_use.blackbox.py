@@ -353,6 +353,84 @@ def test_drag_tool_schema_requires_start_and_end():
         pass
 
 
+# Captured from browser-biometrics-webdecoy (agents 98fac0b3, 1eeef95c): asked to
+# "move to and click" like a user, the model emitted this end-only drag 147-177
+# times in a row because no tool could move the pointer without pressing.
+WEBDECOY_POINTER_MOVE_DRAG_ARGS = {"end_x": 480, "end_y": 408, "steps": 20}
+
+
+def test_pointer_move_intent_has_a_hover_tool_instead_of_drag():
+    from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
+
+    try:
+        normalize_browser_use_tool_call(
+            {"name": "drag", "arguments": json.dumps(WEBDECOY_POINTER_MOVE_DRAG_ARGS)}
+        )
+        raise AssertionError("an end-only drag must stay rejected: drag presses and holds the button")
+    except BrowserToolArgsValidationError as rejected:
+        assert "start_x" in rejected.detail
+
+    assert "hover" in AVAILABLE_ACTIONS and "hover" in _VALID_ACTIONS
+    tool = build_browser_use_tools(["hover"])[0]
+    assert tool["name"] == "hover"
+    assert "without clicking" in tool["description"]
+    assert {"index", "x", "y"} <= set(tool["input_schema"]["properties"])
+
+    to_point = normalize_browser_use_tool_call(
+        {"name": "hover", "arguments": json.dumps({"x": 480, "y": 408})}
+    )
+    assert to_point["action"] == "hover"
+    assert to_point["params"] == {"x": 480, "y": 408}
+    to_element = normalize_browser_use_tool_call({"name": "hover", "arguments": '{"index": 2827}'})
+    assert to_element["action"] == "hover" and to_element["index"] == 2827
+    for invalid in ({}, {"x": 480}):
+        try:
+            normalize_browser_use_tool_call({"name": "hover", "arguments": json.dumps(invalid)})
+            raise AssertionError(f"hover accepted {invalid}")
+        except BrowserToolArgsValidationError:
+            pass
+
+
+def test_pointer_tool_descriptions_match_runtime():
+    """Clicks move the pointer themselves (humanized or browser-use fallback); drag holds the button."""
+    tools = {
+        tool["name"]: tool["description"]
+        for tool in build_browser_use_tools(["click", "click_coordinates", "drag", "hover", "evaluate"])
+    }
+    for click_tool in ("click", "click_coordinates"):
+        assert "moves the mouse pointer to the" in tools[click_tool], click_tool
+    assert "same pointer movement as click" in tools["hover"]
+    assert "button stays held" in tools["drag"]
+    assert "never to move the" in tools["drag"]
+    assert "use hover to move it without clicking" in tools["drag"]
+    assert "source_index or start_x/start_y" in tools["drag"]
+    # Native hover/drag tools exist; evaluate must not route either to JavaScript.
+    assert "hover" not in tools["evaluate"] and "drag" not in tools["evaluate"]
+
+
+async def test_rejected_browser_tool_args_are_still_dumped():
+    from browser_tools.schemas import BrowserToolArgsValidationError
+    from helpers import observability
+    from providers.rose.types import RoseResponse
+
+    client = RoseClient(openrouter_key="offline-unused")
+    client.collect = AsyncMock(return_value=RoseResponse(tool_calls=[
+        {"id": "drag:21", "name": "drag", "arguments": json.dumps(WEBDECOY_POINTER_MOVE_DRAG_ARGS)}
+    ]))
+    with patch.object(observability, "dump_llm_context") as dump:
+        try:
+            await client.complete_browser_use(
+                task="Move to the submit button", browser_state=_browser_state(), action_history=[], available_actions=["drag"],
+            )
+            raise AssertionError("expected the end-only drag to be rejected")
+        except BrowserToolArgsValidationError:
+            pass
+    assert dump.call_count == 1
+    output = dump.call_args.kwargs["output"]
+    assert json.loads(output["tool_calls"][0]["arguments"]) == WEBDECOY_POINTER_MOVE_DRAG_ARGS
+    assert "drag requires source_index" in output["tool_args_validation_error"]
+
+
 def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     prompt = build_browser_use_system_prompt(["recover_from_challenge"])
 
@@ -2574,6 +2652,9 @@ async def run_all_tests():
     )
     r.record("drag_tool_catalog_and_normalize", test_drag_tool_in_catalog_and_normalizes_coordinates)
     r.record("drag_tool_schema_requires_endpoints", test_drag_tool_schema_requires_start_and_end)
+    r.record("pointer_move_intent_has_hover_tool", test_pointer_move_intent_has_a_hover_tool_instead_of_drag)
+    r.record("pointer_tool_descriptions_match_runtime", test_pointer_tool_descriptions_match_runtime)
+    await r.record_async("rejected browser tool args are still dumped", test_rejected_browser_tool_args_are_still_dumped)
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
     r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)
     r.record(
@@ -2962,15 +3043,16 @@ def test_phone_off_matches_prephone_bytes():
     Re-pinned for the approved read_tool_output browser action (Polar item 16, approved
     by Andy 2026-10-26): only the tools hash changed in both modes, and excluding that
     one action reproduces the previous tools hash exactly; system/messages are unchanged.
-    The 158efd7c + f0e250c6 reconciliation combines the reviewed R134 native
-    observation/action identity contract with main retained-output readback.
-    These hashes are computed from that combined tools/system/messages source.
+    Merge reconciliation: branch 50169458861b1e9b5461d723da99fec348d8198e
+    and main 5807c0edf19ab7fe7fda9b059701426872e18d0c. Both original
+    builders reproduced their recorded hashes exactly before this combined pin.
+    Main's hover action and four pointer descriptions change only the tools hash;
+    branch CAPTCHA/batch/observation contracts keep system/messages unchanged.
+    Full deterministic payloads and parent diffs are retained in the sync packet.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    # 2026-11-04 user-authorized captcha rule and Skyvern-aligned batch wording;
-    # prior b757 golden hashes reproduced exactly before replacing these pins.
-    expected = {'0': ('0f91c0a93c69900b55e6f7634aba2862cd9ce9347192b6c5d95d7c2411af0450', 'e46e91fd54170ef1cc5cb00bef0ebbf4e4446447005d9287d6f0d0f4ad455b1d', '62626a38cbbc18d38081798bb33fc33ba33960d7b0fa8a30b75e55e9c62d5d9d'), '1': ('5bee4333c896a1ba508c7e200e64224945d0806c9be550756ed3d780b77b1c7f', 'f304359dd340ba5945d2430237f884708698f7add337fda59ea220453e54fa78', 'b6680960025afe45387e9a390eadff21206ff23e3d3ded2227326958ac0b2835')}
+    expected = {'0': ('f92e8a403224b2f0b96ab6a7438a1314e9a647ed8f02bf1f216dc8b1405f4942', 'e46e91fd54170ef1cc5cb00bef0ebbf4e4446447005d9287d6f0d0f4ad455b1d', '62626a38cbbc18d38081798bb33fc33ba33960d7b0fa8a30b75e55e9c62d5d9d'), '1': ('c228748d6aeea6ef51c1b2812cb8cae52bb3599f6f06f721aa3e4b2514d58c54', 'f304359dd340ba5945d2430237f884708698f7add337fda59ea220453e54fa78', 'b6680960025afe45387e9a390eadff21206ff23e3d3ded2227326958ac0b2835')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):

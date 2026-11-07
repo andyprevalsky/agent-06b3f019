@@ -8,6 +8,10 @@
  *   PARENT_GOAL — agent detail already has parent_goal
  *
  * Result is parent > … so SubAgentBreadcrumb can render the live-run trail.
+ *
+ * FETCH IDENTITY: one GET /ancestors per (agent, parent link). An agent's
+ * detail arriving turns parent_agent_id/parent_goal from undefined (not loaded)
+ * into null (root) — the same link, so that transition must not refetch.
  */
 
 import { useEffect, useState } from 'react';
@@ -66,6 +70,9 @@ export function useAncestors(
     ancestors: AncestorNode[];
   }>({ agentId: null, ancestors: [] });
 
+  // undefined (detail not loaded) and null (root) are the same parent link.
+  const parentId = parentAgentId ?? null;
+  const parentGoalText = parentGoal ?? null;
   useEffect(() => {
     if (!selectedAgentId) {
       setResolved({ agentId: null, ancestors: [] });
@@ -79,18 +86,18 @@ export function useAncestors(
           setResolved({ agentId: selectedAgentId, ancestors: result });
           return;
         }
-        const ancestors = await resolveHubAncestors(selectedAgentId, parentAgentId, parentGoal);
+        const ancestors = await resolveHubAncestors(selectedAgentId, parentId, parentGoalText);
         if (active) setResolved({ agentId: selectedAgentId, ancestors });
       })
       .catch(async () => {
         if (!active) return;
-        const ancestors = await resolveHubAncestors(selectedAgentId, parentAgentId, parentGoal);
+        const ancestors = await resolveHubAncestors(selectedAgentId, parentId, parentGoalText);
         if (active) setResolved({ agentId: selectedAgentId, ancestors });
       });
     return () => {
       active = false;
     };
-  }, [selectedAgentId, parentAgentId, parentGoal]);
+  }, [selectedAgentId, parentId, parentGoalText]);
 
   return resolved.agentId === selectedAgentId ? resolved.ancestors : [];
 }

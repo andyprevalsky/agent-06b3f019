@@ -317,6 +317,32 @@ class DragTool(BaseModel):
         return self
 
 
+class HoverTool(BaseModel):
+    """Move the mouse pointer to an element or viewport point without clicking."""
+
+    tool: Literal["hover"]
+    index: Optional[int] = Field(
+        default=None,
+        description="DOM index of the element to move the pointer to",
+    )
+    x: Optional[int] = Field(
+        default=None,
+        description="Viewport X to move the pointer to (pixels from left; matches screenshot)",
+    )
+    y: Optional[int] = Field(
+        default=None,
+        description="Viewport Y to move the pointer to (pixels from top; matches screenshot)",
+    )
+
+    @model_validator(mode="after")
+    def require_target(self) -> "HoverTool":
+        if (self.x is None) ^ (self.y is None):
+            raise ValueError("hover x and y must be provided together")
+        if self.index is None and self.x is None:
+            raise ValueError("hover requires index or both x and y")
+        return self
+
+
 # ============================================================================
 # DROPDOWN TOOLS (browser-use additions)
 # ============================================================================
@@ -998,6 +1024,7 @@ BROWSER_TOOL_MODELS = {
     # Coordinate-based fallback (for vision models)
     "click_coordinates": ClickAtCoordinatesTool,
     "drag": DragTool,
+    "hover": HoverTool,
     # Dropdown handling
     "dropdown_options": DropdownOptionsTool,
     "select_dropdown": SelectDropdownTool,
