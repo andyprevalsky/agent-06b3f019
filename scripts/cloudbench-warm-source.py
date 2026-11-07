@@ -117,6 +117,8 @@ class Api(Fly):
                 return response.status, (json.loads(payload) if payload else None)
         except urllib.error.HTTPError as error:
             return error.code, None
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            raise WarmSourceError(f"{method} {path} -> {error}") from error
 
     def acquire_lease(self, machine_id, ttl=LEASE_TTL_SECONDS):
         status, body = self._leased("POST", f"/machines/{machine_id}/lease",
