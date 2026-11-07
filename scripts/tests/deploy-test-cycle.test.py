@@ -3195,7 +3195,7 @@ assert len(list(p.iterdir()))==2
                     "print(json.dumps({'ok':True,'status':'delivered'}))" % str(signal_file)]
         self.state = c.initialize(self.plan, self.root); self.state['phase'] = 'initial'
         out = io.StringIO()
-        with patch.object(c, 'EARLY_POLL_SECONDS', 0.05), contextlib.redirect_stdout(out):
+        with patch.object(c, 'EARLY_POLL_SECONDS', 0.05, create=True), contextlib.redirect_stdout(out):
             c.run_phase(self.plan, self.state, self.directory, self.root, launcher)
         api = next(r for r in self.state['attempts'][-1]['results'] if r['gate'] == 'api')
         return out.getvalue(), api, signal_file
