@@ -835,11 +835,14 @@ Output the summary only — no preamble."""
 # Named page facts the web_fetch summarizer receives from scrape metadata.
 # Main-content markdown can omit facts a page declares only in its <head>
 # (the RFC Editor states a publication date only in citation_publication_date).
-# Like Hermes and OpenClaw, keep an explicit allowlist: the title, then one
-# validated publication date. Every other provider key (og:*, citation_reference
-# lists, extract/session IDs) is dropped.
+# Like Hermes and OpenClaw, keep an explicit allowlist: one validated
+# publication date. Every other provider key (og:*, citation_reference lists,
+# extract/session IDs) is dropped. The HTML <title> is dropped too: like Claude
+# Code's WebFetch secondary model, the summarizer reads the page's own title
+# from its content. Sites prefix the <title> ("RFC 9111: HTTP Caching" for a
+# document headed "HTTP Caching"), and the summarizer reported it as the
+# document title (RCA 2026-11-07).
 # Lookups are case-insensitive because HTML meta names are; earlier names win.
-_PAGE_TITLE_KEYS = ("title",)
 _PAGE_PUBLISHED_KEYS = (
     "citation_publication_date",
     "citation_date",
@@ -850,10 +853,8 @@ _PAGE_PUBLISHED_KEYS = (
     "publishedTime",
     "publish_date",  # Parallel Extract
 )
-# OpenClaw web_fetch bounds (src/agents/tools/web-fetch.ts:75-76): 256 chars
-# per field, 512 for all metadata.
+# OpenClaw web_fetch bound (src/agents/tools/web-fetch.ts:75-76): 256 chars per field.
 _PAGE_METADATA_VALUE_CHARS = 256
-_PAGE_METADATA_BLOCK_CHARS = 512
 # ISO dates plus slash dates: citation_publication_date uses YYYY/MM/DD (or YYYY).
 _PAGE_DATE_RE = re.compile(
     r"^(?P<year>\d{4})(?:(?P<sep>[-/])(?P<month>\d{1,2})(?:(?P=sep)(?P<day>\d{1,2})(?P<time>[T ][\d:.+Z-]{1,20})?)?)?$"
@@ -885,11 +886,10 @@ def _is_page_metadata_date(value: str) -> bool:
 
 
 def select_page_metadata(metadata: Any) -> Dict[str, str]:
-    """The allowlisted page facts from scrape metadata, title first.
+    """The allowlisted page facts from scrape metadata.
 
-    Returns at most ``title`` and one publication date, keyed by the
-    matching allowlist name. Dates must parse; values are
-    sanitized to one line and bounded to the OpenClaw-like caps.
+    Returns at most one publication date, keyed by the matching allowlist
+    name. The date must parse; the value is sanitized to one bounded line.
     """
     if not isinstance(metadata, dict):
         return {}
@@ -898,47 +898,17 @@ def select_page_metadata(metadata: Any) -> Dict[str, str]:
         raw = metadata[key]
         by_name.setdefault(key.lower(), []).extend(raw if isinstance(raw, list) else [raw])
 
-    def first(names: Tuple[str, ...], accept) -> Optional[Tuple[str, str]]:
-        for name in names:
-            for raw in by_name.get(name.lower(), []):
-                value = _clean_page_metadata_text(raw)
-                if value and accept(value):
-                    return name, value[:_PAGE_METADATA_VALUE_CHARS]
-        return None
-
-    selected: Dict[str, str] = {}
-    size = 0
-    for found in (
-        first(_PAGE_TITLE_KEYS, lambda _value: True),
-        first(_PAGE_PUBLISHED_KEYS, _is_page_metadata_date),
-    ):
-        if found is None:
-            continue
-        name, value = found
-        line_chars = len(_PAGE_METADATA_LABELS.get(name, name)) + 2 + len(value) + 1
-        if size + line_chars > _PAGE_METADATA_BLOCK_CHARS:
-            continue
-        selected[name] = value
-        size += line_chars
-    return selected
-
-
-# Scrape providers report the HTML <title> element as ``title``. Sites often
-# prefix it ("RFC 9110: HTTP Semantics" titles a document headed "HTTP
-# Semantics"), so the summarizer sees it under its element name, not as the
-# document title (RCA 2026-11-07).
-_PAGE_METADATA_LABELS = {"title": "html_title"}
-PAGE_METADATA_HEADER = (
-    "PAGE METADATA (declared in the page's <head>, not its visible content; "
-    "html_title is the <title> element; report it as such, apart from the title the document itself states):"
-)
+    for name in _PAGE_PUBLISHED_KEYS:
+        for raw in by_name.get(name.lower(), []):
+            value = _clean_page_metadata_text(raw)
+            if value and _is_page_metadata_date(value):
+                return {name: value[:_PAGE_METADATA_VALUE_CHARS]}
+    return {}
 
 
 def format_page_metadata(metadata: Any) -> str:
-    """The allowlisted page facts as ``label: value`` lines (empty when none)."""
-    return "\n".join(
-        f"{_PAGE_METADATA_LABELS.get(key, key)}: {value}" for key, value in select_page_metadata(metadata).items()
-    )
+    """The allowlisted page facts as ``key: value`` lines (empty when none)."""
+    return "\n".join(f"{key}: {value}" for key, value in select_page_metadata(metadata).items())
 
 
 @activity.defn
@@ -1001,7 +971,7 @@ async def summarize_and_filter_links(
 
         metadata_text = format_page_metadata(page_metadata)
         metadata_section = (
-            f"{PAGE_METADATA_HEADER}\n---\n{metadata_text}\n---\n\n"
+            f"PAGE METADATA (declared by the page, e.g. <meta> tags):\n---\n{metadata_text}\n---\n\n"
             if metadata_text
             else ""
         )
