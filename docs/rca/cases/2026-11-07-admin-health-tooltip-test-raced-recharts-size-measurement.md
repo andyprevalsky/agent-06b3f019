@@ -2,7 +2,7 @@
 id: 2026-11-07-admin-health-tooltip-test-raced-recharts-size-measurement
 date: 2026-11-07
 title: Admin-health tooltip test looked up charts before Recharts painted them, so it failed under coverage load
-surface: frontend
+surface: front-end
 component: front-end/src/tests/blackbox/admin-health.blackbox.tsx neutral-series tooltip test
 classification: test-bug
 problem_class: fixture-environment-data-mismatch
