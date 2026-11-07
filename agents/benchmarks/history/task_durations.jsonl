@@ -8397,3 +8397,11 @@
 {"task": "agent-payment-new-user-journey", "duration_seconds": 168.0, "cost_cents": 1.0, "timestamp": "2026-11-07T07:57:04+00:00", "agent_id": "263978ce-a237-44c6-9a0c-04d878f609de", "backfill_source": "hub"}
 {"task": "spawn-sub-agents", "duration_seconds": 196.5, "cost_cents": 0.0, "timestamp": "2026-11-07T07:57:32.500000+00:00", "agent_id": "dfc59aed-1d20-457a-9f05-8774867a1978", "backfill_source": "hub"}
 {"task": "background-agent-message-smoke", "duration_seconds": 91.9, "cost_cents": 0.0, "timestamp": "2026-11-07T07:55:47.900000+00:00", "agent_id": "486009cb-62ef-4ff0-b46f-85398fb42255", "backfill_source": "hub"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 172.9, "cost_cents": 35.0, "timestamp": "2026-11-07T09:43:43.900000+00:00", "agent_id": "4cf790d5-39fa-4ded-934d-e038edfde0d5", "backfill_source": "hub"}
+{"task": "spawn-sub-agents", "duration_seconds": 173.6, "cost_cents": 0.0, "timestamp": "2026-11-07T09:43:44.600000+00:00", "agent_id": "37bd9603-22cf-422c-8860-ee4b348a2a6b", "backfill_source": "hub"}
+{"task": "background-agent-message-smoke", "duration_seconds": 107.4, "cost_cents": 0.0, "timestamp": "2026-11-07T09:42:38.400000+00:00", "agent_id": "28424f01-4d83-465f-aa31-27d5a35888af", "backfill_source": "hub"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 190.8, "cost_cents": 1.0, "timestamp": "2026-11-07T09:44:01.800000+00:00", "agent_id": "406badd8-1c50-441f-91f7-eef09a3c7a44", "backfill_source": "hub"}
+{"task": "claude-code-agent", "duration_seconds": 56.0, "cost_cents": 0.0, "timestamp": "2026-11-07T09:41:47+00:00", "agent_id": "5a7a2474-bc40-4405-b512-3b305b1ec6ef", "backfill_source": "hub"}
+{"task": "chat-mode", "duration_seconds": 16.0, "cost_cents": 0.0, "timestamp": "2026-11-07T09:41:07+00:00", "agent_id": "3bcdd220-d7c7-48d0-abd8-36831f44daf7", "backfill_source": "hub"}
+{"task": "parallel-tool-calls", "duration_seconds": 188.1, "cost_cents": 1.0, "timestamp": "2026-11-07T09:43:58.100000+00:00", "agent_id": "dfde7096-c6f9-4231-a362-0cd518a1b219", "backfill_source": "hub"}
+{"task": "browser-smoke", "duration_seconds": 156.6, "cost_cents": 10.0, "timestamp": "2026-11-07T09:43:26.600000+00:00", "agent_id": "21bb9750-ccd9-4542-abc7-c8ce78af7123", "backfill_source": "hub"}
