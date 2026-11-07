@@ -392,6 +392,64 @@ async def test_rewoken_child_completion_appends_a_new_notification():
         assert await wf._on_rewoken_child_completed("agent-new", {"status": "completed"}) is False
 
 
+async def test_rewoken_child_final_answer_reaches_the_parents_model_context():
+    """A rewoken child's FINAL_ANSWER is the parent's only copy of its new result.
+
+    tree-feedback-routing 29c987c1 (H-55): the coordinator woke drafter cf06780d
+    with a user correction; its corrected FINAL_ANSWER row was stored at 18:53:36
+    but the coordinator's next turn still said "no corrected FINAL_ANSWER arrived"
+    and re-asked until the 900 s budget ran out. The row must survive the context
+    poll and the provider-message converter exactly like a first-run notification.
+    """
+    from helpers.llm import build_llm_messages, build_verifier_context_messages
+    from loop.context_utils import poll_and_update_context
+
+    harness = _Harness()
+    with _env(harness):
+        wf = _workflow(harness)
+        wf._background_finished["toolu_gp"] = {
+            "tool_call_id": "toolu_gp",
+            "agent_type": "general_purpose",
+            "address": "/root/draft_garry_tan",
+            "path": "/root/draft_garry_tan",
+            "goal": "Draft one email",
+            "status": "completed",
+        }
+        wf.child_tool_ids["agent-garry"] = "toolu_gp"
+        corrected = "Best,\nAndy Prevalskii, Founder, Rose Labs"
+        await wf.child_completed(
+            {
+                "child_agent_id": "agent-garry",
+                "result": {
+                    "status": "completed",
+                    "summary": "Corrected the signature.",
+                    "structured_response": {"body": corrected},
+                },
+            }
+        )
+        notes = harness.notifications()
+        assert len(notes) == 1, harness.rows
+
+    async def _poll(_last_checked):
+        return [dict(row) for row in harness.rows]
+
+    context: list = []
+    await poll_and_update_context(_poll, context, datetime.fromtimestamp(0, tz=timezone.utc))
+    assert any(row.get("metadata", {}).get("agentNotification") for row in context), (
+        "the rewoken child's FINAL_ANSWER row was dropped by the context poll",
+        notes[0]["metadata"],
+    )
+    messages = await build_llm_messages(context, "system")
+    model_text = "\n".join(str(message.get("content")) for message in messages)
+    assert "Andy Prevalskii, Founder, Rose Labs" in model_text, (
+        "the rewoken child's corrected FINAL_ANSWER never reached the parent's model messages",
+        messages,
+    )
+    # The parent's verifier reads the same row as the child's delivered result.
+    verifier = build_verifier_context_messages([dict(row) for row in harness.rows], "verifier")
+    assert "Andy Prevalskii, Founder, Rose Labs" in "\n".join(str(m.get("content")) for m in verifier), verifier
+
+
 async def test_carried_child_killed_by_other_agent_notifies_failed():
     harness = _Harness()
     with _env(harness):
@@ -1185,6 +1243,10 @@ async def run_all_tests():
         test_kill_own_activity_task_keeps_kill_reason_when_executor_absorbs_cancel,
     )
     await r.record_async("rewoken_child_appends_notification", test_rewoken_child_completion_appends_a_new_notification)
+    await r.record_async(
+        "rewoken_child_final_answer_reaches_parent_model",
+        test_rewoken_child_final_answer_reaches_the_parents_model_context,
+    )
     await r.record_async(
         "carried_child_killed_notifies_failed", test_carried_child_killed_by_other_agent_notifies_failed
     )
