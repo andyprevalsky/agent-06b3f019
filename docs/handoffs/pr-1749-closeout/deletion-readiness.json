@@ -1,0 +1,45 @@
+{
+ "schema_version": 1,
+ "pr": 1749,
+ "deployed_sha": "3e770c9e10be3ee23f6cf0a2ad4a523b1241789e",
+ "validated_head": "79e007df49786d17071719477a283cbe8ed7b446",
+ "records_branch": "records/pr1749-closeout",
+ "records_base": "8fa81006df7d8f585903999444773e853d5b7d40",
+ "closeout_manifest": "docs/handoffs/pr-1749-closeout/closeout-manifest.json",
+ "recovery": "docs/handoffs/pr-1749-closeout/RECOVERY.md",
+ "verification": "docs/handoffs/pr-1749-closeout/private-preservation-verification.json",
+ "archives": "five AES-GCM objects under devbox-closeout-private/pr1749-3e770c9e/ in the trace-archive bucket (core 4356 files, workers 10551, cloud 4578, control 20, scratch 72); each uploader readback authenticated and an independent verify authenticated every frame and member hash; core restored to an empty directory and 4356 files compared byte-identical to the originals (0 mismatches)",
+ "key_recovery": "project-managed .context/pr1634-archive-recovery.env (PR1634_ARCHIVE_RECOVERY_KEY_B64) and agents/.env TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (dvb-onbox env list shows both); decoded SHA256 e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730; escrow equals live key",
+ "configuration_recovery": "project-managed env files (dvb-onbox env list: agents/.env, back-end/.env, front-end/.env, agents/.env.benchmark-temporal, research/.env, .context/pr1634-archive-recovery.env); no values stored in git or archives",
+ "source": "merged on main (3e770c9e1); branch fix/linkedin-export-agent-live pushed; follow-up branches followup/pr1749-release-retention (d09ce26d4) and followup/backend-blackbox-heap-growth (85a2e2706) pushed with the same SHAs as the scratch clone; the scratch clone's other refs (li-work 79e007df4, fix/linkedin-export-agent-live 22711f595) are ancestors of the merged head",
+ "resources": {
+  "fly": "no Fly Machines or volumes owned by this deploy's smoke campaigns remain: all 9 cloud smoke campaigns (7 archived tar.gz + 2 live dirs) have result.json cleanup_complete true except c7716de8 (infra stop 1/10, cancelled through owned teardown), and every fleet run of the live campaigns (11 + 11) and of c7716de8 (10) has teardown-ownership/provider-teardown-verified.epoch; claimed-pool ids 0; the worker bank cutover is managed by the deploy-agents job",
+  "local_retained": "/home/boxes/rose checkout and .context (archived in core/cloud), shared victoria development database, browser-use temp directories and test scratch under /var/tmp not created by a gate of this deploy",
+  "local_removed_by_closeout": "/home/boxes/pr1749-closeout-staging (10854 hard links plus one copied file; originals untouched) and /var/tmp/pr1749-restore-test",
+  "closeout_scratch_retained": "/home/boxes/pr1749-closeout-control (capture lists, receipts, logs; archived as control except its own receipt, which is reproduced in the manifest), /var/tmp/pr1749-closeout-work (scripts) and the records clone /var/tmp/pr1749-records-clone (shares objects with /home/boxes/rose); safe to delete once this records PR merges",
+  "processes": "agent_link_server.py pid 1936216 (started 11:18Z by the run2 cloud smoke campaign) stopped by exact PID by the deploy owner; not running at 2026-11-07T15:45Z",
+  "local_removed_after_verification": "scratch clone /var/tmp/li-fix-clone, /var/tmp/li-records and the 11 worker roots under /var/tmp/rdw removed at 2026-11-07T15:39:19Z after the live production verification completed (evidence already archived as scratch and workers); 73,626,107,904 bytes reclaimed"
+ },
+ "freedom": "untouched",
+ "open_items": [],
+ "non_pass_items_disclosed": "see closeout-manifest.json non_pass_items_disclosed",
+ "resolved_items": [
+  {
+   "item": "live production LinkedIn verification agent 5357f72b-bf67-44f8-bd66-8963e46a487f",
+   "resolution": "COMPLETED; integration CONNECTED 2026-11-07T15:31:59Z, 375 contacts, 480 messages (re-observed 15:45:01Z)"
+  },
+  {
+   "item": "retain /var/tmp/li-fix-clone and /var/tmp/rdw",
+   "resolution": "removed 2026-11-07T15:39:19Z after verification; 73,626,107,904 bytes reclaimed"
+  },
+  {
+   "item": "stop leftover agent_link_server.py pid 1936216 by exact PID",
+   "resolution": "stopped; pid absent at 15:45Z"
+  },
+  {
+   "item": "publish the production-verify factory events and completed outcome (Step 15)",
+   "resolution": "published on main in 4a122373e (outcome completed 15:39:27Z); smoke ledger rows in d3eda0e5b"
+  }
+ ],
+ "ready_for_deletion": "yes, once this records PR merges: source is on main, private archives verified, no retained resource or process remains for this deploy; closeout scratch (/home/boxes/pr1749-closeout-control, /var/tmp/pr1749-closeout-work, /var/tmp/pr1749-records-clone) may be deleted after the merge"
+}

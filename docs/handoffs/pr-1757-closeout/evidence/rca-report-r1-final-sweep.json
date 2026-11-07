@@ -1,0 +1,272 @@
+{
+ "failures": [
+  {
+   "id": "ffdc34847ab54227a7d552c2fe4085ec",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "gate": "cloudbench-controller",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/rdw/cloudbench-controller/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/rdw/cloudbench-controller",
+    "--stdio"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "multi-workstream step 'hub stub must publish an exact owner record' failed: the fixture's hub stub could not bind the port it had probed free minutes earlier (OSError [Errno 98] Address already in use) while 10 deploy gates ran concurrently on this host. The PR diff (agents helpers/worker/tests) touches no cloudbench code or tests; this gate passed on a6353fb70 (identical controller inputs) in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/cloudbench-controller/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/cloudbench-controller/result.json"
+  },
+  {
+   "id": "00533d6d5d3640ddab797d56d6cb40d7",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "gate": "deploy-command-structural",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/rdw/deploy-command-structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/rdw/deploy-command-structural",
+    "--stdio"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "semantic-deploy suite 'fixture cleanup left the fake run.sh child running': cleanup SIGTERMs the fake run.sh's sleeper and immediately probes it with kill -0, which still succeeds for a not-yet-reaped zombie under host load. Unchanged test; the PR touches no deploy tooling; this gate passed on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/deploy-command-structural/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/deploy-command-structural/result.json"
+  },
+  {
+   "id": "81da2c7e0fb546dfa1d2f94199b3c6ee",
+   "check": "smoke/test-mass-agent-run-0",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "638ebc7df2db45b680be609805a95e1c",
+   "check": "smoke/chat-mode",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "830cc963c01b4c6db6a881f8c79df767",
+   "check": "smoke/spawn-sub-agents",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "fe6910226ef04ded90fc3cdfdc111c04",
+   "check": "smoke/parallel-tool-calls",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "44d4809cbc8a4954b2aaacb87c74892c",
+   "check": "smoke/background-agent-message-smoke",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "8d95c5dff73c4d0695d6e718e9bb09ee",
+   "check": "smoke/claude-code-agent",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "c144337e879a430889f59fd693de6bca",
+   "check": "smoke/browser-smoke",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "6d9d399617e94ab2a2685c2cf6e81f58",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "11506463d66f4adca20fe192b0a00bbf",
+   "check": "smoke/agent-payment-new-user-journey",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "cbb2fbe88d744421891e3b4b181b0163",
+   "check": "smoke/image-handling",
+   "gate": "smoke",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloud smoke campaign INFRA STOP at 1/10: spawn-sub-agents' guest crashed in the production compute-token sync (seed-local.ts --compute-tokens-only exited non-zero with empty stderr right after 'Syncing from production database...', matching the open intermittent seed-local native crash) -> RuntimeError 'Benchmark run could not refresh local compute tokens' -> INFRA_ERROR; the 5% stop cancelled the other 9 jobs, whose guests had refreshed tokens and were running. Not related to the PR diff; the identical smoke set passed 10/10 on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/smoke/output.log"
+  },
+  {
+   "id": "058883cdcfd24a35be0e993627470957",
+   "check": "backend-coverage-blackbox/blackbox:report-bug",
+   "gate": "backend-coverage-blackbox",
+   "source": {
+    "head": "d3a8bd2f5f73fbe1637c6284a7ebaf9abe06ed74",
+    "digest": "d6d6bdec7aa20e653909d214babf54eecd525b7d87380fdd94ad2610ac8da68a"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/var/tmp/rdw/backend-coverage-blackbox"
+   ],
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "report-bug 'POST /report-bug/screenshots -- signed URL serves the image: fetch failed': a single live fetch of a Supabase Storage signed URL failed at the network layer during the concurrent sweep. The PR touches no back-end code; this domain passed (251/251) on a6353fb70 in attempt 2.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/backend-coverage-blackbox/result.json",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the failed gate cases with the box otherwise idle.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/4/final/backend-coverage-blackbox/result.json"
+  }
+ ]
+}

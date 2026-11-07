@@ -1,0 +1,27 @@
+{
+ "failures": [
+  {
+   "id": "9a3f732f795b45f38e65c25981608dda",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "gate": "deploy-command-structural",
+   "source": {
+    "head": "337aa6318515680028b008ec154af7707cf6fead",
+    "digest": "efa33add3fdfba7ff97493243bc0ea57f673caeaeee7072569b89e439402d37b"
+   },
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/structural",
+    "--stdio"
+   ],
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "Only deploy-test-plan failed: InterruptedCustody.test_static_and_cloud_reconcile_preserve_originals_and_history (cloud=True) -> interrupted_boundary 'worker ownership remains ... smoke' because still_bound's live /proc re-scan of the host (namespace_quiet) failed transiently; the same test intermittently hits PermissionError on a transient same-uid /proc/<pid>/fd (1 of 8 isolated full-file runs). The PR diff does not touch deploy_test_cycle.py, deploy_test_interrupted_cleanup.py or deploy-test-plan.test.py (identical to main). The gate passed on this source in v6 attempt 9.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/3/focused/deploy-command-structural/output.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner reruns the structural gate alone on an otherwise idle box.",
+   "assigned_evidence": "/home/boxes/rose/.context/deploy-pipeline-v8/attempts/3/focused/deploy-command-structural/output.log"
+  }
+ ]
+}

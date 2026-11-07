@@ -1,0 +1,45 @@
+[
+  {
+    "message_id": "7eb6ae2f-3cea-4c5d-9d4a-2c0f39385e9d",
+    "timestamp": "2026-11-06T04:14:51.934Z",
+    "role": "TOOL",
+    "text": "Browser task",
+    "metadata": {
+      "task_id": "6efcd1c4-1638-5b06-9b08-9b50cfe7d5e2",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "b6b38413-9002-4ad8-bfcd-10f699efdabf",
+      "toolStatus": "IN_PROGRESS",
+      "action_type": "browser",
+      "browser_url": "https://example.test/live"
+    }
+  },
+  {
+    "message_id": "c9d16047-c4a4-4414-b4a4-23d929f5e435",
+    "timestamp": "2026-11-06T04:15:27.429Z",
+    "role": "TOOL",
+    "text": "Browser session paused; the same session continues when resumed",
+    "metadata": {
+      "task_id": "6efcd1c4-1638-5b06-9b08-9b50cfe7d5e2",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "b6b38413-9002-4ad8-bfcd-10f699efdabf",
+      "toolStatus": "FINISHED",
+      "action_type": "task_complete",
+      "browser_url": "https://example.test/live"
+    }
+  },
+  {
+    "message_id": "dc45642a-609c-491a-a4cb-9729f7cd815b",
+    "timestamp": "2026-11-06T04:15:27.998Z",
+    "role": "TOOL",
+    "text": "User paused the browser agent",
+    "metadata": {
+      "task_id": "6efcd1c4-1638-5b06-9b08-9b50cfe7d5e2",
+      "toolName": "spawn_browser_agent",
+      "toolCallId": "b6b38413-9002-4ad8-bfcd-10f699efdabf",
+      "toolStatus": "ERROR",
+      "action_type": "task_complete",
+      "userPauseRequested": true,
+      "browser_url": "https://example.test/live"
+    }
+  }
+]

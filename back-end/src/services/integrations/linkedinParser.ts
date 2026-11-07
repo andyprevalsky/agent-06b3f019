@@ -105,6 +105,41 @@ function parseCsvBuffer(buffer: Buffer, columns: string[]): Record<string, strin
 
 // ── ZIP Extraction ──────────────────────────────────────
 
+/**
+ * LinkedIn's "larger data archive" arrives in two installments. The first,
+ * ready within minutes, has no Connections.csv; the one with connections and
+ * messages follows (LinkedIn estimates ~24 hours) on the same download page.
+ */
+export const LINKEDIN_ARCHIVE_WITHOUT_CONNECTIONS_MESSAGE =
+  'This LinkedIn archive has no Connections.csv, so it is the first installment of the export. ' +
+  'LinkedIn makes the archive with connections and messages available later (it estimates about ' +
+  '24 hours) on https://www.linkedin.com/mypreferences/d/download-my-data. Upload that archive.';
+
+export class LinkedInArchiveWithoutConnectionsError extends Error {
+  constructor() {
+    super(LINKEDIN_ARCHIVE_WITHOUT_CONNECTIONS_MESSAGE);
+    this.name = 'LinkedInArchiveWithoutConnectionsError';
+  }
+}
+
+/**
+ * Throws when a readable archive lacks Connections.csv (an empty list still
+ * counts). An unreadable archive is left to the import, which records the
+ * failed run on its progress row.
+ */
+export function assertLinkedInArchiveHasConnections(zipPath: string): void {
+  let names: string[];
+  try {
+    names = new AdmZip(zipPath)
+      .getEntries()
+      .filter((entry) => !entry.isDirectory)
+      .map((entry) => entry.entryName.split('/').pop() ?? entry.entryName);
+  } catch {
+    return;
+  }
+  if (!names.includes('Connections.csv')) throw new LinkedInArchiveWithoutConnectionsError();
+}
+
 export function parseLinkedInZip(zipPath: string): LinkedInExportData {
   const zip = new AdmZip(zipPath);
   const entries = zip.getEntries();

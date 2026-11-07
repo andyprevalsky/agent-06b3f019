@@ -21,6 +21,11 @@ case "$source_scope" in complete|worker-runtime) ;; *)
     exit 1 ;;
 esac
 worker_runtime_omitted='agents/benchmarks/history/*.jsonl'
+# A fresh disposable REAL primary appends span ledgers but never reads them (only the
+# agent_latency CLI and its tests do); its runner reads the small task_* ledgers, which
+# stay. The span shards are ~86% of the tree (3.2 GB of 3.7 GB): a full depth-1 fetch
+# spent 271-389 s per guest (2026-11-06 /deploy smoke) against ~30 s for the rest.
+primary_runtime_omitted='agents/benchmarks/history/span_durations*.jsonl'
 
 # Retained physical Volumes may bootstrap only inside the authenticated, private
 # fresh-generation mount. This is not a fresh-physical-volume declaration.
@@ -227,10 +232,14 @@ elif [ "$fresh_checkout_admitted" = 1 ]; then
     # A fresh REAL volume needs the complete requested source, not historical
     # benchmark checkouts. Retained volumes keep their existing history above.
     fetch_args+=(--depth=1)
+    # Blobs outside the sparse definition are never transferred; checkout
+    # fetches the rest once, under this request-scoped credential.
     if [ "$source_scope" = worker-runtime ]; then
-        # Blobs outside the sparse definition are never transferred; checkout
-        # fetches the rest once, under this request-scoped credential.
         git_cmd sparse-checkout set --no-cone '/*' "!/$worker_runtime_omitted"
+        fetch_args+=(--filter=blob:none)
+    elif [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
+        # Disposable physical volume only: retained generations keep the complete tree.
+        git_cmd sparse-checkout set --no-cone '/*' "!/$primary_runtime_omitted"
         fetch_args+=(--filter=blob:none)
     fi
 else
@@ -261,12 +270,16 @@ if [ "$actual" != "$fetched" ]; then
     exit 1
 fi
 if [ "$(git_cmd config --get core.sparseCheckout || true)" = true ]; then
-    # Only the declared worker-runtime omission may be absent from the worktree.
-    if git_cmd ls-files -t | grep '^S ' | cut -c3- \
-        | grep -Ev '^agents/benchmarks/history/[^/]+\.jsonl$' | grep -q .; then
-        echo "[cloudbench] FATAL: sparse worker checkout omitted runtime source" >&2
+    # Only the declared omission for this scope may be absent from the worktree.
+    if [ "$source_scope" = worker-runtime ]; then
+        omitted="$worker_runtime_omitted" allowed='^agents/benchmarks/history/[^/]+\.jsonl$'
+    else
+        omitted="$primary_runtime_omitted" allowed='^agents/benchmarks/history/span_durations[^/]*\.jsonl$'
+    fi
+    if git_cmd ls-files -t | grep '^S ' | cut -c3- | grep -Ev "$allowed" | grep -q .; then
+        echo "[cloudbench] FATAL: sparse $source_scope checkout omitted runtime source" >&2
         exit 1
     fi
-    echo "[cloudbench] worker-runtime checkout omits $worker_runtime_omitted"
+    echo "[cloudbench] $source_scope checkout omits $omitted"
 fi
 echo "[cloudbench] verified checkout $actual"

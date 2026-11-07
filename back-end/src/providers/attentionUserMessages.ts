@@ -1,5 +1,6 @@
 import type { Message, Prisma } from '@prisma/client';
 import { broadcastCreatedMessage, createUserMessageInTransaction } from './messages';
+import { recordPersonMessage } from './personMessageStamp';
 import { prisma } from './database';
 import {
   assertAttentionWorkflowTargets,
@@ -131,11 +132,13 @@ export async function persistAttentionUserMessages(
   return { userMessage, userMessages };
 }
 
+/** After commit: broadcast each authored reply and stamp the sidebar recency key. */
 export function broadcastAttentionUserMessages(messages: Message[]): void {
   for (const message of messages) {
     broadcastCreatedMessage(
       { agentId: message.agentId, text: message.text, role: 'USER' },
       message
     );
+    void recordPersonMessage(message);
   }
 }

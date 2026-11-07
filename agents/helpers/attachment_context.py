@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import weakref
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, TypeVar
 
@@ -100,12 +101,37 @@ async def admit_text_attachments(
     return projected
 
 
+# Keyed weakly by class: a projection lives exactly as long as its model class.
+# Compiled tool sets are shared and hit; a per-turn class (user-tool models
+# are rebuilt every turn) drops its entry when the class is collected.
+_SCHEMA_PROJECTIONS: "weakref.WeakKeyDictionary[Any, tuple[Any, Any]]" = weakref.WeakKeyDictionary()
+
+
+def _schema_projections(response_model: Any) -> tuple[Any, Any]:
+    """Both provider schema projections of one compiled model class.
+
+    They are a pure function of the class (``create_agent_action_model``
+    compiles each tool set once), so derive them once instead of on every
+    turn: rebuilding them was ~15% of a replaying worker's CPU. The result is
+    shared, so callers must only measure it, never mutate it.
+    """
+    cached = _SCHEMA_PROJECTIONS.get(response_model)
+    if cached is None:
+        from providers.rose.schema import build_anthropic_tools_from_response_model, build_openai_response_format
+
+        cached = (
+            build_anthropic_tools_from_response_model(response_model),
+            build_openai_response_format(response_model),
+        )
+        _SCHEMA_PROJECTIONS[response_model] = cached
+    return cached
+
+
 def attachment_request_overhead(response_model: Any, extra_user_message: str | None = None) -> Any:
     """Reserve both actual schema projections; either provider can serve this call."""
-    from providers.rose.schema import build_anthropic_tools_from_response_model, build_openai_response_format
-
+    tools, response_format = _schema_projections(response_model)
     return {
-        "tools": build_anthropic_tools_from_response_model(response_model),
-        "response_format": build_openai_response_format(response_model),
+        "tools": tools,
+        "response_format": response_format,
         "extra_user_message": extra_user_message,
     }

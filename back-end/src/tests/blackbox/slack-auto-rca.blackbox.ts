@@ -366,6 +366,9 @@ async function testSameSignatureAppendsToExistingAgent(): Promise<void> {
   );
   const incident = await prisma.slackAutoRcaIncident.findUnique({ where: { id: incidentId } });
   assert(incident?.occurrenceCount === 2, `occurrenceCount ${incident?.occurrenceCount} !== 2`);
+  // A bot-relayed occurrence is not a person's message: the sidebar key stays unset.
+  const stamped = await prisma.agent.findUnique({ where: { id: agentId } });
+  assert(stamped?.lastUserMessageAt === null, 'a relayed alert stamped lastUserMessageAt');
 
   const replies = slackCalls(await captures(token), 'chat.postMessage');
   assert(replies.length === 1, `expected one reply on the repeat card, got ${replies.length}`);
@@ -424,6 +427,8 @@ async function testReviewerFeedbackReachesAgent(): Promise<void> {
   assert(result.body.agentId === agentId, 'feedback went to a different agent');
   const delivered = (await userMessages(agentId)).filter((text) => text.includes(feedback));
   assert(delivered.length === 1, `feedback delivered ${delivered.length} times`);
+  const stamped = await prisma.agent.findUnique({ where: { id: agentId } });
+  assert(stamped?.lastUserMessageAt !== null, 'reviewer feedback did not stamp lastUserMessageAt');
   const reactions = slackCalls(await captures(token), 'reactions.add');
   assert(
     reactions.length === 1 && reactions[0].timestamp === REPLY_TS && reactions[0].name === 'eyes',

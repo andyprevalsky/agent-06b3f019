@@ -1,0 +1,16 @@
+{
+  "status": "VERIFIED64 full private immutable snapshots",
+  "copies": 64,
+  "scope": "Full bytes and per-file observational provenance; not a redaction or key-name inventory. Managed daemon originals may continue to rotate. Restore authoritative private mappings deliberately.",
+  "map_member": "rose/.context/pause-rca/preservation/immutable-final-configs-20261107T1340Z/recovery-map.json",
+  "mapping": {
+    "path": ".context/pause-rca/preservation/immutable-final-configs-20261107T1340Z/recovery-map.json",
+    "sha256": "c81fb4c153a61e2fe48f8f9bc800ed3e308f8f80c3423b17456688e29df0d90a"
+  },
+  "offline_commit": {
+    "path": ".context/pause-rca/preservation/immutable-final-configs-20261107T1340Z/COMMITTED.json",
+    "sha256": "a06b7a25f16b2fa5483e28248da5ecc8d0274b8a4710f99b6d935148a086549b"
+  },
+  "key_recovery": "Existing project-managed escrow; independent core restore verified on another devbox without copying parent key.",
+  "key_fingerprint": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730"
+}

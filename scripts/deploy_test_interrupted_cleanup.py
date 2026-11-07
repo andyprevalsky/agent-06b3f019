@@ -59,24 +59,21 @@ def namespace_quiet(namespace, ports):
         raw = Path('/proc', str(pid), 'stat').read_text().rsplit(') ', 1)[1].split()
         pid = int(raw[1])
     prefix = str(namespace)
-    for process in Path('/proc').iterdir():
-        if not process.name.isdigit():
-            continue
-        try:
-            if process.stat().st_uid != os.geteuid():
+
+    def inspect(process):
+        argv = (process / 'cmdline').read_bytes().decode(errors='replace')
+        cwd = str((process / 'cwd').resolve(strict=True))
+        need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
+             'original namespace has a live consumer')
+        for fd in (process / 'fd').iterdir():
+            try:
+                target = os.readlink(fd)
+            except (FileNotFoundError, ProcessLookupError):
                 continue
-            argv = (process / 'cmdline').read_bytes().decode(errors='replace')
-            cwd = str((process / 'cwd').resolve(strict=True))
-            need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
-                 'original namespace has a live consumer')
-            for fd in (process / 'fd').iterdir():
-                try:
-                    target = os.readlink(fd)
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
-                need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
-        except (FileNotFoundError, ProcessLookupError):
-            continue
+            need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
+
+    from deploy_test_process import scan_same_user_processes
+    scan_same_user_processes(inspect, lambda pid: need(False, f'original namespace process {pid} is unverifiable'))
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
         for line in Path(table).read_text().splitlines()[1:]:
             row = line.split()

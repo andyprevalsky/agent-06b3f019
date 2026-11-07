@@ -3496,11 +3496,100 @@ class WideRunCatalogModes(unittest.TestCase):
         self.assertEqual(RUNNER['shard_placement_env'](ROOT, None), RUNNER['FRESH_ONLY_PLACEMENT'])
 
 
+HOST_GIT_SETTINGS = ('gc.auto', 'gc.autodetach', 'maintenance.auto', 'maintenance.strategy', 'core.fsmonitor',
+                     'core.hookspath', 'init.templatedir', 'feature.manyfiles', 'core.untrackedcache')
+
+
+def hermetic_git_env():
+    """A Git view that ignores the host's system/global configuration (hooks, filters, auto-maintenance)."""
+    return dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+
+
+def processes_naming(directory):
+    """Live processes whose cwd, open files or argv name `directory`: pid, ppid, state, argv (read-only /proc scan)."""
+    found = []
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry/'cmdline').read_bytes().decode('utf-8', 'replace').replace('\0', ' ').strip()
+            stat = (entry/'stat').read_text()
+        except OSError:
+            continue
+        links = []
+        try:
+            candidates = [entry/'cwd', *(entry/'fd').iterdir()]
+        except OSError:  # another user's process, or one that exited mid-scan: its cwd link is still tried
+            candidates = [entry/'cwd']
+        for link in candidates:
+            try:
+                links.append(os.readlink(link))
+            except OSError:
+                pass
+        if str(directory) in argv or any(str(directory) in link for link in links):
+            state, ppid = stat[stat.rindex(')') + 2:].split()[:2]
+            found.append(f'pid {entry.name} ppid {ppid} state {state} argv {argv[:200]!r}')
+    return found
+
+
+def cleanup_failure_report(directory, error):
+    """What a failed fixture removal leaves behind: the entries that blocked it, their writers, and the host's Git setup."""
+    now = time.time()
+    lines = [f'fixture cleanup of {directory} failed: {error!r}', 'remaining entries (age of mtime/ctime in seconds):']
+    seen = 0
+    for folder, names, files in os.walk(directory, onerror=lambda failure: lines.append(f'  walk error: {failure!r}')):
+        for name in sorted([*names, *files]):
+            seen += 1
+            if seen > 200:
+                break
+            path = os.path.join(folder, name)
+            try:
+                info = os.lstat(path)
+                lines.append(f'  {path} mode {info.st_mode:o} size {info.st_size} '
+                             f'mtime {now - info.st_mtime:.3f} ctime {now - info.st_ctime:.3f}')
+            except OSError as failure:
+                lines.append(f'  {path} vanished: {failure!r}')
+    lines.append('live processes naming the fixture: ' + ('; '.join(processes_naming(directory)) or 'none'))
+    # Keys and values can embed credentials (url.<token>@host.insteadOf): report origins, top-level sections and a fixed allowlist of settings only.
+    try:
+        listing = subprocess.run(['git', 'config', '--list', '--show-origin', '--name-only'], capture_output=True, text=True, timeout=10).stdout
+        sections = {}
+        for line in listing.splitlines():
+            origin, _, key = line.partition('\t')
+            sections.setdefault(origin, set()).add(key.split('.', 1)[0])
+        lines.append('host git: ' + subprocess.run(['git', '--version'], capture_output=True, text=True, timeout=10).stdout.strip())
+        lines.extend(f'  config {origin}: {", ".join(sorted(keys))}' for origin, keys in sorted(sections.items()))
+        for key in HOST_GIT_SETTINGS:
+            value = subprocess.run(['git', 'config', '--get-all', key], capture_output=True, text=True, timeout=10).stdout.split()
+            if value:
+                lines.append(f'  {key} = {" ".join(value)}')
+    except (OSError, subprocess.SubprocessError) as failure:
+        lines.append(f'host git configuration unavailable: {failure!r}')
+    return '\n'.join(lines)
+
+
+@contextmanager
+def fixture_directory():
+    """tempfile.TemporaryDirectory whose failed removal names the writer instead of only 'Directory not empty'."""
+    directory = tempfile.TemporaryDirectory()
+    try:
+        yield directory.name
+    finally:
+        try:
+            directory.cleanup()
+        except OSError as error:
+            try:
+                error.add_note(cleanup_failure_report(directory.name, error))
+            except Exception as failure:  # the evidence is best effort; the original removal error must still surface
+                error.add_note(f'cleanup failure report unavailable: {failure!r}')
+            raise
+
+
 class RunBenchShardedRouting(unittest.TestCase):
     """scripts/run-bench routes wide cloud runs to the sharded operator with the pushed HEAD."""
     @contextmanager
     def checkout(self):
-        with tempfile.TemporaryDirectory() as name:
+        with fixture_directory() as name:
             root = Path(name)/'repo'
             (root/'agents/benchmarks').mkdir(parents=True)
             (root/'.claude/shared').mkdir(parents=True)
@@ -3516,17 +3605,19 @@ class RunBenchShardedRouting(unittest.TestCase):
                            '.claude/shared/benchmark-report-format.txt'):
                 (root/member).write_bytes((ROOT/member).read_bytes())
             git = ['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false']
+            # The fixture repository is built and queried through the same host-independent Git view that run-bench sees.
+            git_env = hermetic_git_env()
             (root/'back-end').mkdir()
             for env_file in ('agents/.env', 'back-end/.env'):  # untracked, as in a real checkout
                 # A Kernel fleet: an unset BROWSER_PROVIDER means the Tilion default and its 20-browser pilot cap.
                 private(root/env_file, 'FIXTURE=1\nBROWSER_PROVIDER=kernel\n')
             (root/'.gitignore').write_text('.env\n.context/\n__pycache__/\n')
-            subprocess.run(git[:3] + ['init', '-q'], check=True)
-            subprocess.run(git + ['add', '-A'], check=True)
-            subprocess.run(git + ['commit', '-qm', 'fixture'], check=True)
-            head = subprocess.check_output(git + ['rev-parse', 'HEAD'], text=True).strip()
+            subprocess.run(git[:3] + ['init', '-q'], check=True, env=git_env)
+            subprocess.run(git + ['add', '-A'], check=True, env=git_env)
+            subprocess.run(git + ['commit', '-qm', 'fixture'], check=True, env=git_env)
+            head = subprocess.check_output(git + ['rev-parse', 'HEAD'], text=True, env=git_env).strip()
             # Pushed: reachable from origin/main, the CLI's offline fetchable fast path.
-            subprocess.run(git + ['update-ref', 'refs/remotes/origin/main', head], check=True)
+            subprocess.run(git + ['update-ref', 'refs/remotes/origin/main', head], check=True, env=git_env)
             calls, fleet = Path(name)/'operator-calls.jsonl', Path(name)/'fleet-calls.jsonl'
             operator = Path(name)/'fake-operator'
             operator.write_text('#!/usr/bin/env python3\nimport json,os,sys\n'
@@ -3538,9 +3629,8 @@ class RunBenchShardedRouting(unittest.TestCase):
             operator.chmod(0o700)
             fake_fleet = Path(name)/'fake-fleet'
             fake_fleet.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$FLEET_CALLS"\n')
-            env = dict(os.environ, RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST=str(operator), OPERATOR_CALLS=str(calls),
-                       RUN_BENCH_FLEET_BIN_UNDER_TEST=str(fake_fleet), FLEET_CALLS=str(fleet),
-                       GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+            env = dict(git_env, RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST=str(operator), OPERATOR_CALLS=str(calls),
+                       RUN_BENCH_FLEET_BIN_UNDER_TEST=str(fake_fleet), FLEET_CALLS=str(fleet))
             for key in ('RUN_BENCH_SHARDED_ROUTE', 'RUN_BENCH_SHARDED_STATE_DIR', 'RUN_BENCH_GOAL', 'RUN_BENCH_CATALOG_UNDER_TEST',
                         'RUN_BENCH_CATALOG_ELIGIBILITY'):
                 env.pop(key, None)
@@ -3552,7 +3642,7 @@ class RunBenchShardedRouting(unittest.TestCase):
                 for path in (calls, fleet):
                     path.unlink(missing_ok=True)
                 return result, ops, fleets
-            yield types.SimpleNamespace(root=root, head=head, run=run, git=git, env=env,
+            yield types.SimpleNamespace(root=root, head=head, run=run, git=git, git_env=git_env, env=env,
                                         manifest=Path(str(calls) + '.manifest'))
 
     def option(self, argv, flag):
@@ -3681,10 +3771,78 @@ class RunBenchShardedRouting(unittest.TestCase):
             result, ops, fleets = fx.run(*names)
             self.assertEqual((result.returncode, ops), (2, []))
             self.assertIn('tracked changes refused', result.stderr)
-            subprocess.run(fx.git + ['commit', '-qam', 'unpushed'], check=True)
+            subprocess.run(fx.git + ['commit', '-qam', 'unpushed'], check=True, env=fx.git_env)
             result, ops, fleets = fx.run(*names)
             self.assertEqual((result.returncode, ops), (2, []))
             self.assertIn('is not pushed to origin', result.stderr)
+
+    def test_fixture_repository_is_built_independently_of_the_hosts_git_configuration(self):
+        # A host system/global configuration (hooks, filters, auto-maintenance, LFS) must not act inside the fixture
+        # repository: it varies by machine and can start work in .git that outlives the commands that triggered it.
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            (folder/'hooks').mkdir()
+            marker = folder/'host-hook-ran'
+            hook = folder/'hooks/post-commit'
+            hook.write_text(f'#!/bin/sh\ntouch {shlex.quote(str(marker))}\n')
+            hook.chmod(0o755)
+            (folder/'gitconfig').write_text(f'[core]\n\thooksPath = {folder/"hooks"}\n')
+            with patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(folder/'gitconfig')):
+                with self.checkout() as fx:
+                    configured = subprocess.run(fx.git + ['config', '--get', 'core.hookspath'], capture_output=True, env=fx.git_env)
+                    self.assertEqual(configured.returncode, 1, configured.stdout)
+                    fx.root.joinpath('later.txt').write_text('later\n')
+                    subprocess.run(fx.git + ['add', 'later.txt'], check=True, env=fx.git_env)
+                    subprocess.run(fx.git + ['commit', '-qm', 'later'], check=True, env=fx.git_env)
+            self.assertFalse(marker.exists(), 'a host Git hook ran inside the fixture repository')
+
+    def test_a_failed_fixture_removal_names_the_blocking_entry_and_its_writer(self):
+        # The reported failure was only "OSError: [Errno 39] Directory not empty: '.git'" from fixture cleanup, with
+        # nothing naming the entry or the process that created it. Removal still fails closed, with that evidence attached.
+        secret = 'SECRET-TOKEN-VALUE'
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder)/'gitconfig'
+            config.write_text(f'[url "https://x-access-token:{secret}@github.com/"]\n\tinsteadOf = https://github.com/\n'
+                              '[gc]\n\tauto = 1\n')
+            holder, name, abandoned = None, None, []
+            blocked = OSError(errno.ENOTEMPTY, 'Directory not empty', '.git')
+            real_cleanup = tempfile.TemporaryDirectory.cleanup
+
+            def blocked_removal(directory):
+                abandoned.append(directory)
+                raise blocked
+
+            try:
+                with patch.dict(os.environ, GIT_CONFIG_GLOBAL=str(config)), \
+                        patch.object(tempfile.TemporaryDirectory, 'cleanup', autospec=True, side_effect=blocked_removal):
+                    with self.assertRaises(OSError) as raised:
+                        with fixture_directory() as name:
+                            git_dir = Path(name)/'repo/.git'
+                            git_dir.mkdir(parents=True)
+                            (git_dir/'late-entry').write_text('written after the removal pass listed .git\n')
+                            holder = subprocess.Popen([sys.executable, '-c', 'import time; print("ready", flush=True); time.sleep(120)'],
+                                                      cwd=git_dir, stdout=subprocess.PIPE, text=True)
+                            self.assertEqual(holder.stdout.readline().strip(), 'ready')  # exec finished: /proc argv is populated
+                self.assertIs(raised.exception, blocked)
+                report = '\n'.join(raised.exception.__notes__)
+                self.assertIn('Directory not empty', report)
+                self.assertIn(str(Path(name)/'repo/.git/late-entry'), report)
+                self.assertIn(f'pid {holder.pid} ppid {os.getpid()} state', report)
+                self.assertIn('time.sleep(120)', report)
+                self.assertIn('host git: git version', report)
+                self.assertIn('gc.auto = 1', report)  # allowlisted setting value
+                self.assertIn('url', report)  # section named, its credential-bearing key and value are not
+                self.assertNotIn(secret, report)
+            finally:
+                if holder is not None:
+                    holder.kill()
+                    holder.wait()
+                    holder.stdout.close()
+                for directory in abandoned:  # the injected failure left the directory in place; remove it for real
+                    real_cleanup(directory)
+        with fixture_directory() as name:
+            Path(name, 'kept.txt').write_text('x')
+        self.assertFalse(Path(name).exists())  # the unchanged success path still removes the directory
 
 
 class TaskRefPins(unittest.TestCase):

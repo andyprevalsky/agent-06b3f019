@@ -151,20 +151,17 @@ def quiet(root):
         # The supervisor owns processes under the invoking uid, including
         # double-forked descendants. A later process in this root also refuses
         # reconciliation; never signal it or infer ownership from recycled pids.
-        for process in Path('/proc').iterdir():
-            if not process.name.isdigit():
-                continue
-            try:
-                if process.stat().st_uid != os.geteuid():
-                    continue
-                cwd = (process / 'cwd').resolve(strict=True)
-                args = (process / 'cmdline').read_bytes().split(b'\0')
-                prefix = os.fsencode(str(root) + '/')
-                need(cwd != root and root not in cwd.parents
-                     and not any(arg == os.fsencode(root) or arg.startswith(prefix) for arg in args),
-                     'worker root still has a live process')
-            except (FileNotFoundError, ProcessLookupError):
-                continue  # process exited during the read; never signal it
+        from deploy_test_process import scan_same_user_processes
+
+        def inspect(process):
+            cwd = (process / 'cwd').resolve(strict=True)
+            args = (process / 'cmdline').read_bytes().split(b'\0')
+            prefix = os.fsencode(str(root) + '/')
+            need(cwd != root and root not in cwd.parents
+                 and not any(arg == os.fsencode(root) or arg.startswith(prefix) for arg in args),
+                 'worker root still has a live process')
+        # An exited process is skipped (never signalled); an unreadable same-user one refuses.
+        scan_same_user_processes(inspect, lambda pid: need(False, f'worker root process {pid} is unverifiable'))
 
 
 def structural_cleanup(state, receipt, proof):

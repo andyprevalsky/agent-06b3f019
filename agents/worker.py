@@ -45,6 +45,7 @@ from domains.agent_messaging.service import (
     send_agent_message_activity,
     send_agent_message_to_address_activity,
 )
+from domains.report_bug.service import report_bug_activity
 from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
 from domains.display.repo import display_media_activity
@@ -135,6 +136,7 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
+from helpers.activity_dispatch import ActivityDispatchLagInterceptor
 from helpers.agent_graph import send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
@@ -1577,6 +1579,7 @@ async def main():
         send_agent_message_activity,
         send_agent_message_to_address_activity,
         kill_agent_activity,
+        report_bug_activity,
         spawn_sub_agent_activity,
         spawn_sub_agents_batch_activity,
         fetch_parent_attachments_activity,
@@ -1759,6 +1762,8 @@ async def main():
         workflow_runner=production_workflow_runner(),
         # Stop polling on shutdown; let in-flight activities (incl. 30m browser) finish.
         graceful_shutdown_timeout=timedelta(seconds=shutdown_grace_seconds),
+        # Attribute a timed-out attempt whose body never ran to the worker.
+        interceptors=[ActivityDispatchLagInterceptor()],
     )
 
     logger.info(

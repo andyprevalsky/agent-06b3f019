@@ -12,6 +12,7 @@ import {
   createUserMessageInTransaction,
   createWorkflowMessageGroup,
 } from '../../providers/messages';
+import { recordPersonMessage } from '../../providers/personMessageStamp';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
@@ -264,13 +265,18 @@ async function withPiggybackedInbox<T extends object>(
   return { ...posted, pending_inbox: pending };
 }
 
-/** Post a message to an agent (user or internal). */
+/**
+ * Post a message to an agent (user or internal). A non-internal USER post is
+ * a person's message unless `personAuthored: false` (a bot relaying alerts on
+ * the owner's behalf); only person-authored posts move the sidebar recency key.
+ */
 export async function postMessage(
   agentId: string,
   body: PostMessageBody,
   isInternal: boolean,
   userId?: string,
-  workflowGeneration?: string
+  workflowGeneration?: string,
+  options: { personAuthored?: boolean } = {}
 ) {
   // Determine role based on auth type
   const roleResult = resolveRole(body, isInternal);
@@ -351,6 +357,10 @@ export async function postMessage(
       buildUserMessageSignalValue(body.message, body.metadata),
       isInternal && workflowGeneration !== undefined
     );
+  }
+  // After delivery: the recency stamp is best-effort and never gates routing.
+  if (role === 'USER' && !isInternal && options.personAuthored !== false) {
+    await recordPersonMessage(message);
   }
 
   return withPiggybackedInbox(agentId, body, isInternal, {

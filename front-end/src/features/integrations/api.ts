@@ -4,12 +4,15 @@ import { getStoredSession } from '@/lib/supabase';
 
 import { API_BASE_URL, API_BASE_WITH_PATH } from './config';
 import type {
+  ComputeAccount,
   ConnectedIntegration,
   GmailResyncResult,
   PlaidItem,
   PlaidLinkSuccessMetadata,
   PlaidLinkTokenResponse,
 } from './types';
+
+export type { ComputeAccount } from './types';
 
 export function getAuthHeaders(): Record<string, string> {
   const session = getStoredSession();
@@ -281,16 +284,6 @@ export async function completePlaidUpdateModeApi(itemId: string): Promise<{ item
 // each renders as a removable chip. Only CONNECTIONS are exposed -- the grants
 // behind them are minted and replaced automatically, so surfacing them would
 // invite users to act on something the system already heals.
-
-export interface ComputeAccount {
-  provider: string;
-  accountId: string;
-  accountEmail: string | null;
-  /** "connected" | "needs_reconnect" -- the only user-actionable state. */
-  state: string;
-  lastErrorReason: string | null;
-  connectedAt: string;
-}
 
 export interface ConnectSessionHandle {
   connectId: string;

@@ -330,6 +330,65 @@ def test_worker_passes_sticky_queue_timeout_to_temporal():
     raise AssertionError("Worker(...) call not found")
 
 
+async def test_late_activity_body_start_is_logged_with_its_dispatch_lag():
+    """2026-11-07 mass-agent recurrence: post_agent_message attempts timed out on
+    the server without their body ever issuing a request. The worker must record
+    how long after Temporal started an attempt its body actually began."""
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
+
+    import structlog
+    from temporalio import activity
+    from temporalio.testing import ActivityEnvironment
+
+    from helpers.activity_dispatch import ActivityDispatchLagInterceptor
+
+    executed = []
+
+    class _Next:
+        async def execute_activity(self, input):
+            executed.append(input)
+            return "ok"
+
+    inbound = ActivityDispatchLagInterceptor().intercept_activity(_Next())
+    template = ActivityEnvironment().info
+
+    async def run(lag_seconds):
+        info = replace(
+            template,
+            activity_type="post_agent_message",
+            activity_id="50",
+            attempt=3,
+            workflow_id="4ec67f04",
+            start_to_close_timeout=timedelta(seconds=30),
+            started_time=datetime.now(timezone.utc) - timedelta(seconds=lag_seconds),
+        )
+        with patch.object(activity, "info", return_value=info), structlog.testing.capture_logs() as logs:
+            assert await inbound.execute_activity("input") == "ok"
+        return [entry for entry in logs if entry["event"] == "activity.dispatch_lag"]
+
+    late = await run(40)
+    assert len(late) == 1, late
+    assert late[0]["activity_type"] == "post_agent_message" and late[0]["attempt"] == 3
+    assert late[0]["lag_s"] >= 40 and late[0]["start_to_close_s"] == 30.0
+    assert await run(0.5) == [], "ordinary scheduling jitter must not be logged"
+    assert executed == ["input", "input"], "the activity body must still run"
+
+
+def test_worker_registers_activity_dispatch_lag_interceptor():
+    """The production Worker(...) installs the dispatch-lag interceptor."""
+    tree = _worker_tree()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Worker":
+            kw = next((k for k in node.keywords if k.arg == "interceptors"), None)
+            assert kw is not None, "Worker(...) must pass interceptors="
+            names = {n.func.id for n in ast.walk(kw.value) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            assert "ActivityDispatchLagInterceptor" in names, names
+            return
+    raise AssertionError("Worker(...) call not found")
+
+
 def test_activity_admission_closes_on_cpu_pressure():
     """Activity admission must close on CPU pressure (not just memory).
 
@@ -2906,6 +2965,8 @@ async def run_all_tests():
     print("worker blackbox tests:")
     r = BlackboxResult()
     r.record("production_process_owned_log_bounded_rotation", test_production_process_bounds_owned_log_after_rotation)
+    await r.record_async("late_activity_body_start_logged", test_late_activity_body_start_is_logged_with_its_dispatch_lag)
+    r.record("worker_registers_dispatch_lag_interceptor", test_worker_registers_activity_dispatch_lag_interceptor)
     r.record(
         "production_process_memory_readback_swap_denied", test_production_process_memory_limit_readback_and_swap_deny
     )

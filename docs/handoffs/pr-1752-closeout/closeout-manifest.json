@@ -1,0 +1,190 @@
+{
+ "schema_version": 1,
+ "pr": 1752,
+ "title": "test(deploy): hold the custody fixture's Hub port reserved for the whole test",
+ "assignment": "Test repair for PR #1729 deploy-command-structural failure: deploy-test-plan InterruptedCustody (cloud=True) \"original Hub listener/socket consumer remains\"; make the original command pass reliably with a live Hub on 8765; finish /deploy.",
+ "merge_commit": "818f3669f43e0282e19dc807db15026732a9a5a0",
+ "gated_source": "db7cce8d239c68ad6e6d708da344fef0021f22fe",
+ "branch_commits": {
+  "94c63b11a": "reserve fixture Hub port (bound non-listening socket)",
+  "dd12c14bb": "namespace_quiet re-observes unreadable same-user processes; dual-stack hold",
+  "f6c37707d": "decide unreadable processes by real uid (review finding)",
+  "8bc255269": "shared scan_same_user_processes for both custody scanners; atomic fixture pid (dropped at merge for main 6670d5723)",
+  "585d7710d": "post-canary standalone join baseline; autoscale harness reaps fake autoscaler",
+  "db7cce8d2": "merge origin/main (first three commits already on main via PR #1750 cherry-picks 706aa5990/8e0c3c79c/a32dec2fb)"
+ },
+ "assigned_fix": {
+  "test": "scripts/tests/deploy-test-plan.test.py InterruptedCustody",
+  "proof": [
+   "standalone 5/5 with 127.0.0.1:8765 held",
+   "repro under localhost connection churn: unchanged main 1/3 FAIL with the exact error, fix 0/5 (then 5/5 twice more after later commits)",
+   "original command python3 scripts/run-deploy-structural-gates.py --max-workers 5 with 8765 held: main FAIL in deploy-test-plan, fix PASS",
+   "deploy-command-structural PASS in staged cycles 3, 7 and 9 (final, merged head)"
+  ]
+ },
+ "rca_cases": [
+  "docs/rca/cases/2026-11-07-custody-fixture-claimed-live-hub-port.md",
+  "docs/rca/cases/2026-11-07-structural-fixture-load-races-postcanary-autoscale.md",
+  "docs/rca/cases/2026-08-03-non-atomic-pid-file-publication.md (recurrence)"
+ ],
+ "review": {
+  "coderabbit": "94c63b11a skipped by path filters (all files test/doc); every later head usage-cap skip recorded via deploy_review_cycle.py skip (dd12c14bb, f6c37707d, 8bc255269, 585d7710d, db7cce8d2)",
+  "independent_reviewer": "adversarial sub-agent: 94c63b11a APPROVE (IPv6 finding fixed in dd12c14bb), dd12c14bb CHANGES_REQUESTED (setuid real-uid, fixed in f6c37707d), f6c37707d APPROVE, 8bc255269 APPROVE, 585d7710d APPROVE"
+ },
+ "staged_cycle": {
+  "final": "cycle 9 on db7cce8d2: 14/14 non-smoke gates PASS; smoke 8/9 (test-mass-agent-run-0 FAIL -> post-merge repair); ready, complete",
+  "selected": [
+   "eslint",
+   "typescript",
+   "backend-structural",
+   "format",
+   "deploy-command-structural",
+   "seed-cache-decision",
+   "canonical-seed-whatsapp-content",
+   "backend-coverage-blackbox",
+   "agents-coverage-blackbox",
+   "live-probes",
+   "smoke",
+   "semantic-stack",
+   "e2b-smoke",
+   "cloudbench-controller",
+   "seed-memory-ratchet"
+  ],
+  "omitted": {
+   "frontend-coverage-blackbox": "no trigger",
+   "mac-app-coverage-blackbox": "Linux platform exclusion",
+   "agentcard-lifecycle": "SKIPPED by deploy-operator election (test-fixture-only agents/benchmarks change)"
+  },
+  "aborted_or_superseded": {
+   "cycle 1": "env-digest mismatch (init in shell, run in service); no gate ran",
+   "cycle 2 (94c63b11a)": "stale; worker timing-run setup gap (3 UNVERIFIED); smoke UNVERIFIED because the coordinator changed during the campaign (native campaign passed)",
+   "cycle 3 (f6c37707d)": "smoke INFRA STOP: transient Fly snapshot listing",
+   "cycle 4 (f6c37707d)": "smoke INFRA STOP: Fly capacity; structural flakes (local cleanup PermissionError, pid race)",
+   "cycle 5 (8bc255269)": "structural post-canary flake, autoscale orphan, smoke Fly capacity",
+   "cycle 6 (8bc255269)": "structural post-canary flake, autoscale orphan, smoke 8/9 (biometrics agent declined)",
+   "cycle 7 (585d7710d)": "READY 15/15 incl. smoke 9/9; superseded by merge with main",
+   "cycle 8 (db7cce8d2)": "smoke: missing pg15 canonical fixture after main schema change (published by another owner during the run); cancelled"
+  }
+ },
+ "production": {
+  "semantic": "chat-lifecycle-ratchet.yml run 42363577860 on 818f3669f: 5/5 jobs success",
+  "render_vercel_fly": "not applicable: merged diff has no back-end/, front-end/ or agent-runtime paths (classify-agent-runtime-changes empty)",
+  "prod_health": "GET /health 200, GET /api/agents 200 at closeout",
+  "agentcard_production": "SKIPPED by election (no payment code)",
+  "mac_post_deploy": "SKIPPED - no Mac available: read-only LocalDevice query for owner 1f85ff25 returned 0 rows at 2026-11-07T10:29:50Z"
+ },
+ "delegated": [
+  {
+   "failure": "smoke/test-mass-agent-run-0: Declared evaluator t10-no-tool-failures failed: Observed tool failure: 4ec67f04:spawn_agent toolu_017WjLfYYfJsJW41EL4GJ68H status=ERROR",
+   "attribution": "NOT_INTRODUCED",
+   "repair": "https://boxes.dev/thread/ph72jb62yvwzyjdgxm3jm45cd98hscag",
+   "devbox": "77d04b7f-774e-4f9f-a84f-5c82a69fe4c0",
+   "folder": "Bugs z57k17gzz4egv17ag6qqtasexs8h273j revision 1",
+   "settings": "requested claude-opus-5-5 / high / standard; accepted; effective settings not exposed by the read API"
+  }
+ ],
+ "external_provider": [
+  {
+   "provider": "Anthropic",
+   "reason": "credits exhausted",
+   "checks": [
+    "live-probes credential-health (warn-only)"
+   ]
+  },
+  {
+   "provider": "CodeRabbit",
+   "reason": "usage spending cap",
+   "checks": [
+    "code review on 5 heads"
+   ]
+  }
+ ],
+ "followups": [
+  "deploy_test_worker setup: prepared workers need run-deploy-stage --start (no automation; documented in memory)",
+  "smoke INFRA STOP on Fly app machine ceiling 56 under cross-workstream load",
+  "upfront owner filter in scan_same_user_processes still skips an already-setuid process with our real uid (documented pre-existing limit)"
+ ],
+ "preservation": {
+  "archives": {
+   "core": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1752-818f3669/20261107-core.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "210e46e626d7fa39763e1727687cb52fcb69d44471453259b8636185d79072e3",
+    "gzip_sha256": "fb9cd3665231324fd9c9f0edcb0be96c726914673fc60d78a83f0a1534731f66",
+    "stored_bytes": 41775936,
+    "frames": 5,
+    "files": 1188,
+    "original_bytes": 72880229,
+    "manifest_sha256": "66b4de699ea06c1c0c9768d4cdc335f26df245caa211612023a474dfab79e5e2",
+    "full_readback_verified": true
+   },
+   "workers": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1752-818f3669/20261107-workers.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "1ec357a5a12526bab83e7ca183a2aafa64463f689bd755ac60e779167f0744f1",
+    "gzip_sha256": "a599a1e305470d864861f585b7b38d8d4cda69abca014c68891eaf2226ce7904",
+    "stored_bytes": 610114184,
+    "frames": 73,
+    "files": 46169,
+    "original_bytes": 1743442969,
+    "manifest_sha256": "b21053c22f2db63c93757c5557ffa576004b01ae81c79c6bc7b72792474b1b7f",
+    "full_readback_verified": true
+   },
+   "cloud": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1752-818f3669/20261107-cloud.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "34df24f590c8d98b66059010bf19144b50c40c785e4b9dd5eda9e52bc3325a2d",
+    "gzip_sha256": "1b579d879a19a47d47ef705ff34a3258d1a0f2f141f5b8bbd53932a8a8877738",
+    "stored_bytes": 1394572269,
+    "frames": 167,
+    "files": 6907,
+    "original_bytes": 4694326050,
+    "manifest_sha256": "7ee8a56b68393ab925c8a736d3635a818f893ebec224cfa74642e5bff4a70508",
+    "full_readback_verified": true
+   },
+   "control": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1752-818f3669/20261107-control.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "e37f87f8cc0a5323442a4bc51d8a0a97d0384310f5fde36fd58af8389e4a0372",
+    "gzip_sha256": "6171abe31cdd9b629ea4b838b9a9d6eaab8f02428e8d3afe92096c2b3c9d40b3",
+    "stored_bytes": 634341,
+    "frames": 1,
+    "files": 33,
+    "original_bytes": 10041374,
+    "manifest_sha256": "433da540ba2dad97fc93b7a05d9198d90a85b4bc8a0e77e1b9f276b3aa4a1ca8",
+    "full_readback_verified": true
+   },
+   "mass_agent_failure_run": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1752-818f3669/mass-agent-spawn-agent-error-run.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "2898629867ca8ae12ce527f35484f57afe5a0f6f238e1537d453cc1d1886ccbc",
+    "gzip_sha256": "18119117aeebb296bd6aff9204afd52e3250488cfc99ca0edbb9cec3c4c1a571",
+    "stored_bytes": 243441861,
+    "frames": 30,
+    "files": 63,
+    "original_bytes": 787949763,
+    "manifest_sha256": "690f3c54c538edaba98e85a5a0e1dd822c1a1d601413c1db06c9e5cc17fc1772",
+    "full_readback_verified": true
+   }
+  },
+  "staging_root": "/home/boxes/pr1752-closeout-staging (hard links/copies; removable after this commit)",
+  "representative_restore": "core restored to an empty dir; rose/.context/deploy-pipeline/cycle.json sha256 matched",
+  "excluded_reproducible": [
+   "worker checkouts /var/tmp/rose-workers/* (reproducible from pushed commits; their .context is in the workers archive)",
+   "node_modules/venv symlinks",
+   "raw coverage tmp dirs",
+   "scratch clone /var/tmp/rca-postcanary/repo (its patch is commit 585d7710d)"
+  ],
+  "secrets": "none committed; archives encrypted with trace-archive-prod key (escrow per docs/handoffs/pr-1739-closeout/RECOVERY.md)"
+ }
+}
