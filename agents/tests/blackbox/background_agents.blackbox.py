@@ -875,6 +875,83 @@ async def test_foreground_spawns_are_addressable_and_answer_truthfully_once_fini
         assert not any(wf._retired_task_names), "its task_name stays free for the plan's tasks"
 
 
+async def test_a_foreground_task_name_is_reusable_once_its_agent_finished_and_refused_while_it_runs():
+    """A finished foreground agent never blocks its task_name; a still-running one does.
+
+    Deploy 2026-11-06 follow-up to smoke test-mass-agent-run-0 (agent 6efe1927): the foreground
+    record added for addressable foreground spawns reserved every task_name for the life of the
+    agent, so a model that re-ran the same explore/browser/code task under the same task_name
+    (19 agents did, twice each) got "task_name ... is already used by another agent you spawned".
+    The earlier agent had finished, so nothing could be addressed through its name any more.
+    Required: the new spawn supersedes the finished record and the path resolves to the newest
+    one; only a duplicate of a STILL-RUNNING agent is refused (same text as a background spawn).
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    harness = _Harness()
+    release = asyncio.Event()
+    started = {}
+    args = {**FOREGROUND_SPAWNS["explore"], "task_name": "find_repo", "run_in_background": False}
+    path = "/root/find_repo"
+
+    async def executor(wf, tool_call, call_id):
+        started[call_id] = True
+        if call_id == "toolu_first":
+            await release.wait()
+        await wf._handle_tool_event(
+            ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Finished",
+                message="explore result",
+                status=MessageStatus.FINISHED,
+                data={"result": "explore result"},
+            ),
+            call_id,
+            "spawn_agent",
+        )
+        return MessageStatus.FINISHED, "explore result"
+
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+        patch.object(temporal_workflow, "info", lambda: SimpleNamespace(workflow_id="agent-parent")),
+    ):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+
+        running = asyncio.ensure_future(wf._execute_tool("spawn_agent", dict(args), "toolu_first"))
+        for _ in range(50):
+            if started.get("toolu_first"):
+                break
+            await asyncio.sleep(0)
+        assert started.get("toolu_first"), "the first spawn is running"
+
+        # Still running: the duplicate is refused, with the text a background duplicate gets.
+        duplicate = await wf._execute_tool("spawn_agent", dict(args), "toolu_dup_while_running")
+        assert duplicate.get("error") is True and not started.get("toolu_dup_while_running"), duplicate
+        assert duplicate["message"] == (
+            "task_name 'find_repo' is already used by another agent you spawned; choose a different task_name."
+        ), duplicate
+
+        release.set()
+        first = await running
+        assert first.get("success") is True, first
+
+        # Finished: the same task_name is free again and the path now resolves to the newest agent.
+        for call_id in ("toolu_second", "toolu_third"):
+            result = await wf._execute_tool("spawn_agent", dict(args), call_id)
+            assert result.get("success") is True and not result.get("error"), (call_id, result)
+            assert started[call_id], call_id
+            resolved = wf._background_task_for_address(path)
+            assert resolved and resolved["background_task_id"] == call_id, (call_id, resolved)
+            holders = [key for key, rec in wf._background_finished.items() if rec.get("task_name") == "find_repo"]
+            assert holders == [call_id], ("only the newest finished agent keeps the name", holders)
+        assert not any(wf._retired_task_names), "a finished foreground agent never reserves its name"
+
+
 async def test_demo_cache_replay_accepts_a_recorded_foreground_spawn_that_repeats_its_task_name():
     """A DEMO-cache replay of a recorded foreground trajectory is never failed by task_name bookkeeping.
 
@@ -2682,6 +2759,10 @@ async def run_all_tests():
     await r.record_async(
         "foreground_spawns_addressable_and_truthful_once_finished",
         test_foreground_spawns_are_addressable_and_answer_truthfully_once_finished,
+    )
+    await r.record_async(
+        "foreground_task_name_reusable_once_finished_refused_while_running",
+        test_a_foreground_task_name_is_reusable_once_its_agent_finished_and_refused_while_it_runs,
     )
     await r.record_async(
         "demo_replay_accepts_recorded_foreground_spawn_repeating_task_name",

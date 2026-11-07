@@ -539,9 +539,20 @@ class BackgroundAgentsMixin:
         # Resolve before the uniqueness check: nothing may await between that
         # check and the insertion (see _start_background_spawn).
         path = child_task_path(await resolve_own_task_path(self), task_name)
+        # A name is taken by a running agent, by a background agent (running or finished: it can
+        # still be woken through its path) or by a retired background name. A FINISHED foreground
+        # agent never blocks its name: nothing can be woken through it, so the new spawn replaces it.
+        superseded = [
+            key
+            for key, finished in self._background_finished.items()
+            if finished.get("foreground") and finished.get("task_name") == task_name
+        ]
         if task_name and (
             task_name in self._retired_task_names
-            or task_name_in_use([*self._background_tasks.values(), *self._background_finished.values()], task_name)
+            or task_name_in_use(self._background_tasks.values(), task_name)
+            or task_name_in_use(
+                (rec for key, rec in self._background_finished.items() if key not in superseded), task_name
+            )
         ):
             error = (
                 f"task_name '{task_name}' is already used by another agent you spawned; choose a different task_name."
@@ -554,6 +565,8 @@ class BackgroundAgentsMixin:
                 "spawn_agent",
             )
             return {"error": True, "message": error}
+        for key in superseded:
+            del self._background_finished[key]  # the path now resolves to the newest agent
         self._background_tasks[tool_call_id] = {
             "tool_call_id": tool_call_id,
             "tool_args": args,
@@ -787,10 +800,12 @@ class BackgroundAgentsMixin:
         )
 
     def _evict_finished_overflow(self) -> None:
-        """Drop the oldest finished records past the bound, keeping their task_names reserved."""
+        """Drop the oldest finished records past the bound, keeping their background task_names reserved."""
         while len(self._background_finished) > MAX_FINISHED_BACKGROUND_TASKS:
             evicted = self._background_finished.pop(next(iter(self._background_finished)))
             name = evicted.get("task_name")
+            if evicted.get("foreground"):
+                continue  # a finished foreground agent never reserves its name
             if isinstance(name, str) and name and name not in self._retired_task_names:
                 self._retired_task_names.append(name)
                 del self._retired_task_names[:-MAX_RETIRED_TASK_NAMES]
