@@ -10,6 +10,8 @@
  *     [MENU OPEN] --Remove--> onRemove, [CLOSED]
  *     [MENU OPEN] --escape / outside click--> [CLOSED]
  *   removing → the ⋯ button shows a spinner and is disabled
+ *   resyncing (a sign-in already in flight) → the resync item is disabled, so a second
+ *     connect cannot replace the first one's remote browser
  *
  * Pure presentation; the row's owner supplies the actions.
  */
@@ -26,7 +28,7 @@ const MENU_ITEM_CLASSES =
 
 function AccountMenu({ account }: { account: DesktopAccountView }) {
   const [open, setOpen] = useState(false);
-  const busy = account.removing === true || account.resyncing === true;
+  const busy = account.removing === true;
   if (account.onRemove === undefined && account.onResync === undefined) return null;
   const run = (action: (() => void) | undefined) => () => {
     setOpen(false);
@@ -59,6 +61,7 @@ function AccountMenu({ account }: { account: DesktopAccountView }) {
             type="button"
             role="menuitem"
             className={MENU_ITEM_CLASSES}
+            disabled={account.resyncing === true}
             onClick={run(account.onResync)}
           >
             <RefreshCw className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />

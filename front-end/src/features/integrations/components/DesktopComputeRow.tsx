@@ -5,7 +5,7 @@
  *   [ACCOUNTS]    one line per account: email (needs_reconnect keeps its amber
  *                 ⚠ "· Reconnect" status), its 7d usage bar (SubscriptionUsageMeter),
  *                 ⋯ menu = Re-authenticate (the same connect flow; re-signing an
- *                 account refreshes it in place) + Remove (existing compute
+ *                 account refreshes it in place; disabled while a sign-in runs) + Remove (existing compute
  *                 removal, no confirm, as today); "+ Add account" = connect flow
  *   [LEGACY]      only the desktop-synced credential row exists → one "This Mac"
  *                 line disconnected through the confirmed row DELETE; no usage
@@ -77,6 +77,7 @@ export default function DesktopComputeRow({
       disabled: state.removing !== null,
       onResync: isAvailable ? () => void state.connect() : undefined,
       resyncLabel: 'Re-authenticate',
+      resyncing: state.isConnecting,
       trailing: <SubscriptionUsageMeter account={account} />,
     };
   });

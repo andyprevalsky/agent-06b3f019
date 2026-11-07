@@ -72,6 +72,12 @@ function serveCompute(accounts: ReturnType<typeof computeAccount>[]) {
         expiresAt: iso(HOUR),
       }),
     ),
+    http.get(`${API_BASE}/compute-accounts/connect/:connectId`, () =>
+      HttpResponse.json({ state: 'pending' }),
+    ),
+    http.delete(`${API_BASE}/compute-accounts/connect/:connectId`, () =>
+      HttpResponse.json({ ok: true }),
+    ),
   );
 }
 
@@ -183,6 +189,19 @@ describe('compute subscription usage bars', () => {
         ),
       ).toBe(true),
     );
+
+    // While that sign-in runs, a second Re-authenticate cannot start another connect (which
+    // would replace the first one's remote browser); Remove stays available.
+    await user.click(
+      within(lineFor('stale@roselabs.ai')).getByRole('button', {
+        name: 'stale@roselabs.ai options',
+      }),
+    );
+    const menu = await screen.findByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: 'Re-authenticate' })).toBeDisabled();
+    expect(
+      within(menu).getByRole('menuitem', { name: 'Remove Claude account stale@roselabs.ai' }),
+    ).toBeEnabled();
   });
 
   it('offers only Remove on the web, where there is no sign-in bridge', async () => {

@@ -100,6 +100,8 @@ def namespace_quiet(namespace, ports):
                         break
                 except (FileNotFoundError, ProcessLookupError):
                     break
+                except PermissionError:
+                    pass  # An unreadable status proves nothing either; keep re-observing to the deadline.
                 need(time.monotonic() < deadline, f'original namespace process {process.name} is unverifiable')
                 time.sleep(0.05)
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
