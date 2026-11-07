@@ -24,6 +24,7 @@ vi.mock('@/features/integrations/hooks/useComputeAccounts', () => ({
     liveViewUrl: null,
     stage: null,
     connectingAs: null,
+    passkeyUnavailableFor: null,
     runId: 0,
     removing: null,
     connect: vi.fn(),
@@ -64,6 +65,7 @@ describe('compute connection UI', () => {
       liveViewUrl: 'https://browser.example/live',
       stage: 'capturing',
       connectingAs: 'a@roselabs.ai',
+      passkeyUnavailableFor: null,
       runId: 1,
       removing: null,
       connect: vi.fn(),
@@ -77,5 +79,48 @@ describe('compute connection UI', () => {
     expect(screen.getByTestId('compute-connect-finishing')).toBeInTheDocument();
     expect(screen.queryByTitle('Sign in to ChatGPT')).not.toBeInTheDocument();
     expect(screen.getByText('Finishing connection…')).toBeInTheDocument();
+  });
+
+  it('explains a passkey prompt Rose cannot answer instead of leaving a dead button', () => {
+    const base = {
+      accounts: [],
+      phase: 'signing_in',
+      error: null,
+      liveViewUrl: 'https://browser.example/live',
+      stage: 'awaiting_human',
+      connectingAs: null,
+      runId: 1,
+      removing: null,
+      connect: vi.fn(),
+      cancel: vi.fn(),
+      remove: vi.fn(),
+      isConnecting: true,
+    };
+    const { rerender } = render(
+      <ComputeConnectModal
+        state={
+          { ...base, passkeyUnavailableFor: null } as unknown as ReturnType<
+            typeof UseComputeAccounts
+          >
+        }
+        providerLabel="ChatGPT"
+      />,
+    );
+    expect(screen.queryByTestId('compute-connect-passkey-unavailable')).not.toBeInTheDocument();
+
+    rerender(
+      <ComputeConnectModal
+        state={
+          { ...base, passkeyUnavailableFor: 'openai.com' } as unknown as ReturnType<
+            typeof UseComputeAccounts
+          >
+        }
+        providerLabel="ChatGPT"
+      />,
+    );
+    const notice = screen.getByTestId('compute-connect-passkey-unavailable');
+    expect(notice).toHaveTextContent("Rose doesn't have your openai.com passkey");
+    expect(notice).toHaveTextContent('Pick another verification method in the window above');
+    expect(screen.getByTitle('Sign in to ChatGPT')).toBeInTheDocument();
   });
 });
