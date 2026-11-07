@@ -13,6 +13,7 @@
  * browser dependencies.
  */
 
+import { listComputeIntegrationUsage } from '../../providers/computeSubscriptionUsage';
 import { reconcileConnectionStatesFromIntegrations } from '../../providers/integrationConnectionSync';
 import { createLogger } from '../../providers/logger';
 import {
@@ -29,7 +30,12 @@ import {
   removeConnection,
   upsertAccountConnection,
 } from './repo';
-import type { ConnectAccountInput, ConnectedAccountDto } from './types';
+import type {
+  AccountUsageDto,
+  ConnectAccountInput,
+  ConnectedAccountDto,
+  UsageWindowDto,
+} from './types';
 
 const log = createLogger('ComputeGrants');
 
@@ -140,24 +146,55 @@ export async function connectAccount(
     state: row.state,
     lastErrorReason: row.lastErrorReason,
     connectedAt: row.createdAt.toISOString(),
+    usage: null,
+    rateLimitedUntil: null,
   };
 }
 
-/** Accounts for the FE chips. Grants are intentionally not exposed. */
+type UsageRow = Awaited<ReturnType<typeof listComputeIntegrationUsage>>[number];
+
+function windowDto(usedPct: number | null, resetsAt: Date | null): UsageWindowDto | null {
+  return usedPct === null ? null : { usedPct, resetsAt: resetsAt?.toISOString() ?? null };
+}
+
+function usageDto(row: UsageRow | undefined): AccountUsageDto | null {
+  if (row === undefined || row.usageObservedAt === null) return null;
+  return {
+    fiveHour: windowDto(row.usage5hUsedPct, row.usage5hResetsAt),
+    sevenDay: windowDto(row.usage7dUsedPct, row.usage7dResetsAt),
+    observedAt: row.usageObservedAt.toISOString(),
+  };
+}
+
+const PROVIDER_INTEGRATION: Record<string, string> = { claude: 'claude_code', codex: 'gpt_code' };
+
+/**
+ * Accounts for the FE rows. Grants are intentionally not exposed; each account
+ * carries the usage agents last reported for the Integration row it mints into.
+ */
 export async function listConnectedAccounts(
   userId: string,
   provider?: string
 ): Promise<ConnectedAccountDto[]> {
   await reconcileConnectionStatesFromIntegrations(userId);
-  const rows = await listConnections(userId, provider);
-  return rows.map((r) => ({
-    provider: r.provider,
-    accountId: r.accountId,
-    accountEmail: r.accountEmail,
-    state: r.state,
-    lastErrorReason: r.lastErrorReason,
-    connectedAt: r.createdAt.toISOString(),
-  }));
+  const [rows, usageRows] = await Promise.all([
+    listConnections(userId, provider),
+    listComputeIntegrationUsage(userId, provider),
+  ]);
+  const usageByAccount = new Map(usageRows.map((u) => [`${u.name}:${u.accountId}`, u]));
+  return rows.map((r) => {
+    const usage = usageByAccount.get(`${PROVIDER_INTEGRATION[r.provider] ?? ''}:${r.accountId}`);
+    return {
+      provider: r.provider,
+      accountId: r.accountId,
+      accountEmail: r.accountEmail,
+      state: r.state,
+      lastErrorReason: r.lastErrorReason,
+      connectedAt: r.createdAt.toISOString(),
+      usage: usageDto(usage),
+      rateLimitedUntil: usage?.rateLimitedUntil?.toISOString() ?? null,
+    };
+  });
 }
 
 /**
