@@ -863,7 +863,7 @@ class AgentCardStallTest(Base):
         benchmarks = self.root / 'agents' / 'benchmarks'
         self.runs = benchmarks / 'runs'
         self.runs.mkdir(parents=True)
-        for name in ('select_predeploy_benches.py', 'tasks.json'):  # the real catalog, bound through ctx.root
+        for name in ('select_predeploy_benches.py', 'history_ledger.py', 'tasks.json'):  # the real catalog, bound through ctx.root
             (benchmarks / name).symlink_to(ROOT / 'agents' / 'benchmarks' / name)
 
     def execute(self, record, *, code: int = 0, lines=None, environ: dict | None = None, rel: str | None = None):

@@ -18,6 +18,10 @@ sys.modules[spec.name] = tool
 spec.loader.exec_module(tool)
 
 HISTORY = Path("agents/benchmarks/history")
+LEDGER_SPEC = importlib.util.spec_from_file_location(
+    "history_ledger_for_latest_only_test", SCRIPT.parents[1] / "agents/benchmarks/history_ledger.py")
+history_ledger = importlib.util.module_from_spec(LEDGER_SPEC)
+LEDGER_SPEC.loader.exec_module(history_ledger)
 
 
 def attempt(task, passed, end, duration, agent):
@@ -64,8 +68,21 @@ class LatestOnlyTests(unittest.TestCase):
                 handle.write(json.dumps(row) + "\n")
 
     def read(self, name):
+        """A ledger as every reader sees it: for attempts/durations, the base file plus shards."""
         path = self.repo / HISTORY / name
+        if history_ledger.is_sharded(path):
+            return history_ledger.read_rows(path)
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else None
+
+    def shards(self, name):
+        return [Path(p) for p in history_ledger.shard_files(self.repo / HISTORY / name)]
+
+    def assert_base_files_untouched(self):
+        """The shared base files hold exactly their base-ref rows: a PR never edits them."""
+        for name in ("task_attempts.jsonl", "task_durations.jsonl"):
+            shown = subprocess.run(("git", "-C", str(self.repo), "show", f"base:{HISTORY}/{name}"),
+                                   capture_output=True, check=True).stdout
+            self.assertEqual((self.repo / HISTORY / name).read_bytes(), shown, name)
 
     def run_tool(self, *args):
         with redirect_stdout(io.StringIO()) as out:
@@ -114,6 +131,8 @@ class LatestOnlyTests(unittest.TestCase):
                          ["main-2", "child-of-a3", "br-a3"])
         # A new branch span file holding only a superseded run disappears entirely.
         self.assertIsNone(self.read("span_durations.20261021.my-branch.jsonl"))
+        self.assert_base_files_untouched()
+        self.assertEqual(len(self.shards("task_attempts.jsonl")), 1)
         self.assertEqual(self.run_tool("--check")[0], 0)
 
     def test_check_fails_until_written_and_report_mode_changes_nothing(self):
@@ -140,6 +159,22 @@ class LatestOnlyTests(unittest.TestCase):
         self.git("commit", "-qm", "branch history")
         self.assertEqual(self.run_tool("--check")[0], 1)
         self.run_tool("--write")
+        self.assertEqual(self.run_tool("--check")[0], 0)
+
+    def test_branch_rows_in_a_shared_base_file_move_to_the_branch_shard(self):
+        # An older writer (or an in-flight branch) appended to the shared base files. GitHub
+        # ignores merge=union, so publishing those rows there would conflict with main.
+        self.write("task_durations.jsonl", [{"task": "smoke-b", "duration_seconds": 100,
+                                             "timestamp": "2026-10-21T11:06:00+00:00", "agent_id": "dur-only"}],
+                   append=True)
+        code, out = self.run_tool("--check")
+        self.assertEqual(code, 1, out)
+        self.assertIn("move 1 branch row(s)", out)
+        self.run_tool("--write")
+        self.assert_base_files_untouched()
+        (shard,) = self.shards("task_durations.jsonl")
+        self.assertEqual([json.loads(line)["agent_id"] for line in shard.read_text().splitlines()], ["dur-only"])
+        self.assertEqual([r["agent_id"] for r in self.read("task_durations.jsonl")], ["main-2", "dur-only"])
         self.assertEqual(self.run_tool("--check")[0], 0)
 
     def test_no_branch_rows_is_a_clean_noop(self):
@@ -177,9 +212,16 @@ class LatestOnlyTests(unittest.TestCase):
         code, out = self.run_tool("--apply-parked", "--write")
         self.assertEqual(code, 0, out)
         for name in self.LEDGERS:
-            self.assertIn(f"{HISTORY}/{name}: applied 1 parked row(s)", out)
-            self.assertEqual((self.repo / HISTORY / name).read_bytes(), before[name] + parked[name], name)
             self.assertFalse((park / name).exists(), f"{name} must be marked applied")
+        self.assertIn(f"{HISTORY}/span_durations.jsonl: applied 1 parked row(s)", out)
+        self.assertEqual((self.repo / HISTORY / "span_durations.jsonl").read_bytes(),
+                         before["span_durations.jsonl"] + parked["span_durations.jsonl"])
+        for name in ("task_attempts.jsonl", "task_durations.jsonl"):
+            # Attempts/durations land byte-for-byte in this branch's own shard; the shared base is untouched.
+            (shard,) = self.shards(name)
+            self.assertIn(f"{shard.relative_to(self.repo)}: applied 1 parked row(s)", out)
+            self.assertEqual(shard.read_bytes(), parked[name], name)
+            self.assertEqual((self.repo / HISTORY / name).read_bytes(), before[name], name)
         applied = sorted(path.name for path in park.iterdir())
         self.assertEqual(len(applied), 3, applied)
         self.assertTrue(all(".applied-" in name for name in applied), applied)
@@ -266,7 +308,7 @@ class LatestOnlyTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(self.tracked_bytes(), once, "a replay must not duplicate rows an interrupted publish applied")
         for name in self.LEDGERS:
-            self.assertIn(f"{HISTORY}/{name}: applied 0 parked row(s)", out)
+            self.assertIn(": applied 0 parked row(s)", out)
             self.assertFalse((park / name).exists(), f"{name} must be marked applied again")
         self.assertIn("1 already applied", out)
         self.assertEqual(self.run_tool("--check")[0], 0)
@@ -274,7 +316,7 @@ class LatestOnlyTests(unittest.TestCase):
         self.park("task_attempts.jsonl", [attempt("smoke-c", True, "2026-10-21T13:06:00+00:00", 100, "park-c1")])
         self.park("task_durations.jsonl", [{"task": "smoke-c", "duration_seconds": 100,
                                             "timestamp": "2026-10-21T13:06:00+00:00", "agent_id": "park-c1"}])
-        with (self.repo / HISTORY / "task_attempts.jsonl").open("ab") as handle:
+        with self.shards("task_attempts.jsonl")[0].open("ab") as handle:
             handle.write((park / "task_attempts.jsonl").read_bytes())  # attempts landed, durations did not
         code, out = self.run_tool("--apply-parked", "--write")
         self.assertEqual(code, 0, out)

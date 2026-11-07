@@ -2501,7 +2501,9 @@ def predeploy_consumption(
 ) -> dict[str, Any]:
     """Measured resource use of each predeploy benchmark trajectory per deploy."""
     attempts = []
-    for row in _factory_ledger_module().read_jsonl(history_dir / "task_attempts.jsonl"):
+    for row in _factory_ledger_module("factory_diagnostics")._history_ledger().read_rows(
+        history_dir / "task_attempts.jsonl"
+    ):  # base file + per-writer shards
         if row.get("suite") != "predeploy" or not row.get("task") or not row.get("timestamp"):
             continue
         try:
