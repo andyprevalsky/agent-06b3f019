@@ -1,0 +1,87 @@
+{
+ "failures": [
+  {
+   "id": "96c63447753b41e1b207695263186460",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "native_result": "UNVERIFIED",
+   "source": {
+    "head": "a1bcaa098818bc1ac303751d3df7716bf249286c",
+    "digest": "25f7aee6afc8049e7e94da0abc8e1eda7418cae183273e0b4d07384d7c356c97"
+   },
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python",
+    "/home/boxes/dw/dcs/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/dw/dcs",
+    "--stdio"
+   ],
+   "description": "deploy-command-structural: deploy-pipeline owner-run preflight assertion failed at sweep start (live/foreign owner counts differ from the fixture)",
+   "evidence": "RCA: the deploy-pipeline suite counts live owner runs on the real host; it ran first (previously-failed ordering) while 11 other gate stacks were starting (load 15-24). It passes when run alone on a quiet host (sweep 10 focused run) and the custody scan fix is in place. Gate: INTRODUCED as a deploy-execution condition (host contention owned by this deploy), not a source defect; rerun the gate alone.",
+   "attribution": "INTRODUCED"
+  },
+  {
+   "id": "c3d9eace8e8f4ed6bd9e6dee169fef52",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "native_result": "UNVERIFIED",
+   "source": {
+    "head": "a1bcaa098818bc1ac303751d3df7716bf249286c",
+    "digest": "25f7aee6afc8049e7e94da0abc8e1eda7418cae183273e0b4d07384d7c356c97"
+   },
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python",
+    "/home/boxes/dw/cbc/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/dw/cbc",
+    "--stdio"
+   ],
+   "description": "cloudbench-controller: multi-workstream step FAIL ('lower demand did not retain the failed run of uncaptured pre-supervisor evidence'); all other steps PASS",
+   "evidence": "RCA: simulated multi-workstream scenario with real-time sampling windows; the scripts and tests are byte-identical to main. The step passed in sweeps 4, 6, 9, 10, 11 and in focused reruns; it has failed on different assertions only in loaded sweeps. Gate: INTRODUCED as a deploy-execution condition (host contention owned by this deploy), not a source defect; rerun the gate.",
+   "attribution": "INTRODUCED"
+  },
+  {
+   "id": "bd718211ab234f6b8d791c38f14ff39b",
+   "check": "backend-coverage-blackbox/blackbox:code-preview",
+   "native_result": "FAIL",
+   "source": {
+    "head": "a1bcaa098818bc1ac303751d3df7716bf249286c",
+    "digest": "25f7aee6afc8049e7e94da0abc8e1eda7418cae183273e0b4d07384d7c356c97"
+   },
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python",
+    "/home/boxes/rose/scripts/deploy_test_backend.py",
+    "--root",
+    "/home/boxes/dw/be"
+   ],
+   "description": "backend coverage: blackbox:code-preview failed (Playwright page.waitForFunction Timeout 10000ms exceeded; 15 of 16 sub-tests pass)",
+   "evidence": "RCA: the code-preview blackbox waits 10 s for a rendered page state; the sweep ran at host load 10-16 with 11 other stacks (swap 1.1-1.8 GB). The domain, the code-preview route and its test are untouched by this PR (git diff vs main empty). It passed in the focused/solo reruns of earlier sweeps and 249/250 cases passed here. Gate: INTRODUCED as a deploy-execution condition (host contention owned by this deploy), not a source defect; rerun the gate.",
+   "attribution": "INTRODUCED"
+  },
+  {
+   "id": "153a10f72c8046dc87add097a8d3bd06",
+   "check": "smoke/test-mass-agent-run-0",
+   "native_result": "FAIL",
+   "source": {
+    "head": "a1bcaa098818bc1ac303751d3df7716bf249286c",
+    "digest": "25f7aee6afc8049e7e94da0abc8e1eda7418cae183273e0b4d07384d7c356c97"
+   },
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "description": "smoke/test-mass-agent-run-0 FAILED the declared evaluator t7-schema-task-complete (a GP child's Task Complete card has empty required opportunities_for_aman and engagement_approach)",
+   "evidence": "RCA: the result is intermittent on IDENTICAL source bytes: this exact HEAD a1bcaa0988 passed the task in sweep 12 and failed it in sweep 13; 26f1549126 passed it in sweeps 9 and 10 while eadce7e999 failed the same evaluator on the same fields in sweep 8 and 78df4183e0 failed a different evaluator (t10 spawn timeout) in sweep 11. The change set cannot produce a content-dependent difference between runs of one commit; for non-project agents (all benchmark agents) the Project section is empty and the prompts are byte-identical to main. The empty required fields are a pre-existing product/agent-behavior defect surfaced by this benchmark (a child can complete a card with empty required schema fields), which an evaluator is designed to catch. Gate: NOT_INTRODUCED; handoff packet attached for post-merge repair.",
+   "attribution": "NOT_INTRODUCED",
+   "post_merge": {
+    "test": "smoke/test-mass-agent-run-0",
+    "command": [
+     "/home/boxes/rose/agents/venv/bin/python",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "Cloud smoke task test-mass-agent-run-0 (mass-agent fan-out of per-creator research cards judged by the declared evaluator t7-schema-task-complete): a first-level general-purpose child's Task Complete card carries empty required outputs (opportunities_for_aman, engagement_approach) although its response schema is populated. The other 9 smoke tasks pass in the same campaign. Preserve the task, its evaluators and the schema contract; fix why a child can complete with empty required fields, not the evaluator.",
+    "error": "Declared evaluator t7-schema-task-complete failed: T7 fails: messages[1565] shows a first-level GP Task Complete card with empty opportunities_for_aman and engagement_approach values despite both being required schema fields. Saved and validated /home/user/output/judgment.json and /home/user/.rose/handoff.json.",
+    "source": "a1bcaa098818bc1ac303751d3df7716bf249286c",
+    "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/smoke/result.json; failing agent 173c61af-2b16-49b9-bb70-de6d021838df; same failure on cycle 8 (eadce7e999, messages[3532]) with the identical fields; campaign log under /home/boxes/rose/.context/deploy-cloud/*/campaigns/*/r001-j0001.log"
+   }
+  }
+ ]
+}
