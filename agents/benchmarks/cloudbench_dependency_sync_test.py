@@ -36670,6 +36670,15 @@ fleet_native_stop_verify_guest 0 {shlex.quote(str(state_dir))} "$deadline"
         return
     assert stops == [f"machine stop {_NATIVE_STOP_MACHINE} -a bench-app"], calls
     assert receipt["stop_requests"] == 2, receipt
+    if reaches_stopped and result.returncode != 0:
+        # The send fit the final tick but the post-stop status read did not (a loaded
+        # host): only an observed production-clock refusal permits the unverified end.
+        trace = (fake / "native-clock.trace").read_text()
+        deadline = int((fake / "native-deadline").read_text())
+        assert _native_stop_last_tick_exhausted(trace, deadline), trace
+        assert receipt["verified"] is False, receipt
+        assert "retaining ownership" in result.stderr
+        return
     if reaches_stopped:
         assert result.returncode == 0, result.stderr
         assert receipt["verified"] is True and receipt["verified_state"] == "stopped", receipt
