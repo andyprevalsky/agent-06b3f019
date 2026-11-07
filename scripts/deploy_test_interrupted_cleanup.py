@@ -15,6 +15,8 @@ KIND = 'interrupted-preallocation-cleanup-v1'
 RENEWAL_KIND = 'interrupted-policy-witness-renewal-v1'
 POLICIES = {'scripts/run-bench-fleet', 'scripts/lib/cloudbench-env.sh',
             'scripts/run-bench-campaign.py', 'agents/benchmarks/hub_upload.py'}
+OBSERVATION_SECONDS = 2.0
+OBSERVATION_PAUSE = 0.05
 MARKERS = {'.cid', 'cloudbench-run.json', 'runtime-evidence.pending',
            'guest-never-started.confirmed', 'runtime-evidence.owner.json',
            'post-config-start.accepted', 'worker-runtime-evidence', 'primary.ids', 'primary.names'}
@@ -51,6 +53,50 @@ def no_holders(paths):
     need(result.returncode == 1 and not result.stdout and not result.stderr, 'log writer or unknown holder remains')
 
 
+def real_uid(process):
+    for line in (process / 'status').read_text().splitlines():
+        if line.startswith('Uid:'):
+            return int(line.split()[1])
+    raise PermissionError(f'{process}: no Uid line')
+
+
+def observe_same_user_processes(inspect, unverifiable, seconds=OBSERVATION_SECONDS):
+    """Call ``inspect(process)`` on every /proc entry this user owns; a read failure is not a verdict.
+
+    /proc cannot be read atomically, so a same-user process may be momentarily unreadable (exiting, non-dumpable,
+    exec of a setuid binary that keeps our real uid). Both namespace scanners share this policy so they cannot
+    drift: re-observe until a deadline, skip a process that exits or whose real uid is another user's, and call
+    ``unverifiable(process)``, which must raise, only for one that stays unreadable and alive for ``seconds``.
+    """
+    for process in Path('/proc').iterdir():
+        if not process.name.isdigit():
+            continue
+        deadline, unreadable = time.monotonic() + seconds, False
+        while True:
+            try:
+                if not unreadable and process.stat().st_uid != os.geteuid():
+                    break
+                inspect(process)
+                break
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            except PermissionError:
+                # A same-user process can turn unreadable mid-scan (non-dumpable, or exec of a setuid
+                # binary that keeps our real uid). Re-observe: skip it only once it exits or its real
+                # uid is another user's; one that stays unreadable is refused, never assumed quiet.
+                unreadable = True
+                try:
+                    if real_uid(process) != os.getuid():
+                        break
+                except (FileNotFoundError, ProcessLookupError):
+                    break
+                except PermissionError:
+                    pass  # An unreadable status proves nothing either; keep re-observing to the deadline.
+                if time.monotonic() >= deadline:
+                    unverifiable(process)
+                time.sleep(OBSERVATION_PAUSE)
+
+
 def namespace_quiet(namespace, ports):
     """Observe only the old namespace; other legitimate source workers stay untouched."""
     ancestors, pid = set(), os.getpid()
@@ -72,38 +118,10 @@ def namespace_quiet(namespace, ports):
                 continue
             need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
 
-    def real_uid(process):
-        for line in (process / 'status').read_text().splitlines():
-            if line.startswith('Uid:'):
-                return int(line.split()[1])
-        raise PermissionError(f'{process}: no Uid line')
+    def unverifiable(process):
+        need(False, f'original namespace process {process.name} is unverifiable')
 
-    for process in Path('/proc').iterdir():
-        if not process.name.isdigit():
-            continue
-        deadline, unreadable = time.monotonic() + 2, False
-        while True:
-            try:
-                if not unreadable and process.stat().st_uid != os.geteuid():
-                    break
-                inspect(process)
-                break
-            except (FileNotFoundError, ProcessLookupError):
-                break
-            except PermissionError:
-                # A same-user process can turn unreadable mid-scan (non-dumpable, or exec of a setuid
-                # binary that keeps our real uid). Re-observe: skip it only once it exits or its real
-                # uid is another user's; one that stays unreadable is refused, never assumed quiet.
-                unreadable = True
-                try:
-                    if real_uid(process) != os.getuid():
-                        break
-                except (FileNotFoundError, ProcessLookupError):
-                    break
-                except PermissionError:
-                    pass  # An unreadable status proves nothing either; keep re-observing to the deadline.
-                need(time.monotonic() < deadline, f'original namespace process {process.name} is unverifiable')
-                time.sleep(0.05)
+    observe_same_user_processes(inspect, unverifiable)
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
         for line in Path(table).read_text().splitlines()[1:]:
             row = line.split()

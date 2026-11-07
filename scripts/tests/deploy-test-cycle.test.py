@@ -4011,6 +4011,19 @@ class InterruptedCardRecovery(unittest.TestCase):
         self.physical['database_status']='UNKNOWN';self.seal()
         with self.assertRaises(ValueError):c.interrupted_boundary(self.state)
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+    def test_transiently_unreadable_same_user_process_does_not_block_reconcile(self):
+        # The Blacksmith failure (PR #1751): quiet() read /proc/<pid>/cwd of a same-user process that was
+        # momentarily unreadable and the PermissionError aborted the proof as "missing or unknown evidence".
+        # A real child that clears PR_SET_DUMPABLE is unreadable to its parent exactly like that process.
+        body = ("import ctypes,time;libc=ctypes.CDLL(None);libc.prctl(4,0,0,0,0);print('ready',flush=True);"
+                "time.sleep(.4);libc.prctl(4,1,0,0,0);time.sleep(60)")
+        child = subprocess.Popen([sys.executable, '-c', body], stdout=subprocess.PIPE, text=True, cwd=self.root)
+        self.addCleanup(lambda: (child.kill(), child.wait(), child.stdout.close()))
+        self.assertEqual('ready', child.stdout.readline().strip())
+        c.reconcile(self.state, self.token, self.proof)
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
     def test_card_admission_foreign_physical_and_unknowns_refuse(self):
         for key,value in [('source','other'),('observed_at',199),('run',str(self.root)),('listeners',[123]),('database_status','PRESENT'),('canonical_reconcile_exit',True)]:
             old=self.physical[key];self.physical[key]=value;self.seal();before=copy.deepcopy(self.state)
@@ -4020,6 +4033,131 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
         self.physical['physical']['unknown_live_userland']=[];self.benchmark['state']='running';self.seal()
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
+
+
+class LocalCleanupProcessObservation(unittest.TestCase):
+    """quiet() decides whether a worker root is still in use from /proc, which no process can read atomically.
+
+    A same-user process that turns unreadable (non-dumpable, exec of a setuid binary, exiting) answers EACCES for
+    /proc/<pid>/cwd. The Blacksmith failure (PR #1751, deploy-command-structural, eleven errors across
+    InterruptedCardRecovery, InterruptedLocalRecovery, LocalCleanup and StructuralSupervisorCleanup):
+    PermissionError: [Errno 13] ... '/proc/215386/cwd' aborted the proof. That is a read failure, never proof of
+    absence or of a leak. It is re-observed until a deadline, skipped once the
+    process is gone or turns out to be another user's, and refused naming the pid only while it stays unreadable
+    and alive. A process that provably uses the root (cwd inside it, or argv naming it) is refused as before.
+    The fixture is a real Linux child: clearing PR_SET_DUMPABLE makes it unreadable to its same-user parent.
+    """
+    CHILD = """
+import ctypes, sys
+libc = ctypes.CDLL(None, use_errno=True)
+def dumpable(flag):
+    assert libc.prctl(4, flag, 0, 0, 0) == 0  # PR_SET_DUMPABLE
+dumpable(sys.argv[1] == 'open')
+print('ready', flush=True)
+for line in sys.stdin:
+    dumpable(line.strip() == 'open')
+    print('ack', flush=True)
+"""
+
+    def setUp(self):
+        import deploy_test_local_cleanup as m
+        self.m = m
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'worker'
+        (self.root / '.context').mkdir(parents=True)
+        (self.root / '.context/native-worker-admission.lock').touch()
+        self.elsewhere = Path(self.tmp.name) / 'elsewhere'
+        self.elsewhere.mkdir()
+        self.sleeps = []
+
+    def child(self, state, cwd=None, label=''):
+        proc = subprocess.Popen([sys.executable, '-c', self.CHILD, state, label], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, text=True, cwd=cwd or self.elsewhere)
+        self.addCleanup(self.reap, proc)
+        self.assertEqual('ready', proc.stdout.readline().strip())
+        return proc
+
+    @staticmethod
+    def reap(proc):
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        proc.stdin.close()
+        proc.stdout.close()
+
+    def switch(self, proc, state):
+        proc.stdin.write(state + '\n')
+        proc.stdin.flush()
+        self.assertEqual('ack', proc.stdout.readline().strip())
+
+    def scan(self, while_waiting=None, window=None):
+        import time
+        real_sleep = time.sleep
+
+        def sleep(seconds):
+            # Really wait: unrelated exiting processes on a busy host need the production window. Only the
+            # refusal cases shorten it, for a process that provably stays unreadable the whole time.
+            self.sleeps.append(seconds)
+            real_sleep(seconds)
+            if while_waiting:
+                while_waiting()
+        with patch.object(time, 'sleep', sleep), patch.object(self.m, 'OBSERVATION_SECONDS', window or self.m.OBSERVATION_SECONDS):
+            self.m.quiet(self.root)
+
+    def test_process_that_becomes_readable_while_waiting_is_reobserved(self):
+        child = self.child('sealed')
+        self.scan(lambda: self.switch(child, 'open'))
+        self.assertTrue(self.sleeps)
+
+    def test_process_that_exits_while_unreadable_is_not_a_holder(self):
+        child = self.child('sealed')
+        self.scan(lambda: (child.kill(), child.wait()))
+        self.assertTrue(self.sleeps)
+
+    def test_process_that_stays_unreadable_and_alive_fails_closed_naming_it(self):
+        child = self.child('sealed')
+        with self.assertRaisesRegex(ValueError, r'worker root process %d is unverifiable \(.+, state \w, parent %d\)'
+                                                % (child.pid, os.getpid())) as raised:
+            self.scan(window=.5)
+        self.assertNotRegex(str(raised.exception), 'live process')
+        self.assertTrue(self.sleeps)
+
+    def test_unreadable_process_of_another_real_user_is_not_ours_to_hold_the_root(self):
+        child = self.child('sealed')
+        status, real_read_text = '/proc/%d/status' % child.pid, Path.read_text
+
+        def other_user(path, *args, **kwargs):
+            if str(path) == status:
+                return 'Name:\tx\nUid:\t%d\t%d\t%d\t%d\n' % ((os.getuid() + 1,) * 4)
+            return real_read_text(path, *args, **kwargs)
+        with patch.object(Path, 'read_text', other_user):
+            self.scan()
+
+    def test_unreadable_status_is_unverifiable_never_a_raw_crash(self):
+        child = self.child('sealed')
+        status, real_read_text = '/proc/%d/status' % child.pid, Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if str(path) == status:
+                raise PermissionError(13, 'Permission denied', status)
+            return real_read_text(path, *args, **kwargs)
+        with patch.object(Path, 'read_text', unreadable), self.assertRaisesRegex(
+                ValueError, 'worker root process %d is unverifiable' % child.pid):
+            self.scan(window=.5)
+
+    def test_a_process_using_the_root_is_still_refused(self):
+        inside = self.root / 'inside'
+        inside.mkdir()
+        for name, kwargs, state in (('cwd is the root', dict(cwd=self.root), 'open'),
+                                    ('cwd is inside the root', dict(cwd=inside), 'open'),
+                                    ('argv names the root', dict(label=str(self.root)), 'open'),
+                                    ('argv of an unreadable process names the root', dict(label=str(self.root / 'x')), 'sealed')):
+            with self.subTest(name):
+                child = self.child(state, **kwargs)
+                with self.assertRaisesRegex(ValueError, 'worker root still has a live process'):
+                    self.scan()
+                self.reap(child)
 
 
 # A benchmarks/local.py stand-in: its own session (a group TERM of the gate never
