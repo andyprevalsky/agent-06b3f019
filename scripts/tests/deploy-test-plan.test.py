@@ -493,11 +493,17 @@ def reserved_loopback_port(test):
 
     A released probe port returns to the kernel's ephemeral range, where a concurrent
     client connection can take it and trip the host-wide Hub socket check. Holding a
-    bound, non-listening socket keeps it out of /proc/net/tcp and out of autobind."""
+    bound, non-listening socket keeps it out of /proc/net/tcp and out of autobind; a
+    dual-stack :: bind also refuses explicit IPv4 and IPv6 binds of the same port."""
     import socket
-    reservation = socket.socket()
+    try:
+        reservation = socket.socket(socket.AF_INET6)
+        reservation.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        reservation.bind(('::', 0))
+    except OSError:  # host without IPv6: an IPv4 wildcard bind still blocks IPv4 and autobind
+        reservation = socket.socket()
+        reservation.bind(('', 0))
     test.addCleanup(reservation.close)
-    reservation.bind(('', 0))
     return reservation.getsockname()[1]
 
 
@@ -685,9 +691,36 @@ class InterruptedCustody(unittest.TestCase):
         import socket
         self.fixture(True)
         port = int(self.hub.name.split('.')[1])
-        for host in ('127.0.0.1', ''):
-            with socket.socket() as other, self.assertRaises(OSError):
+        attempts = [(socket.AF_INET, '127.0.0.1'), (socket.AF_INET, '')]
+        if socket.has_ipv6:
+            attempts.append((socket.AF_INET6, '::1'))
+        for family, host in attempts:
+            try:
+                other = socket.socket(family)
+            except OSError:
+                continue  # family unavailable on this host
+            with other, self.assertRaises(OSError):
                 other.bind((host, port))
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+    def test_namespace_scan_reobserves_unreadable_same_user_process(self):
+        import deploy_test_interrupted_cleanup as m
+        import tempfile, time
+        namespace = Path(tempfile.mkdtemp(dir=self.root))
+        port = reserved_loopback_port(self)
+        # PR_SET_DUMPABLE=4: /proc/<pid> stays ours while fd/cwd turn unreadable, as during a setuid exec.
+        body = "import ctypes,sys,time;ctypes.CDLL(None).prctl(4,0,0,0,0);print('ready',flush=True);" \
+               "time.sleep(float(sys.argv[1]));ctypes.CDLL(None).prctl(4,1,0,0,0);time.sleep(30)"
+        for hidden, refused in ((0.3, False), (60, True)):
+            child = subprocess.Popen([sys.executable, '-c', body, str(hidden)], stdout=subprocess.PIPE, text=True)
+            self.addCleanup(child.kill)
+            self.assertEqual(child.stdout.readline().strip(), 'ready')
+            if refused:
+                with self.assertRaisesRegex(ValueError, 'unverifiable'):
+                    m.namespace_quiet(namespace, {port})
+            else:
+                m.namespace_quiet(namespace, {port})
+            child.kill(); child.wait()
 
     def test_historical_policy_drift_renews_without_changing_original_bindings(self):
         state, receipt, proof, previous, renewal = self.policy_relocation_fixture()
