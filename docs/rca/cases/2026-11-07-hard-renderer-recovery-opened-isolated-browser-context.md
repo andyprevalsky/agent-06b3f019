@@ -131,8 +131,9 @@ empty jar.
 
 Order: create the blank page first, so closing the last target cannot tear
 down the context. Close the hung targets next, then navigate to the resume
-URL. A same-site navigation therefore cannot land in the blocked renderer
-process.
+URL. The close is best-effort: 5 s per target, errors ignored. A same-site
+resume therefore usually starts after the blocked renderer is gone, but this
+is not guaranteed.
 
 The recovery actions now end with `context_cookies:<before>-><after>`. It
 counts only and never records names or values. The next run can then show
@@ -140,7 +141,8 @@ from the log alone that the cookie jar survived.
 
 The two existing hard-recovery tests now build their page with
 `browser.new_context().new_page()`, which no page owns, matching
-production. Their assertions are unchanged.
+production. Their action check is tightened from accepting
+`new_context_page` to requiring `new_page`.
 
 The fix also covers sibling failures:
 - any authenticated browser task (Amazon, Target, OpenTable, …) that
@@ -154,12 +156,32 @@ The fix also covers sibling failures:
 `Storage.getCookies` calls per classified freeze. There is no shared state and
 no fan-in.
 
-Golden reference: OpenClaw
-`openclaw/extensions/browser/src/browser/pw-session-actions.ts:551-567` opens
-new tabs in `browser.contexts()[0]`. It creates a new context only when the
-caller explicitly asks for isolation. The fix follows the same pattern.
-Searched with no analog: hermes-agent, codex and claude-code-src have no
-Playwright/CDP page lifecycle. The kimi-code clone was missing.
+Golden reference (parent-run golden review: GROUNDED at eed52815ed). The
+references agree: a new or replacement page belongs in the existing session
+context, and an isolated context is opt-in.
+- OpenClaw `openclaw/extensions/browser/src/browser/pw-session-actions.ts:550-567`
+  opens new tabs in `browser.contexts()[0]`. `:513` makes `isolatedContext` an
+  explicit option. `:223-250` handles a stuck target by its exact target ID.
+- hermes-agent:
+  - `tools/browser_supervisor.py:441-445` reuses an existing page or calls
+    `Target.createTarget` without a `browserContextId`, which means the
+    default context;
+  - `optional-skills/web-development/har-derived-api-client/scripts/har_capture_cdp.py:97-98`
+    reuses `browser.contexts[0]`;
+  - `tools/browser_tool_session.py:495-505` replaces a stuck client after a
+    command timeout and keeps the same `bb_session_id`.
+- claude-code-src `src/utils/claudeInChrome/prompt.ts:28-47` creates new tabs
+  in the user's own browser profile. When a page stops responding, it stops
+  and asks the user.
+- No analog in codex. The kimi-code clone was missing.
+
+Follow-ups (recorded, not fixed here):
+- Hung-target selection matches on the same URL or same host, not on the
+  frozen page's exact target ID. It can close a healthy same-host tab.
+  OpenClaw's `:223-250` uses the exact target ID.
+- The model sees `hard renderer recovery ran…` with `supervisor_recovered:
+  True` even when nothing was replaced (`recycled=False`). That text is
+  misleading. It is model-visible, so changing it needs its own approval.
 
 Causal proof: done (red on 268e9550b0, green after the fix, five consecutive
 green runs). Outcome proof is still pending. The freeze is

@@ -4451,8 +4451,10 @@ async def _hard_recover_frozen_renderer_page(
 
     The blank replacement page is created *before* the hung target is closed,
     because closing the last page target via CDP can tear down the Playwright
-    BrowserContext. The resume navigation runs *after* the hung targets are
-    closed, so a same-site navigation cannot land in the blocked renderer.
+    BrowserContext. The resume navigation runs after a best-effort close of the
+    hung targets (5 s per target, errors ignored). A same-site resume therefore
+    usually starts after the blocked renderer is gone, but a failed or slow
+    close does not stop the navigation, so this is not guaranteed.
     """
     actions: List[str] = []
     if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):

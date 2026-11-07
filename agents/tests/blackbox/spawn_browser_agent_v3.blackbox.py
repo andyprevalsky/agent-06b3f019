@@ -17886,7 +17886,7 @@ async def test_hard_recover_frozen_renderer_page_restores_evaluate():
                 fallback_url="about:blank",
             )
             assert new_page is not None
-            assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
+            assert "new_page" in actions, actions
             recovered = await classify_evaluate_cdp_stall(
                 input_page=new_page, playwright_browser=browser, timeout_s=2.0
             )
@@ -17966,7 +17966,7 @@ async def test_hard_recover_frozen_renderer_page_restores_click():
                 fallback_url="about:blank",
             )
             assert new_page is not None
-            assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
+            assert "new_page" in actions, actions
             await new_page.set_content("<html><body><button>Sign</button></body></html>")
             assert await _timed_click(new_page) == "ok"
         finally:
