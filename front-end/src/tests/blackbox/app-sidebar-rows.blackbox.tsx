@@ -284,8 +284,20 @@ describe('AppSidebar rows', () => {
     expect(await screen.findByText('2d 4h')).toBeInTheDocument();
   });
 
-  it('floats a needs-help row above active ones', async () => {
+  it('lists running rows first, then needs-help, then done, each by newest user message', async () => {
     const agents = [
+      makeAgent({
+        agent_id: 'blocked',
+        goal: 'Waiting on you',
+        status: 'OUT_OF_CREDITS',
+        created_at: '2026-05-02T00:00:00Z',
+      }),
+      makeAgent({
+        agent_id: 'done',
+        goal: 'Wrapped up',
+        status: 'COMPLETED',
+        created_at: '2026-05-03T00:00:00Z',
+      }),
       makeAgent({
         agent_id: 'active',
         goal: 'Still working',
@@ -294,18 +306,24 @@ describe('AppSidebar rows', () => {
         created_at: '2026-05-01T00:00:00Z',
       }),
       makeAgent({
-        agent_id: 'blocked',
-        goal: 'Waiting on you',
-        status: 'OUT_OF_CREDITS',
+        agent_id: 'messaged',
+        goal: 'Just messaged',
+        status: 'ACTIVE',
+        temporal_workflow_id: 'wf-messaged',
         created_at: '2024-01-01T00:00:00Z',
+        last_user_message_at: '2026-05-04T00:00:00Z',
       }),
     ];
     renderStockSidebar(<AppSidebar {...defaultProps({ agents })} />);
 
     const nodes = await screen.findAllByRole('heading', { level: 3 });
-    // Older, but blocked on the user — a needs-help row buried under active runs
-    // is one you never see.
-    expect(nodes.map((n) => n.textContent)).toEqual(['Waiting on you', 'Still working']);
+    // Oldest, but you messaged it last: it leads the running tier.
+    expect(nodes.map((n) => n.textContent)).toEqual([
+      'Just messaged',
+      'Still working',
+      'Waiting on you',
+      'Wrapped up',
+    ]);
   });
 
   it('shows a checkmark for chat-mode agents that never started a cloud agent', async () => {

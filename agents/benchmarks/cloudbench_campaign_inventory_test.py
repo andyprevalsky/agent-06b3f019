@@ -3584,8 +3584,9 @@ def test_campaign_inventory_full_http_auth_deadline_and_owned_join(tmp_path, can
     env=dict(os.environ, PATH=str(tmp_path)+':'+os.environ['PATH'],FLY_API_TOKEN='fm2_fixture',FLY_FLAPS_BASE_URL='http://127.0.0.1:9')
     process=subprocess.Popen([sys.executable,str(ROOT/'scripts/cloudbench-campaign-machines.py'),'fixture','1'],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     until=time.monotonic()+2
-    while not pidfile.exists() and process.poll() is None and time.monotonic()<until:time.sleep(.01)
-    assert pidfile.exists()
+    # The child creates the file, then writes the pid: wait for the content, not just the name.
+    while not (pidfile.exists() and pidfile.read_text().strip()) and process.poll() is None and time.monotonic()<until:time.sleep(.01)
+    assert pidfile.exists() and pidfile.read_text().strip()
     pid=int(pidfile.read_text());birth=Path('/proc',str(pid),'stat').read_text().split(') ',1)[1].split()[19]
     if cancel: process.terminate()
     stdout,stderr=process.communicate(timeout=4)

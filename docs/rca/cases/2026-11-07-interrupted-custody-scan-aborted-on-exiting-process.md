@@ -106,3 +106,8 @@ None recorded.
 ## Reusable lesson
 
 Treat EACCES on a same-uid `/proc/<pid>` entry as a bounded re-observation, never as proof or a fatal error, and fail closed naming the pid only while it stays unreadable and alive.
+
+## Merge note (PR #1751 sync with main, 2026-11-07)
+
+PR #1721 landed an independent fix for the same race on main (`8e0c3c79c8`, `a32dec2fb2`, `6a85668c16`: the custody scan re-observes an unreadable same-user process by deadline and decides ownership by real uid). The PR #1751 sync kept main's implementation of `scripts/deploy_test_interrupted_cleanup.py` and dropped this branch's duplicate. The branch's `InterruptedProcessObservation` regression stays against main's code (becomes readable while waiting, fd table denied after cwd was read, exits while unreadable, stays unreadable and alive is refused naming the pid, a held namespace is still refused); its owner-change case is covered by main's `test_namespace_scan_reobserves_unreadable_same_user_process`.
+

@@ -818,7 +818,12 @@ bench_pids=()
 cleanup_bench_fixtures() {
   local pid
   for pid in "${bench_pids[@]:-}"; do
+    # The fake run.sh is a bash wrapper around `sleep 30`. End its child first,
+    # or the sleeper is orphaned past the suite and flags the staged deploy
+    # cycle's structural gate as lingering whenever this suite finishes last.
+    [ -n "$pid" ] && pkill -P "$pid" 2>/dev/null || true
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
   done
   rm -rf "$bench_repo" "$LOCK_TEST_DIR"
 }
@@ -857,6 +862,13 @@ wait_for_isolated_benchmarks "$bench_repo" 20 1 >/dev/null \
 bash "$bench_repo/scripts/run.sh" &
 run_sh_pid=$!
 bench_pids+=("$run_sh_pid")
+run_sh_child_pid=""
+for _ in $(seq 1 50); do
+  run_sh_child_pid="$(pgrep -P "$run_sh_pid" | head -n 1 || true)"
+  [ -n "$run_sh_child_pid" ] && break
+  sleep 0.1
+done
+[ -n "$run_sh_child_pid" ] || fail "the fake run.sh must have started its sleeper"
 mkdir -p "$bench_repo/.context/benchmarks/custom-run"
 printf '{"status": "running", "run_sh_pid": %s}\n' "$run_sh_pid" > "$bench_repo/.context/benchmarks/custom-run/services.json"
 if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
@@ -897,6 +909,13 @@ wait_for_isolated_benchmarks "$bench_repo" 0 1 >/dev/null \
 
 if wait_for_isolated_benchmarks "$bench_repo" "10m" 1 >/dev/null 2>&1; then
   fail "a non-integer wait budget must fail closed"
+fi
+
+# The fixtures must not outlive the suite: a leaked child kept the staged
+# deploy cycle's structural gate from completing on an otherwise idle host.
+cleanup_bench_fixtures
+if kill -0 "$run_sh_child_pid" 2>/dev/null; then
+  fail "fixture cleanup left the fake run.sh child running"
 fi
 
 # Every back-end structural suite must be reachable from /deploy: Step 4 runs

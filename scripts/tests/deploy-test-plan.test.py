@@ -609,12 +609,30 @@ class AgentCardElection(unittest.TestCase):
         with self.assertRaises(ValueError):
             election.accept({'elected_omissions':[{'proof':original}]}, proof)
 
-def unused_loopback_port():
-    """A loopback port no live socket holds when the fixture is built."""
+def reserved_loopback_port(test):
+    """A port no live socket can take while the test runs.
+
+    A released probe port returns to the kernel's ephemeral range, where a concurrent
+    client connection can take it and trip the host-wide Hub socket check. Holding a
+    bound, non-listening socket keeps it out of /proc/net/tcp and out of autobind; a
+    dual-stack :: bind also refuses explicit IPv4 and IPv6 binds of the same port."""
     import socket
-    with socket.socket() as probe:
-        probe.bind(('127.0.0.1', 0))
-        return probe.getsockname()[1]
+    try:
+        reservation = socket.socket(socket.AF_INET6)
+    except OSError:
+        reservation = None
+    if reservation is not None:
+        try:
+            reservation.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            reservation.bind(('::', 0))
+        except OSError:
+            reservation.close()
+            reservation = None
+    if reservation is None:  # host without IPv6: an IPv4 wildcard bind still blocks IPv4 and autobind
+        reservation = socket.socket()
+        reservation.bind(('', 0))
+    test.addCleanup(reservation.close)
+    return reservation.getsockname()[1]
 
 
 class InterruptedCustody(unittest.TestCase):
@@ -668,7 +686,7 @@ class InterruptedCustody(unittest.TestCase):
             base=self.root/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()
             campaign=base/'campaigns'/('deploy-'+base.name); runs=base/'runs'; fleet=runs/'20261106-223817-2147483001'
             # The custody check scans the host's live sockets: never claim a port a real Hub may hold.
-            port=str(unused_loopback_port())
+            port=str(reserved_loopback_port(self))
             owner='b'*32; hub=runs/'_hub'/('agent-link-server.'+port+'.'+'c'*32+'.owner')
             self.hub=hub; self.fleet=fleet; self.audit=self.root/'.git/cloudbench-fleet-audits'/owner
             self.put(hub,'version=1\npid=2147483004\npgid=2147483004\npid_start=proc-start:fixture:1\nowner_token='+ 'c'*32+
@@ -796,6 +814,73 @@ class InterruptedCustody(unittest.TestCase):
                    'previous_entry_sha256': c.digest(previous), 'relocations': {str(policy): str(frozen)},
                    'confirmed_at': time.time(), 'observed_by': 'independent relocation fixture'}
         return state, receipt, proof, previous, renewal
+
+    def test_cloud_fixture_hub_port_stays_reserved_for_the_test(self):
+        import socket
+        self.fixture(True)
+        port = int(self.hub.name.split('.')[1])
+        attempts = [(socket.AF_INET, '127.0.0.1'), (socket.AF_INET, '')]
+        if socket.has_ipv6:
+            attempts.append((socket.AF_INET6, '::1'))
+        import errno
+        for family, host in attempts:
+            try:
+                other = socket.socket(family)
+            except OSError:
+                continue  # family unavailable on this host
+            with other, self.assertRaises(OSError) as refused:
+                other.bind((host, port))
+            if refused.exception.errno == errno.EADDRNOTAVAIL and host == '::1':
+                continue  # loopback IPv6 not configured: nothing can bind it either
+            self.assertEqual(refused.exception.errno, errno.EADDRINUSE, (host, port))
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+    def test_namespace_scan_reobserves_unreadable_same_user_process(self):
+        import deploy_test_interrupted_cleanup as m
+        import tempfile, time
+        namespace = Path(tempfile.mkdtemp(dir=self.root))
+        port = reserved_loopback_port(self)
+        # PR_SET_DUMPABLE=4: /proc/<pid> stays ours while fd/cwd turn unreadable, as during a setuid exec.
+        body = "import ctypes,sys,time;ctypes.CDLL(None).prctl(4,0,0,0,0);print('ready',flush=True);" \
+               "time.sleep(float(sys.argv[1]));ctypes.CDLL(None).prctl(4,1,0,0,0);time.sleep(30)"
+        for hidden, refused in ((0.3, False), (60, True)):
+            child = subprocess.Popen([sys.executable, '-c', body, str(hidden)], stdout=subprocess.PIPE, text=True)
+            self.addCleanup(child.kill)
+            self.assertEqual(child.stdout.readline().strip(), 'ready')
+            if refused:
+                with self.assertRaisesRegex(ValueError, 'unverifiable'):
+                    m.namespace_quiet(namespace, {port})
+            else:
+                m.namespace_quiet(namespace, {port})
+            child.kill(); child.wait(); child.stdout.close()
+        # setuid exec mid-scan: the owner turns root after the first look while the real uid stays ours.
+        child = subprocess.Popen([sys.executable, '-c', body, '60'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.kill)
+        self.assertEqual(child.stdout.readline().strip(), 'ready')
+        proc_dir, real_stat, seen = f'/proc/{child.pid}', Path.stat, []
+
+        def owner_turns_root(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if str(path) != proc_dir:
+                return result
+            seen.append(path)
+            return result if len(seen) == 1 else os.stat_result((result.st_mode, *result[1:4], 0, *result[5:]))
+        with patch.object(Path, 'stat', owner_turns_root), self.assertRaisesRegex(ValueError, 'unverifiable'):
+            m.namespace_quiet(namespace, {port})
+        child.kill(); child.wait(); child.stdout.close()
+        # An unreadable /proc/<pid>/status is unverifiable too: refused by the deadline, never a raw crash.
+        child = subprocess.Popen([sys.executable, '-c', body, '60'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.kill)
+        self.assertEqual(child.stdout.readline().strip(), 'ready')
+        status, real_read_text = f'/proc/{child.pid}/status', Path.read_text
+
+        def status_unreadable(path, *args, **kwargs):
+            if str(path) == status:
+                raise PermissionError(13, 'Permission denied', status)
+            return real_read_text(path, *args, **kwargs)
+        with patch.object(Path, 'read_text', status_unreadable), self.assertRaisesRegex(ValueError, 'unverifiable'):
+            m.namespace_quiet(namespace, {port})
+        child.kill(); child.wait(); child.stdout.close()
 
     def test_historical_policy_drift_renews_without_changing_original_bindings(self):
         state, receipt, proof, previous, renewal = self.policy_relocation_fixture()
@@ -1061,27 +1146,12 @@ for line in sys.stdin:
         self.scan(lambda: (child.kill(), child.wait()))
         self.assertTrue(self.sleeps)
 
-    def test_process_that_changes_owner_while_unreadable_is_another_users(self):
-        child = self.child('sealed')
-        owner = {'uid': os.geteuid()}
-        real_stat = Path.stat
-
-        def stat(path, *args, **kwargs):
-            if str(path) == '/proc/%d' % child.pid:
-                return SimpleNamespace(st_uid=owner['uid'])
-            return real_stat(path, *args, **kwargs)
-
-        with patch.object(Path, 'stat', stat):
-            self.scan(lambda: owner.update(uid=os.geteuid() + 1))
-        self.assertTrue(self.sleeps)
-
     def test_process_that_stays_unreadable_and_alive_fails_closed_naming_it(self):
         child = self.child('sealed')
-        with self.assertRaisesRegex(ValueError, r'cannot observe pid %d: EACCES' % child.pid) as raised:
+        with self.assertRaisesRegex(ValueError, r'original namespace process %d is unverifiable' % child.pid) as raised:
             self.scan()
         self.assertNotRegex(str(raised.exception), 'live consumer|holder remains')
-        self.assertGreaterEqual(len(self.sleeps), self.m.OBSERVATION_ATTEMPTS - 1)
-        self.assertLessEqual(self.m.OBSERVATION_ATTEMPTS * self.m.OBSERVATION_DELAY, 2)
+        self.assertTrue(self.sleeps)
 
     def test_a_held_namespace_is_still_refused(self):
         held = self.namespace / 'held.log'
@@ -1089,7 +1159,7 @@ for line in sys.stdin:
         for name, kwargs, message in (
                 ('cwd', dict(cwd=self.namespace), 'live consumer'),
                 ('open file', dict(held=str(held)), 'file holder remains'),
-                ('argv of an unreadable process', dict(label=str(self.namespace)), 'live consumer')):
+                ('argv of an unreadable process', dict(label=str(self.namespace)), 'live consumer|is unverifiable')):
             with self.subTest(name):
                 child = self.child('sealed' if name.startswith('argv') else 'open', **kwargs)
                 with self.assertRaisesRegex(ValueError, message):
