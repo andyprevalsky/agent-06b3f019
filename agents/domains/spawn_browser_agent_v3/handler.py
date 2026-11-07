@@ -9241,15 +9241,9 @@ async def _spawn_browser_agent_activity_v3_real(
         )
         if setup_error is not None:
             if not isinstance(browser_result, BaseException):
-                _orphan_dom_service, _, _, _orphan_playwright_browser, _orphan_playwright_instance = browser_result
-                with contextlib.suppress(Exception):
-                    await _orphan_dom_service.disconnect()
-                await _stop_playwright_resources(
-                    _orphan_playwright_browser,
-                    _orphan_playwright_instance,
-                    agent_id,
-                    driver_pid=playwright_driver_pid,
-                )
+                # Hand connected clients to the activity's bounded, cancellation-safe
+                # cleanup instead of tearing them down here.
+                dom_service, dom_page, input_page, playwright_browser, playwright_instance = browser_result
             raise setup_error
         _record_timing("parallel_setup_total", t_parallel)
 
