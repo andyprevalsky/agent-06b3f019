@@ -83,6 +83,105 @@ class Cycle(unittest.TestCase):
                 gate['env'][key] = str(path)
         return old, new, state
 
+    def collection_coordinator_fixture(self):
+        plan, _, state = self.prepared_bindings_fixture()
+        gate=plan['gates'][1]
+        gate.update(name='backend-coverage-blackbox', native_backend=True, case_protocol=True,
+            result_transport='file', command=[sys.executable,str(c.ROOT/'scripts/deploy_test_backend.py'),'--root',gate['worker_root']],
+            checks=['blackbox:alpha','teardown'], worker_recipe={'cases':{
+                k:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend'} for k in ['blackbox:alpha','teardown']}})
+        state=c.initialize(plan,self.root);state['phase']='initial'
+        folder=self.directory/'original';folder.mkdir(parents=True)
+        original={'token':'old','gate':gate['name'],'source':state['source'],'cases':dict.fromkeys(gate['checks'],'UNVERIFIED'),
+                  'complete':False,'execution_binding':{'environment':state['environment']}}
+        c.write(folder/'receipt.json',original)
+        state['attempts']=[{'phase':'focused','results':[original]}]
+        state['reconciled_owners']={c.sha_file(folder/'receipt.json'):{'execution_gate':copy.deepcopy(gate)}}
+        spec={'seal':'not-read-by-coordinator-fixture','seal_sha256':'a'*64,'report_timeout_seconds':30}
+        request={'token':'old','checks':gate['checks'],'worker_recipe':gate['worker_recipe'],'source':state['source']}
+        result={'token':'new','gate':gate['name'],'source':state['source'],'complete':False,
+                'cases':{'blackbox:alpha':'PASS','teardown':'UNVERIFIED'},
+                'case_complete':{'blackbox:alpha':True,'teardown':False},'log':'native'}
+        return plan,state,gate,original,spec,request,result,folder
+
+    def test_collection_cli_preserves_original_and_refuses_repeat(self):
+        import deploy_test_backend as backend
+        import contextlib,io
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        plan_path=self.root/'.context/plan.json';input_path=self.root/'.context/collection.json'
+        c.write(plan_path,plan);c.write(input_path,spec);c.write(self.directory/'cycle.json',state)
+        seal={'original_folder':str(folder)};old=(folder/'receipt.json').read_bytes()
+        args=['collect-backend','--plan',str(plan_path),'--state-dir',str(self.directory),'--root',str(self.root),'--input',str(input_path)]
+        with patch.object(backend,'validate_collection',return_value=(seal,request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=True), \
+             patch('deploy_test_process_scan.prepared_workers_idle',return_value={'quiescent':True}), \
+             patch.object(c,'execute',return_value=result) as launch,contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0,c.main(args))
+            saved=c.read(self.directory/'cycle.json')
+            self.assertEqual(original,saved['attempts'][0]['results'][0])
+            self.assertEqual('collection',saved['attempts'][-1]['phase'])
+            self.assertEqual('triage',saved['phase']);self.assertFalse(saved['ready'])
+            self.assertEqual('teardown',saved['failures'][-1]['check'].split('/')[-1])
+            self.assertEqual(spec,launch.call_args.kwargs['collection'])
+            self.assertEqual(2,c.main(args));self.assertEqual(1,launch.call_count)
+        self.assertEqual(old,(folder/'receipt.json').read_bytes())
+
+    def test_collection_unreconciled_or_changed_source_never_launches(self):
+        import deploy_test_backend as backend
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        before=copy.deepcopy(state)
+        with patch.object(backend,'validate_collection',return_value=({'original_folder':str(folder)},request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=False), patch.object(c,'execute') as launch:
+            with self.assertRaises(ValueError):c.collect_backend(state,spec,self.directory,self.root)
+            launch.assert_not_called()
+        self.assertEqual(before,state)
+        (self.root/'code').write_text('changed')
+        with patch.object(c,'execute') as launch,self.assertRaises(ValueError):
+            c.collect_backend(state,spec,self.directory,self.root)
+        launch.assert_not_called()
+
+    def test_collection_cycle_claim_publication_synced_before_execute(self):
+        import deploy_test_backend as backend
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        target=self.directory/'cycle.json';events=[];fsync=os.fsync;replace=os.replace
+        def sync(fd):
+            name=Path(os.readlink('/proc/self/fd/'+str(fd)))
+            if name==self.directory:events.append('directory')
+            elif name.parent==self.directory:events.append('file')
+            return fsync(fd)
+        def publish(src,dst):
+            answer=replace(src,dst)
+            if Path(dst)==target:events.append('publish')
+            return answer
+        def execute(*args,**kwargs):
+            self.assertEqual(['file','publish','directory'],events)
+            self.assertEqual('started',c.read(target)['backend_collections']['old']['state'])
+            return result
+        with patch.object(backend,'validate_collection',return_value=({'original_folder':str(folder)},request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=True), \
+             patch('deploy_test_process_scan.prepared_workers_idle',return_value={'quiescent':True}), \
+             patch.object(os,'fsync',side_effect=sync),patch.object(os,'replace',side_effect=publish), \
+             patch.object(c,'execute',side_effect=execute):
+            c.collect_backend(state,spec,self.directory,self.root)
+
+    def test_collection_failed_cycle_parent_sync_stops_execute_and_retains_claim(self):
+        import deploy_test_backend as backend
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        fsync=os.fsync
+        def sync(fd):
+            if Path(os.readlink('/proc/self/fd/'+str(fd)))==self.directory:raise OSError('directory sync failed')
+            return fsync(fd)
+        with patch.object(backend,'validate_collection',return_value=({'original_folder':str(folder)},request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=True), \
+             patch('deploy_test_process_scan.prepared_workers_idle',return_value={'quiescent':True}), \
+             patch.object(os,'fsync',side_effect=sync),patch.object(c,'execute') as launch:
+            with self.assertRaisesRegex(OSError,'directory sync failed'):c.collect_backend(state,spec,self.directory,self.root)
+            launch.assert_not_called()
+            retained=c.read(self.directory/'cycle.json')
+            self.assertEqual('started',retained['backend_collections']['old']['state'])
+            with self.assertRaisesRegex(ValueError,'already has a collection'):c.collect_backend(retained,spec,self.directory,self.root)
+            launch.assert_not_called()
+
     def test_prepare_bindings_before_full_preserves_history_and_restarts_quick(self):
         old, new, state = self.prepared_bindings_fixture(changed_source=True)
         with self.assertRaisesRegex(ValueError, 'repair boundary'):

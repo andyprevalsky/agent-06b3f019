@@ -421,16 +421,16 @@ def run_with_local_slot(gate: dict, root: Path, admission: dict, *, operation=No
             return result
 
 
-def execute(gate: dict, state: dict, directory: Path, root: Path, *, local_failure=None) -> dict:
+def execute(gate: dict, state: dict, directory: Path, root: Path, *, local_failure=None, collection=None) -> dict:
     if gate.get('worker_transport') != 'local-isolated' or not gate.get('case_protocol'):
-        return _execute(gate, state, directory, root)
+        return _execute(gate, state, directory, root, collection=collection)
     admission = {}
     return run_with_local_slot(gate, root, admission, local_failure=local_failure,
         timeout=gate.get('timeout_seconds'), operation=lambda remaining: _execute(
-            gate, state, directory, root, host_admission=admission, host_timeout=remaining))
+            gate, state, directory, root, host_admission=admission, host_timeout=remaining, collection=collection))
 
 
-def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
+def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None, collection=None) -> dict:
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
     token = uuid.uuid4().hex
@@ -455,6 +455,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     folder.mkdir(parents=True, exist_ok=False)
     request = {"token": token, "source": state["source"], "gate": name,
                "checks": active, "skips": {**case_skips, **qualified}, "phase": phase}
+    if collection is not None:
+        request['collection'] = collection
     if 'worker_recipe' in gate:
         request['worker_recipe'] = gate['worker_recipe']
         request['worker_root'] = gate.get('worker_root', str((root / gate.get('cwd', '.')).resolve()))
@@ -537,6 +539,9 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                 worker_evidence = result['evidence']
             raw_cases, complete = validate_result(result, request, code,
                 invalid_process=timed_out or cancelled or lingering)
+            if collection is not None:
+                from deploy_test_backend import validate_collection_result
+                validate_collection_result(result, request, Path(gate['worker_root']))
             cases.update(raw_cases)
             valid = True
         except (KeyError, TypeError, ValueError) as error:
@@ -587,6 +592,71 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result['resource_skips'] = qualified
     result['worker_result'] = str(result_path) if result_path.exists() else None
     write(folder / "receipt.json", result)
+    return result
+
+
+def collect_backend(state, spec, directory, root):
+    """Explicit native report-tail observation; never import caller-supplied cases."""
+    import deploy_test_backend as backend
+    if (CANCEL.is_set() or state.get('running') or 'live_failures' in state
+            or state.get('pending') or state.get('phase') not in
+            {'interrupted', 'initial', 'focused', 'failed-gates', 'final', 'needs-focused-plan'}):
+        raise ValueError('backend collection requires a quiescent boundary without pending RCA')
+    if state.get('phase') == 'interrupted':
+        interrupted_boundary(state)
+    if (source(root) != state['source'] or digest(state['plan']) != state['plan_digest']
+            or environment_digest() != state['environment']
+            or input_fingerprints(state['plan'], root) != state['input_fingerprints']):
+        raise ValueError('refresh exact collector source/plan before collection')
+    validate_plan(state['plan'], root)
+    gate, = [g for g in state['plan']['gates'] if g.get('name') == 'backend-coverage-blackbox']
+    worker = Path(gate['worker_root'])
+    if (gate.get('native_backend') is not True or gate.get('worker_transport') != 'local-isolated'
+            or gate.get('result_transport') != 'file' or gate.get('case_protocol') is not True
+            or gate['command'][1:] != [str(ROOT / 'scripts/deploy_test_backend.py'), '--root', str(worker)]
+            or source(worker) != state['source']):
+        raise ValueError('collection requires the exact native local backend adapter')
+    seal, original, producer, *_ = backend.validate_collection(spec, worker)
+    matches = [r for a in state['attempts'] for r in a.get('results', [])
+               if r.get('token') == original['token']]
+    if len(matches) != 1 or matches[0] != producer or not local_reconciliation_bound(state, producer):
+        raise ValueError('collection requires unique exact reconciled producer receipt')
+    from deploy_test_result import preserve_contract
+    entry = state['reconciled_owners'][sha_file(Path(seal['original_folder'])/'receipt.json')]
+    preserve_contract(entry['execution_gate'], gate)
+    if producer.get('execution_binding', {}).get('environment') != state['environment']:
+        raise ValueError('producer execution environment differs')
+    if (original.get('worker_recipe') != gate.get('worker_recipe') or original['checks'] != gate['checks']
+            or any(k.startswith(gate['name']+'/') for k in state.get('skips', {}))):
+        raise ValueError('collection cannot change producer recipe, inventory or qualifications')
+    claims = state.setdefault('backend_collections', {})
+    if original['token'] in claims:
+        raise ValueError('producer already has a collection attempt; no automatic retry')
+    from deploy_test_process_scan import prepared_workers_idle
+    before = prepared_workers_idle([worker], birth_guard=True)
+    claims[original['token']] = {'seal_sha256':spec['seal_sha256'], 'state':'started', 'at':time.time()}
+    write(directory/'cycle.json', state)  # publish the one-shot claim before any execution
+    parent_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    state['round'] += 1
+    observed = {**state, 'phase':'collection'}
+    result = execute(gate, observed, directory, root, collection=spec)
+    after = prepared_workers_idle([worker], birth_guard=True)
+    if not local_reconciliation_bound(state, producer) or source(root) != state['source']:
+        raise ValueError('original cleanup or collector source no longer bound')
+    claims[original['token']].update(state='finished', token=result.get('token'), before=before, after=after)
+    state['attempts'].append({'phase':'collection', 'source':state['source'],
+        'producer_source':original['source'], 'producer_token':original['token'], 'results':[result]})
+    failures = failed_cases({**state, 'phase':'collection'}, [result])
+    state['failures'].extend(failures)
+    state['pending'] = [f['id'] for f in failures]
+    state.pop('resume_phase', None)
+    state.pop('resume_independent', None)
+    state.update(phase='triage', ready=False, failure_phase='collection')
+    # Even an unexpected all-green result does not discharge normal full/quick sequencing.
     return result
 
 
@@ -2073,7 +2143,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "prepare-bindings", "triage-quick", "triage-independent", "initial-independent", "final-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "prepare-bindings", "triage-quick", "triage-independent", "initial-independent", "final-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "collect-backend"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
@@ -2111,6 +2181,11 @@ def main(argv: list[str] | None = None) -> int:
                 with cancellation_handlers():
                     while not resume_independent and state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:
                         run_phase(plan, state, directory, args.root, args.rca_launcher)
+            elif args.action == "collect-backend":
+                if args.input is None:
+                    raise ValueError("--input sealed collection specification required")
+                with cancellation_handlers():
+                    collect_backend(state, read(args.input), directory, args.root)
             elif args.action == "triage":
                 if args.input is None:
                     raise ValueError("--input RCA report required")

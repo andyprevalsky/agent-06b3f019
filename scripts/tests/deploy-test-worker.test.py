@@ -2259,6 +2259,187 @@ class Backend(unittest.TestCase):
         self.request['checks'] = ['blackbox:delta', 'units']
         with self.assertRaisesRegex(ValueError, 'frozen domain list'): self.backend.execute(self.request, self.root)
 
+    def collection_fixture(self):
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
+        result = self.backend.execute(self.request, self.root)
+        native = Path(result['runner_log']).parent
+        (native/'teardown.log').unlink()
+        for name in ('units.log','units-probe.log'):
+            (self.root/'back-end/coverage'/name).write_text('native fake complete\n')
+        folder = self.root/'.context/original';folder.mkdir()
+        finished=time.time()
+        receipt={'token':self.request['token'],'source':self.request['source'],'gate':self.request['gate'],
+                 'executed':True,'complete':False,'cancelled':True,'native_exit':-9,
+                 'cases':dict.fromkeys(self.request['checks'],'UNVERIFIED'),
+                 'started_at':result['started_at'],'finished_at':finished,
+                 'host_admission':{'original_budget_seconds':14400,'deadline_monotonic':time.monotonic()+14400,'started':True}}
+        original={**self.request,'worker_root':str(self.root),'worker_recipe':{
+            'cases':{c:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend'} for c in self.request['checks']}}}
+        cycle.write(folder/'request.json',original);cycle.write(folder/'receipt.json',receipt)
+        cycle.write(folder/'output.log.process.json',{'native_exit':-9,'quiescent':True,'remaining':[],'error':None})
+        text=Path(result['runner_log']).read_text()
+        children=self.backend.current_shard_logs(self.root,text,receipt['started_at'])
+        joined=text+'\n'+'\n'.join(t for _,t in children)
+        files=[folder/n for n in ('request.json','receipt.json','output.log.process.json')]+[
+            native/'runner.log',native/'threshold.log',self.root/'back-end/coverage/units.log',
+            self.root/'back-end/coverage/units-probe.log']+[p for p,_ in children]+list((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        archives=[self.backend.owned_archive(self.root,self.backend.ARCHIVE_LINE.search(joined).group(1))]+[
+            self.backend.owned_archive(self.root,n) for n in self.backend.FAILED_SHARD_LINE.findall(joined)]
+        sourcefiles={}
+        for raw in subprocess.check_output(['git','ls-files','-z'],cwd=self.root).split(b'\0'):
+            if raw:
+                name=os.fsdecode(raw);sourcefiles[name]={'sha256':self.backend.sha_file(self.root/name),'mode':cycle.source_mode(self.root/name)}
+        seal={'kind':'backend-collection-seal-v1','sealed_at':time.time(),'original_folder':str(folder),'worker_root':str(self.root),
+              'token':original['token'],'producer_source':original['source'],'source_files':sourcefiles,
+              'request_sha256':self.backend.sha_file(folder/'request.json'),'receipt_sha256':self.backend.sha_file(folder/'receipt.json'),
+              'files':{str(p):{'sha256':self.backend.sha_file(p),'size':p.stat().st_size,'mtime_ns':p.stat().st_mtime_ns} for p in files},
+              'archives':{str(a):{'sha256':self.backend.archive_manifest(a)[0],'files':self.backend.archive_manifest(a)[1]} for a in archives}}
+        path=self.root/'.context/seal.json';cycle.write(path,seal)
+        request={**original,'token':'new-collection','collection':{'seal':str(path),'seal_sha256':self.backend.sha_file(path),'report_timeout_seconds':30}}
+        return request,seal,path
+
+    def test_collection_only_never_launches_producer_or_teardown(self):
+        request,seal,path=self.collection_fixture()
+        runner=self.backend.run_command
+        def only_report(argv,**kwargs):
+            self.assertIn('c8 report',' '.join(argv),'collection launched a producer or teardown')
+            return runner(argv,**kwargs)
+        with patch.object(self.backend,'run_command',side_effect=only_report):
+            result=self.backend.execute(request,self.root)
+        self.assertEqual('FAIL',result['cases']['blackbox:beta'])
+        self.assertEqual('PASS',result['cases']['blackbox:alpha'])
+        self.assertEqual('UNVERIFIED',result['cases']['teardown'])
+        self.assertFalse(result['complete'])
+        self.assertEqual(seal['producer_source'],result['collection']['producer_source'])
+        self.assertEqual(seal['receipt_sha256'],self.backend.sha_file(Path(seal['original_folder'])/'receipt.json'))
+        self.backend.validate_collection_result(result,request,self.root)
+        with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+
+    def test_collection_seal_tamper_source_and_late_writer_refuse(self):
+        request,seal,path=self.collection_fixture()
+        with patch.object(self.backend,'run_command',side_effect=AssertionError('must not execute')):
+            bad=copy.deepcopy(request);bad['collection']['seal_sha256']='0'*64
+            with self.assertRaises(ValueError):self.backend.execute(bad,self.root)
+            (self.root/'back-end/src/tests/blackbox/alpha.blackbox.ts').write_text('changed')
+            with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+        self.assertFalse((self.root/'.context/deploy-backend/collection-new-collection').exists())
+
+    def test_collection_missing_partial_duplicate_and_clock_refuse(self):
+        request,seal,path=self.collection_fixture()
+        for mutate in [lambda d:d.update(archives={}),lambda d:d['files'].pop(next(iter(d['files']))),lambda d:d.update(sealed_at=0)]:
+            bad=copy.deepcopy(seal);mutate(bad);cycle.write(path,bad)
+            req=copy.deepcopy(request);req['collection']['seal_sha256']=self.backend.sha_file(path)
+            with self.assertRaises(ValueError):self.backend.execute(req,self.root)
+        cycle.write(path,seal)
+        summary=next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        summary.unlink()
+        with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+
+    def test_collection_post_report_change_is_not_accepted(self):
+        request,seal,path=self.collection_fixture()
+        runner=self.backend.run_command
+        def late(argv,**kwargs):
+            result=runner(argv,**kwargs)
+            next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json')).write_text('{}')
+            return result
+        with patch.object(self.backend,'run_command',side_effect=late),self.assertRaises(ValueError):
+            self.backend.execute(request,self.root)
+
+    def test_collection_report_failure_cannot_be_promoted(self):
+        request,seal,path=self.collection_fixture()
+        config=cycle.read(self.config);config['c8_rc']=1;cycle.write(self.config,config)
+        result=self.backend.execute(request,self.root)
+        self.assertEqual('UNVERIFIED',result['cases']['coverage-threshold'])
+        result['cases']['coverage-threshold']='PASS'
+        with self.assertRaises(ValueError):self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_duplicate_shard_is_not_recoverable(self):
+        request,seal,path=self.collection_fixture()
+        summary=next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        duplicate=summary.parent.parent/'blackbox-run-shard99/summary.json'
+        duplicate.parent.mkdir();duplicate.write_bytes(summary.read_bytes())
+        row={'sha256':self.backend.sha_file(duplicate),'size':duplicate.stat().st_size,'mtime_ns':duplicate.stat().st_mtime_ns}
+        seal['files'][str(duplicate)]=row;cycle.write(path,seal)
+        request['collection']['seal_sha256']=self.backend.sha_file(path)
+        with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+
+    def test_collection_bounds_foreign_root_and_forged_result_refuse(self):
+        request,seal,path=self.collection_fixture()
+        for timeout in (True,0,-1,601,float('inf')):
+            bad=copy.deepcopy(request);bad['collection']['report_timeout_seconds']=timeout
+            with self.assertRaises(ValueError):self.backend.execute(bad,self.root)
+        bad=copy.deepcopy(request);bad['token']='../escape'
+        with self.assertRaises(ValueError):self.backend.execute(bad,self.root)
+        bad=copy.deepcopy(seal);bad['worker_root']=str(self.root.parent);cycle.write(path,bad)
+        changed=copy.deepcopy(request);changed['collection']['seal_sha256']=self.backend.sha_file(path)
+        with self.assertRaises(ValueError):self.backend.execute(changed,self.root)
+        cycle.write(path,seal)
+        result=self.backend.execute(request,self.root)
+        result['cases']['blackbox:beta']='PASS'
+        with self.assertRaises(ValueError):self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_harness_delta_keeps_producer_source_explicit(self):
+        path=self.root/'scripts/deploy_test_backend.py';path.write_text('# original harness\n')
+        subprocess.run(['git','-C',str(self.root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=t','-c','user.email=t@x','commit','-qm','harness'],check=True)
+        self.request['source']=cycle.source(self.root)
+        request,seal,pinpath=self.collection_fixture()
+        old=request['source'];path.write_text('# collection-only harness repair\n')
+        request['source']=cycle.source(self.root)
+        result=self.backend.execute(request,self.root)
+        self.assertNotEqual(old,request['source'])
+        self.assertEqual(old,result['collection']['producer_source'])
+        self.assertEqual(request['source'],result['collection']['collector_source'])
+        self.assertEqual({'scripts/deploy_test_backend.py'},set(result['collection']['harness_delta']))
+        self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_union_and_native_case_tampering_refuse(self):
+        request,seal,path=self.collection_fixture()
+        result=self.backend.execute(request,self.root)
+        identity=result['evidence']['coverage-threshold']['identity']
+        union=Path(identity['union']);next(union.iterdir()).write_text('forged')
+        identity['union_manifest_sha256']=self.backend.archive_manifest(union)[0]
+        with self.assertRaises(ValueError):self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_failed_cases_preserves_prefixed_native_evidence(self):
+        request,seal,path=self.collection_fixture()
+        result=self.backend.execute(request,self.root)
+        receipt={**result,'worker_evidence':result['evidence']}
+        failures=cycle.failed_cases({'phase':'collection','source':request['source']},[receipt])
+        failed=next(f for f in failures if f['check']=='backend-coverage-blackbox/blackbox:beta')
+        shard=next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        self.assertEqual({'shard':str(shard),'passed':False,'aborted':False},failed['worker_evidence'])
+        self.assertNotIn('blackbox:blackbox:beta',result['evidence'])
+
+    def test_collection_claim_parent_is_synced_before_report(self):
+        request,seal,path=self.collection_fixture()
+        parent=self.root/'.context/deploy-backend'
+        claim=parent/'collection-claim-be-1.json'
+        events=[];fsync=os.fsync;report=self.backend.threshold_over_archive
+        def sync(fd):
+            target=Path(os.readlink('/proc/self/fd/'+str(fd)))
+            if target==claim:events.append('file')
+            if target==parent:events.append('directory')
+            return fsync(fd)
+        def tail(*args,**kwargs):
+            self.assertEqual(['file','directory'],events)
+            return report(*args,**kwargs)
+        with patch.object(os,'fsync',side_effect=sync),patch.object(self.backend,'threshold_over_archive',side_effect=tail):
+            self.backend.execute(request,self.root)
+
+    def test_collection_failed_claim_parent_sync_stops_report_and_retains_claim(self):
+        request,seal,path=self.collection_fixture()
+        parent=self.root/'.context/deploy-backend'
+        claim=parent/'collection-claim-be-1.json';fsync=os.fsync
+        def sync(fd):
+            if Path(os.readlink('/proc/self/fd/'+str(fd)))==parent:raise OSError('directory sync failed')
+            return fsync(fd)
+        with patch.object(os,'fsync',side_effect=sync),patch.object(self.backend,'threshold_over_archive',wraps=self.backend.threshold_over_archive) as report:
+            with self.assertRaisesRegex(OSError,'directory sync failed'):self.backend.execute(request,self.root)
+            report.assert_not_called()
+        self.assertEqual({'seal':request['collection']['seal_sha256'],'token':request['token']},cycle.read(claim))
+        with self.assertRaisesRegex(ValueError,'collection claim'):self.backend.execute(request,self.root)
+
     def test_one_failed_domain_keeps_its_peers_and_threshold_runs_over_the_archive(self):
         self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
         result = self.backend.execute(self.request, self.root)

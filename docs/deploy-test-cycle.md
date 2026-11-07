@@ -466,3 +466,37 @@ execution or permission changes are involved. Missing sudo access or any
 unreadable/active ownership still blocks admission. Both generic and backend
 native adapters validate the shared lease and all recipe TMPDIR overrides before
 directory creation, fixture restore or child execution.
+
+
+### Explicit backend collection after a terminal interrupted producer
+
+`collect-backend --input <spec.json>` is a separately admitted native report-tail
+observation, not `resume` and not a test replay. Its specification contains
+`seal`, `seal_sha256`, and `report_timeout_seconds` (positive, at most 600 and
+within the unused original request allowance). Before any harness edit, retain
+a reviewed `backend-collection-seal-v1` inventory of the exact original request,
+receipt, supervisor proof, completed shard summaries/logs, unit/FPS logs and
+announced raw archive manifests, plus producer source/runtime-config hashes.
+The original receipt must be uniquely present and have a revalidated native
+local cleanup reconciliation. The seal is not an arbitrary result import.
+
+The coordinator must first have the current collector source/plan and isolated
+worker frozen normally. Only the named backend/cycle harness, their two owning
+test files and this guide may differ from the producer; all other captured
+inputs must match. The new native receipt records both source identities and
+all harness hash differences. It never relabels the old cancelled execution.
+The exact original full case inventory and recipe remain intact.
+
+Collection takes the normal private-worker admission lock, fresh process
+quiescence before/after and the backend exclusive lock. It runs only c8 report
+over a distinct union of the sealed originals. It never invokes setup, fixture
+restore, unit/blackbox/FPS tests or teardown tests. Claims survive a crash and
+refuse automatic repetition. Partial/missing/changed source, logs or archives
+fail closed. Any later attempt requires diagnosis, not deletion of a claim.
+
+Original native failures stay FAIL. A teardown acceptance test absent from the
+old run stays UNVERIFIED even when cleanup is proven, so collection alone cannot
+make that gate ready. Original failures and the new observation are both kept;
+normal RCA/focused/full coverage obligations and provider-exhaustion rules remain.
+This action does not implement new domain-only execution or automatic provider
+exclusions; those still require a separately reviewed native path if needed.

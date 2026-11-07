@@ -222,7 +222,7 @@ def union_archives(root, text, target):
     return [{'path': str(a), 'manifest_sha256': archive_manifest(a)[0], 'files': archive_manifest(a)[1]} for a in sources]
 
 
-def threshold_over_archive(root, text, log, target, timeout):
+def threshold_over_archive(root, text, log, target, timeout, *, execution=None):
     try:
         sources = union_archives(root, text, target)
     except (ValueError, OSError) as error:
@@ -231,10 +231,215 @@ def threshold_over_archive(root, text, log, target, timeout):
             f'--temp-directory={target} --reporter=text-summary --check-coverage']
     code, timed_out, cancelled, lingering = run_command(argv, cwd=root / 'back-end', env=os.environ.copy(),
                                                        output=log, timeout=timeout)
+    if execution is not None:
+        execution.update(command=argv, exit=code, timed_out=timed_out, cancelled=cancelled, lingering=lingering)
     identity = {'union': str(target), 'union_manifest_sha256': archive_manifest(target)[0], 'sources': sources}
     if code == 0 and not (timed_out or cancelled or lingering):
         return 'PASS', identity, 'merged report over passing phases + failed shards met .c8rc.json thresholds (union: sound)'
     return 'UNVERIFIED', identity, 'threshold failed on partial coverage: inconclusive'
+
+
+# A collection is a new observation of an old producer, never a resumed test.
+COLLECTION_KIND = 'backend-collection-v1'
+COLLECTION_HARNESS = frozenset({
+    'scripts/deploy_test_backend.py', 'scripts/deploy_test_cycle.py',
+    'scripts/tests/deploy-test-worker.test.py', 'scripts/tests/deploy-test-cycle.test.py',
+    'docs/deploy-test-cycle.md',
+})
+
+
+def _require(condition, message):
+    if not condition:
+        raise ValueError('backend collection: ' + message)
+
+
+def collection_source_files(root):
+    """Full producer input inventory, including ignored runtime configuration."""
+    from deploy_test_cycle import source_mode
+    paths = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], cwd=root).split(b'\0')
+    names = {os.fsdecode(p) for p in paths if p and not p.startswith(b'agents/benchmarks/history/')}
+    names.update(p for p in ('.env', 'env.sh', 'back-end/.env', 'agents/.env',
+        'agents/.env.benchmark-temporal', 'front-end/.env', 'front-end/.env.local') if (root / p).is_file())
+    rows = {}
+    for name in sorted(names):
+        path = root / name
+        _require(path.is_file() or path.is_symlink(), 'unsupported source member ' + name)
+        value = hashlib.sha256(os.fsencode(os.readlink(path))).hexdigest() if path.is_symlink() else sha_file(path)
+        rows[name] = {'sha256': value, 'mode': source_mode(path)}
+    return rows
+
+
+def collection_inputs(root, folder):
+    """Describe exact existing producer artifacts; no execution and no mutation."""
+    original = read(folder / 'request.json')
+    receipt = read(folder / 'receipt.json')
+    native = root / '.context/deploy-backend' / hashlib.sha256(original['token'].encode()).hexdigest()
+    text = (native / 'runner.log').read_text(errors='replace')
+    child_logs = current_shard_logs(root, text, receipt['started_at'])
+    combined = text + '\n' + '\n'.join(t for _, t in child_logs)
+    passing = ARCHIVE_LINE.findall(combined)
+    _require(len(passing) == 1, 'unique passing-phases archive missing')
+    archives = list(dict.fromkeys([owned_archive(root, passing[0]),
+                                 *[owned_archive(root, p) for p in FAILED_SHARD_LINE.findall(combined)]]))
+    files = [folder / name for name in ('request.json', 'receipt.json', 'output.log.process.json')]
+    files += [native / 'runner.log', root / 'back-end/coverage/units.log', root / 'back-end/coverage/units-probe.log']
+    files += [p for p, _ in child_logs]
+    files += sorted((root / 'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+    files += [native / n for n in ('teardown.log', 'threshold.log') if (native / n).is_file()]
+    rows = {}
+    for path in files:
+        _require(path.is_file() and not path.is_symlink() and path.resolve() == path, 'foreign artifact')
+        st = path.stat()
+        rows[str(path)] = {'sha256': sha_file(path), 'size': st.st_size, 'mtime_ns': st.st_mtime_ns}
+    raw = {}
+    for archive in archives:
+        _require(all(p.is_file() and not p.is_symlink() and p.resolve() == p
+                     for p in archive.rglob('*')), 'unsupported raw member')
+        digest, count = archive_manifest(archive)
+        _require(count > 0, 'empty raw archive')
+        raw[str(archive)] = {'sha256': digest, 'files': count}
+    return original, receipt, text, native, rows, raw
+
+
+def validate_collection(spec, root):
+    """Validate a reviewed pre-edit seal; only listed harness bytes may differ."""
+    _require(isinstance(spec, dict) and set(spec) == {'seal', 'seal_sha256', 'report_timeout_seconds'}, 'request fields')
+    path = Path(spec['seal'])
+    _require(path.is_absolute() and path.resolve() == path and not path.is_symlink()
+             and path.stat().st_size <= 64 * 1024 * 1024 and sha_file(path) == spec['seal_sha256'], 'seal pin')
+    seal = read(path)
+    _require(seal.get('kind') == 'backend-collection-seal-v1'
+             and seal.get('worker_root') == str(root), 'seal kind/root')
+    folder = Path(seal['original_folder'])
+    _require(folder.is_absolute() and folder.resolve() == folder and not folder.is_symlink(), 'original folder')
+    original, receipt, text, native, files, archives = collection_inputs(root, folder)
+    _require(files == seal['files'] and archives == seal['archives'], 'sealed artifacts changed')
+    _require(sha_file(folder / 'request.json') == seal['request_sha256']
+             and sha_file(folder / 'receipt.json') == seal['receipt_sha256'], 'original identity hashes')
+    _require(isinstance(original.get('token'), str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', original['token']), 'unsafe producer token')
+    _require(original['token'] == seal['token'] == receipt['token']
+             and original['source'] == seal['producer_source'] == receipt['source']
+             and original['gate'] == receipt['gate'] == 'backend-coverage-blackbox'
+             and original.get('worker_root') == str(root) and original.get('skips') == {}, 'producer identity')
+    _require(receipt.get('complete') is False and receipt.get('executed') is True
+             and receipt.get('cancelled') is True and receipt.get('native_exit') in (-9, -2, -15, 130, 137, 143)
+             and set(receipt['cases']) == set(original['checks'])
+             and set(receipt['cases'].values()) == {'UNVERIFIED'}, 'original interrupted receipt')
+    process = read(folder / 'output.log.process.json')
+    _require(process.get('quiescent') is True and process.get('remaining') == []
+             and process.get('error') is None and process.get('native_exit') == receipt['native_exit'], 'producer not quiescent')
+    start, finish = receipt['started_at'], receipt['finished_at']
+    admission = receipt['host_admission']
+    budget, deadline = admission['original_budget_seconds'], admission['deadline_monotonic']
+    _require(all(type(v) in (int, float) and math.isfinite(v) for v in (start, finish, budget, deadline, seal['sealed_at']))
+             and 0 < start < finish <= seal['sealed_at'] and 0 < finish - start <= budget + CLEANUP_SECONDS
+             and deadline > budget > 0 and admission.get('started') is True, 'producer clock/admission window')
+    # Epoch artifact clocks and recorded monotonic admission are retained separately.
+    _require(all(start - 1 <= row['mtime_ns'] / 1e9 <= finish + 1 for name,row in files.items()
+                 if Path(name).parent != folder), 'artifact outside producer window')
+    proof, domains = selection(root)
+    _require(set(original['checks']) == set(checks_for(domains)) and len(original['checks']) == len(set(original['checks'])), 'full producer inventory')
+    sweep = sweep_from_recipe(original['worker_recipe'], original['checks'])
+    _require(sweep['command'][-3:] == RUNNER, 'original full native command')
+    observed = collection_source_files(root)
+    _require(set(observed) == set(seal['source_files'])
+             and all(observed[n] == seal['source_files'][n] for n in observed if n not in COLLECTION_HARNESS), 'non-harness producer input changed')
+    cases, evidence, hashes, unknown = domain_cases(root, domains, start)
+    _require(not unknown and all(v != 'UNVERIFIED' for v in cases.values()), 'incomplete/duplicate/unknown shard inventory')
+    _require(len(UNIT_LINE.findall(text)) == len(FPS_LINE.findall(text)) == 1
+             and phase(UNIT_LINE, text) == ('PASS', 0) and phase(FPS_LINE, text) == ('PASS', 0), 'unit/FPS completion missing')
+    timeout = spec['report_timeout_seconds']
+    _require(type(timeout) in (int, float) and math.isfinite(timeout)
+             and 0 < timeout <= min(600, budget - (finish - start)), 'report budget exceeds remaining original allowance')
+    return seal, original, receipt, text, native, cases, evidence, hashes, proof
+
+
+def collect_only(request, root):
+    spec = request['collection']
+    seal, original, receipt, text, native, cases, evidence, hashes, selection_proof = validate_collection(spec, root)
+    _require(isinstance(request.get('token'), str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', request['token']), 'unsafe collection token')
+    _require(request['source'] == source(root) and request['gate'] == original['gate']
+             and request.get('skips') == {} and request['checks'] == original['checks']
+             and request.get('worker_recipe') == original['worker_recipe']
+             and request['token'] != original['token'], 'collection changes producer contract')
+    validate_tmpdir_request(request, root)
+    claim = root / '.context/deploy-backend' / ('collection-claim-' + original['token'] + '.json')
+    # An interrupted or refused collection remains consumed, requiring explicit investigation.
+    _require(not claim.exists() and not claim.is_symlink(), 'producer already has a collection claim')
+    with claim.open('x') as stream:
+        json.dump({'seal': spec['seal_sha256'], 'token': request['token']}, stream)
+        stream.flush(); os.fsync(stream.fileno())
+    parent_fd = os.open(claim.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    output = root / '.context/deploy-backend' / ('collection-' + request['token'])
+    output.mkdir(exist_ok=False)
+    started = time.time()
+    joined = text + '\n' + '\n'.join(value for _, value in current_shard_logs(root, text, receipt['started_at']))
+    execution = {}
+    with (output / 'threshold.log').open('wb') as log:
+        status, identity, reason = threshold_over_archive(root, joined, log, output / 'raw-v8-union', spec['report_timeout_seconds'], execution=execution)
+    write(output / 'report.json', execution)
+    validate_collection(spec, root)  # late writer or changed input invalidates this observation
+    cases.update(units='PASS', fps='PASS', **{'coverage-threshold': status, 'teardown': 'UNVERIFIED'})
+    # Cleanup custody is verified by the coordinator, NOT a fabricated teardown-test PASS.
+    result = {k: request[k] for k in ('token', 'source', 'gate')}
+    result.update(cases=cases, complete=False, cleanup_complete=not execution.get('lingering', True), reused=False,
+        worker_root=str(root), recipe_digest=hashlib.sha256(json.dumps(original['worker_recipe'],sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+        native_exit=1, started_at=started, finished_at=time.time(),
+        evidence={**evidence, 'summaries': hashes, 'coverage-threshold': {'identity': identity, 'reason': reason},
+                  'teardown': {'reason': 'no teardown acceptance outcome is imported; cleanup reconciliation is not test credit'}},
+        collection={'kind': COLLECTION_KIND, 'seal_sha256': spec['seal_sha256'],
+                    'producer_token': original['token'], 'producer_source': original['source'],
+                    'collector_source': source(root),
+                    'harness_delta': {n: {'producer':seal['source_files'][n], 'collector':r}
+                                      for n,r in collection_source_files(root).items() if r != seal['source_files'][n]},
+                    'producer_started_at': receipt['started_at'],
+                    'producer_finished_at': receipt['finished_at'], 'admission_deadline_monotonic': receipt['host_admission']['deadline_monotonic'],
+                    'report_log': str(output/'threshold.log'), 'report_log_sha256': sha_file(output/'threshold.log'),
+                    'report_receipt_sha256': sha_file(output/'report.json')})
+    write(output / 'result.json', result)
+    return result
+
+
+def validate_collection_result(result, request, root):
+    seal, original, receipt, text, native, cases, evidence, hashes, proof = validate_collection(request['collection'], root)
+    meta = result.get('collection', {})
+    changes = {n:{'producer':seal['source_files'][n],'collector':r} for n,r in collection_source_files(root).items() if r != seal['source_files'][n]}
+    _require(meta.get('kind') == COLLECTION_KIND and meta.get('seal_sha256') == request['collection']['seal_sha256']
+             and meta.get('producer_token') == original['token'] and meta.get('producer_source') == original['source']
+             and meta.get('collector_source') == source(root) and meta.get('harness_delta') == changes, 'result provenance')
+    expected = root / '.context/deploy-backend' / ('collection-' + request['token'])
+    _require(meta.get('report_log') == str(expected / 'threshold.log')
+             and sha_file(expected / 'threshold.log') == meta.get('report_log_sha256'), 'report log binding')
+    fixed = {**cases, 'units':'PASS', 'fps':'PASS', 'teardown':'UNVERIFIED'}
+    _require(all(result['cases'].get(k) == v for k,v in fixed.items())
+             and result['cases'].get('coverage-threshold') in ('PASS','UNVERIFIED'), 'result altered native cases')
+    execution = read(expected / 'report.json')
+    _require(sha_file(expected / 'report.json') == meta.get('report_receipt_sha256')
+             and type(execution.get('exit')) is int
+             and all(type(execution.get(k)) is bool for k in ('timed_out','cancelled','lingering')), 'native report execution')
+    status = 'PASS' if execution['exit'] == 0 and not any(execution[k] for k in ('timed_out','cancelled','lingering')) else 'UNVERIFIED'
+    _require(result['cases']['coverage-threshold'] == status, 'report status differs from native execution')
+    identity = result['evidence']['coverage-threshold'].get('identity')
+    _require(identity is not None and identity.get('union') == str(expected/'raw-v8-union')
+             and archive_manifest(expected/'raw-v8-union')[0] == identity.get('union_manifest_sha256'), 'report union binding')
+    expected_sources = [{'path':name, 'manifest_sha256':row['sha256'], 'files':row['files']}
+                        for name,row in seal['archives'].items()]
+    _require(identity.get('sources') == expected_sources, 'report source manifest differs')
+    expected_files = {}
+    for name in seal['archives']:
+        for path in Path(name).rglob('*'):
+            digest = sha_file(path)
+            _require(path.name not in expected_files or expected_files[path.name] == digest, 'conflicting original raw filename')
+            expected_files[path.name] = digest
+    union = Path(identity['union'])
+    _require(all(p.is_file() and not p.is_symlink() for p in union.iterdir())
+             and {p.name:sha_file(p) for p in union.iterdir()} == expected_files, 'report union changed original content')
+    claim = read(root / '.context/deploy-backend' / ('collection-claim-' + original['token'] + '.json'))
+    _require(claim == {'seal':request['collection']['seal_sha256'],'token':request['token']}, 'collection replay/claim')
 
 
 def handoff_recipe(old, domains, timeout_seconds=14400):
@@ -366,6 +571,8 @@ def execute(request, root, failed_first=False):
     validate_tmpdir_request(request, root)
     # Keep signal ownership through the report and teardown tails too.
     with cancellation_handlers(), exclusive(root / '.context/deploy-backend'):
+        if 'collection' in request:
+            return collect_only(request, root)
         return _execute(request, root, failed_first)
 
 
