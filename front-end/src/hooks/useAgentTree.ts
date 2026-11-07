@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { listenToAgentTree, type TreeNode } from './agentTreeSubscription';
 
 export type { TreeNode, TreeBackgroundTask } from './agentTreeSubscription';
+export { noteTreeUserMessage } from './agentTreeSubscription';
 
 const EMPTY_TREE_SOURCE = new Map<string, TreeNode>();
 const EMPTY_TREE = new Proxy(EMPTY_TREE_SOURCE, {

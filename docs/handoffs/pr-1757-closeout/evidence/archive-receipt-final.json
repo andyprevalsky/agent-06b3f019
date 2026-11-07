@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1757-89906b0f3/final-evidence.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "7dc89c04c2b456515ea20fe18c1146a85f6ce6dd0d7bc4fe6a9f7471f9e34b50",
+  "gzip_sha256": "29815b45f36a48b16d80b1a1a2b2f45bb2b68e39ea8f15d797a726f5c67762b1",
+  "stored_bytes": 627279990,
+  "frames": 75,
+  "files": 11472,
+  "original_bytes": 1650827692,
+  "manifest_sha256": "961e01400ab435efdda16fcc6d353e8738fb8c9ea780ed2b309b5ad91e8d09aa",
+  "full_readback_verified": true
+}

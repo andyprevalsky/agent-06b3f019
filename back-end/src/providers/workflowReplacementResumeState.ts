@@ -58,3 +58,12 @@ export function savedResumeState(value: Prisma.JsonValue | null): WorkflowResume
     child_tool_counts: childToolCounts,
   } as unknown as WorkflowResumeState;
 }
+
+/** Retain only boolean context gates from a stored JSON snapshot. */
+export function booleanRecord(value: Prisma.JsonValue | null): Record<string, boolean> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const entries = Object.entries(value).filter((entry): entry is [string, boolean] => {
+    return typeof entry[1] === 'boolean';
+  });
+  return Object.fromEntries(entries);
+}

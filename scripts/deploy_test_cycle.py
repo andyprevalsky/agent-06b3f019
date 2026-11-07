@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from fnmatch import fnmatchcase
 import fcntl
@@ -32,7 +32,7 @@ from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as
 from deploy_test_isolation import validate as validate_isolation
 
 ROOT = Path(__file__).resolve().parents[1]
-QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural"}
+QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural", "mac-app-static"}
 REQUIRED_QUICK = {"format", "eslint", "typescript"}
 TERMINAL_OK = {"PASS", "SKIP"}
 NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -125,8 +125,23 @@ def source_mode(path: Path) -> int:
 
 
 def environment_digest() -> str:
-    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID"}
+    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
+                 "CODEX_TOOL_CALL_ID"}
     return digest({k: v for k, v in os.environ.items() if k not in transient})
+
+
+ROTATING_CREDENTIAL = re.compile(rb"(?m)^([ \t]*(?:export[ \t]+)?GITHUB_TOKEN[ \t]*=).*$")
+
+
+def runtime_config_sha256(path: Path) -> str:
+    """Digest a runtime config file, ignoring only the rotating GitHub user token's value.
+
+    The devbox daemon rewrites ``GITHUB_TOKEN`` in the managed env files every time it refreshes
+    that short-lived credential (observed 3 times in 40 minutes on 2026-11-07), which made any
+    staged cycle longer than the refresh interval go stale. The key's presence and every other
+    byte stay bound, so adding, removing or changing any other setting still invalidates a cycle.
+    """
+    return hashlib.sha256(ROTATING_CREDENTIAL.sub(rb"\1<rotating-credential>", path.read_bytes())).hexdigest()
 
 
 def input_fingerprints(plan: dict, root: Path) -> dict:
@@ -154,7 +169,7 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
     for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "agents/.env.benchmark-temporal",
                 "front-end/.env", "front-end/.env.local"]:
         if (root / rel).is_file():
-            runtime_config[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+            runtime_config[rel] = runtime_config_sha256(root / rel)
     return {g["name"]: digest({"files": {p: h for p, h in files.items()
                             if any(fnmatchcase(p, glob) for glob in g.get("input_paths", ["*"]))},
                             "runtime_config": runtime_config,
@@ -170,6 +185,7 @@ def command(value: object) -> list[str]:
 
 
 def validate_plan(plan: dict, root: Path = ROOT) -> None:
+    """Refuse unsupported workers before allocating ownership or admitting native work."""
     gates = plan.get("gates")
     if not isinstance(gates, list) or not gates:
         raise ValueError("plan needs gates")
@@ -179,6 +195,9 @@ def validate_plan(plan: dict, root: Path = ROOT) -> None:
         if not isinstance(name, str) or not NAME.fullmatch(name) or name in names:
             raise ValueError("gate names must be unique safe identifiers")
         names.add(name)
+        if (gate.get('native_cloud') is True
+                and gate.get('worker_transport') == 'benchmark-cloud-cli' and sys.platform != 'linux'):
+            raise ValueError(f'{name}: native cloud supervision requires Linux before adapter admission')
         command(gate.get("command"))
         if any("--reuse-passed" in arg for arg in gate["command"]):
             raise ValueError("staged runs require fresh execution, not pass-cache reuse")
@@ -279,6 +298,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
     if not latest or gate.get('quick'):
         return None
     receipt = latest
+    # Recovered native evidence has no positive-adoption contract yet.
+    if receipt.get('kind') == 'recovered-native-execution-v1':
+        return None
     try:
         skips = reuse_qualifications(state, gate)
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
@@ -291,8 +313,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
             or attempt.get('stale') or attempt.get('interrupted')
             or receipt.get('status') != 'PASS' or receipt.get('complete') is not True
             or receipt.get('executed') is not True or type(receipt.get('native_exit')) is not int
-            or receipt['native_exit'] != 0 or receipt.get('timed_out') or receipt.get('cancelled')
-            or receipt.get('lingering_group') or receipt.get('cleanup_owner')
+            or receipt['native_exit'] != 0
+            or any(receipt.get(flag) is not False for flag in ('timed_out', 'cancelled', 'lingering_group'))
+            or receipt.get('cleanup_owner')
             or not active or receipt.get('cases') != expected
             or receipt.get('command') != gate['command']
             or receipt.get('execution_binding') != {'input_fingerprint': state['input_fingerprints'].get(gate['name']),
@@ -429,7 +452,26 @@ def execute(gate: dict, state: dict, directory: Path, root: Path, *, local_failu
             gate, state, directory, root, host_admission=admission, host_timeout=remaining))
 
 
+def benchmark_teardown(gate: dict, token: str, started: float, folder: Path, root: Path, attempt: int) -> dict:
+    """Reach the gate's own detached benchmark controllers once its process group ended.
+
+    benchmarks/local.py runs the runner and its isolated stack in sessions of their own, so the
+    gate's group TERM and ten-second group KILL never wait for their cleanup: on 2026-11-05 an
+    interrupted cycle left agentcard-lifecycle's controller running queued paid tasks for ~24
+    minutes. This is the legacy lane teardown bound to this request's token: only token-owned
+    owner records are signalled (the controller first, then its own published shutdown budget,
+    then the last-resort KILL), foreign runs are only reported, and run directories stay in place
+    for the interrupted-worker recovery protocol.
+    """
+    import run_deploy_pipeline as lanes
+    context = (root / gate.get('cwd', '.')).resolve() / '.context' / 'benchmarks'
+    receipt = lanes.teardown_lane(gate['name'], attempt=attempt, token=token, started_epoch=started,
+                                  state_dir=folder, context_root=context, reconcile_runs=False)
+    return lanes._teardown_summary(receipt)
+
+
 def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
+    from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
     token = uuid.uuid4().hex
@@ -461,7 +503,9 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
            "DEPLOY_GATE_RESULT": str(result_path), "DEPLOY_GATE_TOKEN": token,
-           "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1"}
+           "DEPLOY_LANE_SCOPED_REUSE": "0", "DEPLOY_CYCLE_FRESH": "1",
+           # Teardown ownership of every process the gate starts (benchmark_teardown).
+           LANE_TOKEN_ENV: token}
     admission = isolated_request(state, gate, request, root, env)
     if admission:
         request['isolated_validation'] = admission
@@ -469,12 +513,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     started = time.time()
     timeout = gate.get("timeout_seconds", 120 if gate.get("quick") else None)  # declared wins; 120 s is the quick default
     timed_out = cancelled = lingering = False
-    if (gate.get("category") == "agentcard-lifecycle"
-            and gate.get("worker_transport") not in {"local-isolated", "boxes-thread"}):
-        raise ValueError("AgentCard native lifecycle requires its validated worker binding")
-    native_producer = (gate.get("native_cloud") is True
-                       or (gate.get("category") == "agentcard-lifecycle"
-                           and gate.get("worker_transport") in {"local-isolated", "boxes-thread"}))
+    native_producer = gate.get("native_cloud") is True
     lifecycle = "native-producer" if native_producer else "owned"
     native_cleanup_reference = None
     worker_cleanup_owner = None
@@ -540,6 +579,17 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         complete = True
     else:
         reason = "missing complete case receipt"
+    teardown = None
+    abnormal = timed_out or cancelled or lingering or any(
+        isinstance(row, dict) and any(row.get(k) is True for k in ('timed_out', 'cancelled', 'lingering_group'))
+        for row in worker_evidence.values())
+    if host_admission.get('started') is not False and abnormal:
+        try:
+            teardown = benchmark_teardown(gate, token, started, folder, root, state['round'])
+        except (OSError, ValueError) as error:
+            teardown = {'outcome': 'failed', 'error': f'{type(error).__name__}: {error}'}
+        if teardown['outcome'] not in ('clean', 'exited', 'terminated'):
+            lingering = True  # A KILLed or surviving owner leaves its resources unverified.
     if worker_cleanup_owner is not None:
         # The remote owner must be reconciled before any other token may use that worker
         # thread/root: no credit, and the existing resume guard refuses on lingering_group.
@@ -579,6 +629,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result['worker_evidence'] = worker_evidence
     result['resource_skips'] = qualified
     result['worker_result'] = str(result_path) if result_path.exists() else None
+    if teardown is not None:
+        result['teardown'] = teardown
     write(folder / "receipt.json", result)
     return result
 
@@ -652,6 +704,62 @@ def validate_assigned_repair(entry: dict, disposition: str) -> None:
 
 RESOURCE_SKIP = "SKIPPED_WITH_WARNING"
 RESOURCE_EXCLUSIVE = ("repair_agent", "external_provider", "post_merge", "execute_unverified", "assigned_repair")
+# Standing AgentCard release stall (docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-
+# released.md): the exact runtime reason prefix of run_benchmark.AGENTCARD_RELEASE_SKIP_REASON, which records the
+# native SKIPPED row only for a catalog sandbox lifecycle task whose stall matched _agentcard_release_stalled.
+AGENTCARD_RELEASE_STALL_CODE = "agentcard_release_stall"
+AGENTCARD_RELEASE_STALL_REASON = ("AgentCard never released the closed card's org transfer (consumed, "
+                                  "releasedCents=0); skipped under the standing user-approved warning policy")
+
+
+def agentcard_release_stall_task(name: object, root: Path = ROOT, production: bool = False) -> bool:
+    """The same literal catalog predicate the selector prints for this standing warning. Staged smoke qualifies
+    sandbox rows only (the default: production tasks never run there); scripts/deploy_prod.py's production
+    lane asks for the production task with production=True."""
+    import runpy
+    selector = runpy.run_path(str(root / 'agents/benchmarks/select_predeploy_benches.py'))
+    tasks = [task for task in selector['load_tasks'](root / 'agents/benchmarks/tasks.json')
+             if task.name == name and bool(task.production_only) is production]
+    rules = selector['standing_skip_eligibility'](tasks, [name]).get(name, []) if tasks else []
+    return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
+
+
+def unreleased_amount_text(transfer: object) -> str:
+    """The funds a standing release-stall leaves unreleased, from the runner's own typed org-transfer record:
+    transferredCents less releasedCents, with the provider mode (livemode false is the sandbox). An amount the
+    record does not state, or states inconsistently, is UNRECORDED, never zero. Shared by the staged cycle's
+    warning row and the production lane (scripts/deploy_prod.py)."""
+    try:
+        transferred, released = transfer['transferredCents'], transfer['releasedCents']
+        if any(type(v) is not int or v < 0 for v in (transferred, released)) or released > transferred:
+            raise ValueError('unreleased amount is not stated')
+    except (KeyError, TypeError, ValueError):
+        return 'Unreleased: UNRECORDED'
+    livemode = transfer.get('livemode')
+    mode = 'live' if livemode is True else 'sandbox' if livemode is False else 'mode UNRECORDED'
+    return (f"Unreleased: ${(transferred - released) / 100:.2f} {mode} "
+            f"(transferredCents {transferred} / releasedCents {released})")
+
+
+def agentcard_unreleased_text(state: dict, warning: dict) -> str:
+    """The funds a standing release-stall warning leaves unreleased, for its report row.
+
+    Read from the exact native run document the warning is bound to (its sha256 is checked), from the
+    runner's own typed org-transfer record (unreleased_amount_text). An amount the record does not state is
+    UNRECORDED, never zero.
+    """
+    failure = next((f for f in state['failures'] if f['id'] == warning['id']), {})
+    evidence = failure.get('worker_evidence') if isinstance(failure.get('worker_evidence'), dict) else {}
+    try:
+        path = evidence['path']
+        if sha_file(path) != warning['receipt_sha256']:
+            raise ValueError('native run document changed')
+        name = warning['native_row']['name']
+        task = next(t for t in bounded_read(path, 'native run document')['tasks'] if t.get('name') == name)
+        transfer = task['logs']['agentcard_release_stall_lifecycle']['orgTransfer']
+    except (KeyError, StopIteration, TypeError, ValueError, OSError):
+        return 'Unreleased: UNRECORDED'
+    return unreleased_amount_text(transfer)
 
 
 def sidecar_finished_at(failure: dict):
@@ -749,10 +857,11 @@ def revalidate_standing_skips(state: dict) -> None:
 
 
 def validate_resource_skip(entry: dict, failure: dict) -> None:
-    """Third-party compute-token exhaustion: the native SKIPPED row stays FAIL in the record and is
-    projected as a warning, never a pass. The confirmation must bind the exact row the same way
-    scripts/validate_predeploy_receipts.py does (its receipt predicate, lines 141-152), restricted to
-    reason_code compute_quota_exhausted for now.
+    """Third-party compute-token exhaustion, or the standing AgentCard release stall of a sandbox lifecycle
+    smoke task: the native SKIPPED row stays FAIL in the record and is projected as a warning, never a pass.
+    The confirmation must bind the exact row the same way scripts/validate_predeploy_receipts.py does (its
+    receipt predicate, lines 141-152), restricted to reason_code compute_quota_exhausted or
+    agentcard_release_stall.
     """
     from validate_predeploy_receipts import RESOURCE_CODES, finite
     proof = entry.get("resource_skip")
@@ -773,18 +882,24 @@ def validate_resource_skip(entry: dict, failure: dict) -> None:
     finished = failure.get("finished_at")
     if finished is None:
         finished = sidecar_finished_at(failure)
+    if proof.get("reason_code") == AGENTCARD_RELEASE_STALL_CODE:
+        # A sandbox AgentCard lifecycle smoke task's exact standing release stall: same warning projection.
+        cause = (isinstance(reason, str) and reason.startswith(AGENTCARD_RELEASE_STALL_REASON)
+                 and agentcard_release_stall_task(row.get("name")))
+    else:
+        cause = (proof.get("reason_code") in RESOURCE_CODES and proof.get("reason_code") == "compute_quota_exhausted")
     allowed = (isinstance(sha, str) and bool(sha) and proof.get("receipt_sha256") == sha
                and isinstance(reason, str) and bool(reason.strip()) and proof.get("receipt_reason") == reason
-               and proof.get("resource_scope") == "third_party"
-               and proof.get("reason_code") in RESOURCE_CODES and proof.get("reason_code") == "compute_quota_exhausted"
+               and proof.get("resource_scope") == "third_party" and cause
                and proof.get("exclusive_cause") is True
                and isinstance(proof.get("provider"), str) and bool(proof["provider"].strip())
                and isinstance(proof.get("evidence"), str) and bool(proof["evidence"].strip())
                and finite(proof.get("confirmed_at")) and finite(finished) and proof["confirmed_at"] >= finished)
     if not allowed:
         raise ValueError("resource confirmation does not bind the exact native SKIPPED row "
-                         "(receipt sha, exact reason, third_party compute_quota_exhausted, exclusive cause, "
-                         "provider, evidence, confirmed_at after the row finished)")
+                         "(receipt sha, exact reason, third_party compute_quota_exhausted or the sandbox "
+                         "agentcard_release_stall, exclusive cause, provider, evidence, confirmed_at after the row "
+                         "finished)")
 
 
 def adjudicate(state: dict, report: dict) -> None:
@@ -1284,6 +1399,45 @@ def launch_rca(path: Path, launcher: list[str]) -> None:
         write(receipt, value)
 
 
+CLOUD_SMOKE, CLOUD_SMOKE_PREREQUISITE = 'smoke', 'cloudbench-controller'
+
+
+def cloud_smoke_prerequisite(plan: dict, state: dict, selected: list[dict]) -> dict | None:
+    """The one cross-gate order in a phase: paid cloud smoke waits for the cloudbench-controller gate.
+
+    Original /deploy Step 4cb (DEPRECATED_deploy.md): when the cloudbench-controller gate is planned (it is selected only when
+    cloud benchmark scripts changed), its regressions must pass on this source before any paid cloud
+    run. Returns that planned gate while it is not already credited for this source and the phase runs
+    smoke; None otherwise. Every other gate stays unordered.
+    """
+    if not any(g.get('category') == CLOUD_SMOKE for g in selected):
+        return None
+    gate = next((g for g in plan['gates'] if g.get('category') == CLOUD_SMOKE_PREREQUISITE), None)
+    return None if gate is None or reusable_full_pass(state, gate) else gate
+
+
+def prerequisite_passed(result: dict, state: dict) -> bool:
+    """This phase's prerequisite receipt is a complete, clean PASS on the cycle's source."""
+    return (result.get('status') == 'PASS' and result.get('complete') is True
+            and result.get('executed') is not False and result.get('source') == state['source']
+            and not any(result.get(k) for k in ('timed_out', 'cancelled', 'lingering_group', 'cleanup_owner')))
+
+
+def cloud_smoke_held(gate: dict, why: str) -> dict:
+    """Trace of a smoke gate that was not started this phase (no paid cloud run, no pass credit)."""
+    return {"gate": gate["name"], "prerequisite": CLOUD_SMOKE_PREREQUISITE,
+            "reason": f"paid cloud smoke not started: {CLOUD_SMOKE_PREREQUISITE} has not passed on this source "
+                      f"({why}; the controller gate guards paid cloud smoke)"}
+
+
+def cloud_smoke_blocked(gate: dict, state: dict, held: dict) -> dict:
+    """Blocking, unexecuted smoke receipt for a prerequisite that neither passed cleanly nor failed a case,
+    so the phase cannot advance to READY without the paid run."""
+    return {"gate": gate["name"], "status": "FAIL", "complete": False, "executed": False,
+            "cases": {c: "UNVERIFIED" for c in gate["checks"]}, "source": state["source"],
+            "prerequisite": held["prerequisite"], "reason": held["reason"]}
+
+
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
               launcher: list[str] | None = None, *, independent: bool = False,
               excluded_roots=()) -> None:
@@ -1308,6 +1462,18 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                 raise ValueError('prior independent worker request has no terminal receipt')
     else:
         selected = records(plan, state)
+    held_rows = []
+    prerequisite = cloud_smoke_prerequisite(plan, state, selected)
+    held = next((g for g in selected if g.get('category') == CLOUD_SMOKE), None) if prerequisite else None
+    if prerequisite is not None and all(g['name'] != prerequisite['name'] for g in selected):
+        if independent:
+            # The prerequisite is itself under unresolved triage: observe everything else, never pay
+            # for cloud smoke on a source whose controller regressions have not passed.
+            selected = [g for g in selected if g is not held]
+            held_rows.append(cloud_smoke_held(held, 'it is pending triage'))
+            held = prerequisite = None
+        else:
+            selected = [*selected, prerequisite]  # run it first: smoke is held until it passes
     if state['phase'] in {'initial', 'failed-gates', 'final'}:
         selected_names = {g['name'] for g in selected}
         for gate in plan['gates']:
@@ -1336,25 +1502,52 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                       if g.get('worker_transport') == 'local-isolated'}
     with ThreadPoolExecutor(max_workers=max(1, len(selected))) as rc_pool:
         with ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool:
-            futures = {pool.submit(execute, gate, state, directory, root,
-                local_failure=local_failures.get(local_admission_root(gate, root))
-                    if gate.get('worker_transport') == 'local-isolated' else None): gate for gate in selected}
-            for future in as_completed(futures):
-                gate = futures[future]
-                try:
-                    result = future.result()
-                except (ValueError, OSError) as error:
-                    result = {"gate": gate["name"], "status": "FAIL", "complete": False,
-                              "cases": {c: "UNVERIFIED" for c in gate["checks"]},
-                              "source": state["source"], "reason": str(error)}
+            def submit(gate):
+                return pool.submit(execute, gate, state, directory, root,
+                    local_failure=local_failures.get(local_admission_root(gate, root))
+                        if gate.get('worker_transport') == 'local-isolated' else None)
+
+            def record(result):
                 results.append(result)
                 fresh = failed_cases(state, [result])
                 state["live_failures"].extend(fresh)
                 write(directory / "cycle.json", state)
                 # Publish and dispatch each failure while healthy siblings run.
                 for path in rca_requests(state, directory):
-                    if launcher and not CANCEL.is_set() and path.stem in {f["id"] for f in fresh}:
+                    # A smoke gate blocked by its prerequisite has nothing of its own to diagnose.
+                    if (launcher and not CANCEL.is_set() and not result.get('prerequisite')
+                            and path.stem in {f["id"] for f in fresh}):
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
+
+            futures = {submit(gate): gate for gate in selected if gate is not held}
+            pending = set(futures)
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    gate = futures[future]
+                    try:
+                        result = future.result()
+                    except (ValueError, OSError) as error:
+                        result = {"gate": gate["name"], "status": "FAIL", "complete": False,
+                                  "cases": {c: "UNVERIFIED" for c in gate["checks"]},
+                                  "source": state["source"], "reason": str(error)}
+                    record(result)
+                    if held is None or gate["name"] != prerequisite["name"]:
+                        continue
+                    if prerequisite_passed(result, state) and not CANCEL.is_set():
+                        started = submit(held)
+                        futures[started] = held
+                        pending.add(started)
+                    elif CANCEL.is_set():
+                        held_rows.append(cloud_smoke_held(held, 'the cycle was interrupted'))
+                    elif failed_cases(state, [result]):
+                        # The prerequisite's own failure blocks this phase; no smoke failure of its own.
+                        held_rows.append(cloud_smoke_held(held, f'its result was {result.get("status")}'))
+                    else:
+                        # Neither a clean pass nor a failed case: block, never advance to READY unpaid.
+                        reason = cloud_smoke_held(held, 'its receipt was not a complete clean pass')
+                        held_rows.append(reason)
+                        record(cloud_smoke_blocked(held, state, reason))
         failures = state.pop("live_failures")
         if independent:
             changed = (source(root) != state['source'] or environment_digest() != state['environment']
@@ -1376,6 +1569,8 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             state.update(phase="stale", ready=False)
         else:
             advance(state, results, failures)
+        if held_rows:
+            state['attempts'][-1]['held'] = held_rows
         for job in launched:
             try:
                 job.result()
@@ -1402,15 +1597,19 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
         preserve_contract(gate, after[name])
         if gate['checks'] != after[name]['checks']:
             raise ValueError('quick refresh must preserve every original check')
-    names = {'eslint', 'format', 'typescript', 'backend-structural'}
+    required = {'eslint', 'format', 'typescript', 'backend-structural'}
     quick = [g for g in plan['gates'] if g.get('quick')]
-    if {g['name'] for g in quick} != names or len(quick) != 4:
-        raise ValueError('only the four fixed non-live quick gates are allowed')
+    names = {g['name'] for g in quick}
+    # A darwin plan whose mac-app/ changed adds the conditional mac-app-static verifier (deploy_test_plan.py).
+    if names not in (required, required | {'mac-app-static'}) or len(quick) != len(names):
+        raise ValueError('only the four fixed non-live quick gates (plus mac-app-static) are allowed')
     typescript = ['bash', '-c', 'mkdir -p ../.context/tsbuildinfo && npx tsc --noEmit --incremental '
                   '--tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo']
+    mac_static = ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check']
     for gate in quick:
         name, argv = gate['name'], gate['command']
-        expected = typescript if name == 'typescript' else ['npm', 'run', 'test:structural']
+        expected = (typescript if name == 'typescript' else mac_static if name == 'mac-app-static'
+                    else ['npm', 'run', 'test:structural'])
         if name in {'eslint', 'format'}:
             expected = [argv[0], 'scripts/check_deploy_static.py', 'lint' if name == 'eslint' else 'format']
             if len(argv) == 5 and argv[3:] == ['--base', plan.get('base')]:
@@ -1418,7 +1617,8 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
             if argv[0] not in {sys.executable, '/usr/bin/python3'}:
                 raise ValueError('quick static interpreter changed')
         if (gate.get('category') != name or gate['checks'] != [name] or argv != expected
-                or gate.get('cwd', '.') != ('.' if name in {'eslint', 'format'} else 'back-end')
+                or gate.get('cwd', '.') != ('.' if name in {'eslint', 'format'}
+                                            else 'mac-app' if name == 'mac-app-static' else 'back-end')
                 or gate.get('env', {}) or any(gate.get(k) for k in
                     ('worker', 'worker_transport', 'worker_recipe', 'native_cloud', 'native_backend', 'case_protocol'))):
             raise ValueError('quick recipe is not the fixed non-live command')
@@ -1451,11 +1651,11 @@ def triage_quick(plan: dict, state: dict, directory: Path, root: Path) -> None:
             or input_fingerprints(plan, root) != working['input_fingerprints']
             or digest(state) != original or (directory / 'cycle.json').read_bytes() != saved):
         raise ValueError('quick observation changed source/environment or original triage')
-    if (len(results) != 4 or {r['gate'] for r in results} != names or any(
+    if (len(results) != len(names) or {r['gate'] for r in results} != names or any(
             r.get('status') != 'PASS' or r.get('complete') is not True or r.get('executed') is not True
             or r.get('source') != plan['source'] or r.get('lingering_group') or r.get('cleanup_owner')
             or r.get('cancelled') or r.get('timed_out') or r.get('cases') != {r['gate']: 'PASS'} for r in results)):
-        raise ValueError('all four quick observations must complete; original triage retained')
+        raise ValueError('every quick observation must complete; original triage retained')
     state['attempts'].append({'phase': 'quick', 'source': plan['source'], 'results': results,
                               'triage_refresh': True, 'plan_digest': digest(plan)})
     # No source/plan/round/pending/owner rebinding and no advance() or readiness credit.
@@ -1532,7 +1732,7 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                     'front-end/.env', 'front-end/.env.local'):
             origin, destination = root / rel, Path(after['worker_root']) / rel
             if (origin.is_file() != destination.is_file()
-                    or origin.is_file() and sha_file(origin) != sha_file(destination)):
+                    or origin.is_file() and runtime_config_sha256(origin) != runtime_config_sha256(destination)):
                 raise ValueError('local worker runtime configuration differs from the frozen inputs')
         changed.append(name)
     if not changed:
@@ -1766,6 +1966,11 @@ def main(argv: list[str] | None = None) -> int:
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
+            journal = directory / 'settlement-journal.json'
+            if journal.exists():
+                committed = directory / 'settlement-committed.json'
+                if not committed.is_file() or read(committed) != {'journal_sha256': sha_file(journal)}:
+                    raise ValueError('pending settlement journal; resume its exact recovery before normal actions')
             state_path = directory / "cycle.json"
             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
             if args.action == "init" and state_path.exists():
@@ -1865,7 +2070,10 @@ def main(argv: list[str] | None = None) -> int:
                         proof = w["confirmation"]
                         text += (f"- {w['check']} — {proof['provider']}: {proof['receipt_reason']} [{proof['reason_code']}]"
                                  f" · Evidence: {proof['evidence']} · Confirmed at: {proof['confirmed_at']}"
-                                 f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}\n")
+                                 f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}")
+                        if proof['reason_code'] == AGENTCARD_RELEASE_STALL_CODE:
+                            text += f" · {agentcard_unreleased_text(state, w)} (followup: unreleased funds stay open)"
+                        text += "\n"
                 (directory / "report.md").write_text(text)
                 print(text, end="")
                 return 0

@@ -18,8 +18,9 @@ import type { TerminalView } from '../types';
 
 export function useTerminalDerivedState(agents: ReturnType<typeof useTerminalAgents>) {
   const activeBrowserPanels = useMemo(
-    () => computeActiveBrowserPanels(agents.messages),
-    [agents.messages],
+    () =>
+      agents.agentDetail?.status === 'PAUSED' ? [] : computeActiveBrowserPanels(agents.messages),
+    [agents.agentDetail?.status, agents.messages],
   );
   const pendingApproval = useMemo(() => derivePendingApproval(agents.messages), [agents.messages]);
   const pendingGates = useMemo(() => derivePendingGates(agents.messages), [agents.messages]);

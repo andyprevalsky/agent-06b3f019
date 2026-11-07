@@ -1,7 +1,10 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
+  DEFAULT_MIN_SANDBOX_FLOAT_CENTS,
   ensureAgentCardSandboxFloat,
   ensureBenchmarkOrgCardholder,
   resolveBenchmarkCardholderId,
@@ -83,7 +86,57 @@ function cardholdersResult(cardholders: Array<{ id: string; email?: string }>): 
   };
 }
 
+/** The predeploy selector's hard cap (agents/benchmarks/select_predeploy_benches.py DEFAULT_CAP). */
+const PREDEPLOY_HARD_CAP = 20;
+
 async function main(): Promise<void> {
+  // The sandbox lifecycle tasks run concurrently in smoke, one card per guest: the default floor must
+  // cover a full-cap selection each holding the largest sandbox lifecycle reservation at once.
+  {
+    const catalog = JSON.parse(
+      readFileSync(path.resolve(__dirname, '../../../../agents/benchmarks/tasks.json'), 'utf8')
+    ) as Array<{
+      name: string;
+      tags?: string[];
+      production_only?: boolean;
+      expected_payment_receipt?: { totalCents?: number };
+    }>;
+    const sandbox = catalog.filter(
+      (task) => task.tags?.includes('agentcard-lifecycle-sandbox') && task.production_only !== true
+    );
+    const smoke = sandbox.filter((task) => task.tags?.includes('smoke')).map((task) => task.name);
+    assert.deepEqual(smoke.sort(), [
+      'agent-payment-abandonment',
+      'agent-payment-idempotent-abandonment',
+      'agent-payment-setup-resume',
+      'agent-payment-test-shop',
+    ]);
+    const largest = Math.max(
+      ...sandbox.map((task) => task.expected_payment_receipt?.totalCents ?? 0)
+    );
+    assert.ok(largest > 0, 'sandbox lifecycle tasks declare their reservation');
+    assert.ok(
+      DEFAULT_MIN_SANDBOX_FLOAT_CENTS >= PREDEPLOY_HARD_CAP * largest,
+      `default floor ${DEFAULT_MIN_SANDBOX_FLOAT_CENTS} < ${PREDEPLOY_HARD_CAP} x ${largest}`
+    );
+    const saved = process.env.BENCHMARK_AGENTCARD_MIN_FLOAT_CENTS;
+    delete process.env.BENCHMARK_AGENTCARD_MIN_FLOAT_CENTS;
+    try {
+      const funded = async () =>
+        walletResult({
+          balance: DEFAULT_MIN_SANDBOX_FLOAT_CENTS,
+          available: DEFAULT_MIN_SANDBOX_FLOAT_CENTS,
+        });
+      await ensureAgentCardSandboxFloat(undefined, funded);
+      const short = async () =>
+        walletResult({ balance: 50_000, available: DEFAULT_MIN_SANDBOX_FLOAT_CENTS - 1 });
+      await assert.rejects(ensureAgentCardSandboxFloat(undefined, short), /sandbox pool too low/);
+    } finally {
+      if (saved === undefined) delete process.env.BENCHMARK_AGENTCARD_MIN_FLOAT_CENTS;
+      else process.env.BENCHMARK_AGENTCARD_MIN_FLOAT_CENTS = saved;
+    }
+  }
+
   // A sufficiently funded sandbox pool reads clean via client-credential MCP.
   {
     const calls: Array<{ name: string; args: Record<string, unknown> }> = [];

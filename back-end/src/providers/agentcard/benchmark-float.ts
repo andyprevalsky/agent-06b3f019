@@ -11,15 +11,14 @@ import { retryWithBackoff } from '../retry';
 /**
  * Minimum sandbox pool the benchmark payment fixture requires, in cents.
  *
- * The four sandbox lifecycle tasks each hold at most one card at a time
- * (max-concurrency 1) for up to ~$44, releasing the hold on abandon/close, so
- * $100 is >2x the largest single reservation with margin for sequential runs.
- * The retired v1 flow topped the wallet up to $500 via a `test-fund` REST
- * endpoint; v2 has no programmatic sandbox funding (the pool is provisioned via
- * the dashboard / USDC deposit), so this is a *verification* floor, not a
- * top-up target. Override with BENCHMARK_AGENTCARD_MIN_FLOAT_CENTS.
+ * The sandbox lifecycle tasks are smoke tasks: every guest of a parallel smoke
+ * fleet may hold one card for up to ~$44 at the same moment, so the floor covers
+ * the predeploy hard cap (20 tasks) each holding the largest sandbox lifecycle
+ * reservation, with margin. v2 has no programmatic sandbox funding (the pool is
+ * provisioned via the dashboard / USDC deposit), so this is a *verification*
+ * floor, not a top-up target. Override with BENCHMARK_AGENTCARD_MIN_FLOAT_CENTS.
  */
-const DEFAULT_MIN_SANDBOX_FLOAT_CENTS = 10_000;
+export const DEFAULT_MIN_SANDBOX_FLOAT_CENTS = 100_000;
 const MAX_RATE_LIMIT_ATTEMPTS = 4;
 const MAX_RATE_LIMIT_WAIT_MS = 65_000;
 

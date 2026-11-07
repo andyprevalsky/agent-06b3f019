@@ -400,7 +400,7 @@ describe('api.ts', () => {
     });
 
     it('pauseAgent resolves on success', async () => {
-      await expect(pauseAgent('a')).resolves.toBeUndefined();
+      await expect(pauseAgent('a')).resolves.toEqual({ user_control_revision: undefined });
     });
 
     it('pauseAgent throws on failure', async () => {

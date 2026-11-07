@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "5239b7aee853d438ee980ab94559fbd2d76f7e2e",
+      "status": "completed",
+      "started_at": "2026-11-07T02:56:21.343736+00:00",
+      "result": "unavailable",
+      "finished_at": "2026-11-07T03:27:05.425902+00:00"
+    },
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "e1475b6e034cd46a4e8872867311bb2427c7739b",
+      "status": "completed",
+      "started_at": "2026-11-07T03:27:05.536717+00:00",
+      "replaces": "5239b7aee853d438ee980ab94559fbd2d76f7e2e",
+      "result": "clean",
+      "finished_at": "2026-11-07T03:55:29.134284+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "337aa6318515680028b008ec154af7707cf6fead",
+      "status": "completed",
+      "started_at": "2026-11-07T05:06:25.552575+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-07T06:59:38.852459+00:00"
+    }
+  ]
+}

@@ -66,6 +66,14 @@ export function validateUpdateAgentPayload(payload: unknown): string | null {
   if (p.tokenCount !== undefined && typeof p.tokenCount !== 'number') {
     return `Invalid 'tokenCount' type (got ${typeof p.tokenCount})`;
   }
+  if (
+    p.userControlRevision !== undefined &&
+    (typeof p.userControlRevision !== 'number' ||
+      !Number.isSafeInteger(p.userControlRevision) ||
+      p.userControlRevision < 0)
+  ) {
+    return "Invalid 'userControlRevision'";
+  }
   return null;
 }
 

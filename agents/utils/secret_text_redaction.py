@@ -2,6 +2,7 @@
 
 import json
 import re
+from functools import lru_cache
 
 # Includes env-style suffixes such as SECRET_KEY, SECRET_ACCESS_KEY and PRIVATE_KEY.
 _KEY = (
@@ -82,7 +83,25 @@ def _redact_patterns_preserving_trusted(text: str, trusted_placeholders: frozens
     return "".join(piece if piece in trusted_placeholders else _redact_patterns(piece) for piece in pieces)
 
 
+# Every model turn re-renders the whole history, so the same tool result is
+# redacted once per turn (O(turns^2) regex passes). Redaction is pure in
+# (text, trusted_placeholders); memoize the ordinary-sized texts, bounded in
+# entries and per-entry size so worker memory stays bounded.
+_MEMO_MAX_CHARS = 16_384
+
+
 def redact_sensitive_text(text: str, *, trusted_placeholders: frozenset[str] = frozenset()) -> str:
+    if len(text) <= _MEMO_MAX_CHARS:
+        return _redact_sensitive_text_memo(text, trusted_placeholders)
+    return _redact_sensitive_text(text, trusted_placeholders)
+
+
+@lru_cache(maxsize=4096)
+def _redact_sensitive_text_memo(text: str, trusted_placeholders: frozenset[str]) -> str:
+    return _redact_sensitive_text(text, trusted_placeholders)
+
+
+def _redact_sensitive_text(text: str, trusted_placeholders: frozenset[str]) -> str:
     if text.lstrip().startswith(("{", "[", '"')):
         try:
             parsed = json.loads(text)

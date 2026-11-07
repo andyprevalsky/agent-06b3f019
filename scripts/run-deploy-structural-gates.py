@@ -279,6 +279,11 @@ GATES = (
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py")),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
     Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),
+    Gate("deploy-cli", ("python3", "scripts/tests/deploy-cli.test.py")),
+    Gate("deploy-gates", ("python3", "scripts/tests/deploy-gates.test.py")),
+    Gate("deploy-test-github", ("python3", "scripts/tests/deploy-test-github.test.py")),
+    Gate("deploy-cloud-smoke-speed", ("python3", "scripts/tests/deploy-cloud-smoke-speed.test.py")),
+    Gate("deploy-prod", ("python3", "scripts/tests/deploy-prod.test.py")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
         "cloudbench-controller-linux",

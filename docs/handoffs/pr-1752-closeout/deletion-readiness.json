@@ -1,0 +1,27 @@
+{
+ "schema_version": 1,
+ "pr": 1752,
+ "deployed_sha": "818f3669f43e0282e19dc807db15026732a9a5a0",
+ "gated_source": "db7cce8d239c68ad6e6d708da344fef0021f22fe",
+ "intended_source_only_local": false,
+ "required_records_only_local": false,
+ "archives_verified": {
+  "core": 1188,
+  "workers": 46169,
+  "cloud": 6907,
+  "control": 33
+ },
+ "representative_restore": "core restored to an empty dir; rose/.context/deploy-pipeline/cycle.json sha256 matched",
+ "key_recovery": "same escrow as pr-1739-closeout (agents/.env TRACE_ARCHIVE_ENCRYPTION_KEY_B64 / managed .context/pr1634-archive-recovery.env)",
+ "configuration_recovery": "managed project env (boxes.dev) supplies agents/.env and back-end/.env; nothing unique on this box",
+ "resources": {
+  "cloud_machines": "no Fly Machine or volume carries any of this deploy's fleet owner tokens (checked after each campaign)",
+  "local_processes": "own Hubs, 8765 test listeners and churn processes TERMed; no worker processes",
+  "systemd_units": "rose-deploy-1752-* transient units all inactive",
+  "keep_awake": "none held"
+ },
+ "protected_untouched": [
+  "Freedom",
+  "other workspaces' Machines and runs"
+ ]
+}

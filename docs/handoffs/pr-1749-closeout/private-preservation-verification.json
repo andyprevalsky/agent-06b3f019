@@ -1,0 +1,98 @@
+{
+ "format": "PR1749-PRIVATE-PRESERVATION-VERIFICATION-V1",
+ "bucket": "trace-archive",
+ "key_prefix": "devbox-closeout-private/pr1749-3e770c9e/",
+ "uploader": "docs/handoffs/whm-b07d9037-preservation/private_archive.py (sha256 2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4, format ROSE-PRIVATE-TAR-GCM-V1)",
+ "archives": {
+  "core": {
+   "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-core.tar.gz.aesgcm",
+   "ciphertext_sha256": "ffc8a307a2b5e91ed88c1c3b84a9a94021cd0ef5724cbf8d2e2c29707f503608",
+   "gzip_sha256": "577d10d387d343519a8e45a63cc6e71d79b19439142d32f86c4bd2087ad11625",
+   "manifest_sha256": "d71f78492997763d634289802934bfc3b757d8212ad25d00e368a827a09cc759",
+   "stored_bytes": 31918997,
+   "files": 4356,
+   "original_bytes": 164658398,
+   "frames": 4,
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "full_readback_verified": true,
+   "independent_verify_authenticated_files": 4356
+  },
+  "workers": {
+   "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-workers.tar.gz.aesgcm",
+   "ciphertext_sha256": "8b2325385fd92fc7dd87a40726cc97557b4a96c25f85949a9532907e3b9c898e",
+   "gzip_sha256": "73f30c29e869cf3030db538295055d35dc2bd01813b743296ba0d633bbfe3aae",
+   "manifest_sha256": "b3a6904a5f5d7a5c4ae81816ffe5ccbbeb4742f0c6f5a312a2800cb0aa2b65c5",
+   "stored_bytes": 3447866873,
+   "files": 10551,
+   "original_bytes": 7083611689,
+   "frames": 412,
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "full_readback_verified": true,
+   "independent_verify_authenticated_files": 10551
+  },
+  "cloud": {
+   "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-cloud.tar.gz.aesgcm",
+   "ciphertext_sha256": "fd487c39da6938b9fa7f1f46de7448c1f6a409324c65c863d450a5aea78b81d4",
+   "gzip_sha256": "ed8db42834dd45e7778c277887935cd18737b5a24615effcb17e0b7f561a8412",
+   "manifest_sha256": "e7d260d860d6a5a766e4d2c20f2bbfc7e434e4802854fe7a9eb9a97eebc5cdb8",
+   "stored_bytes": 2634446917,
+   "files": 4578,
+   "original_bytes": 4453918287,
+   "frames": 315,
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "full_readback_verified": true,
+   "independent_verify_authenticated_files": 4578
+  },
+  "control": {
+   "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-control.tar.gz.aesgcm",
+   "ciphertext_sha256": "006c978fbb7b037fa4d5fd1284733a66105330b24418a3f59216a4b230f75bd6",
+   "gzip_sha256": "165152773a5d89f66ef1303c5cef302c287bd394f743303a634d859851690db7",
+   "manifest_sha256": "302e8cf6b95045a68ec3ea5ffc5ac5475b6e9ce55afc42d8795d9a79d8d9115d",
+   "stored_bytes": 210668,
+   "files": 20,
+   "original_bytes": 3281048,
+   "frames": 1,
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "full_readback_verified": true,
+   "independent_verify_authenticated_files": 20
+  },
+  "scratch": {
+   "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-scratch.tar.gz.aesgcm",
+   "ciphertext_sha256": "95af72645d9176c3aae50cbcd56dfd8e2c83b8d2f001f69155aa02b1d8de9dab",
+   "gzip_sha256": "310569858f053c6524671b4383c017f6b5a32f13be6464934689dca07c85f8d8",
+   "manifest_sha256": "dccb2d351592b358826c4e9d17410349d53d9fdd9c75be5609a6699e04044964",
+   "stored_bytes": 367513,
+   "files": 72,
+   "original_bytes": 3251438,
+   "frames": 1,
+   "encryption_key_id": "trace-archive-prod-2026-07-03",
+   "full_readback_verified": true,
+   "independent_verify_authenticated_files": 72
+  }
+ },
+ "restore_test": {
+  "archive": "core",
+  "files_restored": 4356,
+  "files_compared_to_originals": 4356,
+  "mismatches": 0,
+  "destination": "/var/tmp/pr1749-restore-test (created empty, removed after the check)"
+ },
+ "key": {
+  "escrow": ".context/pr1634-archive-recovery.env (PR1634_ARCHIVE_RECOVERY_KEY_B64) and agents/.env TRACE_ARCHIVE_ENCRYPTION_KEY_B64, both project-managed (dvb-onbox env list)",
+  "decoded_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "escrow_equals_live_key": true,
+  "key_id": "trace-archive-prod-2026-07-03"
+ },
+ "pre_archived_evidence": {
+  "lists": [
+   ".context/deploy-cloud/ARCHIVED-EVIDENCE.sha256",
+   "/var/tmp/rdw/backend-coverage-blackbox/.context/test-runs/ARCHIVED-EVIDENCE.sha256",
+   "/var/tmp/rdw/backend-coverage-blackbox/.context/deploy-backend/ARCHIVED-EVIDENCE.sha256"
+  ],
+  "tarballs": 16,
+  "sha256sum_check_ok": 16,
+  "note": "the in-place evidence tarballs were re-hashed against their recorded lists before capture and archived as-is"
+ },
+ "not_archived": "the escrow key file itself; symlinks are listed with targets in list-skipped.json inside the control archive; caches/dependencies are reproducible",
+ "verified_at": "2026-11-07T15:08:22Z"
+}

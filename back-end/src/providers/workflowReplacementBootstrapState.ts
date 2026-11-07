@@ -94,6 +94,7 @@ export async function finalizeWorkflowReplacementBootstrap(
         temporalWorkflowId: true,
         workflowReplacementToken: true,
         status: true,
+        userControlPaused: true,
         statusMessage: true,
         tokenCount: true,
         tokensIn: true,
@@ -110,8 +111,14 @@ export async function finalizeWorkflowReplacementBootstrap(
       return { outcome: 'already_acknowledged', status: agent.status };
     }
 
-    const controlStateWon = agent.status !== 'STARTING_UP';
-    const finalStatus = controlStateWon ? agent.status : (restoredState?.status ?? agent.status);
+    const terminal = agent.status === 'COMPLETED' || agent.status === 'FAILED';
+    const userPaused = agent.userControlPaused && !terminal;
+    const controlStateWon = userPaused || agent.status !== 'STARTING_UP';
+    const finalStatus = userPaused
+      ? 'PAUSED'
+      : controlStateWon
+        ? agent.status
+        : (restoredState?.status ?? agent.status);
     const result = await tx.agent.updateMany({
       where: {
         id: agentId,
@@ -137,6 +144,8 @@ export async function finalizeWorkflowReplacementBootstrap(
                 restoredState.iterationOffset ?? 0
               ),
             }),
+        ...(userPaused ? { status: 'PAUSED' } : {}),
+        ...(terminal ? { userControlPaused: false } : {}),
         workflowReplacementToken: null,
         workflowReplacementState: Prisma.DbNull,
         staleTemporalWorkflowId: null,

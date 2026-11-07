@@ -1,3 +1,4 @@
+import AdmZip from 'adm-zip';
 import {
   uploadFileToIntegrations,
   ctx,
@@ -182,6 +183,50 @@ export async function testLinkedinUpload_nonZipFile() {
   assertStatus(res.status, 400, res.data);
   const body = res.data as { error: string };
   assert(body.error.includes('.zip'), `Expected zip error message, got: ${body.error}`);
+}
+
+// --- LinkedIn upload: first installment of the export (no Connections.csv) ---
+
+/**
+ * LinkedIn's first installment (Profile, Registration, ... but no Connections.csv)
+ * arrives minutes after the request. Importing it used to reply "imported
+ * successfully" with 0 contacts and mark LinkedIn connected, so the export agent
+ * stopped before the archive with connections was ready. It is refused, without
+ * touching the integration, and the reply says where the full archive comes from.
+ */
+export async function testLinkedinUpload_firstInstallmentWithoutConnections_422() {
+  const zip = new AdmZip();
+  zip.addFile('Profile.csv', Buffer.from('First Name,Last Name,Headline\nAda,Owner,Engineer\n'));
+  zip.addFile('Registration.csv', Buffer.from('Registered At\n1/1/20, 9:00 AM\n'));
+  const before = await prisma.integration.findFirst({
+    where: { userId: ctx.userId1!, name: 'linkedin' },
+    select: { status: true, updatedAt: true },
+  });
+  const form = new FormData();
+  form.append(
+    'file',
+    new Blob([new Uint8Array(zip.toBuffer())], { type: 'application/zip' }),
+    'Basic_LinkedInDataExport_10-28-2026.zip.zip'
+  );
+  const response = await fetch(`${BASE_URL}/api/integrations/linkedin/upload`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${ctx.accessToken1!}` },
+    body: form,
+  });
+  const body = (await response.json()) as { error?: string };
+  assertStatus(response.status, 422, body);
+  assert(
+    body.error?.includes('Connections.csv') === true && body.error.includes('first installment'),
+    `Expected the first-installment explanation, got: ${body.error}`
+  );
+  const after = await prisma.integration.findFirst({
+    where: { userId: ctx.userId1!, name: 'linkedin' },
+    select: { status: true, updatedAt: true },
+  });
+  assert(
+    JSON.stringify(after) === JSON.stringify(before),
+    `A refused archive must not write the integration: ${JSON.stringify({ before, after })}`
+  );
 }
 
 // --- Contacts upload: non-vcf file validation ---

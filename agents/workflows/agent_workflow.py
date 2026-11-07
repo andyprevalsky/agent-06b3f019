@@ -27,6 +27,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
     from domains.agent_messaging.handler import kill_agent, send_message_to_agent
+    from domains.report_bug.handler import report_bug, with_report_bug
     from domains.spawn_agent.config import is_demo_cache_task, is_oai_demo_mass_agent_task
     from domains.spawn_agent.handler import (  # Unified: browser/code/general_purpose/explore
         drain_fast_mode_explores,
@@ -261,6 +262,7 @@ TOOL_EXECUTORS = {
     "grep": grep,
     "send_message_to_agent": send_message_to_agent,
     "kill_agent": kill_agent,
+    "report_bug": report_bug,
 }
 
 # Tools requiring user approval before execution
@@ -2667,10 +2669,7 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         # =====================================================================
         # Tool lists from centralized source of truth
         # =====================================================================
-        plan_tools = PLAN_PHASE_TOOLS
-        execute_tools = (
-            ["google_workspace_run", "attempt_completion"] if matches_demo_goal(self.goal) else EXECUTE_PHASE_TOOLS
-        )
+        plan_tools, execute_tools = self._phase_tool_lists()
 
         # Determine whether to skip PLAN phase and/or DAG. ``execute_dag_resume``
         # is a local checkpoint/debug phase: it keeps the persisted plan, marks
@@ -3606,6 +3605,12 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         """
         if agent_config:
             self.project_context_section = render_project_context(agent_config.get("project"))
+
+    def _phase_tool_lists(self) -> Tuple[List[str], List[str]]:
+        """(PLAN tools, EXECUTE tools) for this agent; root-only tools join for eligible roots."""
+        if matches_demo_goal(self.goal):
+            return list(PLAN_PHASE_TOOLS), ["google_workspace_run", "attempt_completion"]
+        return with_report_bug(PLAN_PHASE_TOOLS, self), with_report_bug(EXECUTE_PHASE_TOOLS, self)
 
     async def build_system_prompt(self) -> str:
         """Build system prompt for the current phase.

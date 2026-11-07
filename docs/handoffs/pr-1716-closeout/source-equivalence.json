@@ -1,0 +1,7 @@
+{
+  "validation_source": "08f519dbfb1b782d403fa4d329a2cf8094606ea0",
+  "production_M": "060fa655d16476e0ff84727bef5b4e188bee349d",
+  "comparison": "git diff --name-only C4 M; Git compares blob content and mode",
+  "differing_paths": [],
+  "all_nonhistory_source_bytes_and_modes_identical": true
+}

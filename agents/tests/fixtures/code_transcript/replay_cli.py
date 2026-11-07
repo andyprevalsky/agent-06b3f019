@@ -17,6 +17,11 @@ claude
     reached the CLI exactly once). ``REPLAY_CLI_GATE``: before the first
     turn's ``result``, wait until the file ``<gate>/finish-turn-1`` exists, so a
     test can deliver a turn while that turn is still running.
+    ``REPLAY_CLI_START_GATE``: before the first turn's first output line, wait
+    until ``<gate>/start-turn-1`` exists, so a test can attach its viewer socket
+    before the stream starts. A viewer that attaches later is served the
+    ws-server's bounded replay, which drops the cumulative ``text`` of superseded
+    partial snapshots; one attached from the start receives them live, with it.
     ``REPLAY_CLI_MERGE=1``: like the real CLI (measured on Claude Code
     2.1.284), messages written during turn 1 are folded into it, and its one
     ``result`` reports ``queued_turn_count: 0``. Without it every message is
@@ -67,8 +72,8 @@ def _message_text(line: str) -> str:
     return "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
 
 
-def _wait_for_gate(name: str) -> None:
-    gate = os.environ.get("REPLAY_CLI_GATE")
+def _wait_for_gate(name: str, env: str = "REPLAY_CLI_GATE") -> None:
+    gate = os.environ.get(env)
     if not gate:
         return
     path = os.path.join(gate, name)
@@ -146,6 +151,8 @@ def run_claude() -> int:
         _log_stdin(stdin_log, line)
         turn += 1
         lines = turns[turn - 1] if turn <= len(turns) else _echo_turn(_message_text(line), turn)
+        if turn == 1:
+            _wait_for_gate("start-turn-1", "REPLAY_CLI_START_GATE")
         for out in lines:
             message = json.loads(out)
             if turn == 1 and message.get("type") == "result":
