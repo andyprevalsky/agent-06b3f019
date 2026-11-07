@@ -233,8 +233,9 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
         raise Blocked('workers', f'{gate}: prepared env belongs to {values["ROSE_DEPLOY_WORKTREE_PATH"]}, not {path}')
     env = {key: values[key] for key in (*SLOT_ENV, *OPTIONAL_ENV) if values.get(key)}
     env[RUN_ROOT_ENV] = str(run_root(root))
-    if gate in PARK_GATES:
-        env[PARK_ENV] = str(root.resolve() / PARK_DIR)
+    # Gates inherit the coordinator's environment, so a test-suite gate clears an inherited park
+    # directory explicitly (the ledger writers treat an empty value as unset).
+    env[PARK_ENV] = str(root.resolve() / PARK_DIR) if gate in PARK_GATES else ''
     marker = path / SYSTEM_PG_MARKER
     if gate == BACKEND_GATE and values.get('ROSE_USE_SYSTEM_PG') == 'true' and marker.is_file():
         # run-coverage.sh refuses an isolated system-Postgres worktree without this exact prepared database.

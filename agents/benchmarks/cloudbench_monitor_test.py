@@ -295,3 +295,31 @@ def test_script_snapshot_removal_never_exposes_a_partly_deleted_snapshot(tmp_pat
     assert not snapshot.exists()
     assert observed and all(not visible for _, visible in observed), observed
     assert [p for p in tmp_path.iterdir()] == [], list(tmp_path.iterdir())
+
+
+def test_script_snapshot_cleanup_retries_abandoned_tombstones(tmp_path):
+    """CodeRabbit on PR #1762: a removal interrupted after its rename leaves a
+    private tombstone. The next removal of that snapshot, or a cleanup that finds
+    the snapshot already absent, deletes it instead of leaking it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_script_snapshot_tombstones", ROOT / "scripts/cloudbench-script-snapshot.py"
+    )
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    token = "0123456789abcdef0123456789abcdef"
+    snapshot = tmp_path / f"cloudbench-scripts.{token}"
+    abandoned = tmp_path / f".{snapshot.name}.removing-4242"
+    (abandoned / "nested").mkdir(parents=True)
+    (abandoned / "nested" / "left-behind").write_text("partial\n")
+    snapshot.mkdir()
+    (snapshot / "cloudbench-script-snapshot.py").write_text("# helper\n")
+
+    helper._remove_unadopted_snapshot(snapshot)
+    assert list(tmp_path.iterdir()) == []
+
+    abandoned.mkdir()
+    (abandoned / "left-behind").write_text("partial\n")
+    assert helper.cleanup(snapshot, tmp_path, token, os.getppid(), "unused", False) == "absent"
+    assert list(tmp_path.iterdir()) == []

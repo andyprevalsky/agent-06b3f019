@@ -263,9 +263,20 @@ def _remove_snapshot(path: Path) -> None:
     in one step; the private tombstone is then deleted.
     """
 
-    tombstone = path.with_name(f".{path.name}.removing-{os.getpid()}")
+    tombstone = path.with_name(f".{path.name}.removing-{os.getpid()}-{os.urandom(4).hex()}")
     os.rename(path, tombstone)
-    shutil.rmtree(tombstone)
+    _remove_tombstones(path)
+
+
+def _remove_tombstones(path: Path) -> None:
+    """Delete every private tombstone of ``path``, including ones a crashed or
+    interrupted earlier removal left behind. A tombstone is never renamed back."""
+
+    for tombstone in path.parent.glob(f".{path.name}.removing-*"):
+        try:
+            shutil.rmtree(tombstone)
+        except FileNotFoundError:
+            pass  # A concurrent remover is deleting the same tombstone.
 
 
 def _remove_unadopted_snapshot(path: Path) -> None:
@@ -428,6 +439,7 @@ def recover_create(
             "recovery PID birth identity does not match caller"
         )
     if not path.exists():
+        _remove_tombstones(path)
         return "absent"
     with _snapshot_lock(path):
         if path.exists():
@@ -536,6 +548,7 @@ def cleanup(
 ) -> str:
     _validate_path(path, temp_root, token)
     if not path.exists():
+        _remove_tombstones(path)
         return "absent"
     if os.getppid() != pid:
         raise SnapshotOwnershipError("cleanup PID birth identity does not match caller")
