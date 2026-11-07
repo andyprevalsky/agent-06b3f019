@@ -3178,6 +3178,7 @@ assert len(list(p.iterdir()))==2
 
     def early_failure_fixture(self, final_case_a):
         """api reports test a FAIL while running, then blocks until /RCA has started (or 5 s)."""
+        import contextlib, io
         signal_file = self.root / '.context' / 'rca-started'
         gate = ("import os,json,pathlib,sys,time; sys.path.insert(0,%r); import deploy_gate_progress as p\n"
                 "p.report('a','FAIL',scope='test',case='a',detail='AssertionError: early')\n"
