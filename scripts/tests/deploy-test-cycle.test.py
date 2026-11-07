@@ -3177,56 +3177,66 @@ assert len(list(p.iterdir()))==2
         self.assertEqual('PASS',next(r['status'] for r in rows if r['gate']=='ui'))
         self.assertEqual(2,len(list((self.directory/'rca').glob('*.launch.json'))))
 
-    def early_failure_fixture(self, final_case_a, launcher_exit=0):
-        """api reports test a FAIL while running, then blocks until /RCA has started (or 5 s)."""
+    def early_failure_fixture(self, final_case_a, launcher_exit=None):
+        """api reports check a FAIL while still running, then blocks (5 s at most) until its early
+        occurrence exists: the RCA request file without a launcher (the /deploy flow), or the
+        cycle's own launch with one."""
         import contextlib, io
         signal_file = self.root / '.context' / 'rca-started'
+        rca_dir = self.directory / 'rca'
+        ready = ('any(pathlib.Path(%r).glob("*.json"))' % str(rca_dir) if launcher_exit is None
+                 else 'pathlib.Path(%r).exists()' % str(signal_file))
         gate = ("import os,json,pathlib,sys,time; sys.path.insert(0,%r); import deploy_gate_progress as p\n"
                 "p.report('a','FAIL',scope='test',case='a',detail='AssertionError: early')\n"
                 "p.report('a','FAIL',scope='case',case='a')\n"  # a second row for the same check
-                "s=pathlib.Path(%r); e=time.monotonic()+5\n"
-                "while not s.exists() and time.monotonic()<e: time.sleep(.02)\n"
+                "e=time.monotonic()+5\n"
+                "while not (%s) and time.monotonic()<e: time.sleep(.02)\n"
                 "q=json.load(open(os.environ['DEPLOY_GATE_REQUEST']))\n"
                 "json.dump({**q,'complete':True,'cleanup_complete':True,"
-                "'cases':{'a':%r,'b':'PASS'},'rca_started_before_exit':s.exists()},open(os.environ['DEPLOY_GATE_RESULT'],'w'))\n"
-                "sys.exit(0 if %r=='PASS' else 1)") % (str(Path(c.__file__).resolve().parent), str(signal_file),
-                                                       final_case_a, final_case_a)
+                "'cases':{'a':%r,'b':'PASS'},'rca_started_before_exit':bool(%s)},open(os.environ['DEPLOY_GATE_RESULT'],'w'))\n"
+                "sys.exit(0 if %r=='PASS' else 1)") % (str(Path(c.__file__).resolve().parent), ready, final_case_a,
+                                                       ready, final_case_a)
         self.plan['gates'][1].update(command=[sys.executable, '-c', gate], case_protocol=True)
-        launcher = [sys.executable, '-c', "import pathlib,json,sys; sys.exit(%d) if %d else None; "
-                    "pathlib.Path(%r).touch(); print(json.dumps({'ok':True,'status':'delivered'}))"
-                    % (launcher_exit, launcher_exit, str(signal_file))]
+        launcher = None if launcher_exit is None else [
+            sys.executable, '-c', "import pathlib,json,sys; sys.exit(%d) if %d else None; "
+            "pathlib.Path(%r).touch(); print(json.dumps({'ok':True,'status':'delivered'}))"
+            % (launcher_exit, launcher_exit, str(signal_file))]
         self.state = c.initialize(self.plan, self.root); self.state['phase'] = 'initial'
         out = io.StringIO()
         with patch.object(c, 'EARLY_POLL_SECONDS', 0.05, create=True), contextlib.redirect_stdout(out):
             c.run_phase(self.plan, self.state, self.directory, self.root, launcher)
-        api = next(r for r in self.state['attempts'][-1]['results'] if r['gate'] == 'api')
-        return out.getvalue(), api, signal_file
+        worker = json.loads((self.directory / 'attempts' / '1' / 'initial' / 'api' / 'result.json').read_text())
+        notices = [l for l in out.getvalue().splitlines() if l.startswith('DEPLOY_GATE_EARLY_FAILURE')]
+        return out.getvalue(), notices, worker
 
     def test_failing_test_in_a_running_gate_starts_rca_before_the_gate_ends(self):
-        printed, api, signal_file = self.early_failure_fixture('FAIL')
-        notices = [l for l in printed.splitlines() if l.startswith('DEPLOY_GATE_EARLY_FAILURE')]
+        printed, notices, worker = self.early_failure_fixture('FAIL')
+        self.assertTrue(worker['rca_started_before_exit'], 'the RCA request must exist while the gate runs')
         self.assertEqual(1, len(notices), notices)  # one notice per failing check, not per row
         early = self.state['early_failures']
         request = self.directory / 'rca' / (early[0]['id'] + '.json')
         self.assertEqual('DEPLOY_GATE_EARLY_FAILURE gate=api test=a status=FAIL check=api/a '
                          f"id={early[0]['id']} rca={request}", notices[0])
         self.assertTrue(request.is_file())
-        receipt = request.with_suffix('.launch.json')
-        self.assertIn(f"DEPLOY_GATE_EARLY_RCA id={early[0]['id']} launched=yes receipt={receipt}", printed)
-        self.assertTrue(receipt.is_file())  # confirmed only once the launch receipt exists
-        worker = json.loads((self.directory / 'attempts' / '1' / 'initial' / 'api' / 'result.json').read_text())
-        self.assertTrue(worker['rca_started_before_exit'], 'RCA must start while the gate is still running')
         self.assertEqual([('api/a', 'reused by final FAIL')], [(f['check'], f['settled']) for f in early])
         failure = next(f for f in self.state['failures'] if f['check'] == 'api/a')
         self.assertEqual(early[0]['id'], failure['id'])  # the final failure keeps the early occurrence
-        self.assertEqual(1, len(list((self.directory / 'rca').glob('*.launch.json'))))  # one RCA, not two
+        self.assertEqual([], list((self.directory / 'rca').glob('*.launch.json')))  # the agent owns it
         self.assertEqual('triage', self.state['phase'])
 
-    def test_a_failed_early_rca_launch_is_reported_not_claimed(self):
-        printed, _api, _ = self.early_failure_fixture('FAIL', launcher_exit=3)
-        occurrence = self.state['early_failures'][0]['id']
-        self.assertIn(f'DEPLOY_GATE_EARLY_RCA id={occurrence} launched=no error=CalledProcessError', printed)
-        self.assertNotIn('launched=yes', printed)
+    def test_with_a_cycle_launcher_the_early_rca_launches_without_an_agent_notice(self):
+        printed, notices, worker = self.early_failure_fixture('FAIL', launcher_exit=0)
+        self.assertTrue(worker['rca_started_before_exit'], 'the cycle must launch the RCA while the gate runs')
+        self.assertEqual([], notices)  # the cycle owns this RCA; nothing asks the agent to start one
+        self.assertEqual(1, len(list((self.directory / 'rca').glob('*.launch.json'))))  # one RCA, not two
+        failure = next(f for f in self.state['failures'] if f['check'] == 'api/a')
+        self.assertEqual(self.state['early_failures'][0]['id'], failure['id'])
+
+    def test_a_failed_cycle_launch_is_kept_with_the_other_launch_errors(self):
+        printed, notices, worker = self.early_failure_fixture('FAIL', launcher_exit=3)
+        self.assertEqual([], notices)
+        self.assertTrue(any('CalledProcessError' in e or 'exit status 3' in e
+                            for e in self.state.get('rca_launch_errors', [])), self.state.get('rca_launch_errors'))
 
     def test_a_progress_row_naming_no_gate_check_opens_nothing(self):
         gate = {'name': 'api', 'checks': ['a', 'b']}
@@ -3240,10 +3250,12 @@ assert len(list(p.iterdir()))==2
         self.assertTrue(path.is_file())
 
     def test_early_failure_whose_gate_then_passes_is_superseded_not_a_failure(self):
-        printed, api, _ = self.early_failure_fixture('PASS')
-        self.assertIn('DEPLOY_GATE_EARLY_FAILURE gate=api', printed)
-        self.assertEqual('PASS', api['status'])
-        self.assertEqual(['superseded: final PASS'], [f['settled'] for f in self.state['early_failures']])
+        printed, notices, worker = self.early_failure_fixture('PASS')
+        self.assertEqual(1, len(notices))
+        occurrence = self.state['early_failures'][0]
+        self.assertEqual('superseded: final PASS', occurrence['settled'])
+        self.assertIn(f"DEPLOY_GATE_EARLY_SUPERSEDED gate=api check=api/a id={occurrence['id']} "
+                      'superseded: final PASS', printed)
         self.assertEqual([], [f for f in self.state['failures'] if f['gate'] == 'api'])
         self.assertTrue(self.state['ready'])
 
