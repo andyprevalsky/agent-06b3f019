@@ -57,6 +57,7 @@ import {
   BellRing,
   Send,
   CircleStop,
+  Bug,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -109,6 +110,7 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   agent_notification: BellRing,
   agent_message: Mail,
   kill_agent: CircleStop,
+  report_bug: Bug,
   request_user_approval: AlertCircle,
   request_user_signup: Users,
   enable_write_permissions: FileEdit,
