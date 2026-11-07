@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from _test_utils import BlackboxResult
@@ -750,6 +751,381 @@ async def test_foreground_paths_never_background():
         wf._background_spawns_enabled = True
         wf.fast_mode_cache_enabled = True
         assert wf._spawn_runs_in_background("spawn_agent", dict(EXPLORE_ARGS)) is False
+
+
+FOREGROUND_SCHEMA = {"fields": [{"name": "summary", "type": "str", "description": "d", "required": True}]}
+FOREGROUND_SPAWNS = {
+    "explore": {"type": "explore", "task_name": "find_repo", "goal": "Find the team's main GitHub repo."},
+    "browser": {
+        "type": "browser",
+        "task_name": "inspect_repo",
+        "goal": "Read the repo's open pull requests.",
+        "start_url": "https://github.com/Rose-Ai-Labs/rose",
+        "output_schema": FOREGROUND_SCHEMA,
+    },
+    "code": {
+        "type": "code",
+        "task_name": "rose_repo_status",
+        "goal": "Read-only. Report the latest commit on main.",
+        "output_schema": FOREGROUND_SCHEMA,
+        "github_repo_link": "https://github.com/Rose-Ai-Labs/rose",
+    },
+}
+
+
+async def test_foreground_spawns_are_addressable_and_answer_truthfully_once_finished():
+    """A foreground explore/browser/code spawn has the address its schema promises.
+
+    RCA 2026-11-06-code-spawn-create-retry-duplicated-sessions (C3): root
+    1a3d495c spawned a foreground code agent with task_name rose_repo_status, then
+    send_message_to_agent("/root/rose_repo_status") failed with "No agent or
+    background task at /root/rose_repo_status": foreground spawns registered no
+    address. While one runs, its path resolves (tree state, own inbox) and its
+    rows stay the model's result; once it finished, a send names its state.
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from domains.agent_messaging.handler import resolve_message_target, send_message_to_agent
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    for agent_type, args in FOREGROUND_SPAWNS.items():
+        harness = _Harness()
+        persisted = []
+        activities = []
+
+        async def fake_execute_activity(fn, args=None, **_kwargs):
+            name = getattr(fn, "__name__", "")
+            activities.append(name)
+            if name == "update_agent_tree_state":
+                persisted.append(args[3].get("backgroundTasks"))
+            if name == "send_agent_message_to_address_activity":
+                return {"error": f"No agent or background task at {args[1]}"}
+            return None
+
+        tool_call_id = f"toolu_fg_{agent_type}"
+        path = f"/root/{args['task_name']}"
+        seen_while_running = {}
+
+        async def executor(wf, tool_call, call_id):
+            seen_while_running["tree"] = wf._background_tree_snapshot()
+            seen_while_running["target"] = resolve_message_target(wf, path)
+            await wf._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Finished",
+                    message=f"{agent_type} result",
+                    status=MessageStatus.FINISHED,
+                    data={"result": f"{agent_type} result"},
+                ),
+                call_id,
+                "spawn_agent",
+            )
+            return MessageStatus.FINISHED, f"{agent_type} result"
+
+        with (
+            _workflow_env(harness),
+            patch.object(temporal_workflow, "execute_activity", fake_execute_activity),
+            patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+            patch.object(temporal_workflow, "info", lambda: SimpleNamespace(workflow_id="agent-parent")),
+        ):
+            wf = _workflow(harness)
+            wf.current_phase = "EXECUTE"
+            result = await wf._execute_tool("spawn_agent", {**args, "run_in_background": False}, tool_call_id)
+            assert result.get("success") is True, (agent_type, result)
+
+            running = [entry for entry in seen_while_running["tree"] if entry["path"] == path]
+            assert running and running[0]["status"] == "running", (agent_type, seen_while_running["tree"])
+            assert running[0]["address"] == tool_call_id and running[0]["type"] == agent_type
+            # Own inbox for the task (code: the backend turns a send to a running code task into a CLI turn).
+            assert seen_while_running["target"] == ("agent-parent", tool_call_id, None), agent_type
+            rows = [row for row in harness.rows if row["metadata"].get("toolCallId") == tool_call_id]
+            assert rows and all("excludeFromModel" not in row["metadata"] for row in rows), (
+                "a foreground spawn's rows stay the model's result",
+                rows,
+            )
+            assert not _notifications(harness), "a foreground result is never re-sent as a notification"
+            assert any(e["path"] == path and e["status"] == "completed" for e in persisted[-1]), persisted[-1]
+            assert wf._pending_background_ids() == []
+
+            status, text = await send_message_to_agent(
+                wf, {"to": path, "message": "Print your findings in your final reply."}, f"toolu_send_{agent_type}"
+            )
+            assert status == MessageStatus.ERROR, (agent_type, text)
+            assert "No agent or background task" not in text, text
+            assert path in text and "foreground" in text and "completed" in text, text
+            assert ("code_session_id" in text) is (agent_type == "code"), text
+            assert "send_agent_message_activity" not in activities, "nothing is stored or woken"
+            assert not wf._background_tasks, "a finished foreground spawn never starts another run"
+
+    # PLAN has no send_message_to_agent: its foreground explores are not addressable and
+    # must not reserve their task_name for the plan's own tasks (execute phase).
+    harness = _Harness()
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+    ):
+        wf = _workflow(harness)
+        wf.current_phase = "PLAN"
+        plan_args = {**FOREGROUND_SPAWNS["explore"], "run_in_background": False}
+        seen_while_running.clear()
+        await wf._execute_tool("spawn_agent", plan_args, "toolu_plan_explore")
+        assert seen_while_running["tree"] == [], "a PLAN foreground explore is not registered"
+        assert not wf._background_tasks and not wf._background_finished
+        assert not any(wf._retired_task_names), "its task_name stays free for the plan's tasks"
+
+
+async def test_a_foreground_task_name_is_reusable_once_its_agent_finished_and_refused_while_it_runs():
+    """A finished foreground agent never blocks its task_name; a still-running one does.
+
+    Deploy 2026-11-06 follow-up to smoke test-mass-agent-run-0 (agent 6efe1927): the foreground
+    record added for addressable foreground spawns reserved every task_name for the life of the
+    agent, so a model that re-ran the same explore/browser/code task under the same task_name
+    (19 agents did, twice each) got "task_name ... is already used by another agent you spawned".
+    The earlier agent had finished, so nothing could be addressed through its name any more.
+    Required: the new spawn supersedes the finished record and the path resolves to the newest
+    one; only a duplicate of a STILL-RUNNING agent is refused (same text as a background spawn).
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    harness = _Harness()
+    release = asyncio.Event()
+    started = {}
+    args = {**FOREGROUND_SPAWNS["explore"], "task_name": "find_repo", "run_in_background": False}
+    path = "/root/find_repo"
+
+    async def executor(wf, tool_call, call_id):
+        started[call_id] = True
+        if call_id == "toolu_first":
+            await release.wait()
+        await wf._handle_tool_event(
+            ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Finished",
+                message="explore result",
+                status=MessageStatus.FINISHED,
+                data={"result": "explore result"},
+            ),
+            call_id,
+            "spawn_agent",
+        )
+        return MessageStatus.FINISHED, "explore result"
+
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+        patch.object(temporal_workflow, "info", lambda: SimpleNamespace(workflow_id="agent-parent")),
+    ):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+
+        running = asyncio.ensure_future(wf._execute_tool("spawn_agent", dict(args), "toolu_first"))
+        for _ in range(50):
+            if started.get("toolu_first"):
+                break
+            await asyncio.sleep(0)
+        assert started.get("toolu_first"), "the first spawn is running"
+
+        # Still running: the duplicate is refused, with the text a background duplicate gets.
+        duplicate = await wf._execute_tool("spawn_agent", dict(args), "toolu_dup_while_running")
+        assert duplicate.get("error") is True and not started.get("toolu_dup_while_running"), duplicate
+        assert duplicate["message"] == (
+            "task_name 'find_repo' is already used by another agent you spawned; choose a different task_name."
+        ), duplicate
+
+        release.set()
+        first = await running
+        assert first.get("success") is True, first
+
+        # Finished: the same task_name is free again and the path now resolves to the newest agent.
+        for call_id in ("toolu_second", "toolu_third"):
+            result = await wf._execute_tool("spawn_agent", dict(args), call_id)
+            assert result.get("success") is True and not result.get("error"), (call_id, result)
+            assert started[call_id], call_id
+            resolved = wf._background_task_for_address(path)
+            assert resolved and resolved["background_task_id"] == call_id, (call_id, resolved)
+            holders = [key for key, rec in wf._background_finished.items() if rec.get("task_name") == "find_repo"]
+            assert holders == [call_id], ("only the newest finished agent keeps the name", holders)
+        assert not any(wf._retired_task_names), "a finished foreground agent never reserves its name"
+
+
+async def test_sequential_foreground_spawns_sharing_a_task_name_each_return_their_own_result():
+    """Two foreground spawns that repeat one task_name never swap results.
+
+    The cached July mass-agent trajectory has 19 agents that each issue the same explore spawn twice
+    under one task_name. The foreground record keys its path by task_name, so the result handed back
+    to a spawn call (and the row posted for it) must still be the one its own run produced, in both
+    the live path and the DEMO-cache replay path.
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    for replay in (False, True):
+        harness = _Harness()
+
+        async def executor(wf, tool_call, call_id):
+            text = f"result produced by {call_id}"
+            await wf._handle_tool_event(
+                ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Finished",
+                    message=text,
+                    status=MessageStatus.FINISHED,
+                    data={"result": text},
+                ),
+                call_id,
+                "spawn_agent",
+            )
+            return MessageStatus.FINISHED, text
+
+        with (
+            _workflow_env(harness),
+            patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+            patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+            patch.object(temporal_workflow, "info", lambda: SimpleNamespace(workflow_id="agent-parent")),
+        ):
+            wf = _workflow(harness)
+            wf.current_phase = "EXECUTE"
+            wf.fast_mode_cache_enabled = replay
+            args = {
+                **FOREGROUND_SPAWNS["explore"],
+                "task_name": "research_creator_shared_1a2b3c4d",
+                "run_in_background": False,
+            }
+            results = {}
+            for call_id in ("toolu_one", "toolu_two"):
+                results[call_id] = await wf._execute_tool("spawn_agent", dict(args), call_id)
+                assert results[call_id].get("success") is True, (replay, call_id, results[call_id])
+            for call_id, other in (("toolu_one", "toolu_two"), ("toolu_two", "toolu_one")):
+                assert f"result produced by {call_id}" in str(results[call_id]), (replay, call_id, results[call_id])
+                assert f"result produced by {other}" not in str(results[call_id]), (replay, call_id, results[call_id])
+                rows = [row for row in harness.rows if row["metadata"].get("toolCallId") == call_id]
+                assert rows and all(other not in row["text"] for row in rows), (replay, call_id, rows)
+
+
+async def test_demo_cache_replay_accepts_a_recorded_foreground_spawn_that_repeats_its_task_name():
+    """A DEMO-cache replay of a recorded foreground trajectory is never failed by task_name bookkeeping.
+
+    Deploy 2026-11-06, smoke test-mass-agent-run-0 (agent 6efe1927): the cached July trajectory
+    has 19 explore agents that each issue the SAME spawn (same goal, same task_name) twice. DEMO
+    replay runs spawns in the foreground (``_spawn_runs_in_background``), and the foreground
+    record (``_begin_foreground_spawn``) rejected the second one as "task_name ... is already
+    used by another agent you spawned", so the evaluator t10-no-tool-failures failed. The replay
+    must reproduce the recorded outcome: nothing in a replay addresses these agents, so no record
+    is kept and the name is never reserved.
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    harness = _Harness()
+    spawned = []
+
+    async def executor(wf, tool_call, call_id):
+        spawned.append(call_id)
+        await wf._handle_tool_event(
+            ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Finished",
+                message="explore result",
+                status=MessageStatus.FINISHED,
+                data={"result": "explore result"},
+            ),
+            call_id,
+            "spawn_agent",
+        )
+        return MessageStatus.FINISHED, "explore result"
+
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+        patch.object(temporal_workflow, "info", lambda: SimpleNamespace(workflow_id="agent-parent")),
+    ):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+        wf.fast_mode_cache_enabled = True  # DEMO cache replay
+        args = {**FOREGROUND_SPAWNS["explore"], "task_name": "research_ethan_mollick_s_substa_5c9a76d1"}
+        for call_id in ("toolu_replay_first", "toolu_replay_second"):
+            result = await wf._execute_tool("spawn_agent", dict(args), call_id)  # run_in_background defaults to true
+            assert result.get("success") is True and not result.get("error"), (call_id, result)
+        assert spawned == ["toolu_replay_first", "toolu_replay_second"], "both recorded spawns ran"
+        failed = [row for row in harness.rows if row["metadata"].get("toolStatus") == "ERROR"]
+        assert not failed, ("a replayed spawn must not fail on its task_name", failed)
+        assert not wf._background_tasks and not wf._background_finished, "a replay keeps no spawn record"
+        assert not any(wf._retired_task_names), "and reserves no task_name"
+
+
+async def test_a_foreground_spawn_parked_for_a_deploy_handoff_is_resumed_not_relaunched():
+    """A parked foreground spawn is carried by the normal parking path and re-entered next generation.
+
+    RCA 2026-11-06-foreground-spawn-promised-an-address-it-never-registered: the foreground
+    record lives in ``_background_tasks``, and ``_park_pending_tool`` treated every call found
+    there as a background task (hint on the record, relaunched in the background), so a drained
+    foreground browser/code tool was never resumed ("expected one interrupted + one resumed
+    activity, got 1" in the workflow and deploy-resume-e2e suites).
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from helpers.generation_handoff import GenerationHandoffRequested
+    from tools.base import MessageStatus
+
+    harness = _Harness()
+    args = {**FOREGROUND_SPAWNS["code"], "run_in_background": False}
+    call_id = "toolu_parked_code"
+    resume = {"sandbox_id": "sb-parked"}
+
+    async def parks_itself(wf, tool_call, tool_call_id):
+        assert wf._park_pending_tool(tool_call_id, resume) is True
+        raise GenerationHandoffRequested("queue-2", parked=True)
+
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": parks_itself}),
+    ):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+        wf._tool_parking_enabled = True
+        result = await wf._execute_tool("spawn_agent", dict(args), call_id)
+        assert result.get("pending_tool_resume") is True and result.get("generation_handoff") is True, result
+        assert [r["tool_call_id"] for r in wf._pending_tool_resumes] == [call_id], "parked as a foreground tool call"
+        record = wf._background_tasks[call_id]
+        assert record["foreground"] is True and record["status"] == "running"
+        assert "resume" not in record, "not parked as a background task (that would relaunch it in the background)"
+        assert call_id not in wf._background_finished, "a parked call is not finished"
+
+        # The next generation: the snapshot carries the address, the parked call is re-entered.
+        snapshot = wf._background_state_snapshot()
+        parked_records = list(wf._pending_tool_resumes)
+
+    ran = []
+
+    async def resumed(wf, tool_call, tool_call_id):
+        ran.append((tool_call_id, wf._take_tool_resume(tool_call_id)))
+        return MessageStatus.FINISHED, "report"
+
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": resumed}),
+    ):
+        wf2 = _workflow(harness)
+        wf2.current_phase = "EXECUTE"
+        wf2._restore_background_state(snapshot)
+        wf2._pending_tool_resumes = parked_records
+        wf2._relaunch_background_tasks()
+        assert not wf2._background_handles, "a foreground record is never relaunched in the background"
+        assert await wf2._resume_pending_tools() is None
+        assert ran == [(call_id, resume)], "the parked call re-entered once, with its resume payload"
+        assert call_id not in wf2._background_tasks
+        finished = wf2._background_finished[call_id]
+        assert finished["foreground"] is True and finished["status"] == "completed", finished
+        assert not _notifications(harness), "a foreground result is never re-sent as a notification"
 
 
 def test_tool_schemas_and_prompts_register_agent_messaging():
@@ -1500,6 +1876,9 @@ async def test_agent_messaging_tools_decode_results_in_real_sandbox():
     @activity.defn(name="send_agent_message_activity")
     async def fake_send(*args):
         sent.append(args)
+        if "while it starts" in args[2]:
+            # The backend accepted it for a code agent whose session does not exist yet (C20).
+            return {"delivered": False, "queued": True, "task_running": True, "message_id": "msg-2"}
         return {"delivered": True, "message_id": "msg-1"}
 
     async with await WorkflowEnvironment.start_time_skipping() as env:
@@ -1518,6 +1897,7 @@ async def test_agent_messaging_tools_decode_results_in_real_sandbox():
                         "agent-root",
                         [
                             {"tool": "send_message_to_agent", "to": "parent", "message": "Draft is ready."},
+                            {"tool": "send_message_to_agent", "to": "parent", "message": "Hello while it starts."},
                         ],
                     ],
                     id="agent-messaging-sandbox-probe",
@@ -1525,9 +1905,14 @@ async def test_agent_messaging_tools_decode_results_in_real_sandbox():
                 ),
                 timeout=60,
             )
-    assert [row["status"] for row in results] == ["FINISHED"], results
+    assert [row["status"] for row in results] == ["FINISHED", "FINISHED"], results
     assert results[0]["text"] == "Message sent to parent.", results
-    assert len(sent) == 1
+    # A message the backend queued for a still-starting code agent says so, and not to resend it.
+    assert results[1]["text"] == (
+        "Message queued for parent: its code agent is still starting. It will receive this as its next "
+        "turn as soon as its CLI runs, in the order you sent it; do not send it again."
+    ), results
+    assert len(sent) == 2
 
 
 async def test_background_tasks_persist_in_tree_state_and_names_stay_unique():
@@ -2426,6 +2811,26 @@ async def run_all_tests():
         "agent_rows_feedback_only_from_ancestors", test_agent_rows_are_user_feedback_only_from_ancestors
     )
     await r.record_async("foreground_paths_never_background", test_foreground_paths_never_background)
+    await r.record_async(
+        "foreground_spawns_addressable_and_truthful_once_finished",
+        test_foreground_spawns_are_addressable_and_answer_truthfully_once_finished,
+    )
+    await r.record_async(
+        "foreground_task_name_reusable_once_finished_refused_while_running",
+        test_a_foreground_task_name_is_reusable_once_its_agent_finished_and_refused_while_it_runs,
+    )
+    await r.record_async(
+        "sequential_foreground_spawns_sharing_a_task_name_return_their_own_results",
+        test_sequential_foreground_spawns_sharing_a_task_name_each_return_their_own_result,
+    )
+    await r.record_async(
+        "demo_replay_accepts_recorded_foreground_spawn_repeating_task_name",
+        test_demo_cache_replay_accepts_a_recorded_foreground_spawn_that_repeats_its_task_name,
+    )
+    await r.record_async(
+        "foreground_spawn_parked_for_handoff_is_resumed_not_relaunched",
+        test_a_foreground_spawn_parked_for_a_deploy_handoff_is_resumed_not_relaunched,
+    )
     await r.record_async(
         "dag_planned_spawn_background_dependent_sees_result",
         test_dag_planned_spawn_runs_in_background_and_dependent_sees_child_result,

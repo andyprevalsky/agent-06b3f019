@@ -1,7 +1,7 @@
 /**
- * STATE MACHINE: OpenAppButton (code-agent chip header, UI ledger rows 10/39)
+ * STATE MACHINE: OpenAppButton (the link inside the code-agent view's devbox usage popover; UI ledger rows 10/39)
  *
- * Shown when the chip's code_agent carries a cross-origin preview_url (dev cloud
+ * Shown when the session's code_agent carries a cross-origin preview_url (dev cloud
  * sessions) and an AppViewProvider is mounted (Rose Desktop terminal); else null.
  *   [IDLE] --click--> openApp(task) → the full-screen app view for this session
  *

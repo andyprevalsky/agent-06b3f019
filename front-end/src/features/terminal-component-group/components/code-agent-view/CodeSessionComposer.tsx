@@ -1,11 +1,37 @@
-/** Native settings come from the provider catalog; only a delivery ACK confirms them. */
-import { useEffect, useState } from 'react';
+/**
+ * STATE MACHINE: CodeSessionComposer (the code-agent view's query box)
+ *
+ * The existing QueryInput as the session's direct channel, with its existing
+ * controls fed by the code agent's own data:
+ *   model chip   (ModelSelector) → the model the session runs, with its effort
+ *                  ("claude-opus-5-5 · xhigh"): the live session's effective
+ *                  setting, else its recorded CLI model.
+ *                  [LIVE + catalog] pick the next turn's model · [ENDED] read-only
+ *   speed toggle (SpeedToggle)   → the session's speed (fast ⇄ standard); live
+ *                  sessions change the next turn's speed, ended ones read only
+ *   nub          (never an empty strip) → ContextMeter: the latest model call's
+ *                  prompt over the model's window (the tokens when the window is
+ *                  not known yet) + the existing Agent settings gear, fed by this
+ *                  code agent's own data (messages, tokens, sandbox cost, context)
+ *   agents drawer (BackgroundAgentsBannerView, on top of the box) → the code
+ *                  agent's own sub-agents (Claude's Task / Agent tool)
+ * Unknown values render nothing (no "unavailable" placeholder). A delivery ACK's
+ * effective settings replace the catalog's.
+ */
+import { useEffect, useMemo, useState } from 'react';
 import { API_BASE_WITH_PATH, getAuthHeaders } from '@/lib/api/client';
 import type { FilePointer } from '@/lib/api/types';
+import { useAgentContext, type Model } from '../../hooks';
 import { getCodeDraft, setCodeDraft } from '../../hooks/codeAgentLocalState';
-import { useDirectTurn } from '../../hooks/codeAgentDirectTurn';
-import type { CodeTurnOptions } from '../../hooks/codeAgentContract';
+import type { DirectTurn } from '../../hooks/codeAgentDirectTurn';
+import type { CodeSessionSettings } from '../../hooks/codeSessionSettings';
 import QueryInput from '../QueryInput';
+import AgentSettingsDialog from '../AgentSettingsDialog';
+import { ContextMeter } from '../query-input/ContextMeter';
+import { QueryInfoMenu } from '../query-input/QueryInfoMenu';
+import { BackgroundAgentsBannerView } from '../background-agents/BackgroundAgentsBanner';
+import { codeAgentDetail } from './codeAgentDetail';
+import { buildCodeSubAgentPanelModel, type CodeSessionState } from './codeSubAgents';
 import type { CodeAgentConversation } from './useCodeAgentConversation';
 
 interface Settings {
@@ -18,40 +44,94 @@ interface Capabilities {
   models: Array<{ model: string; label: string; efforts: string[]; speeds: string[] }>;
 }
 
-export function CodeSessionComposer({ c, taskId }: { c: CodeAgentConversation; taskId: string }) {
-  const [draft, setDraft] = useState(() => getCodeDraft(taskId) ?? { text: '', options: {} });
+const noop = () => {};
+
+/** The live session's catalog (null while unknown, ended or unreachable). */
+function useCapabilities(taskId: string, live: boolean): Capabilities | null {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
-  const [loadError, setLoadError] = useState(false);
-  const { send, sending, error, effective } = useDirectTurn(taskId, c.toolCallId);
-  const update = (next: typeof draft) => {
-    setCodeDraft(taskId, next);
-    setDraft(next);
-  };
   useEffect(() => {
-    let live = true;
+    if (!live) return;
+    let current = true;
     void fetch(
       `${API_BASE_WITH_PATH}/claude-code-session/${encodeURIComponent(taskId)}/capabilities`,
       { headers: getAuthHeaders() },
     )
-      .then(async (response) => {
-        if (!response.ok) throw Error('Unavailable');
-        return (await response.json()) as Capabilities;
-      })
+      .then(async (response) => (response.ok ? ((await response.json()) as Capabilities) : null))
       .then((value) => {
-        if (live && Array.isArray(value.models) && value.effective_settings) setCapabilities(value);
+        if (current && value && Array.isArray(value.models) && value.effective_settings)
+          setCapabilities(value);
       })
-      .catch(() => {
-        if (live) setLoadError(true);
-      });
+      .catch(() => undefined);
     return () => {
-      live = false;
+      current = false;
     };
-  }, [taskId]);
-  const acknowledged = effective
-    ? { model: effective.model, effort: effective.reasoning_effort, speed: effective.speed }
-    : capabilities?.effective_settings;
-  const model = draft.options.model ?? capabilities?.effective_settings.model;
+  }, [taskId, live]);
+  return live ? capabilities : null;
+}
+
+export function CodeSessionComposer({
+  c,
+  taskId,
+  settings,
+  turn,
+}: {
+  c: CodeAgentConversation;
+  taskId: string;
+  settings: CodeSessionSettings;
+  turn: DirectTurn;
+}) {
+  const [draft, setDraft] = useState(() => getCodeDraft(taskId) ?? { text: '', options: {} });
+  const live = c.stateText === 'Running';
+  const { messages } = useAgentContext();
+  const sessionState: CodeSessionState =
+    c.chipState === 'completed' || c.chipState === 'failed' || c.chipState === 'paused'
+      ? c.chipState
+      : 'running';
+  const subAgents = useMemo(
+    () => buildCodeSubAgentPanelModel(messages, taskId, sessionState),
+    [messages, taskId, sessionState],
+  );
+  const capabilities = useCapabilities(taskId, live);
+  const { send, sending, error, effective } = turn;
+  const update = (next: typeof draft) => {
+    setCodeDraft(taskId, next);
+    setDraft(next);
+  };
+  const current = {
+    model: effective?.model ?? capabilities?.effective_settings.model ?? settings.model,
+    speed: effective?.speed ?? capabilities?.effective_settings.speed ?? settings.speed,
+  };
+  const model = draft.options.model ?? current.model;
+  const speed = draft.options.speed ?? current.speed;
   const choices = capabilities?.models.find((item) => item.model === model);
+  const effort =
+    effective?.reasoning_effort ?? capabilities?.effective_settings.effort ?? settings.effort;
+  // The chip names the model and its effort; the provider is the code agent's own.
+  const named = (id: string, label: string) => ({
+    id,
+    name: id === model && effort ? `${label} · ${effort}` : label,
+    provider: '',
+  });
+  const models: Model[] =
+    capabilities?.models.map((item) => named(item.model, item.label)) ??
+    (model ? [named(model, model)] : []);
+  const canChangeSpeed = !!choices && choices.speeds.includes('fast') && !sending;
+  const contextWindow = settings.contextWindow;
+  const contextSize = settings.contextTokens ?? 0;
+  const contextPercentage = contextWindow ? Math.min(100, (contextSize / contextWindow) * 100) : 0;
+  const owner = useAgentContext();
+  const agentDetail = useMemo(
+    () =>
+      codeAgentDetail(
+        taskId,
+        owner.selectedAgentId ?? '',
+        c,
+        { ...settings, model, speed },
+        new Date(0).toISOString(),
+        messages.filter((message) => message.metadata?.task_id === taskId).length,
+      ),
+    [taskId, owner.selectedAgentId, c, settings, model, speed, messages],
+  );
   const submit = async (attachments?: FilePointer[]) => {
     const delivered = await send(draft.text, {
       ...draft.options,
@@ -71,88 +151,43 @@ export function CodeSessionComposer({ c, taskId }: { c: CodeAgentConversation; t
         onSubmit={submit}
         disabled={sending}
         placeholder={`Message ${c.label}…`}
-        showModelSelector={false}
         canSubmit
-        sessionControls={
-          capabilities && (
-            <div className="flex flex-wrap gap-2 text-xs">
-              <label>
-                Model{' '}
-                <select
-                  aria-label="Code model"
-                  disabled={sending}
-                  value={model}
-                  onChange={(event) => update({ ...draft, options: { model: event.target.value } })}
-                >
-                  {capabilities.models.map((item) => (
-                    <option key={item.model} value={item.model}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {!!choices?.efforts.length && (
-                <label>
-                  Effort{' '}
-                  <select
-                    aria-label="Reasoning effort"
-                    disabled={sending}
-                    value={draft.options.reasoning_effort ?? ''}
-                    onChange={(event) =>
+        topAttachment={
+          <BackgroundAgentsBannerView key={taskId} model={subAgents} onNavigate={noop} />
+        }
+        selectedModel={model}
+        availableModels={models}
+        showModelSelector={!!capabilities && !sending}
+        onModelChange={(next) => update({ ...draft, options: { model: next } })}
+        speedControl={
+          speed
+            ? {
+                fastMode: speed !== 'standard',
+                onFastModeChange: canChangeSpeed
+                  ? (fast) =>
                       update({
                         ...draft,
-                        options: {
-                          ...draft.options,
-                          reasoning_effort: event.target.value || undefined,
-                        },
+                        options: { ...draft.options, speed: fast ? 'fast' : 'standard' },
                       })
-                    }
-                  >
-                    <option value="">Session default</option>
-                    {choices.efforts.map((value) => (
-                      <option key={value}>{value}</option>
-                    ))}
-                  </select>
-                </label>
-              )}
-              {!!choices?.speeds.length && (
-                <label>
-                  Speed{' '}
-                  <select
-                    aria-label="Code speed"
-                    disabled={sending}
-                    value={draft.options.speed ?? ''}
-                    onChange={(event) =>
-                      update({
-                        ...draft,
-                        options: { ...draft.options, speed: event.target.value || undefined },
-                      })
-                    }
-                  >
-                    <option value="">Session default</option>
-                    {choices.speeds.map((value) => (
-                      <option key={value}>{value}</option>
-                    ))}
-                  </select>
-                </label>
-              )}
-            </div>
-          )
+                  : undefined,
+              }
+            : undefined
+        }
+        nub={
+          <>
+            {settings.contextTokens !== undefined && (
+              <ContextMeter
+                variant="nub"
+                contextPercentage={contextPercentage}
+                contextSize={contextSize}
+                restartThreshold={contextWindow ?? 0}
+              />
+            )}
+            <AgentSettingsDialog variant="nub" agent={agentDetail} contextWindow={contextWindow} />
+            <QueryInfoMenu />
+          </>
         }
       />
-      {acknowledged && (
-        <p role="status" className="mx-auto mt-1 max-w-4xl text-xs text-muted-foreground">
-          Effective:{' '}
-          {[acknowledged.model, acknowledged.effort, acknowledged.speed]
-            .filter(Boolean)
-            .join(' · ')}
-        </p>
-      )}
-      {loadError && (
-        <p className="mx-auto mt-1 max-w-4xl text-xs text-muted-foreground">
-          Session settings unavailable
-        </p>
-      )}
       {error && (
         <p
           role="alert"

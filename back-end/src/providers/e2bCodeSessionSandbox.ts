@@ -76,6 +76,8 @@ export interface CodeAgentSessionResult {
   sandboxSize?: SandboxSize | null;
   /** Attached to a live CLI: its events before this spawn's goal are history. */
   historyEvents?: number;
+  /** How long the ws-server took to serve, and the repo clone inside that (null: none). */
+  startup?: { wsReadyMs: number; cloneMs: number | null };
 }
 
 /** Sizing of a spawn (C16): the size it wants and the agent to attribute checkpoints to. */

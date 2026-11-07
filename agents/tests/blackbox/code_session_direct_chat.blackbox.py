@@ -280,7 +280,14 @@ def test_claude_transcript_records_from_fixture():
 def test_ui_records_follow_the_transcript_tab_contract():
     events = json.loads(CLAUDE_EVENTS.read_text())
     ui = [to_ui_record(record) for record in build_code_transcript(events, "claude", goal=CLAUDE_GOAL)]
-    assert {r["type"] for r in ui} == {"message", "thinking", "tool", "result", "control", "turn", "metrics"}
+    assert {r["type"] for r in ui} == {"message", "thinking", "tool", "result", "control", "turn", "metrics", "session"}
+    # The code-agent view's query box: the CLI's model and speed (its init) and the
+    # latest model call's context over the model's window (its nub).
+    session = next(r for r in ui if r["type"] == "session")
+    assert (session["model"], session["speed"]) == ("claude-sonnet-5", "standard")
+    contexts = [r for r in ui if r["type"] == "metrics" and "context_tokens" in r]
+    assert contexts and all(0 < r["context_tokens"] < r.get("context_window", 10**9) for r in contexts)
+    assert any(r.get("context_window") == 1_000_000 for r in ui if r["type"] == "metrics")
     tools = [r["tool"] for r in ui if r["type"] == "tool"]
     assert [(t["name"], t["target"]) for t in tools] == [
         ("Read", "calc.py"),
@@ -368,6 +375,85 @@ async def test_direct_turn_reaches_cli_once_across_delivery_retry():
         assert observer.count("user_turn") == 1
         await hand_back_code_session(sandbox.ws_url, task_id="t", token=TEST_TURN_TOKEN)
         await observer.wait_for(lambda: observer.exit_code is not None)
+        await observer.close()
+    finally:
+        sandbox.stop()
+
+
+async def _send_turn(sandbox: LocalCodeSessionSandbox, turn_id: str, text: str, sender: str = "agent"):
+    return await deliver_user_turn_to_code_session(
+        sandbox.ws_url, task_id="t", text=text, turn_id=turn_id, sender=sender, token=TEST_TURN_TOKEN
+    )
+
+
+async def test_agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_in_order_once():
+    """C20: the ws-server is up but the CLI is not launched yet (a held project startup): an agent turn is
+    acked queued (not refused), a retry stays queued, and once the CLI starts the turns follow the task
+    prompt in arrival order, each written once."""
+    # The CLI holds its first turn (gate_first_turn) so the session is alive when the late retry below is sent: the
+    # fake CLI otherwise finishes and ends the session first under host load ("rejected: session_ended").
+    sandbox = LocalCodeSessionSandbox("claude", gate_startup=True, gate_first_turn=True)
+    try:
+        await sandbox.start()
+        observer = SessionObserver(sandbox.ws_url)
+        await observer.start()
+        first = await _send_turn(sandbox, "a-1", "ROSE: first")
+        retry = await _send_turn(sandbox, "a-1", "ROSE: first")
+        second = await _send_turn(sandbox, "a-2", "ROSE: second")
+        assert (first.status, retry.status, second.status) == ("queued", "queued", "queued"), (first, retry, second)
+        assert not first.reached_cli, "queued has not reached the CLI yet"
+        # A user's direct turn carries settings that must be confirmed at once: told to retry, never queued.
+        user = await _send_turn(sandbox, "u-1", "typed by the user", sender="user")
+        assert (user.status, user.reason) == ("rejected", "session_starting"), user
+        assert sandbox.cli_stdin_lines() == [], "nothing is written to a CLI that has no task yet"
+
+        sandbox.start_cli()
+        # The server has flushed both queued turns once it reports them; the held CLI logs a turn only when it reads it.
+        await observer.wait_for(lambda: observer.count("user_turn") >= 2)
+        # After the flush a retry of a queued id is a duplicate, not a second turn.
+        late = await _send_turn(sandbox, "a-1", "ROSE: first")
+        assert late.status == "duplicate", late
+        sandbox.finish_first_turn()
+        await observer.wait_for(lambda: len(sandbox.cli_stdin_lines()) >= 3)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert "Task:\n" in texts[0] and texts[1:] == ["ROSE: first", "ROSE: second"], texts
+        await observer.wait_for(lambda: observer.exit_code is not None)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert texts.count("ROSE: first") == 1 and len(texts) == 3, texts
+        assert observer.count("user_turn_queued") == 2 and observer.count("user_turn") == 2, observer.events
+        assert observer.count("user_turn_undelivered") == 0
+        await observer.close()
+    finally:
+        sandbox.stop()
+
+
+async def test_startup_queue_is_bounded_and_a_session_that_ends_first_reports_the_loss():
+    """C20: the startup queue holds at most 20 turns (the 21st is refused with a reason). A session that
+    ends before its CLI is launched never delivers them: the server says which turns were lost
+    (user_turn_undelivered), and later sends are refused or unreachable, never "queued"."""
+    sandbox = LocalCodeSessionSandbox("claude", gate_startup=True)
+    try:
+        await sandbox.start()
+        observer = SessionObserver(sandbox.ws_url)
+        await observer.start()
+        for index in range(20):
+            sent = await _send_turn(sandbox, f"q-{index}", f"ROSE: waiting {index}")
+            assert sent.status == "queued", (index, sent)
+        over = await _send_turn(sandbox, "q-20", "ROSE: one too many")
+        assert (over.status, over.reason) == ("rejected", "startup_queue_full"), over
+        kept = await _send_turn(sandbox, "q-0", "ROSE: waiting 0")
+        assert kept.status == "queued", "a retry of a queued id is still accepted"
+
+        sandbox.end_session()
+        await observer.wait_for(lambda: observer.exit_code is not None)
+        lost = [event for event in observer.events if event.get("type") == "user_turn_undelivered"]
+        assert len(lost) == 1 and lost[0]["turn_ids"] == [f"q-{index}" for index in range(20)], lost
+        assert lost[0]["reason"] == "session_ended", lost
+        for turn_id in ("q-3", "q-new"):
+            # The server is gone: the sender is told so (rejected or unreachable), never "queued".
+            after = await _send_turn(sandbox, turn_id, "ROSE: after the end")
+            assert after.status in ("rejected", "unreachable"), (turn_id, after)
+        assert sandbox.cli_stdin_lines() == [], "the CLI never got a turn"
         await observer.close()
     finally:
         sandbox.stop()
@@ -716,10 +802,42 @@ def test_attachment_only_turn_and_distinct_steers_remain_visible():
     assert ended["turn_outcome"] == "interrupted" and ended["turn_ended_at"] == "2026-10-20T00:00:02Z"
 
 
+def test_background_sub_agent_tool_row_stays_running_until_its_notification():
+    """A Claude sub-agent launched in the background (Task/Agent run_in_background)
+    returns `async_launched` at once; its row stays running (the code-agent view's
+    agents drawer lists it) until the CLI's task_notification names its outcome."""
+    builder = CodeTranscriptBuilder("claude")
+    builder.feed({"type": "turn_started", "turn_id": "t", "turn_started_at": "2026-11-06T00:00:00Z"}, 0)
+    for index, (tool_id, description) in enumerate((("toolu_bg", "Audit the open PRs"), ("toolu_fg", "Read the CI log")), 1):
+        builder.feed({"type": "tool_use", "turn_id": "t", "tool": "Task", "tool_use_id": tool_id,
+                      "input": {"description": description, "prompt": "go", "run_in_background": tool_id == "toolu_bg"}}, index)
+    builder.feed({"type": "tool_result", "turn_id": "t", "tool_use_id": "toolu_bg", "is_error": False,
+                  "tool_use_result": {"status": "async_launched", "agentId": "a1", "description": "Audit the open PRs"}}, 3)
+    builder.feed({"type": "tool_result", "turn_id": "t", "tool_use_id": "toolu_fg", "is_error": False,
+                  "tool_use_result": {"status": "completed", "content": []}}, 4)
+
+    def status(tool_id: str) -> tuple[str, str]:
+        record = to_ui_record(next(r for r in builder.records if r["id"] == f"tool:{tool_id}"))
+        return record["tool"]["name"], record["tool"]["result"]["status"]
+
+    assert status("toolu_bg") == ("Task", "running")
+    assert status("toolu_fg") == ("Task", "ok")
+    assert to_ui_record(next(r for r in builder.records if r["id"] == "tool:toolu_bg"))["tool"]["target"] == "Audit the open PRs"
+    out = builder.feed({"type": "cli_message", "cli_message": {"type": "system", "subtype": "task_notification",
+                        "task_id": "a1", "tool_use_id": "toolu_bg", "status": "failed"}}, 5)
+    assert [r["id"] for r in out] == ["tool:toolu_bg"]
+    assert status("toolu_bg") == ("Task", "error")
+    # A notification for an already-finished or unknown tool changes nothing.
+    assert builder.feed({"type": "cli_message", "cli_message": {"type": "system", "subtype": "task_notification",
+                         "task_id": "a2", "tool_use_id": "toolu_fg", "status": "failed"}}, 6) == []
+    assert status("toolu_fg") == ("Task", "ok")
+
+
 async def run_all_tests():
     print("code-session-direct-chat blackbox tests:")
     r = BlackboxResult()
     r.record("attachment_only_turn_and_distinct_steers_remain_visible", test_attachment_only_turn_and_distinct_steers_remain_visible)
+    r.record("background_sub_agent_tool_row_stays_running_until_its_notification", test_background_sub_agent_tool_row_stays_running_until_its_notification)
     await r.record_async("codex_native_app_server_contract", test_codex_native_app_server_contract)
     await r.record_async("claude_native_direct_chat_contract", test_claude_native_direct_chat_contract)
     await r.record_async(
@@ -743,6 +861,14 @@ async def run_all_tests():
     )
     await r.record_async(
         "direct_turn_reaches_cli_once_across_delivery_retry", test_direct_turn_reaches_cli_once_across_delivery_retry
+    )
+    await r.record_async(
+        "agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_in_order_once",
+        test_agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_in_order_once,
+    )
+    await r.record_async(
+        "startup_queue_is_bounded_and_a_session_that_ends_first_reports_the_loss",
+        test_startup_queue_is_bounded_and_a_session_that_ends_first_reports_the_loss,
     )
     await r.record_async("direct_turn_requires_the_session_token", test_direct_turn_requires_the_session_token)
     await r.record_async(

@@ -20,6 +20,7 @@ import { createLogger } from '../logger';
 import { githubRepoOf } from './preview';
 import { type CodeSessionFs, shellQuote } from '../codeSessions/sandboxFs';
 import { githubJson, newestPull, record } from '../codeSessions/mergeFacts';
+import { GithubRateLimitedError } from '../githubRateLimit';
 import type { RepoFacts } from '../codeSessions/lifecycle';
 
 const log = createLogger('CodeSessionPublish');
@@ -34,6 +35,18 @@ export class CodePublishError extends Error {
   ) {
     super(message);
     this.name = 'CodePublishError';
+  }
+}
+
+/** A GitHub rate limit is a 429 with the reset time, not a generic upstream failure. */
+async function githubCall<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    if (error instanceof GithubRateLimitedError) {
+      throw new CodePublishError(429, 'GITHUB_RATE_LIMITED', error.message);
+    }
+    throw error;
   }
 }
 
@@ -98,7 +111,7 @@ export async function publishCodeSessionBranch(params: {
   }
   let base = session.mergeTarget;
   if (base === null || base === '') {
-    const info = await githubJson(fetchImpl, repoPath);
+    const info = await githubCall(() => githubJson(fetchImpl, repoPath));
     const defaultBranch = record(info.body)?.default_branch;
     if (typeof defaultBranch !== 'string' || defaultBranch === '') {
       throw new CodePublishError(502, 'GITHUB_UNAVAILABLE', 'Could not read the default branch');
@@ -138,17 +151,21 @@ export async function publishCodeSessionBranch(params: {
   const body =
     params.body?.trim() ||
     `Opened from Rose (code session ${session.id}).\n\nShips only through \`/deploy\`; Rose never merges this PR itself.`;
-  const created = await githubJson(fetchImpl, `${repoPath}/pulls`, {
-    method: 'POST',
-    body: { title, head: branch, base, body, draft: params.draft === true },
-  });
+  const created = await githubCall(() =>
+    githubJson(fetchImpl, `${repoPath}/pulls`, {
+      method: 'POST',
+      body: { title, head: branch, base, body, draft: params.draft === true },
+    })
+  );
   let pr = record(created.body);
   let isNew = created.status === 201;
   if (!isNew) {
     // 422: a PR for this head already exists; return it instead of failing.
-    const open = await githubJson(
-      fetchImpl,
-      `${repoPath}/pulls?state=open&per_page=5&head=${encodeURIComponent(`${owner}:${branch}`)}`
+    const open = await githubCall(() =>
+      githubJson(
+        fetchImpl,
+        `${repoPath}/pulls?state=open&per_page=5&head=${encodeURIComponent(`${owner}:${branch}`)}`
+      )
     );
     const existing = open.status === 200 ? newestPull(open.body) : null;
     if (existing === null) {

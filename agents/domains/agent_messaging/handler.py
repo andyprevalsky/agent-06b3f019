@@ -195,7 +195,12 @@ async def send_message_to_agent(
         if not wake.get("woke"):
             result["wake_error"] = wake.get("reason")
     text = f"Message sent to {to}."
-    if result.get("task_running") is False:
+    if result.get("queued") is True:
+        text = (
+            f"Message queued for {to}: its code agent is still starting. It will receive this as its next "
+            "turn as soon as its CLI runs, in the order you sent it; do not send it again."
+        )
+    elif result.get("task_running") is False:
         text += " Note: that background task is no longer running, so it will not read this message."
     if result.get("woke") is True and result.get("resumed"):
         conversation = (

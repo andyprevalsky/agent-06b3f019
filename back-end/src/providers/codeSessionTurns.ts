@@ -10,7 +10,7 @@
  * The ws-server dedupes by `id` for the life of the session, so retries never
  * write a second turn. `rejected` reasons: `relay_paused` (an agent turn while
  * the user holds the session), `session_ended`, `provider_unsupported`
- * (Codex), `unauthorized`, `invalid_text`, `invalid_id`. The control socket
+ * (Codex), `unauthorized`, `invalid_text`, `invalid_id`, `startup_queue_full`. The control socket
  * connects with `?replay=0` so the ack never queues behind the history replay. `token` is an HMAC of the task id under
  * BACKEND_API_KEY, injected into the sandbox as CODE_SESSION_TURN_TOKEN at
  * creation: the stream URL the browser reads stays read-only.
@@ -24,7 +24,12 @@ const log = createLogger('CodeSessionTurns');
 const TURN_TOKEN_CONTEXT = 'rose-code-session-turn:v1:';
 const DEFAULT_TIMEOUT_MS = 10_000;
 
-export type TurnAckStatus = 'delivered' | 'duplicate' | 'rejected' | 'unreachable';
+/**
+ * `queued`: the CLI has not started yet (project startup, launch), so the ws-server
+ * holds the turn and writes it right after the task prompt; it never reaches the CLI
+ * as a refusal. Later retries of the same id answer `duplicate` once it is written.
+ */
+export type TurnAckStatus = 'delivered' | 'duplicate' | 'queued' | 'rejected' | 'unreachable';
 
 export interface CodeTurnSettings {
   model?: string;
@@ -50,6 +55,8 @@ export interface TurnDelivery {
   ignored_config?: string[];
   /** Events the ws-server held before this turn (earlier turns' history). */
   history_events?: number;
+  /** 1-based place in the ws-server's startup queue (status `queued`). */
+  queue_position?: number;
 }
 
 /** Per-session write token; must match `code_session_turn_token` in agents. */
@@ -163,7 +170,9 @@ export async function deliverUserTurnToCodeSession(params: {
         params.timeoutMs ?? DEFAULT_TIMEOUT_MS
       );
       const status: TurnAckStatus =
-        ack.status === 'delivered' || ack.status === 'duplicate' ? ack.status : 'rejected';
+        ack.status === 'delivered' || ack.status === 'duplicate' || ack.status === 'queued'
+          ? ack.status
+          : 'rejected';
       log.info('Code session turn acknowledged', {
         taskId,
         turnId,
@@ -180,6 +189,7 @@ export async function deliverUserTurnToCodeSession(params: {
         ...(ack.attached === true ? { attached: true } : {}),
         ...(Array.isArray(ack.ignored_config) ? { ignored_config: ack.ignored_config } : {}),
         ...(Number.isInteger(ack.history_events) ? { history_events: ack.history_events } : {}),
+        ...(Number.isInteger(ack.queue_position) ? { queue_position: ack.queue_position } : {}),
       };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);

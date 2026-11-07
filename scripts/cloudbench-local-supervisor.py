@@ -13,6 +13,9 @@ import sys
 import time
 
 # Fit within deploy_test_process's existing ten-second cancellation join.
+# A child that is merely finishing when the suite exits (a test fixture winding down) is not a leak: give it this
+# long to exit by itself before it counts as orphaned. One still alive after it is flagged and signalled as before.
+ORPHAN_SETTLE_SECONDS = 1.0
 TERM_GRACE_SECONDS = 5.0
 DRAIN_SECONDS = 8.0
 
@@ -37,6 +40,7 @@ def supervise(command, receipt):
     orphaned = False
     term_sent = set()
     kill_sent = set()
+    settle_until = None
     reaped = []
     quiescent = False
     error = None
@@ -73,6 +77,11 @@ def supervise(command, receipt):
                 quiescent = native_exit is not None
                 break
             remaining = children()
+            if native_exit is not None and not (stopped):
+                settle_until = settle_until or time.monotonic() + ORPHAN_SETTLE_SECONDS
+                if remaining and time.monotonic() < settle_until:
+                    time.sleep(0.02)
+                    continue
             orphaned = orphaned or (native_exit is not None and bool(remaining))
             if stopped or native_exit is not None:
                 now = time.monotonic()

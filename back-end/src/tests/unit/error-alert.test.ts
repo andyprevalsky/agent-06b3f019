@@ -41,9 +41,11 @@ async function run(): Promise<void> {
 
   const calls: Captured[] = [];
   let failNext = false;
+  let rejections = 0;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     if (failNext) {
       failNext = false;
+      rejections += 1;
       throw new Error('simulated network failure');
     }
     const url = String(input);
@@ -139,10 +141,16 @@ async function run(): Promise<void> {
     failNext = true;
     alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
     await sleep(30); // if this throws unhandled, the process crashes → test fails
-    alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
-    await sleep(30);
+    // The slot is released when the rejection settles, which is DB-backed and lands after a fixed
+    // sleep under coverage load; an identical alert sent before that is throttled by design. Send it
+    // until it lands: a rejection that spent the slot for good never lets one through.
+    assert.strictEqual(rejections, 1, 'the first alert reached the rejecting transport');
+    for (let attempt = 0; attempt < 40 && calls.length < 1; attempt++) {
+      alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
+      await sleep(50);
+    }
     await waitForCalls(calls, 1);
-    assert.strictEqual(calls.length, 1, 'a rejected transport remains immediately retryable');
+    assert.strictEqual(calls.length, 1, 'a rejected transport remains retryable');
 
     // --- 6. AUTO_RCA_ENABLED=1 never dispatches to GitHub: RCA runs on Rose,
     //         driven by the Slack card this alert posts. ---

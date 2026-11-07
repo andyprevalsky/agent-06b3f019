@@ -25,6 +25,7 @@
   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
   "cwd": "/home/user/workspace",
   "model": "claude-sonnet-5",
+  "speed": "standard",
   "tools": [
    "Task",
    "Bash",
@@ -79,7 +80,8 @@
   "usage_scope": "turn",
   "output_tokens": 2,
   "input_tokens": 2,
-  "cached_input_tokens": 18643
+  "cached_input_tokens": 18643,
+  "context_tokens": 80567
  },
  {
   "version": 1,
@@ -238,7 +240,8 @@
   "usage_scope": "turn",
   "output_tokens": 162,
   "input_tokens": 2,
-  "cached_input_tokens": 18643
+  "cached_input_tokens": 18643,
+  "context_tokens": 80567
  },
  {
   "version": 1,
@@ -247,6 +250,8 @@
   "turn_id": "native-turn-1",
   "type": "tool_result",
   "raw_type": "user.tool_result",
+  "tool_use_id": "toolu_018yFxWy1mWPEU5pfTb42xus",
+  "is_error": false,
   "tool_use_result": {
    "type": "text",
    "file": {
@@ -256,9 +261,7 @@
     "startLine": 1,
     "totalLines": 7
    }
-  },
-  "tool_use_id": "toolu_018yFxWy1mWPEU5pfTb42xus",
-  "is_error": false
+  }
  },
  {
   "version": 1,
@@ -284,7 +287,8 @@
   "usage_scope": "turn",
   "output_tokens": 163,
   "input_tokens": 4,
-  "cached_input_tokens": 99208
+  "cached_input_tokens": 99208,
+  "context_tokens": 80819
  },
  {
   "version": 1,
@@ -404,7 +408,8 @@
   "usage_scope": "turn",
   "output_tokens": 340,
   "input_tokens": 4,
-  "cached_input_tokens": 99208
+  "cached_input_tokens": 99208,
+  "context_tokens": 80819
  },
  {
   "version": 1,
@@ -413,6 +418,8 @@
   "turn_id": "native-turn-1",
   "type": "tool_result",
   "raw_type": "user.tool_result",
+  "tool_use_id": "toolu_01SJDJjrTW26WcFmpX9D8f4j",
+  "is_error": false,
   "tool_use_result": {
    "filePath": "/home/user/workspace/calc.py",
    "oldString": "    return a - b",
@@ -436,9 +443,7 @@
    ],
    "userModified": false,
    "replaceAll": false
-  },
-  "tool_use_id": "toolu_01SJDJjrTW26WcFmpX9D8f4j",
-  "is_error": false
+  }
  },
  {
   "version": 1,
@@ -464,7 +469,8 @@
   "usage_scope": "turn",
   "output_tokens": 360,
   "input_tokens": 6,
-  "cached_input_tokens": 180025
+  "cached_input_tokens": 180025,
+  "context_tokens": 81123
  },
  {
   "version": 1,
@@ -501,7 +507,8 @@
   "usage_scope": "turn",
   "output_tokens": 422,
   "input_tokens": 6,
-  "cached_input_tokens": 180025
+  "cached_input_tokens": 180025,
+  "context_tokens": 81123
  },
  {
   "version": 1,
@@ -510,15 +517,15 @@
   "turn_id": "native-turn-1",
   "type": "tool_result",
   "raw_type": "user.tool_result",
+  "tool_use_id": "toolu_01GsBwrtfNmuSQc5mCrqi7e5",
+  "is_error": false,
   "tool_use_result": {
    "stdout": "all tests passed",
    "stderr": "",
    "interrupted": false,
    "isImage": false,
    "noOutputExpected": false
-  },
-  "tool_use_id": "toolu_01GsBwrtfNmuSQc5mCrqi7e5",
-  "is_error": false
+  }
  },
  {
   "version": 1,
@@ -544,7 +551,8 @@
   "usage_scope": "turn",
   "output_tokens": 425,
   "input_tokens": 8,
-  "cached_input_tokens": 261146
+  "cached_input_tokens": 261146,
+  "context_tokens": 81255
  },
  {
   "version": 1,
@@ -660,7 +668,8 @@
   "usage_scope": "turn",
   "output_tokens": 547,
   "input_tokens": 8,
-  "cached_input_tokens": 261146
+  "cached_input_tokens": 261146,
+  "context_tokens": 81255
  },
  {
   "version": 1,
@@ -669,9 +678,9 @@
   "turn_id": "native-turn-1",
   "type": "tool_result",
   "raw_type": "user.tool_result",
-  "tool_use_result": "Error: Exit code 3\n42",
   "tool_use_id": "toolu_01LrquaCPK3a8EDN3op1RAZ6",
-  "is_error": true
+  "is_error": true,
+  "tool_use_result": "Error: Exit code 3\n42"
  },
  {
   "version": 1,
@@ -697,7 +706,8 @@
   "usage_scope": "turn",
   "output_tokens": 552,
   "input_tokens": 10,
-  "cached_input_tokens": 342399
+  "cached_input_tokens": 342399,
+  "context_tokens": 81439
  },
  {
   "version": 1,
@@ -864,7 +874,8 @@
   "usage_scope": "turn",
   "output_tokens": 614,
   "input_tokens": 10,
-  "cached_input_tokens": 342399
+  "cached_input_tokens": 342399,
+  "context_tokens": 81439
  },
  {
   "version": 1,
@@ -895,7 +906,8 @@
   "usage_scope": "turn",
   "output_tokens": 614,
   "input_tokens": 10,
-  "cached_input_tokens": 342399
+  "cached_input_tokens": 342399,
+  "context_window": 1000000
  },
  {
   "version": 1,
@@ -988,6 +1000,7 @@
   "session_id": "54fc65d8-c2d4-41e5-a2d8-d4df7c487c60",
   "cwd": "/home/user/workspace",
   "model": "claude-sonnet-5",
+  "speed": "standard",
   "tools": [
    "Task",
    "Bash",
@@ -1048,7 +1061,9 @@
   "usage_scope": "turn",
   "output_tokens": 1,
   "input_tokens": 2,
-  "cached_input_tokens": 81437
+  "cached_input_tokens": 81437,
+  "context_tokens": 81563,
+  "context_window": 1000000
  },
  {
   "version": 1,
@@ -1149,7 +1164,9 @@
   "usage_scope": "turn",
   "output_tokens": 28,
   "input_tokens": 2,
-  "cached_input_tokens": 81437
+  "cached_input_tokens": 81437,
+  "context_tokens": 81563,
+  "context_window": 1000000
  },
  {
   "version": 1,
@@ -1160,7 +1177,8 @@
   "usage_scope": "turn",
   "output_tokens": 28,
   "input_tokens": 2,
-  "cached_input_tokens": 81437
+  "cached_input_tokens": 81437,
+  "context_window": 1000000
  },
  {
   "version": 1,

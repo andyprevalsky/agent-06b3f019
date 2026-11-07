@@ -3,6 +3,8 @@
  * working state whether or not the agent committed anything:
  *
  *   HOME ──tar (minus caches/large/.git/credentials)──► worktree.tar.gz
+ *          and, for a repo git can rebuild from HEAD, minus its tracked files that
+ *          are unchanged since HEAD (the tree of a large repo is not session state)
  *   each git repo under HOME ──git bundle --all --not --remotes──► repo-<n>.bundle
  *                               (local-only commits; refs listed in the manifest)
  *   newest Claude/Codex session log ─────────────────► cli-log.jsonl
@@ -61,6 +63,16 @@ export interface CheckpointRepo {
   defaultBranch?: string | null;
   /** Lines added/removed per file vs the merge base with the merge target (incl. uncommitted). */
   files?: Array<{ path: string; added: number; removed: number }>;
+  /**
+   * worktree.tar.gz omits this repo's tracked files that were unchanged since HEAD:
+   * restore rebuilds them from the repo (`git checkout-index`) and removes
+   * `deletedFiles`. Absent on older checkpoints, whose archive holds every file.
+   */
+  worktreeFromGit?: boolean;
+  /** Tracked files that were missing from the working tree (deleted, staged or not). */
+  deletedFiles?: string[];
+  /** How many unchanged tracked files the archive omitted (observability). */
+  gitOmittedFiles?: number;
 }
 
 export interface CheckpointManifest {
@@ -98,6 +110,19 @@ function maxFileBytes(): number {
 function maxArtifactBytes(): number {
   const raw = Number(process.env.CODE_SESSION_CHECKPOINT_MAX_ARTIFACT_BYTES);
   return Number.isFinite(raw) && raw > 0 ? raw : 200 * 1024 * 1024;
+}
+
+/** More deleted tracked files than this and the repo's whole working tree stays in the archive. */
+const MAX_DELETED_TRACKED_FILES = 2000;
+
+/**
+ * A repo whose tracked files restore can rebuild: HEAD's objects come back from the
+ * incremental bundle (local-only history) or from a remote that already holds HEAD
+ * (restore fetches it first), and the checkout recreates the files.
+ */
+function reproducibleFromGit(repo: CheckpointRepo): boolean {
+  if (repo.head === null) return false;
+  return repo.bundle !== null || (repo.pushed && repo.remoteUrl !== null);
 }
 
 function tmpDirFor(codeSessionId: string, seq: number, op: string): string {
@@ -243,6 +268,37 @@ async function inspectRepo(
   };
 }
 
+/**
+ * Shell for one repo: append its tracked files that are unchanged since HEAD to the
+ * tar exclude list, and keep its deleted tracked files for restore. The repo stays
+ * fully archived (nothing appended, no GITBACKED line) whenever git cannot replay it
+ * exactly: sparse/assume-unchanged entries, submodules, tracked paths with a content filter (LFS), names
+ * git quotes, or more deletions than the manifest should carry.
+ */
+function gitTrackedScan(repoPath: string, index: number): string {
+  const dir = repoPath === '' ? '.' : repoPath;
+  const prefix = repoPath === '' ? './' : `./${repoPath}/`;
+  return [
+    '(',
+    `  cd ${shellQuote(dir)} || exit 0`,
+    '  g() { git -c core.quotepath=false "$@"; }',
+    "  if g ls-files 2>/dev/null | g check-attr --stdin filter 2>/dev/null | grep -q -v ': unspecified$'; then exit 0; fi",
+    "  if g ls-files -v 2>/dev/null | grep -q -E '^([a-z]|S) '; then exit 0; fi",
+    "  if g ls-files -s 2>/dev/null | grep -q -E '^160000 '; then exit 0; fi",
+    '  g update-index -q --refresh >/dev/null 2>&1 || true',
+    `  g diff-index --name-only HEAD > "$T/ch-${index}.txt" 2>/dev/null || exit 0`,
+    `  g diff-index --name-only --diff-filter=D HEAD > "$T/del-${index}.txt" 2>/dev/null || exit 0`,
+    `  g ls-files > "$T/all-${index}.txt" 2>/dev/null || exit 0`,
+    `  if grep -q '^"' "$T/ch-${index}.txt" "$T/all-${index}.txt"; then exit 0; fi`,
+    `  [ "$(wc -l < "$T/del-${index}.txt" | tr -d ' ')" -le ${MAX_DELETED_TRACKED_FILES} ] || exit 0`,
+    `  P=${shellQuote(prefix)} awk 'FILENAME==ARGV[1]{m[$0]=1;next} !($0 in m){print ENVIRON["P"] $0}' "$T/ch-${index}.txt" "$T/all-${index}.txt" > "$T/omit-${index}.txt"`,
+    `  cat "$T/omit-${index}.txt" >> "$T/tracked.txt"`,
+    `  echo "GITBACKED=${index}"`,
+    `  echo "OMITTED=${index} $(wc -l < "$T/omit-${index}.txt" | tr -d ' ')"`,
+    ')',
+  ].join('\n');
+}
+
 export interface CreateCheckpointParams {
   fs: CodeSessionFs;
   userId: string;
@@ -268,6 +324,7 @@ export async function createCheckpoint(
     ...EXCLUDED_TOP_LEVEL.map((name) => `--exclude=${shellQuote(`./${name}`)}`),
     '--no-wildcards',
     `--exclude-from=${shellQuote(`${tmp}/large.txt`)}`,
+    `--exclude-from=${shellQuote(`${tmp}/tracked.txt`)}`,
     '--wildcards',
     '--no-anchored',
     ...EXCLUDED_DIR_NAMES.map((name) => `--exclude=${shellQuote(name)}`),
@@ -278,10 +335,6 @@ export async function createCheckpoint(
       'rm -rf "$T" && mkdir -p "$T" || exit 4',
       `cd ${shellQuote(home)} || exit 3`,
       `find . \\( ${prune} \\) -prune -o -type f -size +${capKb}k -print > "$T/large.txt"`,
-      `tar -czf "$T/${WORKTREE_ARTIFACT}" ${excludes} -C ${shellQuote(home)} .`,
-      'TAR_RC=$?',
-      // GNU tar exits 1 when a file changed while it was read; still usable.
-      'if [ "$TAR_RC" -gt 1 ]; then echo "TAR_FAILED=$TAR_RC"; exit 5; fi',
       'find . -maxdepth 3 -name node_modules -prune -o -name .git -print | while read -r g; do',
       '  d=${g%/.git}; d=${d#./}; [ "$d" = "." ] && d=""; [ "$g" = "./.git" ] && d=""',
       '  echo "REPO=$d"',
@@ -307,13 +360,6 @@ export async function createCheckpoint(
     const cliLogPath = cliLogLine?.slice('CLILOG='.length).trim().replace(/^\.\//, '') || null;
 
     const artifacts = new Map<string, Buffer>();
-    const worktree = await fs.readFile(`${tmp}/${WORKTREE_ARTIFACT}`);
-    if (worktree.length > maxArtifactBytes()) {
-      throw new Error(
-        `Checkpoint worktree is ${worktree.length} bytes (cap ${maxArtifactBytes()}); refusing to store`
-      );
-    }
-    artifacts.set(WORKTREE_ARTIFACT, worktree);
 
     const repos: CheckpointRepo[] = [];
     for (const [index, repoPath] of [...new Set(repoPaths)].entries()) {
@@ -330,6 +376,57 @@ export async function createCheckpoint(
       repos.push(repo);
     }
 
+    // The archive holds what git cannot reproduce. A repo's tracked files that are
+    // unchanged since HEAD are git content: restore rebuilds them from the repo, so
+    // a repo that outgrows the artifact cap (Rose) no longer fails every close.
+    const gitRepos = repos
+      .map((repo, index) => ({ repo, index }))
+      .filter(({ repo }) => reproducibleFromGit(repo));
+    const archive = await fs.exec(
+      [
+        `T=${shellQuote(tmp)}`,
+        `cd ${shellQuote(home)} || exit 3`,
+        ': > "$T/tracked.txt"',
+        ...gitRepos.map(({ repo, index }) => gitTrackedScan(repo.path, index)),
+        `tar -czf "$T/${WORKTREE_ARTIFACT}" ${excludes} -C ${shellQuote(home)} .`,
+        'TAR_RC=$?',
+        // GNU tar exits 1 when a file changed while it was read; still usable.
+        'if [ "$TAR_RC" -gt 1 ]; then echo "TAR_FAILED=$TAR_RC"; exit 5; fi',
+        'awk \'FILENAME==ARGV[1]{m[$0]=1;next} !($0 in m)\' "$T/tracked.txt" "$T/large.txt" > "$T/large-skipped.txt"',
+        'exit 0',
+      ].join('\n'),
+      { timeoutMs: 300_000 }
+    );
+    if (archive.exitCode !== 0) {
+      throw new Error(
+        `Checkpoint archive failed (exit ${archive.exitCode}): ${archive.stderr.slice(0, 500) || archive.stdout.slice(0, 500)}`
+      );
+    }
+    for (const line of archive.stdout.split('\n')) {
+      const backed = /^GITBACKED=(\d+)$/.exec(line.trim());
+      if (backed === null) continue;
+      const repo = repos[Number(backed[1])];
+      if (repo === undefined) continue;
+      repo.worktreeFromGit = true;
+      repo.deletedFiles = (await fs.readFile(`${tmp}/del-${backed[1]}.txt`))
+        .toString('utf8')
+        .split('\n')
+        .filter(Boolean);
+    }
+    for (const line of archive.stdout.split('\n')) {
+      const omitted = /^OMITTED=(\d+) (\d+)$/.exec(line.trim());
+      const repo = omitted === null ? undefined : repos[Number(omitted[1])];
+      if (omitted !== null && repo !== undefined) repo.gitOmittedFiles = Number(omitted[2]);
+    }
+
+    const worktree = await fs.readFile(`${tmp}/${WORKTREE_ARTIFACT}`);
+    if (worktree.length > maxArtifactBytes()) {
+      throw new Error(
+        `Checkpoint worktree is ${worktree.length} bytes (cap ${maxArtifactBytes()}); refusing to store`
+      );
+    }
+    artifacts.set(WORKTREE_ARTIFACT, worktree);
+
     let cliSessionId: string | null = null;
     if (cliLogPath !== null) {
       const content = await fs.readFile(`${home}/${cliLogPath}`);
@@ -339,7 +436,7 @@ export async function createCheckpoint(
 
     let skippedLargeFiles: string[] = [];
     try {
-      skippedLargeFiles = (await fs.readFile(`${tmp}/large.txt`))
+      skippedLargeFiles = (await fs.readFile(`${tmp}/large-skipped.txt`))
         .toString('utf8')
         .split('\n')
         .map((line) => line.replace(/^\.\//, ''))
@@ -464,7 +561,7 @@ export async function applyCheckpoint(
     if (untar.exitCode !== 0) {
       throw new Error(`Checkpoint untar failed: ${untar.stderr.slice(0, 500)}`);
     }
-    for (const repo of manifest.repos ?? []) {
+    for (const [repoIndex, repo] of (manifest.repos ?? []).entries()) {
       if (!safeRelativePath(repo.path)) continue;
       const bundle = repo.bundle !== null && artifacts.has(repo.bundle) ? repo.bundle : null;
       const refs = Object.entries(repo.refs ?? {}).filter(
@@ -476,6 +573,23 @@ export async function applyCheckpoint(
         repo.remoteUrl !== null
           ? (options.authRemoteUrl?.(repo.remoteUrl) ?? repo.remoteUrl)
           : null;
+      // Tracked files the archive omitted come back from HEAD; files that were deleted
+      // stay deleted. A path in the list that could leave the repo is never removed.
+      const deleted = (repo.deletedFiles ?? []).filter(safeRelativePath);
+      if (repo.worktreeFromGit === true) {
+        await fs.writeFile(
+          `${tmp}/deleted-${repoIndex}.txt`,
+          Buffer.from(deleted.map((path) => `${path}\n`).join(''), 'utf8')
+        );
+      }
+      const rebuildTracked =
+        repo.worktreeFromGit === true
+          ? [
+              // Only files missing from the working tree: the archived (modified) ones stay.
+              'git ls-files -d -z | git checkout-index -q -z --stdin',
+              `while IFS= read -r f; do rm -f -- "$f"; done < ${shellQuote(`${tmp}/deleted-${repoIndex}.txt`)}`,
+            ]
+          : [];
       const setHead =
         repo.branch !== null
           ? `git symbolic-ref HEAD ${shellQuote(`refs/heads/${repo.branch}`)}`
@@ -503,6 +617,7 @@ export async function applyCheckpoint(
           setHead,
           // Mixed reset: index matches HEAD, the restored working files stay.
           'git reset -q',
+          ...rebuildTracked,
           'git config user.name >/dev/null || git config user.name "Rose Agent"',
           'git config user.email >/dev/null || git config user.email "agent@roselabs.ai"',
         ].join('\n'),
