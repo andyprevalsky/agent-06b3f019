@@ -28,6 +28,8 @@ const FAKE_UUID = '00000000-0000-4000-8000-000000000099';
 const FIXTURE_GOAL = 'report-bug blackbox fixture';
 /** Every fixture agent this run created, for the closing data-hygiene check. */
 const fixtureAgentIds = new Set<string>();
+/** Tags this suite's requests so the server's outbound fetch captures can be read back. */
+const CAPTURE_TOKEN = `report-bug-${randomUUID()}`;
 
 const ErrorResponse = z.object({ error: z.string() });
 const ScreenshotResponse = z.object({
@@ -55,7 +57,11 @@ async function request(
 ): Promise<{ status: number; data: unknown }> {
   const response = await fetch(url, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Capture-Token': CAPTURE_TOKEN,
+      ...options.headers,
+    },
   });
   let data: unknown;
   const ct = response.headers.get('content-type');
@@ -192,7 +198,11 @@ async function testMissingAgent(): Promise<void> {
     async () => {
       const response = await fetch(`${BASE_URL}/api/agents/${FAKE_UUID}/report-bug`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...apiKeyHeaders(ANDY_USER_ID) },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Capture-Token': CAPTURE_TOKEN,
+          ...apiKeyHeaders(ANDY_USER_ID),
+        },
         body: JSON.stringify({ description: 'agent does not exist' }),
       });
       const data: unknown = await response.json();
@@ -353,7 +363,7 @@ async function postScreenshot(
   form.append('file', new Blob([file.bytes], { type: file.type }), file.name);
   const response = await fetch(`${BASE_URL}/api/agents/${agentId}/report-bug/screenshots`, {
     method: 'POST',
-    headers,
+    headers: { 'X-Capture-Token': CAPTURE_TOKEN, ...headers },
     body: form,
   });
   return { status: response.status, data: await response.json() };
@@ -430,13 +440,39 @@ async function testFixturesLeaveNoHistory(): Promise<void> {
   const ids = [...fixtureAgentIds];
   if (ids.length === 0) throw new Error('no fixture agents were recorded');
   const [agents, trajectoryRows] = await Promise.all([
-    prisma.agent.count({ where: { id: { in: ids } } }),
-    prisma.agentTrajectorySearch.count({ where: { rootAgentId: { in: ids } } }),
+    prisma.agent.count({ where: { OR: [{ id: { in: ids } }, { goal: FIXTURE_GOAL }] } }),
+    prisma.agentTrajectorySearch.count({
+      where: { OR: [{ rootAgentId: { in: ids } }, { agentGoal: FIXTURE_GOAL }] },
+    }),
   ]);
   if (agents !== 0 || trajectoryRows !== 0) {
     throw new Error(
-      `${String(ids.length)} fixture agents left ${String(agents)} agent rows and ` +
+      `fixture agents left ${String(agents)} agent rows and ` +
         `${String(trajectoryRows)} agent_trajectories rows behind`
+    );
+  }
+}
+
+const CaptureList = z.object({
+  captures: z.array(z.object({ url: z.string(), requestBody: z.string().nullable() })),
+});
+
+/**
+ * The fixture needs agent rows, not agent runs. A chat started for a fixture
+ * agent inherits this suite's capture token, so its model calls appear here.
+ */
+async function testFixturesStartNoAgentRun(): Promise<void> {
+  const res = await request(
+    `${BASE_URL}/api/test/captures?token=${encodeURIComponent(CAPTURE_TOKEN)}`
+  );
+  assertStatus(res.status, 200, res.data);
+  const modelCalls = assertSchema(CaptureList, res.data, 'captures').captures.filter(
+    (capture) => capture.requestBody?.includes('"messages"') === true
+  );
+  if (modelCalls.length > 0) {
+    throw new Error(
+      `the suite's fixtures made ${String(modelCalls.length)} model calls: ` +
+        [...new Set(modelCalls.map((capture) => capture.url))].join(', ')
     );
   }
 }
@@ -490,6 +526,7 @@ async function main(): Promise<void> {
     ),
   ]);
   results.push(
+    await runTest('fixtures start no agent run or model call', testFixturesStartNoAgentRun),
     await runTest(
       'fixtures leave no agent or trajectory history behind',
       testFixturesLeaveNoHistory
