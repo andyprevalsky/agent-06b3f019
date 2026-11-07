@@ -127,6 +127,13 @@ for (const url of [
   'postgresql://postgres:postgres@host.docker.internal:5432/victoria',
   'postgresql://postgres:postgres@postgres:5432/victoria',
   'postgresql://postgres:postgres@devbox.local:5432/victoria',
+  // private / local IPv6 literals: unique-local, link-local (with zone), expanded loopback and IPv4-mapped private
+  'postgresql://postgres:postgres@[fd00::1]:5432/victoria',
+  'postgresql://postgres:postgres@[fc00:1234::9]:5432/victoria',
+  'postgresql://postgres:postgres@[fe80::1%25eth0]:5432/victoria',
+  'postgresql://postgres:postgres@[0:0:0:0:0:0:0:1]:5432/victoria',
+  'postgresql://postgres:postgres@[::ffff:10.1.2.3]:5432/victoria',
+  'postgresql://postgres:postgres@[::ffff:7f00:1]:5432/victoria',
 ]) {
   const local = assessProdReferences(plausible, url);
   assert.equal(local.ok, false, url);
@@ -134,6 +141,13 @@ for (const url of [
   assert.ok(!local.problems.join().includes('postgres:postgres'), url);
 }
 assert.equal(assessProdReferences(plausible, 'postgresql://u:p@172.32.0.1:5432/db').ok, true);
+// public IPv6 and IPv4-mapped public addresses are not classified as local
+assert.equal(
+  assessProdReferences(plausible, 'postgresql://u:p@[2606:4700:4700::1111]:5432/db').ok,
+  true
+);
+assert.equal(assessProdReferences(plausible, 'postgresql://u:p@[::ffff:8.8.8.8]:5432/db').ok, true);
+assert.equal(assessProdReferences(plausible, 'postgresql://u:p@[2001:db8::1]:5432/db').ok, true);
 assert.equal(assessProdReferences(plausible, undefined).ok, false);
 // execute refuses; a dry run returns a loud warning instead of throwing
 const bad = assessProdReferences(

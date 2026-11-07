@@ -126,20 +126,65 @@ export function databaseHostOf(databaseUrl: string | undefined): string | null {
  */
 export function isNonProductionHost(host: string): boolean {
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
-  if (host === '0.0.0.0' || host === '::' || host === '::1') return true;
   if (host === 'host.docker.internal') return true;
+  if (host.includes(':')) return isNonProductionIpv6(host);
   const octets = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
-  if (octets !== null) {
-    const [first, second] = [Number(octets[1]), Number(octets[2])];
-    return (
-      first === 10 ||
-      first === 127 ||
-      (first === 172 && second >= 16 && second <= 31) ||
-      (first === 192 && second === 168) ||
-      (first === 169 && second === 254)
-    );
+  if (octets !== null) return isNonProductionIpv4(Number(octets[1]), Number(octets[2]));
+  if (host === '0.0.0.0') return true;
+  return !host.includes('.');
+}
+
+function isNonProductionIpv4(first: number, second: number): boolean {
+  return (
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    (first === 169 && second === 254)
+  );
+}
+
+/** Eight 16-bit groups of an IPv6 literal (zone id and `::` expanded); null when malformed. */
+function ipv6Groups(host: string): number[] | null {
+  const address = host.split('%')[0];
+  const embedded = /^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address);
+  const text =
+    embedded === null
+      ? address
+      : `${embedded[1]}${((Number(embedded[2]) << 8) | Number(embedded[3])).toString(16)}:${(
+          (Number(embedded[4]) << 8) |
+          Number(embedded[5])
+        ).toString(16)}`;
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const parse = (part: string): number[] | null => {
+    if (part === '') return [];
+    const groups = part
+      .split(':')
+      .map((group) => (/^[0-9a-f]{1,4}$/i.test(group) ? parseInt(group, 16) : NaN));
+    return groups.some(Number.isNaN) ? null : groups;
+  };
+  const head = parse(halves[0]);
+  const tail = halves.length === 2 ? parse(halves[1]) : [];
+  if (head === null || tail === null) return null;
+  if (halves.length === 1) return head.length === 8 ? head : null;
+  const missing = 8 - head.length - tail.length;
+  return missing < 1 ? null : [...head, ...new Array<number>(missing).fill(0), ...tail];
+}
+
+/** Loopback, unspecified, unique-local (fc00::/7), link-local (fe80::/10) and IPv4-mapped private IPv6. */
+function isNonProductionIpv6(host: string): boolean {
+  const groups = ipv6Groups(host);
+  if (groups === null) return false;
+  const allZeroBefore = (count: number): boolean =>
+    groups.slice(0, count).every((group) => group === 0);
+  if (allZeroBefore(7) && groups[7] <= 1) return true;
+  if ((groups[0] & 0xfe00) === 0xfc00 || (groups[0] & 0xffc0) === 0xfe80) return true;
+  if (allZeroBefore(5) && groups[5] === 0xffff) {
+    return isNonProductionIpv4(groups[6] >> 8, groups[6] & 0xff);
   }
-  return !host.includes('.') && !host.includes(':');
+  return false;
 }
 
 /**
