@@ -346,6 +346,38 @@ except Exception:
 PY
 }
 
+cloudbench_tcp_port_bindable() {  # <port>
+  # Mirrors the hub's own bind (127.0.0.1 with SO_REUSEADDR, as
+  # http.server.HTTPServer sets it), then releases the port immediately.
+  #
+  # Exit codes:
+  #   0 — bindable now
+  #   1 — address in use (non-listening occupant or a listener that just won)
+  #   2 — bad argument
+  #   3 — probe failed; callers must fail closed
+  python3 -S - "$1" <<'PY'
+import errno
+import socket
+import sys
+
+try:
+    port = int(sys.argv[1])
+except (IndexError, ValueError):
+    raise SystemExit(2)
+if not 1 <= port <= 65535:
+    raise SystemExit(2)
+
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("127.0.0.1", port))
+except OSError as error:
+    raise SystemExit(1 if error.errno == errno.EADDRINUSE else 3)
+except Exception:
+    raise SystemExit(3)
+PY
+}
+
 cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
   local preferred="$1" expected_root="$2" candidate probe_rc
 
@@ -369,8 +401,17 @@ cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
       continue
     fi
     if [ "$probe_rc" -eq 1 ]; then
-      printf '%s\n' "$candidate"
-      return 0
+      # A refused connect only proves nobody is listening. A loopback client's
+      # ephemeral port, its 60-second TIME_WAIT or a bound-only socket still
+      # makes the hub's bind fail with EADDRINUSE, and every start attempt
+      # would otherwise reselect that same port. Skip it like a foreign hub.
+      cloudbench_tcp_port_bindable "$candidate"
+      probe_rc=$?
+      if [ "$probe_rc" -eq 0 ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      [ "$probe_rc" -eq 1 ] && continue
     fi
     echo "FATAL: central hub TCP probe failed on port ${candidate} (rc=${probe_rc}); refusing fail-open port selection" >&2
     return 1
