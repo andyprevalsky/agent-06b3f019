@@ -28,7 +28,7 @@ def _image_dependency_inputs(context):
         path = context / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('{}\n')
-    (context / 'back-end/package-lock.json').write_text('fixture-lock\n')
+    (context / 'back-end/package-lock.json').write_text(json.dumps({'lockfileVersion': 3, 'packages': {'': {'name': 'fixture'}}}) + '\n')
     (context / 'agents').mkdir(exist_ok=True)
     (context / 'agents/requirements.txt').write_text('fixture-requirements\n')
 

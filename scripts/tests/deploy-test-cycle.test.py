@@ -4907,6 +4907,62 @@ class InterruptedLocalRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.interrupted_boundary(self.state)
 
 
+    def file_interruption(self, returned=False):
+        self.gate.update(result_transport='file', command=[sys.executable,
+            str(ROOT/'scripts/deploy_test_worker.py'),'--root',str(self.worker)])
+        self.recipe.clear();self.recipe.update(cases={self.gate['name']:{
+            'command':['python3','scripts/run-deploy-structural-gates.py','--max-workers','5'],
+            'cwd':'.','env':{},'aggregate':True}})
+        self.receipt.update(command=self.gate['command'])
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        if returned:
+            self.receipt.update(native_exit=1,worker_result=str(self.folder/'result.json'))
+            self.process.update(native_exit=1,orphaned_children=True,
+                reaped=[{'pid':124,'status':256},{'pid':125,'status':9}],
+                term_sent=[124,125],kill_sent=[125])
+            self.result.update(source=self.source,recipe_digest=c.digest(self.recipe),
+                cleanup_complete=True,complete=False,cases={self.gate['name']:'UNVERIFIED'})
+            self.result['evidence'][self.gate['name']].update(
+                command=self.recipe['cases'][self.gate['name']]['command'],
+                native_exit=143,cancelled=True)
+            c.write(self.folder/'result.json',self.result)
+        self.seal()
+        if returned:
+            self.paths['result.json']=self.folder/'result.json'
+            self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+
+    def test_file_interrupted_killed_adapter_keeps_original_receipts(self):
+        self.file_interruption()
+        original=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_file_interrupted_returned_structural_keeps_original_receipts(self):
+        self.file_interruption(returned=True)
+        original=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_file_returned_structural_rejects_incomplete_or_foreign_evidence(self):
+        self.file_interruption(returned=True)
+        original=copy.deepcopy(self.result)
+        for key,value in [('cleanup_complete',False),('token','foreign'),('recipe_digest','foreign')]:
+            self.result={**original,key:value};c.write(self.paths['result.json'],self.result)
+            self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+            before=copy.deepcopy(self.state)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.assertEqual(before,self.state)
+        self.result=original;c.write(self.paths['result.json'],self.result)
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        self.process['reaped']=[{'pid':124,'status':256}];self.seal()
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        with self.assertRaises(ValueError):self.reconcile()
+
+
 class InterruptedCardRecovery(unittest.TestCase):
     write_native = CardPreflightCleanup.write_native
 

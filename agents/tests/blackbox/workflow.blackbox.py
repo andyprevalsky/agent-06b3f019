@@ -11406,7 +11406,7 @@ def test_workflow_final_presentation_resume():
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
-        state = wf._continuation_resume_state([])
+        state = wf._continuation_resume_state()
         restored = _bare_workflow_instance()
         restored._restore_deployment_state(state)
         assert restored.output_schema == wf.output_schema

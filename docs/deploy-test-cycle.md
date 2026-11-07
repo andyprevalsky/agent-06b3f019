@@ -411,6 +411,13 @@ If pending execution ownership prevents another isolated lane from starting,
 report that exact unsupported transition and continue supported independent work;
 do not infer live execution from an owner label or infer cleanup from a dead PID.
 
+Cancelled local file-adapter executions may use `local-supervisor-cleanup-v1`
+only with exact request/receipt/process hashes, fully reaped native child and
+descendant identities, idle admission, no root listeners, and no live root
+consumer. A structural adapter that returned exit 1 after cancellation also
+requires its unchanged UNVERIFIED result and cancelled inner-case log. This
+reconciles launch custody only; original failures and missing test credit remain.
+
 The coordinator handles TERM/INT by stopping only the process groups it started
 and recording `interrupted`, never PASS or a provider waiver. Use `resume` only
 after the worker's teardown is verified. A worker that leaves descendants behind

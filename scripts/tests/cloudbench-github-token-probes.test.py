@@ -20,6 +20,9 @@ class TokenProbeCounts(unittest.TestCase):
                 (root/name/'.env').write_text(''.join(f'{key}={value}\n' for key,value in values.items()))
             source = SOURCE.read_text()
             functions = source[source.index('github_token_can_fetch_repo() {'):source.index('# Resolve the CONTROLLER GitHub token')]
+            functions += source[source.index('token_to_git_auth_header() {'):source.index('resolve_controller_git_auth_header() {')]
+            library = (SOURCE.parent/'lib/cloudbench-env.sh').read_text()
+            functions += library[library.index('cloudbench_git_credential_github_token() {'):library.index('cloudbench_resolve_controller_github_token() {')]
             (root/'functions.sh').write_text(functions)
             (root/'bin'/'gh').write_text('''#!/usr/bin/env python3
 import os,sys
@@ -27,24 +30,32 @@ assert sys.argv[1:] == ['auth','token','--hostname','github.com']
 assert all(key not in os.environ for key in ['GITHUB_TOKEN','GH_TOKEN','GH_HOST'])
 print(os.environ.get('FIXTURE_GH',''),end='')
 ''')
-            (root/'bin'/'curl').write_text('''#!/usr/bin/env python3
-import json,os,pathlib,stat,sys
+            (root/'bin'/'git').write_text('''#!/usr/bin/env python3
+import base64,json,os,pathlib,stat,sys
 args=sys.argv[1:]
-assert args[-1]=='https://api.github.com/repos/Rose-Ai-Labs/rose/contents'
-assert args[args.index('--connect-timeout')+1]=='5'
-assert args[args.index('--max-time')+1]=='15'
-p=pathlib.Path(args[args.index('--config')+1])
+assert os.environ['GIT_TERMINAL_PROMPT']=='0'
+assert os.environ['GIT_ASKPASS']=='true'
+if args[-2:]==['credential','fill']:
+    assert args==['-c','credential.interactive=false','-C',os.environ['ROOT_DIR'],'credential','fill']
+    assert sys.stdin.read()=='protocol=https\\n'+'host=github.com\\n'+'path=Rose-Ai-Labs/rose.git\\n\\n'
+    sys.exit(0)
+assert args==['-c','credential.helper=','ls-remote','--exit-code','https://github.com/Rose-Ai-Labs/rose.git','HEAD']
+assert os.environ['GIT_CONFIG_NOSYSTEM']=='1'
+p=pathlib.Path(os.environ['GIT_CONFIG_GLOBAL'])
 assert stat.S_IMODE(p.stat().st_mode)==0o600
-content=p.read_text(); token=content.split('Bearer ',1)[1].split('"',1)[0]
+header=p.read_text().split('Authorization: Basic ',1)[1].strip()
+credential=base64.b64decode(header).decode()
+assert credential.startswith('x-access-token:')
+token=credential.split(':',1)[1]
 assert token not in args
 with open(os.environ['FIXTURE_CALLS'],'a') as f: f.write(token+'\\n')
 status=json.loads(os.environ['FIXTURE_STATUS']).get(token,'401')
-if status=='transport-error': sys.exit(7)
-print(status,end='')
+sys.exit(0 if status=='200' else 7 if status=='transport-error' else 128)
 ''')
+            (root/'bin'/'curl').write_text('#!/bin/sh\nexit 97\n')
             for p in (root/'bin').iterdir(): p.chmod(0o755)
             env = {k:v for k,v in os.environ.items() if not k.startswith(('GITHUB_','GH_','CLOUDBENCH_GITHUB_'))}
-            env.update(PATH=str(root/'bin')+':'+os.environ['PATH'], FIXTURE_GH=gh,
+            env.update(PATH=str(root/'bin')+':'+os.environ['PATH'], ROOT_DIR=str(root), FIXTURE_GH=gh,
                        FIXTURE_CALLS=str(root/'calls'), FIXTURE_STATUS=json.dumps(statuses or {}),
                        GITHUB_TOKEN=ambient, GH_TOKEN=gh_env, GH_HOST='must-be-unset')
             if b64: env['CLOUDBENCH_GITHUB_TOKEN_B64']=base64.b64encode(b64.encode()).decode()
