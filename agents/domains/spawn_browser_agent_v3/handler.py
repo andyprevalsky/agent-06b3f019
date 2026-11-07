@@ -9221,32 +9221,25 @@ async def _spawn_browser_agent_activity_v3_real(
                 _realm_credential_state,
             )
 
-        # Wait for both sides: a failure or cancellation must not discard browser
-        # clients that already connected (an orphaned client holds Tilion's single
-        # CDP slot). Connected handles go to the activity's finally-scheduled cleanup.
         browser_setup = asyncio.ensure_future(_setup_browser())
         data_setup = asyncio.ensure_future(_process_data())
         try:
-            browser_result, data_result = await asyncio.gather(browser_setup, data_setup, return_exceptions=True)
+            browser_result, data_result = await asyncio.gather(browser_setup, data_setup)
         except BaseException:
+            # gather raises the first failure but leaves the other side running, and a
+            # cancelled activity drops a finished side's result. Stop the unfinished side
+            # (its own handler releases what it attached) and hand a connected browser
+            # side to the finally-scheduled cleanup: an orphaned client would hold
+            # Tilion's single CDP slot.
+            for side in (browser_setup, data_setup):
+                side.cancel()
+            await asyncio.wait({browser_setup, data_setup}, timeout=BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS)
+            for side in (browser_setup, data_setup):
+                if side.done() and not side.cancelled():
+                    side.exception()  # retrieved: the raised error below is the reported one
             if browser_setup.done() and not browser_setup.cancelled() and browser_setup.exception() is None:
                 dom_service, dom_page, input_page, playwright_browser, playwright_instance = browser_setup.result()
             raise
-        setup_errors = [result for result in (browser_result, data_result) if isinstance(result, BaseException)]
-        # A replaced generation or interpreter shutdown outranks an ordinary error
-        # from the other side; a cancellation raised inside one side does not hide it.
-        setup_error = next(
-            (
-                error
-                for error in setup_errors
-                if isinstance(error, (WorkflowGenerationSealed, KeyboardInterrupt, SystemExit))
-            ),
-            setup_errors[0] if setup_errors else None,
-        )
-        if setup_error is not None:
-            if not isinstance(browser_result, BaseException):
-                dom_service, dom_page, input_page, playwright_browser, playwright_instance = browser_result
-            raise setup_error
         _record_timing("parallel_setup_total", t_parallel)
 
         (
