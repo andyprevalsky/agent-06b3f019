@@ -178,24 +178,11 @@
       "argv": "/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex app-server --listen ws://127.0.0.1:43225 --enabl",
       "cwd": "/home/boxes/rose",
       "pid": 1464599
-    },
-    {
-      "argv": "tail -25",
-      "cwd": "/home/boxes/rose",
-      "pid": 2111053
-    },
-    {
-      "argv": "cut -c1-260",
-      "cwd": "/home/boxes/rose",
-      "pid": 2111054
     }
   ],
   "manifest": "docs/handoffs/pr-1751-closeout/manifest.json",
   "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1751-closeout/CLOSEOUT.md, docs/handoffs/pr-1751-closeout/closeout-manifest.json, docs/handoffs/pr-1751-closeout/evidence/production-lanes.json, docs/handoffs/pr-1751-closeout/evidence/triage/triage-final2-1751.json, docs/handoffs/pr-1751-closeout/evidence/triage/triage-report-1751.json",
-    "live process 1464599 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex app-server --listen ws://127.0.0.1:43225 --enabl",
-    "live process 2111053 in this checkout: tail -25",
-    "live process 2111054 in this checkout: cut -c1-260"
+    "live process 1464599 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex app-server --listen ws://127.0.0.1:43225 --enabl"
   ],
   "pr": 1751,
   "preserved_refs": {
@@ -340,30 +327,7 @@
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [
-        "docs/handoffs/pr-1751-closeout/CLOSEOUT.md",
-        "docs/handoffs/pr-1751-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-1751-closeout/evidence/production-lanes.json",
-        "docs/handoffs/pr-1751-closeout/evidence/triage/triage-final2-1751.json",
-        "docs/handoffs/pr-1751-closeout/evidence/triage/triage-report-1751.json",
-        "docs/handoffs/pr-1751-closeout/evidence/triage/triage-smoke-1751.json",
-        "docs/handoffs/pr-1751-closeout/evidence/triage/triage-smoke-final-1751.json",
-        "docs/handoffs/pr-1751-closeout/evidence/triage/triage-smoke-final3.json",
-        "docs/handoffs/pr-1751-closeout/evidence/triage/triage-smoke-final4.json",
-        "docs/handoffs/pr-1751-closeout/manifest.json",
-        "docs/rca/INDEX.md",
-        "docs/rca/cases/2026-10-25-demo-replay-worker-cpu-starvation-normalization-and-live-jev.md",
-        "docs/rca/cases/2026-10-27-manifest-lock-connection-test-counted-other-suites-transactions.md",
-        "docs/rca/cases/2026-11-05-interrupted-proof-fixture-port-inside-deploy-claim-range.md",
-        "docs/rca/cases/2026-11-06-browser-state-fetch-failed-silently-on-dropped-cdp-socket.md",
-        "docs/rca/cases/2026-11-06-interrupted-serial-benchmark-loop-swallowed-owner-cancel.md",
-        "docs/rca/cases/2026-11-07-blacksmith-plan-followed-coordinator-host-memory.md",
-        "docs/rca/cases/2026-11-07-canonical-seed-fixture-missing-for-combined-main-schema.md",
-        "docs/rca/cases/2026-11-07-code-session-fixture-viewer-attached-after-cli-streamed.md",
-        "docs/rca/cases/2026-11-07-controller-runner-docker-client-calls-unbounded-and-silent.md",
-        "docs/rca/cases/2026-11-07-interrupted-custody-scan-aborted-on-exiting-process.md",
-        "docs/rca/cases/2026-11-07-local-cleanup-quiet-unguarded-proc-read.md",
-        "docs/rca/cases/2026-11-07-sharded-routing-fixture-cleanup-enotempty-git.md",
-        "docs/rca/cases/2026-11-07-tilion-backing-host-failure-lost-payment-card-pause.md"
+        "docs/handoffs/pr-1751-closeout/deletion-readiness.json"
       ],
       "unpushed_commits": 0
     },
