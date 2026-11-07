@@ -8,8 +8,12 @@
  * This suite cements auth + validation surfaces against a live backend.
  */
 
+import './assertLocalDatabase';
+import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { agentSelfBugReportKey } from '../../domains/agents/repoAgentSelfBugReports';
+import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 config();
 
@@ -21,6 +25,9 @@ if (API_KEY === '') {
 }
 const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const FAKE_UUID = '00000000-0000-4000-8000-000000000099';
+const FIXTURE_GOAL = 'report-bug blackbox fixture';
+/** Every fixture agent this run created, for the closing data-hygiene check. */
+const fixtureAgentIds = new Set<string>();
 
 const ErrorResponse = z.object({ error: z.string() });
 const ScreenshotResponse = z.object({
@@ -93,26 +100,43 @@ async function createAnonymousUser(): Promise<string> {
   return (await createAnonymousSession()).userId;
 }
 
+/**
+ * The report-bug routes only need an owned root agent row. Creating it through
+ * POST /api/agents started a live chat that grepped this goal across the
+ * user's trajectories, so every run's chats fed on earlier runs' grep results.
+ */
 async function createAgent(userId: string): Promise<string> {
-  const res = await request(`${BASE_URL}/api/agents`, {
-    method: 'POST',
-    headers: apiKeyHeaders(userId),
-    body: JSON.stringify({ goal: 'report-bug blackbox fixture' }),
+  const id = randomUUID();
+  await prisma.agent.create({
+    data: { id, userId, goal: FIXTURE_GOAL, status: 'ACTIVE', busId: id },
   });
-  if (res.status !== 201 && res.status !== 200) {
-    throw new Error(`create agent failed: ${res.status} ${JSON.stringify(res.data)}`);
-  }
-  const body = res.data as { agent_id?: string; agent?: { agent_id?: string; id?: string } };
-  const id = body.agent_id ?? body.agent?.agent_id ?? body.agent?.id;
-  if (typeof id !== 'string') throw new Error(`missing agent_id: ${JSON.stringify(res.data)}`);
+  fixtureAgentIds.add(id);
   return id;
 }
 
-async function deleteAgent(agentId: string, userId: string): Promise<void> {
-  await request(`${BASE_URL}/api/agents/${agentId}`, {
-    method: 'DELETE',
-    headers: apiKeyHeaders(userId),
+/** Hard delete: the API's DELETE only archives, leaving the row as user history. */
+async function deleteFixtureAgents(agentIds: string[]): Promise<void> {
+  if (agentIds.length === 0) return;
+  await prisma.toolSideEffect.deleteMany({
+    where: { operationKey: { in: agentIds.map(agentSelfBugReportKey) } },
   });
+  await prisma.agent.deleteMany({ where: { id: { in: agentIds } } });
+  await prisma.agentTrajectorySearch.deleteMany({ where: { rootAgentId: { in: agentIds } } });
+  await prisma.agentTrajectoryAgent.deleteMany({ where: { agentId: { in: agentIds } } });
+}
+
+/** Remove fixture agents (and their chats) left in a persistent DB by earlier runs. */
+async function purgeEarlierFixtures(): Promise<void> {
+  const earlier = await prisma.agent.findMany({
+    where: { goal: FIXTURE_GOAL, parentAgentId: null },
+    select: { id: true },
+  });
+  const ids = earlier.map((agent) => agent.id);
+  const descendants = await prisma.agent.findMany({
+    where: { busId: { in: ids } },
+    select: { id: true },
+  });
+  await deleteFixtureAgents([...new Set([...ids, ...descendants.map((agent) => agent.id)])]);
 }
 
 async function testNoAuth(): Promise<void> {
@@ -136,7 +160,7 @@ async function testNonAdminForbidden(): Promise<void> {
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'non-admin');
   } finally {
-    await deleteAgent(agentId, userId);
+    await deleteFixtureAgents([agentId]);
   }
 }
 
@@ -151,7 +175,7 @@ async function testEmptyDescription(): Promise<void> {
     assertStatus(res.status, 400, res.data);
     assertSchema(ErrorResponse, res.data, 'empty-description');
   } finally {
-    await deleteAgent(agentId, ANDY_USER_ID);
+    await deleteFixtureAgents([agentId]);
   }
 }
 
@@ -220,7 +244,7 @@ async function testByAgentRequiresInternalKey(): Promise<void> {
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'by-agent-user-session');
   } finally {
-    await deleteAgent(agentId, session.userId);
+    await deleteFixtureAgents([agentId]);
   }
 }
 
@@ -234,7 +258,7 @@ async function testByAgentNonAdminForbidden(): Promise<void> {
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'by-agent-non-admin');
   } finally {
-    await deleteAgent(agentId, userId);
+    await deleteFixtureAgents([agentId]);
   }
 }
 
@@ -301,7 +325,7 @@ async function testByAgentSavesOutsideProduction(): Promise<void> {
       throw new Error(`self-report read returned ${JSON.stringify(view.data)}`);
     }
   } finally {
-    await deleteAgent(agentId, ANDY_USER_ID);
+    await deleteFixtureAgents([agentId]);
   }
 }
 
@@ -316,7 +340,7 @@ async function testByAgentReadRequiresInternalKey(): Promise<void> {
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'self-report-read-user-session');
   } finally {
-    await deleteAgent(agentId, session.userId);
+    await deleteFixtureAgents([agentId]);
   }
 }
 
@@ -357,7 +381,7 @@ async function testScreenshotNonAdminForbidden(): Promise<void> {
     assertStatus(res.status, 403, res.data);
     assertSchema(ErrorResponse, res.data, 'screenshot-non-admin');
   } finally {
-    await deleteAgent(agentId, userId);
+    await deleteFixtureAgents([agentId]);
   }
 }
 
@@ -372,7 +396,7 @@ async function testScreenshotRejectsNonImage(): Promise<void> {
     assertStatus(res.status, 400, res.data);
     assertSchema(ErrorResponse, res.data, 'screenshot-non-image');
   } finally {
-    await deleteAgent(agentId, ANDY_USER_ID);
+    await deleteFixtureAgents([agentId]);
   }
 }
 
@@ -392,7 +416,28 @@ async function testScreenshotSignedUrlServesImage(): Promise<void> {
     const served = Buffer.from(await image.arrayBuffer());
     if (!served.equals(PNG_1X1)) throw new Error('signed URL served different bytes');
   } finally {
-    await deleteAgent(agentId, ANDY_USER_ID);
+    await deleteFixtureAgents([agentId]);
+  }
+}
+
+/**
+ * The coverage shard databases persist between runs, and agent_trajectories
+ * history is user-wide. A fixture that leaves its agent or a trajectory behind
+ * becomes grep-able history for every later run as the same user; chats over
+ * that history grew one shard server's LLM bodies to 28.7 MB and out of heap.
+ */
+async function testFixturesLeaveNoHistory(): Promise<void> {
+  const ids = [...fixtureAgentIds];
+  if (ids.length === 0) throw new Error('no fixture agents were recorded');
+  const [agents, trajectoryRows] = await Promise.all([
+    prisma.agent.count({ where: { id: { in: ids } } }),
+    prisma.agentTrajectorySearch.count({ where: { rootAgentId: { in: ids } } }),
+  ]);
+  if (agents !== 0 || trajectoryRows !== 0) {
+    throw new Error(
+      `${String(ids.length)} fixture agents left ${String(agents)} agent rows and ` +
+        `${String(trajectoryRows)} agent_trajectories rows behind`
+    );
   }
 }
 
@@ -422,6 +467,7 @@ async function main(): Promise<void> {
     }
   }
 
+  await purgeEarlierFixtures();
   const results = await Promise.all([
     runTest('POST /report-bug -- no auth -> 401', testNoAuth),
     runTest('POST /report-bug -- non-admin -> 403', testNonAdminForbidden),
@@ -443,6 +489,12 @@ async function main(): Promise<void> {
       testScreenshotSignedUrlServesImage
     ),
   ]);
+  results.push(
+    await runTest(
+      'fixtures leave no agent or trajectory history behind',
+      testFixturesLeaveNoHistory
+    )
+  );
 
   let failed = 0;
   for (const result of results) {
@@ -454,6 +506,7 @@ async function main(): Promise<void> {
     }
   }
   console.log(`RESULTS: ${results.length - failed}/${results.length} passed`);
+  await prisma.$disconnect();
   if (failed > 0) process.exit(1);
 }
 
