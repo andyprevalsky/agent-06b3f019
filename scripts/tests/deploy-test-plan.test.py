@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -1015,8 +1016,12 @@ for line in sys.stdin:
         self.assertEqual(proc.stdout.readline().strip(), 'ack')
 
     def scan(self, while_waiting=None):
+        real_sleep = time.sleep
+
         def sleep(seconds):
+            # Really wait: unrelated exiting processes on a busy host need the production window, not instant re-reads.
             self.sleeps.append(seconds)
+            real_sleep(seconds)
             if while_waiting:
                 while_waiting()
         with patch.object(self.m.time, 'sleep', sleep):
