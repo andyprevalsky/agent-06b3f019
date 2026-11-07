@@ -48,5 +48,6 @@
     "peer_refreshed_snapshot one-second slack + deterministic test",
     "Blacksmith semantic-stack shared ngrok domain",
     "AgentCard sandbox release stall funds (4396 cents per smoke round)"
-  ]
+  ],
+  "decision": "User kept the Fly hold (2026-11-07 after the scorecard): fly, workflow-migration and semantic deferred to the managed worker deployment and UNVERIFIED; workflow not re-enabled; recorded outcome stays blocked."
 }
