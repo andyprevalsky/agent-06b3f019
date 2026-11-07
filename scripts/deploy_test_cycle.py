@@ -1781,7 +1781,12 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
     unstarted_quick = (state["phase"] == "quick" and not state.get('pending')
                        and 'live_failures' not in state and not state.get('resume_phase')
                        and not state.get('running'))
-    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not interrupted_refresh:
+    unstarted_final = (state['phase'] == 'final' and not state.get('pending')
+                       and 'live_failures' not in state and not state.get('resume_phase')
+                       and not state.get('running')
+                       and not any(a.get('phase') == 'final' and a.get('source') == state['source']
+                                   and not a.get('stale') for a in state.get('attempts', [])))
+    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not unstarted_final and not interrupted_refresh:
         raise ValueError("source refresh only at the repair boundary")
     if new["source"] != source(root):
         raise ValueError("new plan is not bound to current source")

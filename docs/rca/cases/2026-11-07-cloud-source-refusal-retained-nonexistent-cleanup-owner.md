@@ -80,6 +80,13 @@ launch latch. Independent read-only review found no blocking objection. This
 proves custody retirement, not successful smoke execution or deployment;
 those require their fresh frozen-source native receipts.
 
+The first resume also exposed a quiescent final phase whose gate had never
+started: refresh accepted unstarted quick phases but refused this equally
+unstarted final boundary. A permanent regression failed on the original
+refresh and passes after allowing this narrow state. Pending/running/resuming
+phases and an already-started final phase still refuse; history and full-gate
+requirements remain intact.
+
 ## Human feedback
 
 None recorded.

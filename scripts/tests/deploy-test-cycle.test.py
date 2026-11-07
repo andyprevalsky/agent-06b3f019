@@ -17,6 +17,30 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
 
 class Cycle(unittest.TestCase):
+    def test_refresh_unstarted_final_preserves_history_and_refuses_active_or_started_phase(self):
+        state = copy.deepcopy(self.state)
+        state.update(phase='final', next_after_quick='final')
+        state['attempts'].append({'phase': 'quick', 'source': state['source'], 'results': []})
+        (self.root / 'code').write_text('repaired source before final admission')
+        new = copy.deepcopy(self.plan)
+        new['source'] = c.source(self.root)
+        before = copy.deepcopy(state)
+        c.refresh(state, self.plan, new, self.root)
+        self.assertEqual(state['attempts'], before['attempts'])
+        self.assertEqual(state['phase'], 'quick')
+        self.assertFalse(state['ready'])
+        for extra in ({'running': [{'gate': 'api'}]}, {'live_failures': []},
+                      {'resume_phase': 'final'}, {'pending': ['unresolved']}):
+            candidate = {**copy.deepcopy(before), **extra}
+            original = copy.deepcopy(candidate)
+            with self.assertRaises(ValueError):
+                c.refresh(candidate, self.plan, new, self.root)
+            self.assertEqual(candidate, original)
+        candidate = copy.deepcopy(before)
+        candidate['attempts'].append({'phase': 'final', 'source': candidate['source'], 'results': []})
+        with self.assertRaises(ValueError):
+            c.refresh(candidate, self.plan, new, self.root)
+
     def source_refusal_fixture(self):
         import hashlib, time
         import deploy_test_cloud_refusal as refusal
