@@ -7,7 +7,45 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, minimal-ui"
     />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="theme-color" content="#f9f9fb" />
+    <script>
+      // Pre-paint theme: apply the persisted Rose theme (localStorage
+      // 'rose-theme:<userId>' = 'dark' | 'light') before first paint so the
+      // page and the iOS status bar never flash light for a dark account.
+      (function () {
+        try {
+          var dark = false;
+          var light = false;
+          var pairs = document.cookie ? document.cookie.split(';') : [];
+          for (var c = 0; c < pairs.length; c++) {
+            var part = pairs[c].trim();
+            if (part.indexOf('rose-theme%3A') === 0) {
+              var cv = part.slice(part.indexOf('=') + 1);
+              if (cv === 'dark') dark = true;
+              else if (cv === 'light') light = true;
+            }
+          }
+          for (var i = 0; i < localStorage.length; i++) {
+            var key = localStorage.key(i);
+            if (key && key.indexOf('rose-theme:') === 0) {
+              var value = localStorage.getItem(key);
+              if (value === 'dark') dark = true;
+              else if (value === 'light') light = true;
+            }
+          }
+          if (dark && !light) {
+            var root = document.documentElement;
+            root.classList.add('dark');
+            root.setAttribute('data-rose-predark', '');
+            var meta = document.querySelector('meta[name="theme-color"]');
+            if (meta) meta.setAttribute('content', '#272725');
+          }
+        } catch (e) {
+          /* storage unavailable: stay light until React mounts */
+        }
+      })();
+    </script>
     <meta name="apple-mobile-web-app-title" content="Rose" />
     <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />

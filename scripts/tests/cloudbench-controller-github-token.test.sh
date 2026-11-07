@@ -45,9 +45,9 @@ expected="Authorization: Basic $(printf 'x-access-token:%s' 'controller-live-tok
 [ "$hdr" = "$expected" ] || fail "controller token must win over machine secret (got ${hdr:0:48}…)"
 pass "controller B64 token wins over stale machine GITHUB_TOKEN"
 
-# ── 4. Resolver prefers live git remote over injected dead GITHUB_TOKEN ──────
-# Reproduce the Cursor Cloud shape: env GITHUB_TOKEN is present but unusable,
-# while origin carries a working x-access-token (as observed on this workspace).
+# ── 4. Resolver prefers Git's live credential over injected dead token ───────
+# Reproduce the managed-box shape: env GITHUB_TOKEN is present but unusable,
+# while Git's repository-scoped helper carries the working credential.
 export GITHUB_TOKEN='github_pat_DEAD_TOKEN_FOR_REPRO_ONLY'
 resolved="$(cloudbench_resolve_controller_github_token "$ROOT_DIR")" \
   || fail "resolver must find the controller git credential despite a dead GITHUB_TOKEN"
@@ -78,6 +78,28 @@ require_text() {
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'token="$(resolve_github_token)"' \
   "run-bench-cloud must resolve a controller token for warm git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_git_credential_github_token "$ROOT_DIR"' \
+  "warm git-sync must consult Git's repository-scoped credential helper"
+require_text "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
+  'GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true' \
+  "credential discovery must never prompt an unattended controller"
+require_text "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
+  'git -c credential.interactive=false -C "$workspace_root" credential fill' \
+  "credential discovery must disable interactive helper fallback"
+if sed -n '/^cloudbench_git_credential_github_token()/,/^}/p' \
+    "$ROOT_DIR/scripts/lib/cloudbench-env.sh" | grep -Fq 'username=x-access-token'; then
+  fail "credential discovery must accept tokens stored under a GitHub username"
+fi
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true' \
+  "private-repo token validation must disable terminal and askpass prompts"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'git -c credential.helper= ls-remote --exit-code' \
+  "private-repo token validation must ignore ambient credential helpers"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'trap '\''rm -f "$cfg"'\'' EXIT' \
+  "private-repo token validation must remove its auth config on interruption"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'export CLOUDBENCH_GITHUB_TOKEN_B64=\$(cat' \
   "warm git-sync must load its request-scoped controller token"
