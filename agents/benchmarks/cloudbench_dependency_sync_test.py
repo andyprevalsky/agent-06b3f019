@@ -22687,54 +22687,6 @@ def test_foreign_central_hub_port_reuses_only_the_matching_runs_root(
         own_hub.wait(timeout=5)
 
 
-def test_central_hub_port_selection_skips_a_bound_port_without_a_listener() -> None:
-    """A refused connect does not make a port bindable.
-
-    A loopback client's ephemeral port, its TIME_WAIT or a bound-only socket on
-    the preferred hub port refuses connections, yet the hub's bind fails with
-    EADDRINUSE. Selection must move past it instead of returning it to every
-    start attempt (deploy gate cloudbench-controller, 2026-11-07).
-    """
-    for candidate in range(42000, 62000):
-        occupant = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        spare = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            occupant.bind(("127.0.0.1", candidate))
-            spare.bind(("127.0.0.1", candidate + 1))
-        except OSError:
-            occupant.close()
-            spare.close()
-            continue
-        spare.close()
-        break
-    else:
-        raise AssertionError("could not reserve consecutive hub test ports")
-
-    try:
-        selection = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'source "$HELPER"; cloudbench_select_central_hub_port "$PORT" "$RUNS_ROOT"',
-            ],
-            env={
-                **os.environ,
-                "HELPER": str(ENV_HELPER_SCRIPT),
-                "PORT": str(candidate),
-                "RUNS_ROOT": "/nonexistent/cloudbench-hub-runs",
-            },
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=20,
-        )
-    finally:
-        occupant.close()
-    assert selection.returncode == 0, selection.stderr
-    # The next port is normally free; a concurrent process may take it first.
-    assert int(selection.stdout.strip()) > candidate
-
-
 def test_central_hub_startup_rebinds_serves_the_run_and_never_kills_foreign_owner(
     tmp_path: Path,
 ) -> None:

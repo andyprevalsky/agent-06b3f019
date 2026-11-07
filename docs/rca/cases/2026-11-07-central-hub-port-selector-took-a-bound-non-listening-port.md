@@ -19,7 +19,7 @@ tags:
   - load
 sources:
   - PR #1749 staged deploy on 8d436372f, gate cloudbench-controller step selected-pytest (test_central_hub_runs_in_own_session_after_launcher_exit; _hub/hub.log shows 20 launches on 127.0.0.1:42000, each EADDRINUSE)
-repro: agents/benchmarks/cloudbench_dependency_sync_test.py::test_central_hub_port_selection_skips_a_bound_port_without_a_listener
+repro: scripts/tests/cloudbench-env.test.sh (central hub bound-only port contract)
 status: fixed
 ---
 
@@ -61,11 +61,12 @@ hub, and a failed check still refuses fail-open selection. Timeouts and attempt
 counts are unchanged.
 
 The visibility test now reads the port the hub actually bound from its owner
-record. Regression
-`test_central_hub_port_selection_skips_a_bound_port_without_a_listener` binds
-the preferred port without listening: the old selector returns 42000 and the
-fixed one returns 42001. It is registered in the cloudbench-controller gate's
-selected pytest step. All five hub tests passed five consecutive runs.
+record. The regression in `scripts/tests/cloudbench-env.test.sh` holds a
+bound-but-not-listening socket on the preferred port and requires selection to
+skip it. It runs in the cloudbench-controller gate's `environment` step and
+fails on the old library (`cloudbench_tcp_port_bindable: command not found`,
+"a bound-only socket must probe as in use"). That file passed five consecutive
+runs with the fix.
 
 ## Human feedback
 
