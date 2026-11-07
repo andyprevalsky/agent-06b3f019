@@ -1,0 +1,2 @@
+PASS test_repeated_history_render_redacts_and_projects_each_input_once
+PASS test_per_turn_compute_lease_calls_reuse_the_pooled_client
