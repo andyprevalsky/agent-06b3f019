@@ -8405,3 +8405,4 @@
 {"task": "chat-mode", "duration_seconds": 16.0, "cost_cents": 0.0, "timestamp": "2026-11-07T09:41:07+00:00", "agent_id": "3bcdd220-d7c7-48d0-abd8-36831f44daf7", "backfill_source": "hub"}
 {"task": "parallel-tool-calls", "duration_seconds": 188.1, "cost_cents": 1.0, "timestamp": "2026-11-07T09:43:58.100000+00:00", "agent_id": "dfde7096-c6f9-4231-a362-0cd518a1b219", "backfill_source": "hub"}
 {"task": "browser-smoke", "duration_seconds": 156.6, "cost_cents": 10.0, "timestamp": "2026-11-07T09:43:26.600000+00:00", "agent_id": "21bb9750-ccd9-4542-abc7-c8ce78af7123", "backfill_source": "hub"}
+{"task": "background-agent-message-smoke", "duration_seconds": 117.5, "cost_cents": 0.0, "timestamp": "2026-11-07T15:13:11.561701+00:00", "agent_id": "5340acb3-c1db-4d7a-b099-6dd3ad14393c"}
