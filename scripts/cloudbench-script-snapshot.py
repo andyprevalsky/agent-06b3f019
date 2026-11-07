@@ -253,6 +253,21 @@ def initialize(
         )
 
 
+def _remove_snapshot(path: Path) -> None:
+    """Remove a snapshot so no observer ever sees it half deleted.
+
+    rmtree unlinks the helper before the directory, so a peer that checked the
+    path between the two (the launcher's handoff poll or its EXIT cleanup, which
+    run this helper from inside the snapshot) found the directory without its
+    helper and reported a failed removal. Renaming first makes the path vanish
+    in one step; the private tombstone is then deleted.
+    """
+
+    tombstone = path.with_name(f".{path.name}.removing-{os.getpid()}")
+    os.rename(path, tombstone)
+    shutil.rmtree(tombstone)
+
+
 def _remove_unadopted_snapshot(path: Path) -> None:
     """Remove the helper-created path while serialized with parent cleanup."""
 
@@ -260,7 +275,7 @@ def _remove_unadopted_snapshot(path: Path) -> None:
         return
     with _snapshot_lock(path):
         if path.exists():
-            shutil.rmtree(path)
+            _remove_snapshot(path)
 
 
 def create(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) -> Path:
@@ -416,7 +431,7 @@ def recover_create(
         return "absent"
     with _snapshot_lock(path):
         if path.exists():
-            shutil.rmtree(path)
+            _remove_snapshot(path)
     return "deleted"
 
 
@@ -544,13 +559,13 @@ def cleanup(
                     if _stale_owner_state(
                         int(marker["owner_pid"]), str(marker["owner_pid_start"])
                     ):
-                        shutil.rmtree(path)
+                        _remove_snapshot(path)
                         return "stale-deleted"
                     return "transferred"
                 raise SnapshotOwnershipError(
                     "snapshot ownership transferred to another live process"
                 )
-            shutil.rmtree(path)
+            _remove_snapshot(path)
     except SnapshotOwnershipError:
         if not path.exists():
             return "absent"
@@ -584,7 +599,7 @@ def check_armed(
                     )
                 return "pending"
             if _stale_owner_state(owner_pid, owner_start):
-                shutil.rmtree(path)
+                _remove_snapshot(path)
                 return "stale-cleaned"
             return "armed" if marker["state"] == "armed" else "pending"
     except SnapshotOwnershipError:
@@ -630,7 +645,7 @@ def cancel_claim(
             if marker["state"] == "armed":
                 return "armed"
             if _stale_owner_state(owner_pid, owner_start):
-                shutil.rmtree(path)
+                _remove_snapshot(path)
                 return "stale-cleaned"
             os.kill(owner_pid, signal.SIGTERM)
             return "signaled"
