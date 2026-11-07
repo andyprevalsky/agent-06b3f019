@@ -496,6 +496,16 @@ class InterruptedCustody(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value) if isinstance(value, (dict, list)) else value)
 
+    def free_port(self):
+        # namespace_quiet scans the host's live socket table, so a fixed Hub port such as the
+        # default 8765 collides with any real Hub left running on the machine, and a port inside
+        # ip_local_port_range collides with whichever outbound connection autobinds it.
+        import random
+        low, high = map(int, Path('/proc/sys/net/ipv4/ip_local_port_range').read_text().split())
+        used = {int(row.split()[i].rsplit(':', 1)[1], 16) for table in ('/proc/net/tcp', '/proc/net/tcp6')
+                for row in Path(table).read_text().splitlines()[1:] for i in (1, 2)}
+        return str(random.choice([p for p in (range(high + 1, 65536) or range(1024, low)) if p not in used]))
+
     def fixture(self, cloud=False):
         import hashlib, shutil, time, runpy
         from datetime import datetime, timezone
@@ -538,12 +548,12 @@ class InterruptedCustody(unittest.TestCase):
         else:
             base=self.root/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()
             campaign=base/'campaigns'/('deploy-'+base.name); runs=base/'runs'; fleet=runs/'20261106-223817-2147483001'
-            owner='b'*32; hub=runs/'_hub'/('agent-link-server.8765.'+'c'*32+'.owner')
-            self.hub=hub; self.fleet=fleet; self.audit=self.root/'.git/cloudbench-fleet-audits'/owner
+            owner='b'*32; port=self.free_port(); hub=runs/'_hub'/('agent-link-server.'+port+'.'+'c'*32+'.owner')
+            self.hub=hub; self.port=port; self.fleet=fleet; self.audit=self.root/'.git/cloudbench-fleet-audits'/owner
             self.put(hub,'version=1\npid=2147483004\npgid=2147483004\npid_start=proc-start:fixture:1\nowner_token='+ 'c'*32+
                 '\nargv_sha256='+'d'*64+'\nroot='+str(runs)+'\nruns_root='+str(runs)+'\nrepo_root='+str(self.root)+
                 '\ncontext_dir='+str(runs/'_hub')+'\ncommand='+str(self.root/'agents/benchmarks/agent_link_server.py')+
-                '\nhost=127.0.0.1\nport=8765\nstatus=live-transfer-required\n')
+                '\nhost=127.0.0.1\nport='+port+'\nstatus=live-transfer-required\n')
             self.put(base/'cli.log',str(campaign))
             log=campaign/'r001-j0001.log'
             self.put(log,str(self.root/'scripts/run-bench')+' monitor '+str(fleet))
@@ -586,7 +596,7 @@ class InterruptedCustody(unittest.TestCase):
             self.put(Path(proof['hub_consumers']),dict(runs=str(runs),owner=str(hub),owner_sha256=c.sha_file(hub),remaining_external_process_references=[],
                 consumer_disposition='All original controllers terminal; namespace closed to new borrowers.',observed_at=now+9,borrowers=[]))
             self.put(Path(proof['hub_retirement']),dict(provider_operations=False,historical_runtime_financial_obligations_unchanged=True,
-                rows=[dict(port='8765',owner=str(hub),owner_sha256=c.sha_file(hub),terminal=str(terminal),terminal_sha256=c.sha_file(terminal),native_exit=0,
+                rows=[dict(port=port,owner=str(hub),owner_sha256=c.sha_file(hub),terminal=str(terminal),terminal_sha256=c.sha_file(terminal),native_exit=0,
                            immutable_owner_unchanged=True,borrowers_terminal=1,started_at=now+10,finished_at=now+12)]))
             proof['producer_files']={n:str(self.root/n) for n in policies}
             self.reseal(proof)
@@ -652,6 +662,33 @@ class InterruptedCustody(unittest.TestCase):
         with patch.object(self.m,'processes',return_value=[(2147483001,2147483001)]),self.assertRaises(ValueError):c.reconcile(state,r['token'],proof)
         state['plan']['gates'][0]['cwd']='somewhere-else'
         with self.assertRaises(ValueError):c.reconcile(state,r['token'],proof)
+
+    def test_cloud_rejects_a_live_listener_on_the_original_hub_port(self):
+        import socket
+        state,r,proof=self.fixture(True)
+        with socket.socket() as hub:
+            hub.bind(('127.0.0.1',int(self.port)));hub.listen(1)
+            with self.assertRaisesRegex(ValueError,'listener/socket consumer remains'):c.reconcile(state,r['token'],proof)
+
+    def test_namespace_scan_reobserves_a_briefly_unreadable_process_and_fails_closed_while_it_stays_so(self):
+        import deploy_test_interrupted_cleanup as m
+        calls = []
+        def unreadable(times):
+            def observe(process, prefix, ancestors):
+                if process.name == str(os.getpid()):
+                    calls.append(process.name)
+                    if len(calls) <= times:
+                        raise PermissionError(13, 'process is mid-exec')
+            return observe
+        with patch.object(m, 'OBSERVATION_DELAY', 0):
+            with patch.object(m, 'consumer_quiet', unreadable(m.OBSERVATION_ATTEMPTS - 1)):
+                m.namespace_quiet(self.root / 'no-such-namespace', set())
+            self.assertEqual(len(calls), m.OBSERVATION_ATTEMPTS)
+            del calls[:]
+            with patch.object(m, 'consumer_quiet', unreadable(m.OBSERVATION_ATTEMPTS)):
+                with self.assertRaisesRegex(ValueError, 'cannot observe original namespace consumer'):
+                    m.namespace_quiet(self.root / 'no-such-namespace', set())
+            self.assertEqual(len(calls), m.OBSERVATION_ATTEMPTS)
 
     def test_cloud_rejects_every_populated_allocation_class(self):
         state,r,proof=self.fixture(True)

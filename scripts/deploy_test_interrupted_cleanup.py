@@ -15,6 +15,8 @@ KIND = 'interrupted-preallocation-cleanup-v1'
 MARKERS = {'.cid', 'cloudbench-run.json', 'runtime-evidence.pending',
            'guest-never-started.confirmed', 'runtime-evidence.owner.json',
            'post-config-start.accepted', 'worker-runtime-evidence', 'primary.ids', 'primary.names'}
+OBSERVATION_ATTEMPTS = 5
+OBSERVATION_DELAY = 0.2
 
 
 def need(value, message):
@@ -48,6 +50,21 @@ def no_holders(paths):
     need(result.returncode == 1 and not result.stdout and not result.stderr, 'log writer or unknown holder remains')
 
 
+def consumer_quiet(process, prefix, ancestors):
+    if process.stat().st_uid != os.geteuid():
+        return
+    argv = (process / 'cmdline').read_bytes().decode(errors='replace')
+    cwd = str((process / 'cwd').resolve(strict=True))
+    need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
+         'original namespace has a live consumer')
+    for fd in (process / 'fd').iterdir():
+        try:
+            target = os.readlink(fd)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
+
+
 def namespace_quiet(namespace, ports):
     """Observe only the old namespace; other legitimate source workers stay untouched."""
     ancestors, pid = set(), os.getpid()
@@ -59,21 +76,19 @@ def namespace_quiet(namespace, ports):
     for process in Path('/proc').iterdir():
         if not process.name.isdigit():
             continue
-        try:
-            if process.stat().st_uid != os.geteuid():
-                continue
-            argv = (process / 'cmdline').read_bytes().decode(errors='replace')
-            cwd = str((process / 'cwd').resolve(strict=True))
-            need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
-                 'original namespace has a live consumer')
-            for fd in (process / 'fd').iterdir():
-                try:
-                    target = os.readlink(fd)
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
-                need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
-        except (FileNotFoundError, ProcessLookupError):
-            continue
+        # A process mid-exec is briefly unreadable even to its own user: re-observe it, and fail
+        # closed only while it stays unreadable and alive (same shape as cloudbench-controller-export).
+        for attempt in range(OBSERVATION_ATTEMPTS):
+            try:
+                consumer_quiet(process, prefix, ancestors)
+                break
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            except PermissionError:
+                if not process.exists():
+                    break
+                need(attempt + 1 < OBSERVATION_ATTEMPTS, 'cannot observe original namespace consumer ' + process.name)
+                time.sleep(OBSERVATION_DELAY)
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
         for line in Path(table).read_text().splitlines()[1:]:
             row = line.split()
