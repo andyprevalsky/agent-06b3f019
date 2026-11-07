@@ -10,7 +10,12 @@ import { createLogger } from '../../providers/logger';
 import * as repo from './repo';
 import { parseVcfContent, importVcfContacts } from '../../services/integrations/vcfParser';
 import { parseEmailZip, importEmailsToDb } from '../../services/integrations/emailParser';
-import { importLinkedInData } from '../../services/integrations/linkedinParser';
+import {
+  assertLinkedInArchiveHasConnections,
+  importLinkedInData,
+} from '../../services/integrations/linkedinParser';
+
+export { LinkedInArchiveWithoutConnectionsError } from '../../services/integrations/linkedinParser';
 import { reportProgressBestEffort } from './service.progress';
 import { uploadRunProgress } from './service.uploadProgress';
 import type { ProgressWriteInput } from './syncAccountsContract';
@@ -80,6 +85,8 @@ export async function processGenericUpload(
  */
 export async function processLinkedInUpload(userId: string, filePath: string, fileName: string) {
   log.info('LinkedIn file uploaded', { fileName, userId });
+  // Before any write: a first-installment archive must not mark LinkedIn connected.
+  assertLinkedInArchiveHasConnections(filePath);
 
   const integration = await repo.upsertIntegrationForUpload({
     userId,

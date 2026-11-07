@@ -22864,6 +22864,11 @@ require_central_hub_visibility
         assert len(owner_files) == 1
         owner_fields = _read_test_owner_record(owner_files[0])
         hub_pid = int(owner_fields["pid"])
+        # The preferred port is only probed free; a concurrent loopback client
+        # may occupy it before the hub binds, and startup then selects a later
+        # port. Verify the port the owned hub actually bound.
+        hub_port = int(owner_fields["port"])
+        assert hub_port >= port
         launcher_sid = int(launcher_sid_file.read_text().strip())
         os.kill(hub_pid, 0)
         assert os.getsid(hub_pid) != launcher_sid, (
@@ -22875,7 +22880,7 @@ require_central_hub_visibility
                 "--noproxy",
                 "*",
                 "-fsS",
-                f"http://127.0.0.1:{port}/hub-meta.json",
+                f"http://127.0.0.1:{hub_port}/hub-meta.json",
             ],
             text=True,
             capture_output=True,
@@ -36671,6 +36676,15 @@ fleet_native_stop_verify_guest 0 {shlex.quote(str(state_dir))} "$deadline"
         return
     assert stops == [f"machine stop {_NATIVE_STOP_MACHINE} -a bench-app"], calls
     assert receipt["stop_requests"] == 2, receipt
+    if reaches_stopped and result.returncode != 0:
+        # The send fit the final tick but the post-stop status read did not (a loaded
+        # host): only an observed production-clock refusal permits the unverified end.
+        trace = (fake / "native-clock.trace").read_text()
+        deadline = int((fake / "native-deadline").read_text())
+        assert _native_stop_last_tick_exhausted(trace, deadline), trace
+        assert receipt["verified"] is False, receipt
+        assert "retaining ownership" in result.stderr
+        return
     if reaches_stopped:
         assert result.returncode == 0, result.stderr
         assert receipt["verified"] is True and receipt["verified_state"] == "stopped", receipt

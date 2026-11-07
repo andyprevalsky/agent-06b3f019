@@ -69,6 +69,7 @@ for (const variable of [
   'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
   'BLACKBOX_TEST_FAKE_WHATSAPP',
   'BENCHMARK_SHARE_SECRET',
+  'DISABLE_PURCHASE_HOLD_RECONCILE',
 ]) {
   assert.equal(
     autoRcaEnv.match(new RegExp(`^export ${variable}=`, 'gm'))?.length ?? 0,
