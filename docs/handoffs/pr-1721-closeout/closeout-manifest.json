@@ -48,7 +48,14 @@
   "evidence": [
     "docs/handoffs/pr-1721-closeout/evidence/production-verification.json",
     "docs/handoffs/pr-1721-closeout/evidence/archive-verification.json",
-    "docs/handoffs/pr-1721-closeout/evidence/deletion-readiness.json"
+    "docs/handoffs/pr-1721-closeout/evidence/deletion-readiness.json",
+    "docs/handoffs/pr-1721-closeout/evidence/archive-verification.json (second object: staged-cycle states)"
   ],
-  "deletion_ready": true
+  "deletion_ready": true,
+  "records_commit": {
+    "pr": 1755,
+    "merge_commit": "70bcf0581aa0cb68e6df88b4d148ad0a648f9d19"
+  },
+  "factory_history_commit": "6880bcac0fecca1260f506c3a4a0586c6c7b25b0",
+  "scorecard": "https://boxes.dev/visuals/vis_ea80b6b6348a1f99ff127978174d7c8b"
 }

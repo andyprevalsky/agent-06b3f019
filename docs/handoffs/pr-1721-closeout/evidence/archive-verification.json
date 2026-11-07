@@ -55,5 +55,13 @@
     "raw backend coverage worker tree (.context/deploy-backend, ~1.3 GB, from the discarded 2026-11-06 cycle)": "reproducible: deploy_test_backend.py on the frozen commit regenerates it; its outcomes are in the RCA cases",
     "worker clones under /var/tmp/rose-deploy-workers": "reproducible from git: deploy_test_worker.py --prepare-checkout at the frozen commit",
     "cloud smoke run trees under .context/deploy-cloud": "reproducible/unneeded: run bundles were uploaded to the Benchmark Hub; terminal summaries are in the archived campaign tarball"
+  },
+  "second_object": {
+    "object_key": "deploy-closeout/v1/objects/f72109c148ce65be1d6b1aefefcdac89305bb84a55b7336ecf3414b2ab329a4f",
+    "readback_hash_match": true,
+    "file": "staged-cycle-states.tgz",
+    "bytes": 3004357,
+    "sha256": "3922825df39fb48d97019bb3c7642f876bf6d767b9bde20e0eefdd37e2186f62",
+    "contents": "final READY cycle state and plan, production.json, every discarded cycle's state (attempt1..13) without output logs, review-ledger files (incl. rounds 1-3), approval-batch receipt and the devbox factory-events file; no env files"
   }
 }
