@@ -1,6 +1,7 @@
 /** Durable admission: device FOR UPDATE -> reconcile -> mutate -> FIFO admit.
  * Every process uses this lock order. Transactions perform database I/O only. */
 import { ensureSetup } from './repo.setup';
+import { availabilityInTransaction } from './repo.availability';
 import { nativeControlError } from './repo.attention';
 import { resumePrivacy } from './repo.privacy';
 import { databaseNow } from './repo.clock';
@@ -144,6 +145,11 @@ export async function enqueue(tx: Transaction, device: IPhoneDevice, input: Acqu
     if (existing.browserTaskId !== (input.browserTaskId ?? null))
       return new IPhoneError(409, 'Request key belongs to another browser task');
     return existing.id;
+  }
+  if (input.browserTaskId !== undefined) {
+    const allowed = await availabilityInTransaction(tx, device.userId, input.browserTaskId);
+    if (!allowed.enabled || allowed.source === 'continuation')
+      return new IPhoneError(409, 'iPhone setup is required');
   }
   const now = await databaseNow(tx);
   const lease = await tx.iPhoneLease.create({

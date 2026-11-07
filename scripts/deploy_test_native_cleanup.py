@@ -661,6 +661,11 @@ def validate(receipt, owner, proof):
         result = validate_prelaunch(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
         need(used == set(bindings), 'proof file closure')
         return result
+    if layout == 'campaign-cleanup-prepare-v1':
+        from deploy_test_native_prepare import validate_prepare
+        result = validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound, document)
+        need(used == set(bindings), 'prepare proof file closure')
+        return result
     if layout == 'campaign-startup-v1':
         campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
         need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')

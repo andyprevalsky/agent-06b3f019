@@ -1,3 +1,4 @@
+import type { Agent } from '@prisma/client';
 /** Caller owns device lock. Only the active exact task can see the configured identity. */
 import {
   setupState,
@@ -8,6 +9,7 @@ import {
 import type { Transaction, IPhoneDevice, IPhoneLease } from './types';
 import { verificationDto } from '../../providers/phoneSetupVerification';
 import { databaseNow } from './repo.clock';
+import { configurationGenerationCurrent } from './repo.availability';
 
 export function setupDto(device: IPhoneDevice, state: SetupState, lease: IPhoneLease) {
   const active =
@@ -77,10 +79,14 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
     lease.browserTaskId !== null &&
     (state.attempt?.leaseId !== lease.id ||
       state.attempt.workflowId !== generation ||
+      state.attempt.firstExecutionRunId !== (agent?.temporalFirstExecutionRunId ?? undefined) ||
       state.attempt.taskId !== lease.browserTaskId ||
       state.expectedPhone !== expectedPhone)
   ) {
     const now = await databaseNow(tx);
+    delete state.readinessAdmission;
+    await captureReadiness(tx, device, state, lease, agent, generation, expectedPhone);
+    if (state.expectedPhone !== expectedPhone) delete state.connection;
     state.expectedPhone = expectedPhone;
     state.claimRevision++;
     state.attempt = {
@@ -90,6 +96,11 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
       taskId: lease.browserTaskId,
       agentId: lease.agentId,
       workflowId: generation!,
+      ...(agent?.temporalFirstExecutionRunId !== undefined &&
+      agent.temporalFirstExecutionRunId !== null &&
+      agent.temporalFirstExecutionRunId !== ''
+        ? { firstExecutionRunId: agent.temporalFirstExecutionRunId }
+        : {}),
       floorCursor: lease.actionCursor,
       floorAt: now.toISOString(),
       ...(state.expectedAppleIdentity === undefined
@@ -119,4 +130,36 @@ export async function ensureSetup(tx: Transaction, deviceId: string, lease: IPho
     });
   }
   return { device, state, dto: setupDto(device, state, lease) };
+}
+
+async function captureReadiness(
+  tx: Transaction,
+  device: IPhoneDevice,
+  state: SetupState,
+  lease: IPhoneLease,
+  agent: Agent | null,
+  generation: string | undefined,
+  expectedPhone: string | null
+) {
+  if (lease.browserTaskId === null) return;
+  if (
+    device.setupState === 'ready' &&
+    setupDto(device, state, lease).verification.configurationReady &&
+    state.verified?.profileRevision === state.profileRevision &&
+    state.expectedPhone === expectedPhone &&
+    agent !== null &&
+    agent.temporalFirstExecutionRunId !== null &&
+    agent.temporalFirstExecutionRunId !== '' &&
+    (await configurationGenerationCurrent(tx, device.userId, state))
+  ) {
+    state.readinessAdmission = {
+      leaseId: lease.id,
+      taskId: lease.browserTaskId,
+      agentId: lease.agentId,
+      workflowId: generation!,
+      firstExecutionRunId: agent.temporalFirstExecutionRunId,
+      profileRevision: state.profileRevision,
+      providerEpoch: device.providerEpoch,
+    };
+  }
 }

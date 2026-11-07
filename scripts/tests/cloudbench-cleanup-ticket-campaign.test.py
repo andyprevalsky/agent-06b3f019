@@ -61,6 +61,14 @@ class CampaignTickets(unittest.TestCase):
                                  "    if __name__ == 'cleanup_parent_identity':\n"
                                  "        raise ValueError('fixture cleanup ticket " + action + " refusal')\n"
                                  "    return _fixture_original_" + action + "(args)\n")
+            if mode.startswith('ordinary-prepare-diagnostic-'):
+                faults={
+                    'ordinary-prepare-diagnostic-value': "ValueError('x'*500+'\\nsecret-file-contents')",
+                    'ordinary-prepare-diagnostic-os': "OSError(28,'secret-file-contents','/secret-filename')",
+                    'ordinary-prepare-diagnostic-subprocess': "subprocess.CalledProcessError(19,['secret-argv'],output='secret-file-contents',stderr='secret-stderr')",
+                }
+                with (scripts/'cloudbench-cleanup-tickets.py').open('a') as helper:
+                    helper.write("\ndef prepare(args):\n    raise "+faults[mode]+"\n")
             if "external" in mode:
                 # External modes join the actual per-fleet barrier helper.
                 shutil.copyfile(ROOT / "scripts/cloudbench-campaign-barrier.py", scripts / "cloudbench-campaign-barrier.py")
@@ -532,6 +540,18 @@ print('bounded 99999999 0',free//1024,'0% /bounded')
                     self.assertEqual(summary['status'],'failed')
                     self.assertNotIn('TASK_START', '\n'.join(events))
                     self.assertEqual(summary['cleanup_ticket_failure'],mode.split('-')[1])
+                    if mode.startswith('ordinary-prepare-diagnostic-'):
+                        diagnostic=summary['cleanup_ticket_error']
+                        self.assertEqual(set(diagnostic),{'type','message'})
+                        expected={'ordinary-prepare-diagnostic-value':'ValueError','ordinary-prepare-diagnostic-os':'OSError','ordinary-prepare-diagnostic-subprocess':'CalledProcessError'}
+                        self.assertEqual(diagnostic['type'],expected[mode])
+                        self.assertTrue(diagnostic['message'])
+                        self.assertLessEqual(len(diagnostic['message']),400)
+                        self.assertNotIn('\n',diagnostic['message'])
+                        self.assertNotIn('secret',json.dumps(diagnostic))
+                        self.assertNotIn('Traceback',json.dumps(diagnostic))
+                        if mode.endswith('-value'):self.assertEqual(diagnostic['message'],'x'*400)
+
                     budgets=list(summaries[0].parent.glob('cleanup-cohorts/*/cleanup-budget/budget.json'))
                     if mode == 'ordinary-assign-fail':
                         self.assertEqual(len(budgets),1)
@@ -962,6 +982,10 @@ print('bounded 99999999 0',free//1024,'0% /bounded')
 
     def test_ordinary_fullwidth_budget_predeclares_all_fourteen_without_task_barrier(self):
         self.campaign_fixture(mode="ordinary-pass")
+
+    def test_ordinary_prepare_diagnostic_retains_type_and_sanitized_bounded_message(self):
+        for suffix in ('value','os','subprocess'):
+            with self.subTest(suffix=suffix):self.campaign_fixture('ordinary-prepare-diagnostic-'+suffix)
 
     def test_ordinary_fullwidth_prepare_failure_dispatches_no_tasks(self):
         self.campaign_fixture(mode="ordinary-prepare-fail")

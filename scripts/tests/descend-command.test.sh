@@ -597,8 +597,12 @@ case "$1" in
   *) exit 99 ;;
 esac
 ''')
+        module=__import__('runpy').run_path(str(campaign_script.parent/'tests/fixtures/campaign_cleanup_fixture.py'))
+        self.cleanup=module['CampaignCleanupFixture'](self.root,campaign_script.parents[1])
+        self.addCleanup(self.cleanup.close)
         self.environment = {
             **os.environ,
+            **self.cleanup.env,
             "RUN_BENCH_CAMPAIGN_ROOT": str(self.root),
             "RUN_BENCH_CAMPAIGN_ID": "lifecycle",
         }
@@ -696,9 +700,16 @@ esac
         child = None
         clock = 0
         signals = []
+        real_popen = subprocess.Popen
+        waiter = real_popen(['bash', '-c', 'read -r unused'], stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        def join_waiter():
+            if not waiter.stdin.closed:waiter.stdin.close()
+            waiter.wait()
+        self.addCleanup(join_waiter)
 
         class DelayedCleanupProcess:
-            pid = 777
+            pid = waiter.pid
 
             def __init__(self, *_args, **_kwargs):
                 nonlocal child
@@ -712,7 +723,15 @@ esac
                     return None
                 self.polls_after_term += 1
                 # Its owned EXIT cleanup outlives several 31 s clock steps.
-                return None if self.polls_after_term < 5 else 143
+                if self.polls_after_term < 5:return None
+                join_waiter()
+                return 143
+
+        class ControllerPopen(DelayedCleanupProcess):
+            def __new__(cls, command, *args, **kwargs):
+                if command == ['bash', str(self.root/'scripts/run-bench'), 'waiting', '--foreground']:
+                    return object.__new__(cls)
+                return real_popen(command, *args, **kwargs)
 
         def killpg(pid, signum):
             self.assertEqual(pid, child.pid)
@@ -730,10 +749,11 @@ esac
             "--runs", "1", "--concurrency", "1", "--task", "waiting",
         ]
         with (
+            self.cleanup.scope(),
             patch.dict(os.environ, self.environment),
             patch.object(campaign.sys, "argv", argv),
             patch.object(campaign, "publish_campaign_group", return_value=None),
-            patch.object(campaign.subprocess, "Popen", DelayedCleanupProcess),
+            patch.object(campaign.subprocess, "Popen", ControllerPopen),
             patch.object(campaign.signal, "signal", side_effect=lambda signum, handler: handlers.update({signum: handler})),
             patch.object(campaign.os, "killpg", side_effect=killpg),
             patch.object(campaign.time, "monotonic", side_effect=monotonic),

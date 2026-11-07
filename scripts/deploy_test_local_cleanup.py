@@ -448,6 +448,9 @@ def interrupted_worker(state, receipt, proof):
 
 
 def validate(state, receipt, proof):
+    if proof.get('layout') == 'backend-prisma-preflight-v1':
+        from deploy_test_backend_preflight_cleanup import validate as validate_preflight
+        return validate_preflight(state, receipt, proof)
     from deploy_test_cycle import bounded_read, digest, sha_file
     need(set(proof) == {'kind', 'files', 'confirmed_at', 'observed_by'} and proof['kind'] == KIND,
          'proof fields')

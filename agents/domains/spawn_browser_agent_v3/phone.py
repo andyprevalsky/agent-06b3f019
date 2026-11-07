@@ -114,10 +114,12 @@ configuration_unavailable, or observed_signed_out; these do not request attentio
 A signed-out screen normally means continue setup; block only when unable to
 proceed safely. Do not abandon the original task or claim setup succeeded.
 Setup includes the required device settings, not merely Apple Account identity.
-Follow setup in order: observe the current screen; if Apple Account sign-in is
-incomplete, finish that authentication flow before auditing later settings.
-Do not wait for configurationReady to sign in. If already signed in, verify
-that evidence without signing out, then check the remaining settings.
+Follow setup in order: observe the current screen. Once legitimate OS controls
+are reachable, configure Portrait Orientation Lock before other settings/apps.
+If an existing blocking private authentication flow prevents those controls,
+finish only that legitimate authentication first, then configure portrait lock.
+Do not wait for configurationReady to gain legitimate access. Inspect an already
+signed-in Apple Account without signing out after portrait lock is verified.
 Read actual interaction.setup.verification: requirementsVersion, each target's
 checks/status/current scope, configurationReady, and operationalStatus. A durable
 identityVerified record or a last-known confirmed check is not current proof of
@@ -135,10 +137,27 @@ iCloud Contacts sync and verify explicit enabled control state; populated
 contact names or counts do not prove the iCloud Contacts setting is on.
 For receive_address use only the
 server's active expectedReceiveAddress and verify it is actually selected for
-receiving, not merely listed. For portrait_lock, use the observed Control Center
-UI to enable the OS Portrait Orientation Lock and verify explicit enabled control
-state or OS confirmation. A portrait frame alone, portrait dimensions, or a lock
-label without its enabled state is not proof. Keep ambiguous evidence unknown.
+receiving, not merely listed. For portrait_lock, open native Settings with
+apps.launch name Settings; use its observed Search to find AssistiveTouch and
+open the observed result. From its detail page return to the native Touch parent
+and read the explicit same-row AssistiveTouch On/Off value (only a trailing native
+chevron is ignorable). Preserve that original state; the detail label alone is
+not its switch state. If originally Off, open the row, enable it once and return
+to Touch to confirm the explicit value is now On, then reopen the detail page.
+Open the floating AssistiveTouch menu and tap the fresh observed Control Center
+label center. Keep this native route uninterrupted: no other apps/URLs, Home,
+unrelated input, private/user control or attention transitions. Submit setup.verify
+with fresh observations. The backend reports current portrait_lock status:
+confirmed is On, disabled is Off, and unknown is unproven. If the returned
+operation.portraitActionHint exists, use its existing input.tap arguments only
+at that current evidenceCursor, then observe and verify again. Never reuse a hint
+after any intervening action. Verification never taps for you. Close Control
+Center and restore the original AssistiveTouch state, confirming its explicit
+Touch-parent value again. Do not blindly toggle switches or use operator coordinates.
+Public screen media remains unavailable. Portrait frames/dimensions, lock labels,
+static screenshots and unsupported or ambiguous layouts are not enabled-state proof.
+If the native route or original switch state cannot be established, keep readiness
+unconfirmed and report that precise blocker without abandoning the original task.
 Before Gmail setup, inspect the owned setup checks for the required device passcode.
 If absent, navigate the observed OS new-passcode creation flow; select Passcode Options
 and 4-Digit Numeric Code before calling credentials.fill_device_passcode with
@@ -295,12 +314,30 @@ async def fetch_phone_capability(config, user_id: str, *, client=None) -> dict:
         return {"enabled": False, "configured": False, "setupState": None}
 
 
+async def fetch_phone_availability(config, user_id: str, task_id: str, *, client=None) -> dict:
+    """Server-owned task admission; account eligibility alone never grants access."""
+    denied = {"enabled": False, "source": None}
+    if not user_id or not task_id:
+        return denied
+    if client is None:
+        async with httpx.AsyncClient() as owned:
+            return await fetch_phone_availability(config, user_id, task_id, client=owned)
+    try:
+        data = await _request(client, config, user_id, "GET", f"availability/{quote(task_id, safe='')}")
+        source = data.get("source")
+        if data.get("enabled") is True and source in ("ready", "bootstrap", "continuation"):
+            return {"enabled": True, "source": source}
+    except Exception:
+        pass
+    return denied
+
+
 async def observe_phone(config, user_id: str, task_id: str, *, client=None) -> dict:
     """A fresh owned observation before each decision; never use cached entitlement."""
     if client is None:
         async with httpx.AsyncClient() as owned:
             return await observe_phone(config, user_id, task_id, client=owned)
-    capability = await fetch_phone_capability(config, user_id, client=client)
+    capability = await fetch_phone_availability(config, user_id, task_id, client=client)
     if not capability["enabled"] or not task_id:
         return {"enabled": False}
     try:
@@ -346,7 +383,7 @@ async def execute_phone(
             )
     if not all((user_id, agent_id, task_id)) or not (snapshot or {}).get("enabled"):
         return {"success": False, "error": "Phone unavailable for this decision"}
-    if not (await fetch_phone_capability(config, user_id, client=client))["enabled"]:
+    if not (await fetch_phone_availability(config, user_id, task_id, client=client))["enabled"]:
         return {"success": False, "error": "Phone capability unavailable or revoked"}
     from browser_tools.schemas import validate_browser_tool_args
 
@@ -623,7 +660,7 @@ async def request_native_phone_authentication(
         or critical_reason not in {"password", "verification_code", "device_passcode", "manual_verification"}
     ):
         return failure
-    if not (await fetch_phone_capability(config, user_id, client=client))["enabled"]:
+    if not (await fetch_phone_availability(config, user_id, task_id, client=client))["enabled"]:
         return failure
     intent = decision_id or _identity("auth-cursor", task_id, lease["id"], cursor)
     key = _identity("auth-assistance", task_id, lease["id"], intent)

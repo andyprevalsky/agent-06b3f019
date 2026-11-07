@@ -1,3 +1,4 @@
+import { availabilityInTransaction } from './repo.availability';
 import { createCommandJournal } from './repo.commandJournal';
 /** Per-device command slot. Provider calls happen only after this transaction commits. */
 import { executionCustody } from './repo.executionCustody';
@@ -52,6 +53,10 @@ export async function claimCommand(
     if (observation) actor = lease.controlOwner === 'user' ? 'user' : 'agent';
     if (lease.controlOwner !== actor)
       return new IPhoneError(409, 'Phone control belongs to the other participant');
+    if (actor === 'agent' && lease.browserTaskId !== null) {
+      const allowed = await availabilityInTransaction(tx, userId, lease.browserTaskId);
+      if (!allowed.enabled) return new IPhoneError(409, 'iPhone setup is required');
+    }
     if (!observation) {
       const error = await validateAttentionInput(tx, lease, input, actor);
       if (error !== null) return error;
@@ -107,6 +112,14 @@ export async function beginExecution(claim: CommandClaim): Promise<boolean> {
   return leases.transaction(async (tx) => {
     const { device, enabled } = await leases.lockedDevice(tx, claim.lease.userId);
     const lease = await tx.iPhoneLease.findUnique({ where: { id: claim.lease.id } });
+    if (
+      claim.command.actor === 'agent' &&
+      lease?.browserTaskId !== undefined &&
+      lease.browserTaskId !== null
+    ) {
+      const allowed = await availabilityInTransaction(tx, claim.lease.userId, lease.browserTaskId);
+      if (!allowed.enabled) return false;
+    }
     if (
       lease === null ||
       lease.status !== 'ACTIVE' ||

@@ -1,3 +1,4 @@
+import { availabilityInTransaction } from './repo.availability';
 import { validateNativePhoneLease } from '../../providers/nativePhoneAttentionBinding';
 import { permitted } from '../../providers/phoneAccountPolicy';
 import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
@@ -30,7 +31,8 @@ export async function setupCommitValid(
     state.attempt.revision === input.expectedRevision &&
     device.providerEpoch === command.providerEpoch &&
     device.providerState !== 'CLOSING' &&
-    !privacyState(device.privateInputEncrypted).active;
+    !privacyState(device.privateInputEncrypted).active &&
+    (await availabilityInTransaction(tx, claim.lease.userId, claim.lease.browserTaskId!)).enabled;
   try {
     const { lease, agent } = await validateNativePhoneLease(
       tx,
@@ -61,7 +63,8 @@ export async function setupCommitValid(
       lease.controlOwner === 'agent' &&
       lease.attentionRequestId === null &&
       other === null &&
-      (agent.temporalWorkflowId ?? agent.id) === claim.state.attempt!.workflowId;
+      (agent.temporalWorkflowId ?? agent.id) === claim.state.attempt!.workflowId &&
+      agent.temporalFirstExecutionRunId === claim.state.attempt!.firstExecutionRunId;
   } catch {
     valid = false;
   }

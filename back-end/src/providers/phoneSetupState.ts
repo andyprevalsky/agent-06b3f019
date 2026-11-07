@@ -2,6 +2,7 @@
 import { openPhoneValue, sealPhoneValue, phoneCommandHash } from './phoneHarnessCredentials';
 import { validSetupChecks, type SetupChecks, type SetupTarget } from './phoneSetupVerification';
 import { PhoneInteractionError } from './phoneInteractionError';
+import type { PhoneConnectionReservation } from './phoneConnectionState';
 export interface SetupAttempt {
   id: string;
   revision: number;
@@ -9,6 +10,7 @@ export interface SetupAttempt {
   taskId: string;
   agentId: string;
   workflowId: string;
+  firstExecutionRunId?: string;
   floorCursor: number;
   floorAt: string;
   reasonCode?: string;
@@ -21,6 +23,16 @@ export interface SetupAttempt {
   };
 }
 export interface SetupState {
+  connection?: PhoneConnectionReservation;
+  readinessAdmission?: {
+    leaseId: string;
+    taskId: string;
+    agentId: string;
+    workflowId: string;
+    firstExecutionRunId: string;
+    profileRevision: number;
+    providerEpoch: number;
+  };
   version: 1;
   profileRevision: number;
   claimRevision: number;
@@ -53,6 +65,43 @@ export function setupState(encrypted: string | null): SetupState {
       !value ||
       value.version !== 1 ||
       (value.verification !== undefined && !validSetupChecks(value.verification)) ||
+      (value.readinessAdmission !== undefined &&
+        (!value.readinessAdmission ||
+          ['leaseId', 'taskId', 'agentId', 'workflowId', 'firstExecutionRunId'].some(
+            (key) =>
+              typeof (value.readinessAdmission as unknown as Record<string, unknown>)[key] !==
+                'string' || !(value.readinessAdmission as unknown as Record<string, unknown>)[key]
+          ) ||
+          !Number.isSafeInteger(value.readinessAdmission.profileRevision) ||
+          value.readinessAdmission.profileRevision < 0 ||
+          !Number.isSafeInteger(value.readinessAdmission.providerEpoch) ||
+          value.readinessAdmission.providerEpoch < 0)) ||
+      (value.connection !== undefined &&
+        (!value.connection ||
+          Object.keys(value.connection).some(
+            (key) =>
+              ![
+                'agentId',
+                'profileRevision',
+                'requestKeyHash',
+                'revision',
+                'workflowId',
+                'firstExecutionRunId',
+              ].includes(key)
+          ) ||
+          (value.connection.firstExecutionRunId !== undefined &&
+            (typeof value.connection.firstExecutionRunId !== 'string' ||
+              !value.connection.firstExecutionRunId)) ||
+          (value.connection.workflowId !== undefined &&
+            (typeof value.connection.workflowId !== 'string' || !value.connection.workflowId)) ||
+          typeof value.connection.agentId !== 'string' ||
+          !/^[a-f0-9-]{36}$/.test(value.connection.agentId) ||
+          typeof value.connection.requestKeyHash !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(value.connection.requestKeyHash) ||
+          !Number.isSafeInteger(value.connection.profileRevision) ||
+          value.connection.profileRevision < 0 ||
+          !Number.isSafeInteger(value.connection.revision) ||
+          value.connection.revision < 0)) ||
       !Number.isSafeInteger(value.profileRevision) ||
       value.profileRevision < 0 ||
       !Number.isSafeInteger(value.claimRevision) ||

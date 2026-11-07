@@ -5311,6 +5311,9 @@ class RelayStartupEvidence(unittest.TestCase):
         namespace=module['main'].__globals__
         scripts=self.base/'scripts';scripts.mkdir()
         (scripts/'run-bench').write_text('exit 0\n')
+        fixture_module=runpy.run_path(str(self.target/'tests/fixtures/campaign_cleanup_fixture.py'))
+        cleanup=fixture_module['CampaignCleanupFixture'](self.base,self.target.parent)
+        self.addCleanup(cleanup.close)
         arguments=['campaign','--root',str(self.base),'--runs','1','--concurrency','2',
                    '--retry-infra','0','--task=fixture']
         published=[]
@@ -5330,7 +5333,7 @@ class RelayStartupEvidence(unittest.TestCase):
             infra_stop_predicate=lambda:lambda *_args:False)
         handlers={number:signal.getsignal(number)for number in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP)}
         try:
-            with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),patch.dict(os.environ,{
+            with cleanup.scope(),patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),patch.dict(os.environ,{
                 'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'hub-failure',
                 'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY':'1' if cancel else '0','CLOUDBENCH_STRICT_BARRIER':'0',
                 'BENCHMARK_HUB_GROUP_RUN_ID':'','BENCHMARK_HUB_PARENT_RUN_ID':''}):
@@ -5504,6 +5507,152 @@ class RelayStartupEvidence(unittest.TestCase):
 
 
 
+class CleanupPrepareEvidence(unittest.TestCase):
+    """Original zero-start ticket refusal keeps execution UNKNOWN and proof closure exact."""
+    setUp = RelayStartupEvidence.setUp
+    fixture = RelayStartupEvidence.fixture
+
+    def prepare_fixture(self):
+        import hashlib
+        receipt, owner, proof = self.fixture()
+        (self.relay / 'startup-cleanup.json').unlink()
+        capture = json.loads((self.relay / 'startup-agent.json').read_text())
+        ready = dict(agent=capture['agent'], authority_sha256=capture['authority_sha256'],
+                     pid=capture['broker']['pid'], birth=capture['broker']['birth'],
+                     socket='/tmp/cb-relay-abcdefgh/control.sock')
+        self.save(self.relay/'ready.json', ready)
+        self.save(self.relay/'serve.once.json', {k: ready[k] for k in ('authority_sha256', 'pid', 'birth')})
+        (self.relay/'broker.private.log').write_text('{"stopped": true}\n')
+        folder = Path(receipt['log']).parent
+        request = json.loads((folder/'request.json').read_text())
+        tasks = ['fixture-task-%02d' % i for i in range(14)]
+        request['checks'] = tasks
+        self.save(folder/'request.json', request)
+        cases = dict.fromkeys(tasks, 'UNVERIFIED')
+        receipt.update(checks=tasks, cases=cases)
+        adapter = json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(checks=tasks, cases=cases, complete=False, cleanup_complete=False,
+                       fleet_directory=str(self.campaign), native_command=['bash', 'scripts/run-bench', *tasks,
+                       '--runs', '1', '--concurrency', '14', '--retry-infra', '0', '--ref', receipt['source']['head']])
+        self.save(Path(receipt['worker_result']), adapter)
+        reference = receipt['native_cleanup_reference']
+        reference['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
+        self.save(folder/'receipt.json', receipt)
+        proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=reference['result_sha256'], layout='campaign-cleanup-prepare-v1')
+        summary = json.loads((self.campaign/'summary.json').read_text())
+        summary.pop('shared_inventory_failed')
+        summary.update(concurrency=14, task_count=14, total_jobs=14, cleanup_ticket_failure='prepare',
+                       cleanup_cohorts=[dict(cohort_id='c001',status='queued',ready_count=0,expected_count=14,
+                                            failed_count=0,released_count=0,released_at=None)],
+                       jobs=[dict(job_id='r001-j%04d' % (i+1), task=task, run=1, attempt=1, attempts=[],
+                           status='cancelled', controller_pid=None, controller_exit_code=None, started_at=None,
+                           finished_at=None, wall_clock_seconds=None, log=str(self.campaign/('r001-j%04d.log' % (i+1))),
+                           controller_command=['bash',str(self.base/'scripts/run-bench'),task,'--ref',receipt['source']['head'],'--foreground'])
+                           for i,task in enumerate(tasks)])
+        self.save(self.campaign/'summary.json',summary)
+        cohort = self.campaign/'cleanup-cohorts/c001'
+        (cohort/'cleanup-budget').mkdir(parents=True)
+        (cohort/'ready').mkdir()
+        (cohort.parent/'parent.lock').touch(); (cohort/'cleanup-budget/prepare.lock').touch()
+        self.save(cohort/'manifest.json',dict(cohort_id='c001',jobs=dict.fromkeys(j['job_id'] for j in summary['jobs'])))
+        (self.base/'.git/cloudbench-fleet-ownership').mkdir(parents=True,mode=0o700)
+        scripts = self.base/'scripts'; scripts.mkdir()
+        for name in ('run-bench-campaign.py','cloudbench-cleanup-tickets.py','run-bench','deploy_test_cloud.py'):
+            data = subprocess.check_output(['git','-C',str(ROOT),'show','abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077:scripts/'+name])
+            (scripts/name).write_bytes(data)
+        self.reseal()
+        return receipt,owner,proof
+
+    def validate_prepare_fixture(self,receipt,owner,proof):
+        import types
+        original = subprocess.check_output
+        published = types.ModuleType('deploy_test_cloud'); published.campaign_published=lambda *_a:getattr(self,'published',True)
+        def source(args,**kwargs):
+            if args[0]=='ps': return original(args,**kwargs)
+            if args[-1].endswith('cloudbench-shared-relay.py'): return b'original-broker'
+            return (self.base/'scripts'/args[-1].rsplit('/',1)[-1]).read_bytes()
+        with patch.dict(sys.modules,deploy_test_cloud=published), patch.object(self.native.runpy,'run_path',return_value={}), \
+             patch.object(self.native.subprocess,'check_output',side_effect=source):
+            state={'plan':{'gates':[{'name':'smoke','native_cloud':True}]},'attempts':[{'results':[receipt]}],
+                   'failures':[{'id':'prepare-failure','gate':'smoke','check':'smoke/'+receipt['checks'][0],
+                                'native_result':'UNVERIFIED','complete':False}]}
+            original_state=copy.deepcopy(state)
+            self.native.reconcile(state,'prepare-failure',proof)
+            self.assertEqual(original_state['attempts'],state['attempts'])
+            self.assertEqual(original_state['failures'],state['failures'])
+            return next(iter(state['reconciled_owners'].values()))
+
+    def test_prepare_reconciliation_never_grants_execution_credit(self):
+        receipt,owner,proof=self.prepare_fixture()
+        entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertEqual(entry['participants'],[]);self.assertEqual(entry['retained_services'],[])
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual(entry['native_audit_seals'],{})
+
+    def test_prepare_rejects_started_or_partial_or_unretired_evidence(self):
+        receipt,owner,proof=self.prepare_fixture()
+        originals={p:p.read_bytes() for p in self.base.rglob('*')if p.is_file()}
+        summary_path=self.campaign/'summary.json'
+        mutations=[('pid',lambda v:v['jobs'][0].update(controller_pid=123)),
+                   ('bool-exit',lambda v:v['jobs'][0].update(controller_exit_code=False)),
+                   ('started-clock',lambda v:v['jobs'][0].update(started_at=v['started_at'])),
+                   ('peak-bool',lambda v:v.update(peak_concurrency=False)),
+                   ('wrong-reason',lambda v:v.update(cleanup_ticket_failure='assign')),
+                   ('missing-job',lambda v:v['jobs'].pop()),
+                   ('duplicate-task',lambda v:v['jobs'][0].update(task=v['jobs'][1]['task'])),
+                   ('wrong-ref',lambda v:v['jobs'][0]['controller_command'].__setitem__(-2,'f'*40)),
+                   ('bool-cohort',lambda v:v['cleanup_cohorts'][0].update(ready_count=False)),
+                   ('task-ran',lambda v:v['jobs'][0].update(status='passed'))]
+        for name,mutate in mutations:
+            with self.subTest(name=name):
+                try:
+                    value=json.loads(summary_path.read_text());mutate(value);self.save(summary_path,value);self.reseal()
+                    with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+                finally:
+                    for p,raw in originals.items():p.write_bytes(raw)
+                    self.reseal()
+        for path in [self.runs/'_hub/owned',self.campaign/'r001-j0001.log',
+                     self.campaign/'cleanup-cohorts/c001/cleanup-budget/budget.json',
+                     self.campaign/'cleanup-cohorts/c001/ready/member']:
+            with self.subTest(path=path):
+                path.parent.mkdir(parents=True,exist_ok=True);path.write_text('{}');self.reseal()
+                try:
+                    with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+                finally:
+                    path.unlink()
+                    if path.parent==self.runs/'_hub':path.parent.rmdir()
+                    self.reseal()
+        broker=self.relay/'broker.private.log';broker.write_text('{"stopped": 1}');self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_prepare_refuses_scope_pin_grant_live_role_and_publication(self):
+        receipt,owner,proof=self.prepare_fixture()
+        for key,value in [('purpose','isolated-validation'),('recovered_runtime',{'foreign':{}})]:
+            with self.subTest(key=key):
+                changed=copy.deepcopy(proof);changed[key]=value
+                with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,changed)
+        import deploy_test_native_prepare as prepare
+        with patch.dict(prepare.REVIEWED_SOURCES,{'run-bench-campaign.py':'0'*64}):
+            with self.assertRaisesRegex(ValueError,'producer changed'):self.validate_prepare_fixture(receipt,owner,proof)
+        grant=self.base/'fixture-grant.json';grant.write_text('{}')
+        try:
+            with patch.object(prepare,'grant_path',return_value=grant),self.assertRaisesRegex(ValueError,'grant remains'):
+                self.validate_prepare_fixture(receipt,owner,proof)
+        finally:grant.unlink()
+        capture_path=self.relay/'startup-agent.json';ready_path=self.relay/'ready.json'
+        capture=json.loads(capture_path.read_text());ready=json.loads(ready_path.read_text())
+        original_capture=copy.deepcopy(capture);original_ready=copy.deepcopy(ready)
+        capture['agent'].update(pid=os.getpid(),birth=self.live_stamp(os.getpid()))
+        ready['agent']=capture['agent'];self.save(capture_path,capture);self.save(ready_path,ready);self.reseal()
+        try:
+            with self.assertRaisesRegex(ValueError,'remains live'):self.validate_prepare_fixture(receipt,owner,proof)
+        finally:
+            self.save(capture_path,original_capture);self.save(ready_path,original_ready);self.reseal()
+        self.published=False
+        with self.assertRaisesRegex(ValueError,'terminal publication'):self.validate_prepare_fixture(receipt,owner,proof)
+
+
 class RecoveredNativeReceiptGuard(unittest.TestCase):
     """Exercise actual full-pass admission on real files; never launch a worker."""
     def setUp(self):
@@ -5595,5 +5744,156 @@ class LocalCleanupQuietScan(unittest.TestCase):
                 finally:
                     child.kill(); child.wait(); child.stdout.close()
 
+
+class BackendPrismaPreflightCleanup(unittest.TestCase):
+    """Original guard refusal closes resources without changing failed results."""
+    def setUp(self):
+        import hashlib
+        import deploy_test_backend_preflight_cleanup as b
+        LocalCleanup.setUp(self)
+        self.b = b
+        self.gate['env'] = {'CONDUCTOR_WORKSPACE_NAME': 'fixture', 'CONDUCTOR_PORT': '12000',
+                            'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1'}
+        names = ['blackbox:browser-provider', 'units', 'fps', 'coverage-threshold', 'teardown']
+        self.recipe.clear()
+        self.recipe.update(cases={name: {'command': ['npm', 'run', 'test:coverage:sharded'],
+                           'cwd': 'back-end', 'sweep': True, 'env': self.gate['env']} for name in names},
+                           execution_timeout_seconds=14400)
+        self.gate['checks'] = names
+        self.request['checks'] = names
+        self.result['cases'] = dict.fromkeys(names, 'UNVERIFIED')
+        self.result['cases'].update(units='FAIL', fps='FAIL', teardown='FAIL')
+        self.result['recipe_digest'] = c.digest(self.recipe)
+        self.result['native_command'] = ['npm', 'run', 'test:coverage:sharded']
+        self.receipt['cases'] = dict.fromkeys(names, 'UNVERIFIED')
+        self.receipt['execution_binding']['contract_digest'] = c.digest(self.gate)
+        self.process['reaped'] = [{'pid': 124, 'status': 256}] + [{'pid': i, 'status': 0} for i in range(125, 135)]
+        native = Path(self.result['runner_log']).parent
+        coverage = self.worker / 'back-end/coverage'
+        coverage.mkdir(parents=True)
+        self.archive = self.root / 'archive'; self.archive.mkdir()
+        self.proof.update(layout=b.LAYOUT, artifacts={})
+        self.native = native
+        self.evidence = self.result['evidence'] = {'artifacts': {'summaries': {}}, 'unknown_domains': []}
+        def artifact(path, raw):
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(raw)
+            archived = self.archive / ('%02d-' % len(self.proof['artifacts']) + path.name)
+            archived.write_bytes(raw); archived.chmod(0o600)
+            row = {'path': str(archived), 'sha256': hashlib.sha256(raw).hexdigest(), 'bytes': len(raw)}
+            self.proof['artifacts'][str(path)] = row
+            return row['sha256']
+        self.artifact = artifact
+        prefix = 'Using local Postgres (Docker container=victoria-db-fixture) at localhost:12005, database victoria_fixture'
+        for role, filename, suffix in [('units', 'units.log', '_s0'), ('fps', 'units-probe.log', '_s0')]:
+            path = coverage / filename
+            h = artifact(path, (b.BROWSER+b.TRACE+prefix+suffix+'\n'+b.STALE).encode())
+            self.evidence[role] = {'log': str(path), 'exit': 1}
+            self.evidence['artifacts'][role+'_log'] = h
+        self.evidence['shard_logs'] = {}
+        for i in (1, 2):
+            path = coverage / ('shard-%d.log' % i)
+            self.evidence['shard_logs'][str(path)] = artifact(path, (b.BROWSER+b.TRACE+prefix+'_s%d\n'%i+b.STALE).encode())
+        path = native / 'teardown.log'
+        h = artifact(path, (b.TRACE+prefix+'\n'+b.STALE+'FAIL: the isolated backend never became ready\n').encode())
+        self.evidence['teardown'] = {'log': str(path), 'exit': 1, 'recipe_cleanup_exit': None,
+              'recipe_setup_exit': None, 'command': ['bash','scripts/tests/blackbox-backend-teardown.test.sh']}
+        self.evidence['artifacts']['teardown_log'] = h
+        path = native / 'threshold.log'
+        self.evidence['coverage-threshold'] = {'log': str(path)}
+        self.evidence['artifacts']['threshold_log'] = artifact(path, b'No coverage; threshold unverified\n')
+        runner_rows = ['Started coverage shard 1/2', 'Started coverage shard 2/2', 'Started the unit pass beside the shards',
+            '❌ Coverage shard 1/2 failed (exit 1)', '❌ Coverage shard 2/2 failed (exit 1)',
+            '❌ Unit pass failed (exit 1)', '❌ fps probe pass failed (exit 1)']
+        self.evidence['artifacts']['runner_log'] = artifact(Path(self.result['runner_log']), ('\n'.join(runner_rows)+'\n').encode())
+        self.pg = {'id': 'c'*64, 'name': '/victoria-db-fixture', 'image': 'sha256:'+'d'*64,
+            'image_name': 'pgvector/pgvector:pg16', 'owner': str(self.worker), 'running': True, 'status': 'running',
+            'paused': False, 'restarting': False, 'dead': False,
+            'ports': {'5432/tcp': [{'HostIp':'127.0.0.1','HostPort':'12005'}]},
+            'mounts': [{'Type':'volume','Name':'victoria-pgdata-fixture','RW':True,'Destination':'/var/lib/postgresql/data'}]}
+        hashes = [artifact(native / ('postgres-'+phase+'.json'), json.dumps(self.pg).encode()) for phase in ('before','after')]
+        self.evidence['postgres_fixture'] = {'id': self.pg['id'], 'name': 'victoria-db-fixture', 'image': self.pg['image'],
+              'volume':'victoria-pgdata-fixture', 'port':12005, 'restored':False,
+              'before_sha256':hashes[0], 'after_sha256':hashes[1]}
+        self.locks = []
+        for port in (12020,12022,12024):
+            path = self.worker / '.context/test-runs/.port-locks' / (str(port)+'.lock')
+            artifact(path, b'999999999\n'); os.utime(path, (150,150)); self.locks.append(path)
+        self.sync()
+        self.original_bytes = {n:p.read_bytes() for n,p in self.paths.items()}
+        # Historical source bytes are real; synthetic root has no Git repository.
+        blobs = {name: subprocess.check_output(['git','--no-replace-objects','-C',str(ROOT),'show',
+                    'abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077:'+name]) for name in b.PINS}
+        self.addCleanup(patch.stopall)
+        patch.object(b.subprocess, 'check_output', side_effect=lambda argv: blobs[argv[-1].split(':',1)[1]]).start()
+        patch.object(b, 'docker_snapshot', side_effect=lambda machine: copy.deepcopy(self.pg)).start()
+        patch.object(b, 'listeners', return_value={12005}).start()
+
+    def sync(self):
+        for name, value in zip(self.paths, [self.request,self.result,self.receipt,self.process]):
+            c.write(self.paths[name], value)
+        self.proof['files'] = {n:c.sha_file(p) for n,p in self.paths.items()}
+
+    def reconcile(self):
+        c.reconcile(self.state, 'occurrence', self.proof)
+
+    def test_guard_refusal_closes_without_credit_or_rewriting(self):
+        self.reconcile()
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertEqual(self.original_bytes, {n:p.read_bytes() for n,p in self.paths.items()})
+        self.assertEqual('UNVERIFIED', self.failure['native_result'])
+        self.assertFalse(self.result['cleanup_complete'])
+        self.assertEqual([], c.retained_owners(self.state,[self.gate['name']]))
+
+    def test_source_inventory_phase_and_supervisor_negatives(self):
+        changes = [('process','orphaned_children',True), ('process','term_sent',[124]),
+            ('process','reaped',self.process['reaped'][:-1]), ('process','reaped',[{'pid':124,'status':True}]+self.process['reaped'][1:]),
+            ('result','complete',True), ('result','cleanup_complete',True), ('result','source_unchanged',False),
+            ('result','native_exit',True), ('request','checks',['teardown'])]
+        for owner,key,value in changes:
+            with self.subTest(owner=owner,key=key):
+                target = getattr(self,owner); old=target[key]; target[key]=value; self.sync()
+                with self.assertRaises(ValueError): self.reconcile()
+                target[key]=old; self.sync()
+        old_head = self.source['head']; self.source['head'] = 'abc'; self.sync()
+        with self.assertRaisesRegex(ValueError, 'full source'): self.reconcile()
+        self.source['head'] = old_head; self.sync()
+        with patch.object(self.b.subprocess,'check_output',return_value=b'changed historical source'):
+            with self.assertRaises(ValueError): self.reconcile()
+        for role in ('units', 'fps', 'teardown'):
+            self.evidence[role]['exit'] = True; self.sync()
+            with self.subTest(role=role), self.assertRaises(ValueError): self.reconcile()
+            self.evidence[role]['exit'] = 1; self.sync()
+        path = Path(self.evidence['units']['log']); row = self.proof['artifacts'][str(path)]
+        raw = b'backend actually started\n'
+        Path(row['path']).write_bytes(raw)
+        import hashlib
+        row.update(sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw))
+        self.evidence['artifacts']['units_log'] = row['sha256']; self.sync()
+        with self.assertRaisesRegex(ValueError, 'guarded phase boundary'): self.reconcile()
+
+    def test_current_app_fixture_lock_and_archive_negatives(self):
+        for observer, value in [('listeners',{12005,12030}), ('docker_snapshot',{})]:
+            with self.subTest(observer=observer), patch.object(self.b,observer,return_value=value):
+                with self.assertRaises(ValueError): self.reconcile()
+        import deploy_test_process
+        fakeproc = self.root / 'fake-proc'; fakeproc.mkdir()
+        (fakeproc / 'cwd').symlink_to(self.worker, target_is_directory=True)
+        (fakeproc / 'cmdline').write_bytes(b'fixture\0')
+        with patch.object(deploy_test_process, 'scan_same_user_processes',
+                          side_effect=lambda inspect, unknown: inspect(fakeproc)):
+            with self.assertRaisesRegex(ValueError, 'root still live'): self.reconcile()
+        import fcntl
+        for path in [self.worker/'.context/native-worker-admission.lock',self.locks[0]]:
+            with path.open('r') as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                with self.assertRaises((ValueError,OSError)): self.reconcile()
+        self.locks[0].write_text(str(os.getpid())+'\n')
+        with self.assertRaises(ValueError): self.reconcile()
+        self.locks[0].write_bytes(b'999999999\n'); os.utime(self.locks[0],(150,150))
+        row = self.proof['artifacts'].pop(str(self.locks[0]))
+        with self.assertRaises(ValueError): self.reconcile()
+        self.proof['artifacts'][str(self.locks[0])] = row
+        Path(row['path']).chmod(0o666)
+        with self.assertRaises(ValueError): self.reconcile()
 
 if __name__ == '__main__': unittest.main()

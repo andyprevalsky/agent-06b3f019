@@ -1,3 +1,6 @@
+import { authLossCases } from './iphone-control.auth-loss.cases';
+import { portraitCases } from './iphone-control.portrait.cases';
+import { connectionCases } from './iphone-control.connection.cases';
 import { messageCases } from './iphone-control.messages.cases';
 import { savedCredentialCases } from './iphone-control.saved-credential.cases';
 import { rolloutCases } from './iphone-control.rollout.cases';
@@ -67,10 +70,13 @@ async function queued(h: Harness, userId: string) {
   return waiter;
 }
 export const cases: Case[] = [
+  ...authLossCases,
+  ...connectionCases,
   ...messageCases,
   ...savedCredentialCases,
   ...rolloutCases,
   ...setupCases,
+  ...portraitCases,
   ...privacyCases,
   ...cleanupCases,
   ...viewCases,

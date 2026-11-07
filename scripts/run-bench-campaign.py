@@ -1539,8 +1539,8 @@ def main() -> int:
     # Predeclare cleanup liability without introducing a task-start rendezvous.
     ordinary_cleanup = not strict_start and len(jobs) <= args.concurrency
     cleanup_ticketed = strict_start or ordinary_cleanup
-    cleanup_identity_module = cleanup_ticket_module(root) if cleanup_ticketed else None
-    cleanup_parent_birth = cleanup_identity_module.birth(os.getpid()) if cleanup_ticketed else ""
+    cleanup_identity_module = cleanup_ticket_module(root) if strict_start else None
+    cleanup_parent_birth = cleanup_identity_module.birth(os.getpid()) if strict_start else ""
     cohorts: list[dict[str, object]] = []
     parent_lock = None
     if cleanup_ticketed:
@@ -1685,6 +1685,12 @@ def main() -> int:
     current_cohort: dict[str, object] | None = None
 
     def prepare_cleanup_tickets(cohort: dict[str, object]) -> None:
+        nonlocal cleanup_identity_module, cleanup_parent_birth
+        if cleanup_identity_module is None:
+            # Persist the immutable dispatch plan and finish inventory admission
+            # before ordinary campaigns request cleanup allocation authority.
+            cleanup_identity_module = cleanup_ticket_module(root)
+            cleanup_parent_birth = cleanup_identity_module.birth(os.getpid())
         common = subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()
         reserve_root = Path(common) / "cloudbench-fleet-ownership"
         reserve_root.mkdir(mode=0o700, exist_ok=True)
@@ -2067,10 +2073,19 @@ def main() -> int:
             if ordinary_cleanup and not barrier_failure and not cohorts[0].get("_cleanup_tickets_prepared"):
                 try:
                     prepare_cleanup_tickets(cohorts[0])
-                except (OSError, ValueError, subprocess.SubprocessError):
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
                     first_failure = first_failure or 1
                     barrier_failure = True
                     state["cleanup_ticket_failure"] = "prepare"
+                    # Keep the native refusal without exposing subprocess argv,
+                    # credentials, tracebacks or a file's contents in telemetry.
+                    if isinstance(error, subprocess.SubprocessError):
+                        message = "cleanup preparation subprocess failed"
+                    elif isinstance(error, OSError):
+                        message = os.strerror(error.errno) if error.errno else "cleanup preparation filesystem error"
+                    else:
+                        message = str(error).splitlines()[0][:400] if str(error) else "cleanup preparation validation failed"
+                    state["cleanup_ticket_error"] = {"type": type(error).__name__, "message": message}
                     write_json_atomic(summary_path, state)
             if strict_start and not active and current_cohort and current_cohort.get("_cleanup_tickets_prepared") and not current_cohort.get("_cleanup_tickets_retired") and all(member["status"] not in {"queued", "running"} for member in current_cohort["_jobs"]):
                 try:
