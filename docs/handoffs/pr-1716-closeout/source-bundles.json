@@ -1,0 +1,921 @@
+{
+  "status": "PASS bounded source prerequisite verification only",
+  "observed_at": "2026-11-07T13:28:58.322490+00:00",
+  "fetched_main_sha": "08b4b13364e642e2ca791942c9d5b7ec1b7286c0",
+  "production_M": "060fa655d16476e0ff84727bef5b4e188bee349d",
+  "M_tree": "c7abf67327a783ee92c2d67628c50a632003cb6d",
+  "M_tree_available": true,
+  "fetched_main_tree_available": true,
+  "bundle_count": 11,
+  "prerequisite_occurrences": 116,
+  "unique_prerequisite_count": 72,
+  "prerequisite_proofs": [
+    {
+      "sha": "d9ed6c6379b893b92f3d149b60b47a3d0504f215",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "7ae871b3882f0ec1fc89ac80276b4353ebf02183",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "b9cbb5b78f265302258b44284cf71cc82b59189a",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "83549c1bf225ad5ddeb7b595fdaf8e0f534ee672",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "18b88fe7a74ab5e198471866587a1e042d7d0276",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "f08361efe002ee23af3e32d54c6364a42fe2d859",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "b8e30eb00e81c620ec03feb5beba26314a133def",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "b9218893364a390487347ac2a5de4e3577c1fde4",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "fd0b229d6f02ba21fd53b59d9e7d773efee4923a",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "ef181804418215f18a513341988507c86f7d4f40",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "63208fdf083b8ae9902ef51a654097daf63c3ef0",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "eab7b10775617cebdf6d6cbbecf3d5323825efce",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "63b743036650977a2cf2ea4b34e0eb8fb975d3b3",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "dfc805d27ca87686c753130871ba09955a104b3e",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "0e4d05772073042601f6d75914ee738d4e201069",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "c6bd53a9cd51ea5701d8c30d2b062f81ed9d4230",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "a9dec2dfc05199eac5866e5873ba5bcf1bebd825",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "3787e92111a61147eb2b64cf592324733e7cfba4",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "f56705fec0c1492a2e7b413f8832e53d236cc6b3",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "619272efae6a7207ae6b43610cbbd8ed53eda34a",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "7441f0ff082b5387d3fba4279ef5055209fdc6ea",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "9f1716634dccab8aecf3b2b6da731613ccb60495",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "46a51ff17f1de96a99e635a44d9a218475ef976d",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "43138a436e9a30f887523b0682f512a286c5a102",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "eabdd4a3643749370c998933ea78b564b0130468",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "67e0d2b93407644a1908e9bfb2cad48d16b778e4",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "261f69f60e26ce436f7eb32e12749b2a38448646",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "09d2821c5c8c09d658387add156f12e08f84119a",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "1044ac7567af5c04e851467189dbc915f3a2f4b4",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "3791ddf9957fd1d16cded80551f3ee6cfe976845",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "fb73177b9f8181a9eecf2c376e42440184389c34",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "85071e01ab57013cb66561933358093dec79c65c",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "fb3a104dcd8a637c5d9c413f8bdfc559992a2de4",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "acd9a666836f505dda3f96006f100f87ce2ad240",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "1c4974f6f4485078ef752c0df34f6a9de0066e64",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "ca4d0b6b34bb27320e54fe1ef773313d829796da",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "c6ad9772b829628bf4c648c770f2a2c2dc3e1745",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "70c91110f6cec8e86aa13b67bb8bc8fde1d4f632",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "648f74b9c947c42edfdd41a066b7d868c7ec81d1",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "a738ac963ec9c9b37fd9a154bdb90e3905c1fefb",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "a4b605fd687a021f3e8d0b3968e08192d926e7c3",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "435538b937090abc992e74d384d029d3fa91d731",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "10a245bbfde4aec0cccdc2968782180e85b60cce",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "ee42d9712c7a5d4beaaa957faa76ed43db4c613c",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "1c0a5e56c2ddeddf20802f337aaa8bf183a86e3f",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "5af5ac28eab08e93bd9ba14e1f78ef0c1ee4f0ed",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "08f519dbfb1b782d403fa4d329a2cf8094606ea0",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "75d1b1df8f877f20a60cc5cf84cf0219e451715c",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "05e935d1d050798766aa2eb4d3710e9ddc86b4ac",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "21dc96cd23c74ff21a685af547d6ba27ac5f6794",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "2ebd9fcdc76891156755e087f98ff7afa55f590f",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "c08be5bfb641e15402bdbc53a80658dc0b5d3e20",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "101ece413be25cf87a4bf6e03febf1ce11f332a9",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "308315a4bc1129139de70ad0c34d429c1c3fbc6a",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "39bcd257dc6e1d731008b46e9611ee7f1a5f1723",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "5807c0edf19ab7fe7fda9b059701426872e18d0c",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "4bbf0c41bc040b78092a4ce275fbc86a907d098d",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "3c72d9da3e68701d3d4e2b8c0557388ed5ff42aa",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "c4532fbf02065d72ab134a86b17079bf12207a0a",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "e773170a235447b97c977b004de56f70a2c34282",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "f371a7d89d152176611fabbbf1827733b37c0461",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "42ffa4d57b8f973ac1f87fb2dc214fc68bd8c9f2",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "d8a43b56a00c929e8129d304e808e3d2094c9663",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "2bee05f9cff375e2e79d9af49676c89361d7217b",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "a0536b2af27b76163739506a8bdae607c3c249e3",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "67998442e44f8cbba942040d9cbeeaea84eb0cb0",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "24b86237555588761ca741cb38e3b9d0e547b5a0",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "7b15b3e06b77b57529cc868b2da50450f933180b",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "8116062bc6d5117265c725fe040d61d56eae7eaf",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "7689c4263742d5bca70c46ddc2be82d55c420b16",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "bebc40cec4d310c1df57c9c423d5aa01da5306e4",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    },
+    {
+      "sha": "7ba3c3f3995c0f6fbca7c87eb1f2a24f7881b375",
+      "ancestor_of_fetched_main": true,
+      "ancestor_of_M": true,
+      "commit_object_available": true,
+      "tree_object_available": true
+    }
+  ],
+  "bundles": [
+    {
+      "member_path": "rose/.context/pause-rca/local-source-recovery-audit/root-historical-source-incremental.bundle",
+      "sha256": "2e08e87f5243bd8b0f95606de92764a4db2c04af2a989841b573d4dc73bd1a30",
+      "bytes": 19147954,
+      "header_sha256": "03a975847d4eb15a9f92aeb256a395f9c07f1bc2310a6f4bf080cbe4ecbcf016",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "d9ed6c6379b893b92f3d149b60b47a3d0504f215",
+        "7ae871b3882f0ec1fc89ac80276b4353ebf02183",
+        "b9cbb5b78f265302258b44284cf71cc82b59189a",
+        "83549c1bf225ad5ddeb7b595fdaf8e0f534ee672",
+        "18b88fe7a74ab5e198471866587a1e042d7d0276",
+        "f08361efe002ee23af3e32d54c6364a42fe2d859",
+        "b8e30eb00e81c620ec03feb5beba26314a133def",
+        "b9218893364a390487347ac2a5de4e3577c1fde4",
+        "fd0b229d6f02ba21fd53b59d9e7d773efee4923a",
+        "ef181804418215f18a513341988507c86f7d4f40",
+        "63208fdf083b8ae9902ef51a654097daf63c3ef0",
+        "eab7b10775617cebdf6d6cbbecf3d5323825efce",
+        "63b743036650977a2cf2ea4b34e0eb8fb975d3b3",
+        "dfc805d27ca87686c753130871ba09955a104b3e",
+        "0e4d05772073042601f6d75914ee738d4e201069",
+        "c6bd53a9cd51ea5701d8c30d2b062f81ed9d4230",
+        "a9dec2dfc05199eac5866e5873ba5bcf1bebd825",
+        "3787e92111a61147eb2b64cf592324733e7cfba4",
+        "f56705fec0c1492a2e7b413f8832e53d236cc6b3",
+        "619272efae6a7207ae6b43610cbbd8ed53eda34a",
+        "7441f0ff082b5387d3fba4279ef5055209fdc6ea",
+        "9f1716634dccab8aecf3b2b6da731613ccb60495",
+        "46a51ff17f1de96a99e635a44d9a218475ef976d",
+        "43138a436e9a30f887523b0682f512a286c5a102",
+        "eabdd4a3643749370c998933ea78b564b0130468",
+        "67e0d2b93407644a1908e9bfb2cad48d16b778e4",
+        "261f69f60e26ce436f7eb32e12749b2a38448646",
+        "09d2821c5c8c09d658387add156f12e08f84119a",
+        "1044ac7567af5c04e851467189dbc915f3a2f4b4",
+        "3791ddf9957fd1d16cded80551f3ee6cfe976845",
+        "fb73177b9f8181a9eecf2c376e42440184389c34",
+        "85071e01ab57013cb66561933358093dec79c65c",
+        "fb3a104dcd8a637c5d9c413f8bdfc559992a2de4",
+        "acd9a666836f505dda3f96006f100f87ce2ad240",
+        "1c4974f6f4485078ef752c0df34f6a9de0066e64",
+        "ca4d0b6b34bb27320e54fe1ef773313d829796da",
+        "c6ad9772b829628bf4c648c770f2a2c2dc3e1745",
+        "70c91110f6cec8e86aa13b67bb8bc8fde1d4f632",
+        "648f74b9c947c42edfdd41a066b7d868c7ec81d1",
+        "a738ac963ec9c9b37fd9a154bdb90e3905c1fefb",
+        "a4b605fd687a021f3e8d0b3968e08192d926e7c3",
+        "435538b937090abc992e74d384d029d3fa91d731",
+        "10a245bbfde4aec0cccdc2968782180e85b60cce",
+        "ee42d9712c7a5d4beaaa957faa76ed43db4c613c"
+      ],
+      "refs": [
+        {
+          "sha": "c4beee61a1bad5f876e6da4a2377eee3cf8db05d",
+          "ref": "refs/backup/marseille-pre-ledger-squash"
+        },
+        {
+          "sha": "5684313c7d8df13ec1125228b0db512d6202e643",
+          "ref": "refs/backup/schema-constraints-pre-flatten"
+        },
+        {
+          "sha": "0b80a2b60aa0078c4b2dc7e5c6fe3628d7b43ca0",
+          "ref": "refs/conductor-archive-heads/3983aefe-4502-448a-957c-5fe5f02cad59"
+        },
+        {
+          "sha": "b787e9f53186713ec41a58f4673fbe124e46a0ad",
+          "ref": "refs/conductor-archive-heads/42f51d58-45b7-44ab-9459-e9c4a9f89623"
+        },
+        {
+          "sha": "bc5700271ec99cbcb237dd8354f101a19f0a1f9c",
+          "ref": "refs/conductor-archive-heads/61debda8-84f0-4bb4-946e-4ba661716705"
+        },
+        {
+          "sha": "0210b0127b9cda7a94bdad9c98bfd5be197097fc",
+          "ref": "refs/conductor-archive-heads/6fafe6e2-9f34-468b-89ce-0d6ed34e6229"
+        },
+        {
+          "sha": "44ccd46a7afb23e33da837772b4546f156040825",
+          "ref": "refs/conductor-archive-heads/a4a23ab5-3c12-4347-af95-92df25aac9a0"
+        },
+        {
+          "sha": "15c54e8282a640d3e4af008377993695d35cc515",
+          "ref": "refs/conductor-archive-heads/a94cbcc5-3889-4e04-8e52-0ea573e1aac2"
+        },
+        {
+          "sha": "395aeef6794505321a72f204ae636e1444621a1b",
+          "ref": "refs/conductor-archive-heads/b62e83b8-0bf5-47e4-bc5e-e728bee34ea1"
+        },
+        {
+          "sha": "0acb2462fc52dd8f6b7a0463b7bfa822f31dc790",
+          "ref": "refs/conductor-archive-heads/c94ab3da-7874-4253-a42b-af06a3510ca5"
+        },
+        {
+          "sha": "700848c08536a63c6c597455b25ce78a66a8d14e",
+          "ref": "refs/conductor-archive-heads/cdb5a59e-bbb3-4abe-a377-6043505c73ca"
+        },
+        {
+          "sha": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2",
+          "ref": "refs/stash"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/local-source-recovery-audit/controller-superseded-source-incremental.bundle",
+      "sha256": "2d2b8dcabb1b13b1594b5c71c609b53f0ba1d27fde4b287a4ae9bf7fcc234d63",
+      "bytes": 235924,
+      "header_sha256": "6fb3025a088c3c49045a5c03fec3e36a112d664f3577d3083c0160adddba3846",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "1c0a5e56c2ddeddf20802f337aaa8bf183a86e3f",
+        "5af5ac28eab08e93bd9ba14e1f78ef0c1ee4f0ed"
+      ],
+      "refs": [
+        {
+          "sha": "da90973dbecdc9fa74a93f5fa0dec76da120902b",
+          "ref": "refs/recovery/controller-superseded/da90973dbecdc9fa74a93f5fa0dec76da120902b"
+        },
+        {
+          "sha": "976689a6f786d6dd13f401faff8f449ee0f499b6",
+          "ref": "refs/recovery/controller-superseded/976689a6f786d6dd13f401faff8f449ee0f499b6"
+        },
+        {
+          "sha": "ba701bb57beb959145fc512a6c202b1b4f0a2090",
+          "ref": "refs/recovery/controller-superseded/ba701bb57beb959145fc512a6c202b1b4f0a2090"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/local-source-recovery-audit/merge-scratch-trees-incremental.bundle",
+      "sha256": "b844f6815323f521b87721f3f53fd00bda26000df7c761c9bb1482e9380de7dc",
+      "bytes": 1036236,
+      "header_sha256": "4bc7bb67c3aea9a91ea1900caea59d835f36225a67142104dc5937a94118af4c",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "08f519dbfb1b782d403fa4d329a2cf8094606ea0"
+      ],
+      "refs": [
+        {
+          "sha": "b6d25394152c5051d0f2fadbdd1801a7848a1922",
+          "ref": "refs/sync-artifacts/docs-resolved-conflicted-tree"
+        },
+        {
+          "sha": "8717d602a49c532165e2bdcf291957d04a89a47a",
+          "ref": "refs/sync-artifacts/raw-conflicted-tree"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/root-current-source.bundle",
+      "sha256": "5facf7711a418dcad4dc09031bd30b2231731db9055f30d3330f9a57328b6a98",
+      "bytes": 98641,
+      "header_sha256": "d6559e32a4afefb4b1b53cbadcb14e332e882383a0eff6e1c3fb89219e6b5284",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "75d1b1df8f877f20a60cc5cf84cf0219e451715c",
+        "05e935d1d050798766aa2eb4d3710e9ddc86b4ac",
+        "21dc96cd23c74ff21a685af547d6ba27ac5f6794",
+        "2ebd9fcdc76891156755e087f98ff7afa55f590f",
+        "c08be5bfb641e15402bdbc53a80658dc0b5d3e20",
+        "101ece413be25cf87a4bf6e03febf1ce11f332a9",
+        "308315a4bc1129139de70ad0c34d429c1c3fbc6a"
+      ],
+      "refs": [
+        {
+          "sha": "1c0a5e56c2ddeddf20802f337aaa8bf183a86e3f",
+          "ref": "HEAD"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/root-C3-source.bundle",
+      "sha256": "64a87ff9babc2c93c1dee084eb001300684b89cf79ddcb57224bdea62fb42b27",
+      "bytes": 152726,
+      "header_sha256": "a4479a35e97c875ef8a11f4eb065ed864993f2aedce010c079001b3f369ee23a",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "75d1b1df8f877f20a60cc5cf84cf0219e451715c",
+        "05e935d1d050798766aa2eb4d3710e9ddc86b4ac",
+        "21dc96cd23c74ff21a685af547d6ba27ac5f6794",
+        "2ebd9fcdc76891156755e087f98ff7afa55f590f",
+        "c08be5bfb641e15402bdbc53a80658dc0b5d3e20",
+        "101ece413be25cf87a4bf6e03febf1ce11f332a9",
+        "308315a4bc1129139de70ad0c34d429c1c3fbc6a",
+        "39bcd257dc6e1d731008b46e9611ee7f1a5f1723",
+        "5807c0edf19ab7fe7fda9b059701426872e18d0c",
+        "4bbf0c41bc040b78092a4ce275fbc86a907d098d"
+      ],
+      "refs": [
+        {
+          "sha": "b1533b9c1403cd4d9947542924e9345ea1cb4740",
+          "ref": "refs/heads/fix/optimistic-browser-pause"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/root-inherited-local-only.bundle",
+      "sha256": "1e046637095047acdaddefe26165f91e1fcbd07b3e05e25cbbefa237b7d2ab07",
+      "bytes": 1147327,
+      "header_sha256": "10955cc9b1656d43bd578395274191fed8133e00908bfda0afebeac1ee6a820f",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "3c72d9da3e68701d3d4e2b8c0557388ed5ff42aa",
+        "435538b937090abc992e74d384d029d3fa91d731",
+        "c4532fbf02065d72ab134a86b17079bf12207a0a",
+        "e773170a235447b97c977b004de56f70a2c34282",
+        "f371a7d89d152176611fabbbf1827733b37c0461",
+        "42ffa4d57b8f973ac1f87fb2dc214fc68bd8c9f2"
+      ],
+      "refs": [
+        {
+          "sha": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca",
+          "ref": "refs/heads/backup/cerebras-chat-quota-prepush-20261002"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/root-C2-source.bundle",
+      "sha256": "d5f4c2a117a117d6d12e80ce99c5f0bb3bbe91bee0a52ae819b123499d5689bb",
+      "bytes": 149798,
+      "header_sha256": "d8582fcd3c6f485865eb4c40550d9c31594992e68123645eaea695db974420e1",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "75d1b1df8f877f20a60cc5cf84cf0219e451715c",
+        "05e935d1d050798766aa2eb4d3710e9ddc86b4ac",
+        "21dc96cd23c74ff21a685af547d6ba27ac5f6794",
+        "2ebd9fcdc76891156755e087f98ff7afa55f590f",
+        "c08be5bfb641e15402bdbc53a80658dc0b5d3e20",
+        "101ece413be25cf87a4bf6e03febf1ce11f332a9",
+        "308315a4bc1129139de70ad0c34d429c1c3fbc6a",
+        "39bcd257dc6e1d731008b46e9611ee7f1a5f1723",
+        "5807c0edf19ab7fe7fda9b059701426872e18d0c"
+      ],
+      "refs": [
+        {
+          "sha": "0e8a1aac82a64438ba80d71fe6c94e95cc79ab04",
+          "ref": "HEAD"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/root-C4-source.bundle",
+      "sha256": "563b2b53fd09d3a1794d80da640298c6458131178dcd3fa42d12f5850a68f333",
+      "bytes": 153413,
+      "header_sha256": "00919981942bb4c7c30ce5b254ed5aae9d2b2804a5dde6ec2131a8a30614711a",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "75d1b1df8f877f20a60cc5cf84cf0219e451715c",
+        "05e935d1d050798766aa2eb4d3710e9ddc86b4ac",
+        "21dc96cd23c74ff21a685af547d6ba27ac5f6794",
+        "2ebd9fcdc76891156755e087f98ff7afa55f590f",
+        "c08be5bfb641e15402bdbc53a80658dc0b5d3e20",
+        "101ece413be25cf87a4bf6e03febf1ce11f332a9",
+        "308315a4bc1129139de70ad0c34d429c1c3fbc6a",
+        "39bcd257dc6e1d731008b46e9611ee7f1a5f1723",
+        "5807c0edf19ab7fe7fda9b059701426872e18d0c",
+        "d8a43b56a00c929e8129d304e808e3d2094c9663",
+        "4bbf0c41bc040b78092a4ce275fbc86a907d098d"
+      ],
+      "refs": [
+        {
+          "sha": "08f519dbfb1b782d403fa4d329a2cf8094606ea0",
+          "ref": "HEAD"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/source-copies/6511045fcc9d.bundle",
+      "sha256": "d6e9bac67e107747379c508350db8dfe73805226f5150cf6059895e2422db29c",
+      "bytes": 5396584,
+      "header_sha256": "1468697270f03d075cb126d7ea1ac35bc0a8bbb4bcaeb82cd60500af0b9dcce9",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "2bee05f9cff375e2e79d9af49676c89361d7217b",
+        "a0536b2af27b76163739506a8bdae607c3c249e3",
+        "67998442e44f8cbba942040d9cbeeaea84eb0cb0",
+        "24b86237555588761ca741cb38e3b9d0e547b5a0",
+        "7b15b3e06b77b57529cc868b2da50450f933180b",
+        "8116062bc6d5117265c725fe040d61d56eae7eaf",
+        "7689c4263742d5bca70c46ddc2be82d55c420b16",
+        "bebc40cec4d310c1df57c9c423d5aa01da5306e4",
+        "7ba3c3f3995c0f6fbca7c87eb1f2a24f7881b375",
+        "75d1b1df8f877f20a60cc5cf84cf0219e451715c"
+      ],
+      "refs": [
+        {
+          "sha": "edd4ba17a64b1521763f5261272abdf527906725",
+          "ref": "HEAD"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/source-copies/4ede0fa30345.bundle",
+      "sha256": "8c74b5eaaf808accb2e6a4fe04437877889c1671dff422925fd23edbc7cf4a70",
+      "bytes": 5324657,
+      "header_sha256": "bd066b354f897a2b2115fc5e643a26e60e687051c57d3dbe70a868e197bc9fd3",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "2bee05f9cff375e2e79d9af49676c89361d7217b",
+        "a0536b2af27b76163739506a8bdae607c3c249e3",
+        "67998442e44f8cbba942040d9cbeeaea84eb0cb0",
+        "24b86237555588761ca741cb38e3b9d0e547b5a0",
+        "7b15b3e06b77b57529cc868b2da50450f933180b",
+        "8116062bc6d5117265c725fe040d61d56eae7eaf",
+        "7689c4263742d5bca70c46ddc2be82d55c420b16",
+        "bebc40cec4d310c1df57c9c423d5aa01da5306e4",
+        "7ba3c3f3995c0f6fbca7c87eb1f2a24f7881b375",
+        "75d1b1df8f877f20a60cc5cf84cf0219e451715c"
+      ],
+      "refs": [
+        {
+          "sha": "308315a4bc1129139de70ad0c34d429c1c3fbc6a",
+          "ref": "HEAD"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    },
+    {
+      "member_path": "rose/.context/pause-rca/closeout-draft/source-copies/8c27f4f1db14.bundle",
+      "sha256": "0fa4fc703258ce071d04af54293bff79045f5ac41956bdf11e09c550fa98d4db",
+      "bytes": 840145,
+      "header_sha256": "8ed90b428d071cbf179d51b99fd31a199115f6a5d008be48c8a3442e2c0ec169",
+      "header_matches_both_manifests": true,
+      "prerequisites": [
+        "2bee05f9cff375e2e79d9af49676c89361d7217b",
+        "a0536b2af27b76163739506a8bdae607c3c249e3",
+        "67998442e44f8cbba942040d9cbeeaea84eb0cb0",
+        "24b86237555588761ca741cb38e3b9d0e547b5a0",
+        "8116062bc6d5117265c725fe040d61d56eae7eaf",
+        "75d1b1df8f877f20a60cc5cf84cf0219e451715c"
+      ],
+      "refs": [
+        {
+          "sha": "cbc1847531e74ad285d0857c767f017b03506cbf",
+          "ref": "HEAD"
+        }
+      ],
+      "all_prerequisites_ancestor_of_fetched_main": true,
+      "all_prerequisites_ancestor_of_M": true,
+      "git_bundle_verify_exit": 0,
+      "final_capture_verified": true
+    }
+  ],
+  "input_manifests": [
+    {
+      "path": ".context/pause-rca/local-source-recovery-audit/recovery-manifest.json",
+      "sha256": "5496d826f48b6443a6bfb1fb5d27491e33c42703b67ce535fa562b36afa2a081"
+    },
+    {
+      "path": ".context/pause-rca/closeout-draft/public/source-bundles.json",
+      "sha256": "d263e6f725a0bfc887b196aac9a3fe0e4ab32060fb756a04d6092d103e34b57e"
+    }
+  ],
+  "scope_limit": "No all-object traversal, checkout, import, unbundle, new bundle, remote storage readback or deletion-readiness claim. Local bundle verification can use local objects; each exact prerequisite was separately proved an ancestor of authenticated fetched main.",
+  "M_tree_closure_check": {
+    "method": "git ls-tree -r -t -z M then cat-file --batch-check of exact tree/blob IDs (gitlinks excluded)",
+    "tree_entry_count": 14350,
+    "unique_tree_and_blob_objects": 14105,
+    "missing_objects": 0,
+    "status": "PASS",
+    "scope": "Only M tree contents; all commit-history/all-object searches excluded"
+  },
+  "archive_inclusion": "VERIFIED every bundle is in the authenticated final capture; exact private member paths and hashes retained"
+}

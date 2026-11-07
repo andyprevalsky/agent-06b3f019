@@ -1,0 +1,114 @@
+# One staged /deploy gate per run on an ephemeral Blacksmith VM.
+# scripts/deploy_test_github.py pushes `deploy-gates/<N>vcpu/<gate>-<token16>` as an
+# annotated tag on the frozen commit; the tag message is the gate request. The VM runs
+# the unchanged deploy_test_worker.py / deploy_test_backend.py and uploads its result.
+name: Deploy gate
+
+on:
+  push:
+    tags: ['deploy-gates/**']
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: ${{ github.ref_name }}
+    if: github.repository == 'Rose-Ai-Labs/rose'
+    runs-on: ${{ contains(github.ref_name, '/32vcpu/') && 'blacksmith-32vcpu-ubuntu-2404' || contains(github.ref_name, '/16vcpu/') && 'blacksmith-16vcpu-ubuntu-2404' || contains(github.ref_name, '/8vcpu/') && 'blacksmith-8vcpu-ubuntu-2404' || contains(github.ref_name, '/2vcpu/') && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    timeout-minutes: 270
+    env:
+      ROSE_USE_SYSTEM_PG: 'true'
+      CONDUCTOR_ROOT_PATH: ${{ github.workspace }}
+      CONDUCTOR_WORKSPACE_PATH: ${{ github.workspace }}
+      NO_PROXY: localhost,127.0.0.1,::1
+      NODE_VERSION: '22.23.4'
+      PYTHON_VERSION: '3.11.9'
+    steps:
+      - name: Start clock
+        run: echo "DEPLOY_GATE_T0=$(date +%s.%N)" >> "$GITHUB_ENV"
+
+      # A bare mirror on a Blacksmith sticky disk: each run fetches only new objects. Fresh,
+      # filtered or shallow clones of this repo make GitHub build a full pack per job and stall.
+      - name: Mount git mirror
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: rose-deploy-gates-git-mirror
+          path: /home/runner/rose-git-mirror
+          commit: on-change
+
+      - name: Check out the frozen commit
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 -w0)"
+          url="https://github.com/${GITHUB_REPOSITORY}.git"
+          mirror=/home/runner/rose-git-mirror/rose.git
+          ts() { echo "[$(date +%T.%N | cut -c1-12)] $*"; }
+          sudo chown "$(id -u):$(id -g)" /home/runner/rose-git-mirror
+          if [ ! -f "$mirror/HEAD" ]; then
+            # main and the gate's own tag only: the repository carries thousands of branches.
+            rm -rf "$mirror"
+            git init --quiet --bare --initial-branch=main "$mirror"
+          fi
+          ts "mirror $(du -sh "$mirror" | cut -f1)"
+          git -C "$mirror" -c http.extraheader="$auth" fetch --quiet --no-tags "$url" \
+            '+refs/heads/main:refs/heads/main' "+$GITHUB_REF:refs/deploy-gate/request"
+          ts "mirror fetched"
+          ws="$GITHUB_WORKSPACE"
+          find "$ws" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          git clone --quiet --shared --no-checkout "$mirror" "$ws"
+          cd "$ws"
+          git remote set-url origin "$url"
+          git fetch --quiet --no-tags "$mirror" '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/deploy-gate/request:refs/deploy-gate/request'
+          ts "cloned"
+          git checkout --quiet --detach "$(git rev-parse 'refs/deploy-gate/request^{commit}')"
+          ts "checked out"
+          git log -1 --format='checked out %H %s'
+
+      - name: Read gate request
+        run: python3 scripts/deploy_test_github.py remote-extract --ref "$GITHUB_REF" --out "$RUNNER_TEMP/gate"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: astral-sh/setup-uv@v6
+
+      # Dependencies live on a sticky disk keyed by every manifest/lockfile and toolchain version
+      # (actions/cache is ref-scoped, and every gate run is a new tag). The setup script bind-mounts
+      # its directories at the devbox paths, installs only into a fresh disk, and marks it ready.
+      - name: Mount dependency disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: rose-deploy-gates-deps-v3-node${{ env.NODE_VERSION }}-uvpy${{ env.PYTHON_VERSION }}-${{ hashFiles('package.json', 'back-end/package.json', 'front-end/package.json', 'back-end/package-lock.json', 'front-end/package-lock.json', 'agents/requirements.txt') }}
+          path: /home/runner/rose-deps
+          commit: on-change
+
+      - name: Prepare runner
+        env:
+          DEPLOY_GATE_ENV_BUNDLE: ${{ secrets.DEPLOY_GATE_ENV_BUNDLE }}
+          DEPLOY_GATE_DEPS: /home/runner/rose-deps
+        run: bash scripts/ci/deploy-gate-setup.sh
+
+      - name: Run gate
+        run: python3 scripts/deploy_test_github.py remote-run --out "$RUNNER_TEMP/gate"
+
+      - name: Bundle evidence
+        if: always()
+        run: uv run --quiet --no-project --with boto3 --with python-dotenv python3 scripts/deploy_test_github.py remote-bundle --out "$RUNNER_TEMP/gate"
+
+      - name: Release dependency mounts
+        if: always()
+        run: bash scripts/ci/deploy-gate-setup.sh --release
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deploy-gate-result
+          path: ${{ runner.temp }}/gate/artifact
+          retention-days: 14
+          if-no-files-found: error
+          include-hidden-files: true  # the gate's evidence lives under .context/

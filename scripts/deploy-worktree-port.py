@@ -41,7 +41,32 @@ LISTENER_OFFSETS = (
     *range(HUB_PORT_OFFSET, HUB_PORT_OFFSET + HUB_PORT_SEARCH + 1),
 )
 FOOTPRINT_PORTS = HUB_PORT_OFFSET + HUB_PORT_SEARCH + 1  # span, for the 65535 bound
-FIRST_BASE_PORT = 20_000
+
+
+def _offset_runs(offsets: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
+    """Collapse sorted offsets into inclusive (first, last) runs."""
+    runs: list[list[int]] = []
+    for offset in sorted(set(offsets)):
+        if runs and offset == runs[-1][1] + 1:
+            runs[-1][1] = offset
+        else:
+            runs.append([offset, offset])
+    return tuple((first, last) for first, last in runs)
+
+
+LISTENER_RUNS = _offset_runs(LISTENER_OFFSETS)
+# Two claims are isolated only when their LISTENER_OFFSETS footprints are
+# disjoint (deploy_test_isolation.validate): bases closer than the 501-port hub
+# window, or 5555..6264 apart (one's owned ports inside the other's hub window),
+# collide. Below Linux's default ephemeral floor (32768) a footprint must start
+# at or below 26503, and from 20000 at most eleven such bases fit, too few for
+# one local worker per deploy gate (2026-11-05). From 10000 first-fit packing
+# interleaves 22 below that window. Nothing in this repository allocates
+# absolute ports in 10000-19999 (local benchmark stacks fall back to
+# 22000-30000; run.sh, the blackbox backend and the benchmark hub are relative
+# to the base), every claim must still bind its whole footprint, and recorded
+# claims above 20000 stay valid and keep their identity.
+FIRST_BASE_PORT = 10_000
 LAST_BASE_PORT = MAX_PORT - FOOTPRINT_PORTS + 1
 # Linux publishes the range the kernel autobinds outbound connections from.
 # Tests point ROSE_DEPLOY_PROC_SYS_NET_IPV4 at a fixture directory; production
@@ -130,7 +155,7 @@ def _footprint_fits(base_port: int) -> bool:
 def _footprint_outside(base_port: int, window: tuple[int, int, set[int]]) -> bool:
     """Every listener port lies below or above the kernel window."""
     low, high, _ = window
-    return all(port < low or port > high for port in _listener_ports(base_port))
+    return all(base_port + last < low or base_port + first > high for first, last in LISTENER_RUNS)
 
 
 def _reserve_remedy(first: int, last: int) -> str:
@@ -171,26 +196,29 @@ def _ephemeral_conflict(base_port: int) -> str | None:
     )
 
 
-def _range_is_bindable(base_port: int) -> bool:
-    sockets: list[socket.socket] = []
-    try:
-        for port in range(base_port, base_port + PORTS_PER_WORKTREE):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sockets.append(sock)
-            sock.bind(("127.0.0.1", port))
-        return True
-    except OSError:
-        return False
-    finally:
-        for sock in sockets:
-            sock.close()
+def _unbindable_port(ports: list[int]) -> int | None:
+    """The first footprint port something on this host already holds, or None.
+
+    Every listener port is probed, not just the owned block: a foreign listener
+    inside the +5764.. hub window or on a coverage shard port would otherwise
+    surface later as EADDRINUSE. One socket at a time keeps the probe within
+    small descriptor limits (macOS defaults to 256).
+    """
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                return port
+    return None
 
 
 def _foreign_claims(registries: tuple[Path, ...], owner: Path) -> set[int]:
     """Live base ports another owner holds in a registry this one must respect.
 
-    Live claims in earlier (TMPDIR-scoped) registries reserve their ranges,
-    because their stacks may not be listening when this claim runs.
+    Live claims in earlier (TMPDIR-scoped) registries reserve their whole
+    listen footprints, because their stacks may not be listening when this
+    claim runs.
     """
     ports: set[int] = set()
     for registry in registries:
@@ -262,19 +290,26 @@ class Registry:
 
         claimed = {int(value["base_port"]) for _, value in records}
         claimed |= _foreign_claims(respected, owner)
+        # A new claim must share no listener port with any live claim, not
+        # merely a different base: 20000 and 20010 overlap in their coverage
+        # shards and hub windows, and deploy_test_isolation.validate rejects
+        # them as sharing a port. Existing claims, even overlapping ones an
+        # earlier allocator recorded, keep their identity (handled above).
+        occupied: set[int] = set()
+        for base_port in claimed:
+            occupied.update(_listener_ports(base_port))
         window = _kernel_autobind_ports()
-        candidates = [
-            base_port
-            for base_port in range(FIRST_BASE_PORT, LAST_BASE_PORT + 1, PORTS_PER_WORKTREE)
-            if base_port not in claimed
-        ]
         # Only ranges whose whole footprint lies outside the kernel window are
         # eligible for a new claim; a host-only ip_local_reserved_ports entry
         # is not inherited by the next boot. When none exist the claim fails
         # with the exact remedy: handing out a stealable range would only
         # recreate the EADDRINUSE race.
-        safe = [base_port for base_port in candidates if window is None or _footprint_outside(base_port, window)]
-        if candidates and not safe:
+        safe = [
+            base_port
+            for base_port in range(FIRST_BASE_PORT, LAST_BASE_PORT + 1, PORTS_PER_WORKTREE)
+            if window is None or _footprint_outside(base_port, window)
+        ]
+        if not safe:
             low, high, _ = window
             raise RuntimeError(
                 "no free deploy-worktree range lies outside the kernel ephemeral port range "
@@ -285,8 +320,18 @@ class Registry:
                 "e.g. sudo sysctl -w net.ipv4.ip_local_port_range='32768 60999' (persist it in "
                 "/etc/sysctl.d), or retire a deploy worktree whose claim sits outside the window, then claim again."
             )
+        # First fit: the lowest eligible base whose footprint is disjoint from
+        # every live claim and fully bindable now. Spacing claims by the hub
+        # window interleaves each owned block inside earlier claims' unused
+        # gap below their hubs.
+        busy: set[int] = set()
         for base_port in safe:
-            if not _range_is_bindable(base_port):
+            ports = _listener_ports(base_port)
+            if not occupied.isdisjoint(ports) or not busy.isdisjoint(ports):
+                continue
+            blocked = _unbindable_port(ports)
+            if blocked is not None:
+                busy.add(blocked)
                 continue
             payload = {
                 "schema_version": 1,
@@ -300,7 +345,13 @@ class Registry:
                 if legacy.is_dir():
                     _write_claim(legacy, payload)
             return base_port
-        raise RuntimeError("no free ten-port deploy-worktree range is available")
+        raise RuntimeError(
+            f"no free deploy-worktree range is available: every base {FIRST_BASE_PORT}-{LAST_BASE_PORT} "
+            f"whose {len(LISTENER_OFFSETS)}-port listen footprint lies outside the kernel ephemeral window "
+            f"either shares a listener port with one of {len(claimed)} live claims or has a port already "
+            "bound on this host. Retire a deploy worktree that is no longer needed (its claim is released "
+            "once its directory is gone) or stop the foreign listener, then claim again."
+        )
 
 
 def main() -> int:

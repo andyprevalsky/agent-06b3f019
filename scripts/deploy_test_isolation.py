@@ -1,10 +1,26 @@
 """Validate execution bindings before removing cross-suite ordering edges."""
 from pathlib import Path
 import importlib.util
+import re
 
 _spec = importlib.util.spec_from_file_location('deploy_worker_ports', Path(__file__).with_name('deploy-worktree-port.py'))
 _ports = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_ports)
+
+# Blacksmith GitHub Actions executor (scripts/deploy_test_github.py, .github/workflows/deploy-gates.yml):
+# one ephemeral VM per gate, so a gate's checkout, database and ports cannot collide with another gate's.
+GITHUB_TRANSPORT = 'github-actions'
+GITHUB_LAUNCHER = 'scripts/deploy_test_github.py'
+GITHUB_WORKER_ROOT = '/home/runner/_work/rose/rose'
+GITHUB_RUNNER = re.compile(r'^blacksmith-(2|4|8|16|32)vcpu-ubuntu-2404$')
+GITHUB_WORKER_SCRIPTS = ('deploy_test_worker.py', 'deploy_test_backend.py')
+BACKEND_GATE = 'backend-coverage-blackbox'
+
+
+def github_argv(runner: str, worker_script: str, timeout) -> list[str]:
+    """Launcher arguments after the interpreter and script path; the binding and the validator share them."""
+    return ['--runner', runner, '--worker-script', worker_script, '--worker-root', GITHUB_WORKER_ROOT,
+            '--deadline-seconds', str(timeout)]
 
 
 def validate(plan, root):
@@ -56,6 +72,29 @@ def validate(plan, root):
                 raise ValueError('workers must not share a worker thread')
             threads.add(thread)
             host = 'boxes:' + box
+        elif mode == GITHUB_TRANSPORT:
+            name = gate.get('name')
+            if gate.get('category', name) == 'smoke':
+                raise ValueError(f'{name}: smoke stays on the cloud benchmark CLI')
+            if gate.get('worker_root') != GITHUB_WORKER_ROOT:
+                raise ValueError(f'github-actions binding requires the runner checkout {GITHUB_WORKER_ROOT}')
+            location = GITHUB_WORKER_ROOT
+            if (not gate.get('case_protocol') or 'worker_recipe' not in gate
+                    or gate.get('result_transport') != 'file'):
+                raise ValueError('github-actions binding requires the source-bound worker receipt protocol')
+            if gate.get('timeout_seconds') is None:
+                raise ValueError('github-actions binding requires its existing gate deadline')
+            if gate.get('native_backend') and name != BACKEND_GATE:
+                raise ValueError('backend entrypoint is restricted to the backend coverage gate')
+            script = GITHUB_WORKER_SCRIPTS[1] if gate.get('native_backend') else GITHUB_WORKER_SCRIPTS[0]
+            runner = args[args.index('--runner') + 1] if '--runner' in args[:-1] else ''
+            if not GITHUB_RUNNER.fullmatch(runner):
+                raise ValueError('github-actions binding requires a Blacksmith Ubuntu 24.04 runner label')
+            expected = github_argv(runner, script, gate['timeout_seconds'])
+            if (len(args) != 2 + len(expected) or args[2:] != expected
+                    or Path(args[1]).resolve() != root / GITHUB_LAUNCHER):
+                raise ValueError('github-actions argv must bind the launcher, runner, worker script, root and deadline')
+            host = 'github:' + name
         elif mode == 'local-isolated':
             host = 'local'
             location = str(Path(gate.get('cwd', root)).resolve())
@@ -65,7 +104,7 @@ def validate(plan, root):
             if gate.get('worker_root', location) != location:
                 raise ValueError('local worker root and working directory differ')
         else:
-            raise ValueError('bind a local-isolated, SSH, boxes-thread, or cloud benchmark executor')
+            raise ValueError('bind a local-isolated, SSH, boxes-thread, github-actions, or cloud benchmark executor')
         workspace = gate.get('env', {}).get('CONDUCTOR_WORKSPACE_NAME')
         port = gate.get('env', {}).get('CONDUCTOR_PORT')
         if not workspace or not port or not port.isdigit() or not 1 <= int(port) <= 65535:

@@ -1028,3 +1028,57 @@ def test_cli_cap_clamps_above_default(tmp_path: Path) -> None:
     names = [line for line in result.stdout.splitlines() if line.strip()]
     assert len(names) <= DEFAULT_CAP
     assert "clamping" in result.stderr.lower() or "ceiling" in result.stderr.lower()
+
+
+AGENTCARD_SANDBOX_LIFECYCLE = (
+    "agent-payment-test-shop",
+    "agent-payment-setup-resume",
+    "agent-payment-idempotent-abandonment",
+    "agent-payment-abandonment",
+)
+
+
+@pytest.mark.parametrize("surface", ["local", "cloud"])
+def test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures(
+    tmp_path: Path, surface: str
+) -> None:
+    """The retired AgentCard deploy lane's four tasks run in smoke on every deploy.
+
+    They are smoke-tagged, so failed attempts never evict them (no history gate),
+    they fit the hard cap with path extras, and the release-stall guidance rides
+    along. Their mutable payment fixture is isolated per task on both surfaces:
+    cloud seeds it on each task's own guest, and the local runner at the
+    predeploy concurrency gives each task an independent world.
+    """
+    attempts = tmp_path / "attempts.jsonl"
+    _write_attempts(attempts, [(name, False) for name in AGENTCARD_SANDBOX_LIFECYCLE for _ in range(3)])
+    catalog = {task["name"]: task for task in json.loads(CATALOG.read_text())}
+    for changed in (["README.md"], ["back-end/src/domains/agentcard/service.ts", "agents/loop/run_agent.py"]):
+        selection = select_predeploy_benches(
+            catalog=CATALOG,
+            changed_files=changed,
+            surface=surface,
+            cap=DEFAULT_CAP,
+            repo_root=ROOT,
+            attempts_file=attempts,
+            pass_streak=DEFAULT_PASS_STREAK,
+        )
+        assert not selection.cap_hit and selection.total <= DEFAULT_CAP, selection.selected
+        for name in AGENTCARD_SANDBOX_LIFECYCLE:
+            task = catalog[name]
+            assert "smoke" in task["tags"] and task["group"] == "pre-deploy", name
+            assert name in selection.floor and "floor:smoke" in selection.reasons[name], name
+            assert name not in selection.skipped_history, name
+            assert any("release-stall standing warning" in rule for rule in selection.skip_eligibility[name]), name
+    if surface == "local":
+        from benchmarks.local_worlds import needs_independent_worlds
+
+        local_concurrency = 2  # scripts/run-predeploy-local PREDEPLOY_LOCAL_CONCURRENCY default
+        assert needs_independent_worlds(selection.selected, local_concurrency)
+    else:
+        driver = (ROOT / "scripts" / "cloudbench-run.sh").read_text()
+        case = driver.index(
+            "agent-payment-test-shop|agent-payment-idempotent-abandonment|"
+            "agent-payment-abandonment|agent-payment-setup-resume)"
+        )
+        assert "BENCH_NEEDS_PAYMENT_FIXTURE=1" in driver[case : driver.index(";;", case)]
