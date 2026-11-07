@@ -330,22 +330,35 @@ export async function retireCodeSession(session: CodeSessionRow): Promise<void> 
 }
 
 /**
+ * Retire expired sessions one by one. A session whose checkpoints cannot be
+ * deleted yet stays unretired for the next sweep; it must not stop this sweep
+ * from retiring the others.
+ */
+async function retireExpired(expired: CodeSessionRow[]): Promise<number> {
+  let retired = 0;
+  for (const session of expired) {
+    try {
+      await retireCodeSession(session);
+      retired += 1;
+    } catch (error: unknown) {
+      log.warn('Retiring an expired code session failed; retried next sweep', {
+        codeSessionId: session.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return retired;
+}
+
+/**
  * Opportunistic, bounded TTL sweep for one user. Never rejects; spawns start it
- * without awaiting so it never blocks them.
+ * without awaiting so it never blocks them. A user who never spawns again is
+ * never swept this way: sweepAllExpiredCodeSessions covers them.
  */
 export function sweepExpiredCodeSessions(userId: string): Promise<void> {
   return findExpiredCodeSessions(userId)
     .then(async (expired) => {
-      // A session whose checkpoints cannot be deleted yet stays unretired for the
-      // next sweep; it must not stop this sweep from retiring the others.
-      for (const session of expired) {
-        await retireCodeSession(session).catch((error: unknown) => {
-          log.warn('Retiring an expired code session failed; retried next sweep', {
-            codeSessionId: session.id,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-      }
+      await retireExpired(expired);
     })
     .catch((error: unknown) => {
       log.warn('Code session TTL sweep failed', {
@@ -353,6 +366,14 @@ export function sweepExpiredCodeSessions(userId: string): Promise<void> {
         error: error instanceof Error ? error.message : String(error),
       });
     });
+}
+
+/**
+ * Scheduled TTL sweep across all users, oldest first, at most `limit` sessions
+ * per call (a backlog drains over ticks). Returns how many were retired.
+ */
+export async function sweepAllExpiredCodeSessions(limit = 20): Promise<number> {
+  return retireExpired(await findExpiredCodeSessions(null, limit));
 }
 
 /**

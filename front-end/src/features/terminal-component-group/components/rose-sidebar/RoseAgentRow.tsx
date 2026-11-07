@@ -14,10 +14,13 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
  * [REST] --click--------> onClick (select agent)
  * [REST] --right-click--> [MENU OPEN] (RoseAgentRowMenu) --close--> [REST]
  *
+ * Pinned roots sort above every run state (agentListOrdering), so an expanded pinned row shows a
+ * small pin after its title: a finished pinned agent on top is then visibly deliberate.
+ *
  * Selected = darker text + semibold weight. Active rows show the model prediction ring.
  */
 
-import { Bot, ChevronDown, ChevronRight } from 'lucide-react';
+import { Bot, ChevronDown, ChevronRight, Pin } from 'lucide-react';
 
 import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { cn } from '@/lib/utils';
@@ -165,6 +168,13 @@ export default function RoseAgentRow({
                 >
                   {name}
                 </span>
+                {isExpanded && isPinned && (
+                  <Pin
+                    data-testid="rose-agent-pinned"
+                    aria-label="Pinned"
+                    className="h-3 w-3 flex-none"
+                  />
+                )}
               </button>
             </TooltipTrigger>
           </ContextMenuTrigger>

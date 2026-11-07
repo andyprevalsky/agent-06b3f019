@@ -1,0 +1,19 @@
+{
+ "schema_version": 1,
+ "pr": 1757,
+ "deployed_merge": "89906b0f3b8c51d85ceb6b3f610aa836dc500161",
+ "ledger_commit": "e21e0bffdc",
+ "records": "docs/handoffs/pr-1757-closeout (this records-only follow-up)",
+ "devbox": "77d04b7f-774e-4f9f-a84f-5c82a69fe4c0 (Bugs folder; not the originating 0f8c2d78)",
+ "inventory": {
+  "git_worktrees": "only /home/boxes/rose; scratch worktrees rose-fix and rose-buggy retired after their deltas were committed (d18703e43, 3152a844c) and their evidence copied to the rca archive",
+  "unpushed_refs": "none: fix/mass-agent-worker-cpu equals origin at d3a8bd2f; main equals origin",
+  "local_only_records": "none outside the three verified archives and this commit",
+  "held_ledger_rows": "/var/tmp/rca-mass/ledger-hold: local CPU-capped repro rows, deliberately excluded from the ledger and preserved in the rca/final archives"
+ },
+ "archive_verification": "rca (413 files), cloud (2306), final (11472): uploaded with read-back authentication; independent verify passed for all three; representative restore of rca matched sha256 for pyspy.raw and hist-4ec67f04.json",
+ "key_recovery": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (key id trace-archive-prod-2026-07-03) lives in the project-managed agents/.env and the PR1739 escrow; nothing depends on this box",
+ "configuration_recovery": "all env files are boxes-managed project env; no unique local configuration was created",
+ "resources": "no owned processes remain (link servers TERMed; cycle units inactive); all smoke Fly clones and volumes released (lifecycle verified per campaign); the warm source 683e47df5094d8 was left stopped; the keep-awake hold is cancelled at close",
+ "preserved": "Freedom and shared resources untouched"
+}

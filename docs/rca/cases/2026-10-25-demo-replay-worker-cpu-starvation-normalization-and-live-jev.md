@@ -213,3 +213,36 @@ agents (rule 28); worker scaling or guest sizing counts as infra.
 ## Reusable lesson
 
 When small activities time out without reaching the backend, profile the worker before touching timeouts; per-call recomputation over growing histories and background live calls in replay mode starve a single event loop.
+
+### Recurrence 2026-11-07 (PR #1751 smoke, source 9c6d9c3622)
+
+`test-mass-agent-run-0` failed `t10-no-tool-failures` again in the cloud smoke of PR #1751 (fleet run
+20261107-120351-779225, agent 27dba2f8-e372-4882-904e-80fe7451d4c8): "Observed tool failure:
+b7261a30:attempt_completion 38d78546-4be3-4c73-8fec-4af69183b30b status=ERROR". The same task passed in the
+smokes at f8c0511b0d (697 s) and 826c8cf8b8 (724.5 s), and `git diff --stat 826c8cf8b8 9c6d9c3622` touches only
+deploy documentation and the failure-report helper, so no runtime file differs. The failing agent paths are
+byte-identical on origin/main. RCA verdict `NOT_INTRODUCED`.
+
+First-bad boundary on the guest primary worker: the `post_agent_message` activity that posts the
+"Running verifier" chip of `attempt_completion` (30 s StartToClose, three attempts, `handle_tool_event.py:90-98`)
+hit `httpx.ReadError('')` at 12:16:34.5 (worker.log:103817-103818); attempts 2 and 3 hit StartToClose
+(worker.log:116394), producing two ERROR chips at 12:17:41.5 and 12:17:52.7. The model re-issued
+`attempt_completion` at 12:18:19 and finished at 12:18:35.5, so the run recovered. Evaluator t10 counts every
+ERROR tool row outside a closed list of recoverable patterns (`run_benchmark.py::_tool_runtime_failures`), and
+`attempt_completion` is not on that list; the evaluator was not changed. Other worker-to-backend calls were served
+in 19-953 ms while the two attempts were stuck, so the worker was not globally wedged. The backend first logged the
+two stuck POSTs 1.2 s after the worker logged both attempts cancelled, and cancellation reached the worker 55-87 s
+after StartToClose although heartbeat throttling is 15 s, so the attempt bodies probably started or heartbeated
+minutes late (unproven).
+
+Local reproduction: not reproduced. `bash scripts/run-bench --local test-mass-agent-run-0` on the exact unchanged
+task under `CPUQuota=200%` passed in 399 s and under `CPUQuota=100%` in 609 s, both with 0 failed activities.
+The cloud guest shows about 300 failed (mostly cancelled) activity completions in every run, so it is chronically
+saturated; cloud-only suspects are Fly-to-Temporal Cloud latency, 15 concurrent fleets in one namespace and the
+autoscaler clone. Status stays open as an observability gap.
+
+Single diagnostic that would capture it next time: a per-attempt worker record for `post_agent_message` with
+`activity.info()` attempt, `started_time`, `current_attempt_scheduled_time`, the start lag at body entry, and
+httpcore trace phase timestamps (pool assigned, headers sent, body sent, response received) when an attempt takes
+longer than 5 s.
+
