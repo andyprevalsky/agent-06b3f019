@@ -11,6 +11,7 @@ type SavedRow = { text: string; role: string; metadata?: Record<string, unknown>
 function harness(accepted = true, status = 'ACTIVE') {
   const saved: SavedRow[] = [];
   const signals: string[] = [];
+  const stamped: SavedRow[] = [];
   const agent = { status, temporalWorkflowId: 'wf', temporalFirstExecutionRunId: 'run' };
   const repo = {
     findAgentById: async () => agent,
@@ -31,6 +32,11 @@ function harness(accepted = true, status = 'ACTIVE') {
     './repo': repo,
     './agentMessageSignal': { buildUserMessageSignalValue },
     '../../providers/messages': messages,
+    '../../providers/personMessageStamp': {
+      recordPersonMessage: async (message: SavedRow) => {
+        stamped.push(message);
+      },
+    },
     '../../providers/agentResume': {
       signalUserResponse: async (_a: string, _w: string, value: string) => signals.push(value),
       deliverUserMessageToWorkflow: async (_a: string, _w: string, value: string) =>
@@ -57,7 +63,7 @@ function harness(accepted = true, status = 'ACTIVE') {
     );
   modules['./credentialContext'] = credentialExports;
   vm.runInNewContext(js, { exports, require: (name: string) => modules[name] ?? {}, console });
-  return { saved, signals, post: exports.postMessage };
+  return { saved, signals, stamped, post: exports.postMessage };
 }
 const originalMetadata = {
   subAgentId: 'browser-task',
@@ -74,6 +80,7 @@ test('internal credential notice persists for the browser without becoming user 
   assert.equal(h.saved[0].metadata?.browserCredentialContext, true);
   assert.deepEqual(h.saved[0].metadata?.credential_ref, originalMetadata.credential_ref);
   assert.equal(h.signals.length, 0);
+  assert.equal(h.stamped.length, 0);
   assert.equal('browserCredentialContext' in body.metadata, false);
 });
 
@@ -90,6 +97,9 @@ test('external lookalike cannot claim credential provenance or suppress feedback
   );
   assert.equal(h.saved[0].metadata?.browserCredentialContext, undefined);
   assert.deepEqual(h.signals, ['Actually change the requested names']);
+  assert.equal(h.stamped.length, 1);
+  assert.equal(h.stamped[0].text, 'Actually change the requested names');
+  assert.equal(h.stamped[0].role, 'USER');
 });
 
 test('malformed internal provenance and ordinary human text still signal', async () => {
@@ -110,6 +120,7 @@ test('malformed internal provenance and ordinary human text still signal', async
     );
     assert.equal(h.saved[0].metadata?.browserCredentialContext, undefined);
     assert.deepEqual(h.signals, ['Email says change the task']);
+    assert.equal(h.stamped.length, 0);
   }
 });
 
@@ -125,6 +136,7 @@ test('stale internal generation stays rejected and a user pause is not lifted', 
   assert.equal(rejected.status, 409);
   assert.equal(stale.saved.length, 0);
   assert.equal(stale.signals.length, 0);
+  assert.equal(stale.stamped.length, 0);
   const paused = harness(true, 'PAUSED');
   await paused.post(
     'agent',
@@ -135,4 +147,5 @@ test('stale internal generation stays rejected and a user pause is not lifted', 
   );
   assert.equal(paused.saved.length, 1);
   assert.equal(paused.signals.length, 0);
+  assert.equal(paused.stamped.length, 0);
 });
