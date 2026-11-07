@@ -552,6 +552,23 @@ export async function releaseSandboxAfterFailedStart(
 }
 
 /**
+ * A project restore that failed. A persistent session's sandbox may hold work
+ * newer than its last checkpoint (a resumed sandbox keeps its filesystem), so
+ * it is paused like any failed start and the retry resumes it; only a one-shot
+ * sandbox is killed, with the restore error kept if the kill itself fails.
+ */
+export async function releaseSandboxAfterFailedRestore(
+  sandbox: Sandbox,
+  codeSession: SpawnCodeSession | null
+): Promise<void> {
+  if (codeSession === null) {
+    await sandbox.kill().catch(() => undefined);
+    return;
+  }
+  await releaseSandboxAfterFailedStart(sandbox, codeSession);
+}
+
+/**
  * Branch the sandbox ws-server checks out before the CLI starts (plan §1b).
  * CODE_AGENT_BASE_BRANCH empty = cut from the repository's default branch.
  */

@@ -320,6 +320,7 @@ run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.p
 run_suite "Biz Review Card" python3 scripts/biz_review.py self-test
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
 run_suite "run.sh Process Tree Reaper" bash scripts/tests/run-sh-kill-tree.test.sh
+run_suite "Devbox Teardown" bash scripts/tests/devbox-teardown.test.sh
 run_suite "Fleet Post-Child Autoscaler Settle" bash scripts/tests/fleet-post-child-settle.test.sh
 run_suite "RCA Model Intelligence Contract" bash scripts/tests/rca-model-intelligence-category.test.sh
 run_suite "RCA Prompt-Edit Abstraction Contract" bash scripts/tests/rca-prompt-edit-abstraction.test.sh

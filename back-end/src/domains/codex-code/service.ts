@@ -8,6 +8,7 @@ import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/gith
 import { GithubRateLimitedError } from '../../providers/githubRateLimit';
 import { createLogger } from '../../providers/logger';
 import { codexSpeedFor } from '../../providers/codexSpeed';
+import { resolveSessionProject } from '../../providers/projects/session';
 
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 
@@ -66,6 +67,26 @@ async function resolveGithubRepo(
   return { repoUrl: await ensureAgentTreeRepo(agentId), userId };
 }
 
+/**
+ * The agent's project, else its tree root's (one indexed read per agent row).
+ * A failed lookup is logged and reads as "no project", so session creation
+ * falls back to the agent tree's repo exactly as it did before projects existed.
+ */
+async function resolveAgentProjectId(agentId: string): Promise<string | undefined> {
+  try {
+    const agent = await repo.findAgentGithubInfo(agentId);
+    if (agent?.projectId !== undefined && agent.projectId !== null) return agent.projectId;
+    if (agent?.busId !== undefined && agent.busId !== null && agent.busId !== agentId) {
+      return (await repo.findRootAgentGithubInfo(agent.busId))?.projectId ?? undefined;
+    }
+  } catch (err) {
+    log.error('Failed to look up agent project', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return undefined;
+}
+
 export async function createSession(params: CreateSessionParams) {
   const { agent_id, goal, attachments, user_id } = params;
   if (!user_id) throw new MissingUserIdError();
@@ -73,7 +94,17 @@ export async function createSession(params: CreateSessionParams) {
   let effectiveGithubRepoUrl = params.github_repo_url;
   let effectiveUserId = user_id;
 
-  if (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '') {
+  // A project session restores the project's checkout; never also clone a repo.
+  const projectWorkspace = await resolveSessionProject(
+    effectiveUserId,
+    await resolveAgentProjectId(agent_id)
+  );
+  if (projectWorkspace !== null) effectiveGithubRepoUrl = undefined;
+
+  if (
+    projectWorkspace === null &&
+    (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '')
+  ) {
     const resolved = await resolveGithubRepo(agent_id, effectiveUserId);
     if (resolved.repoUrl !== undefined) {
       effectiveGithubRepoUrl = resolved.repoUrl;
@@ -94,6 +125,11 @@ export async function createSession(params: CreateSessionParams) {
     normalizedRepoUrl = accessCheck.normalizedUrl!;
   }
 
+  // A project session is scoped (and branched) by its project, as for Claude.
+  const sessionRepoUrl =
+    projectWorkspace !== null
+      ? (projectWorkspace.project.repoUrl ?? `rose-project:${projectWorkspace.project.id}`)
+      : (normalizedRepoUrl ?? null);
   // Codex never uses the DEMO / Fast Mode cache: the agent's speed only
   // selects Codex's native service tier.
   const codexSpeed = codexSpeedFor(await repo.findAgentSpeed(agent_id));
@@ -101,11 +137,11 @@ export async function createSession(params: CreateSessionParams) {
     {
       agentId: agent_id,
       userId: effectiveUserId,
-      repoUrl: normalizedRepoUrl ?? null,
+      repoUrl: sessionRepoUrl,
       codeProvider: 'codex',
       codeSessionId: params.code_session_id,
       leaseOwner: params.lease_owner,
-      baseBranch: params.base_branch ?? null,
+      baseBranch: params.base_branch ?? projectWorkspace?.project.defaultBranch ?? null,
     },
     (codeSession, handoff) =>
       createCodexCodeSession(
@@ -120,6 +156,7 @@ export async function createSession(params: CreateSessionParams) {
           roseApiBaseUrl: params.rose_api_base_url,
           memoryEnabled: params.memory_enabled,
           freshConversation: params.fresh_conversation === true,
+          projectWorkspace,
         },
         codeSession
       )
@@ -132,6 +169,7 @@ export async function createSession(params: CreateSessionParams) {
     uploaded_files: session.uploadedFiles,
     github_repo_url: normalizedRepoUrl ?? null,
     ...fields,
+    project: session.projectRestore ?? null,
     // Live dev-server preview URL (Rose dev accounts, A1); null otherwise.
     preview_url: session.previewUrl ?? null,
   };

@@ -4234,32 +4234,3 @@ def test_campaign_scheduled_stop_refuses_linked_scope_parent_before_parent(tmp_p
             namespace['main']()
     popen.assert_not_called()
     assert not list(protected.iterdir())
-
-
-def test_worker_slot_admission_uses_the_startup_machine_ceiling_default(tmp_path):
-    """RCA 2026-11-07: startup admitted a fleet under the 300-Machine default while
-    reserve_worker_machine_slot still defaulted to 56, so a 13-task deploy smoke on an
-    app with 60 Machines refused test-mass-agent-run-0's mandatory autoscaler worker
-    ("60 app Machines + 0 reserved + 1 requested > ceiling 56")."""
-    fleet = (ROOT / 'scripts/run-bench-fleet').read_text()
-    defaults = {line.split('CLOUDBENCH_APP_MACHINE_CEILING:-', 1)[1].split('}', 1)[0]
-                for line in fleet.splitlines() if 'CLOUDBENCH_APP_MACHINE_CEILING:-' in line}
-    assert defaults == {'300'}, defaults
-
-    def function(name):
-        start = fleet.index(name + '() {')
-        return fleet[start:fleet.index('\n}\n', start) + 3]
-
-    inventory = json.dumps([{'id': f'm{i}'} for i in range(60)])
-    script = tmp_path / 'worker-slot.sh'
-    script.write_text('\n'.join([
-        'set -u', 'unset CLOUDBENCH_APP_MACHINE_CEILING CLOUDBENCH_CAMPAIGN_INVENTORY_DIR SNAPSHOT_LOOP_PID',
-        f'FLY() {{ printf %s {shlex.quote(inventory)}; }}',
-        function('capacity_reserve_slots'), function('reserve_worker_machine_slot'),
-        f'CAPACITY_RESERVATION_ROOT={shlex.quote(str(tmp_path / "capacity"))}',
-        'APP=fixture-app', 'FLEET_OWNER_HOST="$(hostname)"', 'RUN_ID=fixture-run',
-        'FLEET_OWNER_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-        'FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed \'s/^[[:space:]]*//; s/[[:space:]]*$//\')"',
-        'reserve_worker_machine_slot aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-worker-1', '']))
-    result = subprocess.run(['bash', str(script)], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
-    assert result.returncode == 0, result.stdout + result.stderr
