@@ -122,12 +122,21 @@ export class LinkedInArchiveWithoutConnectionsError extends Error {
   }
 }
 
-/** Throws unless the archive contains Connections.csv (an empty list still counts). */
+/**
+ * Throws when a readable archive lacks Connections.csv (an empty list still
+ * counts). An unreadable archive is left to the import, which records the
+ * failed run on its progress row.
+ */
 export function assertLinkedInArchiveHasConnections(zipPath: string): void {
-  const names = new AdmZip(zipPath)
-    .getEntries()
-    .filter((entry) => !entry.isDirectory)
-    .map((entry) => entry.entryName.split('/').pop() ?? entry.entryName);
+  let names: string[];
+  try {
+    names = new AdmZip(zipPath)
+      .getEntries()
+      .filter((entry) => !entry.isDirectory)
+      .map((entry) => entry.entryName.split('/').pop() ?? entry.entryName);
+  } catch {
+    return;
+  }
   if (!names.includes('Connections.csv')) throw new LinkedInArchiveWithoutConnectionsError();
 }
 
