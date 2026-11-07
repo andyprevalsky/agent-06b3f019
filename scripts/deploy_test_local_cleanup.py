@@ -296,28 +296,58 @@ def _premanifest_scan_main():
             raise ValueError('root custody')
         if Path('/proc', str(request['owner_pid'])).exists():
             raise ValueError('owner live or reused')
-        before = {p.name for p in Path('/proc').glob('[0-9]*')}
-        scan_roots([root], birth_guard=True, excluded=(request['pid'],))
-        for value in before:
-            entry = Path('/proc', value)
-            if int(value) in (os.getpid(), request['pid']):
-                continue
-            try:
-                birth = identity(int(value))
-                proc_root = Path(os.readlink(entry / 'root').removesuffix(' (deleted)'))
-                argv = (entry / 'cmdline').read_bytes().split(b'\0')
-                env = (entry / 'environ').read_bytes().split(b'\0')
-                if (proc_root == root or root in proc_root.parents
-                        or any(a == os.fsencode(root) or a.startswith(os.fsencode(str(root) + '/')) for a in argv)
-                        or os.fsencode('RUN_STACK_CLEANUP_TOKEN=' + request['token']) in env
-                        or identity(int(value)) != birth):
-                    raise ValueError('active or changed process')
-            except (FileNotFoundError, ProcessLookupError):
-                if entry.exists():
-                    raise ValueError('unobservable process')
-        after = {p.name for p in Path('/proc').glob('[0-9]*')}
-        if after - before or identity(request['pid']) != original:
-            raise ValueError('process census changed')
+        seen = {}
+
+        def census():
+            rows = {}
+            for entry in Path('/proc').glob('[0-9]*'):
+                try:
+                    pid = int(entry.name)
+                    current = identity(pid)[:3]
+                    if pid in seen and seen[pid] != current:
+                        raise ValueError('process identity reused across scan passes')
+                    seen[pid] = rows[pid] = current
+                except (FileNotFoundError, ProcessLookupError):
+                    if entry.exists():
+                        raise ValueError('unobservable process identity')
+            return rows
+
+        # Inspect arrivals, never exempt them. Four complete passes bound churn;
+        # only a final census wholly covered by one pass permits admission.
+        for round_number in range(4):
+            if Path('/proc', str(request['owner_pid'])).exists():
+                raise ValueError('owner live or reused')
+            before = census()
+            scan_roots([root], birth_guard=True, excluded=(request['pid'],))
+            for pid, expected in before.items():
+                entry = Path('/proc', str(pid))
+                if pid in (os.getpid(), request['pid']):
+                    continue
+                try:
+                    if identity(pid)[:3] != expected:
+                        raise ValueError('process identity changed')
+                    proc_root = Path(os.readlink(entry / 'root').removesuffix(' (deleted)'))
+                    argv = (entry / 'cmdline').read_bytes().split(b'\0')
+                    env = (entry / 'environ').read_bytes().split(b'\0')
+                    if (proc_root == root or root in proc_root.parents
+                            or any(a == os.fsencode(root) or a.startswith(os.fsencode(str(root) + '/')) for a in argv)
+                            or os.fsencode('RUN_STACK_CLEANUP_TOKEN=' + request['token']) in env
+                            or identity(pid)[:3] != expected):
+                        raise ValueError('active or changed process')
+                except (FileNotFoundError, ProcessLookupError):
+                    if entry.exists():
+                        raise ValueError('unobservable process')
+            after = census()
+            if any(before[pid] != after[pid] for pid in before.keys() & after.keys()):
+                raise ValueError('process identity changed')
+            if identity(request['pid']) != original:
+                raise ValueError('caller changed')
+            if not after.keys() - before.keys():
+                if Path('/proc', str(request['owner_pid'])).exists():
+                    raise ValueError('owner live or reused')
+                break
+        else:
+            raise ValueError('process census did not settle within four passes')
         print(json.dumps({'request_sha256': hashlib.sha256(raw).hexdigest(), 'quiescent': True}))
     except Exception:
         print(json.dumps({'quiescent': False}))

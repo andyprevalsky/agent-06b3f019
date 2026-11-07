@@ -5031,4 +5031,75 @@ class PremanifestPhysicalChecks(unittest.TestCase):
                         (entry/link).unlink();(entry/link).symlink_to(target)
                     if (entry/'fd/4').is_symlink():(entry/'fd/4').unlink()
 
+
+class PremanifestCensusArrival(unittest.TestCase):
+    def run_census(self, mode):
+        import io
+        import shutil
+        import deploy_test_local_cleanup as local
+        import deploy_test_process_scan as scan
+        real_path=Path
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp);worker=base/'worker';worker.mkdir();proc=base/'proc';proc.mkdir()
+            uid=os.getuid();caller=10;token='b'*32;rounds=[0];scanned=[]
+            def create(pid):
+                entry=proc/str(pid);entry.mkdir();(entry/'fd').mkdir()
+                (entry/'stat').write_text(str(pid)+' (fixture) S '+' '.join(['0']*18+['123']))
+                (entry/'cmdline').write_bytes(b'fixture\0');(entry/'environ').write_bytes(b'')
+                (entry/'maps').write_text('');(entry/'cwd').symlink_to(base);(entry/'root').symlink_to('/')
+                return entry
+            create(30)
+            class CensusPath:
+                def glob(self, pattern):
+                    rounds[0]+=1
+                    if rounds[0]==2:
+                        if mode=='vanished':shutil.rmtree(proc/'30')
+                        elif mode not in ('identity','caller'):
+                            new=create(40)
+                            if mode=='owned':(new/'fd/5').symlink_to(worker/'active')
+                            if mode=='unreadable':(new/'environ').unlink()
+                    if mode=='reuse' and rounds[0]==2:shutil.rmtree(proc/'30')
+                    if mode=='reuse' and rounds[0]==3:create(30)
+                    if mode=='churn' and rounds[0]>2:create(40+rounds[0])
+                    return proc.glob(pattern)
+            def path(value,*args):
+                if str(value)=='/proc' and not args:return CensusPath()
+                if str(value)=='/proc' or str(value).startswith('/proc/'):
+                    return real_path(str(proc)+str(value)[5:],*args)
+                return real_path(value,*args)
+            def ident(pid):
+                if pid!=caller and not (proc/str(pid)).exists():raise FileNotFoundError()
+                changed=(rounds[0]>=2 and ((mode=='identity' and pid==30) or (mode=='caller' and pid==caller))) or (mode=='reuse' and rounds[0]>=3 and pid==30)
+                return (uid,uid,'2' if changed else '1',caller)
+            def inspect_roots(roots,**kw):
+                scanned.extend(p.name for p in proc.glob('[0-9]*'))
+                return scan.scan_roots(roots,proc,birth_guard=True,excluded=(caller,))
+            request=dict(uid=uid,pid=caller,birth='1',root=str(worker),token=token,owner_pid=20)
+            stdout=io.StringIO()
+            with patch.object(local,'Path',side_effect=path),patch.object(local,'os') as fake_os, \
+                 patch.object(local,'identity',create=True,side_effect=ident), \
+                 patch.object(local,'scan_roots',create=True,side_effect=inspect_roots), \
+                 patch.object(local,'json',create=True,new=json),patch.object(local,'hashlib',create=True,new=__import__('hashlib')), \
+                 patch.object(local,'signal',create=True),patch.object(local,'sys',create=True) as fake_sys:
+                fake_os.geteuid.return_value=0;fake_os.getppid.return_value=caller;fake_os.getpid.return_value=999
+                fake_os.environ={'SUDO_UID':str(uid)};fake_os.readlink=os.readlink;fake_os.fsencode=os.fsencode
+                fake_sys.stdin=io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+                with patch('sys.stdout',stdout):
+                    try:local._premanifest_scan_main()
+                    except SystemExit:pass
+            return json.loads(stdout.getvalue())['quiescent'],rounds[0],scanned
+
+    def test_new_safe_process_is_fully_scanned_and_unsafe_arrivals_refuse(self):
+        ok,rounds,scanned=self.run_census('safe')
+        self.assertTrue(ok)
+        self.assertIn('40',scanned)
+        self.assertGreaterEqual(rounds,3)
+        for mode in ('owned','unreadable','identity','caller','churn','reuse'):
+            with self.subTest(mode=mode):
+                ok,rounds,scanned=self.run_census(mode)
+                self.assertFalse(ok)
+                if mode in ('owned','unreadable'):self.assertIn('40',scanned)
+                self.assertLessEqual(rounds,8)
+        self.assertTrue(self.run_census('vanished')[0])
+
 if __name__ == '__main__': unittest.main()
