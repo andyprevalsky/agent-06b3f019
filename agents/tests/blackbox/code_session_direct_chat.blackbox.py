@@ -335,7 +335,9 @@ async def test_agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_
     """C20: the ws-server is up but the CLI is not launched yet (a held project startup): an agent turn is
     acked queued (not refused), a retry stays queued, and once the CLI starts the turns follow the task
     prompt in arrival order, each written once."""
-    sandbox = LocalCodeSessionSandbox("claude", gate_startup=True)
+    # The CLI holds its first turn (gate_first_turn) so the session is alive when the late retry below is sent: the
+    # fake CLI otherwise finishes and ends the session first under host load ("rejected: session_ended").
+    sandbox = LocalCodeSessionSandbox("claude", gate_startup=True, gate_first_turn=True)
     try:
         await sandbox.start()
         observer = SessionObserver(sandbox.ws_url)
@@ -351,12 +353,15 @@ async def test_agent_turns_before_the_cli_has_its_task_are_queued_and_follow_it_
         assert sandbox.cli_stdin_lines() == [], "nothing is written to a CLI that has no task yet"
 
         sandbox.start_cli()
-        await observer.wait_for(lambda: len(sandbox.cli_stdin_lines()) >= 3)
-        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
-        assert "Task:\n" in texts[0] and texts[1:] == ["ROSE: first", "ROSE: second"], texts
+        # The server has flushed both queued turns once it reports them; the held CLI logs a turn only when it reads it.
+        await observer.wait_for(lambda: observer.count("user_turn") >= 2)
         # After the flush a retry of a queued id is a duplicate, not a second turn.
         late = await _send_turn(sandbox, "a-1", "ROSE: first")
         assert late.status == "duplicate", late
+        sandbox.finish_first_turn()
+        await observer.wait_for(lambda: len(sandbox.cli_stdin_lines()) >= 3)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert "Task:\n" in texts[0] and texts[1:] == ["ROSE: first", "ROSE: second"], texts
         await observer.wait_for(lambda: observer.exit_code is not None)
         texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
         assert texts.count("ROSE: first") == 1 and len(texts) == 3, texts
