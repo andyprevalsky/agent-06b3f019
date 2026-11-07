@@ -38,6 +38,7 @@ const AGENT_LIST_SELECT = {
   folderId: true,
   createdAt: true,
   updatedAt: true,
+  lastUserMessageAt: true,
   deletedAt: true,
 } as const;
 

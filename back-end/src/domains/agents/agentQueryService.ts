@@ -55,6 +55,7 @@ function toListItem(agent: ListedAgent) {
     folder_id: agent.folderId,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
+    last_user_message_at: agent.lastUserMessageAt,
   };
 }
 
@@ -134,6 +135,7 @@ export async function getAgentTree(busId: string, allowBenchmarkArchive = false)
       tree_cost_cents: agent.treeCostCents,
       created_at: agent.createdAt,
       updated_at: agent.updatedAt,
+      last_user_message_at: agent.lastUserMessageAt,
     })),
   };
 }

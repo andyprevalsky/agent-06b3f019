@@ -1,0 +1,10 @@
+CI failure (run 42191005446 attempt 1, 2026-11-06 08:59:16-46Z; Vercel prod 0ee70b27c READY 08:59:10Z):
+  TimeoutError: locator.click: Timeout 30000ms exceeded. waiting for getByRole('button', { name: 'Open menu', exact: true })
+  page snapshot: contentinfo [link "About" · link "Privacy" · link "Terms"] = static index.html shell; React never mounted
+Old entry after a later switch: GET https://www.roselabs.ai/assets/index-BPCOfZSh.js -> 404 text/plain (CSS hash unchanged -> 200)
+Pre-fix repro (prod build, original test body + one injected entry 404): FAIL, identical TimeoutError at select() and identical snapshot
+Pre-fix regression (prod): entry-load-recovery.spec.ts -> 2 failed (no mount; loads 1 instead of 4)
+Post-fix (local prod build): original test x5 + injected-404 variant x5 -> 10/10 passed; new spec x5 -> pass (prod build, dev server)
+Review fix (CodeRabbit, offline during backoff): new case fails on the previous guard, passes after (prod, E2E-fixture, dev builds 15/15 each)
+Spec targeting fix (local semantic E2E-fixture build entry main-*.js): old spec "Expected: 2 Received: 1" reproduced; corrected spec 15/15 x3 builds
+Production after merge 308315a4bc (run 42344595604 attempt 2): mobile-adversarial 10k copy-menus PASS, entry-load-recovery 3/3 PASS, 50 passed

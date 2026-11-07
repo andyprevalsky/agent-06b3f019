@@ -37,6 +37,7 @@ async function runAll(): Promise<void> {
   await import('./agents-status-bootstrap.cases');
   await import('./agents-lifecycle.cases');
   await import('./agents-sidebar-organization.cases');
+  await import('./agents-last-user-message.cases');
   await import('./agents-search.cases');
   await import('./agents-cost-resume.cases');
   await import('./agents-configuration.cases');

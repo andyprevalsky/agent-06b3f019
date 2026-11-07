@@ -40,6 +40,9 @@ model Agent {
   deletedAt                        DateTime?
   createdAt                        DateTime                    @default(now())
   updatedAt                        DateTime                    @updatedAt
+  // Newest person-authored message (UI/API post, attention answer, SMS reply).
+  // Agent-authored USER rows never set it. Null → the sidebar uses createdAt.
+  lastUserMessageAt                DateTime?
   temporalWorkflowId               String?
   temporalFirstExecutionRunId      String?
   workflowReplacementToken         String?
