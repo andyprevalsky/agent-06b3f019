@@ -40,6 +40,7 @@ source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 # tests cover sizing and low-space behavior separately.
 export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-32}"
 python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-port-allocation.test.py" || exit 1
+python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-catalog.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-hub-reaping.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-fake-volume-contract.test.py" || exit 1
 # A quarantined owner whose natively stopped guest never received its shutdown
@@ -762,49 +763,51 @@ cp "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
 # Cloud routing resolves the same two-shard task namespace as the real runner.
 # Keep the synthetic Fleet tasks explicit so an unknown name or absent shard
 # remains a hard failure instead of being silently coerced to real mode.
+# Match the existing --timeout 240 fixture calls; shorter explicit caps still
+# govern cancellation cases, and the 9000s default-detach case stays distinct.
 cat > "$SANDBOX/agents/benchmarks/tasks.json" <<'TASKCATALOG'
 [
-  {"name":"bench-alpha"},
-  {"name":"bench-beta"},
+  {"name":"bench-alpha","timeout_seconds":240},
+  {"name":"bench-beta","timeout_seconds":240},
   {"name":"bench-default-detach","timeout_seconds":9000},
-  {"name":"bench-detached-wait"},
-  {"name":"bench-invalid-recovery"},
-  {"name":"bench-detached-cancel"},
-  {"name":"bench-group-term"},
-  {"name":"bench-group-term-undeliverable"},
-  {"name":"bench-group-term-slowdrain"},
-  {"name":"private-ip-proxy"},
-  {"name":"autoscaler-must-start"},
-  {"name":"autoscaler-waits-for-boot-release"},
-  {"name":"autoscaler-metrics-required"},
-  {"name":"autoscaler-worker-required"},
-  {"name":"autoscaler-worker-never-ready"},
-  {"name":"autoscaler-worker-clone-pending"},
-  {"name":"autoscaler-worker-oscillation"},
-  {"name":"autoscaler-worker-destroy-failure"},
-  {"name":"autoscaler-concurrent-ready-scale-down"},
-  {"name":"autoscaler-post-child-ready"},
-  {"name":"autoscaler-missing-terminal"},
-  {"name":"capacity-a"},
-  {"name":"capacity-b"},
-  {"name":"capacity-c"},
-  {"name":"capacity-d"},
-  {"name":"capacity-e"},
-  {"name":"capacity-f"},
-  {"name":"capacity-g"},
-  {"name":"capacity-h"},
-  {"name":"capacity-i"},
-  {"name":"orphan-source"},
-  {"name":"orphan-recovery"},
-  {"name":"busy-source"},
-  {"name":"must-not-launch"},
-  {"name":"must-wait-for-provider"},
-  {"name":"delayed-visible"},
-  {"name":"cross-pool-recovery"},
-  {"name":"pool-stop-failure"},
-  {"name":"safe-skips"},
-  {"name":"malformed-registry"},
-  {"name":"probe-error"}
+  {"name":"bench-detached-wait","timeout_seconds":240},
+  {"name":"bench-invalid-recovery","timeout_seconds":240},
+  {"name":"bench-detached-cancel","timeout_seconds":240},
+  {"name":"bench-group-term","timeout_seconds":240},
+  {"name":"bench-group-term-undeliverable","timeout_seconds":240},
+  {"name":"bench-group-term-slowdrain","timeout_seconds":240},
+  {"name":"private-ip-proxy","timeout_seconds":240},
+  {"name":"autoscaler-must-start","timeout_seconds":240},
+  {"name":"autoscaler-waits-for-boot-release","timeout_seconds":240},
+  {"name":"autoscaler-metrics-required","timeout_seconds":240},
+  {"name":"autoscaler-worker-required","timeout_seconds":240},
+  {"name":"autoscaler-worker-never-ready","timeout_seconds":240},
+  {"name":"autoscaler-worker-clone-pending","timeout_seconds":240},
+  {"name":"autoscaler-worker-oscillation","timeout_seconds":240},
+  {"name":"autoscaler-worker-destroy-failure","timeout_seconds":240},
+  {"name":"autoscaler-concurrent-ready-scale-down","timeout_seconds":240},
+  {"name":"autoscaler-post-child-ready","timeout_seconds":240},
+  {"name":"autoscaler-missing-terminal","timeout_seconds":240},
+  {"name":"capacity-a","timeout_seconds":240},
+  {"name":"capacity-b","timeout_seconds":240},
+  {"name":"capacity-c","timeout_seconds":240},
+  {"name":"capacity-d","timeout_seconds":240},
+  {"name":"capacity-e","timeout_seconds":240},
+  {"name":"capacity-f","timeout_seconds":240},
+  {"name":"capacity-g","timeout_seconds":240},
+  {"name":"capacity-h","timeout_seconds":240},
+  {"name":"capacity-i","timeout_seconds":240},
+  {"name":"orphan-source","timeout_seconds":240},
+  {"name":"orphan-recovery","timeout_seconds":240},
+  {"name":"busy-source","timeout_seconds":240},
+  {"name":"must-not-launch","timeout_seconds":240},
+  {"name":"must-wait-for-provider","timeout_seconds":240},
+  {"name":"delayed-visible","timeout_seconds":240},
+  {"name":"cross-pool-recovery","timeout_seconds":240},
+  {"name":"pool-stop-failure","timeout_seconds":240},
+  {"name":"safe-skips","timeout_seconds":240},
+  {"name":"malformed-registry","timeout_seconds":240},
+  {"name":"probe-error","timeout_seconds":240}
 ]
 TASKCATALOG
 printf '[{"name":"polar-fixture"}]\n' > "$SANDBOX/agents/benchmarks/polar_tasks.json"
