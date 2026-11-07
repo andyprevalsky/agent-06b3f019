@@ -10280,6 +10280,7 @@ def test_build_usage_items_zeros_kernel_when_all_llm_from_fast_cache():
     assert service["cost_cents"] == 0.0
 
 
+@patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"})
 def test_build_usage_items_carries_browser_pool_model():
     """Regression (A-02): browser llm usage rows MUST name the browser pool.
 
@@ -10387,6 +10388,7 @@ def test_browser_usage_preserves_repeatable_cache_calls():
     assert "unclassified" not in share["routes"], share
 
 
+@patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"})
 def test_build_usage_items_emits_one_row_per_actual_model():
     """The llm rows must name the model that ACTUALLY ran inference.
 
