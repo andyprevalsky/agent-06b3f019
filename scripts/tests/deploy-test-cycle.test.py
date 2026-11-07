@@ -5929,20 +5929,51 @@ class RelayStartupEvidence(unittest.TestCase):
             return next(iter(state['reconciled_owners'].values()))
 
     def test_native_adapter_requests_owned_supervision(self):
-        import ast,contextlib,hashlib,time
+        import ast,contextlib,hashlib,time,shutil
+        import deploy_test_cloud as cloud
         code=(self.target/'deploy_test_cloud.py').read_text()
         function=next(n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name=='execute')
-        calls=[];requested={'checks':['browser-smoke'],'skips':{},'token':'owned','source':{'head':'a'*40},'gate':'smoke'}
-        namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=lambda _r:requested['source'],
+        # Exercise the actual source seal and transport helpers on a local Git
+        # fixture; only native dispatch/collection are fake. Origin discovery is
+        # explicitly offline, as in the owning source-transport tests.
+        subprocess.run(['git','init','-q',str(self.base)],check=True)
+        subprocess.run(['git','-C',str(self.base),'config','user.name','fixture'],check=True)
+        subprocess.run(['git','-C',str(self.base),'config','user.email','fixture@example.test'],check=True)
+        (self.base/'.git/info/exclude').write_text('.context/\n')
+        scripts=self.base/'scripts';(scripts/'lib').mkdir(parents=True)
+        shutil.copyfile(self.target/'create-worktree-patch.sh',scripts/'create-worktree-patch.sh')
+        (scripts/'lib/cloudbench-env.sh').write_text(
+            (self.target/'lib/cloudbench-env.sh').read_text()+
+            '\ncloudbench_origin_advertises_commit() { return 1; }\n')
+        (self.base/'code').write_text('base\n')
+        subprocess.run(['git','-C',str(self.base),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.base),'commit','-qm','fixture'],check=True)
+        base=subprocess.check_output(['git','-C',str(self.base),'rev-parse','HEAD'],text=True).strip()
+        subprocess.run(['git','-C',str(self.base),'update-ref','refs/remotes/origin/main',base],check=True)
+        (self.base/'code').write_text('complete sealed delta\n')
+        calls=[];requested={'checks':['browser-smoke'],'skips':{},'token':'owned','source':c.source(self.base),'gate':'smoke'}
+        namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=c.source,
+                       prepare_source_transport=cloud.prepare_source_transport,
+                       source_transport_environment=cloud.source_transport_environment,
+                       capture_preallocation_evidence=cloud.capture_preallocation_evidence,
                        campaign_width=lambda _c:1,hashlib=hashlib,os=os,time=time,sys=sys,
                        cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,shared_canary_env=lambda _r:{},
                        run_command=lambda *a,**k:(calls.append((a,k)) or (1,False,False,False)),
                        collect_campaign=lambda *_a:({'browser-smoke':'UNVERIFIED'},{},False,'fixture'))
         exec(compile(ast.Module(body=[function],type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)
-        namespace['execute'](requested,self.base)
+        result=namespace['execute'](requested,self.base)
         self.assertEqual(len(calls),1)
         self.assertIs(calls[0][1].get('owned_lifecycle'),True)
         self.assertEqual(calls[0][1]['env'].get('DEPLOY_NATIVE_HUB_JOIN'),'1')
+
+        directory=self.base/'.context/deploy-cloud'/hashlib.sha256(b'owned').hexdigest()
+        seal=c.read(directory/'source-transport.json')
+        self.assertEqual(seal,result['source_transport'])
+        self.assertEqual(seal['source'],requested['source'])
+        self.assertEqual(seal['workspace_root'],str(self.base))
+        self.assertEqual(seal['workspace_patch_sha256'],hashlib.sha256((directory/'workspace.patch').read_bytes()).hexdigest())
+        self.assertEqual(calls[0][1]['env']['CLOUDBENCH_LOCAL_PATCH_SOURCE'],str(directory/'workspace.patch'))
+        self.assertEqual(calls[0][1]['env']['CLOUDBENCH_LOCAL_PATCH_SHA256'],seal['workspace_patch_sha256'])
 
     def test_startup_only_reconciliation_retains_unverified_bytes(self):
         receipt,owner,proof=self.fixture();before=json.dumps(receipt,sort_keys=True)

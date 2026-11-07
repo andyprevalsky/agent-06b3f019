@@ -1030,7 +1030,8 @@ def validate(receipt, owner, proof):
         if preallocation:
             need(fleet in parents and life['status']=='failed'
                  and isolated_canary_release(fleet,life,benches,run,root,receipt,proof,
-                                             preallocation_links.get(fleet),bound,tree), 'preallocation zero resources')
+                                             preallocation_links.get(fleet),bound,tree,
+                                             (source_base, source_patch, adapter)), 'preallocation zero resources')
             need(not provenance_path.exists() and not matrix_path.exists(), 'preallocation execution evidence present')
             need(not Path('/proc',fleet.name.rsplit('-',1)[-1]).exists(), 'preallocation controller PID present')
         if failed_canary:
