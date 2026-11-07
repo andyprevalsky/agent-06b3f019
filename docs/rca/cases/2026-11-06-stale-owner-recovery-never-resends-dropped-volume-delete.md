@@ -11,6 +11,7 @@ symptoms:
   - "volume destroy reconcile 1/6 id=vol_vgnqm710jmlxo0z4 state=created (DELETE not resent)"
   - "could not destroy volume vol_vgnqm710jmlxo0z4 — exact-owner recovery retained: flyctl volumes destroy"
   - "destroy accepted for volume vol_vgnqm710jmlxo0z4 but exact absence has not converged — retaining exact ownership"
+  - "volume destroy reconcile 6/6 id=vol_rnzx135j8xzo9okr state=waiting_for_detach (DELETE not resent)"
 tags:
   - cloudbench
   - fly-volumes
@@ -22,6 +23,11 @@ sources:
   - task google-drive-lease-recall
   - task family-office-angel-outreach
   - task summary-site-no-filetype
+  - benchmark run campaign-20261107-225538-1478726 (descend I-32 proof-B teardown)
+  - fleet run 20261107-231158-1917439
+  - benchmark run campaign-20261107-232156-2232678 (proof-B2 startup recovery r001-j0001)
+  - fleet run 20261107-232223-2242918
+  - benchmark run campaign-20261107-181733-711331 (epoch 18 r003-j0029..j0032)
 repro: scripts/tests/cloudbench-disposable-lifecycle.test.py
 status: fixed
 ---
@@ -108,6 +114,83 @@ latch remains, and `--recover-stale-owner` refuses at
 absent"). main has no supported command that retires such an owner. The
 documented `evidence-retire` exists only on the unmerged `tools/evidence-retire`
 branch, and it retires worktree evidence, not owner claims.
+
+## Recurrence 2026-11-07 (descend I-32)
+
+The aged-intent fix did not hold for a startup that comes soon after the
+teardown. Proof-B (campaign-20261107-225538-1478726) got TERM at 23:17:54 while
+four clones were provisioning. Each teardown destroyed the Machine, sent the
+once-only volume DELETE (intents 23:17:59–23:18:03) and then read
+`waiting_for_detach` on reconciles 2/6–6/6 and returned 75. Proof-B2
+(campaign-20261107-232156-2232678, r001-j0001 lines ~226–266) started at
+23:21:56. Its startup recovery of the four dead owners (33d0d094, 6330e5ce,
+ee9958bb, fdfb01aa) read every volume as `created`, unattached ×6 with
+`(DELETE not resent)`. The intents were 4–7 minutes old, below the 600 s
+`CLOUDBENCH_VOLUME_REDELETE_AFTER_SECONDS` gate, so `fleet_disposable_redelete_intent`
+returned 3. `reap_volume` returned 1 and the startup failed (descend I-33).
+Epoch 18 (r003-j0029..j0032, owners 14879062/50e626e8/dbb919eb/84333329) shows
+the same TERM-during-provisioning sequence. Its four volumes stayed `created`,
+unattached for at least 16 minutes (`/var/tmp/descend-e18/be18-vol-audit-*.txt`).
+
+What the Fly evidence shows. Fly's docs do not list `waiting_for_detach` (see
+https://docs.fly.io/volumes/volume-states and the Machines volumes API). It is a
+state Fly shows after a DELETE:
+
+- At 23:29:53–23:32:27 `--recover-stale-owner` (intents now older than 600 s)
+  sent one more DELETE to each `created`, detached volume. Each read
+  `waiting_for_detach` twice and then `pending_destroy`; all four read
+  `pending_destroy` at 23:34:43–45 (`/var/tmp/descend-e20p/recover-*.log`,
+  `be20p-recovery-volume-receipts.txt`).
+- When the DELETE is honoured, `waiting_for_detach` lasts about two reads before
+  a terminal state. Examples: the proof-B infra canary (vol_rnzx162yd8p1mq0r and
+  vol_r1jd71wlon2p1ppr, recorded `destroyed-provider-retained`) and epoch-18
+  owner 0e72c495.
+- When it is dropped, `waiting_for_detach` lasts all six reads and then becomes
+  `created`, unattached. That happened to 12 volumes in b1e3, 4 in epoch 18 and
+  4 in proof-B.
+
+An honoured DELETE never went from `waiting_for_detach` back to `created`. Once
+`waiting_for_detach` has been seen after our DELETE, a later exact `created`,
+detached read means Fly finished that DELETE without deleting. The age gate is
+then unnecessary. The ambiguous in-flight window (r004-j0014: `created` for a
+few reads before `pending_destroy`) never passes through `waiting_for_detach`.
+
+Separate gap: a coordinator audit built from `flyctl volumes list --json`
+without `--all` returns only `created` volumes. It reported these volumes ABSENT
+while they were in `waiting_for_detach`. In-repo teardown and recovery already
+decide absence only from the exact `volumes show <id>` read
+(`volume_inventory_contains_id`). The list was the coordinator's private
+`/var/tmp/descend-e20/be20-cleanup.py`.
+
+Fix. `reap_volume` now records a once-only receipt,
+`disposable-delete-volume-<id>.detach-observed.json` (same owner/app policy,
+O_EXCL, fsync), the first time an exact read after a dispatched disposable
+DELETE shows `waiting_for_detach`. `stale_registry_only_waits_for_provider_detach`
+records the same receipt. `fleet_disposable_redelete_intent` admits its single
+re-dispatch when that receipt exists or when the intent is older than 600 s.
+Everything else is unchanged: the volume must be exact, `created` and detached,
+the re-dispatch is once-only, and attached volumes or spent re-dispatches are
+refused. At most two DELETEs are sent per volume.
+
+Red→green: `scripts/tests/cloudbench-disposable-lifecycle.test.py`
+`test_startup_recovery_resends_a_delete_fly_dropped_while_waiting_for_detach`.
+The fake provider replays the observed sequence: first DELETE →
+`waiting_for_detach` ×6 → `created`; second DELETE → `waiting_for_detach` ×2 →
+`pending_destroy`. It runs `reap_machine` teardown, then
+`reap_registry_clones stale` 4 minutes later.
+
+- On base 397c28a3ae it failed. Startup printed
+  `volume destroy reconcile 1/6..6/6 id=vol_owned state=created (DELETE not resent)`,
+  `could not destroy volume vol_owned` and `startup=1`, with one DELETE.
+- On the fix it passes: two DELETEs, `startup=0`, `destroyed-provider-retained`,
+  record retired.
+
+Controls: an attached volume and a spent re-dispatch get no DELETE.
+`test_second_dropped_delete_is_not_resent_and_retains_ownership` checks that a
+second drop is not re-sent and ownership stays (bounded at two DELETEs).
+
+10k agents: one extra once-only receipt write per owned volume that reaches
+`waiting_for_detach`. No new reads, polling or shared state.
 
 ## Human feedback
 

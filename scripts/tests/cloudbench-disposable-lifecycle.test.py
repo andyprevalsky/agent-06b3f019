@@ -121,6 +121,55 @@ mkdir -p "$CASE/out"
  def test_attached_or_already_redispatched_volume_is_not_deleted_again(self):
   for kw in (dict(detached=False),dict(redispatched=True)):
    r,v,_=self.dropped_delete_case(**kw);self.assertNotEqual(r.returncode,0,kw);self.assertEqual(v['calls'],'',kw)
+ # Fly-side sequence observed in descend proof-B (2026-11-07, owners 33d0d094/6330e5ce/
+ # ee9958bb/fdfb01aa) and epoch 18: a DELETE sent right after the clone Machine's destroy
+ # puts the volume in waiting_for_detach; Fly abandons it and the volume returns to
+ # created, unattached. A DELETE sent to that created volume (--recover-stale-owner at
+ # 23:30Z) went waiting_for_detach for two reads, then pending_destroy.
+ FLY_DROPS_FIRST_DELETE=r'''
+volume_state_now(){ local d r;d=$(cat "$CASE/deletes" 2>/dev/null||echo 0);r=$(cat "$CASE/reads" 2>/dev/null||echo 0)
+ if [ "$d" = 0 ];then echo created;elif [ "$d" = 1 ];then if [ "$r" -lt 6 ];then echo waiting_for_detach;else echo created;fi
+ elif [ "${REDELETE_DROPPED:-0}" = 1 ]&&[ "$r" -ge 2 ];then echo created;elif [ "$r" -lt 2 ];then echo waiting_for_detach;else echo pending_destroy;fi; }
+FLY(){
+ printf '%s\n' "$*" >> "$CASE/calls"
+ case "$1 $2" in
+ 'machine destroy') printf absent > "$CASE/machine-state";;
+ 'volumes destroy') echo $(( $(cat "$CASE/deletes" 2>/dev/null||echo 0) + 1 )) > "$CASE/deletes";echo 0 > "$CASE/reads";;
+ 'volumes show') printf '{"id":"%s","state":"%s","attached_machine_id":%s}\n' "$3" "$(volume_state_now)" "${ATTACHED:-null}";;
+ *) return 9;;esac
+}
+volume_inventory_contains_id(){ local s r;s=$(volume_state_now);r=$(cat "$CASE/reads" 2>/dev/null||echo 0);echo $((r+1)) > "$CASE/reads";echo "$s"; }
+'''
+ def dropped_while_detaching_case(self,startup='',minutes_later=4):
+  # Teardown destroys the Machine and sends the once-only volume DELETE; the next
+  # controller's stale-owner recovery reaps the dead owner minutes later (<600 s).
+  body=self.FLY_DROPS_FIRST_DELETE+r'''
+reap_machine abcd1234 "" vol_owned;echo "teardown=$?" >> "$CASE/result"
+for f in "$FLEET_REGISTRY_DIR"/disposable-*.json;do touch -d "-MINUTES minutes" "$f";done
+printf destroyed > "$CASE/machine-state"
+'''.replace('MINUTES',str(minutes_later))+startup+r'''
+reap_registry_clones "$FLEET_REGISTRY_DIR" stale;echo "startup=$?" >> "$CASE/result"
+cat "$CASE/result" >&2
+ls "$FLEET_REGISTRY_DIR" >&2
+'''
+  return self.run_case(body)
+ def test_startup_recovery_resends_a_delete_fly_dropped_while_waiting_for_detach(self):
+  r,v,records=self.dropped_while_detaching_case()
+  self.assertIn('teardown=75',r.stderr)
+  # Unfixed: "volume destroy reconcile 1/6 id=vol_owned state=created (DELETE not resent)" x6, startup=1.
+  self.assertNotIn('state=created (DELETE not resent)',r.stderr)
+  self.assertIn('startup=0',r.stderr)
+  self.assertEqual(v['calls'].count('volumes destroy vol_owned -a fixture --yes'),2,v['calls'])
+  self.assertEqual(records,[])
+  self.assertIn(' cloudbench-fixture abcd1234 vol_owned destroyed-provider-retained\n',v['audit-log'])
+  self.assertIn('disposable-redelete-volume-vol_owned.json',r.stderr)
+ def test_detach_evidence_never_redeletes_an_attached_or_already_redispatched_volume(self):
+  for startup in ('ATTACHED=\'"abcd1234"\'\n','cp "$FLEET_REGISTRY_DIR/disposable-delete-volume-vol_owned.json" "$FLEET_REGISTRY_DIR/disposable-redelete-volume-vol_owned.json"\n'):
+   r,v,records=self.dropped_while_detaching_case(startup)
+   self.assertIn('startup=1',r.stderr);self.assertEqual(v['calls'].count('volumes destroy'),1,v['calls']);self.assertEqual(len(records),1)
+ def test_second_dropped_delete_is_not_resent_and_retains_ownership(self):
+  r,v,records=self.dropped_while_detaching_case('REDELETE_DROPPED=1\n')
+  self.assertNotIn('startup=0',r.stderr);self.assertEqual(v['calls'].count('volumes destroy'),2,v['calls']);self.assertEqual(len(records),1)
  def test_warm_whm_borrowed_no_mutation(self):
   for body in ['reap_machine warm "$CASE/log" vol_warm','reap_machine 820224f7e069e8 "$CASE/log" vol_whm','mkdir -p "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs";touch "$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/abcd1234.json";reap_machine abcd1234 "$CASE/log" vol_owned','reap_volume vol_warm']:
    r,v,_=self.run_case(body);self.assertNotEqual(r.returncode,0);self.assertEqual(v['calls'],'')

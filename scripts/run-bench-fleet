@@ -2310,7 +2310,7 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
     local vol="$1" diagnostic_log="${2:-}" i lifecycle_rc state
     local destroy_capture destroy_rc destroy_bytes destroy_excerpt destroy_suffix
     local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0 once_status=0 delete_sent
-    local redispatch_status=1
+    local redispatch_status=1 detach_observed=0
     [ -n "$vol" ] || return 0
     if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         echo "❌ reuse-only retains Volume identity; refusing destroy of $vol" >&2
@@ -2352,8 +2352,9 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
             # Fly accepts a DELETE for a volume still waiting_for_detach and then
             # drops it: the volume returns to created once its destroyed Machine
             # detaches (descend batch-1 epoch 3: 12 volumes). An exact, detached,
-            # created volume whose recorded DELETE is older than the provider's
-            # transient window gets one more exact DELETE, recorded once-only.
+            # created volume whose recorded DELETE was later observed in
+            # waiting_for_detach, or is older than the provider's transient
+            # window, gets one more exact DELETE, recorded once-only.
             fleet_disposable_redelete_intent volume "$vol" && redispatch_status=0 || redispatch_status=$?
         fi
         if [ "${DISPOSABLE_REAP:-0}" = 1 ] && [ "$redispatch_status" = 0 ]; then
@@ -2412,7 +2413,17 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
                         return 74
                     fi
                     ;;
-                created|restoring|waiting_for_detach|scheduling_destroy|recovering) ;;
+                waiting_for_detach)
+                    # Fly's post-DELETE detach wait. Persist it once so a later
+                    # exact created/detached read proves Fly dropped this DELETE
+                    # and the next exact-owner reap re-dispatches it immediately.
+                    if [ "${DISPOSABLE_REAP:-0}" = 1 ] && [ "$detach_observed" = 0 ]; then
+                        detach_observed=1
+                        fleet_disposable_redelete_intent volume "$vol" detach-observed \
+                            || echo "  ⚠️ could not record waiting_for_detach evidence for volume $vol; a dropped DELETE is re-sent only after the aged-intent window" >&2
+                    fi
+                    ;;
+                created|restoring|scheduling_destroy|recovering) ;;
                 *) lifecycle_ambiguous=1 ;;
             esac
         else
@@ -6077,33 +6088,49 @@ finally:os.close(fd)
 PYONCE
 }
 
-fleet_disposable_redelete_intent() {  # volume <exact-id>; 0=admit one re-dispatch, 2=already re-dispatched, 3=too recent
-    # Only for an exact owned volume whose once-only DELETE intent already exists
-    # and is older than the provider's transient window, so an accepted DELETE
-    # still in flight (created for a few reads before pending_destroy) is never
-    # duplicated. The re-dispatch itself is recorded once-only.
+fleet_disposable_redelete_intent() {  # volume <exact-id> [detach-observed]; 0=admit one re-dispatch (or evidence recorded), 2=already re-dispatched, 3=not yet admissible
+    # Only for an exact owned volume whose once-only DELETE intent already exists.
+    # Fly answers that DELETE by holding the volume in waiting_for_detach; when
+    # the host detach of the just-destroyed Machine does not complete, Fly drops
+    # the DELETE and the volume returns to created, unattached (descend b1e3,
+    # epoch 18 and proof-B: 20 volumes). An accepted DELETE still in flight can
+    # instead read created for a few reads before pending_destroy, so a created
+    # read alone never admits a duplicate. Admission therefore needs either the
+    # durable waiting_for_detach-after-DELETE observation recorded by the
+    # detach-observed mode (Fly finished processing that DELETE without
+    # deleting) or an intent older than the provider's transient window. The
+    # re-dispatch itself is recorded once-only.
     local registry="${DISPOSABLE_DELETE_REGISTRY:-$FLEET_REGISTRY_DIR}"
     [ "$1" = volume ] || return 1
+    case "${3:-}" in ''|detach-observed) ;; *) return 1 ;; esac
     fleet_disposable_registry_policy "$registry" || return 1
-    python3 - "$registry" "${registry##*/}" "$APP" "$2" "${CLOUDBENCH_VOLUME_REDELETE_AFTER_SECONDS:-600}" <<'PYREDELETE'
+    python3 - "$registry" "${registry##*/}" "$APP" "$2" "${CLOUDBENCH_VOLUME_REDELETE_AFTER_SECONDS:-600}" "${3:-}" <<'PYREDELETE'
 import json,os,stat,sys,time
 from pathlib import Path
-registry=Path(sys.argv[1]);owner,app,identifier,after=sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5])
+registry=Path(sys.argv[1]);owner,app,identifier,after,mode=sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5]),sys.argv[6]
 assert registry.name==owner and registry.resolve(strict=True)==registry and not registry.is_symlink()
 assert (registry/'disposable-resources-v1').read_text().strip()==owner+'\n'+app
 first=registry/('disposable-delete-volume-'+identifier+'.json')
 raw=json.dumps(dict(owner=owner,app=app,kind='volume',identifier=identifier),sort_keys=True)+'\n'
 assert first.resolve(strict=True)==first and stat.S_ISREG(first.lstat().st_mode) and first.read_text()==raw
-if time.time()-first.lstat().st_mtime<after:raise SystemExit(3)
-path=registry/('disposable-redelete-volume-'+identifier+'.json')
-try: fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-except FileExistsError:
-    assert path.resolve(strict=True)==path and stat.S_ISREG(path.lstat().st_mode) and path.read_text()==raw
-    raise SystemExit(2)
-with os.fdopen(fd,'w')as stream:stream.write(raw);stream.flush();os.fsync(stream.fileno())
-fd=os.open(registry,os.O_RDONLY|os.O_DIRECTORY)
-try:os.fsync(fd)
-finally:os.close(fd)
+evidence=registry/('disposable-delete-volume-'+identifier+'.detach-observed.json')
+observed=json.dumps(dict(owner=owner,app=app,kind='volume',identifier=identifier,observed='waiting_for_detach'),sort_keys=True)+'\n'
+def publish(path,value):
+    try: fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    except FileExistsError:
+        assert path.resolve(strict=True)==path and stat.S_ISREG(path.lstat().st_mode) and path.read_text()==value
+        return False
+    with os.fdopen(fd,'w')as stream:stream.write(value);stream.flush();os.fsync(stream.fileno())
+    fd=os.open(registry,os.O_RDONLY|os.O_DIRECTORY)
+    try:os.fsync(fd)
+    finally:os.close(fd)
+    return True
+if mode=='detach-observed':
+    publish(evidence,observed);raise SystemExit(0)
+if os.path.lexists(evidence):
+    assert evidence.resolve(strict=True)==evidence and stat.S_ISREG(evidence.lstat().st_mode) and evidence.read_text()==observed
+elif time.time()-first.lstat().st_mtime<after:raise SystemExit(3)
+if not publish(registry/('disposable-redelete-volume-'+identifier+'.json'),raw):raise SystemExit(2)
 PYREDELETE
 }
 
@@ -7489,8 +7516,10 @@ reap_orphaned_fleet_proxies() {
     echo "🧹 reaped $n orphaned data-plane proxy tunnel(s) leaked by a dead controller"
 }
 
-stale_registry_only_waits_for_provider_detach() {  # <dead-owner v2 registry>
+stale_registry_only_waits_for_provider_detach() {  # <dead-owner v2 registry> [after-reap]
     local registry="$1" record clone_name id vol details status state actual_name mounted_vol volume count=0 claims
+    local after_reap=0 allowed typed
+    case "${2:-}" in '') ;; after-reap) after_reap=1 ;; *) return 1 ;; esac
     [ "$(registry_meta_value "$registry/meta" version)" = "2" ] || return 1
     [ ! -e "$registry/guest-cleanup-unconfirmed" ] \
         && [ ! -e "$registry/runtime-evidence-unconfirmed" ] || return 1
@@ -7545,29 +7574,43 @@ PY
         # A fresh accepted destroy request and a second exact read prove that
         # only Fly's unattached, transitional Volume is left. Keep its record;
         # a later startup or exact-owner recovery will retry until terminal.
+        # After this startup's own exact reap, a typed owner's already
+        # dispatched DELETE may instead have been dropped (created, unattached,
+        # re-dispatch spent or dropped again). That Volume is not needed by a
+        # new fleet either: retain it for exact-owner recovery, never fail the
+        # unrelated controller. Before the reap, created still goes to the reap
+        # so its dropped DELETE can be re-dispatched.
+        allowed=waiting_for_detach typed=0
         if [ -e "$registry/disposable-resources-v1" ] || [ -L "$registry/disposable-resources-v1" ]; then
             fleet_disposable_registry_policy "$registry" || return 1
+            typed=1
             local DISPOSABLE_DELETE_REGISTRY="$registry" once_status=0
             fleet_disposable_delete_intent volume "$vol" || once_status=$?
             case "$once_status" in
                 0) FLY volumes destroy "$vol" -a "$APP" --yes >/dev/null 2>&1 || return 1 ;;
-                2) : ;; # Prior dispatch survives controller death: exact GET only.
+                2) [ "$after_reap" = 0 ] || allowed=waiting_for_detach,created ;; # Prior dispatch survives controller death: exact GET only.
                 *) return 1 ;;
             esac
         else
             FLY volumes destroy "$vol" -a "$APP" --yes >/dev/null 2>&1 || return 1
         fi
         volume="$(FLY volumes show "$vol" -a "$APP" --json)" || return 1
-        printf '%s' "$volume" | python3 -c '
+        state="$(printf '%s' "$volume" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
-if data.get("id") != sys.argv[1] or data.get("state") != "waiting_for_detach" or data.get("attached_machine_id", "missing") is not None:
+if data.get("id") != sys.argv[1] or data.get("state") not in sys.argv[2].split(",") or data.get("attached_machine_id", "missing") is not None:
     raise SystemExit(1)
-' "$vol" || return 1
+if data["state"] == "created" and data.get("attached_alloc_id"):
+    raise SystemExit(1)
+print(data["state"])
+' "$vol" "$allowed")" || return 1
+        if [ "$state" = waiting_for_detach ] && [ "$typed" = 1 ]; then
+            fleet_disposable_redelete_intent volume "$vol" detach-observed || true
+        fi
         count=$((count + 1))
     done
     [ "$count" -gt 0 ] || return 1
-    echo "⚠️  deferred $count exact orphan Volume(s) awaiting Fly detach; retained dead-owner registry $registry" >&2
+    echo "⚠️  deferred $count exact orphan Volume(s) awaiting Fly detach/deletion; retained dead-owner registry $registry" >&2
 }
 
 reconcile_stale_fleet_registries_full() {
@@ -7655,7 +7698,7 @@ reconcile_stale_fleet_registries_full() {
             continue
         fi
         if ! reap_registry_clones "$registry" stale; then
-            if stale_registry_only_waits_for_provider_detach "$registry"; then
+            if stale_registry_only_waits_for_provider_detach "$registry" after-reap; then
                 release_registry_recovery_lock "$registry"
                 continue
             fi
