@@ -77,7 +77,10 @@ A classic inline script in `front-end/index.html`, ahead of the module entry,
 listens (capture phase) for an `error` event on a module `<script src>` and
 reloads the page so the live build's HTML loads. It retries with 0.5/1/2 s
 backoff, at most three times per entry URL (sessionStorage, window.name
-fallback), and not while offline, so a genuinely missing build cannot loop.
+fallback), so a genuinely missing build cannot loop. An attempt is charged only
+when the reload runs; if the connection drops during the backoff it waits for
+the `online` event instead of navigating to the browser's offline page
+(CodeRabbit review finding, PR #1729).
 
 With the fix, the original test plus the injected entry 404 passed 5/5 and the
 unchanged original test passed 5/5 on a local production build;

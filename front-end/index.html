@@ -152,42 +152,54 @@
     <script>
       // STATE MACHINE: entry-load recovery (before the bundle, so it survives its loss)
       // [LOADING] --entry module script loads--> [MOUNTED] (appVersion.ts owns later reloads)
-      // [LOADING] --entry module graph fails (error event), online--> [RELOADING]
-      //           after 0.5s/1s/2s backoff, at most 3 times per entry URL
-      // [LOADING] --budget for this entry URL spent, or offline--> [STATIC] (links only)
+      // [LOADING] --entry module graph fails (error event)--> [WAITING] 0.5s/1s/2s backoff
+      // [WAITING] --timer fires online--> [RELOADING] (charges 1 of 3 attempts per entry URL)
+      // [WAITING] --timer fires offline--> [OFFLINE] --online event--> [RELOADING]
+      // [LOADING] --budget for this entry URL spent--> [STATIC] (links only)
       // A document can outlive its deploy (edge-cached HTML across a production alias
       // switch); its hashed entry chunks then 404 and React never mounts, leaving only
       // the static links above. src/lib/appVersion.ts runs inside that bundle, so the
       // recovery must live here. Reloading fetches the live build's HTML.
-      window.addEventListener(
-        'error',
-        function (event) {
-          var script = event.target;
-          if (!(script instanceof HTMLScriptElement) || script.type !== 'module' || !script.src)
-            return;
-          if (navigator.onLine === false) return;
-          var key = 'rose:entry-reload:' + script.src;
-          var attempts = 0;
+      (function () {
+        var scheduled = false;
+        function attemptsFor(key) {
           try {
-            attempts = Number(sessionStorage.getItem(key)) || 0;
-            if (attempts >= 3) return;
-            sessionStorage.setItem(key, String(attempts + 1));
+            return Number(sessionStorage.getItem(key)) || 0;
           } catch (_) {
             // Storage disabled: window.name survives a same-tab reload (one attempt).
-            var marker = '[' + key + ']';
-            if (window.name.indexOf(marker) !== -1) return;
-            window.name += marker;
+            return window.name.indexOf('[' + key + ']') === -1 ? 0 : 3;
           }
-          console.warn('[EntryLoad] ' + script.src + ' failed to load; reloading');
-          setTimeout(
-            function () {
-              location.reload();
-            },
-            500 * Math.pow(2, attempts),
-          );
-        },
-        true,
-      );
+        }
+        function reload(key, attempts) {
+          // Charge the attempt only when the reload runs; an offline reload would replace
+          // the static links with the browser's offline page.
+          if (navigator.onLine === false) {
+            window.addEventListener('online', reload.bind(null, key, attempts), { once: true });
+            return;
+          }
+          try {
+            sessionStorage.setItem(key, String(attempts + 1));
+          } catch (_) {
+            window.name += '[' + key + ']';
+          }
+          location.reload();
+        }
+        window.addEventListener(
+          'error',
+          function (event) {
+            var script = event.target;
+            if (!(script instanceof HTMLScriptElement) || script.type !== 'module' || !script.src)
+              return;
+            var key = 'rose:entry-reload:' + script.src;
+            var attempts = attemptsFor(key);
+            if (scheduled || attempts >= 3) return;
+            scheduled = true;
+            console.warn('[EntryLoad] ' + script.src + ' failed to load; reloading');
+            setTimeout(reload.bind(null, key, attempts), 500 * Math.pow(2, attempts));
+          },
+          true,
+        );
+      })();
     </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>

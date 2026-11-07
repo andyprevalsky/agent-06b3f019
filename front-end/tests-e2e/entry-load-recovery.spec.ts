@@ -52,3 +52,30 @@ test('an entry that never loads stops after three bounded reloads', async ({ pag
   await expect(page.locator('#root .rose-static-links')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Open menu', exact: true })).toHaveCount(0);
 });
+test('connectivity lost during the backoff waits for online without spending an attempt', async ({
+  page,
+  context,
+}) => {
+  page.setDefaultTimeout(30_000);
+  await installMobileTrajectories(page);
+  let failed = 0;
+  // The connection drops just as the stale entry fails, before the backoff timer fires.
+  await page.route(ENTRY, async (route) => {
+    if (failed++ > 0) return route.continue();
+    await context.setOffline(true);
+    return route.fulfill({ status: 404, contentType: 'text/plain', body: 'Not found' });
+  });
+  const loads = countDocuments(page);
+  await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+  // Past the first 0.5 s backoff: no offline reload, and the attempt is not charged.
+  await page.waitForTimeout(2_000);
+  expect(loads.count).toBe(1);
+  await expect(page.locator('#root .rose-static-links')).toBeVisible();
+  const charged = await page.evaluate(() =>
+    Object.keys(sessionStorage).filter((key) => key.startsWith('rose:entry-reload:')),
+  );
+  expect(charged).toEqual([]);
+  await context.setOffline(false);
+  await expect(page.getByRole('button', { name: 'Open menu', exact: true })).toBeVisible();
+  expect(loads.count).toBe(2);
+});
