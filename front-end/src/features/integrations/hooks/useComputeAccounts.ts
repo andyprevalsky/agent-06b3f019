@@ -61,11 +61,12 @@ export function useComputeAccounts(provider: string) {
   }, [refresh]);
 
   // A remote browser bills until released, so an abandoned sign-in must not
-  // outlive this component.
+  // outlive this component. Best effort: on sign-out the auth session is gone
+  // before unmount, and the server-side session expiry still releases it.
   useEffect(
     () => () => {
       const id = connectIdRef.current;
-      if (id !== null) void cancelComputeConnect(id);
+      if (id !== null) void cancelComputeConnect(id).catch(() => undefined);
     },
     [],
   );

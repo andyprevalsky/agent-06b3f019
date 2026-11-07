@@ -198,3 +198,29 @@ export interface PlaidLinkTokenResponse {
   expiration: string;
   request_id: string;
 }
+
+/** One provider quota window; `usedPct` is 0-100 as of `ComputeAccountUsage.observedAt`. */
+export interface ComputeUsageWindow {
+  usedPct: number;
+  resetsAt: string | null;
+}
+
+export interface ComputeAccountUsage {
+  fiveHour: ComputeUsageWindow | null;
+  sevenDay: ComputeUsageWindow | null;
+  observedAt: string;
+}
+
+export interface ComputeAccount {
+  provider: string;
+  accountId: string;
+  accountEmail: string | null;
+  /** "connected" | "needs_reconnect" -- the only user-actionable state. */
+  state: string;
+  lastErrorReason: string | null;
+  connectedAt: string;
+  /** Last subscription usage an agent observed on this account; null until one is used. */
+  usage: ComputeAccountUsage | null;
+  /** Provider cooldown: the account serves nothing until this passes. */
+  rateLimitedUntil: string | null;
+}

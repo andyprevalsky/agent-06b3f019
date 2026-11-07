@@ -17,6 +17,9 @@
  *     rowSync (the backend reports one account for the whole row) → one row bar,
  *       no per-chip bars
  *   bar text: provider phase as words, bytes as sizes, "N of M <unit>", "~ETA left"
+ *   [CONNECTED, layout=rows] (compute subscriptions): one line per account instead
+ *     of chips — label, the account's trailing usage meter, and a ⋯ menu holding
+ *     its reconnect / remove actions (DesktopAccountRows)
  *
  * There is no Manage state and no details panel: everything is on the row.
  * Pure presentation; DesktopIntegrations owns data and actions.
@@ -29,6 +32,7 @@ import { isProgressComplete } from '../hooks/integrationAccounts';
 import { useSyncProgress } from '../hooks/useSyncProgress';
 import type { AccountTone } from '../types';
 import ConnectedAccountChip from './ConnectedAccountChip';
+import DesktopAccountRows from './DesktopAccountRows';
 import DropdownIconFrame, { warningGlowGradient } from './DropdownIconFrame';
 import SyncProgressBar from './SyncProgressBar';
 
@@ -52,6 +56,8 @@ export interface DesktopAccountView {
   hideProgress?: boolean;
   /** Why the last sync failed, printed under the chip (not only as a tooltip). */
   errorText?: string;
+  /** Row layout only: right-aligned content beside the label (compute usage meter). */
+  trailing?: ReactNode;
 }
 
 /** Sync of a multi-account row whose backend reports one account for the whole row. */
@@ -81,6 +87,8 @@ export interface DesktopIntegrationView {
   /** Listed several accounts before Rose Desktop: "+ Add account" stays. */
   multiAccount?: boolean;
   rowSync?: RowSync;
+  /** `rows` = one line per account with a ⋯ menu (compute); default wraps chips. */
+  layout?: 'chips' | 'rows';
   /** Row-scoped extras (sign-in modal, inline error). */
   extra?: ReactNode;
 }
@@ -202,11 +210,15 @@ function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
   const rowError = view.rowSync?.errorText;
   return (
     <div className="ml-[46px] mt-2 flex flex-col gap-2">
-      <div className="flex flex-wrap gap-1.5" data-testid={`accounts-${view.key}`}>
-        {view.accounts.map((account) => (
-          <DesktopAccountChip key={accountKey(account)} account={account} />
-        ))}
-      </div>
+      {view.layout === 'rows' ? (
+        <DesktopAccountRows accounts={view.accounts} testId={`accounts-${view.key}`} />
+      ) : (
+        <div className="flex flex-wrap gap-1.5" data-testid={`accounts-${view.key}`}>
+          {view.accounts.map((account) => (
+            <DesktopAccountChip key={accountKey(account)} account={account} />
+          ))}
+        </div>
+      )}
       {view.accounts
         .filter((account) => account.errorText !== undefined)
         .map((account) => (

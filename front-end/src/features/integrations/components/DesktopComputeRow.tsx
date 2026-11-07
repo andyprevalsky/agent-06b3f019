@@ -2,13 +2,17 @@
  * STATE MACHINE: DesktopComputeRow (Rose Desktop, flag on)
  *
  *   [NO_ACCOUNTS] --Connect--> useComputeAccounts.connect() --> sign-in modal
- *   [ACCOUNTS]    chips (compute subscriptions listed several before Rose
- *                 Desktop); × = existing compute removal (no confirm, as today);
- *                 "+ Add account" = the same connect flow
+ *   [ACCOUNTS]    one line per account: email (needs_reconnect keeps its amber
+ *                 ⚠ "· Reconnect" status), its 7d usage bar (SubscriptionUsageMeter),
+ *                 ⋯ menu = Re-authenticate (the same connect flow; re-signing an
+ *                 account refreshes it in place) + Remove (existing compute
+ *                 removal, no confirm, as today); "+ Add account" = connect flow
  *   [LEGACY]      only the desktop-synced credential row exists → one "This Mac"
- *                 chip disconnected through the confirmed row DELETE
+ *                 line disconnected through the confirmed row DELETE; no usage
  *
- * Compute accounts carry no sync progress; chips are synced or warning only.
+ * Usage is whatever agents last reported on the account's token (they carry it
+ * on the lease heartbeat they already send); it refreshes when the list loads.
+ * Compute accounts carry no sync progress; lines are synced or warning only.
  */
 
 import claudeIcon from '@/assets/claude-color.svg';
@@ -22,6 +26,7 @@ import DesktopIntegrationRow, {
   type DesktopIcon,
 } from './DesktopIntegrationRow';
 import { singleAccount, type RemovalPort } from './desktopAccounts';
+import SubscriptionUsageMeter from './SubscriptionUsageMeter';
 import { dropdownIconImageClassName, DropdownIconPreset } from './DropdownIconFrame';
 
 interface DesktopComputeRowProps {
@@ -70,6 +75,9 @@ export default function DesktopComputeRow({
       removeLabel: `Remove ${providerLabel} account ${label}`,
       removing: state.removing === account.accountId,
       disabled: state.removing !== null,
+      onResync: isAvailable ? () => void state.connect() : undefined,
+      resyncLabel: 'Re-authenticate',
+      trailing: <SubscriptionUsageMeter account={account} />,
     };
   });
   const accounts =
@@ -91,6 +99,7 @@ export default function DesktopComputeRow({
         onConnect: isAvailable ? () => void state.connect() : undefined,
         connecting: state.isConnecting || localSyncing,
         multiAccount: true,
+        layout: 'rows',
         extra: (
           <>
             {state.error !== null && (
