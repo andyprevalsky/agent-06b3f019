@@ -47,6 +47,46 @@ export interface WsServerWait extends WsServerProbe {
   elapsedMs: number;
 }
 
+// A ws-server that is up but not serving (it clones the session's repo before it
+// serves) may take this long before the create fails. Not a retry bound: the
+// agents activity heartbeats while it waits. `startup.cloneMs` of every create
+// is returned with the session and logged, so the budget is sized from
+// measurements (Rose-Ai-Labs/rose, 1.2 GB .git, 2 vCPU sandbox: 173 s on
+// 2026-11-06, so 10 min is about 3.4x that); override per deployment with
+// CODE_AGENT_STARTUP_BUDGET_MS.
+const DEFAULT_WS_STARTUP_BUDGET_MS = 10 * 60_000;
+
+export function wsStartupBudgetMs(): number {
+  const configured = Number(process.env.CODE_AGENT_STARTUP_BUDGET_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_WS_STARTUP_BUDGET_MS;
+}
+
+const WS_READINESS_NAMES = {
+  claude: { logName: 'WebSocket server', errorName: 'Claude Code WebSocket server' },
+  codex: { logName: 'Codex WebSocket server', errorName: 'Codex WebSocket server' },
+};
+
+/**
+ * Log one readiness outcome. Returns null when the server served; otherwise the error to throw
+ * once the caller has released its sandbox.
+ */
+export function wsReadinessOutcome(
+  log: { info(message: string): void; warn(message: string): void },
+  kind: keyof typeof WS_READINESS_NAMES,
+  ws: WsServerWait
+): Error | null {
+  const { logName, errorName } = WS_READINESS_NAMES[kind];
+  if (ws.ready) {
+    const clone = ws.cloneMs !== null ? ` (repo clone ${ws.cloneMs}ms)` : '';
+    log.info(`${logName} ready in ${ws.elapsedMs}ms${clone}`);
+    return null;
+  }
+  log.warn(
+    `${logName} readiness check timed out after ${ws.elapsedMs}ms (server state: ${ws.state})`
+  );
+  return new Error(`${errorName} failed to become ready (${ws.state} after ${ws.elapsedMs}ms)`);
+}
+
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

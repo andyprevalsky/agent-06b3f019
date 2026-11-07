@@ -101,6 +101,8 @@ async function liveTask(ctx: CodeSessionLifecycleContext, label: string) {
   return { agentId, home, sandboxId, codeSession, task, fake };
 }
 
+type LiveTask = Awaited<ReturnType<typeof liveTask>>;
+
 export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleContext): void {
   test('a terminated workflow (cutover / descendant) checkpoints and pauses its code session instead of killing it; the retried spawn resumes the same session', async (t) => {
     const { agentId, sandboxId, codeSession, task, fake } = await liveTask(ctx, 'cutover');
@@ -558,18 +560,19 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
         findStarted: async () => null,
         admit: async () => undefined,
       });
+    const closeWith = async (held: LiveTask, reason: 'close' | 'cancel') => {
+      ctx.patchConnect(async () => held.fake.sandbox);
+      try {
+        await closeClaudeCodeSession(held.task.id, undefined, undefined, undefined, { reason });
+      } finally {
+        ctx.restoreConnect();
+      }
+    };
     const owned = await liveTask(ctx, 'startup-row');
     const ownedKey = owned.codeSession.leaseOwner ?? '';
     assert.equal((await queue(ownedKey, 'a2a:sender:one')).status, 'queued');
     assert.equal(await queuedStartupTurnCount(ownedKey), 1);
-    ctx.patchConnect(async () => owned.fake.sandbox);
-    try {
-      await closeClaudeCodeSession(owned.task.id, undefined, undefined, undefined, {
-        reason: 'close',
-      });
-    } finally {
-      ctx.restoreConnect();
-    }
+    await closeWith(owned, 'close');
     assert.equal(await queuedStartupTurnCount(ownedKey), 0, 'the closed spawn keeps no row');
 
     // A newer spawn already owns the session's sandbox: the older task's close must not
@@ -581,14 +584,7 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
       where: { id: stale.codeSession.id },
       data: { sandboxId: `sb-newer-${randomUUID()}` },
     });
-    ctx.patchConnect(async () => stale.fake.sandbox);
-    try {
-      await closeClaudeCodeSession(stale.task.id, undefined, undefined, undefined, {
-        reason: 'cancel',
-      });
-    } finally {
-      ctx.restoreConnect();
-    }
+    await closeWith(stale, 'cancel');
     assert.equal(await queuedStartupTurnCount(staleKey), 1, "the newer spawn's row is untouched");
   });
 

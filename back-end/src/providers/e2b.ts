@@ -38,7 +38,7 @@ import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
 import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
-import { waitForSandboxWsServer } from './e2bWsReady';
+import { waitForSandboxWsServer, wsReadinessOutcome, wsStartupBudgetMs } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
 import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
 import { prepareCodeSessionWorkspace, promptFlagsForUser } from './codeSessionWorkspace';
@@ -97,20 +97,6 @@ const WS_PORT = 3000;
 const WS_READY_TIMEOUT_MS = 10000;
 const CODEX_WS_READY_TIMEOUT_MS = 30000;
 const WS_READY_POLL_INTERVAL_MS = 100;
-// A ws-server that is up but not serving (it clones the session's repo before it
-// serves) may take this long before the create fails. Not a retry bound: the
-// agents activity heartbeats while it waits. `startup.cloneMs` of every create
-// is returned with the session and logged, so the budget is sized from
-// measurements (Rose-Ai-Labs/rose, 1.2 GB .git, 2 vCPU sandbox: 173 s on
-// 2026-11-06, so 10 min is about 3.4x that); override per deployment with
-// CODE_AGENT_STARTUP_BUDGET_MS.
-const DEFAULT_WS_STARTUP_BUDGET_MS = 10 * 60_000;
-
-function wsStartupBudgetMs(): number {
-  const configured = Number(process.env.CODE_AGENT_STARTUP_BUDGET_MS);
-  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_WS_STARTUP_BUDGET_MS;
-}
-
 /**
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
  *
@@ -485,19 +471,10 @@ async function createClaudeCodeSessionUnlocked(
     pollMs: WS_READY_POLL_INTERVAL_MS,
     startupBudgetMs: wsStartupBudgetMs(),
   });
-  if (ws.ready) {
-    log.info(
-      `WebSocket server ready in ${ws.elapsedMs}ms` +
-        (ws.cloneMs !== null ? ` (repo clone ${ws.cloneMs}ms)` : '')
-    );
-  } else {
-    log.warn(
-      `WebSocket server readiness check timed out after ${ws.elapsedMs}ms (server state: ${ws.state})`
-    );
+  const wsFailure = wsReadinessOutcome(log, 'claude', ws);
+  if (wsFailure !== null) {
     await releaseSandboxAfterFailedStart(sandbox, codeSession);
-    throw new Error(
-      `Claude Code WebSocket server failed to become ready (${ws.state} after ${ws.elapsedMs}ms)`
-    );
+    throw wsFailure;
   }
   // Rose-in-Rose (A1): a dev Rose-repo session serves its front-end with HMR.
   await autostartRosePreview(sandbox, {
@@ -702,15 +679,10 @@ export async function createCodexCodeSession(
     pollMs: WS_READY_POLL_INTERVAL_MS,
     startupBudgetMs: wsStartupBudgetMs(),
   });
-  if (ws.ready) log.info(`Codex WebSocket server ready in ${ws.elapsedMs}ms`);
-  else {
-    log.warn(
-      `Codex WebSocket server readiness check timed out after ${ws.elapsedMs}ms (server state: ${ws.state})`
-    );
+  const wsFailure = wsReadinessOutcome(log, 'codex', ws);
+  if (wsFailure !== null) {
     await releaseSandboxAfterFailedStart(sandbox, codeSession);
-    throw new Error(
-      `Codex WebSocket server failed to become ready (${ws.state} after ${ws.elapsedMs}ms)`
-    );
+    throw wsFailure;
   }
   await autostartRosePreview(sandbox, {
     envs: sessionEnvs,
