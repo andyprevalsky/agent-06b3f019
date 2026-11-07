@@ -182,7 +182,12 @@ type GeneratorLlmParams = {
   providerRoute?: ChatProviderRoute;
   abortSignal?: AbortSignal;
   streamGate?: TransactionalStreamGate;
+  projectContext?: string; // `## Project` section; '' or omitted = Home
 };
+
+/** Static generator prompt (cached prefix), then the agent's project section (projectContext.ts). */
+export const buildGeneratorSystemMessage = (projectContext = '') =>
+  markCacheable(GENERATOR_SYSTEM_PROMPT, projectContext);
 
 export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<GeneratorResponse> {
   let attention: GeneratorAttentionLifecycle | undefined;
@@ -209,7 +214,7 @@ async function callGeneratorLlmCore(
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [markCacheable(GENERATOR_SYSTEM_PROMPT)];
+  }> = [buildGeneratorSystemMessage(params.projectContext)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {
