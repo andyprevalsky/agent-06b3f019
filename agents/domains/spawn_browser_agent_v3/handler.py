@@ -303,6 +303,18 @@ def _browser_task_terminal_metadata(
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
 
 
+def _track_background_browser_cleanup(task: asyncio.Task) -> None:
+    """Keep a detached browser teardown owned until it finishes, for the worker's drain."""
+    _background_browser_cleanup_tasks.add(task)
+
+    def _discard(done: asyncio.Task) -> None:
+        _background_browser_cleanup_tasks.discard(done)
+        with contextlib.suppress(BaseException):
+            done.result()
+
+    task.add_done_callback(_discard)
+
+
 def build_browser_user_profile_sections(user_profile: Dict[str, Any]) -> List[str]:
     """Build the identity and delivery context supplied to a browser agent."""
     return build_user_profile_sections(user_profile)
@@ -9022,8 +9034,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     _pw_browser = await _pw_instance.chromium.connect_over_cdp(connection_cdp_url)
                 except BaseException:
                     _driver_process = _playwright_driver_process(_pw_instance)
+                    # Bounded like _stop_playwright_resources: a hung stop must not keep
+                    # the DOMService teardown below from releasing the CDP client.
                     with contextlib.suppress(Exception):
-                        await _pw_instance.stop()
+                        await asyncio.wait_for(_pw_instance.stop(), timeout=5.0)
                     await _reap_playwright_driver_process(_driver_process, agent_id)
                     _playwright_instance = None
                     raise
@@ -9088,10 +9102,16 @@ async def _spawn_browser_agent_activity_v3_real(
                         _input_page,
                     ) = await _connect_playwright()
             except BaseException:
-                # Bounded like every other terminal disconnect: a setup cancelled while
-                # still connecting must not hang on a wedged CDP stop past the parallel
-                # setup's teardown bound, or the connected client is never released.
-                await _disconnect_browser(_dom_service)
+                # Bounded like every other terminal disconnect. A wedged or failed one does
+                # not prove the slot was released, so then close the loopback multiplexer
+                # itself: it drops every client and Tilion's single upstream socket.
+                if not await _disconnect_browser(_dom_service) and _cdp_multiplexer is not None:
+                    await _await_bounded_browser_cleanup(
+                        _cdp_multiplexer.close(),
+                        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+                        timeout_message="Browser setup CDP multiplexer close timed out",
+                        failure_message="Browser setup CDP multiplexer close failed",
+                    )
                 await _stop_playwright_resources(
                     _playwright_browser,
                     _playwright_instance,
@@ -9223,8 +9243,8 @@ async def _spawn_browser_agent_activity_v3_real(
                 _realm_credential_state,
             )
 
-        browser_setup = asyncio.ensure_future(_setup_browser())
-        data_setup = asyncio.ensure_future(_process_data())
+        browser_setup = asyncio.create_task(_setup_browser(), name=f"browser-setup:{agent_id}")
+        data_setup = asyncio.create_task(_process_data(), name=f"browser-setup-data:{agent_id}")
         try:
             browser_result, data_result = await asyncio.gather(browser_setup, data_setup)
         except BaseException:
@@ -9232,14 +9252,17 @@ async def _spawn_browser_agent_activity_v3_real(
             # cancelled activity drops a finished side's result. Hand a connected browser
             # side to the finally-scheduled cleanup first (an orphaned client would hold
             # Tilion's single CDP slot, even if a second cancel interrupts the wait), then
-            # stop the unfinished side; its own handler releases what it attached.
+            # stop the unfinished side; its own handler releases what it attached. A side
+            # still releasing after the wait is detached but stays owned for the drain.
             if browser_setup.done() and not browser_setup.cancelled() and browser_setup.exception() is None:
                 dom_service, dom_page, input_page, playwright_browser, playwright_instance = browser_setup.result()
             for side in (browser_setup, data_setup):
                 side.cancel()
             await asyncio.wait({browser_setup, data_setup}, timeout=BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS)
             for side in (browser_setup, data_setup):
-                if side.done() and not side.cancelled():
+                if not side.done():
+                    _track_background_browser_cleanup(side)
+                elif not side.cancelled():
                     side.exception()  # retrieved: the raised error below is the reported one
             raise
         _record_timing("parallel_setup_total", t_parallel)

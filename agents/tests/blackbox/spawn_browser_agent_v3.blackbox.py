@@ -27458,13 +27458,14 @@ async def test_activity_cancelled_mid_setup_releases_the_connected_browser_clien
 
 @_in_browser_activity_context
 async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_browser():
-    """A browser side cancelled mid-connect bounds its own wedged disconnect.
+    """A browser side cancelled mid-connect stays owned until its wedged disconnect is bounded.
 
     Credential setup fails after DOMService connected but while the browser side
-    is still attaching. The cancelled browser side tears down its client itself;
-    a wedged CDP stop there must use the bounded, tracked disconnect, not an
-    inline await that outlives the parallel setup's teardown bound and leaves
-    the connected client unreleased.
+    is still attaching. The cancelled browser side tears down its client itself.
+    With production ordering (the 20s disconnect bound outlives the parallel
+    setup's 10s wait), the still-releasing side must stay tracked for the
+    worker's drain, and its wedged CDP stop must be detached at its own bound,
+    not awaited inline forever.
     """
     from contextlib import ExitStack
 
@@ -27484,13 +27485,16 @@ async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_brow
                 await release.wait()
 
     class _StillConnectingDomService(_FakeDomService):
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, cdp_multiplexer=None, **kwargs):
             super().__init__(*args, **kwargs)
+            self.cdp_multiplexer = cdp_multiplexer
             self.session.get_current_page = still_connecting
             self.disconnect = AsyncMock(side_effect=wedged_stop)
 
         async def connect(self):
             connected.set()
+
+    multiplexer = SimpleNamespace(close=AsyncMock())
 
     async def credential_setup_fails_after_connect(*_args, **_kwargs):
         await connected.wait()
@@ -27510,8 +27514,12 @@ async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_brow
                 "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
                     new=AsyncMock(return_value=[native_start])
                 ),
-                "domains.spawn_browser_agent_v3.handler.BROWSER_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.05),
-                "domains.spawn_browser_agent_v3.handler.BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.5),
+                "domains.spawn_browser_agent_v3.handler.open_browser_cdp_connection": dict(
+                    new=AsyncMock(return_value=("ws://127.0.0.1:1/devtools/browser/rose-single-cdp", multiplexer))
+                ),
+                # Production ordering: the disconnect bound outlives the setup wait.
+                "domains.spawn_browser_agent_v3.handler.BROWSER_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.5),
+                "domains.spawn_browser_agent_v3.handler.BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.05),
             },
         ):
             stack.enter_context(target)
@@ -27530,17 +27538,87 @@ async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_brow
                     ),
                     timeout=10,
                 )
-            own_cleanups = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
             _FakeDomService.last_instance.disconnect.assert_awaited()
+            own_cleanups = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
+            setup_sides = [task for task in own_cleanups if task.get_name() == "browser-setup:agent-1"]
+            assert setup_sides and not setup_sides[0].done(), (
+                "a browser side still releasing after the setup wait must stay tracked for the worker's drain"
+            )
+            await asyncio.wait(setup_sides, timeout=5)
+            assert setup_sides[0].done(), "the detached browser side must finish once its disconnect is bounded"
+            multiplexer.close.assert_awaited_once()  # a timed-out disconnect proves no release
+            own_cleanups = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
             assert any(
                 task.get_name() == handler._EXPIRED_OPTIONAL_CDP_TASK_NAME and not task.done()
                 for task in own_cleanups
-            ), "the wedged disconnect must be bounded and tracked, not awaited inline by the cancelled setup"
+            ), "the wedged disconnect must be detached at its own bound, not awaited inline forever"
         finally:
             release.set()
             pending = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
             if pending:
                 await asyncio.wait(pending, timeout=10)
+
+
+@_in_browser_activity_context
+async def test_playwright_connect_failure_with_a_hung_stop_still_disconnects_dom():
+    """A hung Playwright stop after a failed CDP attach does not block the DOMService release.
+
+    The Playwright side's own teardown runs before the browser setup's DOMService
+    disconnect; an unbounded stop there would keep the connected DOM client (and
+    Tilion's single CDP slot) attached indefinitely.
+    """
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    release = asyncio.Event()
+
+    async def hung_stop(*_args, **_kwargs):
+        await release.wait()
+
+    async def credential_setup_never_finishes(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    instance = _FakePlaywright(fake_browser)
+    instance.chromium.connect_over_cdp = AsyncMock(side_effect=RuntimeError("cdp attach refused"))
+    instance.stop = AsyncMock(side_effect=hung_stop)
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    _FakeDomService.last_instance = None
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(
+            dict(_PARALLEL_SETUP_SESSION),
+            fake_browser,
+            _FakeDomService,
+            **{
+                "domains.spawn_browser_agent_v3.handler.build_realm_credential_state": dict(
+                    new=credential_setup_never_finishes
+                ),
+                "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
+                    new=AsyncMock(return_value=[native_start])
+                ),
+                "playwright.async_api.async_playwright": dict(return_value=_FakeAsyncPlaywright(instance)),
+            },
+        ):
+            stack.enter_context(target)
+        try:
+            with pytest.raises(RuntimeError, match="cdp attach refused"):
+                await asyncio.wait_for(
+                    spawn_browser_agent_activity_v3(
+                        user_id="user-1",
+                        agent_id="agent-1",
+                        goal="Check the inbox",
+                        tool_call_id="tool-1",
+                        output_schema={"fields": [{"name": "result", "type": "string"}]},
+                        use_claude_mode=False,
+                        start_url="https://example.com",
+                    ),
+                    timeout=20,
+                )
+        finally:
+            release.set()
+    instance.stop.assert_awaited()
+    _FakeDomService.last_instance.disconnect.assert_awaited()
 
 
 async def _run_browser_activity_cancelled_mid_step(cancellation_details):
@@ -37747,6 +37825,10 @@ async def run_all_tests():
     await r.record_async(
         "setup_failure_bounds_hung_disconnect_of_connecting_browser",
         test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_browser,
+    )
+    await r.record_async(
+        "playwright_connect_failure_hung_stop_still_disconnects_dom",
+        test_playwright_connect_failure_with_a_hung_stop_still_disconnects_dom,
     )
     await r.record_async(
         "timed_out_browser_activity_leaves_the_tool_result_to_the_workflow",
