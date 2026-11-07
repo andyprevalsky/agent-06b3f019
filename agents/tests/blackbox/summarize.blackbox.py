@@ -1072,7 +1072,9 @@ async def _summarizer_prompt(page_metadata=None) -> str:
 
 
 def _metadata_block(prompt: str) -> str:
-    head = "PAGE METADATA (declared by the page, e.g. <meta> tags):\n---\n"
+    from helpers.summarize import PAGE_METADATA_HEADER
+
+    head = f"{PAGE_METADATA_HEADER}\n---\n"
     assert head in prompt, prompt[:600]
     return prompt.split(head, 1)[1].split("\n---\n", 1)[0]
 
@@ -1114,8 +1116,24 @@ async def test_summarize_page_metadata_is_title_first_allowlist_on_scholarly_pag
 
     block = _metadata_block(await _summarizer_prompt(metadata))
 
-    assert block.split("\n", 1)[0] == "title: RFC 9110: HTTP Semantics", block[:300]
-    assert block == "title: RFC 9110: HTTP Semantics\ncitation_publication_date: 2022/06/06", block
+    assert block.split("\n", 1)[0] == "html_title: RFC 9110: HTTP Semantics", block[:300]
+    assert block == "html_title: RFC 9110: HTTP Semantics\ncitation_publication_date: 2022/06/06", block
+
+
+async def test_summarize_page_metadata_labels_html_title_apart_from_document_title():
+    """RCA 2026-11-07: the <head> title must not read as the document's own title.
+
+    The RFC Editor's <title> is "RFC 9111: HTTP Caching" for a document headed
+    "HTTP Caching". Labelled plain ``title``, the summarizer reported it as
+    "Title: RFC 9111: HTTP Caching" and dropped the heading in 12 of 50 live
+    Foundry replays, so background-agent-message-smoke returned prefixed titles.
+    """
+    prompt = await _summarizer_prompt({"title": "RFC 9111: HTTP Caching", "citation_publication_date": "2022/06/06"})
+    header = prompt.split("\n---\n", 1)[0].rsplit("\n", 1)[1]
+
+    assert _metadata_block(prompt) == "html_title: RFC 9111: HTTP Caching\ncitation_publication_date: 2022/06/06"
+    assert "html_title is the <title> element" in header and "not its visible content" in header, header
+    assert "\ntitle: " not in prompt
 
 
 async def test_summarize_page_metadata_excludes_parallel_extract_ids():
@@ -1137,7 +1155,7 @@ async def test_summarize_page_metadata_excludes_parallel_extract_ids():
 
     prompt = await _summarizer_prompt(metadata)
 
-    assert _metadata_block(prompt) == "title: RFC 9110: HTTP Semantics\npublish_date: 2022-06-06"
+    assert _metadata_block(prompt) == "html_title: RFC 9110: HTTP Semantics\npublish_date: 2022-06-06"
     for leaked in ("extract_8c1f2b", "session_93ad7e", "truncated to 100000", "extract_id", "session_id", "warnings"):
         assert leaked not in prompt, leaked
 
@@ -1158,7 +1176,7 @@ async def test_summarize_page_metadata_validates_dates_and_sanitizes_values():
     block = _metadata_block(await _summarizer_prompt(metadata))
     lines = block.split("\n")
 
-    assert [line.split(": ", 1)[0] for line in lines] == ["title", "datePublished"], lines
+    assert [line.split(": ", 1)[0] for line in lines] == ["html_title", "datePublished"], lines
     assert lines[1] == "datePublished: 2022-06-06"
     title_value = lines[0].split(": ", 1)[1]
     assert title_value.startswith("RFC 9110: HTTP [2J Semantics x"), title_value
@@ -1227,8 +1245,14 @@ async def test_summarize_page_metadata_keeps_demo_cache_content_key():
     )
     title_only = await _summarizer_prompt({"title": "RFC 9110: HTTP Semantics"})
 
+    from helpers.summarize import PAGE_METADATA_HEADER
+
+    recorded_header = with_title_and_date.replace(
+        PAGE_METADATA_HEADER, "PAGE METADATA (declared by the page, e.g. <meta> tags):"
+    )
     assert with_title_and_date != without
     assert key(with_title_and_date) == key(without)
+    assert recorded_header != with_title_and_date and key(recorded_header) == key(without)
     assert key(title_only) == key(without)
     assert key(without.replace("Internet Standard", "Proposed Standard")) != key(without)
 
@@ -1248,6 +1272,10 @@ async def run_all_tests():
     await r.record_async(
         "summarize_page_metadata_is_title_first_allowlist_on_scholarly_page",
         test_summarize_page_metadata_is_title_first_allowlist_on_scholarly_page,
+    )
+    await r.record_async(
+        "summarize_page_metadata_labels_html_title_apart_from_document_title",
+        test_summarize_page_metadata_labels_html_title_apart_from_document_title,
     )
     await r.record_async(
         "summarize_page_metadata_excludes_parallel_extract_ids",

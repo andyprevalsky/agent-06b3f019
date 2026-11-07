@@ -915,7 +915,7 @@ def select_page_metadata(metadata: Any) -> Dict[str, str]:
         if found is None:
             continue
         name, value = found
-        line_chars = len(name) + 2 + len(value) + 1
+        line_chars = len(_PAGE_METADATA_LABELS.get(name, name)) + 2 + len(value) + 1
         if size + line_chars > _PAGE_METADATA_BLOCK_CHARS:
             continue
         selected[name] = value
@@ -923,9 +923,22 @@ def select_page_metadata(metadata: Any) -> Dict[str, str]:
     return selected
 
 
+# Scrape providers report the HTML <title> element as ``title``. Sites often
+# prefix it ("RFC 9110: HTTP Semantics" titles a document headed "HTTP
+# Semantics"), so the summarizer sees it under its element name, not as the
+# document title (RCA 2026-11-07).
+_PAGE_METADATA_LABELS = {"title": "html_title"}
+PAGE_METADATA_HEADER = (
+    "PAGE METADATA (declared in the page's <head>, not its visible content; "
+    "html_title is the <title> element; report it as such, apart from the title the document itself states):"
+)
+
+
 def format_page_metadata(metadata: Any) -> str:
-    """The allowlisted page facts as ``key: value`` lines (empty when none)."""
-    return "\n".join(f"{key}: {value}" for key, value in select_page_metadata(metadata).items())
+    """The allowlisted page facts as ``label: value`` lines (empty when none)."""
+    return "\n".join(
+        f"{_PAGE_METADATA_LABELS.get(key, key)}: {value}" for key, value in select_page_metadata(metadata).items()
+    )
 
 
 @activity.defn
@@ -988,7 +1001,7 @@ async def summarize_and_filter_links(
 
         metadata_text = format_page_metadata(page_metadata)
         metadata_section = (
-            f"PAGE METADATA (declared by the page, e.g. <meta> tags):\n---\n{metadata_text}\n---\n\n"
+            f"{PAGE_METADATA_HEADER}\n---\n{metadata_text}\n---\n\n"
             if metadata_text
             else ""
         )
