@@ -586,19 +586,24 @@ RELEASE_KEYS = ("run_id", "fleet_dir", "fleet_owner_token", "resources_released"
 
 
 def refresh_release(run_dir: Path, summary: dict) -> None:
-    """Re-read each finished job's fleet teardown receipts through the campaign's own release
-    verifier (in memory only). A recorded verified release stands; an unverified one stays unverified."""
+    """For finished jobs whose summary never recorded a release check (plain campaigns before
+    I-29), read the fleet teardown receipts through the campaign's own release verifier, in
+    memory only. The runner's exit-time check already covers jobs that recorded one; a receipt
+    that cannot be verified, or that raises, leaves the job unverified."""
     parts = run_dir.resolve().parts
     if len(parts) < 5 or parts[-4:-1] != (".context", "benchmarks", "campaigns"):
         return  # The verifier binds receipts to the owning workspace root.
     verify = None
     for job in summary.get("jobs") or []:
-        if (not isinstance(job, dict) or not job.get("finished_at") or not isinstance(job.get("log"), str)
-                or (job.get("resources_released") is True and job.get("lifecycle_verified") is True)):
+        if (not isinstance(job, dict) or "resources_released" in job or not job.get("finished_at")
+                or not isinstance(job.get("log"), str)):
             continue
-        verify = verify or runpy.run_path(str(HERE / "run-bench-campaign.py"))["released_attempt"]
-        found = verify(Path(*parts[:-4]), job)
-        if found.get("resources_released") is True:
+        try:
+            verify = verify or runpy.run_path(str(HERE / "run-bench-campaign.py"))["released_attempt"]
+            found = verify(Path(*parts[:-4]), job)
+        except Exception:
+            continue
+        if isinstance(found, dict) and found.get("resources_released") is True:
             job.update({key: found[key] for key in RELEASE_KEYS if key in found})
 
 

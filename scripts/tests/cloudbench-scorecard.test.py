@@ -198,7 +198,8 @@ class Fixtures:
                          kind="sharded", run_dir=str(admission), triggered_at=T0, scheduled_total=scheduled)
         return admission
 
-    def workspace_campaign(self) -> Path:
+    def workspace_campaign(self, specs=(("alpha", "passed", "PASSED", True), ("beta", "failed", "FAILED", True),
+                                         ("gamma", "passed", "PASSED", False))) -> Path:
         """A finished plain (--retry-infra 0) campaign in its workspace layout, shaped like
         campaign-20261107-211039-3331466: summary.json jobs carry only the exit verdict, while each
         job's fleet run holds the controller's teardown receipts. j0003's provider teardown never
@@ -207,9 +208,7 @@ class Fixtures:
         directory = root / ".context/benchmarks/campaigns/campaign-20261107-211039-3331466"
         audits = root / ".git/cloudbench-fleet-audits"
         jobs = []
-        for index, (task_name, status, verdict, verified) in enumerate(
-                (("alpha", "passed", "PASSED", True), ("beta", "failed", "FAILED", True),
-                 ("gamma", "passed", "PASSED", False)), start=1):
+        for index, (task_name, status, verdict, verified) in enumerate(specs, start=1):
             run_id, owner = f"20261107-212636-354385{index}", f"{index:032x}"
             fleet = root / ".context/fleet/runs" / run_id
             meta = (f"version=1\nfleet_owner_token={owner}\nrun_id={run_id}\napp=navi-whisper-lux-bench\n"
@@ -237,7 +236,7 @@ class Fixtures:
                          "terminal_task": True})
         write(directory / "summary.json", {"campaign_id": directory.name, "started_at": "2026-10-18T19:28:52+00:00",
                                            "e2e_started_at_epoch": T0, "finished_at": "2026-10-18T19:51:00+00:00",
-                                           "status": "failed", "runs": 1, "task_count": 3, "total_jobs": 3,
+                                           "status": "failed", "runs": 1, "task_count": len(jobs), "total_jobs": len(jobs),
                                            "retry_infra": 0, "jobs": jobs})
         LEDGER["record"]("launch", directory.name, ledger=self.ledger, goal="campaign-goal", slice="mixed3",
                          kind="campaign", run_dir=str(directory), triggered_at=T0)
@@ -650,6 +649,22 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(exp["reasons"][0][1], "Expected tool 'spawn_browser_agent' not found in messages",
                          "the verified fleet handle also binds the job's report card")
         self.assertEqual((directory / "summary.json").read_bytes(), before, "rendering never rewrites evidence")
+        self.valid(data)
+
+    def test_campaign_with_malformed_release_receipts_renders_them_unverified(self):
+        # A looping or malformed receipt is an unverified release, never a failed render.
+        directory = self.f.workspace_campaign(tuple((name, "passed", "PASSED", True)
+                                                    for name in ("alpha", "beta", "gamma", "delta")))
+        runs = self.tmp / "ws/.context/fleet/runs"
+        loop = runs / "20261107-212636-3543852/loop"
+        loop.symlink_to(loop)
+        write(loop.parent / "teardown-ownership.path", f"{loop}\n")  # Path.resolve() -> RuntimeError
+        write(runs / "20261107-212636-3543853/_batch/run.json", "[" * 100000 + "]" * 100000)  # RecursionError
+        write(runs / "20261107-212636-3543854/_batch/run.json", [])  # AttributeError
+        data = render(directory, self.f)
+        exp, text = data["experiment"], CARD["render_text"](data)
+        self.assertEqual((exp["released"], exp["lifecycle_verified"]), ({"yes": 1, "of": 4}, {"yes": 1, "of": 4}))
+        self.assertIn("🟠 Guests released · 1/4 terminal jobs · no native audit", text)
         self.valid(data)
 
     def test_missing_data_renders_explicit_states(self):

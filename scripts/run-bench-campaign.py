@@ -804,16 +804,24 @@ def task_verdict(task: dict) -> dict[str, object]:
                 "SKIPPED"}}
 
 
+def unverified_reason(error: Exception) -> str:
+    """Why a recorded result or release seal could not be verified (bounded)."""
+    return f"terminal result or release remains unverified ({type(error).__name__}: {error})"[:240]
+
+
 def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
-    """Read the existing physical result and full-release seal, without regrading."""
+    """Read the existing physical result and full-release seal, without regrading.
+
+    Any unreadable, looping or malformed receipt is an unverified release, never a
+    campaign failure: every exited attempt runs this check, including healthy peers'."""
     try:
         found = terminal_task(root, job)
         if found is None:
             return {"resources_released": False, "retry_blocked": "physical run handle unavailable"}
         fleet, record, task = found
         verdict = task_verdict(task)
-    except (OSError, ValueError, KeyError, TypeError):
-        return {"resources_released": False, "retry_blocked": "terminal result or release remains unverified"}
+    except Exception as error:
+        return {"resources_released": False, "retry_blocked": unverified_reason(error)}
     try:
         run_id = fleet.name
         lifecycle = json.loads((fleet / "_batch/lifecycle.json").read_text())
@@ -844,10 +852,9 @@ def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
                 **verdict, "resources_released": closed,
                 "lifecycle_verified": closed and lifecycle.get("status") == "verified",
                 "released_at_epoch": float(epoch_bytes) if closed else None}
-    except (OSError, ValueError, KeyError, TypeError):
+    except Exception as error:
         # The recorded verdict stands; only release remains unverified.
-        return {**verdict, "resources_released": False,
-                "retry_blocked": "terminal result or release remains unverified"}
+        return {**verdict, "resources_released": False, "retry_blocked": unverified_reason(error)}
 
 
 def infra_stop_policy() -> str:

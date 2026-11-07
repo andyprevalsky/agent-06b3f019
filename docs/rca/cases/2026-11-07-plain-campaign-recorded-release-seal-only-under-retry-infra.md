@@ -24,7 +24,7 @@ sources:
   - commit 268e9550b0 (base; fix on branch rca/i-29-20261107)
   - benchmark run campaign-20261107-211039-3331466 (descend-launch-e20, run descend-failed-neverrun-20261106)
   - fleet run 20261107-212636-3543850 (first of 16 copies; last 20261107-221203-488132)
-repro: scripts/tests/cloudbench-scorecard.test.py (test_plain_campaign_counts_verified_fleet_teardown_receipts); scripts/tests/campaign-hub-grouping.test.ts ("a plain campaign records each exited attempt's verified fleet release seal")
+repro: scripts/tests/cloudbench-scorecard.test.py (test_plain_campaign_counts_verified_fleet_teardown_receipts, test_campaign_with_malformed_release_receipts_renders_them_unverified); scripts/tests/campaign-hub-grouping.test.ts ("a plain campaign records each exited attempt's verified fleet release seal", "a looping release receipt is unverified and never stops a healthy peer")
 status: fixed
 ---
 
@@ -75,11 +75,21 @@ exit by 14–31 s, so the receipts were present when the campaign recorded the j
   disposition (verdict + release seal + fleet handle), with or without
   `--retry-infra`; retry bookkeeping stays gated. `attempt_verdict` is deleted
   (one verifier, one path).
-- `cloudbench-scorecard.py`: `refresh_release` re-reads finished jobs' fleet
-  receipts at render time through that same `released_attempt`, in memory only,
-  bound to the workspace derived from `<root>/.context/benchmarks/campaigns/<id>`.
-  A recorded verified release stands; only a verifier-confirmed release is
-  added, so a job whose teardown never verified stays unverified.
+- `released_attempt` now runs on every exit, so it must never raise: any
+  exception while reading the run record or seal (symlink-loop `RuntimeError`
+  from `Path.resolve()`, `RecursionError` from deeply nested JSON,
+  `AttributeError` from non-dict JSON) returns an unverified release with the
+  error type in `retry_blocked`. Adversarial review of 9580f1c9e4 reproduced the
+  crash: one looping receipt raised out of the exit handler, the `finally` block
+  TERMed the healthy peer at 0.9 s and summary.json stayed `running`.
+- `cloudbench-scorecard.py`: `refresh_release` re-reads fleet receipts at
+  render time through that same `released_attempt`, in memory only, bound to
+  the workspace derived from `<root>/.context/benchmarks/campaigns/<id>`, and
+  only for finished jobs whose summary has no `resources_released` key (plain
+  summaries written before this fix; the runner's exit-time check covers the
+  rest, keeping render cost flat). Only a verifier-confirmed release is added;
+  an unverifiable or raising receipt leaves the job unverified. Legacy epoch20
+  renders in ~1.7 s because each check parses its full `_batch/run.json`.
 - Real card after the fix (summary.json byte-identical): `✅ Guests released ·
   16/16`, `✅ Lifecycle verified · 16/16`, four distinct failure reasons,
   `Cost $1.30 metered (16/16)`, cache 47% (16/16).
@@ -89,7 +99,8 @@ exit by 14–31 s, so the receipts were present when the campaign recorded the j
 
 ## Human feedback
 
-None recorded.
+None recorded. (The parent agent's adversarial code review requested the
+exception hardening and the render-cost bound described in Solution.)
 
 ## Reusable lesson
 

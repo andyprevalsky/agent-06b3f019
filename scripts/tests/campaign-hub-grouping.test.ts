@@ -2003,7 +2003,7 @@ test(
 // verified fleet teardowns rendered "Guests released · 0/16 terminal jobs".
 // Each exited attempt now records the same release seal a retry reads; a
 // teardown that never verified (no provider epoch) stays unverified.
-const RELEASE_SEAL_CHILD = `import json, os, sys
+const RELEASE_SEAL_CHILD = `import json, os, sys, time
 from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 job, task = os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"], os.environ["RUN_BENCH_CAMPAIGN_TASK"]
@@ -2015,9 +2015,15 @@ meta = ("version=1\\nfleet_owner_token=%s\\nrun_id=%s\\napp=navi-whisper-lux-ben
 for directory in (audit, fleet / "teardown-ownership"):
     directory.mkdir(parents=True)
     (directory / "meta").write_text(meta)
-    if job != os.environ["UNVERIFIED_JOB"]:
+    if job != os.environ.get("UNVERIFIED_JOB"):
         (directory / "provider-teardown-verified.epoch").write_text("1794087712")
 (fleet / "teardown-ownership.path").write_text(str(audit) + "\\n")
+if job == os.environ.get("LOOP_JOB"):
+    # The recorded audit path is a symlink loop: Path.resolve() raises RuntimeError.
+    (fleet / "loop").symlink_to(fleet / "loop")
+    (fleet / "teardown-ownership.path").write_text(str(fleet / "loop") + "\\n")
+if job == os.environ.get("SLOW_JOB"):
+    time.sleep(4)
 (fleet / "_batch").mkdir(parents=True)
 (fleet / "_batch/lifecycle.json").write_text(json.dumps({
     "version": 1, "run_id": job, "status": "verified", "workspace_root": str(root),
@@ -2108,6 +2114,74 @@ test(
       unverified.task_status,
       "PASSED",
       "the verdict survives an unverified release",
+    );
+  },
+);
+
+test(
+  "a looping release receipt is unverified and never stops a healthy peer",
+  { timeout: 120_000 },
+  async () => {
+    const fixture = fixtureRoot("release-loop");
+    const child = path.join(fixture.root, "release-child.py");
+    writeFileSync(child, RELEASE_SEAL_CHILD);
+    writeFileSync(
+      fixture.fleet,
+      `#!/usr/bin/env bash\nexec '${project}/agents/venv/bin/python' '${child}' '${fixture.root}'\n`,
+    );
+    const campaigns = path.join(fixture.root, "campaigns");
+    const run = spawn(
+      path.join(project, "agents/venv/bin/python"),
+      [
+        path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+        "--root",
+        fixture.root,
+        "--runs",
+        "1",
+        "--concurrency",
+        "2",
+        "--task",
+        "demo-fleet-alpha",
+        "--task",
+        "demo-fleet-beta",
+      ],
+      {
+        cwd: fixture.root,
+        env: {
+          ...process.env,
+          BENCHMARK_HUB_PARENT_RUN_ID: "release-loop-parent",
+          RUN_BENCH_CAMPAIGN_ID: "release-loop",
+          RUN_BENCH_CAMPAIGN_ROOT: campaigns,
+          RUN_BENCH_FLEET_BIN_UNDER_TEST: fixture.fleet,
+          CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY: "0",
+          LOOP_JOB: "r001-j0001",
+          SLOW_JOB: "r001-j0002",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    run.stdout!.on("data", (chunk) => (output += chunk.toString()));
+    run.stderr!.on("data", (chunk) => (output += chunk.toString()));
+    await once(run, "close");
+    assert.equal(run.exitCode, 0, output);
+    const summary = JSON.parse(
+      readFileSync(path.join(campaigns, "release-loop/summary.json"), "utf8"),
+    );
+    assert.equal(summary.status, "passed");
+    const jobs = Object.fromEntries(
+      summary.jobs.map((job: any) => [job.job_id, job]),
+    );
+    const looping = jobs["r001-j0001"];
+    assert.deepEqual(
+      [looping.status, looping.task_status, looping.resources_released],
+      ["passed", "PASSED", false],
+    );
+    assert.match(looping.retry_blocked, /RuntimeError/);
+    const peer = jobs["r001-j0002"];
+    assert.deepEqual(
+      [peer.status, peer.resources_released, peer.lifecycle_verified],
+      ["passed", true, true],
     );
   },
 );
