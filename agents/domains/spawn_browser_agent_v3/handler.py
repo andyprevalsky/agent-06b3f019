@@ -567,6 +567,26 @@ async def _disconnect_browser(dom_service: Any) -> bool:
     )
 
 
+async def _release_browser_client(dom_service: Any) -> bool:
+    """Bounded disconnect; when it fails, close the loopback CDP multiplexer itself.
+
+    A timed-out or failed disconnect does not prove the client detached (Tilion
+    admits one CDP client). DOMService.disconnect clears its multiplexer
+    reference, so capture it first. True only when the client was released.
+    """
+    multiplexer = getattr(dom_service, "cdp_multiplexer", None)
+    if await _disconnect_browser(dom_service):
+        return True
+    if multiplexer is None:
+        return False
+    return await _await_bounded_browser_cleanup(
+        multiplexer.close(),
+        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
+        timeout_message="Browser CDP multiplexer close timed out",
+        failure_message="Browser CDP multiplexer close failed",
+    )
+
+
 async def disconnect_browser_after_passkey_capture(
     dom_service: Any,
     capture_passkey_usage: Any,
@@ -9102,16 +9122,9 @@ async def _spawn_browser_agent_activity_v3_real(
                         _input_page,
                     ) = await _connect_playwright()
             except BaseException:
-                # Bounded like every other terminal disconnect. A wedged or failed one does
-                # not prove the slot was released, so then close the loopback multiplexer
-                # itself: it drops every client and Tilion's single upstream socket.
-                if not await _disconnect_browser(_dom_service) and _cdp_multiplexer is not None:
-                    await _await_bounded_browser_cleanup(
-                        _cdp_multiplexer.close(),
-                        timeout_s=BROWSER_DISCONNECT_TIMEOUT_SECONDS,
-                        timeout_message="Browser setup CDP multiplexer close timed out",
-                        failure_message="Browser setup CDP multiplexer close failed",
-                    )
+                # Bounded; a wedged or failed disconnect falls back to closing the
+                # loopback multiplexer, which drops Tilion's single upstream socket.
+                await _release_browser_client(_dom_service)
                 await _stop_playwright_resources(
                     _playwright_browser,
                     _playwright_instance,
@@ -13167,9 +13180,11 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if dom_service:
             with contextlib.suppress(Exception):
-                await _disconnect_browser(dom_service)
+                released = await _release_browser_client(dom_service)
                 _tilion_leave_session()
-                dom_service = None
+                if released:
+                    # Kept otherwise, so the finally-scheduled cleanup retries the release.
+                    dom_service = None
 
         error_context = f"Failed during: {last_action}"
         error_message = build_context_summary(

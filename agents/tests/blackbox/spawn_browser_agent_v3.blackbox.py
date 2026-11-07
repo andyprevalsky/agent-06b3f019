@@ -27560,6 +27560,89 @@ async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_brow
 
 
 @_in_browser_activity_context
+async def test_failed_activity_closes_the_multiplexer_when_its_disconnect_is_wedged():
+    """A failed activity whose DOMService disconnect wedges still frees Tilion's CDP slot.
+
+    Browser setup connected and handed its clients to the activity, then credential
+    setup failed. The error handler's bounded disconnect timed out; a timeout does
+    not prove the loopback client detached, so the multiplexer (captured before
+    disconnect clears it) must be closed, and the service kept for the final cleanup.
+    """
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    release = asyncio.Event()
+    browser_ready = asyncio.Event()
+
+    async def wedged_stop(*_args, **_kwargs):
+        # Like DomService.disconnect, a cancel while draining continues into a wedged stop.
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+
+    class _WedgedDisconnectDomService(_FakeDomService):
+        def __init__(self, *args, cdp_multiplexer=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.cdp_multiplexer = cdp_multiplexer
+            self.disconnect = AsyncMock(side_effect=wedged_stop)
+
+        async def connect(self):
+            browser_ready.set()
+
+    async def credential_setup_fails_after_browser(*_args, **_kwargs):
+        await browser_ready.wait()
+        await asyncio.sleep(0.2)  # the browser side has returned its handles
+        raise RuntimeError("credential setup failed")
+
+    multiplexer = SimpleNamespace(close=AsyncMock())
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(
+            dict(_PARALLEL_SETUP_SESSION),
+            fake_browser,
+            _WedgedDisconnectDomService,
+            **{
+                "domains.spawn_browser_agent_v3.handler.build_realm_credential_state": dict(
+                    new=credential_setup_fails_after_browser
+                ),
+                "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
+                    new=AsyncMock(return_value=[native_start])
+                ),
+                "domains.spawn_browser_agent_v3.handler.open_browser_cdp_connection": dict(
+                    new=AsyncMock(return_value=("ws://127.0.0.1:1/devtools/browser/rose-single-cdp", multiplexer))
+                ),
+                "domains.spawn_browser_agent_v3.handler.BROWSER_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.05),
+            },
+        ):
+            stack.enter_context(target)
+        earlier_cleanups = set(handler._background_browser_cleanup_tasks)
+        try:
+            with pytest.raises(RuntimeError, match="credential setup failed"):
+                await asyncio.wait_for(
+                    spawn_browser_agent_activity_v3(
+                        user_id="user-1",
+                        agent_id="agent-1",
+                        goal="Check the inbox",
+                        tool_call_id="tool-1",
+                        output_schema={"fields": [{"name": "result", "type": "string"}]},
+                        use_claude_mode=False,
+                        start_url="https://example.com",
+                    ),
+                    timeout=20,
+                )
+            _FakeDomService.last_instance.disconnect.assert_awaited()
+            multiplexer.close.assert_awaited()
+        finally:
+            release.set()
+            pending = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
+            if pending:
+                await asyncio.wait(pending, timeout=10)
+
+
+@_in_browser_activity_context
 async def test_playwright_connect_failure_with_a_hung_stop_still_disconnects_dom():
     """A hung Playwright stop after a failed CDP attach does not block the DOMService release.
 
@@ -37825,6 +37908,10 @@ async def run_all_tests():
     await r.record_async(
         "setup_failure_bounds_hung_disconnect_of_connecting_browser",
         test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_browser,
+    )
+    await r.record_async(
+        "failed_activity_closes_multiplexer_when_disconnect_wedged",
+        test_failed_activity_closes_the_multiplexer_when_its_disconnect_is_wedged,
     )
     await r.record_async(
         "playwright_connect_failure_hung_stop_still_disconnects_dom",
