@@ -81,9 +81,11 @@ The live local run ae7983a2 (Nov 7, Tilion) hit three more defects in sequence:
 - `handler.py` init uses `_resume_context_from_session_info(session_data, ...)`.
   The initial state is the realm its material belongs to, and the first step's
   realm transition prepares google.com and reloads.
-- `handler.py` parallel setup gathers with `return_exceptions=True`. When either
-  side failed, it disconnects a connected DOMService, stops Playwright and then
-  re-raises.
+- `handler.py` parallel setup still raises exactly what `asyncio.gather` raises.
+  On that exit it cancels the unfinished side and waits for it within the
+  terminal disconnect bound. A finished browser side's DOMService and Playwright
+  handles become the activity's, and the existing except/finally cleanup
+  releases them.
 - `download_persist.py` accepts `blob:` URLs. It reads them in the page that
   created them, under Chrome's suggested filename, with no second request to
   LinkedIn's rate-limited endpoint. It logs in-page fetch failures instead of
@@ -104,7 +106,7 @@ connections plus 480 messages. Integration: CONNECTED.
 
 ## Regression tests
 
-- `spawn_browser_agent_v3.blackbox.py`: `test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to` (fails with the exact passkey error on the old code), `test_credential_setup_failure_disconnects_the_connected_browser_clients` (DOMService disconnect never awaited on the old code).
+- `spawn_browser_agent_v3.blackbox.py`: `test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to` (fails with the exact passkey error on the old code), `test_credential_setup_failure_disconnects_the_connected_browser_clients` (DOMService disconnect never awaited on the old code), `test_activity_cancelled_mid_setup_releases_the_connected_browser_clients` (activity cancelled after the browser side connected: client never released on the old code).
 - `browser_tilion.blackbox.py`: `test_tilion_blob_download_is_read_from_the_page_with_one_request` (real Chromium behind the fake Tilion gateway; asserts one archive request).
 - backend `integrations` blackbox: `POST /linkedin/upload first installment without Connections.csv -> 422` (200 / `contacts: 0` on the old code).
 
