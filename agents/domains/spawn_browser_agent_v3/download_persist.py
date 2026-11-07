@@ -633,9 +633,9 @@ class BrowserDownloadPersister:
         # and fails the compressed file_pointer. Always materialize Chrome
         # download URLs; upload overwrite is idempotent. Dedupe is guid-keyed.
 
-        if not url.startswith(("http://", "https://")):
+        if not url.startswith(("http://", "https://", "blob:")):
             logger.warning(
-                "[DownloadPersist] Completed download missing http(s) URL; cannot materialize",
+                "[DownloadPersist] Completed download missing http(s) or blob URL; cannot materialize",
                 agent_id=self.agent_id,
                 provider=self.provider,
                 filename=filename,
@@ -661,6 +661,8 @@ class BrowserDownloadPersister:
                 config=self.config,
                 provider=self.provider,
                 trust_download=True,
+                # A blob: URL names no file; Chrome's suggestedFilename does.
+                **({"filename": filename} if url.startswith("blob:") else {}),
                 **({"user_id": self.user_id} if self.user_id else {}),
             )
         if result:
@@ -717,16 +719,18 @@ async def persist_navigation_download_via_page_fetch(
     provider: Optional[str] = None,
     trust_download: bool = False,
     user_id: Optional[str] = None,
+    filename: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Credentialed in-page fetch + session write for goto ERR_ABORTED / CDP download fallback.
 
     When ``trust_download`` is True (Chrome ``Browser.download*`` path), skip the
     Content-Disposition / URL-extension heuristic — Chrome already decided this
     is a Downloads-folder file (e.g. TinyPNG ``inline; filename=rs.png``).
+    A ``blob:`` URL is read from the page that created it, before it is revoked.
     """
     import json
 
-    suggested = filename_from_url(url)
+    suggested = os.path.basename(filename or "") or filename_from_url(url)
     expression = f"""
     (async () => {{
       const response = await fetch({json.dumps(url)}, {{ credentials: "include" }});
@@ -763,9 +767,21 @@ async def persist_navigation_download_via_page_fetch(
         session_id=cdp_session.session_id,
     )
     if evaluated.get("exceptionDetails"):
+        logger.warning(
+            "[DownloadPersist] In-page download fetch failed",
+            session_id=session_id,
+            url=url[:200],
+            error=str((evaluated.get("exceptionDetails") or {}).get("exception", {}).get("description") or "")[:200],
+        )
         return None
     payload = (evaluated.get("result") or {}).get("value") or {}
     if not payload.get("ok") or not payload.get("base64"):
+        logger.warning(
+            "[DownloadPersist] In-page download fetch returned no file",
+            session_id=session_id,
+            url=url[:200],
+            status=payload.get("status"),
+        )
         return None
     filename = str(payload.get("filename") or suggested)
     headers = {"content-disposition": str(payload.get("disposition") or "attachment")}
