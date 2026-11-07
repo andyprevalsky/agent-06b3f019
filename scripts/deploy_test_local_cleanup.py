@@ -265,6 +265,230 @@ def structural_cleanup(state, receipt, proof):
     return gate
 
 
+def _premanifest_scan_main():
+    """Fixed read-only extension of the native scanner for token/root custody."""
+    try:
+        signal.alarm(25)
+        raw = sys.stdin.buffer.read(65537)
+        request = json.loads(raw)
+        if (len(raw) > 65536 or set(request) != {'uid', 'pid', 'birth', 'root', 'token', 'owner_pid'}
+                or os.geteuid() != 0 or type(request['uid']) is not int or request['uid'] <= 0
+                or os.environ.get('SUDO_UID') != str(request['uid'])
+                or type(request['pid']) is not int or request['pid'] <= 1
+                or type(request['owner_pid']) is not int or request['owner_pid'] <= 1
+                or not isinstance(request['token'], str) or not re.fullmatch('[0-9a-f]{32}', request['token'])):
+            raise ValueError('scan identity')
+        original = identity(request['pid'])
+        if original[:3] != (request['uid'], request['uid'], request['birth']):
+            raise ValueError('caller changed')
+        ancestor = os.getppid()
+        for _ in range(6):
+            if ancestor == request['pid']:
+                break
+            uid, euid, birth, ancestor = identity(ancestor)
+            if uid not in (0, request['uid']) or euid not in (0, request['uid']):
+                raise ValueError('foreign caller')
+        else:
+            raise ValueError('caller ancestry')
+        root = Path(request['root'])
+        if (not root.is_absolute() or str(root) != request['root'] or len(root.parts) < 3
+                or root.resolve(strict=True) != root or root.stat().st_uid != request['uid']):
+            raise ValueError('root custody')
+        if Path('/proc', str(request['owner_pid'])).exists():
+            raise ValueError('owner live or reused')
+        before = {p.name for p in Path('/proc').glob('[0-9]*')}
+        scan_roots([root], birth_guard=True, excluded=(request['pid'],))
+        for value in before:
+            entry = Path('/proc', value)
+            if int(value) in (os.getpid(), request['pid']):
+                continue
+            try:
+                birth = identity(int(value))
+                proc_root = Path(os.readlink(entry / 'root').removesuffix(' (deleted)'))
+                argv = (entry / 'cmdline').read_bytes().split(b'\0')
+                env = (entry / 'environ').read_bytes().split(b'\0')
+                if (proc_root == root or root in proc_root.parents
+                        or any(a == os.fsencode(root) or a.startswith(os.fsencode(str(root) + '/')) for a in argv)
+                        or os.fsencode('RUN_STACK_CLEANUP_TOKEN=' + request['token']) in env
+                        or identity(int(value)) != birth):
+                    raise ValueError('active or changed process')
+            except (FileNotFoundError, ProcessLookupError):
+                if entry.exists():
+                    raise ValueError('unobservable process')
+        after = {p.name for p in Path('/proc').glob('[0-9]*')}
+        if after - before or identity(request['pid']) != original:
+            raise ValueError('process census changed')
+        print(json.dumps({'request_sha256': hashlib.sha256(raw).hexdigest(), 'quiescent': True}))
+    except Exception:
+        print(json.dumps({'quiescent': False}))
+        raise SystemExit(2)
+
+
+def premanifest_card_scan(root, owner):
+    import hashlib
+    import inspect
+    import json
+    import subprocess
+    from deploy_test_process_scan import ProcessAccessError, identity, scan_roots
+    uid, euid, birth, _ = identity(os.getpid())
+    need(uid == euid and uid > 0, 'Card scan requires original nonroot caller')
+    request = dict(uid=uid, pid=os.getpid(), birth=birth, root=str(root),
+                   token=owner['token'], owner_pid=owner['pid'])
+    raw = json.dumps(request, sort_keys=True).encode()
+    program = ('import os,sys,json,hashlib,signal,re\nfrom pathlib import Path\n'
+               + inspect.getsource(ProcessAccessError) + '\n' + inspect.getsource(identity) + '\n'
+               + inspect.getsource(scan_roots) + '\n' + inspect.getsource(_premanifest_scan_main)
+               + '\n_premanifest_scan_main()\n')
+    result = subprocess.run(['/usr/bin/sudo', '-n', '/usr/bin/python3', '-I', '-S', '-B', '-c', program],
+                            input=raw, capture_output=True, timeout=30, close_fds=True,
+                            env={'PATH': '/usr/bin:/bin', 'LANG': 'C', 'LC_ALL': 'C'})
+    need(result.returncode == 0 and len(result.stdout) <= 4096, 'Card process custody unverified')
+    need(json.loads(result.stdout) == {'request_sha256': hashlib.sha256(raw).hexdigest(), 'quiescent': True}
+         and identity(os.getpid())[:3] == (uid, euid, birth), 'Card scan response changed')
+
+
+def premanifest_card_database(database):
+    # Reuse the existing read-only native catalog query, never a cleanup operation.
+    import runpy
+    from deploy_test_cycle import ROOT
+    return runpy.run_path(str(ROOT / 'agents/benchmarks/local_cleanup_reconcile.py'))['_database_present'](database)
+
+
+def premanifest_card_absent(root, run, owner, database, ports):
+    premanifest_card_scan(root, owner)
+    listeners = set()
+    for table in ('/proc/net/tcp', '/proc/net/tcp6'):
+        for line in Path(table).read_text().splitlines()[1:]:
+            row = line.split()
+            if row[3] == '0A':
+                listeners.add(int(row[1].rsplit(':', 1)[1], 16))
+    need(not set(ports.values()) & listeners, 'Card listener remains')
+    need(premanifest_card_database(database) is None, 'Card database present')
+    premanifest_card_scan(root, owner)
+
+
+def premanifest_card(state, receipt, proof):
+    """Only resource closure of a cancelled FILE startup; original evidence stays failed."""
+    import hashlib
+    import sys
+    from deploy_test_cycle import ROOT, bounded_read, digest, sha_file
+    gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+    root = Path(gate['worker_root']).resolve(strict=True)
+    name = 'agentcard-lifecycle'
+    need(gate.get('name') == gate.get('category') == name and gate.get('worker_transport') == 'local-isolated'
+         and gate.get('case_protocol') is True and gate.get('result_transport') == 'file'
+         and gate.get('cwd') == gate['worker_root'] == str(root)
+         and not gate.get('native_backend') and not gate.get('native_cloud'), 'pre-manifest Card binding')
+    command = gate['command']
+    need(len(command) == 4 and Path(command[0]).resolve(strict=True) == Path(sys.executable).resolve(strict=True)
+         and command[1:] == [str(ROOT / 'scripts/deploy_test_worker.py'), '--root', str(root)]
+         and receipt.get('command') == command, 'pre-manifest native command')
+    binding = receipt.get('execution_binding', {})
+    need(binding.get('contract_digest') == digest(gate)
+         and all(isinstance(binding.get(k), str) and binding[k] for k in ('environment', 'input_fingerprint'))
+         and receipt.get('host_admission', {}).get('started') is True
+         and receipt['host_admission'].get('lock') == str(root / '.context/native-worker-admission.lock'),
+         'pre-manifest execution binding')
+    need(receipt.get('lifecycle') == 'native-producer' and receipt.get('executed') is True
+         and receipt.get('complete') is False and receipt.get('native_exit') == 1
+         and type(receipt['native_exit']) is int and receipt.get('cancelled') is True
+         and receipt.get('timed_out') is False and receipt.get('lingering_group') is True,
+         'pre-manifest cancelled receipt')
+    names = {'request.json', 'receipt.json', 'result.json', 'native-result.json', 'case.log',
+             'services.log', 'local-stack-owner.json', 'local-benchmark-owner.json'}
+    need(set(proof['files']) == names, 'pre-manifest sealed inventory')
+    folder = Path(receipt['log']).parent
+    need(folder.resolve(strict=True) == folder and Path(receipt['log']) == folder / 'output.log'
+         and receipt.get('worker_result') == str(folder / 'result.json'), 'pre-manifest result path')
+    def sealed(path, key, text=False):
+        need(not path.is_symlink() and path.resolve(strict=True) == path and path.is_file()
+             and sha_file(path) == proof['files'][key], 'pre-manifest artifact changed: ' + key)
+        if text:
+            need(path.stat().st_size <= 65536, 'pre-manifest log bound')
+            return path.read_text()
+        return bounded_read(path, key)
+    request, result, recorded = [sealed(folder / n, n) for n in ('request.json', 'result.json', 'receipt.json')]
+    need(recorded == receipt and all(row.get(k) == receipt.get(k) for row in (request, result)
+                                    for k in ('source', 'token', 'gate'))
+         and request.get('worker_root') == result.get('worker_root') == str(root)
+         and request.get('checks') == gate['checks'] == [name] and request.get('skips') == {},
+         'pre-manifest source/token/inventory')
+    recipe = request['worker_recipe']
+    spec = recipe.get('cases', {}).get(name, {})
+    need(recipe == gate.get('worker_recipe') and set(recipe) == {'cases'} and set(recipe['cases']) == {name}
+         and spec.get('cwd') == '.' and spec.get('aggregate') is True
+         and spec.get('command') == ['bash', 'scripts/run-bench', '--local', 'agent-payment-test-shop',
+             'agent-payment-setup-resume', 'agent-payment-idempotent-abandonment', 'agent-payment-abandonment',
+             '--bootstrap', '--max-concurrency', '1', '--no-dashboard']
+         and result.get('recipe_digest') == digest(recipe), 'pre-manifest recipe')
+    need(receipt.get('cases') == result.get('cases') == {name: 'UNVERIFIED'}
+         and result.get('complete') is False and result.get('cleanup_complete') is True
+         and result.get('reused') is False and not result.get('cleanup_owner'), 'pre-manifest result state')
+    reference = dict(result=str(folder / 'result.json'), native_directory=None, cleanup_complete=True,
+                     result_sha256=proof['files']['result.json'], native_evidence=result['evidence'])
+    need(receipt.get('native_cleanup_reference') == reference and receipt.get('cleanup_owner') == dict(
+        request_token=receipt['token'], worker_root=str(root), native_cleanup_reference=reference), 'pre-manifest retained owner')
+    case = result['evidence'][name]
+    native = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest()
+    log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
+    need(case.get('log') == str(log) and case.get('sha256') == proof['files']['case.log']
+         and case.get('command') == spec['command'] and case.get('status') == 'UNVERIFIED'
+         and type(case.get('native_exit')) is int and case['native_exit'] == 1
+         and case.get('cancelled') is True and case.get('timed_out') is False and case.get('lingering_group') is False
+         and receipt['started_at'] <= case['started_at'] <= case['finished_at'] <= receipt['finished_at']
+         and sealed(native / 'result.json', 'native-result.json') == result, 'pre-manifest native result')
+    text = sealed(log, 'case.log', True)
+    matches = set(re.findall(r'cleanup receipt is missing or unsafe: (.+/local-stack-cleanup\.status)', text))
+    need(len(matches) == 1 and 'Received signal 15; draining owned benchmark before services...' in text,
+         'pre-manifest startup interruption linkage')
+    run = Path(matches.pop().split('. If the stack owner exited,', 1)[0]).parent
+    need(run.parent == root / '.context/benchmarks' and run.resolve(strict=True) == run
+         and re.fullmatch(r'[0-9]+-[0-9]+-[0-9]+', run.name), 'pre-manifest run identity')
+    need(not any((run / n).exists() or (run / n).is_symlink() for n in
+         ('local-stack-cleanup.status', 'services.json', 'services.json.tmp', 'run.json', 'report-card.json',
+          'local-benchmark-results.json')) and not list(run.glob('benchmark-cleanup*.status')),
+         'pre-manifest conflicting or admitted artifact')
+    benchmark = sealed(run / 'local-benchmark-owner.json', 'local-benchmark-owner.json')
+    need(benchmark == dict(version=1, run_id=run.name, state='not_started', pid=None, native_identity='',
+                           token='', receipt=str(run / 'benchmark-cleanup.status'), signal=None), 'benchmark admitted')
+    owner = sealed(run / 'local-stack-owner.json', 'local-stack-owner.json')
+    need(owner.get('version') == 1 and owner.get('run_id') == run.name and type(owner.get('pid')) is int
+         and owner['pid'] > 1 and isinstance(owner.get('birth'), str) and owner['birth']
+         and re.fullmatch('[0-9a-f]{32}', owner.get('token', ''))
+         and re.fullmatch('linux:' + Path('/proc/sys/kernel/random/boot_id').read_text().strip() + r':[0-9]+',
+                          owner.get('native_identity', '')) and not Path('/proc', str(owner['pid'])).exists(),
+         'pre-manifest native owner live/reused/unknown')
+    startup = sealed(run / 'services.log', 'services.log', True)
+    need(startup.rstrip().endswith('Python and Node Playwright Chromium assets are ready'),
+         'not the observed pre-manifest bootstrap boundary')
+    port = gate.get('env', {}).get('CONDUCTOR_PORT')
+    need(isinstance(port, str) and port.isdecimal() and gate['env'].get('ROSE_USE_SYSTEM_PG') == 'true',
+         'pre-manifest system PG launch')
+    base = int(port) + 200
+    ports = {key: base + offset for key, offset in
+             [('backend', 0), ('frontend', 1), ('health', 2), ('mac-app', 3), ('metrics', 4),
+              ('db', 5), ('wmh', 6), ('ngrok_api', 9)]}
+    need(all(1 <= p <= 65535 for p in ports.values()), 'pre-manifest port range')
+    port_rows = re.findall(r'^🔌 Ports: (.+)$', startup, re.M)
+    need(len(port_rows) == 1 and all(re.search(r'(?:^| )' + key + '=' + str(value) + r'(?: |$)', port_rows[0])
+                                   for key, value in ports.items()), 'pre-manifest launch ports')
+    database = dict(use_system_postgres=True, name='victoria_bench_' + run.name.replace('-', '_'))
+    need(re.findall(r'^🐘 Created isolated system database (\S+)$', startup, re.M) == [database['name']]
+         and '🐘 System Postgres already running on port 5432' in startup,
+         'pre-manifest database identity')
+    need(spec.get('env', {}) == {k: v for k, v in spec.get('env', {}).items()
+         if (k, v) in {('BENCHMARK_SKIP_WMH_BUILD', '1'), ('BENCHMARK_ATTEMPT_SUITE', 'predeploy'),
+                       ('BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY', '0'), ('BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL', '1')}},
+         'pre-manifest case environment changed')
+    workspace = gate['env'].get('CONDUCTOR_WORKSPACE_NAME')
+    need(isinstance(workspace, str) and workspace
+         and 'queue=navi-agent-tasks-' + workspace + '-bench-' + run.name + ' ' in port_rows[0],
+         'pre-manifest workspace/run linkage')
+    quiet(root)
+    premanifest_card_absent(root, run, owner, database, ports)
+    return gate
+
+
 def interrupted_card(state, receipt, proof):
     """A never-admitted Card stack with failed cleanup needs independent physical closure."""
     import hashlib
@@ -462,6 +686,9 @@ def validate(state, receipt, proof):
     if receipt.get('cancelled') is True and receipt.get('lifecycle') == 'owned':
         return interrupted_worker(state, receipt, proof)
     if name == 'agentcard-lifecycle':
+        gate, = [g for g in state['plan']['gates'] if g['name'] == name]
+        if gate.get('result_transport') == 'file' and receipt.get('cancelled') is True:
+            return premanifest_card(state, receipt, proof)
         if receipt.get('cancelled') is True:
             return interrupted_card(state, receipt, proof)
         return card_preflight(state, receipt, proof)
@@ -551,6 +778,10 @@ def reconcile(state, occurrence_id, proof):
         need(all(failure.get(a) == receipt.get(b) for a, b in (
             ('source', 'source'), ('evidence', 'log'), ('worker_result', 'worker_result'), ('finished_at', 'finished_at'))),
              'occurrence does not identify the latest receipt')
+    if receipt['gate'] == 'agentcard-lifecycle' and receipt.get('cancelled') is True:
+        gate, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
+        if gate.get('result_transport') == 'file':
+            need(proof['files'].get('receipt.json') not in state.get('reconciled_owners', {}), 'reconciliation already recorded')
     try:
         gate = validate(state, receipt, proof)
     except (OSError, KeyError, TypeError) as error:

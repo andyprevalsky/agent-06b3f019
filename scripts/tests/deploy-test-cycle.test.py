@@ -4847,4 +4847,188 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
 
 
+
+class PremanifestCardRecovery(unittest.TestCase):
+    write_native = CardPreflightCleanup.write_native
+    """Captured FILE/cancelled/missing-receipt boundary; no real DB or providers."""
+    def setUp(self):
+        CardPreflightCleanup.setUp(self)
+        self.run.rename(self.run.with_name('1794032988-1971531-70259'))
+        old=self.run; self.run=old.with_name('1794032988-1971531-70259')
+        for key in ('local-stack-cleanup.status','services.json'):
+            self.paths[key]=self.run/self.paths[key].name
+            self.paths[key].unlink(); self.paths.pop(key)
+        for key in ('local-stack-owner.json','local-benchmark-owner.json'):
+            self.paths[key]=self.run/key
+        self.stack['run_id']=self.run.name
+        self.benchmark.update(run_id=self.run.name,receipt=str(self.run/'benchmark-cleanup.status'))
+        self.recipe.clear(); self.recipe.update(cases={'agentcard-lifecycle':dict(
+            command=['bash','scripts/run-bench','--local','agent-payment-test-shop','agent-payment-setup-resume',
+                     'agent-payment-idempotent-abandonment','agent-payment-abandonment','--bootstrap',
+                     '--max-concurrency','1','--no-dashboard'],cwd='.',env={},aggregate=True)})
+        self.gate.update(result_transport='file',command=[sys.executable,str(ROOT/'scripts/deploy_test_worker.py'),
+                        '--root',str(self.worker)],env={'CONDUCTOR_PORT':'13514','ROSE_USE_SYSTEM_PG':'true','CONDUCTOR_WORKSPACE_NAME':'deploy_agentcard_lifecycle'})
+        self.receipt.update(command=self.gate['command'],cancelled=True)
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        self.result.update(recipe_digest=c.digest(self.recipe))
+        self.result['evidence']['agentcard-lifecycle'].update(command=self.recipe['cases']['agentcard-lifecycle']['command'],cancelled=True)
+        self.paths['case.log'].write_text('Received signal 15; draining owned benchmark before services...\n'
+            f'RuntimeError: cleanup receipt is missing or unsafe: {self.run}/local-stack-cleanup.status\n')
+        self.paths['services.log']=self.run/'services.log'
+        self.paths['services.log'].write_text('🔌 Ports: backend=13714 frontend=13715 health=13716 mac-app=13717 metrics=13718 db=13719 wmh=13720 ngrok_api=13723 queue=navi-agent-tasks-deploy_agentcard_lifecycle-bench-'+self.run.name+' temporal_namespace=rose-labs-bench.tch2n benchmark_mode=true worker_processes=1\n'
+            '🐘 System Postgres already running on port 5432\n'
+            '🐘 Created isolated system database victoria_bench_1794032988_1971531_70259\n'
+            'Python and Node Playwright Chromium assets are ready\n')
+        self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log'])
+        self.seal()
+        import deploy_test_local_cleanup as local
+        self.physical=self.enterContext(patch.object(local,'premanifest_card_absent',return_value=None,create=True))
+
+    def seal(self):
+        for key,value in [('request.json',self.request),('result.json',self.result),('native-result.json',self.result),
+                          ('local-stack-owner.json',self.stack),('local-benchmark-owner.json',self.benchmark)]:
+            c.write(self.paths[key],value)
+        reference=dict(result=str(self.paths['result.json']),native_directory=None,cleanup_complete=True,
+            result_sha256=c.sha_file(self.paths['result.json']),native_evidence=self.result['evidence'])
+        self.receipt.update(native_cleanup_reference=reference,cleanup_owner=dict(request_token=self.token,
+                            worker_root=str(self.worker),native_cleanup_reference=reference))
+        c.write(self.paths['receipt.json'],self.receipt)
+        self.proof=dict(kind=KIND,files={k:c.sha_file(p) for k,p in self.paths.items()},confirmed_at=201,observed_by='native-review')
+
+    def reconcile(self): c.reconcile(self.state,'occurrence',self.proof)
+
+    def test_file_missing_receipt_reconciles_only_resource_custody(self):
+        before={k:p.read_bytes() for k,p in self.paths.items()}
+        self.reconcile()
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertEqual('UNVERIFIED',self.failure['native_result'])
+        self.assertEqual(before,{k:p.read_bytes() for k,p in self.paths.items()})
+        self.assertFalse((self.run/'local-stack-cleanup.status').exists())
+        self.assertEqual([],c.retained_owners(self.state,['agentcard-lifecycle']))
+        self.assertEqual('victoria_bench_1794032988_1971531_70259',self.physical.call_args.args[3]['name'])
+
+    def test_physical_failure_and_late_database_refuse(self):
+        self.physical.side_effect=ValueError('database present')
+        before=copy.deepcopy(self.state)
+        with self.assertRaises(ValueError):self.reconcile()
+        self.assertEqual(before,self.state)
+        self.physical.side_effect=None;self.reconcile()
+        self.physical.side_effect=ValueError('database appeared')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,['agentcard-lifecycle'])
+
+    def test_conflicting_artifacts_and_admission_refuse(self):
+        for name in ['services.json','local-stack-cleanup.status','run.json','benchmark-cleanup.status']:
+            path=self.run/name;path.write_text('{}')
+            with self.subTest(name=name),self.assertRaises(ValueError):self.reconcile()
+            path.unlink()
+            path.symlink_to(self.paths['services.log'])
+            with self.subTest(symlink=name),self.assertRaises(ValueError):self.reconcile()
+            path.unlink()
+        self.benchmark['state']='running';self.seal()
+        with self.assertRaises(ValueError):self.reconcile()
+
+    def test_resigned_wrong_launch_contract_refuses_before_physical_probe(self):
+        for key, replacement in [('services.log','victoria_bench_other'),('case.log','other-run')]:
+            original=self.paths[key].read_text()
+            altered=(original.replace('victoria_bench_1794032988_1971531_70259',replacement)
+                     if key=='services.log' else original.replace(self.run.name,replacement))
+            self.paths[key].write_text(altered)
+            self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log'])
+            self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.paths[key].write_text(original)
+        self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log'])
+        for target,key,value in [(self.request,'token','wrong'),(self.stack,'native_identity','linux:wrong:1'),
+                                 (self.recipe['cases']['agentcard-lifecycle'],'env',{'CONDUCTOR_PORT':'1'}),
+                                 (self.benchmark,'pid',42)]:
+            old=target.get(key);target[key]=value;self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+        self.physical.assert_not_called()
+
+    def test_tampering_and_replay_refuse(self):
+        for key in self.paths:
+            raw=self.paths[key].read_bytes();self.paths[key].write_bytes(raw+b' ')
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.paths[key].write_bytes(raw)
+        for target,key,value in [(self.stack,'run_id','other'),(self.stack,'pid',os.getpid()),
+                                 (self.result,'source',{}),(self.gate,'command',['other']),
+                                 (self.gate,'env',{'CONDUCTOR_PORT':'12000'})]:
+            old=target[key];target[key]=value;self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+        self.seal();self.reconcile()
+        with self.assertRaises(ValueError):self.reconcile()
+
+
+class PremanifestPhysicalChecks(unittest.TestCase):
+    def test_database_query_failure_present_and_late_resource_are_not_absence(self):
+        import deploy_test_local_cleanup as local
+        owner={'pid':2000000000,'token':'a'*32}
+        with patch.object(local,'premanifest_card_scan') as scan, \
+             patch.object(local,'premanifest_card_database') as db, \
+             patch.object(local.Path,'read_text',return_value='header\n'):
+            for effect in ['present',RuntimeError('query failed')]:
+                db.side_effect=effect if isinstance(effect,Exception) else None
+                db.return_value=effect
+                with self.assertRaises((ValueError,RuntimeError)):
+                    local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'}, {'backend':12345})
+            db.side_effect=None;db.return_value=None;scan.side_effect=[None,ValueError('late owner')]
+            with self.assertRaises(ValueError):
+                local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'},{'backend':12345})
+            scan.side_effect=None
+            local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'},{'backend':12345})
+            with patch.object(local.Path,'read_text',return_value='header\n0: 00000000:3039 00:0 0A x\n'):
+                with self.assertRaises(ValueError):
+                    local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'},{'backend':12345})
+
+    def test_fixed_privileged_scanner_checks_real_fixture_fd_maps_root_and_token(self):
+        import io
+        import deploy_test_local_cleanup as local
+        import deploy_test_process_scan as scan
+        real_path=Path
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp);worker=base/'worker';worker.mkdir();proc=base/'proc';proc.mkdir()
+            caller=10;other=30;uid=os.getuid();token='b'*32
+            entry=proc/str(other);entry.mkdir();(entry/'fd').mkdir()
+            (entry/'stat').write_text('30 (fixture) S '+' '.join(['0']*18+['123']))
+            (entry/'cmdline').write_bytes(b'fixture\0');(entry/'environ').write_bytes(b'')
+            (entry/'maps').write_text('');(entry/'cwd').symlink_to(base);(entry/'root').symlink_to('/')
+            request=dict(uid=uid,pid=caller,birth='1',root=str(worker),token=token,owner_pid=20)
+            def path(value,*args):
+                v=str(value)
+                if v=='/proc' or v.startswith('/proc/'):return real_path(str(proc)+v[5:],*args)
+                return real_path(value,*args)
+            def invoke():
+                stdout=io.StringIO()
+                with patch.object(local,'Path',side_effect=path),patch.object(local,'os') as fake_os, \
+                     patch.object(local,'identity',create=True,side_effect=lambda pid:(uid,uid,'1',caller)), \
+                     patch.object(local,'scan_roots',create=True,side_effect=lambda roots,**kw:scan.scan_roots(roots,proc,birth_guard=True,excluded=(caller,))), \
+                     patch.object(local,'json',create=True,new=json),patch.object(local,'hashlib',create=True,new=__import__('hashlib')), \
+                     patch.object(local,'signal',create=True) as sig,patch.object(local,'sys',create=True) as fake_sys:
+                    fake_os.geteuid.return_value=0;fake_os.getppid.return_value=caller;fake_os.getpid.return_value=999
+                    fake_os.environ={'SUDO_UID':str(uid)};fake_os.readlink=os.readlink;fake_os.fsencode=os.fsencode
+                    fake_sys.stdin=io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+                    with patch('sys.stdout',stdout):
+                        try:local._premanifest_scan_main()
+                        except SystemExit:pass
+                return json.loads(stdout.getvalue())['quiescent']
+            self.assertTrue(invoke())
+            (proc/'20').mkdir()
+            self.assertFalse(invoke())  # live or reused original PID is never accepted
+            (proc/'20').rmdir()
+            for field in ('token','root','fd','maps','cwd','unreadable'):
+                with self.subTest(field=field):
+                    if field=='token':(entry/'environ').write_bytes(('RUN_STACK_CLEANUP_TOKEN='+token).encode())
+                    if field=='root':(entry/'root').unlink();(entry/'root').symlink_to(worker)
+                    if field=='fd':(entry/'fd/4').symlink_to(worker/'data')
+                    if field=='maps':(entry/'maps').write_text('00-ff r--p 0 00:00 1 '+str(worker/'data'))
+                    if field=='cwd':(entry/'cwd').unlink();(entry/'cwd').symlink_to(worker)
+                    if field=='unreadable':(entry/'environ').unlink()
+                    self.assertFalse(invoke())
+                    (entry/'environ').write_bytes(b'');(entry/'maps').write_text('')
+                    for link,target in [('root',Path('/')),('cwd',base)]:
+                        (entry/link).unlink();(entry/link).symlink_to(target)
+                    if (entry/'fd/4').is_symlink():(entry/'fd/4').unlink()
+
 if __name__ == '__main__': unittest.main()
