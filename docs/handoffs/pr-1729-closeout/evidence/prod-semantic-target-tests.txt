@@ -1,0 +1,6 @@
+  HEAD is now at 308315a4b Merge pull request #1729 from Rose-Ai-Labs/fix/entry-load-recovery-after-deploy-switch
+  ✓   8 [chromium] › tests-e2e/entry-load-recovery.spec.ts:39:1 › stale document whose entry chunk 404s reloads onto the live build and mounts (4.3s)
+  ✓  10 [chromium] › tests-e2e/entry-load-recovery.spec.ts:53:1 › an entry that never loads stops after three bounded reloads (8.7s)
+  ✓  25 [chromium] › tests-e2e/entry-load-recovery.spec.ts:65:1 › connectivity lost during the backoff waits for online without spending an attempt (4.6s)
+  ✓  56 [chromium] › tests-e2e/mobile-adversarial-trajectories.spec.ts:327:1 › 10k message details, source links and mobile/desktop copy menus remain usable (17.9s)
+  50 passed (4.9m)

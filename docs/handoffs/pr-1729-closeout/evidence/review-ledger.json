@@ -1,0 +1,61 @@
+{
+  "attempt1_blocked": {
+    "schema_version": 1,
+    "cycles": [
+      {
+        "number": 1,
+        "kind": "initial",
+        "head": "1b2adbc90e3b02051ca2f3785d297c6d9fd75637",
+        "status": "completed",
+        "started_at": "2026-11-06T09:30:43.017666+00:00",
+        "result": "findings",
+        "finished_at": "2026-11-07T02:27:36.310928+00:00"
+      },
+      {
+        "number": 2,
+        "kind": "incremental",
+        "head": "9e769324ec5e512520deea49947779c4fdc274de",
+        "status": "completed",
+        "started_at": "2026-11-07T02:37:02.043685+00:00",
+        "result": "clean",
+        "finished_at": "2026-11-07T02:41:12.968658+00:00"
+      }
+    ]
+  },
+  "attempt2": {
+    "schema_version": 1,
+    "cycles": [
+      {
+        "number": 1,
+        "kind": "initial",
+        "head": "50639d26f52ceac2a3df23c2405fde849156d753",
+        "status": "completed",
+        "started_at": "2026-11-07T03:07:52.025644+00:00",
+        "result": "clean",
+        "finished_at": "2026-11-07T03:26:04.083856+00:00"
+      },
+      {
+        "number": 2,
+        "kind": "incremental",
+        "head": "68a09c7ffa15e560f7bf766b9ce870ddabe1f9c1",
+        "status": "completed",
+        "started_at": "2026-11-07T03:26:04.200668+00:00",
+        "result": "clean",
+        "finished_at": "2026-11-07T03:34:41.699916+00:00"
+      },
+      {
+        "number": 3,
+        "kind": "sync-inherited",
+        "head": "30409b901ca62adc62bf5d596488303c58b2d11e",
+        "status": "completed",
+        "result": "clean",
+        "inherited_from": "68a09c7ffa15e560f7bf766b9ce870ddabe1f9c1",
+        "base": "b67cc6d6297b1c14c992597696ebcb4e36ae1586",
+        "branch_diff_sha256": "96cc6affe5f486608dfd45f3a297fc25d0655ae50f03511039dc56a07799c765",
+        "generated_changed": ["docs/rca/INDEX.md"],
+        "started_at": "2026-11-07T05:03:34.301011+00:00",
+        "finished_at": "2026-11-07T05:03:34.301042+00:00"
+      }
+    ]
+  }
+}
