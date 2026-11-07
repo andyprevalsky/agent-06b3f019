@@ -1,0 +1,48 @@
+{
+ "schema_version": 1,
+ "pr": 1749,
+ "deployed_sha": "3e770c9e10be3ee23f6cf0a2ad4a523b1241789e",
+ "validated_head": "79e007df49786d17071719477a283cbe8ed7b446",
+ "records_branch": "records/pr1749-closeout",
+ "records_base": "8fa81006df7d8f585903999444773e853d5b7d40",
+ "closeout_manifest": "docs/handoffs/pr-1749-closeout/closeout-manifest.json",
+ "recovery": "docs/handoffs/pr-1749-closeout/RECOVERY.md",
+ "verification": "docs/handoffs/pr-1749-closeout/private-preservation-verification.json",
+ "archives": "five AES-GCM objects under devbox-closeout-private/pr1749-3e770c9e/ in the trace-archive bucket (core 4356 files, workers 10551, cloud 4578, control 20, scratch 72); each uploader readback authenticated and an independent verify authenticated every frame and member hash; core restored to an empty directory and 4356 files compared byte-identical to the originals (0 mismatches)",
+ "key_recovery": "project-managed .context/pr1634-archive-recovery.env (PR1634_ARCHIVE_RECOVERY_KEY_B64) and agents/.env TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (dvb-onbox env list shows both); decoded SHA256 e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730; escrow equals live key",
+ "configuration_recovery": "project-managed env files (dvb-onbox env list: agents/.env, back-end/.env, front-end/.env, agents/.env.benchmark-temporal, research/.env, .context/pr1634-archive-recovery.env); no values stored in git or archives",
+ "source": "merged on main (3e770c9e1); branch fix/linkedin-export-agent-live pushed; follow-up branches followup/pr1749-release-retention (d09ce26d4) and followup/backend-blackbox-heap-growth (85a2e2706) pushed with the same SHAs as the scratch clone; the scratch clone's other refs (li-work 79e007df4, fix/linkedin-export-agent-live 22711f595) are ancestors of the merged head",
+ "resources": {
+  "fly": "no Fly Machines or volumes owned by this deploy's smoke campaigns remain: all 9 cloud smoke campaigns (7 archived tar.gz + 2 live dirs) have result.json cleanup_complete true except c7716de8 (infra stop 1/10, cancelled through owned teardown), and every fleet run of the live campaigns (11 + 11) and of c7716de8 (10) has teardown-ownership/provider-teardown-verified.epoch; claimed-pool ids 0; the worker bank cutover is managed by the deploy-agents job",
+  "local_retained_open": "scratch clone /var/tmp/li-fix-clone (its .context evidence archived as scratch; refs pushed or ancestors of the merged head) and the 11 worker roots under /var/tmp/rdw (evidence archived in workers) remain until the live production LinkedIn verification completes; owner deploy owner",
+  "local_retained": "/home/boxes/rose checkout and .context (archived in core/cloud), shared victoria development database, browser-use temp directories and test scratch under /var/tmp not created by a gate of this deploy",
+  "local_removed_by_closeout": "/home/boxes/pr1749-closeout-staging (10854 hard links plus one copied file; originals untouched) and /var/tmp/pr1749-restore-test",
+  "closeout_scratch_retained": "/home/boxes/pr1749-closeout-control (capture lists, receipts, logs; archived as control except its own receipt, which is reproduced in the manifest), /var/tmp/pr1749-closeout-work (scripts) and the records clone /var/tmp/pr1749-records-clone (shares objects with /home/boxes/rose); safe to delete once this records PR merges",
+  "processes": "agent_link_server.py pid 1936216 (127.0.0.1:8768, root .context/deploy-cloud/ff2cbc640d80.../runs, started 11:18Z by the run2 cloud smoke campaign) is still running; it was not started by the closeout agent and was left for the deploy owner to stop by exact PID"
+ },
+ "freedom": "untouched",
+ "open_items": [
+  {
+   "item": "live production LinkedIn verification agent 5357f72b-bf67-44f8-bd66-8963e46a487f",
+   "state": "in progress at closeout (status ACTIVE, 357 messages at 2026-11-07T15:08:22Z); final outcome reported by the deploy owner",
+   "owner": "deploy owner",
+   "condition": "final outcome reported by the deploy owner"
+  },
+  {
+   "item": "retain /var/tmp/li-fix-clone and /var/tmp/rdw",
+   "owner": "deploy owner",
+   "condition": "after live prod LinkedIn verification completes"
+  },
+  {
+   "item": "stop leftover agent_link_server.py pid 1936216 by exact PID",
+   "owner": "deploy owner",
+   "condition": "now (no consumer; its campaign finished 11:58:30Z)"
+  },
+  {
+   "item": "publish the production-verify factory events and completed outcome (Step 15)",
+   "owner": "deploy owner",
+   "condition": "at deploy completion"
+  }
+ ],
+ "non_pass_items_disclosed": "see closeout-manifest.json non_pass_items_disclosed"
+}
