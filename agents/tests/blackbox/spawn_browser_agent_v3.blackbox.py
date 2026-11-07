@@ -36207,6 +36207,10 @@ async def run_all_tests():
     r.record("build_autopay_prompt_section_no_card", test_build_autopay_prompt_section_no_card)
     r.record("build_payment_card_resume_prompt_section", test_build_payment_card_resume_prompt_section)
     r.record(
+        "saved_payment_method_default_yields_to_user_one_time_card_request",
+        test_saved_payment_method_default_yields_to_user_one_time_card_request,
+    )
+    r.record(
         "build_payment_card_resume_prompt_section_requires_all_refs",
         test_build_payment_card_resume_prompt_section_requires_all_refs,
     )
