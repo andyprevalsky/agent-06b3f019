@@ -407,9 +407,8 @@ class Cycle(unittest.TestCase):
                 c.write(folder/name,c.read(path))
         new=copy.deepcopy(old)
         outside=Path(tempfile.mkdtemp(prefix='dpt-'));self.addCleanup(__import__('shutil').rmtree,outside)
-        for gate in new['gates']:
-            if gate.get('quick'):continue
-            path=outside/gate['name'];path.mkdir(mode=0o700)
+        for index,gate in enumerate(g for g in new['gates'] if not g.get('quick')):
+            path=outside/f'g{index}';path.mkdir(mode=0o700)
             info=path.stat()
             marker=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(self.root),
                 worker_root=gate['worker_root'],gate=gate['name'],uid=os.geteuid(),device=info.st_dev,inode=info.st_ino)
