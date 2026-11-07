@@ -1,0 +1,1039 @@
+[
+ {
+  "dir": "0bdd40f79f0a",
+  "mtime": "2026-11-05T23:21Z",
+  "mb": 11,
+  "campaign_status": "failed",
+  "runs": []
+ },
+ {
+  "dir": "6a584f09a3e8",
+  "mtime": "2026-11-06T00:18Z",
+  "mb": 15,
+  "campaign_status": "failed",
+  "runs": [
+   {
+    "run": "20261105-235921-3492432",
+    "hub_run_id": "20261105-235921-3492432-m5446a9b0d15b",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261105-235921-3492434",
+    "hub_run_id": "20261105-235921-3492434-m96c8167e5d61",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261105-235921-3492440",
+    "hub_run_id": "20261105-235921-3492440-m196a9bbcd616",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261105-235921-3492446",
+    "hub_run_id": "20261105-235921-3492446-m212a5ac91c85",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261105-235921-3492449",
+    "hub_run_id": "20261105-235921-3492449-m0401f8ea8f53",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261105-235921-3492459",
+    "hub_run_id": "20261105-235921-3492459-m090e97ac8c62",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261105-235921-3492462",
+    "hub_run_id": "20261105-235921-3492462-m9fd643c7dacb",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261105-235921-3492464",
+    "hub_run_id": "20261105-235921-3492464-m637181e957cb",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261105-235921-3492468",
+    "hub_run_id": "20261105-235921-3492468-m9957fb615986",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "20261106-000005-3536248",
+    "hub_run_id": "20261106-000005-3536248",
+    "tasks": [
+     "browser-doordash-food-plan-grocery-cart-reauth",
+     "browser-auth-saved-password-retry"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "195f125b8073",
+  "mtime": "2026-11-06T01:03Z",
+  "mb": 1819,
+  "campaign_status": "failed",
+  "runs": [
+   {
+    "run": "20261106-003224-306842",
+    "hub_run_id": "20261106-003224-306842-mc444821e62ad",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-003224-306846",
+    "hub_run_id": "20261106-003224-306846-mbb8ac0e252dc",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-003224-306847",
+    "hub_run_id": "20261106-003224-306847-m893f7fa57522",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-003224-306854",
+    "hub_run_id": "20261106-003224-306854-mf5eb0b884210",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-003224-306859",
+    "hub_run_id": "20261106-003224-306859-m68d164f141f1",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-003224-306866",
+    "hub_run_id": "20261106-003224-306866-ma0945c3533f1",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-003224-306869",
+    "hub_run_id": "20261106-003224-306869-m9a59e6fcd39a",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-003224-306883",
+    "hub_run_id": "20261106-003224-306883-m17847b629c89",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-003224-306887",
+    "hub_run_id": "20261106-003224-306887-mb143a1a73bd3",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "4210422893cf",
+  "mtime": "2026-11-06T02:00Z",
+  "mb": 14,
+  "campaign_status": "failed",
+  "runs": [
+   {
+    "run": "20261106-014135-2675147",
+    "hub_run_id": "20261106-014135-2675147-m39d7b158b7bd",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-014135-2675148",
+    "hub_run_id": "20261106-014135-2675148-m85cbb02f142e",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-014135-2675152",
+    "hub_run_id": "20261106-014135-2675152-m63a1bc3c1e0d",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-014135-2675165",
+    "hub_run_id": "20261106-014135-2675165-m5b4a1c0289ca",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-014135-2675171",
+    "hub_run_id": "20261106-014135-2675171-m2e41dd489aa1",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-014135-2675181",
+    "hub_run_id": "20261106-014135-2675181-m41eda9625bbe",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-014135-2675197",
+    "hub_run_id": "20261106-014135-2675197-m27c9843029bd",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-014135-2675224",
+    "hub_run_id": "20261106-014135-2675224-m5a840a4a0218",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "20261106-014136-2675162",
+    "hub_run_id": "20261106-014136-2675162-m00d872a4747d",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-014210-2706996",
+    "hub_run_id": "20261106-014210-2706996",
+    "tasks": [
+     "browser-doordash-food-plan-grocery-cart-reauth",
+     "browser-auth-saved-password-retry"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "dcbdb1e50739",
+  "mtime": "2026-11-06T02:39Z",
+  "mb": 1296,
+  "campaign_status": "passed",
+  "runs": [
+   {
+    "run": "20261106-021151-3673516",
+    "hub_run_id": "20261106-021151-3673516-m175698c866c2",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-021151-3673519",
+    "hub_run_id": "20261106-021151-3673519-m6d5a51edd877",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-021151-3673529",
+    "hub_run_id": "20261106-021151-3673529-m0a3a4eaab9f5",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-021151-3673543",
+    "hub_run_id": "20261106-021151-3673543-m5f3f8b2c4b8d",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-021151-3673551",
+    "hub_run_id": "20261106-021151-3673551-m771d59241c4a",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-021151-3673553",
+    "hub_run_id": "20261106-021151-3673553-mf9dc84630ea1",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-021151-3673567",
+    "hub_run_id": "20261106-021151-3673567-m52d2ed6519e2",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-021151-3673577",
+    "hub_run_id": "20261106-021151-3673577-m0dc7a123ee40",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-021151-3673584",
+    "hub_run_id": "20261106-021151-3673584-me9e4a9d5a3e8",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "94c450af3840",
+  "mtime": "2026-11-06T02:50Z",
+  "mb": 13,
+  "campaign_status": "failed",
+  "runs": [
+   {
+    "run": "20261106-024322-562950",
+    "hub_run_id": "20261106-024322-562950-m5493f8d4f576",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-024322-562953",
+    "hub_run_id": "20261106-024322-562953-m1ad36b948aac",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-024322-562957",
+    "hub_run_id": "20261106-024322-562957-me29e002b5496",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-024322-562970",
+    "hub_run_id": "20261106-024322-562970-mc58e26a77d05",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-024322-562979",
+    "hub_run_id": "20261106-024322-562979-m07f29dfb671c",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-024322-562986",
+    "hub_run_id": "20261106-024322-562986-m12d7fb74d567",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-024322-562990",
+    "hub_run_id": "20261106-024322-562990-mb3b2797751e6",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-024322-562993",
+    "hub_run_id": "20261106-024322-562993-mc6d855e080e7",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "20261106-024323-562967",
+    "hub_run_id": "20261106-024323-562967-m57fc0eb79715",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "5d9aa487b4cf",
+  "mtime": "2026-11-06T03:51Z",
+  "mb": 1204,
+  "campaign_status": "passed",
+  "runs": [
+   {
+    "run": "20261106-031223-1306484",
+    "hub_run_id": "20261106-031223-1306484-m2ae4d015cf31",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-031223-1306504",
+    "hub_run_id": "20261106-031223-1306504-m0f8e5626c620",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-031223-1306508",
+    "hub_run_id": "20261106-031223-1306508-m1b27221bb19d",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-031223-1306516",
+    "hub_run_id": "20261106-031223-1306516-m4e90f1cc02c9",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-031223-1306522",
+    "hub_run_id": "20261106-031223-1306522-mca79e2cb86e8",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-031223-1306525",
+    "hub_run_id": "20261106-031223-1306525-mae0d08a55e1e",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-031223-1306541",
+    "hub_run_id": "20261106-031223-1306541-m3c8cc8aadc35",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-031223-1306557",
+    "hub_run_id": "20261106-031223-1306557-m2cb64b936f46",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-031223-1306577",
+    "hub_run_id": "20261106-031223-1306577-m32daa9f01b72",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "20261106-031319-1355254",
+    "hub_run_id": "20261106-031319-1355254",
+    "tasks": [
+     "browser-doordash-food-plan-grocery-cart-reauth",
+     "browser-auth-saved-password-retry"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "288561dcde2a",
+  "mtime": "2026-11-06T04:30Z",
+  "mb": 1172,
+  "campaign_status": "passed",
+  "runs": [
+   {
+    "run": "20261106-040328-2764508",
+    "hub_run_id": "20261106-040328-2764508-m0a02f86ac91f",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-040328-2764510",
+    "hub_run_id": "20261106-040328-2764510-md8717fee31f1",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-040328-2764513",
+    "hub_run_id": "20261106-040328-2764513-m6c96b07c55e2",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-040328-2764518",
+    "hub_run_id": "20261106-040328-2764518-mb7842bcbcbb8",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-040328-2764519",
+    "hub_run_id": "20261106-040328-2764519-m15beff2bb8ec",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-040328-2764525",
+    "hub_run_id": "20261106-040328-2764525-m638f70f6605e",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-040328-2764532",
+    "hub_run_id": "20261106-040328-2764532-mb3c2a0516d6d",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-040328-2764536",
+    "hub_run_id": "20261106-040328-2764536-m39e106110b64",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-040328-2764550",
+    "hub_run_id": "20261106-040328-2764550-m236feba48407",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "3ff3f072c02a",
+  "mtime": "2026-11-06T06:30Z",
+  "mb": 4,
+  "campaign_status": "failed",
+  "runs": [
+   {
+    "run": "20261106-061859-1047177",
+    "hub_run_id": "20261106-061859-1047177-m6b94f65417f9",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-061859-1047215",
+    "hub_run_id": "20261106-061859-1047215-m9bd9bf4e9d9c",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-061859-1047237",
+    "hub_run_id": "20261106-061859-1047237-mc8f8063e2d30",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-061859-1047272",
+    "hub_run_id": "20261106-061859-1047272-m628aa812abeb",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-061859-1047276",
+    "hub_run_id": "20261106-061859-1047276-m90c0bf6c1308",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-061859-1047297",
+    "hub_run_id": "20261106-061859-1047297-m29fd121b4850",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-061859-1047369",
+    "hub_run_id": "20261106-061859-1047369-m1f189ee70b2e",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-061859-1047419",
+    "hub_run_id": "20261106-061859-1047419-md438fa2afa1a",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-061900-1047471",
+    "hub_run_id": "20261106-061900-1047471-m3c7ca2d8cca1",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "20261106-061938-1094198",
+    "hub_run_id": "20261106-061938-1094198",
+    "tasks": [
+     "browser-doordash-food-plan-grocery-cart-reauth",
+     "browser-auth-saved-password-retry"
+    ]
+   },
+   {
+    "run": "20261106-062910-1637038",
+    "hub_run_id": "20261106-062910-1637038",
+    "tasks": [
+     "browser-doordash-food-plan-grocery-cart-reauth",
+     "browser-auth-saved-password-retry"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "75dc36080fec",
+  "mtime": "2026-11-06T07:07Z",
+  "mb": 5,
+  "campaign_status": "failed",
+  "runs": [
+   {
+    "run": "20261106-070429-2337238",
+    "hub_run_id": "20261106-070429-2337238-mca7260eda316",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-070429-2337260",
+    "hub_run_id": "20261106-070429-2337260-m8823babaa864",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-070429-2337274",
+    "hub_run_id": "20261106-070429-2337274-mdc09451c634f",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-070429-2337296",
+    "hub_run_id": "20261106-070429-2337296-md42c8dad78da",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-070429-2337332",
+    "hub_run_id": "20261106-070429-2337332-m2920c5f68cbf",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-070429-2337374",
+    "hub_run_id": "20261106-070429-2337374-m252c4a1b9c72",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-070429-2337446",
+    "hub_run_id": "20261106-070429-2337446-m8852b960fbf9",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-070429-2337508",
+    "hub_run_id": "20261106-070429-2337508-m8b40903e64f6",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-070430-2337556",
+    "hub_run_id": "20261106-070430-2337556-m760ab10be8e2",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "acaa710adf8c",
+  "mtime": "2026-11-06T09:00Z",
+  "mb": 14,
+  "campaign_status": "failed",
+  "runs": [
+   {
+    "run": "20261106-083941-26788",
+    "hub_run_id": "20261106-083941-26788-m7574a0035701",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-083941-26823",
+    "hub_run_id": "20261106-083941-26823-m4d9909fcc842",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-083941-26878",
+    "hub_run_id": "20261106-083941-26878-me7a7f6a1744c",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-083941-27037",
+    "hub_run_id": "20261106-083941-27037-m260cfb08c94b",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-083942-26724",
+    "hub_run_id": "20261106-083942-26724-ma6db3b2967fc",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-083942-26834",
+    "hub_run_id": "20261106-083942-26834-mfd72a3028b46",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-083942-26906",
+    "hub_run_id": "20261106-083942-26906-md722761e83ec",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-083942-26967",
+    "hub_run_id": "20261106-083942-26967-ma00fd3f5468b",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-083942-27063",
+    "hub_run_id": "20261106-083942-27063-m69158094baf5",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "20261106-084027-75810",
+    "hub_run_id": "20261106-084027-75810",
+    "tasks": [
+     "browser-doordash-food-plan-grocery-cart-reauth",
+     "browser-auth-saved-password-retry"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "923a5d94a5a5",
+  "mtime": "2026-11-06T09:38Z",
+  "mb": 1195,
+  "campaign_status": "passed",
+  "runs": [
+   {
+    "run": "20261106-091020-1297405",
+    "hub_run_id": "20261106-091020-1297405-m604b0ef0ce48",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-091020-1297406",
+    "hub_run_id": "20261106-091020-1297406-mf632a52eb170",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-091020-1297474",
+    "hub_run_id": "20261106-091020-1297474-m15b1811f55dd",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-091021-1297412",
+    "hub_run_id": "20261106-091021-1297412-m2526f0c21482",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-091021-1297534",
+    "hub_run_id": "20261106-091021-1297534-m1bed3bb8beb9",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-091021-1297588",
+    "hub_run_id": "20261106-091021-1297588-m633a4f540132",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-091021-1297610",
+    "hub_run_id": "20261106-091021-1297610-m1c05fdb5fbe9",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-091021-1297722",
+    "hub_run_id": "20261106-091021-1297722-m998c06e60430",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-091021-1297740",
+    "hub_run_id": "20261106-091021-1297740-mc6e85a40d5e5",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "8562df6acdc4",
+  "mtime": "2026-11-06T10:36Z",
+  "mb": 1434,
+  "campaign_status": "failed",
+  "runs": [
+   {
+    "run": "20261106-095657-2926380",
+    "hub_run_id": "20261106-095657-2926380-m3423f1cdb464",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-095657-2926431",
+    "hub_run_id": "20261106-095657-2926431-m3fba3b6a41f5",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-095657-2926448",
+    "hub_run_id": "20261106-095657-2926448-mdcb42894085b",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-095657-2926451",
+    "hub_run_id": "20261106-095657-2926451-m328942d15570",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-095657-2926557",
+    "hub_run_id": "20261106-095657-2926557-ma9e7c75e1302",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-095657-2926609",
+    "hub_run_id": "20261106-095657-2926609-madb2a17f5626",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "20261106-095657-2926622",
+    "hub_run_id": "20261106-095657-2926622-mc29e58eff36d",
+    "tasks": [
+     "browser-biometrics-webdecoy"
+    ]
+   },
+   {
+    "run": "20261106-095658-2926464",
+    "hub_run_id": "20261106-095658-2926464-mfb29ee666737",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-095658-2926651",
+    "hub_run_id": "20261106-095658-2926651-m9d4162203dc0",
+    "tasks": [
+     "agent-payment-new-user-journey"
+    ]
+   },
+   {
+    "run": "20261106-095745-2973171",
+    "hub_run_id": "20261106-095745-2973171",
+    "tasks": [
+     "browser-doordash-food-plan-grocery-cart-reauth",
+     "browser-auth-saved-password-retry"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ },
+ {
+  "dir": "dc89a6a0d1f3",
+  "mtime": "2026-11-06T11:29Z",
+  "mb": 1064,
+  "campaign_status": "failed",
+  "runs": [
+   {
+    "run": "20261106-105813-889399",
+    "hub_run_id": "20261106-105813-889399-m2f2a7e39b917",
+    "tasks": [
+     "test-mass-agent-run-0"
+    ]
+   },
+   {
+    "run": "20261106-105813-889400",
+    "hub_run_id": "20261106-105813-889400-m5edbb7f9f629",
+    "tasks": [
+     "chat-mode"
+    ]
+   },
+   {
+    "run": "20261106-105813-889401",
+    "hub_run_id": "20261106-105813-889401-m1b7a9e198f81",
+    "tasks": [
+     "spawn-sub-agents"
+    ]
+   },
+   {
+    "run": "20261106-105813-889402",
+    "hub_run_id": "20261106-105813-889402-mfa70829f6947",
+    "tasks": [
+     "parallel-tool-calls"
+    ]
+   },
+   {
+    "run": "20261106-105813-889403",
+    "hub_run_id": "20261106-105813-889403-m82ec215bb630",
+    "tasks": [
+     "background-agent-message-smoke"
+    ]
+   },
+   {
+    "run": "20261106-105813-889404",
+    "hub_run_id": "20261106-105813-889404-mf8813b4397f6",
+    "tasks": [
+     "claude-code-agent"
+    ]
+   },
+   {
+    "run": "20261106-105813-889411",
+    "hub_run_id": "20261106-105813-889411-mf0832c44f23a",
+    "tasks": [
+     "browser-smoke"
+    ]
+   },
+   {
+    "run": "_hub",
+    "hub_run_id": "",
+    "tasks": []
+   }
+  ]
+ }
+]

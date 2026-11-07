@@ -1,0 +1,48 @@
+{
+ "failures": [
+  {
+   "id": "69258300ef484c3fac770a2fef657db5",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "4b79be50e644aab2aceb399c1f106b97708f5a2e",
+    "digest": "8186aeab3ffb2ab6609024dcfc7f97007845d2057134912221a78129b712bb58"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "deploy-command-structural failed only under full-sweep load/rate-limit; passes in isolation on the same bytes",
+   "evidence": "Native exit 1 at 4b79be50e under the 11-gate sweep: run-deploy-pipeline.test.py check_materialized_reservation_credit asserted reserved_live_mb < 60 but observed 100 (a live process-memory measurement of fixture lanes; timing-sensitive under load), then the runner stopped early with 95 jobs not run. The identical test passes in isolation on the same bytes (/var/tmp/webdecoy-rca/branch-deploy-pipeline.log: 'run-deploy-pipeline: all checks passed', 208 s). This diff changes no deploy tooling or its tests beyond the main merge (8116062bc).",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged gate at normal load; no waiver",
+   "assigned_evidence": "Native exit 1 at 4b79be50e under the 11-gate sweep: run-deploy-pipeline.test.py check_materialized_reservation_credit asserted reserved_live_mb < 60 but observed 100 (a live process-memory measurement of fixture lanes; timing-sensitive under load), then the runner stopped early with 95 jobs not run. The identical test passes in isolation on the same bytes (/var/tmp/webdecoy-rca/branch-deploy-pipeline.log: 'run-deploy-pipeline: all checks passed', 208 s). This diff changes no deploy tooling or its tests beyond the main merge (8116062bc)."
+  },
+  {
+   "id": "60c6c26d121a4d85975a19e4aae187d2",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/cloudbench/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/cloudbench",
+    "--stdio"
+   ],
+   "source": {
+    "head": "4b79be50e644aab2aceb399c1f106b97708f5a2e",
+    "digest": "8186aeab3ffb2ab6609024dcfc7f97007845d2057134912221a78129b712bb58"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloudbench-controller failed only under full-sweep load/rate-limit; passes in isolation on the same bytes",
+   "evidence": "Native exit 1 at 4b79be50e under the 11-gate sweep: step environment 'resolve_github_token returned empty despite available controller credentials' (GitHub API was rate-limiting this user: 'API rate limit exceeded for user ID 25310436') and multi-workstream autoscaler startup timeout. The same gate passed in round 1 at 584cf4076, and the identical command passes all 12 steps in isolation on 4b79be50e (/var/tmp/webdecoy-rca/branch-cloudbench.log: GATE_RESULT exit=0, 1466 s). This diff touches no cloudbench controller code.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun the unchanged gate at normal load; no waiver",
+   "assigned_evidence": "Native exit 1 at 4b79be50e under the 11-gate sweep: step environment 'resolve_github_token returned empty despite available controller credentials' (GitHub API was rate-limiting this user: 'API rate limit exceeded for user ID 25310436') and multi-workstream autoscaler startup timeout. The same gate passed in round 1 at 584cf4076, and the identical command passes all 12 steps in isolation on 4b79be50e (/var/tmp/webdecoy-rca/branch-cloudbench.log: GATE_RESULT exit=0, 1466 s). This diff touches no cloudbench controller code."
+  }
+ ]
+}

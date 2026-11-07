@@ -10,6 +10,8 @@
  *          probes: origin "null"; cookie, localStorage, parent.document refused
  *   http://rose-evil.test:<port>/host (same server, host-resolver mapped)
  *     └─ frame-ancestors refuses the same URL
+ *   /host?fit=1 sizes the frame from its rose:resize messages like an expanded
+ *     chat display (200..10000 px): served pages report their content height
  *
  * The embedder is a real loopback server, not a route fulfilment: Chromium's
  * Local Network Access checks block a "public" (fulfilled) page from framing
@@ -88,9 +90,18 @@ const THREE_CDN = /^https:\/\/cdn\.jsdelivr\.net\/npm\/three@0\.160\.1\//;
 const SANDBOX = 'allow-scripts allow-pointer-lock allow-popups';
 const FOREIGN_HOSTNAME = 'rose-evil.test';
 
-const hostHtml = (src: string) =>
+/** Applies rose:resize from the frame the way an expanded chat display does. */
+const FIT_FRAME_SCRIPT =
+  `<script>addEventListener('message', (event) => {` +
+  `const f = document.getElementById('f');` +
+  `if (event.source !== f.contentWindow || event.data?.type !== 'rose:resize') return;` +
+  `f.style.height = Math.min(10000, Math.max(200, Math.round(event.data.height))) + 'px';` +
+  `});</script>`;
+
+const hostHtml = (src: string, fit = false) =>
   `<!doctype html><html><body style="margin:0;background:#fff">` +
   `<iframe id="f" sandbox="${SANDBOX}" src="${src}" style="border:0;width:640px;height:400px;display:block"></iframe>` +
+  (fit ? FIT_FRAME_SCRIPT : '') +
   `</body></html>`;
 
 /** The URL this test's backend serves for a display usercontent URL. */
@@ -108,8 +119,9 @@ export async function withBrowser(
   fn: (page: Page, logs: string[], hosts: Hosts) => Promise<void>
 ): Promise<void> {
   const server = createServer((req, res) => {
-    const src = new URL(req.url ?? '/', 'http://x').searchParams.get('src') ?? '';
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(hostHtml(src));
+    const params = new URL(req.url ?? '/', 'http://x').searchParams;
+    const html = hostHtml(params.get('src') ?? '', params.get('fit') === '1');
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(html);
   });
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
   const port = (server.address() as AddressInfo).port;
@@ -245,6 +257,19 @@ export function isolationProbe(frame: Frame) {
   return frame.evaluate<{ origin: string; cookie: string; storage: string; parent: string }>(
     ISOLATION_PROBE
   );
+}
+
+/** Polls the host frame's height until `want` holds (10 s), returning it. */
+async function frameHeightWhen(page: Page, want: (height: number) => boolean, label: string) {
+  let height = 0;
+  for (let i = 0; i < 100; i += 1) {
+    height = await page
+      .mainFrame()
+      .evaluate(() => document.getElementById('f')?.getBoundingClientRect().height ?? 0);
+    if (want(height)) return height;
+    await page.waitForTimeout(100);
+  }
+  throw new Error(`${label}: frame height ${height}px`);
 }
 
 export function displayRenderCases(): BlackboxTest[] {
@@ -389,6 +414,47 @@ export function displayRenderCases(): BlackboxTest[] {
             'viewer runs in an opaque origin'
           );
           process.stdout.write(`    glb viewer: ${(red * 100).toFixed(1)}% red pixels\n`);
+        });
+      },
+    },
+    {
+      name: 'render: a framed display page reports its content height; a viewport-height layout stops growing',
+      fn: async () => {
+        const pages = {
+          tall: `<!doctype html><html><body style="margin:0"><div style="height:2400px">tall ${RUN}</div></body></html>`,
+          short: `<!doctype html><html><body style="margin:0"><div style="height:300px">short ${RUN}</div></body></html>`,
+          viewport: `<!doctype html><html><body style="min-height:100vh">viewport ${RUN}</body></html>`,
+        };
+        const urls: Record<string, string> = {};
+        for (const [name, html] of Object.entries(pages)) {
+          const res = await display(
+            otherA,
+            { items: [b64(Buffer.from(html), `${name}.html`)] },
+            { apiKeyUser: userA }
+          );
+          assert(res.status === 201 || res.status === 200, `display ${name} ${res.status}`);
+          urls[name] = local(items(res)[0].file_pointer.usercontent_url ?? '');
+        }
+        await withBrowser(async (page, _logs, hosts) => {
+          const fit = (name: string) => `${hosts.rose}?fit=1&src=${encodeURIComponent(urls[name])}`;
+          await page.goto(fit('tall'));
+          await frameHeightWhen(page, (h) => h === 2400, 'tall page grows to its content');
+          await page.goto(fit('short'));
+          await frameHeightWhen(page, (h) => h === 300, 'short page shrinks to its content');
+          // body min-height:100vh + its 8px margins is always 16px taller than the frame.
+          await page.goto(fit('viewport'));
+          await frameHeightWhen(page, (h) => h > 400, 'viewport page reports once');
+          await page.waitForTimeout(1500);
+          const settled = await frameHeightWhen(page, (h) => h > 0, 'viewport page');
+          assert(settled <= 432, `viewport-height page stopped growing: ${settled}px`);
+          await page.waitForTimeout(1000);
+          const later = await frameHeightWhen(page, (h) => h > 0, 'viewport page later');
+          assert(later === settled, `viewport-height page is stable: ${settled} → ${later}px`);
+          await page.goto(urls.tall);
+          const topLevel = await page
+            .mainFrame()
+            .evaluate(() => document.querySelectorAll('script[data-rose-display-height]').length);
+          assert(topLevel === 1, `served page carries one height reporter (${topLevel})`);
         });
       },
     },

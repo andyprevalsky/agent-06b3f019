@@ -383,7 +383,7 @@ try:
 except Exception:
     print("")
 ' 2>/dev/null)}"
-GATE_NODE_VERSION="${GATE_NODE_VERSION:-v24.21.0}"
+GATE_NODE_VERSION="${GATE_NODE_VERSION:-v24.22.1}"
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 MACHINE_NAME="$(gate_machine_name)"

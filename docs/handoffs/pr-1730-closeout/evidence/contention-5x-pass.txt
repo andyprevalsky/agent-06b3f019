@@ -1,0 +1,15 @@
+# python3 scripts/tests/run-deploy-pipeline.test.py on final bytes (sha256 below), under 16-32 busy loops + 5-10 GB hog
+ce12e993e84f01d68cbec6fc41cb980e6144c4f00e573cbd280d78a2e0c3faa9  scripts/tests/run-deploy-pipeline.test.py
+b13f646e39aabf5b8ae6780af51711da148b42a4a6f16c73827e054696118d20  scripts/run_deploy_pipeline.py
+run 1 exit=0 339s load=33.56
+run 2 exit=0 312s load=20.75
+run 3 exit=0 280s load=17.93
+(run 4 of the first loop was cut by the agent's 20-min background cap; not a failure; rerun below)
+run 4 exit=0 282s load=18.52
+run 5 exit=0 283s load=19.32
+(run 6 surplus, stopped before rebase)
+run-deploy-pipeline: all checks passed
+run-deploy-pipeline: all checks passed
+run-deploy-pipeline: all checks passed
+run-deploy-pipeline: all checks passed
+run-deploy-pipeline: all checks passed

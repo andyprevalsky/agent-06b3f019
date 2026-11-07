@@ -1,0 +1,21 @@
+First, set this thread's title to start with the exact prefix `--ai--` (for example `dvb-onbox threads set-title --title " --ai-- Test repair: run-deploy-pipeline tree_peak_anon_mb load flake"`) and verify it.
+
+/goal Fix scripts/tests/run-deploy-pipeline.test.py check_materialized_reservation_credit (inherited-flag case) within the deploy-pipeline lane-admission/sampler test harness, make the original failing command pass reliably under host contention, and finish /deploy through merge, production verification, cleanup and a completed deploy scorecard.
+
+Failed test: scripts/tests/run-deploy-pipeline.test.py :: check_materialized_reservation_credit (case `inherited-flag`)
+Command: `python3 scripts/tests/run-deploy-pipeline.test.py` (run inside the deploy-command-structural gate: `python3 scripts/run-deploy-structural-gates.py --max-workers 5`)
+Scope: deploy-command-structural gate, suite deploy-pipeline. The assertion that materialized reservation credit is applied (holder lane's anonymous-PSS tree peak recorded and >= 50 MB) must keep its intent; make the holder sample deterministic under CPU/memory contention (e.g. wait for a recorded sample, or assert on the recorded reservation without depending on sampler timing). Do not weaken the assertion, raise timeouts, or skip the case. Register a reproduction under contention in the existing owning suite.
+Exact error:
+```
+File "scripts/tests/run-deploy-pipeline.test.py", line 2295, in main: check_materialized_reservation_credit(tmp / "inherited-flag", env)
+line 608: assert holder["tree_peak_anon_mb"] >= 50, holder
+KeyError: 'tree_peak_anon_mb'
+== deploy-pipeline: exit=1 duration=39.60s ==
+```
+Conditions when it failed: 11 staged deploy gates running concurrently on an 8-core / 15.6 GB boxes.dev devbox, coordinator inside a systemd scope with MemoryHigh=11G and swap in use; load average 10–18 (2026-11-06 07:49–08:03Z). The identical, unchanged suite passed on the same box at 07:29Z (lighter load) and passed again when rerun with one other gate. Related prior flake in the same file: PR #1695 closeout (rca-report-cycle11) — `check_observation_validity` load flake, 7/8 fail under 16 busy loops, passes solo.
+Failure evidence: native log excerpt above; full logs stayed on the originating devbox (not required — reproduce locally by running the command under CPU/memory contention, e.g. several `yes > /dev/null` busy loops plus a memory hog).
+Failed source: bf81ac6a48871d10d973cd443ce4b31175975a47 (PR #1724; its diff touched only scripts/benchmark-history-backfill.py, its test and the benchmark history ledgers — not run_deploy_pipeline or this test)
+Originating merge: 0ee70b27c83a9ac586a958fb3db4df8f5e5d9c32 (PR #1724 merged to main)
+Originating devbox: b2fce81e-aeaa-470a-a8d8-e357c322fe90 (this repair must run elsewhere)
+
+Read CLAUDE.md and follow /RCA. Work autonomously from current main; before repair work, verify this is a different devbox and its project-folder membership is Bugs using the boxes-devbox-folders skill. Keep this /goal and all deployment coordination here; never depend on the originating box staying open. Retain every needed artifact here or in accessible durable storage. Do not ask questions or depend on human replies. Resolve implementation choices using the existing instructions and evidence. Prove the assigned test passes, then carry the fix through /deploy to its completed scorecard. An OPEN diagnosis, observability report, draft PR or stopped investigation does not complete this goal. Do not waive or re-delegate the assigned test as a substitute for fixing it. Preserve test intent, assertions, timeouts and existing permissions; never fabricate success. Keep working until the goal is achieved, including ordinary review and production work.

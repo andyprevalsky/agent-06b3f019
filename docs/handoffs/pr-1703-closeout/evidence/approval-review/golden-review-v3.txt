@@ -1,0 +1,110 @@
+# Golden-reference adversarial review v3 — RCA-WEBDECOY-POINTER-1 @ 584cf4076
+
+I am a fresh reviewer, working read-only, and I did not write this change. Inputs: packet-v3.md and llm-visible-v2.diff. I also read `git diff origin/main...584cf4076` myself.
+
+- **Diff identity.** The `-U2` in-scope diff at 584cf4076 is byte-identical to `llm-visible-v2.diff`. The diff pasted in the packet also matches it exactly, after removing the 2-space block indent.
+- **Base.** The merge base equals origin/main at 24b862375.
+
+## A. Mechanism grounding: PASSES for every in-scope hunk
+
+I opened each of these references in this session:
+
+1. **`claude-code-src/cli.js:1830`** (Claude Code computer use)
+   - `mouse_move`: "Move the mouse cursor without clicking. Useful for triggering hover states."
+   - `left_click_drag`: "Press, move to target, and release."
+   - `left_mouse_down`: "Use mouse_move first to position the cursor."
+   - The dispatcher has `case"mouse_move":return gjz(...)`.
+2. **`claude-code-src/cli.js:66`** (Claude in Chrome `computer`)
+   - The action enum includes `left_click_drag` and `hover`.
+   - "`hover`: Move the mouse cursor to the specified coordinates or element without clicking. Useful for revealing tooltips, dropdown menus, or triggering hover states."
+3. **`claude-code-src/cli.js:63`** (`javascript_tool`)
+   - Generic text: "Execute JavaScript code in the context of the current page …".
+   - It does not advertise hover or drag.
+4. **`claude-code-src/src/utils/computerUse/executor.ts:103-120`**
+   - `moveAndSettle` does an instant move, then waits 50 ms.
+   - It is used for click, scroll and drag-from. `animatedMove` is used only for drag-to.
+5. **OpenClaw browser tool**
+   - `openclaw/extensions/browser/src/browser-tool.schema.ts:19-26`: `hover`, `drag` and `evaluate` are separate act kinds.
+   - `openclaw/extensions/browser/src/browser/routes/agent.act.normalize.ts:222-226`: hover requires an element target.
+   - `agent.act.normalize.ts:228-237`: drag fails without both ends ("drag requires startRef or startSelector" / "drag requires endRef or endSelector").
+6. **Hermes**
+   - `hermes-agent/tools/drive_preview_tool.py:81-83`: "Input is real (pointer travels, hover menus open). Actions: elements, click, hover (park the pointer — opens dropdowns before clicking in)".
+   - `hermes-agent/tools/computer_use/schema.py:18-35`: the enum has `drag` and no hover.
+   - `hermes-agent/tools/computer_use/schema.py:117-131`: drag takes `from_*` and `to_*`.
+7. **Neutral repos.** I grepped `codex/`, `prime-agent/` and `/var/tmp/webdecoy-rca/kimi-code` for `mouse_move|left_click_drag|"hover"|dispatchMouseEvent`.
+   - codex and prime-agent: no hits.
+   - kimi-code: hits only in its terminal-UI mouse code (`packages/pi-tui/src/tui.ts:82`, `components/mouse-region.ts:26`), which is not an agent pointer tool.
+   - The packet's `Not applicable` line holds.
+
+I re-checked that the descriptions match the runtime at the snapshot:
+
+- **`hover`.** `_execute_hover` (`agents/domains/spawn_browser_agent_v3/service_actions.py:3680-3713`) calls `humanizer.hover(x, y)`. Without a humanizer it sends one CDP `mouseMoved`. It never presses.
+- **`drag`.** `_execute_drag` (`agents/browser_tools/tool_executor_v2.py:309-310`) calls `humanizer.drag_between` (humanizer.py:704). Both ends are still required (lines 295-298).
+- **`click` text.** It is true in both input modes, except browser-use's JS fallback click on occluded elements. The packet now states that exception in Downstream.
+
+Each in-scope hunk maps to a reference:
+
+| Hunk (snapshot line) | Reference behaviour | Verdict |
+|---|---|---|
+| `HoverTool` index or x+y, with validator (schemas.py:289) + registry (schemas.py:996) | CC Chrome `hover` takes "coordinates or element" (cli.js:66). CC `mouse_move` (cli.js:1830). OpenClaw hover takes an element (normalize.ts:222-226). Hermes preview `hover` (drive_preview_tool.py:82). | Converges. Same target shape and no broader. |
+| `hover` description (browser_use.py:124) | Near-verbatim cli.js:1830 / cli.js:66. Hermes "park the pointer". | Converges. |
+| `click` / `click_coordinates` say the click itself moves the pointer (browser_use.py:77, :84) | executor.ts:103-120 moves before click. CC `left_click` needs no prior move; only the decomposed `left_mouse_down` does (cli.js:1830). Hermes "pointer travels" (drive_preview_tool.py:81). | Converges. The text is true at runtime. |
+| `drag`: held button, never used to move the pointer, both ends required (browser_use.py:95) | CC keeps press-move-release separate from `mouse_move` (cli.js:1830). Both ends are required in OpenClaw (normalize.ts:228-237) and Hermes (schema.py:117-131). | Converges. |
+| `evaluate` drops "hover, drag" (browser_use.py:194) | CC `javascript_tool` (cli.js:63) does not advertise pointer gestures; those live in `computer` (cli.js:66). OpenClaw keeps `evaluate` separate from `hover`/`drag` (schema.ts:19-26). | Converges. The text only narrows. |
+| `_VALID_ACTIONS += "hover"` (browser_use.py:1301) + normalize hover branch (browser_use.py:1428) | Dispatch on the declared action name: CC `case"mouse_move"` (cli.js:1830), OpenClaw `case "hover"` (normalize.ts:222). | Converges. Structured dispatch, not a classifier. |
+
+**Contrary practice.**
+- Hermes `computer_use` omits hover, but Hermes ships hover with pointer travel in its preview tool. That is an omission, not a contrary design.
+- No reference uses drag to move the pointer.
+- No reference advertises JS for hover or drag alongside native pointer tools.
+- The change adds one tool on the existing humanizer with only index/x/y parameters, so it is no broader than the references.
+
+**CLAUDE.md hard rules.**
+- **Rule 25: PASS.** `git diff --stat` shows no change to tasks.json, the evaluator, the timeout, concurrency or the ratchet. The capability is general.
+- **Rule 25a: PASS.** Only static tool text and dispatch change, and no synthetic messages are injected. The `client.py` change only dumps rejected arguments before re-raising, which the LLM never sees.
+- **Rule 25b: PASS.** Dispatch is on structured tool names.
+- **Rule 28: PASS.** Pointer input is per-session, with no shared state. Each browser request carries one more tool schema, plus a one-time cache-prefix change.
+
+## B. Packet validity (packet-v3.md): PASSES
+
+Review 2's blocking findings are all fixed:
+
+- **B1 (wall-clock): FIXED.** The header reads "Local repro (4m 47s: step 2 24.4 s, step 3 262.4 s; step 4 ~140 s)".
+  - `bz4nahf39.output` records `rbu rc=0 24.4s`, `sbav3 rc=0 262.4s`, `total 286.7s`, which is 4m 47s.
+  - The logs agree: timed-rbu.log "PASS (122 passed)" / "(23.3s)", and timed-sbav3.log "PASS" / "(261.0s)".
+  - Both runs started at 01:40, after 584cf4076 was committed (01:30:18), on a clean tree. So they ran the snapshot bytes.
+  - The headline correctly leaves out the full benchmark duration, which approval-format.md requires.
+- **B2 (mixed snapshots): FIXED.** Post-fix and Detail now say "PASS 1/1 on the approved bytes (15f2ef6cf = 584cf4076 code), run 7ab20ea6 138 s" and keep "Earlier text (cce696e9d era): PASS 2/2" separate.
+  - I checked fix-run3.log:1238-1239: "browser-biometrics-webdecoy: PASS / Duration: 138.3s".
+  - Run JSON `20261106_013007_345f01b2…json`: score `0.05700000000000001`, `"detections": []`, 0 `vision_ai`, 0 `teleport`, 0 `"drag"`.
+- **B3 (prod denominator): FIXED.** It now reads `— unknown: the share of production trajectories that spawn a browser agent … was not measured; it needs a read-only prod query of root trajectories with spawn_browser_agent tool calls over a recent window`. That is the allowed unknown form, with no benchmark-derived figure.
+
+Review 2's non-blocking notes:
+
+- **Hermes line: FIXED.** It now cites drive_preview_tool.py:81-83 and computer_use/schema.py:117-131. I opened both and they say what is claimed.
+- **FE link status: FIXED.** It now reads "verified rendered" and is wrapped.
+- **Occluded-element JS click exception: FIXED.** It is added to Downstream.
+
+Other validity checks:
+
+- **Structure.** One four-backtick `text` block, then the Links list; outside those there is only the heading.
+- **Section order.** Before, After, How, TL;DR, Evidence, Detail, Downstream, then Approve/Reject. Omitting `Edit:` is allowed.
+- **Frame.** 64-column borders.
+- **Line width.** Prose lines are 80 characters or less. The exceptions are verbatim: the task prompt, the diff, and one copy-paste command line (step 3, 86 characters).
+- **Task prompt.** It is byte-identical to the `browser-biometrics-webdecoy` `prompt` in agents/benchmarks/tasks.json.
+- **Evaluator.** The line matches `_evaluate_webdecoy_biometrics_result` (run_benchmark.py:11025-11093): demo, checkbox and invisible-form markers; score source order is captured API, then structured, then visible; ratchet 0.163.
+- **Scope.** All nine Scope lines resolve at 584cf4076 to the named construct: schemas.py:289/996 and browser_use.py:77/84/95/124/194/1301/1428. Each also appears as a clickable link.
+- **Evidence links.** The FE and LLM-dump URLs are in the Links list.
+- **Golden review line.** It says "pending" because this is a draft. A `GROUNDED` packet does not reach the user, so this is not a defect.
+
+**Non-blocking notes (do not affect the verdict)**
+
+- The Environment `Evaluators:` line lists only the webdecoy evaluator and the status check. The generic built-in checks are left out: `expected_tools ["spawn_agent"]` (run_benchmark.py:6343-6345), and fresh-profile `expected_browser_session_metadata_values` (run_benchmark.py:6096-6115, "Expected isolated browser session metadata was not observed"). This change affects neither. Consider adding them for completeness.
+- Step 4 "~140 s" is rounded. The approved-bytes run measured 138.3 s.
+- Out of scope, but worth confirming with the gate: `agents/domains/spawn_browser_agent_v3/handler.py:1169` adds `"hover": ("index", "x", "y")` to `_model_visible_browser_message` target-field preservation. It does the same mechanical per-action handling as `click_coordinates`/`drag` and injects no text, so it is not a rule-25a nudge.
+  - If deploy Step 0c's trajectory-injection guard flags handler.py, that hunk is not covered by this approval ID's snapshot scope and would need its own review.
+  - `state_prefetch.py:33` (`"hover"` in `PREFETCH_AFTER_ACTIONS`) is the same kind of change.
+
+No blocking findings. Mechanism grounding passes for every in-scope hunk, and the packet is valid under approval-format.md.
+
+VERDICT RCA-WEBDECOY-POINTER-1: GROUNDED

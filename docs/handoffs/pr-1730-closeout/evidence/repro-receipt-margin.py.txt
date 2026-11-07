@@ -1,0 +1,12 @@
+import json, sys
+from pathlib import Path
+for root in sys.argv[1:]:
+    for r in sorted(Path(root).rglob("receipt.json")):
+        try: L = json.loads(r.read_text())["lanes"]
+        except Exception: continue
+        if "holder" not in L or "gate" not in L: continue
+        g, h, j = L["gate"], L["holder"], L["joiner"]
+        a = j.get("admission") or {}
+        first = (a.get("deferred") or {}).get("first") or {}
+        print(Path(root).name, r.parent.relative_to(root), "gate_fin-holder_start=%.3f" % (g["finished_epoch"]-h["started_epoch"]),
+              "joiner_headroom", a.get("headroom_mb"), "first_defer_headroom", first.get("headroom_mb"), "peak", h.get("tree_peak_anon_mb"))

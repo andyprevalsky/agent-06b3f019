@@ -1,0 +1,30 @@
+{
+ "kind": "post-merge-repair-packet",
+ "created_at": "2026-11-06T08:08:53Z",
+ "pr": 1724,
+ "test": "scripts/tests/run-deploy-pipeline.test.py::check_materialized_reservation_credit (inherited-flag case)",
+ "command": [
+  "python3",
+  "scripts/tests/run-deploy-pipeline.test.py"
+ ],
+ "gate_command": [
+  "python3",
+  "scripts/run-deploy-structural-gates.py",
+  "--max-workers",
+  "5"
+ ],
+ "scope": "deploy-command-structural gate, suite deploy-pipeline; load-dependent sampler assertion. Not introduced by PR #1724 (bc31eb4..bf81ac6 touches only scripts/benchmark-history-backfill.py, its test and the history ledgers).",
+ "error": "File \"scripts/tests/run-deploy-pipeline.test.py\", line 2295, in main: check_materialized_reservation_credit(tmp / \"inherited-flag\", env); line 608: assert holder[\"tree_peak_anon_mb\"] >= 50, holder -> KeyError: 'tree_peak_anon_mb'",
+ "conditions": "11 staged deploy gates concurrent on an 8-core/15.6 GB devbox, coordinator in a systemd service with MemoryHigh=11G and swap in use; load average 10-18 at 07:49-08:03Z",
+ "source": {
+  "head": "bf81ac6a48871d10d973cd443ce4b31175975a47",
+  "digest": "7d94c78b7b68cc0a58df99354b00d891eff60486901a7fdcea256da264abc4fc"
+ },
+ "evidence": {
+  "native_log": "/home/boxes/deploy-workers/structural/.context/deploy-worker/4f3cc093ca6512f2cd0501a52af35dbaeefe332ab74329e8e7330856adb5ad5d/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log (suite output after line 126)",
+  "coordinator_receipt": "/home/boxes/rose/.context/deploy-pipeline-bf81ac6/attempts/2/initial/deploy-command-structural/receipt.json",
+  "prior_pass": "same suite and unchanged test/code passed on bc31eb4 in /home/boxes/rose/.context/deploy-pipeline-bc31eb4/attempts/2/initial/deploy-command-structural/receipt.json (07:29Z)",
+  "related": "PR #1695 closeout rca-report-cycle11: run-deploy-pipeline.test.py check_observation_validity load flake (7/8 fail under 16 busy loops, passes solo)"
+ },
+ "expected_fix": "make the holder anon-PSS sample deterministic under load (wait for a recorded sample or assert on the recorded reservation without depending on sampler timing) without weakening the assertion that materialized reservation credit is applied; register the reproduction under CPU/memory contention."
+}

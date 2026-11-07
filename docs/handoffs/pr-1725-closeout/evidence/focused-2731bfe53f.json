@@ -1,0 +1,104 @@
+{
+ "source": {
+  "head": "2731bfe53f7ace99196021906b423b2a6296766a",
+  "digest": "7342924de1a9e74d0a1c36cd26ff468d04f41a077a39ea9e01851d6dea7722b6"
+ },
+ "gates": {
+  "deploy-command-structural": {
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/structural",
+    "--stdio"
+   ],
+   "checks": [
+    "deploy-command-structural"
+   ],
+   "worker_recipe": {
+    "cases": {
+     "deploy-command-structural": {
+      "command": [
+       "python3",
+       "scripts/run-deploy-structural-gates.py",
+       "--max-workers",
+       "5"
+      ],
+      "cwd": ".",
+      "env": {
+       "CONDUCTOR_WORKSPACE_NAME": "dw-structural",
+       "CONDUCTOR_PORT": "11503",
+       "CONDUCTOR_ROOT_PATH": "/home/boxes/deploy-workers/structural",
+       "ROSE_USE_SYSTEM_PG": "true",
+       "PATH": "/home/boxes/.local/bin:/home/boxes/.fly/bin:/home/boxes/rose/agents/venv/bin:/opt/devbox-tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin",
+       "TMPDIR": "/var/tmp"
+      },
+      "aggregate": true
+     }
+    },
+    "setup": {
+     "command": [
+      "bash",
+      "scripts/run-deploy-stage",
+      "--start"
+     ]
+    },
+    "cleanup": {
+     "command": [
+      "bash",
+      "-c",
+      "bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish"
+     ]
+    },
+    "services": true
+   }
+  },
+  "cloudbench-controller": {
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/deploy-workers/cloudctl/scripts/deploy_test_worker.py",
+    "--root",
+    "/home/boxes/deploy-workers/cloudctl",
+    "--stdio"
+   ],
+   "checks": [
+    "cloudbench-controller"
+   ],
+   "worker_recipe": {
+    "cases": {
+     "cloudbench-controller": {
+      "command": [
+       "/usr/bin/python3",
+       "scripts/run-cloudbench-controller-local.py"
+      ],
+      "cwd": ".",
+      "env": {
+       "CONDUCTOR_WORKSPACE_NAME": "dw-cloudctl",
+       "CONDUCTOR_PORT": "15010",
+       "CONDUCTOR_ROOT_PATH": "/home/boxes/deploy-workers/cloudctl",
+       "ROSE_USE_SYSTEM_PG": "true",
+       "PATH": "/home/boxes/.local/bin:/home/boxes/.fly/bin:/home/boxes/rose/agents/venv/bin:/opt/devbox-tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin",
+       "TMPDIR": "/var/tmp"
+      },
+      "aggregate": true
+     }
+    },
+    "setup": {
+     "command": [
+      "bash",
+      "scripts/run-deploy-stage",
+      "--start"
+     ]
+    },
+    "cleanup": {
+     "command": [
+      "bash",
+      "-c",
+      "bash scripts/kill-services.sh && bash scripts/run-deploy-stage --finish"
+     ]
+    },
+    "services": true
+   }
+  }
+ }
+}
