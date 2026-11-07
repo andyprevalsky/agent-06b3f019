@@ -2343,7 +2343,7 @@ async def test_repeated_history_render_redacts_and_projects_each_input_once():
 
     Every model turn re-renders the whole history. Each render re-ran secret
     redaction over every earlier tool result and rebuilt both provider schema
-    projections of the action model: ~29% of the single fan-out worker's CPU.
+    projections of the action model: ~30% of the single fan-out worker's CPU.
     A history that was already rendered must not be redacted again, and the
     projections are derived once per compiled model class. Redaction itself
     must still apply.
