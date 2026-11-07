@@ -56,7 +56,7 @@ function selfClaimFromRow(row: {
     name: stored.name,
     promptText: stored.promptText,
     idempotencyKey: stored.idempotencyKey,
-    description: typeof stored.description === 'string' ? stored.description : '',
+    description: stored.description ?? '',
     status: row.status,
     runId: row.status === 'SUCCEEDED' ? row.externalId : null,
   };
