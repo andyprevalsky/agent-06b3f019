@@ -1,0 +1,15 @@
+{
+  "closeout-manifest.json": "08d9108e1f67d965a992dab358dba91c922c434a081121041cbe76cb08934d14",
+  "source-equivalence.json": "c820c95cd14898013c862f27e92874dd17b5bc915ed426e6d2160e3af9119581",
+  "RECOVERY.md": "2f44d5cb3a4340c8789b8f473da8c547431ec2fc0242c89e85125067c79d017d",
+  "configuration-recovery.json": "69e69284e4dfdc961473f954f079ee67f5b951089ecb3a5dc66863d5bbb36384",
+  "validation.json": "e3855e85b8d25fac5dd46dd5310b83edde3945446f2ee8ce9143de87611ea9cd",
+  "failure-truth.json": "5ff1511aa2c38c4aa444200173fc34c6f93093196b7b1297968e773240c1cf81",
+  "README.md": "e092b050c2a8f076cbb1d5b40bdb3b1651b5e3ac89ac63f07d85714e7cff2ad6",
+  "archive-receipts.json": "f58edb72953a290dd15084e40140e6c6f4c7704648f9469e4952ab6fde3bbcda",
+  "source-bundles.json": "5ecfea842967e1c3c4b5ff252cc4b8a5541f572edac1b93bd4e43ae0e002d069",
+  "resource-closure.json": "e8ce77262708c09d978a23b00170793530beb69f6a95b91e6e068f024b14d039",
+  "production.json": "e2247311a9eee5c93d49268aaccab629f8ab920464ae3aa2db72f738941b682c",
+  "current-local-census.json": "d89be5f449a332082a819bee609c87a719e413f3a206a9908e9b33c0132abfa8",
+  "input-evidence.json": "70b23d51a29bf90e664a13c3a894d836957eef8717e7324550fa0f4a1e965653"
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "status": "VERIFIED release evidence and recovery; records-only Git change",
+  "original_run": "20261106-043859-2259398",
+  "original_deploy_start": "2026-11-06T04:24:00.182421Z",
+  "prepared_at": "2026-11-07T13:28:58.322490+00:00",
+  "source_roles": {
+    "validation_C4": "08f519dbfb1b782d403fa4d329a2cf8094606ea0",
+    "production_M": "060fa655d16476e0ff84727bef5b4e188bee349d",
+    "fetched_main_at_preparation": "08b4b13364e642e2ca791942c9d5b7ec1b7286c0",
+    "future_records_R": "THIS_RECORDS_ONLY_CHANGE; actual merge resolved through Git/PR1716"
+  },
+  "production_PR": 1716,
+  "future_records_destination": "docs/handoffs/pr-1716-closeout",
+  "existing_initial_record_destination": "docs/handoffs/pr1716-closeout",
+  "source_equivalence": "source-equivalence.json",
+  "validation": "validation.json",
+  "production": "production.json",
+  "failure_truth": "failure-truth.json",
+  "prior_archives": "archive-receipts.json",
+  "source_prerequisites": "source-bundles.json",
+  "completion": "Application delivery verified with exact qualified failure; this records update completes recovery custody when merged",
+  "deletion_readiness": "Verified source/evidence/configuration/resource custody; destruction is NOT requested or performed. Final remote records readback and native factory outcome are recorded separately by their canonical Git/PR receipts.",
+  "final_configuration_capture": "VERIFIED64 full immutable copies",
+  "final_archive_delta": "VERIFIED18 parts plus global index",
+  "final_resource_census": "VERIFIED current-local-only; historical UNVERIFIED unchanged",
+  "model_metadata": {
+    "parent_reported_model": "gpt-6.1-sol",
+    "parent_reported_effort": "xhigh",
+    "service_tier": "UNKNOWN",
+    "explicit_supported_fallback": "ultrafast; not evidence it was applied",
+    "assignment_tokens": "UNMETERED"
+  },
+  "protection": {
+    "Freedom": "PRESERVE app/extension/helper/blocklists/login/automatic restore and protected instructions",
+    "warm_and_shared_resources": "PRESERVE; no allocation/stop/removal authorized by preparation",
+    "operations": "Read-only Git and existing evidence; writes only under final-record-prep; no tests, installs, DB, providers, signals, checkout, merge, commit, push or PR."
+  },
+  "archives": 30,
+  "configuration": "configuration-recovery.json",
+  "resources": "resource-closure.json",
+  "record_resolution": "Resolve the immutable records merge through git log -- docs/handoffs/pr-1716-closeout; final actual R SHA and factory-publication SHA are linked from originating PR1716 and final published scorecard. No self-referential commit hash is embedded."
+}
