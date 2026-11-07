@@ -11,6 +11,15 @@ FRONTEND_LOCK="$ROOT_DIR/front-end/package-lock.json"
 PROD_SESSION_GENERATOR="$ROOT_DIR/front-end/scripts/generate-prod-test-session.mjs"
 PROD_SESSION_TEST="$ROOT_DIR/scripts/tests/prod-semantic-session.test.mjs"
 DEPLOY_COMMAND="${DEPLOY_COMMAND_OVERRIDE:-$ROOT_DIR/.claude/commands/deploy.md}"
+# deploy.md is a short command doc: one `scripts/deploy ...` command per step, no inline
+# scripts and no gate list. The behavior below is asserted on the sources that execute
+# it (the planner, registry, lane runner, CLI and semantic-stack script); deploy.md is
+# asserted only for the rules it states.
+PROD="$ROOT_DIR/scripts/deploy_prod.py"
+PIPELINE="$ROOT_DIR/scripts/run_deploy_pipeline.py"
+DEPLOY_CLI="$ROOT_DIR/scripts/deploy_cli.py"
+DEPLOY_GATES="$ROOT_DIR/scripts/deploy_gates.py"
+SEMANTIC_STACK="$ROOT_DIR/scripts/run-deploy-semantic-stack.sh"
 STACK_DB_RESOLVER="$ROOT_DIR/scripts/resolve-deploy-stack-db.sh"
 CODERABBIT_CONFIG="$ROOT_DIR/.coderabbit.yaml"
 REVIEW_WAITER="$ROOT_DIR/scripts/wait_for_code_review.py"
@@ -48,7 +57,7 @@ require_count() {
   [ "$actual" = "$expected" ] || fail "$description (expected $expected, found $actual)"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$STACK_DB_RESOLVER" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$PROD" "$PIPELINE" "$DEPLOY_CLI" "$DEPLOY_GATES" "$SEMANTIC_STACK" "$STACK_DB_RESOLVER" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -198,7 +207,8 @@ require_text "$RUNNER" '127\.([0-9]{1,3}\.){2}[0-9]{1,3}' "prod semantic loopbac
 require_text "$RUNNER" 'localhost|*.localhost|::1' "prod semantic loopback check must cover localhost and IPv6 ::1"
 require_text "$RUNNER" 'curl -4 -sfL --max-time 20 -o /dev/null "$FRONTEND_URL"' "prod frontend probe must force IPv4, follow redirects, and bound wait"
 require_text "$WORKFLOW" "default: https://www.roselabs.ai" "workflow_dispatch frontend default must match the hardened www probe"
-require_text "$DEPLOY_COMMAND" "--frontend-url https://www.roselabs.ai" "/deploy production semantic dispatch must target www"
+require_text "$PROD" "FRONTEND_URL = 'https://www.roselabs.ai'" "/deploy production semantic dispatch must target www"
+require_text "$PROD" "'--frontend-url', FRONTEND_URL" "/deploy production semantic dispatch must pass the www frontend URL"
 require_text "$WORKFLOW" "source_sha:" "production semantic gate must accept the exact merged commit (source_sha)"
 require_count "$WORKFLOW" 'ref: ${{ inputs.source_sha || (github.event_name == '"'"'workflow_dispatch'"'"' && github.sha) || github.event.repository.default_branch }}' "2" "both semantic checkouts must check out source_sha on dispatch and the trusted default branch on deployment events"
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
@@ -217,42 +227,144 @@ require_text "$WORKFLOW" 'CHAT_LIFECYCLE_PATH: ${{ matrix.path }}' "each lifecyc
 require_text "$WORKFLOW" "fail-fast: false" "one failing lifecycle shard must not cancel the evidence of the others"
 require_count "$WORKFLOW" "filter: blob:none" "2" "both semantic jobs must use the blob-filtered checkout"
 require_text "$WORKFLOW" "/agents/benchmarks/tasks.json" "sparse semantic checkout must keep the benchmark task catalog the specs read"
-if grep -Fq 'npm run dev > frontend-logs.log' "$DEPLOY_COMMAND"; then
+if grep -Fq 'npm run dev > frontend-logs.log' "$DEPLOY_COMMAND" "$SEMANTIC_STACK" "$DEPLOY_GATES"; then
   fail "/deploy must not start a second frontend; run.sh --benchmark already owns it"
 fi
-if grep -Fq 'SMOKE_RESEARCH_URL' "$DEPLOY_COMMAND"; then
+if grep -Fq 'SMOKE_RESEARCH_URL' "$DEPLOY_COMMAND" "$SEMANTIC_STACK" "$DEPLOY_GATES" "$DEPLOY_ENV"; then
   fail "/deploy must not wait on the retired research service"
 fi
 
-# /deploy runs all local semantics by default and preserves explicit user authority
-# to override any individual gate with an auditable record.
-require_text "$DEPLOY_COMMAND" "Explicit user gate overrides (highest-precedence deploy rule)" "/deploy must define the user override precedence rule"
-require_text "$DEPLOY_COMMAND" "may override **any** \`/deploy\` gate" "/deploy must allow explicit user overrides for every gate"
-require_text "$DEPLOY_COMMAND" 'Record `⚠️ Overridden` in `TEST_REPORT`' "/deploy must disclose overridden gates instead of reporting them as passing"
-require_text "$DEPLOY_COMMAND" 'DEPLOY_GATE_OVERRIDES=credential-health:anthropic' "/deploy must document the narrow Anthropic credential override"
-require_text "$DEPLOY_COMMAND" "When selected by the affected-category plan, run the complete semantic suite." "/deploy must run the complete selected semantic category"
-require_text "$DEPLOY_COMMAND" "This predeploy selection does not waive the required post-deploy production semantic verification." "/deploy must retain production semantic verification"
-require_text "$DEPLOY_COMMAND" "WHERE workspace_path = '\$ESCAPED_WORKSPACE_PATH' AND branch = '\$ESCAPED_BRANCH'" "/deploy must lock PR titles to the exact Conductor workspace path and branch"
-if grep -Fq "WHERE directory_name =" "$DEPLOY_COMMAND"; then
-  fail "/deploy must not update Conductor PR title locks by basename; multiple archived workspaces can share the same directory name"
-fi
-require_text "$DEPLOY_COMMAND" "SEMANTIC_WORKERS=4" "/deploy local semantic gate must use four workers"
-require_text "$DEPLOY_COMMAND" 'SEMANTIC_GREP_INVERT="chat full-lifecycle latency"' "/deploy local UI semantic job must exclude the separately gated latency spec"
-require_text "$DEPLOY_COMMAND" "SEMANTIC_WORKERS=1" "/deploy local latency ratchet must avoid renderer contention"
-require_text "$DEPLOY_COMMAND" "chat-lifecycle-latency" "/deploy local gate must run the lifecycle ratchet separately"
-require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/workspace-env.sh"' "/deploy must load canonical workspace identity normalization"
-require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"' "/deploy must load the tested local environment boundary"
-require_text "$DEPLOY_COMMAND" 'configure_deploy_local_env' "/deploy must normalize identity before resolving local resources"
-require_text "$DEPLOY_COMMAND" 'bash scripts/tests/workspace-env.test.sh' "/deploy must run the behavioral workspace identity regression"
-require_text "$DEPLOY_COMMAND" 'bash scripts/tests/kill-services.test.sh' "/deploy must run the benchmark-controller cleanup regression"
-require_text "$DEPLOY_COMMAND" 'bash scripts/tests/deploy-worktree-preflight.test.sh' "/deploy must cement isolated deploy-worktree preparation"
-require_text "$DEPLOY_COMMAND" 'bash scripts/tests/semantic-deploy-gate.test.sh' "/deploy must keep its command invariants in the static gate"
-require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/factory-review.test.py' "/deploy must protect factory-review telemetry collection"
-require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/wait-for-code-review.test.py' "/deploy must protect exact-HEAD reviewer waiting"
-require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-review-cycle.test.py' "/deploy must protect the bounded reviewer state machine"
-require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/deploy must protect deploy-stage telemetry collection"
-require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-live-probes.test.py' "/deploy must protect concurrent live-probe scheduling"
-require_text "$DEPLOY_COMMAND" 'python3 scripts/run-deploy-structural-gates.py' "/deploy must schedule independent command-structural suites concurrently"
+# deploy.md keeps the explicit-override rule and its disclosure (Guidelines and
+# Skippable tests). Retired with the inline skill: the "highest-precedence deploy
+# rule" heading, `TEST_REPORT` wording and the DEPLOY_GATE_OVERRIDES=credential-
+# health:anthropic example; the back-end credential-health code still honors that
+# channel and is pinned by back-end/src/tests/unit/integration-health.test.ts.
+require_text "$DEPLOY_COMMAND" "An override must name the gate explicitly; never infer one" "/deploy must require explicit, gate-named user overrides"
+require_text "$DEPLOY_COMMAND" '| Any gate | The user explicitly overrides that named gate | Record `⚠️ Overridden` |' "/deploy must allow explicit user overrides for every gate and record them as overridden"
+require_text "$DEPLOY_COMMAND" "A skip, waiver, exception or override is never PASS" "/deploy must disclose overridden gates instead of reporting them as passing"
+require_text "$DEPLOY_COMMAND" '| Credential health: Anthropic, Parallel.ai | Any failure (warn-only) |' "/deploy must keep the Anthropic and Parallel.ai credential probes warn-only"
+require_text "$DEPLOY_COMMAND" '| Production semantics | always, after the Render, Vercel and Fly lanes it exercises |' "/deploy must retain production semantic verification"
+require_text "$PROD" "'semantic': Lane('semantic', True, 'always runs (Step 13b)')," "production semantic verification must run for every merge"
+# Retired with the inline skill: the Conductor PR-title lock step (and its path+branch
+# versus basename SQL rule); nothing in the deploy path touches the Conductor database.
+# The local semantic lane is `scripts/run-deploy-semantic-stack.sh` (the planner's
+# semantic-stack gate): four UI workers with the latency ratchet excluded, then
+# the ratchet alone on one worker, on a normalized workspace identity.
+require_text "$SEMANTIC_STACK" "SEMANTIC_WORKERS=4" "/deploy local semantic gate must use four workers"
+require_text "$SEMANTIC_STACK" 'SEMANTIC_GREP_INVERT="chat full-lifecycle latency"' "/deploy local UI semantic job must exclude the separately gated latency spec"
+require_text "$SEMANTIC_STACK" "SEMANTIC_WORKERS=1" "/deploy local latency ratchet must avoid renderer contention"
+require_text "$SEMANTIC_STACK" "chat-lifecycle-latency" "/deploy local gate must run the lifecycle ratchet separately"
+require_text "$SEMANTIC_STACK" '. scripts/lib/workspace-env.sh' "/deploy must load canonical workspace identity normalization"
+require_text "$SEMANTIC_STACK" '. scripts/lib/deploy-local-env.sh' "/deploy must load the tested local environment boundary"
+require_text "$SEMANTIC_STACK" 'configure_deploy_local_env' "/deploy must normalize identity before resolving local resources"
+# The doc has no gate list: every behavior owner is a registered structural gate
+# (one registration each, exact command) and the planner runs the registry.
+python3 -B - "$ROOT_DIR" <<'PY_DEPLOY_WIRING' || fail "deploy planner, registry and lane wiring must hold"
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts"))
+import deploy_prod as prod
+import deploy_test_plan as plan
+import run_deploy_pipeline as pipeline
+
+
+def fail(message):
+    raise SystemExit(f"FAIL: {message}")
+
+
+spec = importlib.util.spec_from_file_location("deploy_registry_wiring", root / "scripts/run-deploy-structural-gates.py")
+registry = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = registry
+spec.loader.exec_module(registry)
+owners_expected = {
+    "workspace-env": ("bash", "scripts/tests/workspace-env.test.sh"),
+    "kill-services": ("bash", "scripts/tests/kill-services.test.sh"),
+    "deploy-worktree-preflight": ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
+    "semantic-deploy": ("bash", "scripts/tests/semantic-deploy-gate.test.sh"),
+    "factory-review": ("python3", "scripts/tests/factory-review.test.py"),
+    "wait-for-code-review": ("python3", "scripts/tests/wait-for-code-review.test.py"),
+    "deploy-review-cycle": ("python3", "scripts/tests/deploy-review-cycle.test.py"),
+    "deploy-stage": ("bash", "scripts/tests/run-deploy-stage.test.sh"),
+    "deploy-live-probes": ("python3", "scripts/tests/deploy-live-probes.test.py"),
+}
+for name, command in owners_expected.items():
+    owners = [gate for gate in registry.GATES if gate.name == name or gate.command == command]
+    if len(owners) != 1 or owners[0].name != name or owners[0].command != command:
+        fail(f"{name} must have exactly one registered behavior owner running {' '.join(command)}")
+    if not (root / command[1]).is_file():
+        fail(f"{name}: {command[1]} is missing")
+
+template = plan.standard_template()
+gates = {gate["name"]: gate for gate in template["gates"]}
+result = {"all": False, "reasons": [], "lanes": {lane: [] for lanes in plan.GRAPH_LANES.values() for lane in lanes}}
+
+
+def selected(changed):
+    return {gate["name"] for gate in plan.select(template, changed, result, None)["gates"]}
+
+
+# When selected, the complete semantic suite runs (no case filter on the command).
+if gates["semantic-stack"]["command"] != ["bash", "scripts/run-deploy-semantic-stack.sh"]:
+    fail("the semantic-stack gate must run the complete semantic suite")
+for changed in (["front-end/src/App.tsx"], ["back-end/src/server.ts"], ["agents/helpers/messages.py"], ["scripts/run.sh"]):
+    if "semantic-stack" not in selected(changed):
+        fail(f"semantic-stack must be selected for {changed}")
+# The command-structural runner and the full back-end structural suite are planner gates.
+if gates["deploy-command-structural"]["command"][:2] != ["python3", "scripts/run-deploy-structural-gates.py"]:
+    fail("/deploy must schedule independent command-structural suites through the registry runner")
+if gates["backend-structural"]["command"] != ["npm", "run", "test:structural"] or gates["backend-structural"]["cwd"] != "back-end":
+    fail("/deploy must run the full back-end structural suite")
+# Five enforced cold-seed measurements.
+if gates["seed-memory-ratchet"]["command"] != ["bash", "scripts/measure-seed-memory.sh", "5", "0", "0", "--enforce-budget"]:
+    fail("/deploy must run five enforced cold-seed measurements")
+# Coverage and blackbox run once, in one combined gate per repo.
+for name in ("backend-coverage-blackbox", "frontend-coverage-blackbox", "agents-coverage-blackbox", "mac-app-coverage-blackbox"):
+    if name not in gates:
+        fail(f"/deploy must run {name} as one combined coverage and blackbox gate")
+rerun = {"backend-blackbox", "mac-blackbox", "mac-app-blackbox"} & set(gates)
+if rerun:
+    fail(f"/deploy must not rerun blackbox after coverage already ran it: {sorted(rerun)}")
+if "BLACKBOX_TEST_REPLAY_OUTBOUND" in json.dumps(template):
+    fail("/deploy gates must not retain replay config used only by the removed duplicate backend blackbox run")
+# AgentCard has no separate lane: its four sandbox lifecycle tasks are cloud smoke tasks.
+if "agentcard-lifecycle" in gates:
+    fail("AgentCard sandbox lifecycle tasks must not form a separate deploy gate")
+if tuple(pipeline.AGENTCARD_TASKS) != ("agent-payment-test-shop", "agent-payment-setup-resume",
+                                      "agent-payment-idempotent-abandonment", "agent-payment-abandonment"):
+    fail("the four AgentCard lifecycle tasks must stay one set")
+missing = set(pipeline.AGENTCARD_TASKS) - set(gates["smoke"]["checks"])
+if missing:
+    fail(f"the cloud smoke gate must run every AgentCard lifecycle task: {sorted(missing)}")
+
+mac = {"ship": "false", "reason": "test", "label": "false"}
+# Benchmark history-ledger rows never start the production AgentCard lane.
+if prod.plan_lanes(["agents/benchmarks/history/task_attempts.jsonl"], [], mac)["agentcard"].applicable:
+    fail("/deploy must not start the AgentCard lane for benchmark history-ledger rows")
+if not prod.plan_lanes(["back-end/src/domains/agentcard/service.ts"], [], mac)["agentcard"].applicable:
+    fail("an AgentCard payment path must start the AgentCard lane")
+# Poller-only changes reach backend coverage; the worktree patch controller reaches cloudbench coverage.
+selector = plan.Selector()
+poller = selector.select(["scripts/run-bench-hub-poller"]).selected
+if not (poller.get("backend-blackbox") or poller.get("backend-unit")):
+    fail("/deploy must classify poller-only changes into backend coverage")
+if not plan.Selector().select(["scripts/create-worktree-patch.sh"]).selected.get("cloudbench-controller"):
+    fail("/deploy must classify worktree patch controller changes into cloudbench coverage")
+# Production lanes: the independent Mac release never delays semantics; the
+# applicable Mac release remains a required lane that must pass.
+if "mac-release" in prod.DEPENDS["semantic"]:
+    fail("production semantics must overlap the independent Mac release lane")
+shipping = prod.plan_lanes(["front-end/src/App.tsx"], [], {"ship": "true", "reason": "shipped surface", "label": "false"})
+if not shipping["mac-release"].applicable or "mac-release" not in prod.LANES:
+    fail("the applicable Mac release must remain a production lane")
+unknown = prod.plan_lanes(["front-end/src/App.tsx"], [], None, mac_error="no decision")["mac-release"]
+if not unknown.applicable or not unknown.error:
+    fail("an unknown Mac release decision must block, never pass")
+PY_DEPLOY_WIRING
 require_text "$DEPLOY_STRUCTURAL_RUNNER" 'DEFAULT_MAX_WORKERS = 8' "command-structural runner must bound default host admission"
 # Exercise the default CLI branch; source spelling is not admission behavior.
 python3 - "$DEPLOY_STRUCTURAL_RUNNER" <<'PY_ADMISSION'
@@ -279,35 +391,41 @@ PY_ADMISSION
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"kill-services"' "command-structural runner must retain the benchmark-controller cleanup regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"deploy-structural-runner"' "command-structural runner must retain its signal-handling regression"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"seed-memory-ratchet"' "command-structural runner must protect the seed-memory deploy wiring"
-require_text "$DEPLOY_COMMAND" 'bash scripts/measure-seed-memory.sh 5 0 0 --enforce-budget' "/deploy must run five enforced cold-seed measurements"
 require_text "$CODERABBIT_CONFIG" 'auto_incremental_review: false' "CodeRabbit must not review every intermediate deploy push"
 require_text "$CODERABBIT_CONFIG" 'auto_pause_after_reviewed_commits: 2' "CodeRabbit must retain a defensive automatic review cap"
-require_text "$DEPLOY_COMMAND" 'scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD"' "/deploy must wait for CodeRabbit on one exact HEAD"
-require_text "$DEPLOY_COMMAND" 'python3 scripts/deploy_approval_batch.py freeze --head "$FREEZE_SHA"' "/deploy must batch approval-scoped hunks at the source freeze"
-require_text "$DEPLOY_COMMAND" 'python3 scripts/deploy_approval_batch.py check' "/deploy must prove the approval still covers the merged bytes"
-require_text "$DEPLOY_COMMAND" 'npm run test:coverage:sharded' "/deploy backend coverage must run as merged-threshold shards"
-require_text "$DEPLOY_COMMAND" 'BACKEND_COVERAGE_FAILED_FIRST=1' "/deploy backend coverage retries must be failed-first full sweeps"
+# Review and approval commands are executed by `scripts/deploy` (deploy_cli.py).
+require_text "$DEPLOY_CLI" "'bash', 'scripts/wait-for-code-review', '--pr', str(pr), '--head', review_head," "/deploy must wait for CodeRabbit on one exact HEAD"
+require_text "$DEPLOY_CLI" "'scripts/deploy_approval_batch.py', 'freeze', '--head', head(), '--base', args.base" "/deploy must batch approval-scoped hunks at the source freeze"
+require_text "$DEPLOY_CLI" "'scripts/deploy_approval_batch.py', 'check'" "/deploy must prove the approval still covers the merged bytes"
+require_text "$ROOT_DIR/scripts/deploy_test_backend.py" "RUNNER = ['npm', 'run', 'test:coverage:sharded']" "/deploy backend coverage must run as merged-threshold shards"
+require_text "$ROOT_DIR/scripts/deploy_test_backend.py" "FAILED_FIRST = ['bash', 'scripts/run-coverage-sharded.sh', '--failed-first']" "/deploy backend coverage retries must be failed-first full sweeps"
+require_text "$PIPELINE" 'retry_env={"BACKEND_COVERAGE_FAILED_FIRST": "1"}' "the pipeline backend coverage retry must be a failed-first full sweep"
 require_text "$ROOT_DIR/back-end/package.json" '"test:coverage:sharded": "bash scripts/run-coverage-sharded.sh 2 &&' "backend sharded coverage must keep two shards and the teardown check"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage-sharded.sh" '--check-coverage' "sharded backend coverage must enforce thresholds on the merged report"
-require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage --wait --since "$GROUP_SINCE"' "/deploy gate waits must wake on stage receipts, not fixed polls"
-require_text "$DEPLOY_COMMAND" 'The applicable Mac release remains a required production gate' "/deploy must retain required applicable Mac release completion"
-require_text "$DEPLOY_COMMAND" 'including the Mac release, remains a hard gate' "parallel production checks must retain the Mac release gate"
-require_text "$DEPLOY_COMMAND" 'never close it `clean` merely because the Claude fallback is disabled' "disabled fallback must not waive substantive CodeRabbit review"
+require_text "$PIPELINE" 'deploy_stage_wait.wait_for_stages(' "/deploy gate waits must wake on stage receipts, not fixed polls"
+# Mac release: the applicable lane is required (asserted on the lane plan above); deploy.md states the merge rule.
+require_text "$DEPLOY_COMMAND" '| Mac release | `scripts/mac-app-release-decision` ships' "/deploy must retain required applicable Mac release completion"
+require_text "$DEPLOY_COMMAND" "Never merge an unwaived blocking failure, and never invent a PASS." "a failed required production lane must block the deploy"
+# The disabled Claude fallback never waives CodeRabbit: it is the only review gate and a green check is not a review.
+require_text "$DEPLOY_COMMAND" "The Claude fallback review is disabled." "the Claude fallback must stay disabled"
+require_text "$DEPLOY_COMMAND" "CodeRabbit is the only review gate" "disabled fallback must not waive substantive CodeRabbit review"
+require_text "$DEPLOY_COMMAND" "a green check is not a review" "a green check must not stand in for a CodeRabbit review"
 require_text "$ROOT_DIR/CLAUDE.md" 'Format, ESLint, TypeScript and application structural checks always' "the quick categories must always run"
 require_text "$ROOT_DIR/CLAUDE.md" 'Coverage thresholds inside a selected full gate remain' "selected categories must preserve full coverage thresholds"
 require_text "$ROOT_DIR/CLAUDE.md" 'a focused subset cannot masquerade as a full coverage pass' "focused subsets must not replace full selected coverage"
-require_text "$DEPLOY_COMMAND" 'Promoting prebuilt worker image' "/deploy must document prebuilt worker-image promotion"
-require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py start --reset --kind initial' "/deploy must initialize a bounded review ledger"
-require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py require-mergeable --head' "/deploy must reject an unreviewed merge HEAD"
+require_text "$ROOT_DIR/scripts/deploy-agents-cooperative-cutover.sh" 'Promoting prebuilt worker image' "the worker cutover must log prebuilt worker-image promotion"
+require_text "$DEPLOY_CLI" "'scripts/deploy_review_cycle.py', 'start', '--reset', '--kind', 'initial'" "/deploy must initialize a bounded review ledger"
+require_text "$DEPLOY_CLI" "'scripts/deploy_review_cycle.py', 'require-mergeable', '--head', sha]" "/deploy must reject an unreviewed merge HEAD"
 require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py inherit-sync --head' "/deploy must record main-sync-only HEADs through the audited ledger path"
 require_text "$REVIEW_CYCLES" 'MAX_REVIEW_CYCLES = 3' "review cycle enforcement must hard-cap each deploy at three"
 require_text "$REVIEW_WAITER" 'actual_head != expected_head' "review waiter must reject stale or changed PR heads"
-if grep -Fq 'gh pr checks <PR_NUMBER> --watch' "$DEPLOY_COMMAND"; then
+if grep -Eq 'gh pr checks.*--watch' "$DEPLOY_COMMAND" "$DEPLOY_CLI"; then
   fail "/deploy must not wait on every PR check"
 fi
-if grep -Fq 'gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>"' "$DEPLOY_COMMAND"; then
+if grep -Fq 'gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>"' "$DEPLOY_COMMAND" "$DEPLOY_CLI"; then
   fail "/deploy must not request GraphQL-only statusCheckRollup from the REST PR endpoint"
 fi
+require_text "$REVIEW_WAITER" 'command.extend(["--json", "headRefOid,statusCheckRollup"])' "the review waiter must read statusCheckRollup through gh pr view, not the REST PR endpoint"
 require_text "$DEPLOY_ENV" 'normalize_conductor_workspace_env' "/deploy environment must normalize stale workspace identity"
 require_text "$DEPLOY_ENV" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-' "/deploy must mint a unique Temporal queue from normalized identity"
 require_text "$DEPLOY_ENV" 'export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB container must use normalized identity"
@@ -327,12 +445,16 @@ require_text "$RUN_SH" 'if ! $BENCHMARK_MODE && $IS_MAC; then' "benchmark stacks
 require_text "$RUN_SH" 'VITE_REALTIME_PRIVATE=false \' "bundled local frontends must not request production-only private realtime authorization"
 require_text "$RUN_SH" 'ROSE_E2E_FIXTURES=true npx vite build' "bundled semantic stacks must build the dev-only overlay-layers fixture page into the preview"
 require_text "$ROOT_DIR/front-end/vite.config.ts" "process.env.ROSE_E2E_FIXTURES === 'true'" "only the opt-in fixture build adds semantic fixture pages"
-require_text "$DEPLOY_COMMAND" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
-require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy semantic stack must retain enough workers for concurrent lifecycle checks"
-require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
-require_text "$DEPLOY_COMMAND" 'deploy stage-start runtime-blackbox' "/deploy must record the shared runtime-blackbox start boundary"
-require_text "$DEPLOY_COMMAND" 'deploy stage-finish runtime-blackbox' "/deploy must record the shared runtime-blackbox finish boundary"
-require_text "$DEPLOY_COMMAND" 'Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only' "/deploy must document the narrow Claude Code cache-ratchet skip"
+require_text "$SEMANTIC_STACK" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
+require_text "$SEMANTIC_STACK" 'SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"' "/deploy semantic stack must default to enough workers for concurrent lifecycle checks"
+require_text "$SEMANTIC_STACK" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES"' "/deploy semantic stack must pass its worker count to run.sh"
+require_text "$SEMANTIC_STACK" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
+require_text "$DEPLOY_GATES" "factory_event(root, 'stage-start', 'runtime-blackbox')" "/deploy must record the shared runtime-blackbox start boundary"
+require_text "$DEPLOY_GATES" "factory_event(root, 'stage-finish', 'runtime-blackbox')" "/deploy must record the shared runtime-blackbox finish boundary"
+# The Claude Code cache-ratchet warn-only wording left deploy.md; its wiring is pinned below
+# (run-predeploy-local/cloud, run-bench-cloud, cloudbench-run.sh) and the doc keeps the
+# rule that Claude Code task failures still block (Skippable tests).
+require_text "$DEPLOY_COMMAND" '| Claude Code smoke | Preflight proves no synced Claude credential and no pool token | Task failures still block |' "/deploy must keep Claude Code task correctness hard-gated"
 require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1' "local predeploy smoke must wire the narrow Claude Code cache-ratchet skip"
 require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1' "local predeploy smoke must allow Claude Code credential SKIP when the pool is rate-limited (infra-fix deploys)"
 require_text "$ROOT_DIR/agents/benchmarks/run_benchmark.py" 'resolve_hub_upload_url(base_url)' "local smoke must register Hub against the local stack, not hard-default to prod (prod-outage deadlock)"
@@ -365,23 +487,24 @@ require_text "$RUN_PREDEPLOY_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ON
 require_text "$RUN_BENCH_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}' "cloud benchmark controller must pass the Claude Code cache-ratchet skip into benchmark machines"
 require_text "$CLOUDBENCH_RUN" 'STACK_ENV+=("BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY")' "cloud benchmark stack must inherit the Claude Code cache-ratchet skip"
 require_text "$CLOUDBENCH_RUN" "export BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY='\$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY'" "cloud benchmark driver must pass the Claude Code cache-ratchet skip into run_benchmark.py"
-require_text "$DEPLOY_COMMAND" 'BACKEND_BLACKBOX_WORKERS=4' "/deploy must cap backend blackbox workers when agents coverage also runs"
-require_text "$DEPLOY_COMMAND" 'BACKEND_BLACKBOX_WORKERS=5' "/deploy must use the measured backend blackbox width in the all-repo batch"
-require_text "$DEPLOY_COMMAND" 'BACKEND_UNIT_WORKERS=2' "/deploy must retain the measured all-repo backend unit width"
-require_text "$DEPLOY_COMMAND" 'AGENTS_COVERAGE_WORKERS=3' "/deploy must retain the measured agents width in the all-repo batch"
-require_text "$DEPLOY_COMMAND" 'FRONTEND_COVERAGE_WORKERS=2' "/deploy must cap frontend workers in the all-repo batch"
-require_text "$DEPLOY_COMMAND" 'MAC_COVERAGE_WORKERS=1' "/deploy must cap Mac workers in the all-repo batch"
-require_text "$DEPLOY_COMMAND" 'BLACKBOX_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS"' "/deploy must apply the computed backend worker budget"
-require_text "$DEPLOY_COMMAND" 'AGENTS_COVERAGE_CONCURRENCY="$AGENTS_COVERAGE_WORKERS"' "/deploy must apply the computed agents worker budget"
-require_text "$DEPLOY_COMMAND" '--maxWorkers="$FRONTEND_COVERAGE_WORKERS"' "/deploy must apply the computed frontend worker budget"
-require_text "$DEPLOY_COMMAND" '--maxWorkers="$MAC_COVERAGE_WORKERS"' "/deploy must apply the computed Mac worker budget"
+# Worker widths are host-scaled ceilings in the pipeline planner (the fixed
+# BACKEND_BLACKBOX_WORKERS=4/5, BACKEND_UNIT_WORKERS=2, AGENTS_COVERAGE_WORKERS=3,
+# FRONTEND_COVERAGE_WORKERS=2 and MAC_COVERAGE_WORKERS=1 values of the retired inline
+# skill are gone) and applied through each gate's own concurrency settings.
+require_text "$PIPELINE" '"backend_blackbox": scale_workers(min(4, args.backend_blackbox_workers), host),' "/deploy must cap backend blackbox workers by host capacity"
+require_text "$PIPELINE" '"backend_unit": scale_workers(min(6, args.backend_unit_workers), host),' "/deploy must cap backend unit workers by host capacity"
+require_text "$PIPELINE" '"agents": scale_workers(min(6, args.agents_workers), host),' "/deploy must cap agents workers by host capacity"
+require_text "$PIPELINE" '"frontend": scale_workers(min(4, args.frontend_workers), host),' "/deploy must cap frontend workers by host capacity"
+require_text "$PIPELINE" '"BLACKBOX_TEST_CONCURRENCY": str(workers["backend_blackbox"]),' "/deploy must apply the computed backend worker budget"
+require_text "$PIPELINE" 'env={"AGENTS_COVERAGE_CONCURRENCY": str(workers["agents"])},' "/deploy must apply the computed agents worker budget"
+require_text "$PIPELINE" "f\"--maxWorkers={workers['frontend']}\"" "/deploy must apply the computed frontend worker budget"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"amplitude-live"' "/deploy must retain the focused live Amplitude probe"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"chat-router-failover-live"' "/deploy must replay the e8f2279b chat follow-up through the real OpenRouter failover"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"CHAT_ROUTER_FAILOVER_LIVE=1"' "/deploy chat router failover probe must run the live case"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"scripts/migration-preflight.ts"' "/deploy must preflight new migrations read-only against production data"
-require_text "$DEPLOY_COMMAND" 'ADMIN_HEALTH_LIVE_ONLY=1' "/deploy live Amplitude probe must run only the strict weekly endpoint case"
-require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must document fail-closed live Amplitude credentials"
-require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
+require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"ADMIN_HEALTH_LIVE_ONLY=1"' "/deploy live Amplitude probe must run only the strict weekly endpoint case"
+# Fail-closed live Amplitude credentials are exercised directly below.
+require_text "$PROD" "BACKEND_RE = re.compile(r'^(back-end/|scripts/run-bench-hub-poller\$)')" "/deploy must classify poller-only changes into backend lanes"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
 require_text "$ROOT_DIR/agents/scripts/run-coverage.sh" 'playwright install chromium' "agents coverage must install the venv Playwright chromium revision before real-browser blackboxes"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" '  export BACKEND_UNIT_DATABASE_URL="$LOCAL_DB_URL"' "backend coverage must hand unit tests the schema-synced coverage database"
@@ -390,13 +513,11 @@ if grep -Fq 'if [[ -n "${BACKEND_COVERAGE_DATABASE_URL:-}" ]]; then' "$ROOT_DIR/
   fail "backend coverage must not gate the unit-test database on BACKEND_COVERAGE_DATABASE_URL (unit tests fall back to a stale shared DB)"
 fi
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'playwright install chromium' "backend coverage must install Node Playwright Chromium before captcha-solve-indicator"
-require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health check (runs unless explicitly overridden)' "/deploy must retain one focused credential probe unless the user explicitly overrides it"
+require_text "$DEPLOY_COMMAND" '| Credential health: Anthropic, Parallel.ai | Any failure (warn-only) | Other providers'"'"' auth rejections block |' "/deploy must retain one focused credential probe, blocking every other provider's rejection"
 require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"credential-health"' "/deploy must record the focused credential probe"
-require_text "$DEPLOY_COMMAND" 'run-deploy-stage credential-health' "/deploy must record the focused credential probe"
-require_text "$DEPLOY_COMMAND" 'create-worktree-patch\.sh' "/deploy must classify worktree patch controller changes into cloudbench coverage"
-require_text "$DEPLOY_COMMAND" 'cloud_patch_includes_tracked_and_untracked_changes' "/deploy must gate the cloud patch base-ref contract"
-require_text "$DEPLOY_COMMAND" 'worktree_patch_ignores_append_only_history_ledgers' "/deploy must gate the append-only history ledger cloud patch RCA regression"
-if grep -Fq 'credential-health blackbox only when Step 4a is skipped' "$DEPLOY_COMMAND"; then
+require_text "$ROOT_DIR/scripts/run-cloudbench-controller-local.py" 'cloud_patch_includes_tracked_and_untracked_changes' "/deploy must gate the cloud patch base-ref contract"
+require_text "$ROOT_DIR/scripts/run-cloudbench-controller-local.py" 'worktree_patch_ignores_append_only_history_ledgers' "/deploy must gate the append-only history ledger cloud patch RCA regression"
+if grep -Fq 'credential-health blackbox only when Step 4a is skipped' "$DEPLOY_COMMAND" "$DEPLOY_LIVE_PROBE_RUNNER"; then
   fail "/deploy must not retain the retired conditional credential-health wiring"
 fi
 set +e
@@ -444,67 +565,47 @@ grep -Fq 'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECR
   printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | tail -n 40 >&2
   fail "/deploy live Amplitude probe must explain its fail-closed credential contract"
 }
-require_text "$DEPLOY_COMMAND" 'Do not start the Group 4 semantic/smoke' "/deploy must not oversubscribe Group 3 with Group 4 worker pools"
-for stage in backend frontend agents mac; do
-  require_text "$DEPLOY_COMMAND" "run-deploy-stage ${stage}-coverage-blackbox" "/deploy must run ${stage} coverage and blackbox behavior once in a combined gate"
-done
-if grep -Fq 'run-deploy-stage backend-blackbox' "$DEPLOY_COMMAND"; then
-  fail "/deploy must not rerun backend blackbox after backend coverage already ran it"
-fi
-if grep -Fq 'run-deploy-stage mac-blackbox' "$DEPLOY_COMMAND"; then
-  fail "/deploy must not rerun mac blackbox after mac coverage already ran it"
-fi
-if grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' "$DEPLOY_COMMAND"; then
-  fail "/deploy semantic stack must not retain replay config used only by the removed duplicate backend blackbox run"
-fi
-require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage agentcard-lifecycle --' "/deploy must record AgentCard as one lifecycle lane"
-require_text "$DEPLOY_COMMAND" "CHANGED_AGENTCARD_PAYMENT=\$(echo \"\$CHANGED\" | grep -v '^agents/benchmarks/history/'" "/deploy must not start the AgentCard lane for benchmark history-ledger rows"
-# Assert on the fenced command that actually runs, not deploy.md prose, which
-# mentions env vars the lane deliberately does not set.
-AGENTCARD_DEPLOY_BLOCK="$(awk '
-  /^```/ { if (in_block) { if (block ~ /run-deploy-stage agentcard-lifecycle --/) printf "%s", block; in_block = 0; block = "" } else { in_block = 1 }; next }
-  in_block { block = block $0 "\n" }
-' "$DEPLOY_COMMAND")"
-[ -n "$AGENTCARD_DEPLOY_BLOCK" ] || fail "/deploy must run the AgentCard lane from a fenced command block"
-require_agentcard_command() {
-  grep -Fq -- "$1" <<<"$AGENTCARD_DEPLOY_BLOCK" || fail "$2"
-}
-require_agentcard_command 'bash scripts/run-bench --local' "/deploy AgentCard lane must own an isolated local stack"
-if grep -Eq 'ROSE_EXCLUDE_ANTHROPIC_FAMILY=1|SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' <<<"$AGENTCARD_DEPLOY_BLOCK"; then
-  fail "/deploy AgentCard lane must let normal pool selection choose the compute lane"
-fi
-require_agentcard_command 'BENCHMARK_SKIP_WMH_BUILD=1' "/deploy AgentCard lane must not cold-build an unused simulated world model"
-require_agentcard_command 'BENCHMARK_COUNTS_FOR_DEPLOY_ELIGIBILITY=0' "/deploy AgentCard lane must not count active-worktree attempts toward canary eligibility"
-require_agentcard_command 'BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=1' "/deploy AgentCard lane must warn-skip the open sandbox closed-card release stall"
-require_text "$DEPLOY_COMMAND" 'This standing user instruction covers BOTH sandbox' "/deploy must preserve the user's permanent sandbox and production AgentCard release waiver"
-require_text "$DEPLOY_COMMAND" 'No environment opt-in or renewed' "/deploy must not require repeated approval for the AgentCard release waiver"
-require_text "$DEPLOY_COMMAND" 'does not block' "/deploy production release stall must be a warning skip, not a deployment blocker"
-if grep -Fq 'production abandonment stays strict' "$DEPLOY_COMMAND"; then
-  fail "/deploy must not contradict the standing production AgentCard release waiver"
-fi
-require_agentcard_command 'agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment' "/deploy must keep all four AgentCard lifecycle tasks in one lane"
-require_agentcard_command '--max-concurrency 1 --no-dashboard' "/deploy must preserve sequential payment state inside the isolated AgentCard lane"
-if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; then
+# Retired with the inline skill: the Group 3/Group 4 worker-pool exclusion text, the
+# `run-deploy-stage <stage>` fenced AgentCard lane (its env, task list and
+# --max-concurrency flags) and the standing production release-stall waiver wording.
+# The planner now runs every gate on its own Blacksmith VM (or `--executor local`
+# under host admission and memory sampling) and the sandbox AgentCard lifecycle
+# tasks are ordinary cloud smoke tasks (asserted in the wiring block above).
+# deploy.md states the replacement AgentCard rules.
+require_text "$DEPLOY_COMMAND" 'The sandbox lifecycle tasks are ordinary smoke tasks on the fleet; there is no separate AgentCard gate or election.' "/deploy must keep AgentCard sandbox lifecycle tasks inside the smoke lane"
+require_text "$DEPLOY_COMMAND" '`releasedCents=0`' "the AgentCard release stall must keep its exact signature"
+require_text "$DEPLOY_COMMAND" "agentcard_release_stall" "the AgentCard release stall must be triaged as a resource skip"
+require_text "$ROOT_DIR/scripts/deploy_test_cycle.py" 'AGENTCARD_RELEASE_STALL_CODE = "agentcard_release_stall"' "the staged runner must classify the AgentCard release stall"
+if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND" "$DEPLOY_CLI" "$DEPLOY_GATES"; then
   fail "/deploy must not tear down and rebuild the shared stack for each AgentCard task"
 fi
-require_text "$DEPLOY_COMMAND" 'python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha "$DEPLOY_MERGED_SHA"' "/deploy must dispatch the production semantic gate through the versioned CLI on the exact merged SHA"
-if grep -Fq "gh workflow run chat-lifecycle-ratchet.yml" "$DEPLOY_COMMAND"; then
+if grep -Fq 'production abandonment stays strict' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not contradict the AgentCard release-stall rules"
+fi
+# The production semantic gate is dispatched by the versioned CLI on the exact merged SHA.
+require_text "$PROD" "[PY, 'scripts/run_deploy_pipeline.py', 'production-semantic', '--merged-sha', sha, '--state-dir'," "/deploy must dispatch the production semantic gate through the versioned CLI on the exact merged SHA"
+if grep -Fq "gh workflow run chat-lifecycle-ratchet.yml" "$DEPLOY_COMMAND" "$DEPLOY_CLI" "$PROD"; then
   fail "/deploy must not dispatch the production semantic workflow by hand: the raw dispatch tests main's later head, not the merged SHA (#1646)"
 fi
-require_text "$DEPLOY_COMMAND" 'export GH_TOKEN DEPLOY_GH_BIN=/opt/devbox-tools/gh/current/bin/gh' "/deploy must hand the CLI the workflow-scoped gh binary on boxes.dev"
-require_text "$DEPLOY_COMMAND" 'STACK_PORTS=$(bash scripts/resolve-deploy-stack-db.sh) || exit 1' "/deploy E2B smoke must fail closed when it cannot resolve the running stack"
-require_text "$DEPLOY_COMMAND" 'BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$SMOKE_DB_PORT/victoria_$CONDUCTOR_WORKSPACE_NAME"' "/deploy E2B smoke must name the isolated workspace test database"
-require_text "$DEPLOY_COMMAND" 'echo "❌ production semantic gate is not green for $DEPLOY_MERGED_SHA"; exit 1; }' "/deploy must block on production semantic success"
-require_text "$DEPLOY_COMMAND" '--retry-failed-once "<justification>"' "/deploy must document the single failed-jobs retry"
-require_text "$DEPLOY_COMMAND" "Start every applicable provider lane concurrently" "/deploy must not serialize independent production providers"
-require_text "$DEPLOY_COMMAND" "Do not wait for the independent Mac release lane" "production semantics must overlap Mac release work"
+require_text "$PROD" "DEVBOX_GH = Path('/opt/devbox-tools/gh/current/bin/gh')" "/deploy must hand the CLI the workflow-scoped gh binary on boxes.dev"
+require_text "$PROD" "overrides = {'DEPLOY_GH_BIN': str(DEVBOX_GH)}" "/deploy must export DEPLOY_GH_BIN to the production children"
+# The E2B smoke resolves the running stack (or the explicit port) and names the isolated workspace database.
+require_text "$SEMANTIC_STACK" 'if stack_ports=$(bash scripts/resolve-deploy-stack-db.sh 2>/dev/null); then' "/deploy E2B smoke must resolve the running stack's ports"
+require_text "$SEMANTIC_STACK" 'echo "E2B smoke: invalid Postgres port' "/deploy E2B smoke must reject an invalid database port"
+require_text "$SEMANTIC_STACK" 'db_name="victoria_$CONDUCTOR_WORKSPACE_NAME"' "/deploy E2B smoke must name the isolated workspace test database"
+require_text "$SEMANTIC_STACK" 'db_url="postgresql://postgres:postgres@localhost:$db_port/$db_name"' "/deploy E2B smoke must target the isolated workspace test database"
+# Production lanes: a failed required lane (semantics included) fails the deploy; the single
+# failed-jobs retry and concurrent provider lanes are CLI behavior.
+require_text "$PROD" "passed = all(records[n]['status'] in SATISFIED for n in applicable)" "/deploy must block on production semantic success"
+require_text "$PIPELINE" 'semantic_parser.add_argument("--retry-failed-once", metavar="JUSTIFICATION"' "/deploy must keep the single failed-jobs retry"
+require_text "$DEPLOY_COMMAND" 'runs every applicable lane concurrently' "/deploy must not serialize independent production providers"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export BENCHMARK_SKIP_WMH_BUILD=1' "AgentCard lifecycle stacks must skip unrelated WMH build/refresh before readiness"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "AgentCard lifecycle helper must not block on Claude credentials"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "AgentCard lifecycle helper must pass GPT-only seed policy into run.sh"
 
 # /descend is part of the deploy orchestration surface. Its behavior has an
-# independent owner; this suite checks its wiring.
-require_text "$DEPLOY_COMMAND" 'bash scripts/tests/descend-command.test.sh' "/deploy must run the descend behavior owner"
+# independent owner; the registry check below pins its wiring (deploy.md carries
+# no gate list, so the doc-wording check for it is retired).
 python3 - "$DEPLOY_STRUCTURAL_RUNNER" <<'PY'
 import importlib.util
 import sys
@@ -717,7 +818,12 @@ bench_pids=()
 cleanup_bench_fixtures() {
   local pid
   for pid in "${bench_pids[@]:-}"; do
+    # The fake run.sh is a bash wrapper around `sleep 30`. End its child first,
+    # or the sleeper is orphaned past the suite and flags the staged deploy
+    # cycle's structural gate as lingering whenever this suite finishes last.
+    [ -n "$pid" ] && pkill -P "$pid" 2>/dev/null || true
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
   done
   rm -rf "$bench_repo" "$LOCK_TEST_DIR"
 }
@@ -756,6 +862,13 @@ wait_for_isolated_benchmarks "$bench_repo" 20 1 >/dev/null \
 bash "$bench_repo/scripts/run.sh" &
 run_sh_pid=$!
 bench_pids+=("$run_sh_pid")
+run_sh_child_pid=""
+for _ in $(seq 1 50); do
+  run_sh_child_pid="$(pgrep -P "$run_sh_pid" | head -n 1 || true)"
+  [ -n "$run_sh_child_pid" ] && break
+  sleep 0.1
+done
+[ -n "$run_sh_child_pid" ] || fail "the fake run.sh must have started its sleeper"
 mkdir -p "$bench_repo/.context/benchmarks/custom-run"
 printf '{"status": "running", "run_sh_pid": %s}\n' "$run_sh_pid" > "$bench_repo/.context/benchmarks/custom-run/services.json"
 if wait_for_isolated_benchmarks "$bench_repo" 1 1 >/dev/null 2>&1; then
@@ -798,9 +911,17 @@ if wait_for_isolated_benchmarks "$bench_repo" "10m" 1 >/dev/null 2>&1; then
   fail "a non-integer wait budget must fail closed"
 fi
 
+# The fixtures must not outlive the suite: a leaked child kept the staged
+# deploy cycle's structural gate from completing on an otherwise idle host.
+cleanup_bench_fixtures
+if kill -0 "$run_sh_child_pid" 2>/dev/null; then
+  fail "fixture cleanup left the fake run.sh child running"
+fi
+
 # Every back-end structural suite must be reachable from /deploy: Step 4 runs
 # `npm run test:structural`, and that script must list every *.test.ts file.
-require_text "$DEPLOY_COMMAND" 'run-deploy-stage backend-structural --reuse-passed -- npm run test:structural' "/deploy Step 4 must run the full back-end structural suite"
+# `npm run test:structural` is the planner's backend-structural gate (asserted in the
+# wiring block above); that script must list every *.test.ts file.
 structural_script=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["scripts"]["test:structural"])' "$ROOT_DIR/back-end/package.json")
 for structural_test in "$ROOT_DIR"/back-end/src/tests/structural/*.test.ts; do
   case "$structural_script" in

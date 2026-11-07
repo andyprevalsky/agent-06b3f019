@@ -1,0 +1,141 @@
+{
+ "schema_version": 1,
+ "pr": 1745,
+ "title": "fix(integrations): iMessage connector count overwritten by incremental sync",
+ "assignment": "user: 'Fix the iMessage connector, when i first connected it said 200k messages, now it says 1? did the updater instead overwrite?' then /rca and /deploy",
+ "merge_commit": "0b3fda43f21aaeae5fdac19885484aa4b5966051",
+ "gated_source": "9d8a8fcbd858d2e9a798437a9125d0799ba82abd",
+ "branch_commits": [
+  "9d8a8fcbd858d2e9a798437a9125d0799ba82abd Merge remote-tracking branch 'origin/main' into fix/imessage-connector-count",
+  "5c7903b5cbcfa7091ce464053591e9b0f4bcc7d7 fix(cloudbench): fence the warm-source re-list on a newer shared generation",
+  "824df87a1fd092d5ad3c2775ce8b8afac61319e6 test(deploy): isolate two structural fixtures from live host state",
+  "ee13b59151dbd1bdd14267fa3b32406cf37d3b81 Merge remote-tracking branch 'origin/main' into fix/imessage-connector-count",
+  "d47052f5ef2b8148d1629ccf590e3a560a45c39a test(agents): pin the browser provider in usage-row tests",
+  "a305adcf71fd04407ee90840b21f41efa4b12cb6 Merge remote-tracking branch 'origin/main' into fix/imessage-connector-count",
+  "1f32c5fbb7ec58ada1ed5e14bbec3d12449f093a fix(integrations): derive messaging connector totals from stored history"
+ ],
+ "assigned_fix": {
+  "root_cause": "acceptMessagingUpload and finalizeIntegration wrote each upload's payload size into Integration.config.messages/contacts, so each incremental iMessage sync replaced the ~208k total with its delta (prod config messages=1 while MessageRecord held 209,328 IMESSAGE rows).",
+  "fix": "finalizeIntegration recounts per person on MessageRecord(personId, channel); accept stops writing sizes; racy per-part accumulators removed from iMessage/WhatsApp/Telegram parsers.",
+  "regression": "back-end/src/tests/blackbox/integrations.messaging-ingestion.cases.ts testMessagingUpload_incrementalSyncKeepsTotalCount",
+  "pre_fix": "FAIL incremental sync keeps the total (expected 51 messages/2 contacts, got {\"messages\":1,\"contacts\":1})",
+  "post_fix": "PASS; backend coverage 250/250 in final cycle",
+  "adversarial_review": "managed boxes.dev thread ph7f3sqakwgja33gpswf7rfwp98hpg4w (Opus 5.5, medium/fast fallback): FAIL on first query plan (cross-user channel scan), then PASS after per-person count",
+  "prod_outcome": "live in prod at 0b3fda43f; the reporting user's row self-corrects at their next finalized iMessage sync (none had arrived by 04:57Z; config still messages=3, MessageRecord 209,342)"
+ },
+ "rca_cases": [
+  "docs/rca/cases/2026-11-06-messaging-connector-count-overwritten-by-upload-delta.md",
+  "docs/rca/cases/2026-11-07-usage-test-inherited-ambient-browser-provider.md",
+  "docs/rca/cases/2026-11-07-custody-fixture-claimed-live-hub-port.md",
+  "docs/rca/cases/2026-11-07-warm-source-wait-reread-stale-shared-inventory.md",
+  "docs/rca/cases/2026-08-03-non-atomic-pid-file-publication.md (recurrence appended)"
+ ],
+ "review": {
+  "coderabbit": "cycle 1 clean on 1f32c5fbb; sync-inherited a305adcf7; d47052f5e and 824df87a1 superseded before review (quota cap); cycle 2 full review clean on 9d8a8fcbd ('No merge-blocking issues were identified'; docstring-coverage style warning only)",
+  "graphide": "not requested"
+ },
+ "staged_cycle": {
+  "final": "ready=true on 9d8a8fcbd: 16 selected gates; smoke 9/9 cloud PASS (campaign d07819f1); backend coverage 250/250; agents, frontend, semantic, live probes, E2B, seed gates PASS",
+  "re_executed_unchanged": [
+   "deploy-command-structural (deploy-pipeline live-memory budget 293 vs 300 MB under load; receipt temp-file race)",
+   "cloudbench-controller (multi-workstream hub stub EADDRINUSE; autoscale orphan reap)"
+  ],
+  "aborted_cycles": [
+   "a305adcf7 run1: smoke INFRA stop (stale warm Python deps after main's certifi bump), agents-coverage provider test, 2 structural fixture bugs",
+   "824df87a1 run2/run3: smoke INFRA stop (warm-source stale inventory re-read)",
+   "9d8a8fcbd collided: previous cycle still running in worker roots (operator error)",
+   "ee13b5915 uninitiated"
+  ],
+  "skipped": [
+   "agentcard-lifecycle (local and production): deploy-operator election, only agents/benchmarks change is a test fixture; no payment code",
+   "mac-app-coverage-blackbox: Linux platform exclusion"
+  ]
+ },
+ "infra_actions": [
+  "scripts/run-bench-cloud --refresh-deps --ref a305adcf7 (warm donor 683e47df5094d8, fresh snapshot vs_9mDOzvJaye1HV5V2DLX)",
+  "terminated three leaked agent_link_server.py owned by this deploy's cancelled campaigns"
+ ],
+ "production": {
+  "render": "live 0b3fda43f (deploy dep-dbnannfb9u1s73cgiqs0)",
+  "probes": "/health ok, /api/agents 200, prod-endpoint-smoke 15/15, post-deploy log scan 0 error lines",
+  "fly": "not required (no agent runtime change)",
+  "vercel": "not required",
+  "mac_release": "not required",
+  "semantic": "chat-lifecycle-ratchet run 42340121475 passed on source 0b3fda43f",
+  "agentcard_production": "SKIPPED (operator election, no payment code)",
+  "wmh": "not applicable"
+ },
+ "ledger": "commit 35cd718f7: 9 smoke attempt/duration rows for merged source",
+ "followups": [
+  "Cancelled cloud campaigns leave agent_link_server.py (ppid 1) behind, so a cancelled smoke receipt retains a cleanup owner and the cycle cannot re-execute smoke (forced 3 full re-inits).",
+  "deploy-command-structural deploy-pipeline memory-admission test asserts an exact live MemAvailable-derived budget; flakes under concurrent load.",
+  "cloudbench multi-workstream hub stub ports (40000+) lie in the kernel ephemeral range and can hit EADDRINUSE under load.",
+  "linkedinParser and gmailSync still keep racy/accumulated totalMessagesProcessed / config.messages counters (out of scope)."
+ ],
+ "preservation": {
+  "archives": {
+   "core": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1745-0b3fda43/20261107T045318Z-core.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "36dbf70f03e692c172f3d101e3c9ee9c5a8b674383c984aacb3fd88ed1007cf2",
+    "gzip_sha256": "e59dd0f32a0a2f4d34ce89320447b255a94976314813f62eb8cb74ffbe21d247",
+    "manifest_sha256": "ceedf8d02db7217ee614530df3289c3f402aa2b1711ea57f9f49e6bbc11bc65f",
+    "stored_bytes": 6019862,
+    "original_bytes": 49842575,
+    "frames": 1,
+    "files": 1393,
+    "independent_verify_authenticated_files": 1393,
+    "full_readback_verified": true
+   },
+   "workers": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1745-0b3fda43/20261107T045318Z-workers.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "0eddbfb17943da94e7bf6afd8ac77ac8afe7155ae9b22b84d09e6e0c8a5de15d",
+    "gzip_sha256": "d03e765be1c6e6d183801a12d3896852ba5d1a8cbc64a333db0b4345849fbb41",
+    "manifest_sha256": "cb6ec69c5e79b5e6d39bdec743338b3db760c18678ecb5065cc1a6f0087f368f",
+    "stored_bytes": 148424623,
+    "original_bytes": 394994047,
+    "frames": 18,
+    "files": 27022,
+    "independent_verify_authenticated_files": 27022,
+    "full_readback_verified": true
+   },
+   "cloud": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeout-private/pr1745-0b3fda43/20261107T045318Z-cloud.tar.gz.aesgcm",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "7f4c4ce5aaa77a94b6f10cbc5cc3c916baf28836cdfff9c8ad412a798feccd05",
+    "gzip_sha256": "deb77dbc02d1faa459c09e3a44bf3222159f3b89f506f6341a142636fc35ea85",
+    "manifest_sha256": "ae68a6d39aef8d976e72c30b256e11e3d7af87c22c3ffb4255354a90d2189832",
+    "stored_bytes": 379282528,
+    "original_bytes": 1273941002,
+    "frames": 46,
+    "files": 2547,
+    "independent_verify_authenticated_files": 2547,
+    "full_readback_verified": true
+   }
+  },
+  "staging_root": "/home/boxes/pr1745-closeout-staging (hard links; removable after this commit)",
+  "excluded_reproducible": [
+   "raw V8 coverage tmp-*/raw-v8 dirs of interrupted backend coverage runs",
+   "fast-forward-cache, frontend-builds, node_modules",
+   "/var/tmp/rca-imsg/main-agents (git archive of origin/main agents)",
+   "worker checkouts /var/tmp/rdw/* (reproducible from the pushed commits)"
+  ],
+  "secrets": "none committed; archives encrypted with trace-archive-prod key (escrow as documented in pr-1739-closeout/RECOVERY.md)"
+ },
+ "files": {
+  "final-cycle-9d8a8fcbd.json.gz": "13f0c292012a7bd0020a162081b37b8354f156d3af80c464ac7a049447d3037d",
+  "final-plan-9d8a8fcbd.json.gz": "ea99aaca7c8859de9331985e4a25f57b0e0d29e68aebc7906a3d8c62feb72d53",
+  "prod-semantic-pipeline.log.gz": "359de735ac50534c4310b50718e8091ba30d67853ba5f413fc613fc35ac4bfef",
+  "production-receipt.json.gz": "53d778bd7692f80b6b968aa619c0aefa0e8d79709fa88cc32bfcbedf31353142",
+  "rca-repro-lines.txt": "b55c5b99f7e07dae11d861cfb8f12d224609b2be18760df18524c96767dd5353",
+  "review-ledger.json": "1561891be9f38886a1de1704380d9fb88c35df46b034b61ff45e3a1d653a631a"
+ },
+ "factory_history": "commit 38eef2b22 (27 factory timing rows: /rca and /deploy stages, review, production, outcomes)"
+}

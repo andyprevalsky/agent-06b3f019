@@ -1,0 +1,289 @@
+{
+ "schema_version": 1,
+ "pr": 1749,
+ "title": "fix(linkedin): export agent completes end to end (realm reattach, CDP slot leak, blob downloads, first-installment guard)",
+ "branch": "fix/linkedin-export-agent-live",
+ "originating_devbox": "ed7a3716-f3df-4537-8207-8058623127e1",
+ "merge_commit": "3e770c9e10be3ee23f6cf0a2ad4a523b1241789e",
+ "merged_at": "2026-11-07T14:24:58Z",
+ "gated_source": "79e007df49786d17071719477a283cbe8ed7b446",
+ "gated_source_digest": "4fcae213f23b47595019cc9d6d027cb3088d221fcee10e131a5146dd85799326",
+ "main_parent": "08b4b13364e642e2ca791942c9d5b7ec1b7286c0",
+ "branch_commits": [
+  "3c6d0ee74e12bed2adc80cf689a5e278eaa71912 fix(browser-agent): reattached session starts in its credential realm; setup failure releases connected CDP clients",
+  "39abd0a2727a2982aba1503472663230b90364ce fix(browser-agent): materialize blob: downloads from the page that built them",
+  "f072bb9b5e8360827ae32c7bd249e94d1075a49c fix(integrations): refuse a LinkedIn first-installment archive instead of a 0-contact 'success'",
+  "13f92f1695a63e11b98365e874b5b52453c95603 fix(integrations): an unreadable LinkedIn archive keeps its failed progress run",
+  "0671f87f104579d5feb98b5ffe87b0ac1f4ead4a fix(browser-agent): a sealed generation outranks an ordinary setup error; document the Tilion blob fallback gap",
+  "cbd76bb26f1f48396514b9ff24165a1b094f819d fix(browser-agent): hand connected setup clients to the activity's bounded cleanup",
+  "13a399605d52f9771bc75a539a5f65d8ab3f2c7e test(cloudbench): autoscale finalization harness reaps its simulated autoscalers",
+  "4ce3da61bf18ea398d887c6b3ee10d7a05bcc93c fix(deploy-gates): custody namespace scan skips a same-uid process it cannot inspect",
+  "afbc38ecddbd83fd698cd957763dc10866f844ab fix(browser-agent): setup cancellation keeps connected clients owned; inner cancellation does not hide a setup error",
+  "a4440c14ec2c9d03e3ddd51a2ec71300b21fdb5c refactor(browser-agent): parallel setup keeps gather's first-failure semantics; only ownership changes",
+  "f3a306de77daeba89f840b3bbbd4571d56c9cb27 test(cloudbench): native-stop last tick accepts a proven post-send deadline refusal",
+  "790e413f4f17cc4dee4ea72c20ba62c91337a8c3 docs(rca): LinkedIn export case describes the final setup ownership fix",
+  "c3aa14bd27c92218eb1bac67ed2a5a0ecae2c310 fix(browser-agent): hand a finished browser setup to cleanup before the bounded wait",
+  "82a6c9efc09dede0cc3c082c291518315fd23184 fix(cloudbench): central hub port selection skips a bound port nobody listens on",
+  "3551f5d3420f53888f2b360ae05e0bcfcac00391 test(admin-health): tooltip test waits for each chart to paint after its size measurement",
+  "f6ae7b05e4594535181fcdde2ac89319b34d149b docs(rca): admin-health case uses the archive's front-end surface name",
+  "21517359c79433a6dd7f1bda79716f707c3b25ce test(cloudbench): bound-only hub port regression runs in the gate's environment suite",
+  "3b8ee58ad5302fe9c8553576ac7a87a8aabd974e fix(browser-agent): a setup cancelled mid-connect bounds its own disconnect",
+  "d12d9a9bacaddfadd702a5732acae8fa447b8875 fix(browser-agent): a failed setup teardown still releases Tilion's CDP slot",
+  "1b61399be5ca0ae09201347061f680eeb0cdfc45 fix(browser-agent): a failed activity keeps its browser until the CDP slot is released",
+  "e3794c9de6f73c4bb261b0e833d76a53cf02b1be fix(browser-agent): every terminal browser release falls back to closing the CDP multiplexer",
+  "56bf43fe2b2dc8a09dbcfe2600f5122d6d11deef test(backend-blackbox): the isolated test backend does not run the purchase hold reconciler",
+  "20f3748dc272eef7a36059ad4384da89d815fe8d merge: origin/main into fix/linkedin-export-agent-live",
+  "79e007df49786d17071719477a283cbe8ed7b446 merge: origin/main into fix/linkedin-export-agent-live"
+ ],
+ "product_fixes": [
+  "agents/domains/spawn_browser_agent_v3/handler.py: a reattached browser starts in the credential realm of its session response (Gmail check no longer fails with 'Credential payload for google.com is missing passkey material')",
+  "handler.py: a setup failure no longer leaks the Tilion CDP slot; gather keeps first-failure semantics, connected clients are handed to the bounded cleanup, the unfinished side is cancelled and awaited within the terminal bound or tracked for the worker drain",
+  "handler.py: terminal browser releases (setup teardown, error handler, completion, approval, handoff, deploy-drain, cancellation) fall back to closing the loopback CDP multiplexer when the bounded disconnect times out or fails; Playwright stop after a failed CDP attach bounded at 5s",
+  "agents/domains/spawn_browser_agent_v3/download_persist.py: blob: downloads (LinkedIn 'Download archive') are materialized in the page that created them, with no second request to the rate-limited endpoint",
+  "back-end linkedinParser.ts / routes.upload.ts: an archive without Connections.csv (first installment) returns 422 naming the first installment and leaves the integration unchanged; an unreadable archive keeps its failed progress run"
+ ],
+ "deploy_gate_repairs": [
+  "scripts/lib/cloudbench-env.sh: central hub port selection binds before choosing a port (a bound non-listening port no longer fails all 20 hub binds); fix 82a6c9efc, regression 21517359c",
+  "back-end/scripts/blackbox-auto-rca-env.sh: isolated blackbox backend disables the minute purchase-hold reconciler (DISABLE_PURCHASE_HOLD_RECONCILE=1) that compensated the purchases.part5 fixture mid-assertion; fix 56bf43fe2",
+  "deploy_test_interrupted_cleanup.py: custody namespace scan skips a same-UID process it cannot inspect instead of raising PermissionError; fix 4ce3da61b",
+  "cloudbench-acceptance-autoscale finalization harness reaps its simulated autoscalers; 13a399605",
+  "native-stop last-tick test accepts a proven post-send deadline refusal; f3a306de7",
+  "admin-health tooltip test waits for each chart to paint after ResponsiveContainer's size measurement; 3551f5d34 (RCA surface name corrected in f6ae7b05e)"
+ ],
+ "rca_cases_added": [
+  "docs/rca/cases/2026-11-07-linkedin-export-agent-never-reached-upload.md",
+  "docs/rca/cases/2026-11-07-central-hub-port-selector-took-a-bound-non-listening-port.md",
+  "docs/rca/cases/2026-11-07-admin-health-tooltip-test-raced-recharts-size-measurement.md",
+  "docs/rca/cases/2026-11-07-blackbox-backend-purchase-reconciler-raced-stale-charging-fixture.md",
+  "docs/rca/cases/2026-11-07-native-stop-last-tick-test-ignored-post-send-deadline-exhaustion.md"
+ ],
+ "review": {
+  "coderabbit_rounds_delivered": 3,
+  "rounds": "initial review (findings fixed), incremental review (findings fixed; one declined with a reason), verification review 5811674830 on 56bf43fe2 (one finding deferred)",
+  "override": "Code Review | Overridden | finding 4501365937 (retain-unless-released at the five terminal release sites, a double-failure hardening edge) deferred to branch followup/pr1749-release-retention under the standing three-round authorization (recorded 2026-11-07T10:50:33Z)",
+  "merge_head_skip": "Code Review | Skipped | usage-cap on 79e007df4 (CodeRabbit 'Review limit reached' issue comment 6701533028, check run 128412473570 neutral 'Review rate limited'); the head contains only main merges and all branch code was reviewed in the three rounds. An earlier usage-cap skip was also recorded on 22711f595 at 03:56:57Z",
+  "external_provider_failure": "CodeRabbit organization usage spending cap reached (needs fixing by the account owner)",
+  "golden_reference_review": "GROUNDED for AB-1749-4, AB-1749-5, AB-1749-6, AB-1749-7 (harness hunks); deploy approval batch clear",
+  "ledger": "core archive: .context/deploy-review-cycle.json and .context/deploy-review-dispositions.jsonl"
+ },
+ "staged_cycles": [
+  {
+   "state_dir": ".context/deploy-pipeline.run1-20261107",
+   "deploy_run": "20261107-030512-410782",
+   "heads": "22711f595d -> b51156833e -> f407e0738b",
+   "rounds": 12,
+   "phase": "triage (not ready; superseded by the next run)",
+   "failures": [
+    "deploy-command-structural UNVERIFIED (deploy-test-plan cloud fixture hard-coded Hub port 8765 occupied by this cycle's smoke Hub; NOT_INTRODUCED, assigned to the deploy owner for repair in this PR)",
+    "backend-coverage-blackbox integration-accounts FAIL (INTRODUCED: LinkedIn archive check ran before the progress row existed; fixed by 13f92f169)",
+    "cloudbench-controller UNVERIFIED (autoscale finalization harness orphaned its simulated autoscaler; NOT_INTRODUCED, fixed by 13a399605)",
+    "deploy-command-structural UNVERIFIED on f407e0738b final round (no RCA recorded; cycle superseded by run 20261107-064130-2393987)"
+   ]
+  },
+  {
+   "state_dir": ".context/deploy-pipeline.run1-20261107T0641",
+   "deploy_run": "20261107-064130-2393987",
+   "heads": "8d436372f3 -> 3551f5d342 -> f6ae7b05e4 -> 21517359c7 -> d12d9a9bac -> 56bf43fe2b",
+   "rounds": 17,
+   "phase": "triage (not ready; archived)",
+   "failures": [
+    "deploy-command-structural UNVERIFIED (native-stop last-tick test; fixed f3a306de7, RCA case added)",
+    "frontend-coverage-blackbox UNVERIFIED (admin-health Recharts race; fixed 3551f5d34, RCA case added)",
+    "cloudbench-controller UNVERIFIED (central hub port selector; fixed 82a6c9efc, RCA case added)",
+    "semantic-stack UNVERIFIED (two mobile-adversarial Playwright specs timed out under 12 concurrent gates, load1 25.5; rerun on fewer concurrent gates, no code defect)",
+    "backend-structural UNVERIFIED (INTRODUCED: RCA case surface 'frontend' rejected by rca_archive.py; fixed f6ae7b05e)",
+    "backend-coverage-blackbox purchases.part5 FAIL (purchase-hold reconciler race; fixed 56bf43fe2, RCA case added)",
+    "smoke UNVERIFIED x10 and cloudbench-controller UNVERIFIED on 56bf43fe2b final round 17 ('worker result identity/inventory mismatch'; the 10:45Z cloud campaign c7716de8 stopped at INFRA 1/10 with r001-j0005 and cancelled the rest through owned teardown; no RCA recorded in this cycle; cycle archived and rerun as run2)"
+   ]
+  },
+  {
+   "state_dir": ".context/deploy-pipeline.run2-20261107T1117",
+   "deploy_run": "20261107-064130-2393987",
+   "heads": "56bf43fe2b",
+   "rounds": 6,
+   "phase": "ready (superseded because main moved)",
+   "failures": [
+    "backend-coverage-blackbox shard-2 x5 FAIL (benchmarks-hub, browser-provider, code-preview, codex-code, whatsapp-webhook): devbox memory watchdog SIGTERMed the shard-2 server at 11:37:18Z (working set 14.9 of 15.17 GB); NOT_INTRODUCED; focused rerun with other gates idle passed",
+    "smoke background-agent-message-smoke FAIL (LLM-judged title exactness, agent 7b2a1efe-fff1-4147-a691-b4d69c25c5a7); NOT_INTRODUCED; delegated / waived to repair thread ph75hp07f66ahp4tgdg0h2zts98hszya"
+   ]
+  },
+  {
+   "state_dir": ".context/deploy-pipeline.run3-20261107T1300-interrupted",
+   "deploy_run": "20261107-064130-2393987",
+   "heads": "20f3748dc2",
+   "rounds": 1,
+   "phase": "interrupted in quick (typescript and backend-structural UNVERIFIED 'missing complete case receipt', backend-structural exit -15); superseded by the second main merge 79e007df4"
+  },
+  {
+   "state_dir": ".context/deploy-pipeline",
+   "deploy_run": "20261107-064130-2393987",
+   "heads": "79e007df49",
+   "rounds": 9,
+   "phase": "READY on the gated head; 16 gates PASS (agentcard-lifecycle SKIPPED by operator election, mac-app-coverage-blackbox SKIPPED platform unavailable)",
+   "failures": [
+    "typescript UNVERIFIED (quick): shared generated Prisma client predated main's schema migrations from #1716; NOT_INTRODUCED; prisma generate, rerun PASS",
+    "backend-coverage-blackbox 13 shard-2 domains FAIL + coverage-threshold UNVERIFIED (final): shard-2 server hit the JS heap limit at 13:29Z; RCA a8d2534b (report-bug fixture trajectory growth + capture retention, repro .context/li-goal/rca/backend-heap-repro.ts); NOT_INTRODUCED; accumulated fixture trees removed from the isolated shard DBs and the gate rerun alone PASS; durable fix handed off to ph780y7z1f5azjngd52xvdk4c98hrtyb"
+   ]
+  }
+ ],
+ "deploy_runs": {
+  "20261107-030512-410782": "completed 03:05:12Z-06:41:13Z on 87e4a0b8d (superseded by the next run)",
+  "20261107-064130-2393987": "started 06:41:30Z on 8d436372f; outcome 'blocked' recorded 13:00:08Z, then continued under the same run id through code review (13:06:49Z), merge and production verification (production-verify stage 14:24:56Z, semantic finish 14:41:27Z)",
+  "successor": "no separate successor run directory exists in .context/deploy-runs; post-13:00Z events were recorded under 20261107-064130-2393987 (factory-current)"
+ },
+ "infra_actions": [
+  "disk: superseded evidence archived in place with .context/li-goal/archive-evidence.sh (tar.gz beside each directory, listing verified, sha256 appended to ARCHIVED-EVIDENCE.sha256, then the directory removed): 7 cloud campaign directories under .context/deploy-cloud, 6 backend coverage failure runs under /var/tmp/rdw/backend-coverage-blackbox/.context/test-runs and 3 deploy-backend dirs; this cleared the smoke cleanup-reserve ENOSPC and the git-fetch volume refusal (bytes reclaimed were not recorded)",
+  "shard DB fixture cleanup: accumulated report-bug fixture agent trees removed from the isolated coverage databases victoria_backend-coverage-blackbox_s1 (20) and victoria_backend-coverage-blackbox_s2 (29) at about 13:5xZ; remaining fixture agents 0; no shared or production database touched",
+  "shared generated Prisma client regenerated (back-end npx prisma generate) for main's merged schema"
+ ],
+ "production": {
+  "render": "service Navi deploy dep-dbnj9f8473hc739mn810 live on 3e770c9e1 at 2026-11-07T14:32:59Z (303.6s); backend probes 15/15 and 0 error log lines reported by the deploy owner (factory events backend-probes 14:33:12Z-14:33:30Z)",
+  "fly": "deploy-agents.yml run 42381494351 attempt 1 success; cooperative cutover job 3edddda51b4b1c3927990971e40acfc6fea44417a172038f957e999320e50193 SUCCEEDED, live pointer navi-agent-tasks-pool-4bdf824ebb55@56b2b334e82d, monitor --verify exit 0 (phase cooperative_drain_complete)",
+  "vercel": "GitHub deployment 7622443354 (Production, vercel[bot]) state success at 2026-11-07T14:30:09Z for 3e770c9e1",
+  "semantic": "chat-lifecycle-ratchet.yml run 42382404599 source_sha=3e770c9e1: 5/5 jobs success (semantic frontend flows + 4 chat lifecycle latency ratchets), 14:36:35Z-14:41:27Z",
+  "agentcard": "SKIPPED by operator election (only trigger was test-only agents/benchmarks/cloudbench_dependency_sync_test.py; no AgentCard/payment/provider path changed)",
+  "mac_release": "not applicable (no mac-app or front-end changes)",
+  "receipt": "core archive: .context/deploy-pipeline/production.json"
+ },
+ "live_prod_linkedin_verification": {
+  "agent_id": "5357f72b-bf67-44f8-bd66-8963e46a487f",
+  "state": "COMPLETED: integration 0e41a4d5-46db-4ce1-a17f-d3435c881edc (linkedin) CONNECTED at 2026-11-07T15:31:59Z from Basic_LinkedInDataExport_11-06-2026.zip.zip, totalContactsProcessed 375, totalMessagesProcessed 480, failureReason null",
+  "observed_at": "2026-11-07T15:45:01Z",
+  "observed_by": "read-only production query by the deploy owner (status CONNECTED, lastSuccessfulSyncAt 2026-11-07T15:31:59.730Z)",
+  "gaps_observed": [
+   "the request_linkedin_export browser task retried LinkedIn's requestDataExport (HTTP 412, a recent full-archive request) until its 30-minute StartToClose timeout at about 15:07Z; the agent uploaded the already-downloaded Basic archive instead",
+   "after that timeout the root's _browser_activity_cleanup_unknown flag stayed set although background cleanup finished at 15:08:09Z, so later browser spawns failed 'Previous browser activity cleanup is unconfirmed' (pre-existing since 659203815; not a failed test, no repair handoff)"
+  ],
+  "local_live_run": "ae7983a2-1636-4eed-b908-69bd4dd6f470 completed before merge: 170,039-byte archive from a blob URL, Claude Code upload HTTP 200, 227 connections and 480 messages imported, integration CONNECTED (local recordings and trace outbox in the core archive)"
+ },
+ "delegated_repairs": [
+  {
+   "test": "smoke/background-agent-message-smoke",
+   "thread": "ph75hp07f66ahp4tgdg0h2zts98hszya",
+   "devbox": "9c4f8215-56fa-4552-a3b7-f66db0da873f",
+   "folder": "Bugs z57k17gzz4egv17ag6qqtasexs8h273j",
+   "dispatch": "accepted (request 1b701d13-e608-41b0-b237-9be26705697f)",
+   "packet": "core archive .context/li-goal/handoff-bg-agent-smoke.md"
+  },
+  {
+   "test": "backend-coverage-blackbox shard heap growth (report-bug fixture)",
+   "thread": "ph780y7z1f5azjngd52xvdk4c98hrtyb",
+   "devbox": "aa460e55-b828-4b5f-b63d-4d582a3e308b",
+   "folder": "Bugs z57k17gzz4egv17ag6qqtasexs8h273j",
+   "dispatch": "accepted (request 0ee700f2-792b-4775-95e6-f31dd235b1aa)",
+   "packet": "branch followup/backend-blackbox-heap-growth docs/handoffs/backend-blackbox-heap-growth/GOAL.md; core archive .context/li-goal/handoff-backend-heap.md"
+  }
+ ],
+ "followup_branches": {
+  "followup/pr1749-release-retention": "d09ce26d4ad30032156cf95644ebf62326190708 (pushed to origin; deferred CodeRabbit finding 4501365937)",
+  "followup/backend-blackbox-heap-growth": "85a2e270651ee63621add4550ac6ac81406346ec (pushed to origin; repair goal packet + unmerged RCA patch 098ecbc28)"
+ },
+ "non_pass_items_disclosed": [
+  "AgentCard lifecycle SKIPPED by operator election; mac-app coverage SKIPPED (platform unavailable)",
+  "CodeRabbit merge-head review skipped at the organization usage cap; finding 4501365937 deferred to followup/pr1749-release-retention",
+  "background-agent-message-smoke failed once (title exactness) and was delegated; it passed in the final cycle",
+  "backend-coverage shard-2 heap exhaustion is NOT fixed in this PR; the final pass followed removal of accumulated fixture rows from the isolated shard DBs and the durable fix is delegated",
+  "earlier cycles carry UNVERIFIED results without recorded RCA (run1 final deploy-command-structural on f407e0738b; run1-T0641 round 17 smoke/cloudbench 'worker result identity/inventory mismatch' with the c7716de8 campaign infra stop 1/10); preserved unchanged in the core and cloud archives",
+  "li-goal contains secret-bearing local logs: run-sh.3.log has Supabase user session JWTs (exp 2027-02) in curl commands and AB-1749-4.dump-url/AB-1749-4.packet.md carry a 7-day presigned R2 URL; they are kept only inside the encrypted core archive, never in Git; credential rotation requires the user's explicit permission",
+  "the live production LinkedIn verification agent had not finished at closeout"
+ ],
+ "preservation": {
+  "archives": {
+   "core": {
+    "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-core.tar.gz.aesgcm",
+    "ciphertext_sha256": "ffc8a307a2b5e91ed88c1c3b84a9a94021cd0ef5724cbf8d2e2c29707f503608",
+    "gzip_sha256": "577d10d387d343519a8e45a63cc6e71d79b19439142d32f86c4bd2087ad11625",
+    "manifest_sha256": "d71f78492997763d634289802934bfc3b757d8212ad25d00e368a827a09cc759",
+    "stored_bytes": 31918997,
+    "files": 4356,
+    "original_bytes": 164658398,
+    "frames": 4,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "full_readback_verified": true,
+    "independent_verify_authenticated_files": 4356
+   },
+   "workers": {
+    "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-workers.tar.gz.aesgcm",
+    "ciphertext_sha256": "8b2325385fd92fc7dd87a40726cc97557b4a96c25f85949a9532907e3b9c898e",
+    "gzip_sha256": "73f30c29e869cf3030db538295055d35dc2bd01813b743296ba0d633bbfe3aae",
+    "manifest_sha256": "b3a6904a5f5d7a5c4ae81816ffe5ccbbeb4742f0c6f5a312a2800cb0aa2b65c5",
+    "stored_bytes": 3447866873,
+    "files": 10551,
+    "original_bytes": 7083611689,
+    "frames": 412,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "full_readback_verified": true,
+    "independent_verify_authenticated_files": 10551
+   },
+   "cloud": {
+    "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-cloud.tar.gz.aesgcm",
+    "ciphertext_sha256": "fd487c39da6938b9fa7f1f46de7448c1f6a409324c65c863d450a5aea78b81d4",
+    "gzip_sha256": "ed8db42834dd45e7778c277887935cd18737b5a24615effcb17e0b7f561a8412",
+    "manifest_sha256": "e7d260d860d6a5a766e4d2c20f2bbfc7e434e4802854fe7a9eb9a97eebc5cdb8",
+    "stored_bytes": 2634446917,
+    "files": 4578,
+    "original_bytes": 4453918287,
+    "frames": 315,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "full_readback_verified": true,
+    "independent_verify_authenticated_files": 4578
+   },
+   "control": {
+    "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-control.tar.gz.aesgcm",
+    "ciphertext_sha256": "006c978fbb7b037fa4d5fd1284733a66105330b24418a3f59216a4b230f75bd6",
+    "gzip_sha256": "165152773a5d89f66ef1303c5cef302c287bd394f743303a634d859851690db7",
+    "manifest_sha256": "302e8cf6b95045a68ec3ea5ffc5ac5475b6e9ce55afc42d8795d9a79d8d9115d",
+    "stored_bytes": 210668,
+    "files": 20,
+    "original_bytes": 3281048,
+    "frames": 1,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "full_readback_verified": true,
+    "independent_verify_authenticated_files": 20
+   },
+   "scratch": {
+    "key": "devbox-closeout-private/pr1749-3e770c9e/20261107T145219Z-scratch.tar.gz.aesgcm",
+    "ciphertext_sha256": "95af72645d9176c3aae50cbcd56dfd8e2c83b8d2f001f69155aa02b1d8de9dab",
+    "gzip_sha256": "310569858f053c6524671b4383c017f6b5a32f13be6464934689dca07c85f8d8",
+    "manifest_sha256": "dccb2d351592b358826c4e9d17410349d53d9fdd9c75be5609a6699e04044964",
+    "stored_bytes": 367513,
+    "files": 72,
+    "original_bytes": 3251438,
+    "frames": 1,
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "full_readback_verified": true,
+    "independent_verify_authenticated_files": 72
+   }
+  },
+  "verification": "private-preservation-verification.json",
+  "recovery": "RECOVERY.md",
+  "capture": {
+   "core": {
+    "files": 4356,
+    "bytes": 164658398
+   },
+   "workers": {
+    "files": 10551,
+    "bytes": 7083611689
+   },
+   "cloud": {
+    "files": 4578,
+    "bytes": 4453918287
+   }
+  },
+  "scratch_archive": "regular files of /var/tmp/li-fix-clone/.context (approval batch state, test-runs, trace-archive-outbox; lock/cache dirs excluded), captured after the control archive",
+  "staging": "paths outside /home/boxes were hard-linked into /home/boxes/pr1749-closeout-staging/<absolute path> (10854 links) and /run/boxes-memory-terminations.jsonl was copied there, so members appear under pr1749-closeout-staging/...; staging removed after verification",
+  "symlinks_and_exclusions": "18 symlinks (16 'current' links in /var/tmp/li-cds and li-probe-* RCA repro dirs, 2 shared-inventory 'current' links in deploy-cloud) are recorded with targets in list-skipped.json inside the control archive with the capture lists and the upload receipts; worker checkouts, node_modules, venvs, databases, browser-use temp dirs, trace-archive test scratch under /var/tmp and .context caches (fast-forward-cache, tsbuildinfo, trace-archive locks, benchmark-hub, frontend-builds, fleet canary stamps, ngrok.log, services.json) are reproducible or transient and excluded; the key escrow file is never archived"
+ },
+ "files": [
+  "closeout-manifest.json",
+  "deletion-readiness.json",
+  "private-preservation-verification.json",
+  "RECOVERY.md"
+ ],
+ "factory_history": {
+  "published_through": "4a122373e chore(factory-history): record 14 factory timing row(s) on main, including stage-finish production-verify 15:37:38Z and outcome completed 15:39:27Z for deploy run 20261107-064130-2393987",
+  "pending": "none"
+ },
+ "benchmark_history": "d3eda0e5b chore(benchmark-history): PR #1749 deploy smoke rows on main: 10 attempt and 10 duration rows from final campaign deploy-8d13a0ad on 79e007df4 (10/10 passed); earlier sweeps are pre-merge iterations (latest-only)"
+}

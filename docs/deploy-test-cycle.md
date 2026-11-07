@@ -282,6 +282,9 @@ Source binding uses the existing pipeline's output-ledger exclusion for
 `agents/benchmarks/history/`, so benchmark result append operations do not
 masquerade as runtime edits. All other tracked/untracked source, ignored runtime
 configuration and the worker commands remain bound and are rechecked.
+The one exception is the value of a `GITHUB_TOKEN` line in those env files: the devbox
+daemon rewrites that short-lived credential several times an hour, so the digest keeps the
+key and every other byte but not its value. Any other config change still stales the cycle.
 
 A focused JSON has `source` and a `gates` mapping, each value with argv `command`
 and `checks`. With a case-aware worker, keep its transport `command` and add a

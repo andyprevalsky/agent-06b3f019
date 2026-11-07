@@ -31,11 +31,18 @@ model Agent {
   taskEstimateRows                 AgentTaskProgressEstimate[]
   status                           AgentStatus                 @default(STARTING_UP)
   statusMessage                    String?
+  /// User control ordering; unrelated row writes preserve this revision.
+  userControlRevision              Int                         @default(0)
+  /// Durable user pause intent for this lifecycle; terminal reports clear it.
+  userControlPaused                Boolean                     @default(false)
   // Archive marker. Set by DELETE /api/agents/:id (soft delete); the sidebar's
   // archived view lists rows where this is non-null.
   deletedAt                        DateTime?
   createdAt                        DateTime                    @default(now())
   updatedAt                        DateTime                    @updatedAt
+  // Newest person-authored message (UI/API post, attention answer, SMS reply).
+  // Agent-authored USER rows never set it. Null → the sidebar uses createdAt.
+  lastUserMessageAt                DateTime?
   temporalWorkflowId               String?
   temporalFirstExecutionRunId      String?
   workflowReplacementToken         String?
@@ -954,6 +961,15 @@ model Integration {
   accountId              String                       @default("")
   /// Shown on the FE chip.
   accountEmail           String?
+  /// Subscription usage windows (compute rows only), 0-100 percent USED, as the
+  /// provider reported them on a response this token served. Agents carry the
+  /// latest snapshot on the lineage heartbeat they already send per LLM call;
+  /// `usageObservedAt` orders those writes and throttles them per row.
+  usage5hUsedPct         Float?
+  usage5hResetsAt        DateTime?
+  usage7dUsedPct         Float?
+  usage7dResetsAt        DateTime?
+  usageObservedAt        DateTime?
   createdAt              DateTime                     @default(now())
   updatedAt              DateTime                     @updatedAt
   emailCredentials       EmailIntegrationCredential[]
@@ -2166,52 +2182,52 @@ model SlackAutoRcaEvent {
 /// bearing content (env files, linked config, git artifacts) is stored only as
 /// credential envelopes (RSA-OAEP + AES-256-GCM, CLAUDE_CREDENTIAL_DECRYPTION_KEY).
 model Project {
-  id              String               @id @default(uuid())
-  userId          String
-  name            String
-  repoUrl         String?
-  defaultBranch   String               @default("main")
-  startupScript   String?
-  startupTimeoutS Int                  @default(120)
-  autoWake        Boolean              @default(false)
+  id                        String                  @id @default(uuid())
+  userId                    String
+  name                      String
+  repoUrl                   String?
+  defaultBranch             String                  @default("main")
+  startupScript             String?
+  startupTimeoutS           Int                     @default(120)
+  autoWake                  Boolean                 @default(false)
   /// Default sandbox size for new code sessions: {cpu, memoryGb}; null = deployment default.
-  sandboxSize     Json?
+  sandboxSize               Json?
   /// Per-project salt for content fingerprints (incremental re-sync).
-  syncSalt        String
+  syncSalt                  String
   /// Monotonic snapshot revision; bumped by every accepted sync.
-  syncRevision    Int                  @default(0)
-  lastSyncedAt    DateTime?
+  syncRevision              Int                     @default(0)
+  lastSyncedAt              DateTime?
   /// Template sync ("maintenance") script, run on the project's ONE template sandbox.
   /// null = never configured (the Rose default is filled in); "" = cleared on purpose.
   maintenanceScript         String?
-  maintenanceTimeoutS       Int       @default(480)
+  maintenanceTimeoutS       Int                     @default(480)
   /// Run nightly (fixed UTC slot, see providers/projects/maintenanceSchedule.ts).
-  maintenanceNightly        Boolean   @default(false)
+  maintenanceNightly        Boolean                 @default(false)
   /// Run when the repo's default branch head changes on GitHub (cron polls the head sha).
-  maintenanceOnGithubChange Boolean   @default(false)
+  maintenanceOnGithubChange Boolean                 @default(false)
   maintenanceWatchedSha     String?
   maintenanceWatchCheckedAt DateTime?
   /// Lease: at most one maintenance run per project; an expired lease is reclaimable.
   maintenanceRunId          String?
   maintenanceLeaseUntil     DateTime?
   /// Latest successful template snapshot (E2B snapshot id); new code sessions start from it.
-  templateSnapshotId         String?
+  templateSnapshotId        String?
   /// The one before it, kept until the next publish so sessions already starting from it finish.
-  templatePrevSnapshotId     String?
-  templateSnapshotAt         DateTime?
-  templateSnapshotSha        String?
-  templateSnapshotRunId      String?
+  templatePrevSnapshotId    String?
+  templateSnapshotAt        DateTime?
+  templateSnapshotSha       String?
+  templateSnapshotRunId     String?
   /// {cpu, memoryGb} of the template sandbox the snapshot came from.
-  templateSnapshotSize       Json?
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
-  user            User                 @relation(fields: [userId], references: [userId], onDelete: Cascade)
-  envFiles        ProjectEnvFile[]
-  syncSnapshot    ProjectSyncSnapshot?
-  maintenanceRuns ProjectMaintenanceRun[]
-  agents          Agent[]
-  cliLogins       ProjectCliLogin[]
-  folders         ProjectFolder[]
+  templateSnapshotSize      Json?
+  createdAt                 DateTime                @default(now())
+  updatedAt                 DateTime                @updatedAt
+  user                      User                    @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  envFiles                  ProjectEnvFile[]
+  syncSnapshot              ProjectSyncSnapshot?
+  maintenanceRuns           ProjectMaintenanceRun[]
+  agents                    Agent[]
+  cliLogins                 ProjectCliLogin[]
+  folders                   ProjectFolder[]
 
   @@unique([userId, name])
   @@index([userId, updatedAt])

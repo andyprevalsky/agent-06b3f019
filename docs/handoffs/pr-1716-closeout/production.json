@@ -1,0 +1,133 @@
+{
+  "production_M": "060fa655d16476e0ff84727bef5b4e188bee349d",
+  "observations_are_historical_not_new_probes": true,
+  "vercel": {
+    "merged_sha": "060fa655d16476e0ff84727bef5b4e188bee349d",
+    "deployment_id": 7621520237,
+    "creator": "vercel[bot]",
+    "environment": "Production",
+    "status": "PASS",
+    "observed_at": "2026-11-07T13:04:47.017912+00:00"
+  },
+  "render": {
+    "status": "live",
+    "live_commit": "060fa655d16476e0ff84727bef5b4e188bee349d",
+    "deploy_id": "dep-dbni19u8bjmc73a8m7rg",
+    "started_at": "2026-11-07T13:00:18Z",
+    "finished_at": "2026-11-07T13:07:03Z",
+    "waited_s": 404.8
+  },
+  "endpoint_probes": {
+    "status": "PASS",
+    "count": 15,
+    "evidence": {
+      "member_path": "rose/.context/pause-rca/production-endpoint-smoke.log",
+      "sha256": "35ad86ee5b7a6d7843a1af646de2b1602ce7bd863512adaf64e3eff1e53e7f1a",
+      "bytes": 1045
+    }
+  },
+  "schema": {
+    "status": "PASS",
+    "evidence": {
+      "member_path": "rose/.context/pause-rca/production-control-schema.json",
+      "sha256": "0627ca76a4891abeabe59d8fa30358b61943f5506458ea3767b6730bb12da230",
+      "bytes": 1871
+    }
+  },
+  "render_logs": {
+    "observed_at": "2026-11-07T13:10:03.512645+00:00",
+    "merged_sha": "060fa655d16476e0ff84727bef5b4e188bee349d",
+    "rows": 100,
+    "errors": 0,
+    "status": "PASS"
+  },
+  "mac": {
+    "status": "SKIP",
+    "reason": "No owned devices returned by fresh owner-scoped discovery after M went live",
+    "observed_at": "2026-11-07T13:08:45.164Z",
+    "discovery_evidence_sha256": "fbe70511e14e8245e3c1c73636297d9c87cde5492e31ee9968e12442a5e8f3c5",
+    "no_mac_test_pass_claim": true
+  },
+  "fly": {
+    "status": "NOT_REQUIRED",
+    "reason": "no agent runtime or deploy-agents.yml change in the merge"
+  },
+  "semantic": {
+    "native_result": "FAIL",
+    "source_sha": "060fa655d16476e0ff84727bef5b4e188bee349d",
+    "workflow_head_sha": "08b4b13364e642e2ca791942c9d5b7ec1b7286c0",
+    "workflow_run": "42375546418",
+    "workflow_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42375546418",
+    "started_at": "2026-11-07T13:07:55Z",
+    "finished_at": "2026-11-07T13:13:19Z",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "Semantic frontend flows",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42375546418/job/128412263540"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (direct_answer)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42375546418/job/128412263641"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_execute)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42375546418/job/128412263644"
+      },
+      {
+        "conclusion": "success",
+        "name": "Chat full-lifecycle latency ratchet (agent_plan)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42375546418/job/128412263671"
+      },
+      {
+        "conclusion": "failure",
+        "name": "Chat full-lifecycle latency ratchet (web_search)",
+        "status": "completed",
+        "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42375546418/job/128412263676"
+      }
+    ],
+    "success_count": 4,
+    "failed_count": 1,
+    "attribution": "NOT_INTRODUCED",
+    "disposition": "delegated / waived",
+    "repair_thread": "https://boxes.dev/thread/thr_11193cb19c5743cb98dbbc8450e3b4cf",
+    "repair_devbox": "ad630ec5-0b31-4712-acc4-fb38897fb4a5",
+    "Bugs_placement_verified": true,
+    "repair_completion": "PENDING independent repair owner; not required for originating handoff",
+    "first_bad_boundary": "Initial Cerebras 429 followed by 14.351s Wafer invalid JSON; retry and search completed after the unchanged 15000ms test deadline. Distinct from S32 after-search escalation.",
+    "external_provider_outage_exception": false,
+    "deeper_RCA": "OPEN: full first-response bytes and finish reason absent",
+    "retry_count": 0,
+    "failure_report_evidence": {
+      "member_path": "rose/.context/deploy-pipeline/validated/failure-report.json",
+      "sha256": "b78cb4fe05d467af666ce2e843d21ca2d58591d1afea252cc1d51b612f54d5da",
+      "bytes": 721
+    },
+    "attribution_evidence": {
+      "member_path": "rose/.context/pause-rca/production-websearch-rca/report.json",
+      "sha256": "c9ebfd739ce0793b4d495a60f17dec4ee566d26ace4f5ab32b94434d92a8608a",
+      "bytes": 11136
+    },
+    "parent_review_evidence": {
+      "member_path": "rose/.context/pause-rca/production-websearch-rca/parent-attribution-review.json",
+      "sha256": "8debb59ba860984c7a19dfd2236a617aace4dafe3f1a603db5ed6e68737c6824",
+      "bytes": 783
+    },
+    "delivery_evidence": {
+      "member_path": "rose/.context/pause-rca/production-websearch-rca/repair-evidence-delivery.json",
+      "sha256": "81ad00d0d819def72ddb4ff9bac29c091c2d1e1e427d7e093a7c4e94a4b33fa0",
+      "bytes": 189
+    },
+    "placement_evidence": {
+      "member_path": "rose/.context/pause-rca/production-websearch-rca/repair-folder-verified.json",
+      "sha256": "c61b679b1a36c72feb68db766de4f7c4e4b1276c07bac03d50bc412e681f2e25",
+      "bytes": 464
+    }
+  }
+}

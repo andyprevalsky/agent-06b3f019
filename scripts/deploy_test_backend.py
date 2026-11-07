@@ -399,6 +399,9 @@ def _execute(request, root, failed_first=False):
     sweep = sweep_from_recipe(recipe, checks_for(domains)) if recipe else {'command': list(RUNNER), 'cwd': 'back-end'}
     refuse_env_skips(os.environ, sweep.get('env'), (recipe or {}).get('setup', {}).get('env'))
     env = {**os.environ, **sweep.get('env', {}), 'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
+    if excluded:
+        native_skips = ','.join(sorted(set(EXCLUSION_REASON) | {name.split(':', 1)[1] for name in excluded}))
+        env.update({key: native_skips for key in SKIP_ENV})
     shards = env.get('BACKEND_COVERAGE_SHARDS', '2')
     argv = list(sweep['command'])
     if failed_first:  # the existing repair recipe, under the same wrapper when present

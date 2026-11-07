@@ -2523,6 +2523,17 @@ printf '{"scripts":{"test":"new"},"dependencies":{"tsx":"2.0.0"}}\n' > "$node_b/
 node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
 [ "$node_a_fingerprint" != "$node_b_fingerprint" ] ||
   fail "dependency field changes must invalidate baked dependencies"
+printf '{"lockfileVersion":3,"packages":{"":{"engines":{"node":"22.23.4"}}}}\n' > "$node_a/back-end/package-lock.json"
+printf '{"lockfileVersion":3,"packages":{"":{"engines":{"node":"24.22.1"}}}}\n' > "$node_b/back-end/package-lock.json"
+printf '{"scripts":{"test":"old"},"dependencies":{"tsx":"1.0.0"}}\n' > "$node_b/package.json"
+node_a_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_a")"
+node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
+[ "$node_a_fingerprint" = "$node_b_fingerprint" ] ||
+  fail "runtime-only engines changes must not invalidate baked dependencies"
+printf '{"lockfileVersion":3,"packages":{"":{"engines":{"node":"24.22.1"}},"node_modules/tsx":{"version":"2.0.0"}}}\n' > "$node_b/back-end/package-lock.json"
+node_b_fingerprint="$(cloudbench_node_dependency_fingerprint "$node_b")"
+[ "$node_a_fingerprint" != "$node_b_fingerprint" ] ||
+  fail "locked package changes must invalidate baked dependencies"
 
 lock_file="$TMP_ROOT/controller.lock"
 cloudbench_controller_lock_acquire "$lock_file"
@@ -2576,9 +2587,14 @@ require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
 require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
   'bash "$ROOT_DIR/scripts/tests/cloudbench-acceptance-autoscale.test.sh"' \
   "pre-deploy cloud gate must reject every autoscale off-state"
-require_text "$ROOT_DIR/.claude/commands/deploy.md" \
-  'bash scripts/tests/cloudbench-acceptance-autoscale.test.sh' \
+# deploy.md carries no test list: the deploy plan's cloudbench-controller gate
+# (scripts/run-cloudbench-controller-local.py) executes the regression.
+require_text "$ROOT_DIR/scripts/run-cloudbench-controller-local.py" \
+  "('autoscale', 'bash scripts/tests/cloudbench-acceptance-autoscale.test.sh')," \
   "deploy must execute the permanent mandatory-autoscale regression"
+require_text "$ROOT_DIR/scripts/deploy_test_plan.py" \
+  '{"name": "cloudbench-controller", "command": [sys.executable, "scripts/run-cloudbench-controller-local.py"],' \
+  "the deploy plan must run the cloudbench-controller gate that executes the autoscale regression"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_VERIFIED=1' \
   "fleet children must receive proof that the controller verified the environment"
@@ -3439,8 +3455,11 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'github_token_can_fetch_repo()' \
   "cloudbench must validate GitHub tokens against the private rose repo"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'api.github.com/repos/Rose-Ai-Labs/rose/contents' \
-  "token validation must require Contents access (not metadata-only GET /repos)"
+  "git -c credential.helper= ls-remote --exit-code" \
+  "token validation must require private Git contents access without consuming REST quota"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true' \
+  "token validation must fail without terminal or askpass prompts"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'resolve_durable_github_token' \
   "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
@@ -3479,19 +3498,10 @@ mv "$resolve_trimmed" "$resolve_snippet"
   source "$resolve_snippet"
   tok="$(resolve_github_token)"
   [ -n "$tok" ] || fail "resolve_github_token returned empty despite available controller credentials"
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
-    -H "Authorization: Bearer ${tok}" \
-    -H 'Accept: application/vnd.github+json' \
-    -H 'User-Agent: cloudbench-env-test' \
-    'https://api.github.com/repos/Rose-Ai-Labs/rose/contents')"
-  [ "$code" = "200" ] || fail "resolve_github_token returned a token without Contents access to rose (HTTP $code)"
+  github_token_can_fetch_repo "$tok" \
+    || fail "resolve_github_token returned a token without Git contents access to rose"
   if [ -n "${GITHUB_TOKEN:-}" ]; then
-    stale_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
-      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-      -H 'Accept: application/vnd.github+json' \
-      -H 'User-Agent: cloudbench-env-test' \
-      'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' || true)"
-    if [ "$stale_code" != "200" ] && [ "$tok" = "$GITHUB_TOKEN" ]; then
+    if ! github_token_can_fetch_repo "$GITHUB_TOKEN" && [ "$tok" = "$GITHUB_TOKEN" ]; then
       fail "resolve_github_token returned the ambient stale GITHUB_TOKEN"
     fi
   fi
@@ -3665,6 +3675,44 @@ PY
   }
   [ "$selected" = "$free_port" ] || fail "select_central_hub_port must return preferred free port (got $selected)"
 ) || fail "central hub free-port selection contract broken"
+
+# A refused connect only proves no listener. A bound-but-not-listening socket
+# (like a loopback client's ephemeral port or its TIME_WAIT) still fails the
+# hub's bind, so selection must skip it rather than re-pick it every attempt.
+(
+  bound_port_file="$TMP_ROOT/tcp-bound-port"
+  python3 - "$bound_port_file" <<'PY' &
+import pathlib, socket, sys, time
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("127.0.0.1", 0))
+pathlib.Path(sys.argv[1]).write_text(str(s.getsockname()[1]))
+while True:
+    time.sleep(1)
+PY
+  bound_pid=$!
+  trap 'kill "$bound_pid" 2>/dev/null || true' EXIT
+  for _ in $(seq 1 100); do
+    [ -s "$bound_port_file" ] && break
+    sleep 0.05
+  done
+  [ -s "$bound_port_file" ] || fail "bound-only socket did not become ready"
+  bound_port="$(cat "$bound_port_file")"
+  rc=0
+  cloudbench_tcp_listener_present "$bound_port" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a bound-only socket must probe as no listener (got $rc)"
+  rc=0
+  cloudbench_tcp_port_bindable "$bound_port" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a bound-only socket must probe as in use (got $rc)"
+  selected="$(cloudbench_select_central_hub_port "$bound_port" "/tmp/no-such-hub-root")" ||
+    fail "selection must skip, not refuse, a bound-only preferred port"
+  [ -n "$selected" ] && [ "$selected" != "$bound_port" ] ||
+    fail "a bound-only preferred port must not be selected (got ${selected:-empty})"
+  kill "$bound_pid" 2>/dev/null || true
+  wait "$bound_pid" 2>/dev/null || true
+  rc=0
+  cloudbench_tcp_port_bindable "$bound_port" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a released port must probe as bindable (got $rc)"
+) || fail "central hub bound-only port contract broken"
 
 # --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox
 # (cloudbench-multi scenario 14) and cement ordering vs the production-only

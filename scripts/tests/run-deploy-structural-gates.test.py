@@ -21,7 +21,9 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "run-deploy-structural-gates.py"
-DEPLOY_MD = ROOT / ".claude" / "commands" / "deploy.md"
+# Gate registry floor: deleting a registration lowers the count. Raise it when gates
+# are added; lowering it is the deliberate, reviewable act of retiring a gate.
+MIN_REGISTERED_GATES = 96
 
 
 def _registry_commands() -> set[str]:
@@ -46,13 +48,22 @@ def _registry_commands() -> set[str]:
     return commands
 
 
-class StructuralGateDocumentationTests(unittest.TestCase):
-    """Step 4s lists its suites explicitly so a gate cannot be silently dropped.
+def _load_registry():
+    spec = importlib.util.spec_from_file_location("deploy_registry_guard", RUNNER)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
-    Several suites (approval-format, deploy-worktree-preflight, semantic-deploy,
-    check-agent-behavior-approval) assert their own command still appears in
-    deploy.md. Replacing that list with a registry pointer therefore removes
-    real coverage while still looking tidy. Pin both directions instead.
+
+class StructuralGateDocumentationTests(unittest.TestCase):
+    """The registry is the only gate list: deploy.md carries none by design.
+
+    `scripts/deploy gates` runs this registry, so a gate is dropped silently only if
+    its registration disappears. Without a doc to compare against, the guards here
+    keep the registry well-formed (unique names and commands, every script exists),
+    prevent it from shrinking unnoticed, and require the suites that own deploy
+    behavior to assert their own registration (several already do).
     """
 
     def test_frontend_coverage_requires_app_typecheck_before_vitest(self) -> None:
@@ -114,21 +125,55 @@ class StructuralGateDocumentationTests(unittest.TestCase):
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=60)
 
-    def test_deploy_md_lists_every_registered_gate(self) -> None:
-        deploy_md = DEPLOY_MD.read_text()
-        missing = sorted(c for c in _registry_commands() if f"`{c}`" not in deploy_md)
+    def test_registry_names_and_commands_are_unique(self) -> None:
+        gates = _load_registry().GATES
+        names = [gate.name for gate in gates]
+        commands = [gate.command for gate in gates]
         self.assertEqual(
-            missing, [], f"deploy.md Step 4s is missing registered gate(s): {missing}"
+            sorted({n for n in names if names.count(n) > 1}), [], "duplicate gate names"
+        )
+        self.assertEqual(
+            sorted({" ".join(c) for c in commands if commands.count(c) > 1}),
+            [],
+            "one command registered under two gate names would run twice and hide a drop",
         )
 
-    def test_deploy_md_lists_no_unregistered_gate(self) -> None:
-        deploy_md = DEPLOY_MD.read_text()
-        registry = _registry_commands()
-        documented = {match.group(1) for match in re.finditer(r"`((?:bash|python3) scripts/tests/[^`]+)`", deploy_md)}
-        stale = sorted(documented - registry)
-        self.assertEqual(
-            stale, [], f"deploy.md names gate(s) absent from the registry: {stale}"
+    def test_every_registered_command_points_at_existing_paths(self) -> None:
+        missing = []
+        for gate in _load_registry().GATES:
+            for token in gate.command[1:]:
+                if "/" in token and "*" not in token and not (ROOT / token).exists():
+                    missing.append(f"{gate.name}: {token}")
+        self.assertEqual(missing, [], f"registered gate(s) run a missing path: {missing}")
+
+    def test_registry_does_not_shrink_below_the_floor(self) -> None:
+        count = len(_load_registry().GATES)
+        self.assertGreaterEqual(
+            count,
+            MIN_REGISTERED_GATES,
+            f"{count} registered gates < floor {MIN_REGISTERED_GATES}: a gate registration was "
+            "removed; retire it deliberately by lowering MIN_REGISTERED_GATES in this test",
         )
+
+    def test_owning_suites_are_registered_once_with_their_exact_command(self) -> None:
+        """The suites that own deploy behavior also assert this about themselves."""
+        gates = _load_registry().GATES
+        owners = {
+            "deploy-structural-runner": ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
+            "cooperative-cutover-monitor": ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
+            "workflow-deployment-migration": ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
+            "durable-evidence-links": ("bash", "scripts/tests/durable-evidence-links.test.sh"),
+            "seed-memory-ratchet": ("bash", "scripts/tests/seed-memory-ratchet.test.sh"),
+            "deploy-worktree-preflight": ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
+            "semantic-deploy": ("bash", "scripts/tests/semantic-deploy-gate.test.sh"),
+        }
+        for name, command in owners.items():
+            registered = [g for g in gates if g.name == name or g.command == command]
+            self.assertEqual(
+                [(g.name, g.command) for g in registered],
+                [(name, command)],
+                f"{name} must be registered exactly once with {' '.join(command)}",
+            )
 
     def test_agents_blackbox_registration_guard_is_a_deploy_gate(self) -> None:
         self.assertIn(
@@ -138,12 +183,29 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         )
 
     def test_cloudbench_blackbox_is_not_duplicated_with_agents_coverage(self) -> None:
-        deploy_md = DEPLOY_MD.read_text()
-        step = deploy_md.split("## Step 4cb:", 1)[1].split("## Step 4c:", 1)[0]
-        self.assertIn('if [ -z "$CHANGED_AGENTS" ]; then', step)
-        self.assertIn("./venv/bin/python scripts/run_blackbox_tests.py benchmark", step)
-        self.assertIn("Step 4g's agents coverage already runs it", step)
-        self.assertIn("wait for Step 4g to finish before starting", step)
+        """The agents `benchmark` blackbox domain runs once, inside agents coverage."""
+        self.assertTrue((ROOT / "agents/tests/blackbox/benchmark.blackbox.py").is_file())
+        parallel = (ROOT / "agents/scripts/run_coverage_blackbox_parallel.py").read_text()
+        self.assertIn("TESTS_DIR = AGENTS_ROOT", parallel)
+        self.assertIn('"benchmark",', parallel)
+        controller = (ROOT / "scripts/run-cloudbench-controller-local.py").read_text()
+        self.assertNotIn("run_blackbox_tests.py", controller, "controller regressions must not rerun the benchmark domain")
+        for gate in _load_registry().GATES:
+            self.assertNotIn(
+                "run_blackbox_tests.py", " ".join(gate.command), f"{gate.name} reruns a blackbox domain"
+            )
+        sys.path.insert(0, str(ROOT / "scripts"))
+        try:
+            import deploy_test_plan as plan
+            runners = [
+                gate["name"]
+                for gate in plan.standard_template()["gates"]
+                if "run-coverage.sh" in " ".join(map(str, gate["command"]))
+                and gate.get("cwd") == "agents"
+            ]
+        finally:
+            sys.path.remove(str(ROOT / "scripts"))
+        self.assertEqual(runners, ["agents-coverage-blackbox"])
 
 
 class StructuralGatePortIsolationTests(unittest.TestCase):
@@ -360,7 +422,6 @@ class StructuralGateRunnerTests(unittest.TestCase):
                 (scripts / "semantic-deploy-gate.test.sh").write_text(
                     "set -euo pipefail\n"
                     f"DESCEND_COMMAND_TEST={str(scripts / 'descend-command.test.sh')!r}\n"
-                    f"DEPLOY_COMMAND={str(DEPLOY_MD)!r}\n"
                     f"DEPLOY_STRUCTURAL_RUNNER={str(registry_path)!r}\n"
                     'fail() { echo "FAIL: $1" >&2; exit 1; }\n'
                     'require_text() { grep -Fq -- "$2" "$1" || fail "$3"; }\n'
@@ -787,7 +848,7 @@ else: print('origin/fixture')
         env = {**os.environ, "PATH": str(transport)+os.pathsep+os.environ["PATH"],
                "FLY_API_TOKEN":"offline-fixture", "GITHUB_TOKEN":"offline-fixture",
                "CLOUDBENCH_GATE_REF":"a"*40, "WARM_IMAGE_REF":"fixture/immutable@sha256:"+"b"*64,
-               "CLOUDBENCH_GATE_NODE_VERSION":"v24.21.0", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
+               "CLOUDBENCH_GATE_NODE_VERSION":"v24.22.1", "CLOUDBENCH_GATE_LOG":str(root/"machine.log"),
                "CLOUDBENCH_GATE_TIMEOUT_S":"0" if outcome=="timeout" else "30",
                "CLOUDBENCH_GATE_RETAIN_HOST":retain, "CLOUDBENCH_GATE_ROOTFS_SIZE_GB":size,
                "CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE":keep_tmp,

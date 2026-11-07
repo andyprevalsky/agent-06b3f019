@@ -6,6 +6,7 @@ import {
   parseClaudeEnvelope,
 } from './claudeOauthEnvelope';
 import { createLogger } from './logger';
+import { recordSubscriptionUsage, type SubscriptionUsageReport } from './computeSubscriptionUsage';
 export { classifyReportedLogin, markComputeTokenUnavailable } from './computeLoginFailure';
 export {
   __clearGptApiKeyCooldownCache,
@@ -516,14 +517,24 @@ export async function fetchComputeTokenForUser(
   return poolToken;
 }
 
-export async function heartbeatComputeTokenLineage(lineageKey: string) {
+/**
+ * Keep a lineage lease live. The heartbeat may also carry the subscription
+ * usage snapshot the worker last observed for this token; it is recorded only
+ * while the lease is live, riding this existing per-call request.
+ */
+export async function heartbeatComputeTokenLineage(
+  lineageKey: string,
+  usage: SubscriptionUsageReport | null = null
+) {
   const trimmed = lineageKey.trim();
-  if (trimmed === '') return { ok: false, updated: 0 };
+  if (trimmed === '') return { ok: false, updated: 0, usageRecorded: false };
   const result = await prisma.computeTokenLineageLease.updateMany({
     where: { lineageKey: trimmed, releasedAt: null },
     data: { lastUsedAt: new Date() },
   });
-  return { ok: result.count > 0, updated: result.count };
+  const usageRecorded =
+    result.count > 0 && usage !== null ? await recordSubscriptionUsage(trimmed, usage) : false;
+  return { ok: result.count > 0, updated: result.count, usageRecorded };
 }
 
 export async function releaseComputeTokenLineage(lineageKey: string) {

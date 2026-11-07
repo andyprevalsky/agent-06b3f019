@@ -5849,7 +5849,11 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     Codex account was in a provider cooldown when test-mass-agent-run-0's declared judge
     asked for a lease, so both copies ended ERROR and the campaign counted them INFRA.
     Per Andy, an exhausted or cooled-down token pool is a skipped test: the run record,
-    CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR."""
+    CI gate and campaign verdict must say SKIPPED with the exact reason, never ERROR.
+    Andy 2026-11-06: a missing Codex token must not break the judge at once; the spawn leases
+    its own credential (subscriptions, then the funded Azure key). Only when every funded path
+    is exhausted, at the credential-plan preflight or inside the spawn itself, is the judge a
+    compute-token SKIP."""
     import importlib.util
     from dataclasses import replace
     from benchmarks import run_benchmark as bench
@@ -5887,48 +5891,85 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
         try:
             await bench._run_declared_evaluators(judged_task, {"messages": []})
         except Exception as error:  # the real judge path owns the raised type
-            judge_error = error
+            preflight_error = error
         else:
             raise AssertionError("judge must not succeed without a compute token")
-    assert isinstance(judge_error, bench.ComputeTokenUnavailable), judge_error
-    assert "Codex compute token unavailable for agentic benchmark judge" in str(judge_error)
+    assert isinstance(preflight_error, bench.ComputeTokenUnavailable), preflight_error
+    assert "Codex compute token unavailable for agentic benchmark judge" in str(preflight_error)
 
-    logs = {"failure_evidence": {"errors": []}}
-    with contextlib.ExitStack() as stack:
-        for name in (
-            "_apply_live_fixtures",
-            "_apply_memory_fixtures",
-            "_apply_auth_test_site",
-            "_restore_live_fixture_scenarios_async",
-            "_release_auth_test_site",
-        ):
-            stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
-        for name, replacement in {
-            "create_agent": AsyncMock(return_value="ddc1c122-6786-4501-b0c9-dcdbe0b69718"),
-            "_run_with_agent_execution_backstop": AsyncMock(side_effect=judge_error),
-            "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": []}, logs)),
-            "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None)),
-            "ensure_payment_lifecycle_cleanup": AsyncMock(return_value=None),
-            "delete_agent": AsyncMock(return_value=None),
-        }.items():
-            stack.enter_context(patch.object(bench, name, replacement))
-        result = await bench._run_single_task_as_run_user(
-            "https://fixture.invalid", task, False, None, "", None, None, None
-        )
-    assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
-    assert result.failure_reason.startswith(
-        f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
-        "failed: Codex compute token unavailable for agentic benchmark judge"
-    ), result.failure_reason
-    assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
-
-    spec = importlib.util.spec_from_file_location(
-        "run_bench_campaign_skip", Path(__file__).parents[3] / "scripts" / "run-bench-campaign.py"
+    # The plan still had a credential at preflight but the spawn found every subscription and
+    # funded path exhausted (or hit a usage limit): the judge ran, returned no verdict and must
+    # still be a compute-token SKIP, never a no-verdict 0.0 task FAIL.
+    codex_funded = {"claude": False, "codex": True, "next_credential": {"provider": "codex", "tier": "funded"}}
+    exhausted_at_spawn = AsyncMock(
+        return_value={
+            "failure_kind": "no_credentials",
+            "usage_limit": {"provider": "codex"},
+            "structured_response": None,
+            "output_files": [],
+        }
     )
-    campaign = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(campaign)
-    verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
-    assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
+    with (
+        patch.object(bench, "_sync_compute_tokens", lambda **_: None),
+        patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
+        patch(
+            "domains.spawn_claude_code_agent.repo.fetch_code_credential_availability",
+            AsyncMock(return_value=codex_funded),
+        ),
+        patch.object(bench.httpx, "AsyncClient", _Client),
+        patch(
+            "helpers.attachments.upload_to_storage",
+            AsyncMock(return_value={"id": "evidence-1", "storage_path": "judge/benchmark_evidence.json"}),
+        ),
+        patch("domains.spawn_claude_code_agent.service.spawn_claude_code_activity", exhausted_at_spawn),
+    ):
+        try:
+            await bench._run_declared_evaluators(judged_task, {"messages": []})
+        except Exception as error:  # the real judge path owns the raised type
+            spawn_error = error
+        else:
+            raise AssertionError("judge must not succeed with every funded credential exhausted")
+    exhausted_at_spawn.assert_awaited_once()
+    assert isinstance(spawn_error, bench.ComputeTokenUnavailable), spawn_error
+    assert "Codex compute token unavailable for agentic benchmark judge" in str(spawn_error)
+
+    for judge_error in (preflight_error, spawn_error):
+        logs = {"failure_evidence": {"errors": []}}
+        with contextlib.ExitStack() as stack:
+            for name in (
+                "_apply_live_fixtures",
+                "_apply_memory_fixtures",
+                "_apply_auth_test_site",
+                "_restore_live_fixture_scenarios_async",
+                "_release_auth_test_site",
+            ):
+                stack.enter_context(patch.object(bench, name, AsyncMock(return_value=[])))
+            for name, replacement in {
+                "create_agent": AsyncMock(return_value="ddc1c122-6786-4501-b0c9-dcdbe0b69718"),
+                "_run_with_agent_execution_backstop": AsyncMock(side_effect=judge_error),
+                "_capture_task_failure_evidence": AsyncMock(return_value=({"messages": []}, logs)),
+                "finalize_archive_and_score_world_model": AsyncMock(return_value=(None, None)),
+                "ensure_payment_lifecycle_cleanup": AsyncMock(return_value=None),
+                "delete_agent": AsyncMock(return_value=None),
+            }.items():
+                stack.enter_context(patch.object(bench, name, replacement))
+            result = await bench._run_single_task_as_run_user(
+                "https://fixture.invalid", task, False, None, "", None, None, None
+            )
+        assert (result.status, result.benchmark_status, result.passed) == ("SKIPPED", "SKIPPED", False), result
+        assert result.failure_reason.startswith(
+            f"{bench.COMPUTE_TOKEN_UNAVAILABLE_SKIP_REASON}: Declared evaluator t7-schema-task-complete execution "
+            "failed: Codex compute token unavailable for agentic benchmark judge"
+        ), result.failure_reason
+        assert bench._ci_should_fail({"failed": 0, "skipped": 1}, [result]) is False
+
+        spec = importlib.util.spec_from_file_location(
+            "run_bench_campaign_skip", Path(__file__).parents[3] / "scripts" / "run-bench-campaign.py"
+        )
+        campaign = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(campaign)
+        verdict = campaign.task_verdict({"benchmark_status": result.benchmark_status, "passed": result.passed})
+        assert verdict == {"task_status": "SKIPPED", "infra_failure": False, "terminal_task": True}, verdict
 
 
 async def test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_codex_login():
@@ -6906,6 +6947,58 @@ def test_agent_payment_accepts_grounded_finished_browser_text_without_structured
     )
     for invalid_result in invalid_terminal_markers:
         assert _extract_agent_payment_output_blob({"messages": [invalid_result]}) == ""
+
+
+async def test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules():
+    """.claude/commands/DEPRECATED_deploy.md Step 13c (orig L3407-3434): when the non-admin
+    production identity is missing, `agent-payment-production-abandonment` stops before any live
+    spend and its own error carries the exact provisioning command, the credential source and the
+    guardrails, so the agent that hits it needs no other document and never asks the user."""
+    import contextlib
+    import io
+
+    import httpx
+    import pytest
+
+    import benchmarks.run_benchmark as bench
+
+    original_client = httpx.AsyncClient
+    seen = []
+    printed = io.StringIO()
+
+    def missing_identity(request):
+        seen.append(request)
+        return httpx.Response(200, json={"tier": None, "remaining": 0})
+
+    assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME == "agent-payment-production-abandonment"
+    assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME in bench.AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES
+    with patch.object(bench, "_api_headers", new=AsyncMock(return_value={})), \
+         patch.object(bench.httpx, "AsyncClient",
+                      side_effect=lambda **kw: original_client(transport=httpx.MockTransport(missing_identity), **kw)):
+        with pytest.raises(RuntimeError) as raised, contextlib.redirect_stdout(printed):
+            await bench._preflight_production_payment_identity("https://api.fixture.invalid")
+    assert [(r.url.path, r.url.params.get("userId")) for r in seen] == [
+        ("/api/credits/usage", "00000000-0000-4000-8000-000000000107")]
+    message = str(raised.value)
+    command = (
+        "  cd back-end && set -a && . ./.env && set +a && \\\n"
+        '    DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
+        "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
+        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107 \\\n"
+        '    --agentcard-cardholder-id "$DEDICATED_AGENTCARD_CARDHOLDER_ID"\n'
+    )
+    assert command in message
+    for rule in (
+        "is not provisioned: it has no Subscription row",
+        "Every credential it needs is already in back-end/.env; do not ask the user",
+        "the 6543 pooler fails",
+        "EXISTING dedicated benchmark cardholder only",
+        "never create an identity automatically or bypass pending KYC",
+        "never enter a card number",
+        "one-time hosted Stripe Checkout link: a human saves the live card there once",
+    ):
+        assert rule in message, rule
+    assert message in printed.getvalue()  # printed in full, not only raised
 
 
 def test_production_payment_lifecycle_refuses_sandbox_target():
@@ -25524,6 +25617,16 @@ def test_predeploy_selector_rejects_production_only_tasks():
             test_predeploy_excludes_production_only_even_with_pass_streak(Path(folder), surface)
 
 
+def test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke():
+    from benchmarks.select_predeploy_benches_test import (
+        test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures,
+    )
+
+    for surface in ("local", "cloud"):
+        with tempfile.TemporaryDirectory() as folder:
+            test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures(Path(folder), surface)
+
+
 async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, judge_cases):
     """Bound isolated native checks while existing live judge I/O progresses.
 
@@ -26813,6 +26916,7 @@ async def run_all_tests():
     r.record("local_worlds_controls", test_local_worlds_controls)
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
+    r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
     r.record(
         "local_cleanup_preserves_run_id_observers",
         test_local_cleanup_does_not_signal_processes_that_only_mention_run_id,
@@ -27905,6 +28009,10 @@ async def run_all_tests():
     r.record(
         "production_payment_rejects_sandbox_target",
         test_production_payment_lifecycle_refuses_sandbox_target,
+    )
+    await r.record_async(
+        "production_payment_identity_gap_prints_its_provisioning_rules",
+        test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules,
     )
     r.record(
         "production_frontend_ignores_stale_local_manifest",

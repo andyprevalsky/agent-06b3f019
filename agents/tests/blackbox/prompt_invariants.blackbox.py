@@ -273,10 +273,13 @@ def test_every_tool_model_appears_in_at_least_one_phase_list():
         EXPLORE_AGENT_TOOLS,
         PLAN_PHASE_TOOLS,
         PLANNER_ASSIGNABLE_TOOLS,
+        ROOT_ONLY_TOOLS,
         TOOL_MODELS,
     )
 
     union = set(PLAN_PHASE_TOOLS) | set(EXECUTE_PHASE_TOOLS) | set(EXPLORE_AGENT_TOOLS) | set(PLANNER_ASSIGNABLE_TOOLS)
+    # Root-only tools reach both phases through the workflow, for eligible agents only.
+    union |= set(ROOT_ONLY_TOOLS)
 
     # This exact-goal benchmark tool is injected into the root workflow's
     # execute list only for the Google OAuth video task. Adding it to a shared

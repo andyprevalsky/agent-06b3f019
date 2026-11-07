@@ -1,0 +1,23 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1716-pause/initial-core-20261106T0439Z.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "bad8aa8df7a43723a1bcaec59ca9a89c4aee2b35b4bbe16b5ed482034eee9e3d",
+  "gzip_sha256": "3a3dcf2bfc7eb53ed0b47a883abb909ff027fe918448c72fa5adf233d589957d",
+  "stored_bytes": 241868,
+  "frames": 1,
+  "files": 58,
+  "original_bytes": 1334350,
+  "manifest_sha256": "4a97887616f5cb90bfd0ae6147c35fd9101f9e8e1a642b6acfb81bc233a92965",
+  "full_readback_verified": true,
+  "receipt_sidecar_key": "devbox-closeout-private/pr1716-pause/initial-core-20261106T0439Z.aesgcm.receipt.aesgcm",
+  "receipt_sidecar_sha256": "0639242647fcaaefc93b39bd2c80c5ef5bacbbe50ad85b6e9d2b257e438eec60",
+  "receipt_sidecar_authenticated_readback": true,
+  "scope": "Original RCA evidence, independent review packets, regression failures/passes, and canonical configuration; later deployment evidence will be preserved in the post-deploy delta.",
+  "restore": {
+    "command": "agents/venv/bin/python docs/handoffs/pr-1691-closeout/recover_closeout.py --recipe docs/handoffs/whm-b07d9037-preservation/private_archive.py --config agents/.env --config back-end/.env --escrow .context/pr1634-archive-recovery.env --key-fingerprint e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730 fetch-receipt --sidecar-key devbox-closeout-private/pr1716-pause/initial-core-20261106T0439Z.aesgcm.receipt.aesgcm --output <new-private-receipt>",
+    "real_separate_process_restore": true,
+    "restored_files": 58
+  }
+}

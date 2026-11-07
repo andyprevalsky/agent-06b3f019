@@ -346,6 +346,38 @@ except Exception:
 PY
 }
 
+cloudbench_tcp_port_bindable() {  # <port>
+  # Mirrors the hub's own bind (127.0.0.1 with SO_REUSEADDR, as
+  # http.server.HTTPServer sets it), then releases the port immediately.
+  #
+  # Exit codes:
+  #   0 — bindable now
+  #   1 — address in use (non-listening occupant or a listener that just won)
+  #   2 — bad argument
+  #   3 — probe failed; callers must fail closed
+  python3 -S - "$1" <<'PY'
+import errno
+import socket
+import sys
+
+try:
+    port = int(sys.argv[1])
+except (IndexError, ValueError):
+    raise SystemExit(2)
+if not 1 <= port <= 65535:
+    raise SystemExit(2)
+
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("127.0.0.1", port))
+except OSError as error:
+    raise SystemExit(1 if error.errno == errno.EADDRINUSE else 3)
+except Exception:
+    raise SystemExit(3)
+PY
+}
+
 cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
   local preferred="$1" expected_root="$2" candidate probe_rc
 
@@ -369,8 +401,17 @@ cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
       continue
     fi
     if [ "$probe_rc" -eq 1 ]; then
-      printf '%s\n' "$candidate"
-      return 0
+      # A refused connect only proves nobody is listening. A loopback client's
+      # ephemeral port, its 60-second TIME_WAIT or a bound-only socket still
+      # makes the hub's bind fail with EADDRINUSE, and every start attempt
+      # would otherwise reselect that same port. Skip it like a foreign hub.
+      cloudbench_tcp_port_bindable "$candidate"
+      probe_rc=$?
+      if [ "$probe_rc" -eq 0 ]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      [ "$probe_rc" -eq 1 ] && continue
     fi
     echo "FATAL: central hub TCP probe failed on port ${candidate} (rc=${probe_rc}); refusing fail-open port selection" >&2
     return 1
@@ -1455,6 +1496,29 @@ cloudbench_git_insteadof_github_token() {
   return 1
 }
 
+# Read the repository-scoped credential through Git's configured helper. On
+# boxes.dev the working short-lived credential is intentionally exposed only
+# through this standard interface; it is not copied into gh hosts.yml or an
+# ambient token variable. Keep the request path-scoped so helpers using
+# credential.useHttpPath cannot return a credential for another repository.
+cloudbench_git_credential_github_token() {
+  local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}"
+  local key value token=""
+  while IFS='=' read -r key value; do
+    [ "$key" = password ] && token="$value"
+  done < <(
+    printf '%s\n' \
+      'protocol=https' \
+      'host=github.com' \
+      'path=Rose-Ai-Labs/rose.git' \
+      '' \
+      | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+          git -c credential.interactive=false -C "$workspace_root" credential fill 2>/dev/null || true
+  )
+  [ -n "$token" ] || return 1
+  printf '%s' "$token"
+}
+
 cloudbench_resolve_controller_github_token() {
   local token="" dotenv backend_env agents_env
   local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}"
@@ -1465,6 +1529,8 @@ cloudbench_resolve_controller_github_token() {
     [ -n "$token" ] && { printf '%s' "$token"; return 0; }
   fi
   token="$(cloudbench_git_insteadof_github_token 2>/dev/null || true)"
+  [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  token="$(cloudbench_git_credential_github_token "$workspace_root" 2>/dev/null || true)"
   [ -n "$token" ] && { printf '%s' "$token"; return 0; }
   if command -v gh >/dev/null 2>&1; then
     # gh prefers $GITHUB_TOKEN even when it is invalid; strip it so hosts.yml wins.
@@ -2594,8 +2660,15 @@ dependency_fields = (
 lock_path = root / "back-end/package-lock.json"
 if not lock_path.is_file():
     raise SystemExit(f"missing dependency manifest: {lock_path}")
+lock = json.loads(lock_path.read_text())
+# Runtime policy belongs to the service/image configuration, not the installed
+# dependency graph. npm mirrors package.json's engines field into only the root
+# package entry, so normalize it out without weakening package/version checks.
+root_package = lock.get("packages", {}).get("")
+if isinstance(root_package, dict):
+    root_package.pop("engines", None)
 digest.update(b"back-end/package-lock.json\0")
-digest.update(lock_path.read_bytes())
+digest.update(json.dumps(lock, sort_keys=True, separators=(",", ":")).encode())
 digest.update(b"\0")
 
 for relative in ("package.json", "back-end/package.json", "front-end/package.json"):

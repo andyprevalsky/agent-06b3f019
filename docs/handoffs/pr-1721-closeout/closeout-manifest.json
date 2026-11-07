@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "pr": 1721,
+  "title": "feat(sidebar): running agents first, then most recent user message",
+  "merge_commit": "39bcd257dc6e1d731008b46e9611ee7f1a5f1723",
+  "merged_at": "2026-11-07T07:56:19Z",
+  "what_deployed": [
+    "Every Rose left-bar list (Home, projects, folders, mobile list, stock sidebar, sub-agent disclosures) orders pinned, then running, then needs-help, then done; within a tier the agent with the most recent person-authored message is first (code agents and sub-agents merged in one list).",
+    "Agent.lastUserMessageAt (nullable; migration 20261106120000_agent_last_user_message_at, backfilled for live roots and children, skipping bot-relayed Slack occurrences); recordPersonMessage stamps it after delivery without moving updatedAt; GET /api/agents and /api/agents/tree expose last_user_message_at; the terminal patches the live tree node after a send.",
+    "Deploy tooling: the staged-cycle runtime-config digest ignores only the rotating GITHUB_TOKEN value; env-coupled tests (browser provider pin, pid-file wait) and the interrupted-custody Hub-port fixture hardened (main's identical concurrent fix kept)."
+  ],
+  "verification": {
+    "staged_cycle": "head 6670d5723 started 2026-11-07T06:32:28Z, verified READY (deploy_test_cycle.py verify --require-resolved exit 0): 14 of 16 gates PASS, smoke 9/9 tasks PASS (cleanup sealed), back-end coverage 249/250 with blackbox:treasury-rails skipped under the standing treasury policy",
+    "merged_tree": "main (42 commits) was merged afterwards as 3bdaeb519; the full cycle was not rerun (every gate has '*' inputs); instead format, eslint, tsc (back-end, front-end), back-end structural, full front-end suite (292 files / 4349 tests), back-end agents blackbox, deploy-test-cycle (154) and deploy-test-plan (42) passed on the merged tree",
+    "production_endpoints": "15/15 healthy incl. migration-declared-objects schema check; last_user_message_at present on all 183 rows of GET /api/agents (183 non-null) and on the tree; post-deploy Render log scan: 0 error lines",
+    "production_semantics": "chat-lifecycle-ratchet.yml run 42353943646 on source_sha=merge commit: every job success",
+    "production": "Render dep-dbndj9favr4c73abofl0 live on the merge commit (2026-11-07T08:03:46Z); Vercel deployment success; Mac release v1.1.288 (run 42353359276) success; Fly agents deploy not required (only tests under agents/ changed)"
+  },
+  "rca": {
+    "cases": [
+      "2026-11-06-sidebar-order-ranked-blocked-first-and-lacked-user-message-recency",
+      "2026-11-06-semantic-deploy-fixture-orphaned-sleep30-masked-by-load",
+      "2026-11-07-browser-usage-tests-read-live-browser-provider-env",
+      "2026-11-07-interrupted-custody-fixture-asserts-live-hub-port-quiet",
+      "2026-11-07-staged-cycle-goes-stale-when-daemon-rotates-github-token",
+      "2026-11-07-campaign-inventory-test-reads-pidfile-before-child-writes-it"
+    ],
+    "gate": "NOT_INTRODUCED for every gate failure outside the feature; the feature RCA reproduced and fixed its own failure",
+    "repair_handoff": null
+  },
+  "review": "CodeRabbit: 4 delivered rounds (last clean on 0e977f5e1, carried across the main sync to 89186966c). Commits after that (6e5a87280, 0358982d7, 6670d5723) and the final main sync 3bdaeb519 were not reviewed: CodeRabbit answered 'Review rate limited' to 9 requests between 04:40Z and 07:51Z (07:29Z: included review allowance reached under its Fair Usage policy). An in-session read-only adversarial review of exactly the unreviewed hunks returned VERDICT APPROVE with no blocking findings. Merged under the standing 3-round review deferral; deploy_review_cycle.py require-mergeable was overridden (ledger cycle open, reviewer unavailable). Graphide: skipped (free reviews exhausted).",
+  "elections": {
+    "agentcard": "skipped by deploy-operator election: no payment lifecycle code changed",
+    "mac_local_acceptance": "unavailable: Linux devbox, no Mac; the Mac release workflow itself succeeded"
+  },
+  "external_provider_failures": [],
+  "provider_notes": [
+    "OpenRouter credits were exhausted for part of 2026-11-06 (live-probes, agents benchmark, back-end planner-memory failed on HTTP 402); they recovered by themselves and the gates passed on rerun with no waiver",
+    "blackbox:treasury-rails: unused mint card_48769eb72b7ff77127a0dc00 past the 24 h reclaim deadline; recorded as Skipped (standing treasury instruction); no treasury record was touched"
+  ],
+  "followups": [
+    "runtime_config_sha256: use [^\\r\\n] instead of '.' and restrict the normalized value shape; add lookalike-key and rebind_local tests; soften the doc sentence (reviewer non-blocking items)",
+    "deploy_test_interrupted_cleanup.namespace_quiet: tolerate EACCES on /proc/<pid>/fd of foreign-state processes (transient failure seen once under parallel load)",
+    "smoke native cleanup proof cannot bind a >64 MB _batch/run.json (a completed mass-agent run is ~98 MB), so a failed smoke campaign is not reconcilable; mass-agent's mandatory autoscaler fails when the shared app sits at the 56-Machine ceiling",
+    "code-agent rows sort by creation only inside their tier",
+    "fixture follow-up: structural gate and cloud smoke are load- and capacity-sensitive when several lanes share the devbox and the Fly app"
+  ],
+  "evidence": [
+    "docs/handoffs/pr-1721-closeout/evidence/production-verification.json",
+    "docs/handoffs/pr-1721-closeout/evidence/archive-verification.json",
+    "docs/handoffs/pr-1721-closeout/evidence/deletion-readiness.json",
+    "docs/handoffs/pr-1721-closeout/evidence/archive-verification.json (second object: staged-cycle states)"
+  ],
+  "deletion_ready": true,
+  "records_commit": {
+    "pr": 1755,
+    "merge_commit": "70bcf0581aa0cb68e6df88b4d148ad0a648f9d19"
+  },
+  "factory_history_commit": "6880bcac0fecca1260f506c3a4a0586c6c7b25b0",
+  "scorecard": "https://boxes.dev/visuals/vis_ea80b6b6348a1f99ff127978174d7c8b"
+}

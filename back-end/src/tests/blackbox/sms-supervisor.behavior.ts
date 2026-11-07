@@ -482,11 +482,13 @@ export async function testGrep_failureBlocksCompletionAndFallsBackGracefully(pri
   const fallbackReply = SUPERVISOR_FALLBACK_MESSAGE;
 
   try {
-    // Invalid regex → dispatch fails every round → attempt_completion in the
-    // same fixture response stays blocked until the round cap.
+    // agent_network needs an agent tree and the supervisor has none → dispatch
+    // fails every round → attempt_completion in the same fixture response stays
+    // blocked until the round cap. (An invalid regex no longer fails: the shared
+    // grep executor retries it as literal text.)
     await setFixtureOverride(
       userId,
-      buildGrepFixture({ pattern: '(unclosed', source: 'messages', replyText: blockedReply })
+      buildGrepFixture({ pattern: 'anything', source: 'agent_network', replyText: blockedReply })
     );
 
     const res = await request(`${BASE_URL}/api/sms/inbound`, {

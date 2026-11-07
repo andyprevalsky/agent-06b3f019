@@ -1,0 +1,1 @@
+ALTER TABLE "Agent" ADD COLUMN "userControlRevision" INTEGER NOT NULL DEFAULT 0;

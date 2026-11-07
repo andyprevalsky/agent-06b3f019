@@ -40,6 +40,7 @@ function toListItem(agent: ListedAgent) {
     taskProgressEstimates: agent.taskProgressEstimates ?? {},
     status: agent.status,
     status_message: agent.statusMessage,
+    user_control_revision: agent.userControlRevision,
     temporal_workflow_id: agent.temporalWorkflowId,
     token_count: agent.tokenCount,
     tokens_in: agent.tokensIn,
@@ -54,6 +55,7 @@ function toListItem(agent: ListedAgent) {
     folder_id: agent.folderId,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
+    last_user_message_at: agent.lastUserMessageAt,
   };
 }
 
@@ -133,6 +135,7 @@ export async function getAgentTree(busId: string, allowBenchmarkArchive = false)
       tree_cost_cents: agent.treeCostCents,
       created_at: agent.createdAt,
       updated_at: agent.updatedAt,
+      last_user_message_at: agent.lastUserMessageAt,
     })),
   };
 }
@@ -278,6 +281,7 @@ export async function getAgentDetail(agentId: string, options: AgentDetailOption
       taskProgressEstimates: agent.taskProgressEstimates ?? {},
       status: agent.status,
       status_message: agent.statusMessage,
+      user_control_revision: agent.userControlRevision,
       temporal_workflow_id: agent.temporalWorkflowId,
       token_count: agent.tokenCount,
       tokens_in: agent.tokensIn,

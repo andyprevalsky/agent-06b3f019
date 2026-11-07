@@ -42,6 +42,7 @@ function databaseRegexPattern(pattern: string, multiline: boolean): string {
 }
 
 interface ResolvedSourceSelection {
+  /** The DEFAULT_GREP_SOURCES array itself when the caller named no source. */
   resolvedSources: ValidSource[];
   /** No pattern means "list": agent sources, or only calendar/drive. */
   patternOptional: boolean;
@@ -126,6 +127,13 @@ function requireKnownSources(params: GrepParams): void {
   }
 }
 
+/** Defaults without an agent tree search an empty agent_network, which lists nothing. */
+function searchesAnAgentTree(params: GrepParams, sources: ValidSource[]): boolean {
+  return (
+    sources !== DEFAULT_GREP_SOURCES || (params.agent_id !== undefined && params.agent_id !== '')
+  );
+}
+
 /**
  * Sources in precedence order: explicit `sources`/`source`; sources the
  * filters name (a nested block or a printed path); typed trajectory narrowing;
@@ -153,7 +161,7 @@ function resolveSourceSelection(params: GrepParams, split: SplitFilters): Resolv
     resolvedSources,
     patternOptional:
       resolvedSources.includes('agent_trajectories') ||
-      resolvedSources.includes('agent_network') ||
+      (resolvedSources.includes('agent_network') && searchesAnAgentTree(params, resolvedSources)) ||
       resolvedSources.every(isGoogleGrepSource),
   };
 }

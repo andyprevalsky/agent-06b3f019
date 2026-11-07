@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import re
 import sqlite3
@@ -1141,6 +1144,30 @@ class ApprovalLifecycleTest(unittest.TestCase):
                 ):
                     self.assertIn(workflow, recorder.VALID_EVENTS)
                     recorder.validate_event(workflow, event, value)
+        # The one-line deploy steps emit their events from code, not from docs.
+        emitters = {
+            "scripts/deploy_cli.py": r"\bfactory\('([a-z][a-z-]*)', '([a-z][a-z-]*)'\)",
+            "scripts/deploy_gates.py": r"\bfactory_event\(root, '([a-z][a-z-]*)', '([a-z][a-z-]*)'\)",
+            "scripts/deploy_prod.py": r"\bctx\.factory\('([a-z][a-z-]*)', '([a-z][a-z-]*)'\)",
+        }
+        for relative, pattern in emitters.items():
+            emitted = re.findall(pattern, (ROOT / relative).read_text())
+            self.assertTrue(emitted, relative)
+            for event, value in emitted:
+                checked += 1
+                with self.subTest(file=relative, invocation=f"deploy {event} {value}"):
+                    recorder.validate_event("deploy", event, value)
+        lane_source = (ROOT / "scripts/deploy_prod.py").read_text()
+        lanes = re.search(r"FACTORY_LANES = frozenset\(\{([^}]*)\}\)", lane_source)
+        assert lanes
+        for lane in re.findall(r"'([a-z-]+)'", lanes.group(1)):
+            for event in ("production-start", "production-finish"):
+                checked += 1
+                with self.subTest(file="scripts/deploy_prod.py", invocation=f"deploy {event} {lane}"):
+                    recorder.validate_event("deploy", event, lane)
+        for decision in ("approved", "rejected"):  # deploy_cli passes args.decision through
+            checked += 1
+            recorder.validate_event("deploy", "approval-decision", decision)
         self.assertGreater(checked, 30)
 
     def test_instrumented_deploy_does_not_require_historical_review_duration(
@@ -1603,44 +1630,67 @@ class ApprovalLifecycleTest(unittest.TestCase):
     def test_workflow_commands_require_structured_collection_hooks(self) -> None:
         deploy_command = (ROOT / ".claude/commands/deploy.md").read_text()
         rca_command = (ROOT / ".claude/commands/rca.md").read_text()
+        deploy_cli = (ROOT / "scripts/deploy_cli.py").read_text()
+        deploy_gates = (ROOT / "scripts/deploy_gates.py").read_text()
+        deploy_prod = (ROOT / "scripts/deploy_prod.py").read_text()
 
+        # deploy.md names the one step that closes timing, records the outcome and
+        # publishes telemetry, and sends every stop through it.
         for marker in (
-            "deploy approval-request prompt-approval",
-            "deploy approval-request agent-behavior-approval",
-            "deploy approval-decision approved",
-            "deploy stage-start runtime-blackbox",
-            "deploy stage-finish runtime-blackbox",
-            "deploy stage-start code-review",
-            "deploy stage-finish code-review",
-            "deploy stage-start production-verify",
-            "deploy stage-finish production-verify",
-            "deploy production-start vercel",
-            "deploy production-finish vercel",
-            "deploy production-start render",
-            "deploy production-finish render",
-            "deploy production-start fly",
-            "deploy production-finish fly",
-            "deploy production-start mac-release",
-            "deploy production-finish mac-release",
-            "deploy production-start backend-probes",
-            "deploy production-finish backend-probes",
-            "deploy production-start semantic",
-            "deploy production-finish semantic",
-            "deploy production-start agentcard",
-            "deploy production-finish agentcard",
-            "deploy outcome completed",
-            "agents/benchmarks/history/factory_events.jsonl",
-            "Every `/deploy` publishes these timestamps to the repo, whatever its outcome.",
+            "| Close the timing run, record the outcome, publish telemetry | `scripts/deploy finish` |",
+            "On any stop, run `scripts/deploy finish --outcome blocked` before ending the turn.",
+            "`bash scripts/run-deploy-stage --start`",
+            "Factory telemetry metadata: `docs/factory-telemetry.md`",
         ):
             self.assertIn(marker, deploy_command)
-        # The publication rule, the review-cap block and Step 15 each publish.
-        self.assertGreaterEqual(
-            deploy_command.count("python3 scripts/factory_ledger.py publish"), 3
+        self.assertTrue((ROOT / "docs/factory-telemetry.md").is_file())
+
+        # The deploy CLI emits the approval, review and production-verify boundaries.
+        for marker in (
+            "factory('approval-request', 'combined')",
+            "factory('approval-decision', args.decision)",
+            "if args.decision != 'grounded':",  # a GROUNDED review is not a human wait
+            "factory('stage-start', 'production-verify')",
+            "factory('outcome', args.outcome)",
+            "finished.add_argument('--outcome', choices=['completed', 'blocked'], default='completed')",
+        ):
+            self.assertIn(marker, deploy_cli)
+        # Review cycle 1 (open-pr) and every later cycle (review-next) start the
+        # code-review boundary; review-finish closes it.
+        self.assertEqual(deploy_cli.count("factory('stage-start', 'code-review')"), 2)
+        self.assertEqual(deploy_cli.count("factory('stage-finish', 'code-review')"), 1)
+        # The gate runner brackets every round, even a failed or aborted one.
+        for marker in (
+            "factory_event(root, 'stage-start', 'runtime-blackbox')",
+            "factory_event(root, 'stage-finish', 'runtime-blackbox')",
+        ):
+            self.assertIn(marker, deploy_gates)
+        # Production lanes emit their own start/finish pair; the stage closes after them.
+        lanes = re.search(r"FACTORY_LANES = frozenset\(\{([^}]*)\}\)", deploy_prod)
+        assert lanes
+        self.assertEqual(
+            set(re.findall(r"'([a-z-]+)'", lanes.group(1))),
+            {"vercel", "render", "fly", "mac-release", "backend-probes", "semantic", "agentcard"},
         )
+        for marker in (
+            "ctx.factory('production-start', name)",
+            "ctx.factory('production-finish', name)",
+            "ctx.factory('stage-finish', 'production-verify')",
+        ):
+            self.assertIn(marker, deploy_prod)
+
+        # Every /deploy publishes these timestamps to the repo, whatever its
+        # outcome: finish records the outcome and then publishes, unconditionally.
+        finish = deploy_cli.split("def cmd_finish(", 1)[1].split("\ndef ", 1)[0]
+        between = finish.split("factory('outcome', args.outcome)", 1)[1].split("factory_ledger.py", 1)[0]
+        self.assertLess(len(between), 120)
+        self.assertNotIn("if ", between)
+        self.assertIn("'scripts/factory_ledger.py', 'publish'", finish)
         self.assertNotIn("factory_ledger.py sync", deploy_command)
-        blocked = deploy_command.index("deploy outcome blocked")
-        self.assertLess(
-            deploy_command.index("factory_ledger.py publish", blocked) - blocked, 120
+        self.assertNotIn("factory_ledger.py', 'sync", deploy_cli)
+        self.assertIn(
+            'LEDGER_RELATIVE = Path("agents/benchmarks/history/factory_events.jsonl")',
+            (ROOT / "scripts/factory_ledger.py").read_text(),
         )
         self.assertIn(
             "agents/benchmarks/history/factory_events.jsonl merge=union",
@@ -1655,6 +1705,33 @@ class ApprovalLifecycleTest(unittest.TestCase):
             "rca outcome blocked",
         ):
             self.assertIn(marker, rca_command)
+
+    def test_deploy_finish_records_the_outcome_and_publishes_whatever_it_is(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "deploy_cli_under_test", ROOT / "scripts/deploy_cli.py"
+        )
+        assert spec and spec.loader
+        deploy_cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(deploy_cli)
+        for outcome in ("completed", "blocked"):
+            for timing_exit, publish_exit in ((0, 0), (1, 0), (0, 1)):
+                with self.subTest(outcome=outcome, timing_exit=timing_exit, publish_exit=publish_exit):
+                    argvs: list[list[str]] = []
+                    events: list[tuple[str, ...]] = []
+                    exits = iter((timing_exit, publish_exit))
+
+                    def fake_run(argv: list[str], **_: object) -> int:
+                        argvs.append(argv)
+                        return next(exits)
+
+                    with patch.object(deploy_cli, "run", side_effect=fake_run), patch.object(
+                        deploy_cli, "factory", side_effect=lambda *event: events.append(event)
+                    ), contextlib.redirect_stdout(io.StringIO()):
+                        code = deploy_cli.cmd_finish(argparse.Namespace(outcome=outcome))
+                    self.assertEqual(argvs[0], ["bash", "scripts/run-deploy-stage", "--finish"])
+                    self.assertEqual(events, [("outcome", outcome)])
+                    self.assertEqual(argvs[1][1:], ["scripts/factory_ledger.py", "publish"])
+                    self.assertEqual(code, 1 if timing_exit or publish_exit else 0)
 
 
 LEDGER = FACTORY_REVIEW._factory_ledger_module()

@@ -769,6 +769,10 @@ async def test_tilion_regional_hosts_use_the_single_client_multiplexer():
 # ----- HTTP fixture site ----------------------------------------------------
 
 DOWNLOAD_BYTES = b"%PDF-1.4 tilion download fixture\n" + bytes(range(256)) * 8
+ARCHIVE_BYTES = b"PK\x03\x04 linkedin-shaped archive fixture\n" + bytes(range(256)) * 16
+ARCHIVE_FILENAME = "Basic_LinkedInDataExport_11-07-2026.zip"
+# Requests per fixture path: the archive endpoint must be hit once per click.
+FIXTURE_HITS: Dict[str, int] = {}
 UPLOAD_BYTES = b"tilion-upload-fixture:" + os.urandom(3000)
 
 
@@ -879,6 +883,34 @@ async def _fixture_site():
         )
 
     app.router.add_get("/rerendering-checkbox", rerendering_checkbox)
+
+    # LinkedIn's "Download archive": XHR the ZIP, then save it from a blob: URL
+    # that the page revokes shortly afterwards.
+    async def archive_page(_request):
+        return web.Response(
+            content_type="text/html",
+            text=(
+                "<title>download my data</title>"
+                '<button id="archive" onclick="(async () => {'
+                " const blob = await (await fetch('/api/archive')).blob();"
+                " const href = window.URL.createObjectURL(blob);"
+                " const link = document.createElement('a');"
+                f" link.href = href; link.download = '{ARCHIVE_FILENAME}';"
+                " document.body.appendChild(link); link.click(); link.remove();"
+                ' setTimeout(() => window.URL.revokeObjectURL(href), 1000); })()">Download archive</button>'
+            ),
+        )
+
+    async def archive(_request):
+        FIXTURE_HITS["/api/archive"] = FIXTURE_HITS.get("/api/archive", 0) + 1
+        return web.Response(
+            body=ARCHIVE_BYTES,
+            content_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{ARCHIVE_FILENAME}.zip"'},
+        )
+
+    app.router.add_get("/archive-page", archive_page)
+    app.router.add_get("/api/archive", archive)
     app.router.add_get("/files/report.pdf", report)
     app.router.add_get("/static/logo.png", logo)
     runner = web.AppRunner(app, access_log=None)
@@ -973,6 +1005,56 @@ async def test_tilion_download_lands_in_worker_ledger_not_static_assets():
         assert gateway.rejected_4409 == 0
     tilion_worker.release_session(session_id)
     assert not tilion_worker.owns_download_session(session_id)
+
+
+async def test_tilion_blob_download_is_read_from_the_page_with_one_request():
+    """A page-built blob: download reaches the ledger without re-requesting the file.
+
+    LinkedIn's archive page fetches the ZIP and saves it from a blob: URL, so
+    Chrome's downloadWillBegin carries no http(s) URL. The persister dropped
+    such downloads ("missing http(s) URL"): the export agent could never hand
+    the archive to the upload step. The blob is read in the page that created
+    it, under Chrome's suggested name, and the archive endpoint (rate-limited
+    on LinkedIn: "Fuse limit exceeded") sees only the page's own request.
+    """
+    from domains.spawn_browser_agent_v3 import service as browser_service
+    from domains.spawn_browser_agent_v3 import tilion_worker
+    from domains.spawn_browser_agent_v3.download_persist import BrowserDownloadPersister
+
+    session_id = "tilion-blob-download-session"
+    FIXTURE_HITS.clear()
+    async with _fixture_site() as base, _tilion_worker_stack() as (service, pw_browser, gateway):
+
+        async def no_backend(*_args, **_kwargs):
+            raise AssertionError("Tilion downloads must not use backend file routes mid-run")
+
+        with (
+            patch("domains.spawn_browser_agent_v3.repo.upload_file_to_session", no_backend),
+            patch("domains.spawn_browser_agent_v3.repo.download_session_file", no_backend),
+            patch.object(browser_service, "list_session_files", no_backend),
+        ):
+            persister = await BrowserDownloadPersister.create(
+                browser_session=service.session,
+                session_id=session_id,
+                config=object(),
+                provider="tilion",
+            )
+            assert persister is not None
+            page = pw_browser.contexts[0].pages[0]
+            await page.goto(base + "/archive-page")
+            await page.click("#archive")
+            for _ in range(100):
+                if tilion_worker.list_downloads(session_id):
+                    break
+                await asyncio.sleep(0.1)
+            await persister.close()
+        files = tilion_worker.list_downloads(session_id)
+        assert [item["filename"] for item in files] == [ARCHIVE_FILENAME], files
+        stored = tilion_worker.read_download(session_id, files[0]["path"])
+        assert stored is not None and stored["content"] == ARCHIVE_BYTES
+        assert FIXTURE_HITS == {"/api/archive": 1}, FIXTURE_HITS
+        assert gateway.rejected_4409 == 0
+    tilion_worker.release_session(session_id)
 
 
 # ----- uploads ------------------------------------------------------------
@@ -4145,6 +4227,7 @@ async def run_all_tests():
         ("worker_logs_never_carry_raw_browser_urls", test_worker_logs_never_carry_raw_browser_urls),
         ("click_coordinates_follow_re_rendered_element", test_click_coordinates_follow_an_element_the_page_re_rendered),
         ("tilion_download_lands_in_worker_ledger", test_tilion_download_lands_in_worker_ledger_not_static_assets),
+        ("tilion_blob_download_one_request", test_tilion_blob_download_is_read_from_the_page_with_one_request),
         ("tilion_upload_sets_worker_bytes_on_file_input", test_tilion_upload_sets_worker_bytes_on_file_input),
         ("tilion_worker_apply_contract", test_tilion_worker_apply_contract_sets_cookies_and_local_storage),
         (
