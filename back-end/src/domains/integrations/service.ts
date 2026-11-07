@@ -80,6 +80,7 @@ export { handleOAuthCallback } from './oauthService.callback';
 export {
   processGenericUpload,
   processLinkedInUpload,
+  LinkedInArchiveWithoutConnectionsError,
   processContactsUpload,
   processEmailZipUpload,
   processIMessageUpload,

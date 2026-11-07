@@ -90,6 +90,10 @@ router.post(
         const result = await service.processLinkedInUpload(userId, filePath, fileName);
         return res.json({ message: 'LinkedIn data imported successfully', ...result });
       } catch (parseError: unknown) {
+        if (parseError instanceof service.LinkedInArchiveWithoutConnectionsError) {
+          fs.unlinkSync(filePath);
+          return res.status(422).json({ error: parseError.message });
+        }
         return res.status(500).json({
           error: 'Failed to parse LinkedIn data',
           details: parseError instanceof Error ? parseError.message : 'Unknown error',
