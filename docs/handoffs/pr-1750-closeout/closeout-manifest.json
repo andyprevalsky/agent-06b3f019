@@ -90,7 +90,7 @@
   "cloud": ".context/deploy-cloud (both cloud smoke campaigns)"
  },
  "restore_check": "core restored into an empty directory: 632/632 files byte-identical",
- "scorecard_sha256": "2accf23e6868691a40d8fd4959d1e19caa35dde84c257e3a9c08af449f9000cc",
+ "scorecard_sha256": "d507785236e809f40c3471fe4e04ff764f2415e1a3066c7f0955727e1f4cace5",
  "dispositions": {
   "source": "everything committed and merged (6e67bded0) plus ledger 5807c0edf",
   "local_config": "env files are project-managed (boxes managed env); no new keys",
@@ -101,5 +101,7 @@
   "PR #1752 still open (owner notified by PR comment)",
   "cloudbench multi-workstream Hub-stub port race / 5s readiness budget and autoscale orphan fixture remain load flakes",
   "backend (TS) chat path does not report usage"
- ]
+ ],
+ "factory_ledger_commit": "e0a09dcbf7821e687f741b0ae5ca0cd06e9d3f7b (31 factory timing rows incl. outcome completed)",
+ "timeline_note": "devbox suspended ~09:45-16:24 UTC after production verification; nothing was running; shown as unrecorded"
 }
