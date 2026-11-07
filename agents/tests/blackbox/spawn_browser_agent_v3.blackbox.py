@@ -27135,6 +27135,223 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
 
 
+async def test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to():
+    """A reattached browser starts in the realm its credential material was prepared for.
+
+    Agent ae7983a2 (LinkedIn export): the root's logical browser was last on
+    linkedin.com, so `/browser-session/init` reattached it and returned
+    task-info passkeys for linkedin.com (none) without auth_options. A Gmail
+    check then started at mail.google.com; the worker paired google.com auth
+    options (three enabled passkeys) with that linkedin.com material and failed
+    before its first step: "Credential payload for google.com is missing
+    passkey material". The initial state must use the response's realm; the
+    first step boundary then prepares google.com through the realm transition.
+    """
+    from contextlib import ExitStack
+
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    env = ActivityEnvironment()
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    # Task-info shape of a reattached logical browser: realm + material, no auth_options.
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "auth_realm": "linkedin.com",
+        "passwords": [],
+        "passkeys": [],
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+    google_passkeys = [{"id": f"pk-{index}", "label": "Google passkey"} for index in range(3)]
+
+    async def auth_options_for(_config, _user_id, realm):
+        # The backend canonicalizes mail.google.com to the google.com realm.
+        if realm.endswith("google.com"):
+            return {"realm": "google.com", "passkeys": google_passkeys}
+        return {"realm": realm}
+
+    fetch_options = AsyncMock(side_effect=auth_options_for)
+    prepare_auth = AsyncMock(
+        return_value={"auth_realm": "google.com", "auth_options": {"realm": "google.com"}, "passkeys": []}
+    )
+    llm_step = AsyncMock(
+        return_value={
+            "action": {"action": "scroll", "thinking": "Opening the inbox", "params": {"direction": "down"}},
+            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+            "mode": "waterfall",
+        }
+    )
+
+    async def execute_step(*args, **kwargs):
+        env.worker_shutdown()
+        return {"success": True, "message": "Scrolled down", "current_url": inbox_url}
+
+    inbox_url = "https://mail.google.com/mail/u/0/"
+
+    class _NavigationEvent:
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+        async def event_result(self, **_kwargs):
+            return None
+
+    reload_dispatch = MagicMock(return_value=_NavigationEvent())
+
+    class _InboxDomService(_FakeDomService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.session.event_bus = SimpleNamespace(dispatch=reload_dispatch)
+
+        async def get_browser_state(self, include_screenshot=False):
+            return {"url": inbox_url, "screenshot": None}
+
+        async def get_page_identity(self):
+            return {"url": inbox_url, "title": "Inbox"}
+
+        async def get_current_url(self, *, fallback: str = ""):
+            return inbox_url
+
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    patch_targets = [
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_auth_options", fetch_options),
+        patch("domains.spawn_browser_agent_v3.handler.prepare_browser_auth", prepare_auth),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _InboxDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        result = await env.run(
+            spawn_browser_agent_activity_v3,
+            user_id="user-1",
+            agent_id="agent-1",
+            goal="Check the inbox for the LinkedIn archive email",
+            tool_call_id="tool-1",
+            task_id="task-1",
+            output_schema={"fields": [{"name": "result", "type": "string"}]},
+            use_claude_mode=False,
+            start_url="https://mail.google.com/",
+        )
+
+    # Setup succeeded and the run reached a step boundary on the inbox.
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["current_url"] == inbox_url, result
+    assert result["auth_realm"] == "google.com", result
+    assert [call.args[2] for call in fetch_options.await_args_list] == ["linkedin.com"], (
+        "initial auth options must come from the realm the reattached material belongs to"
+    )
+    assert [call.kwargs["target_url"] for call in prepare_auth.await_args_list] == [inbox_url], (
+        "the first google.com observation must prepare that realm through the transition"
+    )
+    navigations = [call.args[0].url for call in reload_dispatch.call_args_list]
+    assert navigations == ["https://mail.google.com/", inbox_url], (
+        f"start URL, then one reload so the prepared google.com cookies reach the page: {navigations}"
+    )
+
+
+@_in_browser_activity_context
+async def test_credential_setup_failure_disconnects_the_connected_browser_clients():
+    """A credential-setup failure releases the CDP clients the browser side connected.
+
+    Agent ae7983a2: credential preparation raised while the parallel browser
+    setup had already attached DOMService and Playwright. `asyncio.gather`
+    propagated the data error and dropped the browser result, so teardown saw
+    no clients; the orphaned loopback client kept Tilion's single CDP slot and
+    every later browser start for the agent failed with 4409 / connect() timeouts.
+    """
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "passkeys": [],
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+    # Inventory names an enabled passkey whose material the session lacks.
+    auth_options = {"realm": "example.com", "passkeys": [{"id": "pk-1", "label": "Example passkey"}]}
+    _FakeDomService.last_instance = None
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_auth_options", AsyncMock(return_value=auth_options)),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="missing passkey material"):
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Check the inbox",
+                tool_call_id="tool-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="https://example.com",
+            )
+
+    dom_service = _FakeDomService.last_instance
+    assert dom_service is not None, "the browser side must have connected before the data side failed"
+    dom_service.disconnect.assert_awaited()
+    fake_browser.close.assert_awaited()
+
+
 async def _run_browser_activity_cancelled_mid_step(cancellation_details):
     """Run the real browser activity and cancel it mid-step with ``cancellation_details``.
 
@@ -37323,6 +37540,14 @@ async def run_all_tests():
     await r.record_async(
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
+    )
+    await r.record_async(
+        "reattached_session_starts_in_its_credential_realm",
+        test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to,
+    )
+    await r.record_async(
+        "credential_setup_failure_disconnects_connected_browser_clients",
+        test_credential_setup_failure_disconnects_the_connected_browser_clients,
     )
     await r.record_async(
         "timed_out_browser_activity_leaves_the_tool_result_to_the_workflow",

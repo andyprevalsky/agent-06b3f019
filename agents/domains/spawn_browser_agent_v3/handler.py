@@ -8901,7 +8901,10 @@ async def _spawn_browser_agent_activity_v3_real(
             browser_session_metadata = session_data.get("browser_session_metadata") or {}
             if browser_session_metadata.get("provider") == "tilion":
                 tilion_creates["count"] += 1
-            user_profile = session_data.get("user_settings") or {}
+            # A reattached logical browser returns the material of the realm it
+            # is on, not the start URL's; the first step's realm transition
+            # prepares the start URL's realm.
+            user_profile, auth_realm = _resume_context_from_session_info(session_data, auth_realm)
         _record_timing("session_init", t_session)
         # Durable Tilion downloads from before a write-lock/payment/auth pause,
         # keyed by the session this activity actually runs on.
@@ -9218,10 +9221,28 @@ async def _spawn_browser_agent_activity_v3_real(
                 _realm_credential_state,
             )
 
+        # Wait for both sides: a data failure must not discard browser clients that
+        # already connected (an orphaned client holds Tilion's single CDP slot).
         browser_result, data_result = await asyncio.gather(
             _setup_browser(),
             _process_data(),
+            return_exceptions=True,
         )
+        setup_error = next(
+            (result for result in (browser_result, data_result) if isinstance(result, BaseException)), None
+        )
+        if setup_error is not None:
+            if not isinstance(browser_result, BaseException):
+                _orphan_dom_service, _, _, _orphan_playwright_browser, _orphan_playwright_instance = browser_result
+                with contextlib.suppress(Exception):
+                    await _orphan_dom_service.disconnect()
+                await _stop_playwright_resources(
+                    _orphan_playwright_browser,
+                    _orphan_playwright_instance,
+                    agent_id,
+                    driver_pid=playwright_driver_pid,
+                )
+            raise setup_error
         _record_timing("parallel_setup_total", t_parallel)
 
         (
