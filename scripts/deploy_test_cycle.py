@@ -298,6 +298,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
     if not latest or gate.get('quick'):
         return None
     receipt = latest
+    # Recovered native evidence has no positive-adoption contract yet.
+    if receipt.get('kind') == 'recovered-native-execution-v1':
+        return None
     try:
         skips = reuse_qualifications(state, gate)
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
@@ -310,8 +313,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
             or attempt.get('stale') or attempt.get('interrupted')
             or receipt.get('status') != 'PASS' or receipt.get('complete') is not True
             or receipt.get('executed') is not True or type(receipt.get('native_exit')) is not int
-            or receipt['native_exit'] != 0 or receipt.get('timed_out') or receipt.get('cancelled')
-            or receipt.get('lingering_group') or receipt.get('cleanup_owner')
+            or receipt['native_exit'] != 0
+            or any(receipt.get(flag) is not False for flag in ('timed_out', 'cancelled', 'lingering_group'))
+            or receipt.get('cleanup_owner')
             or not active or receipt.get('cases') != expected
             or receipt.get('command') != gate['command']
             or receipt.get('execution_binding') != {'input_fingerprint': state['input_fingerprints'].get(gate['name']),
@@ -1785,6 +1789,11 @@ def main(argv: list[str] | None = None) -> int:
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
+            journal = directory / 'settlement-journal.json'
+            if journal.exists():
+                committed = directory / 'settlement-committed.json'
+                if not committed.is_file() or read(committed) != {'journal_sha256': sha_file(journal)}:
+                    raise ValueError('pending settlement journal; resume its exact recovery before normal actions')
             state_path = directory / "cycle.json"
             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
             if args.action == "init" and state_path.exists():

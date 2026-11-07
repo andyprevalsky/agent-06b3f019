@@ -4401,4 +4401,71 @@ class RelayStartupEvidence(unittest.TestCase):
 
 
 
+
+class RecoveredNativeReceiptGuard(unittest.TestCase):
+    """Exercise actual full-pass admission on real files; never launch a worker."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.temp.name)
+        source = {'head': 'fixture', 'digest': 'fixture'}
+        self.gate = {'name': 'api', 'command': ['native-fixture'], 'checks': ['case']}
+        self.state = {'source': source, 'input_fingerprints': {'api': 'input'}, 'skips': {},
+                      'environment': 'env', 'attempts': [], 'failures': []}
+        self.request = {'token': 'original-token', 'source': source, 'gate': 'api', 'checks': ['case']}
+        self.worker = {**self.request, 'cases': {'case': 'PASS'}, 'complete': True,
+                       'cleanup_complete': True, 'reused': False}
+        self.receipt = {**{k: self.request[k] for k in ('token', 'source', 'gate')},
+            'status': 'PASS', 'complete': True, 'executed': True, 'native_exit': 0,
+            'cancelled': False, 'timed_out': False, 'lingering_group': False,
+            'cases': {'case': 'PASS'}, 'command': self.gate['command'],
+            'log': str(self.folder / 'output.log'), 'worker_result': str(self.folder / 'result.json'),
+            'execution_binding': {'input_fingerprint': 'input', 'contract_digest': c.digest(self.gate),
+                                  'environment': 'env'}}
+        c.write(self.folder / 'request.json', self.request)
+        c.write(self.folder / 'result.json', self.worker)
+
+    def tearDown(self): self.temp.cleanup()
+
+    def admit(self, receipt):
+        c.write(self.folder / 'receipt.json', receipt)
+        self.state['attempts'] = [{'phase': 'final', 'source': self.state['source'], 'results': [receipt]}]
+        return c.full_pass_binding(self.state, self.gate)
+
+    def test_known_native_pass_is_still_admitted(self):
+        self.assertIsNotNone(self.admit(self.receipt))
+
+    def test_unknown_lifecycle_is_never_false(self):
+        for field in ('cancelled', 'timed_out', 'lingering_group'):
+            for value in ('MISSING', None, 0, ''):
+                with self.subTest(field=field, value=value):
+                    receipt = copy.deepcopy(self.receipt)
+                    if value == 'MISSING': receipt.pop(field)
+                    else: receipt[field] = value
+                    self.assertIsNone(self.admit(receipt))
+
+    def test_recovered_type_cannot_borrow_legacy_native_flags_for_pass(self):
+        receipt = {**self.receipt, 'kind': 'recovered-native-execution-v1',
+                   'original_coordinator': {'cancelled': 'UNKNOWN', 'timed_out': 'UNKNOWN'},
+                   'native_evidence': {'cancelled': False, 'timed_out': False}}
+        self.assertIsNone(self.admit(receipt))
+
+
+
+class PendingSettlementJournalGuard(unittest.TestCase):
+    def test_normal_coordinator_refuses_uncommitted_recovery_journal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            c.write(root/'plan.json',{})
+            c.write(root/'cycle.json',{'phase':'final','ready':False,'source':{},'round':30})
+            c.write(root/'settlement-journal.json',{'kind':'native-settlement-journal-v1'})
+            original=(root/'cycle.json').read_bytes()
+            args=['status','--plan',str(root/'plan.json'),'--state-dir',str(root)]
+            self.assertEqual(c.main(args),2)
+            self.assertEqual((root/'cycle.json').read_bytes(),original)
+            c.write(root/'settlement-committed.json',{'journal_sha256':'wrong'})
+            self.assertEqual(c.main(args),2)
+            self.assertEqual((root/'cycle.json').read_bytes(),original)
+            c.write(root/'settlement-committed.json',{'journal_sha256':c.sha_file(root/'settlement-journal.json')})
+            self.assertEqual(c.main(args),0)
+
 if __name__ == '__main__': unittest.main()
