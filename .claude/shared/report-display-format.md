@@ -314,5 +314,5 @@ the originating deploy. Preserve entries across refreshes and resume.
 In the fixed **EXTERNAL PROVIDER FAILURES** box, show each
 unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING**
 with affected checks and evidence. Keep the shared-axis stage timeline last.
-Outages and exhausted credits are non-blocking and create no repair agent. Waived or failed checks never become
+Outages, exhausted credits and credential or billing changes only the user can make are non-blocking and create no repair agent. Waived or failed checks never become
 PASS; preserve original measurements and native outcomes.

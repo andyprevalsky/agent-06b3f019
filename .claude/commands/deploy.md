@@ -130,7 +130,7 @@ Stop and ask the user only for a prompt, agent-behavior or trajectory-injection 
 
 Two more decisions are reserved to the user by the review ledger, not by this skill: the verification-cycle approval id, and a security or prod-impacting finding still open after cycle 3 (see **Review**).
 
-Stop immediately when the user says stop. Provider credit exhaustion, review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
+Stop immediately when the user says stop. Credential or billing changes only the user can make, provider credit exhaustion, review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
 
 ## Skippable tests
 
@@ -138,7 +138,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 
 | Test | Skip when | Note |
 |------|-----------|------|
-| Any test | A third-party provider is out of credits or storage, or down (user decision, 2026-11-06: skip and report), with explicit evidence; record it as an external-provider waiver (`credits exhausted` or `outage`) | Never top up or wait; report it at the end of the scorecard |
+| Any test | A third-party provider is out of credits or storage, is down, or needs a credential or billing change only the user can make (user decision, 2026-11-06: skip and report), with explicit evidence; record it as an external-provider waiver (`credits exhausted`, `outage` or `credential or billing change`) | Never top up or wait; report it at the end of the scorecard |
 | Treasury test failures | Always (the test still runs; its original FAIL stays on record) | Never mutate treasury records to pass |
 | AgentCard, production lane | The user elects it (`--skip-agentcard "<reason>"` on `scripts/deploy production`), or the exact release stall | The stall proven from the run's native record is recorded `SKIPPED-stall` (satisfied, never PASS, unreleased amount stated); any other outcome fails |
 | AgentCard, smoke tasks | The exact release stall (closed card, zero balance, transfer `consumed`, `releasedCents=0`) | Triage the native SKIPPED row as `resource_skip` with `reason_code: agentcard_release_stall`; never PASS; unreleased funds stay a followup |
@@ -161,7 +161,7 @@ Never skip for an unexplained failure, an auth failure our own configuration cau
 3. Each RCA returns an evidence-backed `Gate: INTRODUCED` or `Gate: NOT_INTRODUCED`; without evidence it is UNKNOWN.
 4. INTRODUCED: fix it in this deploy. UNKNOWN: blocking until attributed.
 5. NOT_INTRODUCED: keep the failed-test packet; it does not block the merge and is handed off after merge.
-6. Provider outage or exhausted credits with evidence: external exception, no handoff, alert at the end of the scorecard.
+6. Provider outage or exhausted credits with evidence: external exception, no handoff, alert at the end of the scorecard; likewise a credential or billing change only the user can make.
 7. An assigned repair (the failure your `/goal` targets) stays yours whatever the attribution says.
 8. Import the attributions: `python3 scripts/deploy_test_cycle.py triage --input report.json`.
 9. After a fix: `focus --input focused.json` then `run` (failing tests plus regressions), then the full failed gates, then every selected gate on the final source.

@@ -88,11 +88,12 @@ class FailurePolicyTest(unittest.TestCase):
         self.assertEqual(MODULE.render({"failures": [entry]}, "Existing scorecard\n"), "Existing scorecard\n")
 
     def test_external_outage_and_credit_exhaustion_never_require_or_accept_handoff(self):
-        for reason in ["outage", "credits exhausted"]:
+        for reason in ["outage", "credits exhausted", "credential or billing change"]:
             e = self.occurrence(attribution="NOT_INTRODUCED", external_provider={"name": "Example", "reason": reason})
             self.assertEqual(MODULE.decision(e), "external / waived")
             with self.assertRaises(ValueError): MODULE.decision({**e, "repair_agent": "https://www.roselabs.ai/?agent-id=x"})
             with self.assertRaises(ValueError): MODULE.decision({**e, "attribution": "INTRODUCED"})
+            with self.assertRaises(ValueError): MODULE.decision({**e, "external_provider": {"name": "Example", "reason": "flaky"}})
 
     def test_report_survives_resume_retains_original_results_and_alert_is_last(self):
         with tempfile.TemporaryDirectory(prefix="rose-deploy-report-") as d:
