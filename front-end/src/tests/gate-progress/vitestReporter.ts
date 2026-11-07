@@ -10,17 +10,35 @@
  * plugin appends this reporter to the reporters Vitest already resolved (the default/agent and
  * github-actions defaults, or any CLI --reporter), so the gate's console output is unchanged.
  */
-import type {
-  Reporter,
-  SerializedError,
-  TestCase,
-  TestModule,
-  VitestPluginContext,
-} from 'vitest/node';
 import { stripVTControlCharacters } from 'node:util';
 import { reportGateProgress } from './gateProgress.ts';
 
 type Env = Record<string, string | undefined>;
+
+// The parts of Vitest's reporter API this reporter reads, declared here: a type import from
+// 'vitest/node' inside tsconfig.app.json's program changed how jest-dom's matchers resolve, so
+// `toHaveStyle({ opacity: 1 })` stopped type-checking in the coverage gate (2026-11-07).
+interface SerializedError {
+  stack?: string;
+  diff?: unknown;
+  name?: string;
+  message: string;
+}
+export interface VitestTestCase {
+  fullName: string;
+  module: { relativeModuleId: string };
+  result(): { state: string; errors?: ReadonlyArray<SerializedError> };
+}
+export interface VitestTestModule {
+  relativeModuleId: string;
+  state(): string;
+  ok(): boolean;
+  errors(): ReadonlyArray<SerializedError>;
+  children: { allTests(state: 'failed'): Iterable<{ fullName: string }> };
+}
+export interface VitestPluginContext {
+  vitest: { config: { reporters: unknown[] } };
+}
 
 /** Stack, diff, then message (the tail survives the 2000-char cut), without terminal colors. */
 function describeErrors(errors: ReadonlyArray<SerializedError> | undefined): string {
@@ -39,14 +57,14 @@ function describeErrors(errors: ReadonlyArray<SerializedError> | undefined): str
   );
 }
 
-export class GateProgressVitestReporter implements Reporter {
+export class GateProgressVitestReporter {
   private readonly env: Env;
 
   constructor(options: { env?: Env } = {}) {
     this.env = options.env ?? process.env;
   }
 
-  onTestCaseResult(testCase: TestCase): void {
+  onTestCaseResult(testCase: VitestTestCase): void {
     const result = testCase.result();
     if (result.state !== 'failed') return;
     reportGateProgress(
@@ -57,7 +75,7 @@ export class GateProgressVitestReporter implements Reporter {
     );
   }
 
-  onTestModuleEnd(testModule: TestModule): void {
+  onTestModuleEnd(testModule: VitestTestModule): void {
     if (testModule.state() === 'skipped') return;
     const failedTests = [...testModule.children.allTests('failed')].map((test) => test.fullName);
     const detail = [

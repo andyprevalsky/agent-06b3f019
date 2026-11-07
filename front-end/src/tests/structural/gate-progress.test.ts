@@ -16,7 +16,6 @@ import type {
   TestCase as PlaywrightTestCase,
   TestResult as PlaywrightTestResult,
 } from '@playwright/test/reporter';
-import type { TestCase, TestModule, VitestPluginContext } from 'vitest/node';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   gateProgressRow,
@@ -27,6 +26,9 @@ import GateProgressPlaywrightReporter from '../gate-progress/playwrightReporter'
 import {
   GateProgressVitestReporter,
   gateProgressVitestPlugin,
+  type VitestPluginContext,
+  type VitestTestCase as TestCase,
+  type VitestTestModule as TestModule,
 } from '../gate-progress/vitestReporter';
 
 const ESC = String.fromCharCode(27);
