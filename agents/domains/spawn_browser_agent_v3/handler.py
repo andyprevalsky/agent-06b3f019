@@ -9227,18 +9227,18 @@ async def _spawn_browser_agent_activity_v3_real(
             browser_result, data_result = await asyncio.gather(browser_setup, data_setup)
         except BaseException:
             # gather raises the first failure but leaves the other side running, and a
-            # cancelled activity drops a finished side's result. Stop the unfinished side
-            # (its own handler releases what it attached) and hand a connected browser
-            # side to the finally-scheduled cleanup: an orphaned client would hold
-            # Tilion's single CDP slot.
+            # cancelled activity drops a finished side's result. Hand a connected browser
+            # side to the finally-scheduled cleanup first (an orphaned client would hold
+            # Tilion's single CDP slot, even if a second cancel interrupts the wait), then
+            # stop the unfinished side; its own handler releases what it attached.
+            if browser_setup.done() and not browser_setup.cancelled() and browser_setup.exception() is None:
+                dom_service, dom_page, input_page, playwright_browser, playwright_instance = browser_setup.result()
             for side in (browser_setup, data_setup):
                 side.cancel()
             await asyncio.wait({browser_setup, data_setup}, timeout=BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS)
             for side in (browser_setup, data_setup):
                 if side.done() and not side.cancelled():
                     side.exception()  # retrieved: the raised error below is the reported one
-            if browser_setup.done() and not browser_setup.cancelled() and browser_setup.exception() is None:
-                dom_service, dom_page, input_page, playwright_browser, playwright_instance = browser_setup.result()
             raise
         _record_timing("parallel_setup_total", t_parallel)
 
