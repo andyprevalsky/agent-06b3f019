@@ -164,7 +164,10 @@ function withSpawnGoal(node: TreeNode | undefined, id: string, parent: string, g
   return { ...makePendingNode(id), parentAgentId: parent, goal };
 }
 
-function countAll(groups: PanelGroup[], getChildren: (id: string) => TreeNode[]): PanelCounts {
+export function countAll(
+  groups: PanelGroup[],
+  getChildren: (id: string) => TreeNode[],
+): PanelCounts {
   let total = 0;
   let running = 0;
   let paused = 0;

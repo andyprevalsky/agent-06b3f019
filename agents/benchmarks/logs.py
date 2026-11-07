@@ -40,7 +40,7 @@ import os
 import shutil
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
 
 import httpx
@@ -356,6 +356,47 @@ def fetch_local_worker_logs(
     if newest:
         return [line for _, _, line in sorted(recent)]
     return matched
+
+
+def _local_backend_log_paths() -> List[str]:
+    """Backend log files of the local stack that served the benchmark.
+
+    Isolated ``run-bench`` stacks write ``<BENCHMARK_CONTEXT_DIR>/logs/backend.log``
+    (scripts/run.sh ``BACKEND_LOG_FILE``); a plain ``run.sh`` stack writes
+    ``back-end/backend-logs.log``.
+    """
+    candidates = [(os.environ.get("BACKEND_LOG_FILE") or "").strip()]
+    context_dir = (os.environ.get("BENCHMARK_CONTEXT_DIR") or "").strip()
+    if context_dir:
+        candidates.append(os.path.join(context_dir, "logs", "backend.log"))
+    candidates.append(os.path.join(os.path.dirname(__file__), "..", "..", "back-end", "backend-logs.log"))
+    paths: List[str] = []
+    for path in candidates:
+        resolved = os.path.realpath(path) if path else ""
+        if resolved and resolved not in paths and os.path.isfile(resolved):
+            paths.append(resolved)
+    return paths
+
+
+def fetch_local_backend_log_lines(needles: Sequence[str], *, limit: int = 50000) -> List[str]:
+    """Lines of the local backend log that contain any of ``needles``, in file order.
+
+    The first readable file wins: an isolated stack's own log must not be mixed
+    with a workspace stack's stale ``backend-logs.log``.
+    """
+    for path in _local_backend_log_paths():
+        matched: List[str] = []
+        try:
+            with open(path, "r", errors="replace") as handle:
+                for raw_line in handle:
+                    if any(needle in raw_line for needle in needles):
+                        matched.append(raw_line.rstrip("\n"))
+                        if len(matched) >= limit:
+                            break
+        except OSError:
+            continue
+        return matched
+    return []
 
 
 def _is_remote_worker_log_placeholder(line: str) -> bool:

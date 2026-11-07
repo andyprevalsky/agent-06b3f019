@@ -34,6 +34,7 @@
  */
 
 import type { Message } from '@/lib/api/types';
+import { fenceTerminalOutput } from '@/lib/fenceTerminalOutput';
 
 import {
   codeAgentLabel,
@@ -156,20 +157,29 @@ function toolTitle(entry: TranscriptEntry): string {
 
 function activityMessage(entry: TranscriptEntry, id: string): Message {
   const base = { message_id: id, timestamp: iso(entry.at ?? entry.firstSeenAt) };
-  if (entry.type === 'message') return finalAnswer(entry.text, id, entry.at ?? entry.firstSeenAt);
+  // Narration mid-turn is assistant text, as in a Rose agent's history (the
+  // work rows show it as a thought); only the turn's answer is user-facing.
+  if (entry.type === 'message') return { ...base, role: 'ASSISTANT', text: entry.text };
   if (entry.type === 'thinking') {
+    // The shared thought row (metadata.generation is added by the usage samples around it).
+    const live = entry.partial === true;
     return {
       ...base,
       role: 'TOOL',
       text: entry.text,
-      metadata: { toolName: 'thought', toolStatus: 'FINISHED', title: 'Thought', toolCallId: id },
+      metadata: {
+        toolName: 'thought',
+        toolStatus: live ? 'IN_PROGRESS' : 'FINISHED',
+        title: live ? 'Thinking' : 'Thought',
+        toolCallId: id,
+      },
     };
   }
   const running = entry.tool?.status === 'running';
   return {
     ...base,
     role: 'TOOL',
-    text: entry.tool?.output ?? '',
+    text: fenceTerminalOutput(entry.tool?.output),
     metadata: {
       toolName: entry.tool?.name ?? entry.type,
       toolStatus: running ? 'IN_PROGRESS' : 'FINISHED',
@@ -290,6 +300,65 @@ interface OpenTurn {
   metricBaseline?: number;
 }
 
+interface UsageSample {
+  count: number;
+  at: number;
+  /** The creating event's index (creation order); null when the producer sent none. */
+  seq: number | null;
+}
+
+/**
+ * Records the generation that `from`→`to` brackets on the finished thoughts (and the
+ * mid-turn narration, rendered as a thought row) inside it.
+ * One backward walk over just the window's rows. A finished tool row inside the window
+ * means it spans a tool run, not generation: no rate rather than a wrong one. A tool
+ * CREATED inside the window (its seq follows `from`) is the call's own: Claude Code runs
+ * a tool as soon as its tool_use block completes, so it can finish before the call's
+ * message_delta while the call is still generating. Only a tool created before the
+ * window (a run in flight across it, as with Codex's per-response samples) disqualifies it.
+ */
+function attachGeneration(
+  activities: Message[],
+  from: UsageSample,
+  to: UsageSample,
+  createdSeq: ReadonlyMap<string, number | null>,
+) {
+  if (to.at <= from.at || to.count <= from.count) return;
+  const thoughts: number[] = [];
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const message = activities[index];
+    const time = eventTimeMs(message.timestamp);
+    if (time !== null && time <= from.at) break;
+    if (time === null || time > to.at) continue;
+    const metadata = message.metadata;
+    if (metadata?.toolName === 'thought') {
+      if (metadata.toolStatus === 'FINISHED' && !metadata.generation) thoughts.push(index);
+    } else if (message.role === 'ASSISTANT') {
+      // Mid-turn narration is the same model call's text: the root renders it as a
+      // "Thought" row too, so it carries the call's generation like a thinking row.
+      if (!metadata?.generation) thoughts.push(index);
+    } else if (
+      message.role === 'TOOL' &&
+      metadata?.toolStatus === 'FINISHED' &&
+      metadata.a2a === undefined &&
+      metadata.isUserAttentionMessage !== true
+    ) {
+      const created = createdSeq.get(message.message_id) ?? null;
+      const createdInside = created !== null && from.seq !== null && created > from.seq;
+      if (!createdInside) return;
+    }
+  }
+  const generation = {
+    output_tokens: to.count - from.count,
+    started_at: iso(from.at),
+    ended_at: iso(to.at),
+  };
+  for (const index of thoughts) {
+    const message = activities[index];
+    activities[index] = { ...message, metadata: { ...message.metadata, generation } };
+  }
+}
+
 class SessionBuilder {
   readonly out: CodeSessionEntry[] = [];
   private open: OpenTurn | null = null;
@@ -297,6 +366,21 @@ class SessionBuilder {
   private readonly comms = new Set<string>();
   /** Coordination before any slot exists: joins the next slot. */
   private pendingComms: Message[] = [];
+  /**
+   * The previous usage sample of the session, whether or not a turn was open when it
+   * arrived: a call's first sample (its message_start) can arrive before its turn opens,
+   * because the CLI's lifecycle record keeps the "started" revision's low `seq` and its
+   * later "ended" revision closes the turn early. A thought is bracketed against this chain.
+   */
+  private lastSample: {
+    count: number;
+    at: number | null;
+    seq: number | null;
+    scope: string;
+    turnId: string | null;
+  } | null = null;
+  /** Creation order (seq) of each activity row, by message id. */
+  private readonly createdSeq = new Map<string, number | null>();
 
   constructor(private readonly input: CodeSessionInput) {}
 
@@ -331,7 +415,19 @@ class SessionBuilder {
     const direction =
       a2a.from.id === taskId ? 'sent' : a2a.to.id === taskId ? 'received' : a2a.direction;
     const raw = message.metadata?.a2a as Record<string, unknown>;
-    return { ...message, metadata: { ...message.metadata, a2a: { ...raw, direction } } };
+    // The backend tags these rows with the code session's `subAgentId` and the chip's
+    // `toolCallId`. The root MessageList drops sub-agent rows and merges rows sharing a
+    // toolCallId (a sent and a received row would collapse), so the row is its own
+    // main-chat row here: no sub-agent scope, its message id as its tool call id.
+    return {
+      ...message,
+      metadata: {
+        ...message.metadata,
+        subAgentId: undefined,
+        toolCallId: message.message_id,
+        a2a: { ...raw, direction },
+      },
+    };
   }
 
   private finish(outcome: TurnOutcome, endedAt: number | null) {
@@ -339,6 +435,16 @@ class SessionBuilder {
     if (!open) return;
     open.turn.status = outcome;
     open.turn.endedAt = endedAt;
+    // A thought still streaming when its turn ends (interrupted, or never finalized) is
+    // over: a finished slot never keeps a live "Thinking" row.
+    open.turn.activities = open.turn.activities.map((message) =>
+      message.metadata?.toolName === 'thought' && message.metadata.toolStatus === 'IN_PROGRESS'
+        ? {
+            ...message,
+            metadata: { ...message.metadata, toolStatus: 'FINISHED', title: 'Thought' },
+          }
+        : message,
+    );
     this.open = null;
   }
 
@@ -417,6 +523,7 @@ class SessionBuilder {
         ? entry.type
         : 'control';
     const id = this.id(entry.key);
+    this.createdSeq.set(id, entry.seq);
     open.turn.isThinking = entry.type === 'thinking' && entry.partial === true;
     open.turn.streamingMessageId =
       entry.type === 'message' && entry.partial === true ? id : undefined;
@@ -427,13 +534,15 @@ class SessionBuilder {
   }
 
   metrics(entry: TranscriptEntry) {
-    const open = this.open;
-    if (!open || (entry.turnId && open.turnId && entry.turnId !== open.turnId)) return;
-    const previous = open.metricSample;
     const count = entry.outputTokens;
     const scope = entry.usageScope;
     const at = entry.at;
     if (count == null || !scope) return;
+    const before = this.lastSample;
+    this.lastSample = { count, at, seq: entry.seq, scope, turnId: entry.turnId };
+    const open = this.open;
+    if (!open || (entry.turnId && open.turnId && entry.turnId !== open.turnId)) return;
+    const previous = open.metricSample;
     const reset = !previous || previous.scope !== scope || count < previous.count;
     if (reset) open.metricBaseline = count;
     const elapsed = at != null && previous?.at != null ? (at - previous.at) / 1000 : 0;
@@ -445,6 +554,19 @@ class SessionBuilder {
       tokensPerSecond: !reset && elapsed > 0 ? (count - previous!.count) / elapsed : undefined,
     };
     open.metricSample = { count, at, scope };
+    // A thought's generation: the producer samples usage at each model call's start and
+    // end, so the samples around a thinking record bracket the call that generated it.
+    // Only a sample with an earlier sample of the same native turn and scope to bracket
+    // from qualifies: a first sample, a counter reset or a new scope has no baseline, and
+    // nothing is invented for it.
+    const from = before && before.scope === scope && before.turnId === entry.turnId ? before : null;
+    if (!from || from.at === null || at === null) return;
+    attachGeneration(
+      open.turn.activities,
+      { count: from.count, at: from.at, seq: from.seq },
+      { count, at, seq: entry.seq },
+      this.createdSeq,
+    );
   }
 
   end(entry: TranscriptEntry) {
@@ -525,6 +647,7 @@ function roseMessage(input: CodeSessionInput, id: string, entry: TranscriptEntry
     text: entry.text,
     metadata: {
       code_provider: input.provider,
+      toolCallId: id,
       a2a: {
         kind: 'message',
         message_id: entry.key,

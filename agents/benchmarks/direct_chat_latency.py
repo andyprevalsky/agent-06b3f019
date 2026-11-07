@@ -57,6 +57,7 @@ if str(AGENTS_ROOT) not in sys.path:
     sys.path.insert(0, str(AGENTS_ROOT))
 
 REPLAY_CLI = AGENTS_ROOT / "tests" / "fixtures" / "code_transcript" / "replay_cli.py"
+GATED_STARTUP = AGENTS_ROOT / "tests" / "fixtures" / "code_transcript" / "gated_startup.mjs"
 WS_SERVERS = {
     "claude": REPO_ROOT / "e2b-templates" / "claude-code" / "ws-server.mjs",
     "codex": REPO_ROOT / "e2b-templates" / "codex-code" / "ws-server.mjs",
@@ -83,6 +84,7 @@ class LocalCodeSessionSandbox:
         *,
         fixture: Optional[Path] = None,
         gate_first_turn: bool = False,
+        gate_startup: bool = False,
         hold_first_turn_output: bool = False,
         cli_bin: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,
@@ -91,6 +93,7 @@ class LocalCodeSessionSandbox:
         self.provider = provider
         self.fixture = fixture
         self.gate_first_turn = gate_first_turn
+        self.gate_startup = gate_startup
         self.hold_first_turn_output = hold_first_turn_output
         self.cli_bin = cli_bin
         self.extra_env = dict(extra_env or {})
@@ -126,6 +129,18 @@ class LocalCodeSessionSandbox:
             env["REPLAY_CLI_FIXTURE"] = str(self.fixture)
         if self.gate_first_turn:
             env["REPLAY_CLI_GATE"] = str(self.tmp)
+        if self.gate_startup:
+            # Project mode with a startup runner held open: the CLI is not launched until start_cli().
+            project = self.tmp / "project"
+            project.mkdir(exist_ok=True)
+            env.update(
+                {
+                    "ROSE_PROJECT_WORKDIR": str(project),
+                    "ROSE_PROJECT_STARTUP": str(GATED_STARTUP),
+                    "ROSE_PROJECT_NAME": "gated",
+                    "STARTUP_GATE": str(self.tmp),
+                }
+            )
         if self.hold_first_turn_output:
             env["REPLAY_CLI_START_GATE"] = str(self.tmp)
         if self.provider == "codex":
@@ -165,6 +180,14 @@ class LocalCodeSessionSandbox:
     def finish_first_turn(self) -> None:
         (self.tmp / "finish-turn-1").touch()
 
+    def start_cli(self) -> None:
+        """Release a ``gate_startup`` session: its project startup finishes and the CLI is launched."""
+        (self.tmp / "start-project").touch()
+
+    def end_session(self) -> None:
+        """Stop the server the way the sandbox does (SIGTERM): the session ends where it is."""
+        if self.process is not None:
+            self.process.terminate()
     def release_first_turn_output(self) -> None:
         """Let the held stand-in CLI start streaming turn 1 (see ``hold_first_turn_output``)."""
         (self.tmp / "start-turn-1").touch()

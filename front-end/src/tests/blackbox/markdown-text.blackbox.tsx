@@ -5,7 +5,7 @@
  *  - Plain text rendering
  *  - Escape-sequence normalization (\n, \t, \*, etc.)
  *  - breaks=true + shouldAnimate=false path (ReactMarkdown + remarkBreaks)
- *  - FadeInMarkdown path: animated (static non-breaks now uses ReactMarkdown)
+ *  - FadeInMarkdown path: animated, same ReactMarkdown tree as the static path
  *  - Headings, lists (ul/ol), code blocks, fenced code, inline code
  *  - Links, bold/italic, blockquotes
  *  - className passthrough
@@ -19,8 +19,6 @@ import { render, waitFor } from '@testing-library/react';
 import { MarkdownText } from '@/features/terminal-component-group/components/MarkdownText';
 import { isAllowedImageSrc } from '@/features/terminal-component-group/components/markdown-text/isAllowedImageSrc';
 import { linkifyMarkdownText } from '@/features/terminal-component-group/components/markdown-text/linkifyMarkdownText';
-import { renderWords } from '@/features/terminal-component-group/components/markdown-text/renderWords';
-import { type WordItem } from '@/features/terminal-component-group/components/markdown-text/types';
 
 const CAPTURED_ATTENTION_TEXT = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), 'fixtures/agent-3be856d5-attention.txt'),
@@ -194,31 +192,17 @@ describe('MarkdownText', () => {
     });
   });
 
-  it('uses inline group keys that do not collide with interleaved whitespace children', () => {
-    const words: WordItem[] = [
-      { word: 'Best', isWord: true, isBold: true },
-      { word: ' ', isWord: false },
-      { word: 'cities', isWord: true, isItalic: true },
-      { word: ' ', isWord: false },
-      { word: 'cheap', isWord: true, isCode: true },
-    ];
-
-    const nodes = renderWords(words, false, 0, words[4], vi.fn());
-    const groupKeys = nodes
-      .map((node) => (typeof node === 'object' && node !== null && 'key' in node ? node.key : null))
-      .filter((key): key is string => typeof key === 'string' && key.startsWith('group-'))
-      .map((key) => key.match(/^group-\d+/)?.[0]);
-
-    expect(groupKeys).toEqual(['group-0', 'group-1', 'group-2']);
-  });
-
-  it('does not render disallowed image sources through renderWords', () => {
-    const words: WordItem[] = [
-      { word: 'xss', isWord: true, isImage: true, src: 'javascript:alert(1)', alt: 'xss' },
-    ];
-    const nodes = renderWords(words, false, 0, words[0], vi.fn());
-    const { container } = render(<>{nodes}</>);
-    expect(container.querySelector('img')).toBeNull();
+  it('animated path keeps inline formatting without duplicate React keys', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { container } = render(
+      <MarkdownText text={'**Best** *cities* `cheap` [maps](https://x.y)'} shouldAnimate />,
+    );
+    expect(container.querySelector('strong')).toHaveTextContent('Best');
+    expect(container.querySelector('em')).toHaveTextContent('cities');
+    expect(container.querySelector('code')).toHaveTextContent('cheap');
+    expect(container.querySelector('a')).toHaveAttribute('href', 'https://x.y');
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key|unique "key"/);
+    errors.mockRestore();
   });
 
   it('renders nested list items with multiple paragraphs correctly', async () => {
