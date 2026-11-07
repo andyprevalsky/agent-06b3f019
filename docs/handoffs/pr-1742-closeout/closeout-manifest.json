@@ -1,0 +1,123 @@
+{
+ "schema_version": 1,
+ "pr": 1742,
+ "title": "Root agent report_bug tool (launches /rca in production, records elsewhere) + /rca reads the agent's own report",
+ "merge_commit": "43bb8f30beddd4ad483fbd5bc7f5a2cc822eb328",
+ "gated_source": "337aa6318515680028b008ec154af7707cf6fead",
+ "production": {
+  "render": "live 43bb8f30b at 2026-11-07T09:12:34Z (deploy dep-dbnejatg1s2s73ffhtp0); /health ok, /api/agents 200, prod-endpoint-smoke 15/15, post-deploy log scan 0 error lines, prod-health 3m window 677 requests 0 errors",
+  "new_route": "GET https://api.roselabs.ai/api/agents/<id>/report-bug/by-agent -> 200 {report:null} with internal key, 401 without key, 404 unknown agent",
+  "fly": "deploy-agents.yml run 42358168537 attempt 1 success; cooperative cutover job 5977f968... SUCCEEDED, monitor --verify hash dcb19cdb5e86 (evidence/production-43bb8f30b.json)",
+  "workflow_migration": "validate-prod-workflow-migration.ts --execute: 45 PASS rows, fixtures removed (evidence/production-workflow-migration-report.json)",
+  "vercel": "Production deployment 7619179753 success 2026-11-07T09:10:02Z",
+  "mac_app": "auto-tagged v1.1.290 at 43bb8f30b; release-mac-app.yml run 42358197141 success",
+  "semantic": "chat-lifecycle-ratchet.yml run 42360420349 source_sha=43bb8f30b passed (evidence/production-semantic-42360420349.log)",
+  "agentcard": "not applicable: diff touches no AgentCard/payment code"
+ },
+ "branch_commits": [
+  "e1475b6e03 test(deploy): make two structural fixtures independent of host state",
+  "5239b7aee8 refactor(agents): read a saved report_bug description directly",
+  "ffb765cb92 test(agents): pin the browser provider in two usage-row cases",
+  "8c8fa3bf19 fix(agents): count newer report_bug claims in the daily cap window",
+  "d3db4499cb fix(agents): make the report_bug daily cap atomic across agents",
+  "4f1c58312f docs(rca): read Hub-run self-reports through production",
+  "8d8cbd9d84 docs(rca): query the backend that ran the agent for its self-report",
+  "c358d5ef69 feat(agents): report_bug saves outside production; /rca reads self-reports",
+  "b868a45d3e fix: count report_bug tool calls, document report_bug helpers",
+  "b2a9b52472 fix(agents): report_bug only after confirming a Rose malfunction",
+  "03fdb7611f feat(agents): root agent report_bug tool (production only)"
+ ],
+ "review": {
+  "cycles": "c358d5ef6/8d8cbd9d8 skipped (CodeRabbit usage cap); 4f1c58312 initial: 1 Major (non-atomic daily cap) fixed d3db4499c; d3db4499c incremental: cap window race fixed 8c8fa3bf1; 8c8fa3bf1 verification clean. A post-cycle-3 gate fix (test hermeticity) + main sync started a fresh ledger: 5239b7aee unavailable (rate limited), e1475b6e0 initial clean, 337aa6318 incremental clean.",
+  "ledger": "evidence/review-ledger.json (pre-reset copy evidence/review-ledger-pre-5239b7aee.json)"
+ },
+ "approvals": "Prompt-approval batch (tool description; rca.md Step 0.25) recorded approved as directed changes (Andy's instructions in this deploy + 2026-10-23 standing feedback); golden reviews NOT_GROUNDED @ c358d5ef6 recorded in the decision evidence.",
+ "staged_cycle": {
+  "final": "ready on 337aa6318 (evidence/final-plan-337aa6318.json.gz, evidence/final-cycle-337aa6318.json.gz, secrets redacted); PIPELINE_VERIFY status=bound-staged exit=0",
+  "rca_reports": [
+   "evidence/rca-report-v9.json",
+   "evidence/rca-report-v8-initial.json",
+   "evidence/rca-report-v8-focused.json",
+   "evidence/rca-report-v6-final.json"
+  ],
+  "notes": "Cycles v1-v8 failed only on infrastructure or load-dependent tests: devbox frozen ~2h10m (00:16-02:25Z) despite a keep-awake hold; stale warm image after main's certifi bump (rebuilt + activated, evidence/warm-image-build-receipt.json); shared bench-app Machine ceiling (smoke now queues with CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=5400); 10 MB Machines list vs 30 s inventory read (CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS=120); shared-relay ready.json read race; GitHub REST quota exhaustion; smoke/structural receipts that retain cleanup owners and force a fresh cycle. Gate fixes landed in the PR: pinned BROWSER_PROVIDER in two usage-row tests, free-port custody fixture, TERM-ignoring forced-kill fixture."
+ },
+ "benchmark_history": "9 deploy smoke rows (campaign de8516fb, 2026-11-07 07:54-08:4xZ, source 337aa6318 merged as 43bb8f30b, all PASS) appended to task_attempts.jsonl/task_durations.jsonl with benchmark-history-backfill's hub_ledger_row in this commit",
+ "repair_handoffs": [],
+ "followups": [
+  "Load-dependent test flakes seen during concurrent 12-gate sweeps (all pass in isolation): backend browser-session resume race, backend error-alert.test.ts non-2xx retry count, cloudbench multi-workstream readiness active-retry, cloudbench_codex_auth spawn-direct owner.json, cloudbench_dependency_sync fake-Machine stop poll, deploy-test-cycle 'old controller still active', wall_clock_backstop 10 s guard, cloud_batch_cleanup delete-seal 0.02 s, run-deploy-structural stress200 120 s, cloudbench_monitor detached launch exit 1",
+  "deploy_test_interrupted_cleanup.namespace_quiet: PermissionError on transient /proc/<pid>/fd fails the custody test (fail-closed; needs bounded re-observation)",
+  "run-bench-campaign start_shared_relay reads ready.json before cloudbench-shared-relay.py finishes writing it (JSONDecodeError fails smoke at startup)",
+  "navi-whisper-lux-bench Machines list is ~10 MB (config.files boot payloads); initial inventory snapshot has a single 30 s attempt",
+  "A smoke or structural receipt with an unreconciled cleanup owner blocks relaunch inside a deploy cycle; reconcile proofs for mixed/zero-allocation smoke and passed-but-orphaned structural runs are not available",
+  "Managed env sets agents/.env BROWSER_PROVIDER=tilion while the Fly prod worker fallback is kernel, so image-activate/--setup refuses from the main checkout (worked around with a throwaway clone)",
+  "check-prompt-human-approval.sh flags a ternary `x.description : ''` as tool-description text",
+  "benchmark-history-backfill reports 5 eligible rows from other refs' merged runs that this closeout did not commit"
+ ],
+ "inventory": [
+  {
+   "path": "PR #1742 source",
+   "disposition": "committed",
+   "detail": "merged in 43bb8f30b"
+  },
+  {
+   "path": "branch feat/root-agent-report-bug",
+   "disposition": "committed",
+   "detail": "on origin, not deleted"
+  },
+  {
+   "path": "/home/boxes/deploy-workers/* (11 gate clones)",
+   "disposition": "reproducible-unneeded",
+   "detail": "clones of committed source + caches; regenerate with scripts/deploy_test_worker.py --prepare-checkout; retired after this record lands"
+  },
+  {
+   "path": "/var/tmp/rose-img-activate",
+   "disposition": "reproducible-unneeded",
+   "detail": "throwaway clone used only for image-activate (held env copies); deleted after this record lands"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-pipeline{,-v2..-v9}",
+   "disposition": "committed-summary",
+   "detail": "final plan/cycle and RCA reports committed here; superseded cycles are diagnostic only"
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-cloud/*",
+   "disposition": "committed-summary",
+   "detail": "smoke campaigns; run bundles published to the Benchmark Hub, final campaign's ledger rows committed"
+  },
+  {
+   "path": "/home/boxes/rose/.context/image-build-5239b7aee, image-activation-5239b7aee",
+   "disposition": "committed-summary",
+   "detail": "build receipt committed; image registry.fly.io/navi-whisper-lux-bench:cloudbench-warm-20261107-031010-220731@sha256:03434823..."
+  },
+  {
+   "path": "/home/boxes/rose/.context/deploy-approval (A1/A2 packets)",
+   "disposition": "committed-summary",
+   "detail": "approved hunks are in the merged source; decision recorded in the approval batch"
+  },
+  {
+   "path": "/var/tmp/*.log (isolation reruns)",
+   "disposition": "reproducible-unneeded",
+   "detail": "diagnostic reruns; commands recorded in the RCA reports"
+  },
+  {
+   "path": "/project/.claude/memory (deploy learnings)",
+   "disposition": "committed",
+   "detail": "persistent agent memory outside the repo"
+  }
+ ],
+ "files": {
+  "evidence/final-cycle-337aa6318.json.gz": "02a1feba0677856c5f2170481850b4ffaa76e5294a1e26c7a023f2813366650a",
+  "evidence/final-plan-337aa6318.json.gz": "6280f12fdd854013fd472df401aac6024af1fda7ff1b3b12cc60e962815333e5",
+  "evidence/production-43bb8f30b.json": "27f5092995d6e8b5fb5e7dde4e8fb83c8257fe8da6c6f6b40ea7008da7e68371",
+  "evidence/production-semantic-42360420349.log": "cfe1d0aa5992e915348b200509d2c2489df916ce0ba599f9b7a3c705ff273e75",
+  "evidence/production-workflow-migration-report.json": "5090cd2fe44a29990c33cc460604c1c9d4e8efd4c7a5f8d47dde4c353d6decc5",
+  "evidence/rca-report-v6-final.json": "632e4bbbcc4f651c861abe4a2b4a89a7dbebfb17b9d2dcc4e49ecc9527b77de9",
+  "evidence/rca-report-v8-focused.json": "09140b570676f22820fffff69349f118c87112e616ed5ae9e6b12932aa7bcc39",
+  "evidence/rca-report-v8-initial.json": "e986823b93154ec31f243e52bafe50757cefa7eaf1b2518ae81ae05546b35f61",
+  "evidence/rca-report-v9.json": "0478ee1177ae4caa1abb1d9b9321cb5f1fa00e83f10abcb099390a1cc984bbcb",
+  "evidence/review-ledger-pre-5239b7aee.json": "60e550e1d4edc0fc09f96ff31ecce42999feb114a4b846c32664c0fa870ae4b6",
+  "evidence/review-ledger.json": "aba7a9b18157f09924ee0b48c094d45d5ace91c17e8357fabdbae8a8176a2377",
+  "evidence/warm-image-build-receipt.json": "84a2216471c5bc23779ce5359be11222d0bdd3cebf17be0b17915559da3ef064"
+ }
+}
