@@ -24,7 +24,7 @@ PORTS = {'backend-coverage-blackbox': 20000, 'frontend-coverage-blackbox': 20510
          'agents-coverage-blackbox': 21020, 'live-probes': 21530}
 
 
-def standard():
+def standard(host=()):
     """Shape of deploy_test_plan.standard_template() for the gates the host cuts touch."""
     return {'gates': [
         {'name': 'format', 'category': 'format', 'command': ['python3', 'scripts/check_deploy_static.py', 'format'],
@@ -775,6 +775,21 @@ class Template(unittest.TestCase):
             with self.assertRaises(g.Blocked) as caught:
                 g.build_template(2, 2, standard=case)
             self.assertEqual('template', caught.exception.stage)
+
+    def test_blacksmith_plan_uses_a_fixed_reference_host_and_local_follows_this_host(self):
+        """A VM's worker counts must not drift with the coordinator's live MemAvailable (resume matched plans)."""
+        seen = []
+
+        def recorder(host=()):
+            seen.append(tuple(host))
+            return standard()
+
+        with patch.object(g, 'standard_template', recorder):
+            g.build_template(2, 2, executor='blacksmith')
+            g.build_template(2, 2, executor='local')
+        self.assertEqual([g.BLACKSMITH_REFERENCE_HOST, ()], seen)
+        flags = dict(zip(g.BLACKSMITH_REFERENCE_HOST[::2], g.BLACKSMITH_REFERENCE_HOST[1::2]))
+        self.assertEqual({'--host-cpus', '--host-mem-mb', '--host-total-mem-mb', '--host-watchdog-mb'}, set(flags))
 
     def test_real_standard_template_keeps_the_native_backend_recipe(self):
         """The cut applies to the actual standard template and leaves the backend's native fields intact."""

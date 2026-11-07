@@ -37,7 +37,7 @@ import time
 
 from deploy_test_cycle import digest
 from deploy_test_isolation import GITHUB_TRANSPORT, GITHUB_WORKER_ROOT
-from deploy_test_plan import standard_template
+from deploy_test_plan import BLACKSMITH_REFERENCE_HOST, standard_template
 from deploy_test_process import cancellation_handlers, run_command
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -401,7 +401,10 @@ def build_template(structural_workers: int, semantic_worker_processes: int, stan
 
     Under --executor blacksmith the structural and semantic gates run on their own VMs, so they keep
     the standard template's concurrency; the host cuts apply only to gates this host runs."""
-    template, found = copy.deepcopy((standard or standard_template)()), set()
+    if standard is None:
+        def standard():
+            return standard_template(BLACKSMITH_REFERENCE_HOST if executor == 'blacksmith' else ())
+    template, found = copy.deepcopy(standard()), set()
     if executor == 'blacksmith':  # neither cut gate is in BLACKSMITH_LOCAL_GATES
         return template
     for gate in template['gates']:

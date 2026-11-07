@@ -234,7 +234,7 @@ class Isolation(unittest.TestCase):
             self.assertIsNone(iso.GITHUB_RUNNER.fullmatch(label), label)
 
 
-def standard():
+def standard(host=()):
     return {'gates': [
         {'name': 'format', 'category': 'format', 'command': ['python3', 'scripts/check_deploy_static.py', 'format'],
          'checks': ['format']},
