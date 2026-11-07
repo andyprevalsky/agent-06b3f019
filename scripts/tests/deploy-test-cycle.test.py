@@ -17,6 +17,140 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
 
 class Cycle(unittest.TestCase):
+    def source_refusal_fixture(self):
+        import hashlib, time
+        import deploy_test_cloud_refusal as refusal
+        policies = {}
+        for name in refusal.POLICIES:
+            path = self.root / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_text('# audited pre-admission fixture: ' + name)
+            policies[name] = (hashlib.sha256(path.read_bytes()).hexdigest(),)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'audited producer'], check=True)
+        gate = {'name': 'smoke', 'category': 'smoke', 'native_cloud': True,
+                'worker_transport': 'benchmark-cloud-cli', 'cwd': str(self.root),
+                'command': ['/fixture/bin/python3', str(self.root / 'scripts/deploy_test_cloud.py')],
+                'checks': ['one', 'two']}
+        token = 'a' * 32
+        folder = self.root / '.context/deploy-pipeline/attempts/2/initial/smoke'
+        folder.mkdir(parents=True)
+        owner = {'request_token': token, 'worker_root': str(self.root), 'native_cleanup_reference': None}
+        receipt = dict(gate='smoke', token=token, source=c.source(self.root), native_exit=2,
+                       executed=True, status='FAIL', complete=False, lifecycle='native-producer',
+                       timed_out=False, cancelled=False, lingering_group=True, worker_result=None,
+                       native_cleanup_reference=None, cleanup_owner=owner,
+                       cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'),
+                       case_complete=dict.fromkeys(gate['checks'], False), command=gate['command'],
+                       execution_binding={'contract_digest': c.digest(gate)},
+                       log=str(folder / 'output.log'), stderr_log=str(folder / 'stderr.log'),
+                       started_at=time.time() - 2, finished_at=time.time() - 1)
+        c.write(folder / 'request.json', {k: receipt[k] for k in ('token', 'source', 'gate')} |
+                {'checks': gate['checks'], 'skips': {}, 'phase': 'initial'})
+        c.write(folder / 'receipt.json', receipt)
+        (folder / 'output.log').write_bytes(refusal.MESSAGE)
+        (folder / 'stderr.log').write_bytes(b'')
+        state = copy.deepcopy(self.state)
+        state['plan']['gates'].append(gate)
+        state['attempts'].append({'phase': 'initial', 'results': [receipt]})
+        proof = dict(kind=refusal.KIND, root=str(self.root), request_token=token,
+                     files={str(p): c.sha_file(p) for p in folder.iterdir()},
+                     confirmed_at=time.time(), observed_by='hermetic source-refusal test')
+        return refusal, policies, state, receipt, proof
+
+    def test_source_refusal_reconciliation_preserves_unverified_history_and_is_idempotent(self):
+        refusal, policies, state, receipt, proof = self.source_refusal_fixture()
+        original = copy.deepcopy(state)
+        originals = {p: Path(p).read_bytes() for p in proof['files']}
+        with patch.dict(refusal.POLICIES, policies, clear=True), \
+                patch.object(refusal, 'no_holders'), patch.object(refusal, 'namespace_quiet'):
+            self.assertEqual(c.retained_owners(state, ['smoke']), ['smoke'])
+            c.reconcile(state, receipt['token'], proof)
+            self.assertEqual(c.retained_owners(state, ['smoke']), [])
+            accepted = copy.deepcopy(state)
+            c.reconcile(state, receipt['token'], proof)
+            self.assertEqual(state, accepted)
+            entry, = state['reconciled_owners'].values()
+            self.assertFalse(entry['credit_granted'])
+            self.assertFalse(entry['financial_cleanup_credit'])
+            self.assertEqual({k: v for k, v in state.items() if k != 'reconciled_owners'}, original)
+            self.assertEqual(originals, {p: Path(p).read_bytes() for p in proof['files']})
+            (Path(receipt['log'])).write_bytes(b'changed evidence')
+            self.assertEqual(c.retained_owners(state, ['smoke']), ['smoke'])
+
+    def test_source_refusal_reconciliation_refuses_unbound_or_allocated_evidence(self):
+        import hashlib
+        refusal, policies, state, receipt, proof = self.source_refusal_fixture()
+        with patch.dict(refusal.POLICIES, policies, clear=True), \
+                patch.object(refusal, 'no_holders'), patch.object(refusal, 'namespace_quiet'):
+            mutations = [lambda s, p: p.update(request_token='b' * 32),
+                         lambda s, p: p.update(confirmed_at=receipt['started_at'] - 1),
+                         lambda s, p: p['files'].update({receipt['log']: '0' * 64}),
+                         lambda s, p: p['files'].update({'/unbound': '0' * 64}),
+                         lambda s, p: s['plan']['gates'][-1]['command'].append('--other')]
+            for mutate in mutations:
+                candidate, changed = copy.deepcopy(state), copy.deepcopy(proof)
+                mutate(candidate, changed)
+                before = copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):
+                    c.reconcile(candidate, receipt['token'], changed)
+                self.assertEqual(candidate, before)
+            for name in ('no_holders', 'namespace_quiet'):
+                with patch.object(refusal, name, side_effect=ValueError('unknown consumer')):
+                    with self.assertRaises(ValueError):
+                        c.reconcile(state, receipt['token'], proof)
+            with patch.dict(refusal.POLICIES, {next(iter(policies)): ('0' * 64,)}):
+                with self.assertRaisesRegex(ValueError, 'unaudited producer'):
+                    c.reconcile(state, receipt['token'], proof)
+            namespace = self.root / '.context/deploy-cloud' / hashlib.sha256(receipt['token'].encode()).hexdigest()
+            namespace.mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                c.reconcile(state, receipt['token'], proof)
+            namespace.rmdir()
+            namespace.symlink_to(self.root, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                c.reconcile(state, receipt['token'], proof)
+            namespace.unlink()
+            log = Path(receipt['log'])
+            log.rename(log.with_suffix('.original'))
+            log.symlink_to(log.with_suffix('.original'))
+            with self.assertRaises(ValueError):
+                c.reconcile(state, receipt['token'], proof)
+
+    def test_explicit_cloud_source_refusal_has_no_owner_and_no_test_credit(self):
+        import deploy_test_cloud_refusal as refusal
+        gate = {'name': 'smoke', 'category': 'smoke', 'native_cloud': True,
+                'worker_transport': 'benchmark-cloud-cli', 'cwd': str(self.root),
+                'command': [sys.executable, str(self.root / 'scripts/deploy_test_cloud.py')],
+                'case_protocol': True, 'checks': ['one', 'two']}
+        state = copy.deepcopy(self.state)
+        state['input_fingerprints']['smoke'] = 'fixture'
+        def native(argv, **kwargs):
+            request = c.read(Path(kwargs['env']['DEPLOY_GATE_REQUEST']))
+            result = {k: request[k] for k in ('token', 'source', 'gate')}
+            result.update(cases=dict.fromkeys(request['checks'], 'UNVERIFIED'), complete=False,
+                          cleanup_complete=True, reused=False, evidence={}, native_exit=2,
+                          native_command=[], fleet_directory=None,
+                          reason='cloud source differs from the requested freeze',
+                          admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+            c.write(Path(kwargs['env']['DEPLOY_GATE_RESULT']), result)
+            return 2, False, False, False
+        with patch.object(c, 'run_command', side_effect=native):
+            receipt = c._execute(gate, state, self.directory, self.root)
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(receipt['status'], 'FAIL')
+        self.assertEqual(receipt['cases'], dict.fromkeys(gate['checks'], 'UNVERIFIED'))
+        self.assertFalse(receipt['lingering_group'])
+        self.assertIsNone(c.receipt_owner('smoke', receipt))
+        request = c.read(Path(receipt['log']).parent / 'request.json')
+        result = c.read(Path(receipt['worker_result']))
+        for field, value in [('admission', None), ('cleanup_complete', False), ('cases', {'one': 'PASS', 'two': 'PASS'}),
+                             ('native_command', ['provider']), ('token', 'other')]:
+            changed = {**result, field: value}
+            self.assertFalse(refusal.refused_before_admission(changed, request, gate, self.root, 2, invalid_process=False))
+        self.assertFalse(refusal.refused_before_admission(result, request, gate, self.root, 2, invalid_process=True))
+
     def test_native_cloud_rejects_unsupported_host_before_coordinator_admission(self):
         plan = copy.deepcopy(self.plan)
         plan['gates'][1].update(native_cloud=True, case_protocol=True,

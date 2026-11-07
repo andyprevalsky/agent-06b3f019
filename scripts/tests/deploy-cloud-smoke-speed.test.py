@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import deploy_test_cloud as cloud
@@ -27,6 +28,52 @@ def repo_with_worktree(tmp):
 
 
 class SharedCanaryStamp(unittest.TestCase):
+    def test_source_guard_writes_explicit_unverified_no_admission_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            request = {'token': 'a' * 32, 'source': {'head': 'a' * 40, 'digest': 'a' * 64},
+                       'gate': 'smoke', 'checks': ['one', 'two'], 'skips': {}}
+            request_path, result_path = root / 'request.json', root / 'result.json'
+            cloud.write(request_path, request)
+            mkdir_original = Path.mkdir
+            def result_parent_only(path, *args, **kwargs):
+                self.assertEqual(path, root, 'source refusal crossed the allocation mkdir boundary')
+                return mkdir_original(path, *args, **kwargs)
+            with patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(request_path), DEPLOY_GATE_RESULT=str(result_path)), \
+                    patch.object(sys, 'argv', ['deploy_test_cloud.py', '--root', str(root)]), \
+                    patch.object(cloud, 'source', return_value={'head': 'b' * 40}), \
+                    patch.object(Path, 'mkdir', autospec=True, side_effect=result_parent_only), \
+                    patch.object(cloud, 'campaign_width', side_effect=AssertionError('capacity')) as capacity, \
+                    patch.object(cloud, 'shared_canary_env', side_effect=AssertionError('canary')) as canary, \
+                    patch.object(cloud, 'run_command', side_effect=AssertionError('provider')) as provider:
+                self.assertEqual(cloud.main(), 2)
+                for sentinel in (capacity, canary, provider):
+                    sentinel.assert_not_called()
+            result = cloud.read(result_path)
+            self.assertEqual(result['admission'], {'kind': 'cloud-source-refusal-v1', 'admitted': False})
+            self.assertTrue(result['cleanup_complete'])
+            self.assertFalse(result['complete'])
+            self.assertEqual(result['cases'], {'one': 'UNVERIFIED', 'two': 'UNVERIFIED'})
+            self.assertFalse((root / '.context/deploy-cloud').exists())
+
+    def test_other_refusals_never_claim_no_admission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            request = {'token': 'a' * 32, 'source': {'head': 'a' * 40, 'digest': 'a' * 64},
+                       'gate': 'smoke', 'checks': ['one'], 'skips': {}}
+            request_path, result_path = root / 'request.json', root / 'result.json'
+            cloud.write(request_path, request)
+            with patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(request_path), DEPLOY_GATE_RESULT=str(result_path)), \
+                    patch.object(sys, 'argv', ['deploy_test_cloud.py', '--root', str(root)]), \
+                    patch.object(cloud, 'source', return_value=request['source']), \
+                    patch.object(cloud, 'campaign_width', return_value=0):
+                self.assertEqual(cloud.main(), 2)
+                self.assertFalse(result_path.exists())
+                self.assertTrue((root / '.context/deploy-cloud').is_dir())
+                cloud.write(request_path, {**request, 'checks': []})
+                self.assertEqual(cloud.main(), 2)
+                self.assertFalse(result_path.exists())
+
     def test_every_worktree_of_a_repository_shares_one_stamp_and_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             main, linked = repo_with_worktree(tmp)
