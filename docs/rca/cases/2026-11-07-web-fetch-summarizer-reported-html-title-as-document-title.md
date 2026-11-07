@@ -6,7 +6,7 @@ surface: agents
 component: web-fetch-summarizer
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: agents/helpers/summarize.py format_page_metadata / summarize_and_filter_links (HTML <title> forwarded under the bare label "title")
+first_bad_boundary: agents/helpers/summarize.py select_page_metadata (HTML <title> forwarded to summarize_web_fetch as a bare "title" metadata fact)
 symptoms:
   - 'Declared evaluator smoke_rfc_semantics failed: The first unmet requirement is the exact document titles in the final structured output'
   - 'The title fields are "RFC 9110: HTTP Semantics" and "RFC 9111: HTTP Caching", rather than the required "HTTP Semantics" and "HTTP Caching"'
@@ -22,7 +22,7 @@ sources:
   - agent 7b2a1efe-fff1-4147-a691-b4d69c25c5a7 (cloud smoke run 20261107-111844-1927539, Hub run 20261107-111844-1927539-m53c903592667)
   - PR #1749 (head 56bf43fe2b2dc8a09dbcfe2600f5122d6d11deef; follows case 2026-10-26-web-fetch-summarizer-dropped-head-only-page-metadata)
   - hub run 20261107-111844-1927539-m53c903592667
-repro: agents/tests/blackbox/summarize.blackbox.py (test_summarize_page_metadata_labels_html_title_apart_from_document_title)
+repro: agents/tests/blackbox/summarize.blackbox.py (test_summarize_page_metadata_omits_html_title)
 status: fixed
 ---
 
@@ -53,51 +53,66 @@ title.
 
 Live replay (`summarize_and_filter_links`, the real Firecrawl scrapes of
 rfc9110.html and rfc9111.html, the failing run's objective,
-gpt-5.6-luna-foundry, 25 calls per page):
+gpt-5.6-luna-foundry, 25 calls per page; script and outputs retained in
+`.context/bams-rca/` on devbox 9c4f8215):
 
 - **Pre-fix:** 12 of 50 summaries never stated the document's own title, and
-  37 of 50 had an unqualified `Title: RFC …` line.
-- **Post-fix:** 0 of 50 for both.
+  37 of 50 had a `Title: RFC NNNN: …` line.
+- **Renaming the line to `html_title` under a provenance header:** 9 of 50
+  still missed the title, so labelling alone does not fix it.
+- **With the head title omitted (committed 7abbdee87):** 0 of 50 missed it,
+  and 0 of 50 had a `Title: RFC NNNN:` line. An identical earlier run missed it
+  in 1 of 50.
 
-The deepest owned cause is provenance loss at the tool boundary: a head-only
-fact was forwarded without saying which element it came from. The summary
-format therefore could not keep a browser-tab label separate from the
-content's title. Task-level gap: at about a 2% task failure rate, the
-unchanged task was not run enough times on the buggy revision to fail locally.
-The causal fail/pass pair is at the summarizer boundary. The exact task passed
-locally on the fixed revision (agent 39a138b6-80d2-4343-a8a0-2d28351b5795);
-its summaries labelled the value "declared HTML title" / "HTML page title".
+The deepest owned cause: a head-only browser label went into the summarizer as
+though it were a page fact, beside an instruction to lead with the page title.
+That made the summarizer more likely to replace the content's own heading.
+
+Task-level gap: the task fails about 2% of the time, and it was not run often
+enough on the buggy revision to fail locally. The causal fail/pass pair is at
+the summarizer boundary. The exact unchanged task passed locally three times
+on the fix's first revision (agents 39a138b6-80d2-4343-a8a0-2d28351b5795,
+50254ed8-f689-4a5f-ae1d-e4542aaea889 and 67a40c33-8ef2-4344-99c4-f5443f9a8335), and passes again in the
+deploy smoke gate on the final revision.
 
 ## Solution
 
-`format_page_metadata` renders the provider `title` as `html_title`. The block
-header now reads "declared in the page's <head>, not its visible content;
-html_title is the <title> element; report it as such, apart from the title the
-document itself states". Only the excluded PAGE METADATA block changed. The
-summarizer rules text is byte-identical, and the demo-cache regex accepts the
-old and new headers. Recorded summarize_web_fetch rows, including
-test-mass-agent-run-0, therefore keep their content keys; the key-parity
-blackbox now also asserts that for an old-header prompt. The same change
-prevents prefixed or suffixed site titles (`… | Site`) from replacing article,
+`select_page_metadata` now forwards only one validated publication date, which
+was the original 2026-10-26 need. The HTML `<title>` no longer reaches the
+summarizer, so the summarizer reads the title from the page content, as Claude
+Code's WebFetch secondary model does. The summarizer rules and the PAGE
+METADATA header are byte-identical. Pages with only a title now produce the
+prompt they produced before the metadata block existed.
+
+The block is still excluded from the demo-cache key, so summarize_web_fetch
+replays, including test-mass-agent-run-0, keep their keys. The same change
+stops prefixed or suffixed site titles (`… | Site`) from replacing article,
 paper or product headings on any web_fetch.
 
-At 10k agents: the block grows by a constant 5 bytes per line plus the header.
-There is no new state, query or call.
+At 10k agents, each prompt shrinks by at most 256 characters. There is no new
+state, query or call.
 
 Golden reference:
 
-- `openclaw/src/agents/tools/web-fetch-utils.ts:181-207` takes the title from
-  the `<title>` token. `openclaw/src/agents/tools/web-fetch.ts:465-507` returns
-  it as its own wrapped `title` field next to the body text.
-- `hermes-agent/tools/web_tools_truncate.py:185-188` keeps `title` separate
-  from `content`.
-- `kimi-code/packages/agent-core-v2/src/app/web/providers/local-fetch-url.ts:138-146`
-  keeps the article title apart from the `<title>` element.
-- `claude-code-src/src/tools/WebFetchTool/prompt.ts:23-45` gives its secondary
-  model only the page content, with no head title.
+- `claude-code-src/src/tools/WebFetchTool/prompt.ts:23-45`, the closest analog,
+  gives its secondary summarizer only the page content: no head metadata, no
+  title.
+- `openclaw/src/agents/tools/web-fetch-utils.ts:181-207` and
+  `openclaw/src/agents/tools/web-fetch.ts:465-507` capture the `<title>` and
+  return it to the agent as a separate `title` field beside the body, with no
+  instruction.
+- `hermes-agent/tools/web_tools_truncate.py:184-191` keeps `title` separate
+  from `content` and has no summarizer.
+- Contrary: `kimi-code/packages/agent-core-v2/src/app/web/providers/local-fetch-url.ts:138-146`
+  prepends Readability's `<title>`-derived title to the body as `# <title>`.
+  That is the conflation this RCA measured; Rose does not follow it.
 
-None of them merges the head `<title>` into the content's own title. Rose keeps
-it as an explicitly labelled separate field.
+No reference feeds the `<title>` into a summarizer prompt.
+
+A first candidate relabelled the line as `html_title`, with a header telling
+the summarizer to report it separately. The golden review rejected it
+(NOT_GROUNDED): no reference instructs a model this way, and the Kimi citation
+was mis-stated. It was replaced by the deletion above.
 
 ## Human feedback
 
@@ -105,4 +120,4 @@ None recorded.
 
 ## Reusable lesson
 
-When a tool forwards page metadata to a summarizing model, name each field by its source element so the model cannot present a browser label as the document's own content.
+Do not feed a page's HTML <title> to a summarizer as a page fact: summarizers echo it as the document title, so let them read titles from the content and forward only head facts the content lacks.
