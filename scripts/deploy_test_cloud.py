@@ -23,6 +23,10 @@ from deploy_test_cycle import NAME, ROOT, read, source, write
 from deploy_test_process import cancellation_handlers, run_command
 
 
+class SourceRefusal(ValueError):
+    """The source guard refused before this request could admit any resources."""
+
+
 def collect(request, root, runs, started, native_exit):
     fleets = [p for p in runs.iterdir() if p.is_dir() and (p / '_batch').is_dir()]
     if len(fleets) != 1:
@@ -229,9 +233,11 @@ def execute(request, root):
             or any(not isinstance(n, str) or not NAME.fullmatch(n) or n.startswith('-')
                    or n in {'.','..'} for n in checks)):
         raise ValueError('invalid cloud case inventory')
-    if source(root) != request['source']:
-        raise ValueError('cloud source differs from the requested freeze')
     directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    if source(root) != request['source']:
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('cloud source differs with an existing request namespace')
+        raise SourceRefusal('cloud source differs from the requested freeze')
     runs = directory / 'runs'
     runs.mkdir(parents=True, exist_ok=False)
     width = campaign_width(checks)
@@ -287,6 +293,17 @@ def main():
         result = execute(request, args.root.resolve())
         write(Path(os.environ['DEPLOY_GATE_RESULT']), result)
         return 0 if result['complete'] and all(v == 'PASS' for v in result['cases'].values()) else 1
+    except SourceRefusal as error:
+        # This exception is raised only before mkdir, capacity checks or provider commands.
+        # It closes admission custody, never test execution or financial cleanup credit.
+        receipt = {k: request[k] for k in ('token', 'source', 'gate')}
+        receipt.update(cases=dict.fromkeys(request['checks'], 'UNVERIFIED'), complete=False,
+                       cleanup_complete=True, reused=False, evidence={}, native_exit=2,
+                       native_command=[], fleet_directory=None, reason=str(error),
+                       admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+        write(Path(os.environ['DEPLOY_GATE_RESULT']), receipt)
+        print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
+        return 2
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
         return 2

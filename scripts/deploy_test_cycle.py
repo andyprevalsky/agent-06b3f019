@@ -519,6 +519,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     native_producer = gate.get("native_cloud") is True
     lifecycle = "native-producer" if native_producer else "owned"
     native_cleanup_reference = None
+    preallocation_refused = False
     worker_cleanup_owner = None
     host_admission = {} if host_admission is None else host_admission
     with (folder / "output.log").open("wb") as output, (folder / 'stderr.log').open('wb') as stderr:
@@ -570,8 +571,14 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                 }
             if isinstance(result.get('evidence'), dict):
                 worker_evidence = result['evidence']
-            raw_cases, complete = validate_result(result, request, code,
-                invalid_process=timed_out or cancelled or lingering)
+            from deploy_test_cloud_refusal import refused_before_admission
+            preallocation_refused = refused_before_admission(
+                result, request, gate, root, code, invalid_process=timed_out or cancelled or lingering)
+            if preallocation_refused:
+                raw_cases, complete = result['cases'], False
+            else:
+                raw_cases, complete = validate_result(result, request, code,
+                    invalid_process=timed_out or cancelled or lingering)
             cases.update(raw_cases)
             valid = True
         except (KeyError, TypeError, ValueError) as error:
@@ -600,7 +607,7 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         valid = False
         complete = False
         reason = reason or 'worker reported a retained remote cleanup owner'
-    if native_producer and host_admission.get('started') is not False and (not valid or not complete):
+    if native_producer and host_admission.get('started') is not False and not preallocation_refused and (not valid or not complete):
         # Native producers can intentionally retain recovery resources. Unknown
         # native cleanup must be reconciled before another attempt can resume.
         lingering = True
@@ -1078,6 +1085,9 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        if entry and entry.get('kind') == 'cloud-source-refusal-cleanup-v1':
+            from deploy_test_cloud_refusal import still_bound
+            return still_bound(state, receipt, entry)
         if entry and entry.get('kind') == 'interrupted-preallocation-cleanup-v1':
             from deploy_test_interrupted_cleanup import still_bound
             return still_bound(state, receipt, entry)
@@ -1157,6 +1167,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'cloud-source-refusal-cleanup-v1':
+        from deploy_test_cloud_refusal import reconcile as reconcile_refusal
+        reconcile_refusal(state, occurrence_id, proof)
+        return
     if proof.get('kind') == 'interrupted-policy-witness-renewal-v1':
         from deploy_test_interrupted_cleanup import renew_policy_witness
         renew_policy_witness(state, occurrence_id, proof)
