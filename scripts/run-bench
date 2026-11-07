@@ -619,6 +619,14 @@ if [ "$INTERNAL_OPERATION" -eq 1 ]; then
     exec bash "$FLEET_MAINTENANCE_BIN" "${FLEET_ARGS[@]}"
 fi
 [ "${#SELECTORS[@]}" -gt 0 ] || { usage >&2; exit 2; }
+# Every cloud route below (full, sharded, ordinary campaign, fleet) and the
+# processes it spawns resolve the Fly CLI by name. Use the same discovery as
+# run-bench-cloud/run-bench-fleet once here, so a shell without ~/.fly/bin
+# needs no PATH patch (descend I-30: the campaign shared relay hit
+# FileNotFoundError flyctl). The operator still pins its version.
+if ! command -v flyctl >/dev/null 2>&1 && [ -x "$HOME/.fly/bin/flyctl" ]; then
+    export PATH="$HOME/.fly/bin:$PATH"
+fi
 
 CATALOG_PATH="${RUN_BENCH_CATALOG_UNDER_TEST:-$ROOT_DIR/agents/benchmarks/tasks.json}"
 FULL_SELECTION=0
@@ -629,9 +637,6 @@ if [ "$FULL_SELECTION" -eq 1 ]; then
     [ "${#SELECTORS[@]}" -eq 1 ] || { echo "❌ full selects its own tasks; run it alone" >&2; exit 2; }
     [ "$RUNS_EXPLICIT" -eq 1 ] || RUNS=2
     CAMPAIGN_REQUESTED=1
-    if ! command -v flyctl >/dev/null 2>&1 && [ -x "$HOME/.fly/bin/flyctl" ]; then
-        export PATH="$HOME/.fly/bin:$PATH"
-    fi
     FULL_ARGS=(--catalog "$CATALOG_PATH" --runs "$RUNS")
     [ -z "${RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST:-}" ] || FULL_ARGS+=(--free-slots "$RUN_BENCH_FULL_FREE_SLOTS_UNDER_TEST")
     [ -z "${RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST:-}" ] || FULL_ARGS+=(--attempts "$RUN_BENCH_FULL_ATTEMPTS_UNDER_TEST")
@@ -851,10 +856,6 @@ with open(sys.argv[1],"x") as f: json.dump(sys.argv[2:],f)' "$SHARDED_MANIFEST" 
     )
     [ -z "$SHARDED_TIMEOUT" ] || SHARDED_ARGS+=(--task-timeout "$SHARDED_TIMEOUT")
     [ -z "$SHARDED_E2E" ] || SHARDED_ARGS+=(--e2e-timeout "$SHARDED_E2E")
-    # Same Fly CLI discovery as run-bench-cloud/run-bench-fleet; the operator pins its version.
-    if ! command -v flyctl >/dev/null 2>&1 && [ -x "$HOME/.fly/bin/flyctl" ]; then
-        export PATH="$HOME/.fly/bin:$PATH"
-    fi
     SHARDED_OPERATOR=("${RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST:-python3}" "$SHARDED_ROOT/scripts/run-original600-controller.py")
     echo "🧾 manifest: $SHARDED_MANIFEST (${#RESOLVED_TASKS[@]} tasks x $RUNS)"
     echo "═══ sharded operator --check (local checks + read-only provider preflight) ═══"

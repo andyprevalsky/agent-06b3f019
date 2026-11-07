@@ -278,6 +278,86 @@ def test_campaign_inventory_normal_cli_forwards_original_clock_and_bounded_retry
     assert actual[-2:] == ['--forward-arg=--timeout', '--forward-arg=1200']
 
 
+def test_campaign_inventory_normal_cli_resolves_home_fly_client_for_shared_relay(tmp_path):
+    """An ordinary campaign finds the documented ~/.fly/bin client without a PATH patch.
+
+    descend I-30: ``scripts/run-bench <tasks> -k 3 --concurrency 9`` from a shell
+    without ~/.fly/bin aborted every job with "Campaign inventory did not
+    initialize ... (FileNotFoundError: ... 'flyctl')": the parent's shared relay
+    calls bare ``flyctl``. The campaign exec'd by the real CLI here runs the real
+    shared-relay startup against a HOME-installed fake client; nothing reaches Fly.
+    """
+    checkout = tmp_path / 'checkout'
+    scripts = checkout / 'scripts'
+    scripts.mkdir(parents=True)
+    (checkout / 'agents').mkdir()
+    for name in ('run-bench', 'cloudbench_catalog.py', 'cloudbench-shard-coordinator.py'):
+        shutil.copyfile(ROOT / 'scripts' / name, scripts / name)
+    copy_timeout_policy(checkout)
+    report_contract = checkout / '.claude/shared/benchmark-report-format.txt'
+    report_contract.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / '.claude/shared/benchmark-report-format.txt', report_contract)
+    home = tmp_path / 'home'
+    client = home / '.fly/bin/flyctl'
+    client.parent.mkdir(parents=True)
+    calls = tmp_path / 'flyctl-calls.jsonl'
+    # status answers like the pinned client; proxy refuses, so no transport opens.
+    client.write_text(
+        f'#!{sys.executable}\n'
+        'import json, sys\n'
+        f'open({str(calls)!r}, "a").write(json.dumps(sys.argv) + "\\n")\n'
+        'if sys.argv[1:2] == ["status"]:\n'
+        '    print(json.dumps({"Name": "navi-whisper-lux-bench", "Organization": {"Slug": "fixture"}, "Network": ""}))\n'
+        '    raise SystemExit(0)\n'
+        'raise SystemExit(9)\n')
+    client.chmod(0o700)
+    receipt = tmp_path / 'dispatch.json'
+    (scripts / 'run-bench-campaign.py').write_text(
+        'import json, os, runpy, sys\n'
+        'from pathlib import Path\n'
+        "campaign = runpy.run_path(str(Path(os.environ['FIXTURE_CAMPAIGN_ROOT']) / 'scripts/run-bench-campaign.py'))\n"
+        "base = Path(os.environ['FIXTURE_BASE'])\n"
+        "inventory = base / 'inventory'\n"
+        'inventory.mkdir()\n'
+        "(inventory / 'owner').write_text('app=navi-whisper-lux-bench\\n')\n"
+        "(base / 'campaign').mkdir()\n"
+        'try:\n'
+        "    campaign['start_shared_relay'](Path(os.environ['FIXTURE_CAMPAIGN_ROOT']), base / 'campaign', base, inventory, None)\n"
+        "    outcome = 'started'\n"
+        'except Exception as error:\n'
+        "    outcome = f'{type(error).__name__}: {error}'\n"
+        "json.dump({'argv': sys.argv[1:], 'outcome': outcome}, open(os.environ['FIXTURE_DISPATCH'], 'w'))\n")
+    # The launching shell has no Fly client on PATH, as in the reported launch.
+    path = os.pathsep.join(part for part in os.environ['PATH'].split(os.pathsep)
+                           if part and not os.access(os.path.join(part, 'flyctl'), os.X_OK))
+    assert shutil.which('flyctl', path=path) is None
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ('FLY_BENCH_API_TOKEN', 'FLY_AGENT_SOCKET_PATH', 'FLY_AGENT_ISOLATED')}
+    environment.update(PATH=path, HOME=str(home), FLY_API_TOKEN='offline-fixture',
+                       FIXTURE_DISPATCH=str(receipt), FIXTURE_BASE=str(tmp_path),
+                       FIXTURE_CAMPAIGN_ROOT=str(ROOT),
+                       RUN_BENCH_CATALOG_UNDER_TEST=str(ROOT / 'agents/benchmarks/tasks.json'))
+    try:
+        result = subprocess.run(['bash', str(scripts / 'run-bench'), 'demo-fleet-alpha', 'demo-fleet-beta',
+                                 '-k', '3', '--concurrency', '6'], capture_output=True, text=True,
+                                env=environment, timeout=FIXTURE_HOST_GUARD_SECONDS)
+        assert result.returncode == 0, result.stdout + result.stderr
+        dispatched = json.loads(receipt.read_text())
+    finally:
+        location = tmp_path / 'campaign/shared-relay-location.json'
+        if location.is_file():
+            shutil.rmtree(json.loads(location.read_text())['directory'], ignore_errors=True)
+    # The ordinary campaign exec, not the full or sharded route.
+    assert '--runs=3' in dispatched['argv'] and '--concurrency=6' in dispatched['argv']
+    assert 'FileNotFoundError' not in dispatched['outcome'], dispatched['outcome']
+    invoked = [json.loads(line) for line in calls.read_text().splitlines()] if calls.is_file() else []
+    assert invoked == [
+        [str(client), 'status', '-a', 'navi-whisper-lux-bench', '--json'],
+        [str(client), 'proxy', '0:1', '::1', '-a', 'navi-whisper-lux-bench', '--bind-addr', '127.0.0.1', '-q'],
+    ], dispatched['outcome']
+    assert dispatched['outcome'] == 'ValueError: shared transport bootstrap did not initialize'
+
+
 @pytest.mark.parametrize("runner_mode", ("installed", "node", "npx", "missing"))
 def test_campaign_inventory_seed_get_empty_runner_keeps_native_bash_fallbacks(tmp_path, runner_mode):
     root = tmp_path / "checkout"

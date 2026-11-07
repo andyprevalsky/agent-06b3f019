@@ -11,10 +11,15 @@ symptoms:
   - FileNotFoundError: [Errno 2] No such file or directory: 'flyctl'
   - HubVisibilityError: benchmark Hub API key is missing
   - Campaign inventory did not initialize
+  - "Campaign inventory did not initialize; see private publisher log (FileNotFoundError: [Errno 2] No such file or directory: 'flyctl')"
+  - all jobs cancelled before starting, peak_concurrency 0, shared_inventory_failed true
 tags:
   - smoke
   - campaign
   - executable-path
+  - flyctl
+  - run-bench
+  - recurrence
   - python-environment
 sources:
   - PR #1662
@@ -22,7 +27,9 @@ sources:
   - commit e62978decdfffa17da358783556051440051d47a
   - commit 067495d51582f3946d5a5b980ccc8416b66dff02
   - task 8d6e31666e9847cb8add0896efeafe46
-repro: /var/tmp/pr1662-smoke-round16-prerequisites/relay_repro.py and hub_repro.py
+  - commit b0fbd7742d (campaign parent shared relay gained bare flyctl calls)
+  - fleet run campaign-20261107-225348-1436886 (descend-failed-neverrun-20261106 I-30 recurrence)
+repro: agents/benchmarks/cloudbench_campaign_inventory_test.py::test_campaign_inventory_normal_cli_resolves_home_fly_client_for_shared_relay (flyctl half); hub half /var/tmp/pr1662-smoke-round16-prerequisites/hub_repro.py
 status: open
 ---
 
@@ -34,6 +41,15 @@ byte snapshot before the parent shared relay failed to execute flyctl. The paren
 startup catch labelled the relay exception as inventory initialization failure.
 Starting and terminal Hub publication separately failed because their API key
 was missing. All task outcomes remain UNVERIFIED and all original failures remain.
+
+Recurrence 2026-11-07 (descend I-30): an ordinary `scripts/run-bench <3 tasks>
+-k 3 --concurrency 9 --durable` launched from a shell without ~/.fly/bin
+ended in 46.2 s with all 9 jobs cancelled and nothing allocated. The inventory
+publisher completed a 7,885,125 byte machines snapshot and printed its ready
+line; the next launch-log line was "Campaign inventory did not initialize; see
+private publisher log (FileNotFoundError: [Errno 2] No such file or directory:
+'flyctl')". The relay temp directory was created and left empty, so the first
+relay `flyctl status` exec failed. The same command with a PATH prefix started.
 
 ## Diagnosis
 
@@ -55,6 +71,24 @@ and frozen 067495d51. The deploying repair e62978dec newly activated the campaig
 path without validating these coordinator prerequisites. Gate: INTRODUCED at this integration boundary was independently reviewed without
 blocking objection; this is not a provider outage or exhausted-credit exception.
 
+Recurrence diagnosis: the 2026-11-02 repair prepared one coordinator environment
+and left the CLI unchanged, so the next ordinary shell hit the same exec. At
+268e9550b0, scripts/run-bench, the one supported entrypoint, added the documented
+~/.fly/bin discovery only inside its full and sharded branches; the ordinary
+campaign exec handed run-bench-campaign.py the caller's PATH. That parent's
+_start_shared_relay execs bare `flyctl status` and `flyctl proxy` (added in
+b0fbd7742d) with os.environ copies. Its inventory and fleet children survive
+because each shell copies the same discovery. Deepest owned cause: discovery was
+copied per route instead of owned once before route dispatch, so a new
+parent-side consumer had none. The next rung, the host installer not putting
+flyctl on the default PATH, is host configuration we do not own. Gate:
+NOT_INTRODUCED by the descend run; the campaign bytes it used are base 268e9550b0.
+The checked-in regression runs the real run-bench ordinary campaign route with
+no flyctl on PATH and a fake client in HOME/.fly/bin. The exec'd campaign runs
+the real start_shared_relay. Pre-fix it recorded the exact FileNotFoundError and
+made zero client calls. Post-fix the unchanged test records both relay calls at
+HOME/.fly/bin/flyctl; nothing contacts Fly.
+
 Archive searches used FileNotFoundError flyctl and campaign inventory did not
 initialize. The controller-image and remote-worker PATH cases are relatives,
 not evidence for this local coordinator occurrence. No prompt edit is proposed;
@@ -69,6 +103,16 @@ No application source, provider cap, task, timeout, credential value or benchmar
 assertion changes are necessary. This is preparation proof only: real task and
 publication outcomes await the unchanged smoke rerun by the deploy owner.
 
+Code fix for the flyctl half (rca/i-30-20261107): scripts/run-bench now runs the
+existing discovery once, after maintenance dispatch and before every cloud route.
+The full and sharded copies are deleted. The campaign parent, its shared relay,
+and every inheriting child then resolve HOME/.fly/bin/flyctl with no shell patch.
+An existing PATH flyctl still wins, so pinned/fixture clients are unchanged. This
+also covers the prod-only and fleet routes and any later parent-side consumer.
+The regression runs in the benchmark-live-results structural gate (campaign_inventory
+selection). The Hub dotenv/interpreter half was not re-observed (this launch's
+Hub upload succeeded) and remains as recorded, so the case stays open.
+
 ## Human feedback
 
 The user reserved source/deployment ownership to the parent, prohibited full gates
@@ -78,4 +122,4 @@ after the current round terminates.
 
 ## Reusable lesson
 
-Validate executable discovery and credential-loader dependencies in the exact coordinator environment before enabling a new native campaign route.
+Resolve documented tool locations once in the supported CLI entrypoint before route dispatch, never per route or in a prepared operator shell.
