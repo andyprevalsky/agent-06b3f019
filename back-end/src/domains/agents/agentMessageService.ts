@@ -5,6 +5,7 @@
 import { deliverUserMessageToWorkflow, signalUserResponse } from '../../providers/agentResume';
 import { handleChatMessage } from '../../providers/chat';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
+import { isInternalSubagentMessage } from '../../providers/chat/contextScope';
 import {
   broadcastCreatedMessage,
   createMessage,
@@ -54,12 +55,21 @@ function resolveRole(
   return { role: 'USER' };
 }
 
-/** USER rows written by agents rather than people (metadata flags, never text). */
+/**
+ * Internal USER rows that are not the user's input to this agent's own loop
+ * (metadata only, never text): agent notifications, agent-to-agent messages,
+ * environment context, and rows scoped to one child's work stream. A browser
+ * task writes each OTP it reads from the user's inboxes onto its owner as a
+ * USER row tagged with its own subAgentId; the owner's model never reads such a
+ * row (contextScope), so signalling it woke the owner's waits for nothing and
+ * fed the code to its response-schema feedback.
+ */
 function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
   return (
     metadata?.agentNotification === true ||
     metadata?.agentMessage === true ||
-    metadata?.environmentContext === true
+    metadata?.environmentContext === true ||
+    isInternalSubagentMessage({ role: 'USER', text: '', metadata })
   );
 }
 
@@ -348,6 +358,7 @@ export async function postMessage(
   // Agent-authored USER rows (background-agent notifications, agent-to-agent
   // messages) are polled by the owning workflow, which already woke itself;
   // echoing them back as receive_user_response would read as user feedback.
+  // A child task's own rows (a browser's OTP row) are that child's input only.
   // A Browser-composer message belongs to that browser task: the browser reads
   // it at its next step, so the owner's loop is never signalled for it.
   // User messages lift a user pause; generation-stamped workflow writes leave it alone.
