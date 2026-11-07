@@ -2409,6 +2409,32 @@ async def test_repeated_history_render_redacts_and_projects_each_input_once():
     assert not any(repeated.values()), f"4 re-renders of a seen history repeated work: {repeated}"
 
 
+def test_schema_projections_do_not_outlive_per_turn_model_classes():
+    """User-tool agents rebuild their action model class every turn; a cache
+    keyed strongly by class would retain one ~0.85 MB projection per turn. The
+    projection lives only as long as its class, while a shared class still hits."""
+    import gc
+    import weakref
+
+    from pydantic import create_model
+
+    from helpers.attachment_context import attachment_request_overhead
+    from utils.tool_schemas import create_agent_action_model
+
+    shared = create_agent_action_model(["web_search", "attempt_completion"])
+    first = attachment_request_overhead(shared, "finish")
+    assert attachment_request_overhead(shared, "again")["tools"] is first["tools"], "a shared class must hit"
+    per_turn_refs = []
+    for turn in range(20):
+        per_turn = create_model(f"UserToolAction{turn}", response=(str, ...))
+        assert attachment_request_overhead(per_turn, "finish")["response_format"]["json_schema"]["name"] == per_turn.__name__
+        per_turn_refs.append(weakref.ref(per_turn))
+        del per_turn
+    gc.collect()
+    retained = sum(ref() is not None for ref in per_turn_refs)
+    assert retained == 0, f"the projection cache kept {retained} of 20 per-turn model classes alive"
+
+
 async def test_per_turn_compute_lease_calls_reuse_the_pooled_client():
     """The explore loop leases and heartbeats a compute token every turn.
 
@@ -2446,19 +2472,21 @@ async def test_per_turn_compute_lease_calls_reuse_the_pooled_client():
     from helpers.llm import fetch_compute_token_activity, heartbeat_compute_token_lineage_activity
 
     get_http_client()  # the worker's pooled client exists before its first turn
-    with (
-        patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "", "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "0"}),
-        patch("helpers.llm.load_config", return_value=config),
-        patch("temporalio.activity.heartbeat"),
-        patch.object(httpx.AsyncClient, "__init__", counting_init),
-    ):
-        for _turn in range(3):
-            assert await fetch_compute_token_activity("user-1", lineage_key="agent:a-1") == {
-                **payload, "accountId": None, "poolTokenId": None, "integrationId": None,
-                "fastCacheAffinityKey": None,
-            }
-            assert await heartbeat_compute_token_lineage_activity("agent:a-1") is True
-    teardown_mock()
+    try:
+        with (
+            patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "", "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "0"}),
+            patch("helpers.llm.load_config", return_value=config),
+            patch("temporalio.activity.heartbeat"),
+            patch.object(httpx.AsyncClient, "__init__", counting_init),
+        ):
+            for _turn in range(3):
+                assert await fetch_compute_token_activity("user-1", lineage_key="agent:a-1") == {
+                    **payload, "accountId": None, "poolTokenId": None, "integrationId": None,
+                    "fastCacheAffinityKey": None,
+                }
+                assert await heartbeat_compute_token_lineage_activity("agent:a-1") is True
+    finally:
+        teardown_mock()
     assert len(seen) == 6, seen
     assert clients_built == 0, f"{clients_built} per-call AsyncClient(s) built for 6 per-turn lease calls"
 
@@ -11174,6 +11202,10 @@ async def run_all_tests():
     await r.record_async(
         "per_turn_compute_lease_calls_reuse_the_pooled_client",
         test_per_turn_compute_lease_calls_reuse_the_pooled_client,
+    )
+    r.record(
+        "schema_projections_do_not_outlive_per_turn_model_classes",
+        test_schema_projections_do_not_outlive_per_turn_model_classes,
     )
     await r.record_async(
         "fetch_compute_token_activity_pins_benchmark_provider",

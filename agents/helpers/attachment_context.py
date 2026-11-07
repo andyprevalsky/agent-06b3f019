@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+import weakref
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any, Awaitable, Callable, TypeVar
 
 from helpers.context_limits import AUTOCOMPACT_BUFFER_TOKENS, MAX_LLM_ESCALATION_TOKENS
@@ -101,7 +101,12 @@ async def admit_text_attachments(
     return projected
 
 
-@lru_cache(maxsize=256)
+# Keyed weakly by class: a projection lives exactly as long as its model class.
+# Compiled tool sets are shared and hit; a per-turn class (user-tool models
+# are rebuilt every turn) drops its entry when the class is collected.
+_SCHEMA_PROJECTIONS: "weakref.WeakKeyDictionary[Any, tuple[Any, Any]]" = weakref.WeakKeyDictionary()
+
+
 def _schema_projections(response_model: Any) -> tuple[Any, Any]:
     """Both provider schema projections of one compiled model class.
 
@@ -110,9 +115,16 @@ def _schema_projections(response_model: Any) -> tuple[Any, Any]:
     turn: rebuilding them was ~15% of a replaying worker's CPU. The result is
     shared, so callers must only measure it, never mutate it.
     """
-    from providers.rose.schema import build_anthropic_tools_from_response_model, build_openai_response_format
+    cached = _SCHEMA_PROJECTIONS.get(response_model)
+    if cached is None:
+        from providers.rose.schema import build_anthropic_tools_from_response_model, build_openai_response_format
 
-    return build_anthropic_tools_from_response_model(response_model), build_openai_response_format(response_model)
+        cached = (
+            build_anthropic_tools_from_response_model(response_model),
+            build_openai_response_format(response_model),
+        )
+        _SCHEMA_PROJECTIONS[response_model] = cached
+    return cached
 
 
 def attachment_request_overhead(response_model: Any, extra_user_message: str | None = None) -> Any:
