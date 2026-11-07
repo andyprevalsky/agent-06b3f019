@@ -1,0 +1,222 @@
+{
+  "format": "PR1711-DELETION-READINESS-MANIFEST-V1",
+  "generated_at": "2026-11-07T03:54:04Z",
+  "status": "PRESERVATION_VERIFIED",
+  "deletion_ready": true,
+  "deletion_ready_scope": "All PR #1711 source, evidence, receipts and configuration pointers. This checkout also holds legacy local-only refs and one stash that predate the deploy (see legacy_local_refs); they were bundled and archived but remain in the checkout.",
+  "deployment_pr": 1711,
+  "deployed_merge_sha": "d9a154486f06f578785d56210104dac5016ef241",
+  "merged_at": "2026-11-07T03:26:04Z",
+  "branch": "feat/unified-grep-definition (kept on origin; fully pushed, 0 commits ahead of any remote)",
+  "validated_source": {
+    "head": "a64c415abe492c22a6fc6f8cb695bbc9f9d22ffc",
+    "source_digest": "9c7d0c5854084640fe67b69c0b59c16c11d3a9f2ffbc74eb410e0551c6e865eb",
+    "plan_digest_prefix": "1053f1b833de",
+    "pipeline_verify": "PIPELINE_VERIFY status=bound-staged exit=0 (also verify --require-resolved rc=0 post-merge, on the exact head)",
+    "cycle_rounds": 6,
+    "final_sweep": "sweep 10 (initial) + focused re-execution of deploy-command-structural"
+  },
+  "follow_up_commits": {
+    "benchmark_history": "ffba71bb1",
+    "factory_ledger": "ab84f8caa",
+    "closeout_manifest": "this commit"
+  },
+  "deliverable": "One shared grep tool definition (explore agent, SMS supervisor, web chat), one executor, a drift lock and grep in web chat; 42 files vs main at merge.",
+  "tests": {
+    "final_gates_pass": [
+      "format",
+      "eslint",
+      "typescript",
+      "backend-structural",
+      "agents-coverage-blackbox",
+      "backend-coverage-blackbox (249 cases)",
+      "frontend-coverage-blackbox",
+      "canonical-seed-whatsapp-content",
+      "seed-cache-decision",
+      "seed-memory-ratchet",
+      "cloudbench-controller",
+      "e2b-smoke",
+      "live-probes",
+      "semantic-stack",
+      "deploy-command-structural (focused re-execution on an idle box)",
+      "cloud smoke 11/11 incl. grep-agent-trajectories-code-tool-status and -cross-surface"
+    ],
+    "skipped_by_election": [
+      "agentcard-lifecycle: no payment code in the diff",
+      "mac-app-coverage-blackbox: no mac-app change"
+    ],
+    "simulated_merge_with_current_main": "main was 119 commits ahead, 0 conflicts; backend tsc clean, test:structural 2135 passed, grep unit tests and drift lock pass",
+    "preserved_failures_not_relabelled": [
+      "deploy-command-structural failed its first execution in sweeps 6, 9 and 10 (run-deploy-pipeline.test.py check_observation_validity expected stale got unknown; check_materialized_reservation_credit KeyError tree_peak_anon_mb) when started with 10 other gates; passed on unchanged re-execution; NOT_INTRODUCED, existing repair thread \"Test repair: deploy structural timing tests flake under load\"",
+      "backend blackbox:project-maintenance subtest 7 failed once in sweep 6 (reconcileStaleRuns counts every expired lease in the shared DB); passed isolated and in sweeps 9 and 10; NOT_INTRODUCED; evidence in the core archive (rca/project-maintenance-evidence.txt)",
+      "cloud smoke infra-stopped in sweeps 1-9: shared donor churn by other lanes, donor image mismatch, local disk reserve, native Machine-count ceiling, and one guest hung 45 min in bootstrap git fetch (5/11 PASS first); infra, not code; the hang is unattributed (only fleet-child.log survives)",
+      "backend gate once reported interrupted=true with exit 0 and coverage green (sweep 3); not reproduced in isolation (3 clean runs of the teardown test)",
+      "load-sensitive flakes under 12-way local load: frontend admin-health tooltip, backend browser-session budget, Tilion popup, cloudbench autoscale observation"
+    ]
+  },
+  "review": {
+    "ledger": "cycle 1 skipped (CodeRabbit usage cap), cycle 2 clean, verification on b72b2cb31 skipped (usage cap), verification on a64c415ab delivered 7 findings -> Overridden (user pre-authorization after 3 rounds; user approval id user-approved-verification-review-a64c415ab-20261106)",
+    "deferred_findings_register": "https://github.com/Rose-Ai-Labs/rose/pull/1711#issuecomment-6697792780",
+    "golden_reference_review": "GROUNDED (grep-unify-b72b2cb; approval batch check rc 0 on the merged head)"
+  },
+  "production_verification": {
+    "render": "live on d9a154486 (dep-dbn9kjm8bjmc73a1ocs0); /health 200, /api/agents 200, prod-endpoint-smoke 15/15, post-deploy log scan 0 error lines",
+    "fly": "deploy-agents run 42333995427 attempt 1 success; durable job 47825e34... SUCCEEDED; live pointer hash cce22c7b3f1f verified by monitor-cooperative-cutover --verify",
+    "workflow_replacement_matrix_13ac": "45/45 PASS (run c62e76de-b671-4f77-86f5-f24a9e639656)",
+    "production_semantics": "chat-lifecycle-ratchet.yml run 42335145604 success, 5/5 jobs (frontend flows + agent_plan/direct_answer/web_search/agent_execute latency ratchets), source_sha d9a154486",
+    "vercel": "not applicable: no front-end/ changes",
+    "agentcard_production": "SKIPPED - elected: no payment code in diff",
+    "mac_execution_acceptance": "SKIPPED - no Mac available: read-only prod LocalDevice query for user 1f85ff25 returned 0 rows at 2026-11-07T03:38:41Z; no mac-app changes"
+  },
+  "archives": {
+    "core": {
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1711-d9a15448/20261107T034224Z-core.tar.gz.aesgcm",
+      "encryption": "aes-256-gcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "aad": "devbox-closeout-private/pr1711-d9a15448/20261107T034224Z-core.tar.gz.aesgcm",
+      "compression": "gzip",
+      "nonce_b64": "VLX+KLCzCmFu4tae",
+      "plaintext_sha256": "411ffdb70a84b85ef3090031820b0c1e432a07316fbe12db5afaf4b138a60180",
+      "ciphertext_sha256": "713b578799c72a766b072248ab41058db1765b6f84b945291ec446ee899142a0",
+      "ciphertext_bytes": 1283805522,
+      "member_count": 19994,
+      "members_sha256": "e321d82900f5e010cc08abab24c9f7f16a27bbcee1a36b8dc700313d45e588c5",
+      "verified_at": "2026-11-07T03:47:36Z",
+      "full_readback_verified": true,
+      "gzip_stream_bytes": 1283805506,
+      "member_bytes_uncompressed": 4577361131,
+      "symlinks_recorded": 11
+    },
+    "delta": {
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1711-d9a15448/20261107T035022Z-delta.tar.gz.aesgcm",
+      "encryption": "aes-256-gcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "aad": "devbox-closeout-private/pr1711-d9a15448/20261107T035022Z-delta.tar.gz.aesgcm",
+      "compression": "gzip",
+      "nonce_b64": "jwi1OPOuMd5IoLUc",
+      "plaintext_sha256": "6655e7d6254d78eb6889d2f57a84767b8d12c09faea6308c50ccea52695ed8d0",
+      "ciphertext_sha256": "eb80bdf73ff03c8d0a299bb159c7b898198504388058b6bb391fbf4454674b84",
+      "ciphertext_bytes": 9861394,
+      "member_count": 247,
+      "members_sha256": "56ffd23e6abffd4e1faa56a3fc40b4948bea54b88afda8fa1d9935dafba2fa61",
+      "verified_at": "2026-11-07T03:50:27Z",
+      "full_readback_verified": true,
+      "gzip_stream_bytes": 9861378,
+      "member_bytes_uncompressed": 68479509,
+      "symlinks_recorded": 0
+    },
+    "legacy": {
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1711-d9a15448/20261107T035157Z-legacy.tar.gz.aesgcm",
+      "encryption": "aes-256-gcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "aad": "devbox-closeout-private/pr1711-d9a15448/20261107T035157Z-legacy.tar.gz.aesgcm",
+      "compression": "gzip",
+      "nonce_b64": "me5/B1pzRnhHAl1a",
+      "plaintext_sha256": "7a53080a61acf07bf7b97ca97c63e54f04f2f637de43b54247dacd07677da410",
+      "ciphertext_sha256": "0069d7fbb413f1b57c13d12f5224018c90094c6d55ac624b70f0e2563b2b6e5f",
+      "ciphertext_bytes": 7200664,
+      "member_count": 3,
+      "members_sha256": "e8b5bfd061c04d00f80091c9809e4fc8745fd71ee61e841f1d7fe10ea1a2af08",
+      "verified_at": "2026-11-07T03:52:03Z",
+      "full_readback_verified": true,
+      "gzip_stream_bytes": 7200648,
+      "member_bytes_uncompressed": 9465366,
+      "symlinks_recorded": 0
+    }
+  },
+  "independent_recovery": {
+    "validated_at": "2026-11-07T03:53:07Z",
+    "method": "values read from the managed Render production environment only (not this devbox files); delta and legacy archives downloaded, decrypted and every member hash-verified",
+    "result": {
+      "legacy": {
+        "key": "devbox-closeout-private/pr1711-d9a15448/20261107T035157Z-legacy.tar.gz.aesgcm",
+        "members_hash_verified": 3,
+        "expected": 3
+      },
+      "delta": {
+        "key": "devbox-closeout-private/pr1711-d9a15448/20261107T035022Z-delta.tar.gz.aesgcm",
+        "members_hash_verified": 247,
+        "expected": 247
+      }
+    },
+    "core_archive": "verified by full readback and streamed member hash check at build time with the same key and bucket"
+  },
+  "key_recovery": {
+    "variable": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+    "key_id": "trace-archive-prod-2026-07-03",
+    "recovery": "managed production secret (Render service env, Fly agents secrets, agents/.env); also R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_TRACE_ARCHIVE. Decrypt: AESGCM(base64decode(key)).decrypt(base64decode(nonce_b64), ciphertext, aad=object key); then gunzip and untar. Object key = archives.<name>.key.",
+    "never_commit": true
+  },
+  "configuration_recovery": "Env files are boxes.dev project-managed settings and the managed production secret stores; no unique env value lives only on this disk. The PR #1711 evidence tools used are in the repo (scripts/deploy_test_*.py, scripts/run_deploy_pipeline.py, scripts/benchmark-history-backfill.py) and the archive builder script is inside the delta archive (devbox/grep-deploy/closeout/archive.py).",
+  "inventory": [
+    {
+      "path": "source: feat/unified-grep-definition commits (7e6c3feab .. a64c415ab) and merge d9a154486",
+      "disposition": "committed (merged to main); branch kept on origin"
+    },
+    {
+      "path": "docs/plans/active",
+      "disposition": "no plan related to this work; nothing to archive"
+    },
+    {
+      "path": ".context/deploy-cloud (12 campaign directories, 4.1 GB), .context/deploy-pipeline* (14 cycle-state directories: current + 13 archived), review and approval ledgers, deploy-runs, test-runs",
+      "disposition": "durably archived and verified (archives.core)"
+    },
+    {
+      "path": "/var/tmp/grep-deploy/workers/*/.context/{deploy-worker,deploy-backend,test-runs} and back-end/coverage (11 gate worker checkouts)",
+      "disposition": "durably archived and verified (archives.core); the checkouts themselves are clean clones of a64c415ab and reproducible from git"
+    },
+    {
+      "path": "/var/tmp/grep-deploy/{cycle,rca,closeout,approval-packet.txt,make_packet.py,refresh-deps*.log}",
+      "disposition": "durably archived and verified (archives.core, archives.delta)"
+    },
+    {
+      "path": "production lane logs, 13ac report, cutover verify, semantic receipt (.context/deploy-pipeline/production.json), factory events, final cycle state",
+      "disposition": "durably archived and verified (archives.delta)"
+    },
+    {
+      "path": "this session transcript and memory notes (private, never committed)",
+      "disposition": "durably archived and verified (archives.delta, private/)"
+    },
+    {
+      "path": "benchmark attempts/durations rows for the merged smoke runs",
+      "disposition": "committed to main (ffba71bb1)"
+    },
+    {
+      "path": "factory timing rows",
+      "disposition": "committed to main (ab84f8caa)"
+    },
+    {
+      "path": ".git local refs: 72 branches whose commits are on no remote (tips 2026-04-10..2026-10-07), refs/backup (5), refs/gen/pending (63), refs/conductor-archive-heads (203), 1 stash (2026-10-01)",
+      "disposition": "predate this deploy and are unrelated to it; not modified; unique commits bundled and archived (archives.legacy, 150 heads, git bundle verify okay)"
+    },
+    {
+      "path": "reproducible and unneeded: node_modules, venvs, build outputs, caches under the workers and this checkout",
+      "disposition": "regenerate from lockfiles (npm ci, pip install -r agents/requirements.txt)"
+    }
+  ],
+  "resource_disposition": {
+    "fly_bench_machines": "all 71 Machines referenced by this deploy's 119 fleet runs are destroyed (read-only Machines API check at 2026-11-07T03:48Z)",
+    "fly_bench_volumes": "67 volumes referenced; 3 purged, 64 in pending_destroy (destroyed, unattached, awaiting Fly purge)",
+    "warm_donor_683e47df5094d8": "PR #1711 donor mutations: a refresh-deps that finished by 2026-11-06T06:29Z (fresh snapshot vs_5mj51vMNyLPHop8oqpeO) and a second refresh-deps at ~08:00-08:03Z that stopped a donor another lane had started and failed with rsync code 23 from a concurrent writer; PR #1711 made no donor write after 08:03Z. The donor's current image and state belong to other lanes.",
+    "local_processes": "all PR #1711 coordinators, monitors, systemd transient units and 8 leftover agent_link_server helpers exited or were stopped by exact PID; no owned process remains",
+    "local_worktrees": "scratch worktrees merged-wt and main-wt and the 11 gate worker checkouts retired after archive verification (see closeout steps)",
+    "freedom": "untouched; shared flyctl agent and other lanes' resources untouched"
+  },
+  "known_loss": [
+    "2026-11-06 ~09:35Z and ~09:55Z: w-backend per-run artifacts (.context/test-runs, .context/deploy-backend) for sweeps 3-8 were deleted to recover disk when / hit 96% (4.5 GB free); the cycle receipts, results and verdicts for those runs are retained in the archived cycle states, only the raw per-run shard logs are gone",
+    "2026-11-06 ~09:35Z: the per-worker TMPDIR directories were deleted and recreated; five gates failed to start in sweep 8 as a result (recorded, rerun in sweep 9)",
+    "the 45-minute guest hang in sweep 9: only fleet-child.log survives; the guest and its Machine were destroyed by the fleet teardown"
+  ],
+  "followups": [
+    "seven deferred CodeRabbit findings (register comment above), each needs a fix with a regression",
+    "deploy structural timing tests flake under concurrent start (run-deploy-pipeline.test.py: check_observation_validity, check_materialized_reservation_credit); existing repair thread owns it",
+    "shared warm donor needs an owner/lease protocol: five smoke attempts died from other lanes' donor writes, image changes or the 56-Machine app ceiling",
+    "cloud smoke: guest bootstrap git fetch can hang for 45 min with no stderr; capture a read-only process listing before teardown next time",
+    "benchmark-history-backfill cannot bind cloud-fleet runs (Hub index entries carry no code identity); rows for merged cloud runs have to be built by hand from execution provenance",
+    "deploy.md Step 13a embeds a production API key in prose; use BACKEND_API_KEY from back-end/.env",
+    "run_deploy_pipeline.py / deploy_test_cycle.py verify exit 5/2 outside the frozen environment wrapper; document or make the digest error say so"
+  ]
+}
