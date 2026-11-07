@@ -59,24 +59,51 @@ def namespace_quiet(namespace, ports):
         raw = Path('/proc', str(pid), 'stat').read_text().rsplit(') ', 1)[1].split()
         pid = int(raw[1])
     prefix = str(namespace)
+
+    def inspect(process):
+        argv = (process / 'cmdline').read_bytes().decode(errors='replace')
+        cwd = str((process / 'cwd').resolve(strict=True))
+        need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
+             'original namespace has a live consumer')
+        for fd in (process / 'fd').iterdir():
+            try:
+                target = os.readlink(fd)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
+
+    def real_uid(process):
+        for line in (process / 'status').read_text().splitlines():
+            if line.startswith('Uid:'):
+                return int(line.split()[1])
+        raise PermissionError(f'{process}: no Uid line')
+
     for process in Path('/proc').iterdir():
         if not process.name.isdigit():
             continue
-        try:
-            if process.stat().st_uid != os.geteuid():
-                continue
-            argv = (process / 'cmdline').read_bytes().decode(errors='replace')
-            cwd = str((process / 'cwd').resolve(strict=True))
-            need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
-                 'original namespace has a live consumer')
-            for fd in (process / 'fd').iterdir():
+        deadline, unreadable = time.monotonic() + 2, False
+        while True:
+            try:
+                if not unreadable and process.stat().st_uid != os.geteuid():
+                    break
+                inspect(process)
+                break
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            except PermissionError:
+                # A same-user process can turn unreadable mid-scan (non-dumpable, or exec of a setuid
+                # binary that keeps our real uid). Re-observe: skip it only once it exits or its real
+                # uid is another user's; one that stays unreadable is refused, never assumed quiet.
+                unreadable = True
                 try:
-                    target = os.readlink(fd)
+                    if real_uid(process) != os.getuid():
+                        break
                 except (FileNotFoundError, ProcessLookupError):
-                    continue
-                need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
-        except (FileNotFoundError, ProcessLookupError):
-            continue
+                    break
+                except PermissionError:
+                    pass  # An unreadable status proves nothing either; keep re-observing to the deadline.
+                need(time.monotonic() < deadline, f'original namespace process {process.name} is unverifiable')
+                time.sleep(0.05)
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
         for line in Path(table).read_text().splitlines()[1:]:
             row = line.split()

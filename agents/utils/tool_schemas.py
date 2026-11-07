@@ -99,6 +99,10 @@ EXECUTE_PHASE_TOOLS = [
     "attempt_completion",
 ]
 
+# Root-only tools the workflow adds to both phases for eligible agents
+# (domains/report_bug/handler.with_report_bug); never in the shared phase lists.
+ROOT_ONLY_TOOLS = ["report_bug"]
+
 # Stable union of PLAN + EXECUTE tools for LLM schema generation.
 # Passing the same tool set in every call makes the Anthropic tools array
 # identical across phases, enabling cross-phase cache hits on the
@@ -1606,6 +1610,20 @@ class KillAgentTool(BaseModel):
     to: str = Field(description="Address of one of your descendants or background tasks (see your environment block).")
 
 
+class ReportBugTool(BaseModel):
+    """Report a bug in Rose itself, the same as the user's Report Bug button: a separate engineering agent investigates your run and fixes it.
+
+    Use it only after you have confirmed that Rose's own tools, sub-agents or harness malfunction: a tool keeps failing on valid arguments, returns a result that contradicts its inputs, a sub-agent crashes or loops, or a capability you were given does not work. First rule out your own arguments and transient errors that a retry clears. Do not use it for problems outside Rose, such as a website being down, a person not replying or missing information from the user. A run files at most one report, so file it once you have evidence and describe every problem you saw, then continue your task."""
+
+    tool: Literal["report_bug"]
+    description: str = Field(
+        description=(
+            "What went wrong: the tool or agent involved, what you called it with, the exact error or "
+            "wrong result, and what you expected. The investigator reads only this and your run's logs."
+        )
+    )
+
+
 class SetPlanTool(BaseModel):
     """Signal readiness for plan generation; the planner LLM produces the DAG."""
 
@@ -1704,6 +1722,8 @@ TOOL_MODELS: ToolRegistry = {
     "list_agents": ListAgentsTool,
     "send_message_to_agent": SendMessageToAgentTool,
     "kill_agent": KillAgentTool,
+    # Root-only (ROOT_ONLY_TOOLS)
+    "report_bug": ReportBugTool,
     # Plan phase tools
     "set_plan": SetPlanTool,
     # Universal completion tool (available in both phases)
