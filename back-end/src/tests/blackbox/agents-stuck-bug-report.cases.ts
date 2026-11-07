@@ -19,10 +19,10 @@ import {
 } from './agents-blackbox-harness';
 import { reportAgentBugFromAgent } from '../../domains/agents/agentBugReportService';
 import { reportAgentBug, type ReportBugLaunchArgs } from '../../domains/agents/bugReportService';
+import { agentSelfBugReportKey } from '../../domains/agents/repoAgentSelfBugReports';
 import {
   AGENT_BUG_REPORT_OPERATION_TYPE,
   agentBugReportKey,
-  agentSelfBugReportKey,
   claimStuckAgentBugReport,
   markStuckAgentBugReportLaunched,
 } from '../../domains/agents/repoAgentBugReports';

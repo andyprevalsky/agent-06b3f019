@@ -8,7 +8,7 @@
  *     → admin owner (the button's gate) + real-world root run (not a sub-agent or simulated run)
  *     → one claim per run: agent-self-bug-report:<id> freezes the first request
  *     → launch = production backend AND not record_only AND not a benchmark run:
- *         daily cap across agents (checked only before a run's first claim)
+ *         daily cap across agents (atomic count + claim, only before a run's first claim)
  *         → boxes.dev thread `--ai-- <description>` with the manual /goal + /rca prompt
  *         → agent-bug-report:<id> (source agent), so the 24h stuck-agent job skips it
  *       otherwise the claim is saved as RECORDED and nothing is launched
@@ -33,17 +33,17 @@ import {
 import { getBoxesBugReportAppUrl } from './config';
 import { createLogger } from '../../providers/logger';
 import { isProductionEnvironment } from '../../providers/productionEnvironment';
+import { recordManualAgentBugReport } from './repoAgentBugReports';
 import {
   type AgentSelfBugReportClaim,
   type AgentSelfBugReportRequest,
   claimAgentSelfBugReport,
-  countAgentSelfBugReportsBetween,
+  claimAgentSelfBugReportWithinCap,
   findAgentSelfBugReport,
   findAgentSelfBugReportRow,
   markAgentSelfBugReportFailed,
   markAgentSelfBugReportLaunched,
-  recordManualAgentBugReport,
-} from './repoAgentBugReports';
+} from './repoAgentSelfBugReports';
 
 const log = createLogger('ReportBug');
 
@@ -87,7 +87,7 @@ export interface AgentReportBugDeps {
   launch?: (args: ReportBugLaunchArgs) => Promise<ReportBugLaunch>;
   findClaim?: typeof findAgentSelfBugReport;
   claim?: typeof claimAgentSelfBugReport;
-  countClaims?: typeof countAgentSelfBugReportsBetween;
+  claimWithinCap?: typeof claimAgentSelfBugReportWithinCap;
   markLaunched?: typeof markAgentSelfBugReportLaunched;
   markFailed?: typeof markAgentSelfBugReportFailed;
   recordReport?: typeof recordManualAgentBugReport;
@@ -128,7 +128,7 @@ async function loadReportableRootRun(
   return agent;
 }
 
-/** The run's existing claim, or a new one when the daily cap allows it. */
+/** The run's existing claim, or a new one when the daily cap allows it (atomically). */
 async function claimReport(
   agentId: string,
   request: AgentSelfBugReportRequest,
@@ -137,16 +137,19 @@ async function claimReport(
 ): Promise<AgentSelfBugReportClaim> {
   const existing = await (deps.findClaim ?? findAgentSelfBugReport)(agentId);
   if (existing !== null) return existing;
-  const filedToday = await (deps.countClaims ?? countAgentSelfBugReportsBetween)(
-    new Date(now.getTime() - DAY_MS),
-    now
+  const claim = await (deps.claimWithinCap ?? claimAgentSelfBugReportWithinCap)(
+    agentId,
+    request,
+    now,
+    MAX_AGENT_BUG_REPORTS_PER_DAY,
+    new Date(now.getTime() - DAY_MS)
   );
-  if (filedToday >= MAX_AGENT_BUG_REPORTS_PER_DAY) {
+  if (claim === null) {
     throw new ReportBugLimitError(
       `Agents already filed ${MAX_AGENT_BUG_REPORTS_PER_DAY} bug reports in the last 24 hours`
     );
   }
-  return (deps.claim ?? claimAgentSelfBugReport)(agentId, request, now);
+  return claim;
 }
 
 /** Launch the frozen request, then record the run on both claims. */

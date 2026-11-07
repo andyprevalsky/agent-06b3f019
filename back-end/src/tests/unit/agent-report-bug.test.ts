@@ -20,7 +20,7 @@ import {
   ReportBugValidationError,
   type ReportBugLaunchArgs,
 } from '../../domains/agents/bugReportService';
-import type { AgentSelfBugReportClaim } from '../../domains/agents/repoAgentBugReports';
+import type { AgentSelfBugReportClaim } from '../../domains/agents/repoAgentSelfBugReports';
 
 const ADMIN_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
@@ -54,11 +54,16 @@ function agentReportHarness(
     isProduction: () => options.production ?? true,
     findAgentById: async () => agent as never,
     findClaim: async (agentId) => claims.get(agentId) ?? null,
-    countClaims: async () => {
+    claimWithinCap: async (agentId, request, _now, cap) => {
       counted += 1;
-      return options.filedToday ?? 0;
+      const existing = claims.get(agentId);
+      if (existing !== undefined) return existing;
+      if ((options.filedToday ?? 0) >= cap) return null;
+      const created = { ...request, status: 'STARTED', runId: null };
+      claims.set(agentId, created);
+      return created;
     },
-    claim: async (agentId, request, _now, status = 'STARTED') => {
+    claim: async (agentId, request, _now, status = 'RECORDED') => {
       const existing = claims.get(agentId);
       if (existing !== undefined) return existing;
       const created = { ...request, status, runId: null };
