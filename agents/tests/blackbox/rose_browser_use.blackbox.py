@@ -2804,6 +2804,10 @@ async def run_all_tests():
         "auth_assistance_requires_sign_in_form_open",
         test_auth_assistance_requires_sign_in_form_open_with_and_without_challenge_recovery,
     )
+    await r.record_async(
+        "browser_request_asserts_no_auth_state_its_inventory_contradicts",
+        test_browser_request_asserts_no_auth_state_its_inventory_contradicts,
+    )
     r.record(
         "build_browser_use_system_prompt_reuses_main_grading_prompt",
         test_build_browser_use_system_prompt_reuses_main_grading_prompt,
@@ -3004,16 +3008,22 @@ def test_phone_off_matches_prephone_bytes():
     states the user one-time-card exception before the saved-method default. Only the
     tools hash changed in both modes; 7555a20d05 reproduces the previous tools hash
     exactly; system/messages are unchanged.
+    Re-pinned for H-57 (rca/h-57-20261107): the static Browser Rules line "Browser
+    cookies have been injected - assume the user is logged in until proven otherwise."
+    was deleted because it was emitted for sessions with no cookies; the per-realm
+    Auth Options inventory states the real auth state. Only system/messages changed in
+    both modes; tools are unchanged; 4c9636f84d reproduces the previous system/messages
+    hashes exactly.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('27606ab8b67e2ebd29ee872786a0513bbaa2361ff079157827328bf904a32618', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
+    expected = {'0': ('27606ab8b67e2ebd29ee872786a0513bbaa2361ff079157827328bf904a32618', '3f50042e64b15fb8b8c91008163dc3b2f9886da5a52d97200ece77fabb50737a', '3822ffe092a5e0834aeec47486b27bd473624f3078a3de1466d183bda9e06dd3'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', 'cef5a1e96f3d475a84a4b49e08dac1955354404be4a398dd921a00657c7bf639', '0cad5190c943eca3b6ebe9e7b6ec3c5cdb0a39b4fa194bc86ff07b75eec58509')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
             values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
         actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
-        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7"
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7+H-57"
 
 
 async def test_phone_off_actual_rose_request():
@@ -3599,3 +3609,58 @@ async def test_declared_tool_admission_keeps_aliases_and_batch_semantics():
         result = await complete(RoseResponse(tool_calls=[{"id": "key-" + key, "name": "press_key", "arguments": json.dumps({"key": key})} for key in "ab"]), ["press_key"])
         assert result["action"]["action"] == "input_text"
         assert result["action"]["params"]["text"] == "ab"
+
+
+async def test_browser_request_asserts_no_auth_state_its_inventory_contradicts():
+    """H-57: the actual browser request must not claim cookies were injected.
+
+    OpenTable epoch18 r1/r2 (agents aef03f00, 7fee52e3) started with
+    `[Steel] Cookies: none` and `cookie_source: none, cookies_injected: false`.
+    Their per-realm Auth Options inventory said "Steel session: none" and
+    "Cookie bundles: none", yet the static system prompt said "Browser cookies
+    have been injected - assume the user is logged in until proven otherwise."
+    After a fresh-cookie recovery r2 reasoned "It looks like I lost the cookie".
+    Auth state is per session and realm; only that observed inventory may state it.
+    """
+    import re
+    from browser_tools.schemas import AVAILABLE_ACTIONS
+    from domains.spawn_browser_agent_v3.service import build_browser_dynamic_system_context
+    from domains.spawn_browser_agent_v3.service_crypto import build_auth_options_prompt_section
+    from helpers import observability
+    from providers.rose.types import RoseResponse
+
+    inventory, *_ = build_auth_options_prompt_section({"realm": "opentable.com"})
+    assert "  - Steel session: none\n  - Cookie bundles:\n    - none\n" in inventory
+    observation = {
+        "success": True,
+        "current_url": "https://www.opentable.com/prospect",
+        "auth_context": {"auth_realm": "opentable.com", "inventory_status": "available", "auth_options": inventory},
+    }
+    turn_messages = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "state-1", "type": "function", "function": {"name": "read_browser_state", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "state-1", "content": json.dumps(observation)},
+    ]
+    client = RoseClient(openrouter_key="offline-unused")
+    client.collect = AsyncMock(return_value=RoseResponse(tool_calls=[{"id": "wait-1", "name": "wait", "arguments": '{"time_ms": 1}'}]))
+    with patch.object(observability, "dump_llm_context"):
+        await client.complete_browser_use(
+            task="# Current Goal\nReserve Prospect for two",
+            browser_state=_browser_state(url="https://www.opentable.com/prospect"),
+            action_history=[],
+            available_actions=[a for a in AVAILABLE_ACTIONS if a != "phone"],
+            dynamic_system_context=build_browser_dynamic_system_context(),
+            turn_messages=turn_messages,
+        )
+    sent = client.collect.await_args.kwargs["messages"]
+    system = "\n".join(str(m.get("content")) for m in sent if m.get("role") == "system")
+    observed = [json.loads(m["content"]) for m in sent if m.get("role") == "tool" and m.get("tool_call_id") == "state-1"]
+    assert [o["auth_context"]["auth_options"] for o in observed] == [inventory], "the no-cookie inventory observation must reach the model"
+    unverified_auth_claim = re.compile(
+        r"cookies? (?:have|has) been injected|cookies (?:are|were) injected|assume the user is (?:already )?(?:logged|signed) in",
+        re.I,
+    )
+    claim = unverified_auth_claim.search(system)
+    assert claim is None, f"system prompt asserts auth state the session inventory contradicts: {claim.group(0)!r}"
+    # The truthful, session-independent auth contract stays.
+    assert "Cookie-based and existing Steel-session auth are applied automatically before you start." in system
+    assert "Avoid login flows unless the site forces you to login to complete your directed goal." in system

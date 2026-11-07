@@ -839,7 +839,6 @@ Use `screenshot` when you need a viewport image. Re-read state after navigation,
 
 - Your browser is in full screen mode. No search bar or navigation bar.
 - Control+L will NOT focus the address bar - use the goto action to navigate to URLs.
-- Browser cookies have been injected - assume the user is logged in until proven otherwise.
 - Avoid login flows unless the site forces you to login to complete your directed goal.
 - Only interact with elements that have a numeric [index] assigned
 - Only use indexes that are explicitly provided in the current state
