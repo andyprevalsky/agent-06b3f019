@@ -8410,3 +8410,13 @@
 {"task": "parallel-tool-calls", "duration_seconds": 82.8, "cost_cents": 24.0, "timestamp": "2026-08-20T23:54:24.523327+00:00", "agent_id": "57345cac-45a6-45ec-bb06-c799737236cd", "backfill_source": "branch"}
 {"task": "chat-mode", "duration_seconds": 13.2, "cost_cents": 0.0, "timestamp": "2026-08-20T23:54:24.523327+00:00", "agent_id": "a11dfab9-4405-480f-b3b6-21818e33d228", "backfill_source": "branch"}
 {"task": "browser-smoke", "duration_seconds": 48.9, "cost_cents": 1.0, "timestamp": "2026-08-20T23:54:24.523327+00:00", "agent_id": "26fae63f-7283-43ce-9079-9a382beec755", "backfill_source": "branch"}
+{"task": "browser-smoke", "duration_seconds": 132.6, "cost_cents": 8.0, "timestamp": "2026-11-07T14:21:30.600000+00:00", "agent_id": "c3645e6e-55e3-4ea8-a2cd-dc9e6c5d13c3", "backfill_source": "hub"}
+{"task": "test-mass-agent-run-0", "duration_seconds": 478.5, "cost_cents": 0.0, "timestamp": "2026-11-07T14:27:15.500000+00:00", "agent_id": "f51cda72-4bb8-4657-a3db-02bf9a1039d3", "backfill_source": "hub"}
+{"task": "spawn-sub-agents", "duration_seconds": 176.6, "cost_cents": 0.0, "timestamp": "2026-11-07T14:22:13.600000+00:00", "agent_id": "6d8ed454-7e79-4e7b-b1ef-255546f10deb", "backfill_source": "hub"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 144.2, "cost_cents": 2.0, "timestamp": "2026-11-07T14:21:41.200000+00:00", "agent_id": "b4724005-6ce4-4dec-acb0-bae6d674f8a8", "backfill_source": "hub"}
+{"task": "claude-code-agent", "duration_seconds": 56.3, "cost_cents": 0.0, "timestamp": "2026-11-07T14:20:13.300000+00:00", "agent_id": "95ac3df5-5bdb-46ec-bf43-cb92fcd198a2", "backfill_source": "hub"}
+{"task": "parallel-tool-calls", "duration_seconds": 192.9, "cost_cents": 2.0, "timestamp": "2026-11-07T14:22:28.900000+00:00", "agent_id": "d382e993-b47c-4e8d-a788-db2f49533de7", "backfill_source": "hub"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 127.0, "cost_cents": 33.0, "timestamp": "2026-11-07T14:21:23+00:00", "agent_id": "ab0b1abf-70a2-4487-949e-f7306c9b1d58", "backfill_source": "hub"}
+{"task": "background-agent-message-smoke", "duration_seconds": 81.4, "cost_cents": 0.0, "timestamp": "2026-11-07T14:20:37.400000+00:00", "agent_id": "087c02fc-65ad-41a3-8476-e7ed2e464830", "backfill_source": "hub"}
+{"task": "image-handling", "duration_seconds": 86.9, "cost_cents": 0.0, "timestamp": "2026-11-07T14:20:42.900000+00:00", "agent_id": "a548a3ee-f8e1-430b-afb1-0d6a1a033eda", "backfill_source": "hub"}
+{"task": "chat-mode", "duration_seconds": 15.7, "cost_cents": 0.0, "timestamp": "2026-11-07T14:19:31.700000+00:00", "agent_id": "0917292e-390e-4515-b167-f56959633f3e", "backfill_source": "hub"}
