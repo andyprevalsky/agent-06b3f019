@@ -39,7 +39,10 @@ were healthy again, so a longer budget outlasts the window. Nothing was allocate
 
 The read is now `list_donor_snapshots`: up to 12 reads with 5 s steps capped at 30 s plus up to 3 s of jitter (about four
 minutes), the same completed-snapshot selector, the same fail-closed messages, and the failure text now states how many reads were
-made and how many snapshots the last valid read held. A stubbed-provider regression executes the real function.
+made and how many snapshots the last valid read held. A stubbed-provider regression executes the real function. The refactor also moved the loop out of the block that the
+private-source fixture in `cloudbench_dependency_sync_test.py` replays by extraction, so `test_private_fleet_source_keeps_shared_default`
+failed with `list_donor_snapshots: command not found` (INTRODUCED by this change, caught by the agents `benchmark` domain); the
+fixture now extracts the helper as well.
 
 ## Human feedback
 

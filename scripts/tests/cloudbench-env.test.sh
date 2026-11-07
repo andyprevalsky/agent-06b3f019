@@ -4229,3 +4229,63 @@ assert (attempts, listing) == (12, "[]") and slept >= 240, (attempts, slept, lis
 attempts, slept, listing = scenario(["Error: rate limit exceeded"])
 assert (attempts, listing) == (12, "") and slept >= 240, (attempts, slept, listing)
 PYSNAP
+
+# A scaled-down worker is destroyed right after its runtime evidence is captured, and one failed flyctl transport read
+# ("api.fly.io/graphql: EOF") used to lose that evidence and fail a passing run (test-mass-agent-run-0, 2026-11-07:
+# "worker ... runtime evidence was not preserved"). Execute the real capture against a stubbed provider.
+python3 - "$ROOT_DIR" <<'PYCAPTURE' || fail "worker runtime evidence capture must retry its transport and still fail closed"
+import re
+import subprocess
+import sys
+import tempfile
+import textwrap
+from pathlib import Path
+
+root = Path(sys.argv[1])
+src = (root / "scripts/run-bench-fleet").read_text()
+match = re.search(r"^cloudbench_capture_worker_runtime_evidence\(\) \{[^\n]*\n.*?^\}\n", src, flags=re.M | re.S)
+assert match, "cloudbench_capture_worker_runtime_evidence is missing"
+function = match.group(0)
+
+
+def scenario(console_failures, verify_rc):
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "snap").mkdir()
+        (tmp / "snap/cloudbench-worker-evidence.py").write_text(f"import sys\nsys.exit({verify_rc})\n")
+        base = tmp / "out/worker-runtime-evidence/abc123"
+        base.mkdir(parents=True)
+        (base / "owner.json").write_text('{"version": 1, "machine_id": "abc123", "run_token": "tok-1"}')
+        script = textwrap.dedent(
+            """
+            set -uo pipefail
+            %s
+            APP=app_test
+            CLOUDBENCH_SCRIPT_SNAPSHOT=%s
+            out=%s
+            retained=0 console_calls=0 sftp_calls=0
+            cloudbench_preserve_unlaunched_worker() { return 1; }
+            cloudbench_retain_runtime_evidence() { retained=$((retained + 1)); }
+            sleep() { :; }
+            fly_with_timeout() {
+                shift
+                case "$1 $2" in
+                    "ssh console") console_calls=$((console_calls + 1)); [ "$console_calls" -gt %d ] ;;
+                    "ssh sftp") sftp_calls=$((sftp_calls + 1)); : > "$out/worker-runtime-evidence/abc123/evidence.tar" ;;
+                    *) return 99 ;;
+                esac
+            }
+            cloudbench_capture_worker_runtime_evidence "$out" abc123; rc=$?
+            printf '%%s %%s %%s %%s\\n' "$rc" "$console_calls" "$sftp_calls" "$retained"
+            """
+        ) % (function, tmp / "snap", tmp / "out", console_failures)
+        path = tmp / "scenario.sh"
+        path.write_text(script)
+        out = subprocess.run(["bash", str(path)], capture_output=True, text=True, timeout=60, check=True).stdout.split()
+        return tuple(int(value) for value in out)
+
+
+assert scenario(2, 0) == (0, 3, 1, 0), "a transport that recovers on the third read must preserve the evidence"
+assert scenario(99, 0) == (1, 4, 0, 1), "an unreachable worker must still fail closed after four reads"
+assert scenario(0, 1) == (1, 1, 1, 1), "a verification failure is a verdict on the bytes and is not retried"
+PYCAPTURE

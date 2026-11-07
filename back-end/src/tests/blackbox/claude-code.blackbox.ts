@@ -861,6 +861,25 @@ async function testCreate_githubWithoutUserId() {
   assert(body.code === 'MISSING_USER_ID', `Expected code MISSING_USER_ID, got ${body.code}`);
 }
 
+/**
+ * The GitHub access check reads the shared GitHub core quota. When another run has drained it, the endpoint answers
+ * with its typed 429 (not a denial) and stops before E2B; that is the contract's rate-limit answer, and the dedicated
+ * github-rate-limit blackbox pins its body against real GitHub responses. Accept it only in this exact typed shape.
+ */
+function isTypedGithubRateLimit(res: { status: number; data: unknown }): boolean {
+  const body = (res.data ?? {}) as {
+    code?: unknown;
+    reset_at?: unknown;
+    retry_after_seconds?: unknown;
+  };
+  return (
+    res.status === 429 &&
+    body.code === 'GITHUB_RATE_LIMITED' &&
+    typeof body.reset_at === 'string' &&
+    typeof body.retry_after_seconds === 'number'
+  );
+}
+
 async function testCreate_githubAccessDenied() {
   const res = await request(`${BASE_URL}/api/claude-code-session/create`, {
     method: 'POST',
@@ -872,6 +891,12 @@ async function testCreate_githubAccessDenied() {
       user_id: FAKE_UUID,
     }),
   });
+  if (isTypedGithubRateLimit(res)) {
+    console.log(
+      '    [info] GitHub core quota drained: access check answered with the typed 429, not a denial'
+    );
+    return;
+  }
   // No GithubRepoAccess record → 403
   assertStatus(res.status, 403, res.data);
   const body = res.data as { error: string; code?: string };
@@ -1282,8 +1307,8 @@ async function testBoundary_githubAccessCheckDeniesMissingRepo() {
   await new Promise((r) => setTimeout(r, 200));
   const calls = await readCapturesForToken(captureToken);
   assert(
-    res.status === 403,
-    `Expected 403 GITHUB_ACCESS_DENIED for missing repo, got ${res.status}: ${JSON.stringify(res.data).substring(0, 200)}`
+    res.status === 403 || isTypedGithubRateLimit(res),
+    `Expected 403 GITHUB_ACCESS_DENIED (or the typed GitHub rate limit) for missing repo, got ${res.status}: ${JSON.stringify(res.data).substring(0, 200)}`
   );
   const e2bCalls = filterInfraCalls(calls).filter((c) => c.url.includes('e2b.app'));
   assert(
@@ -1638,7 +1663,8 @@ async function testCreate_withGithubRepoAndUserId() {
       github_repo_url: 'https://github.com/nonexistent/repo',
     }),
   });
-  // Should get 400 (validation), 403 (no GitHub access), or 500 (E2B failure)
+  // Should get 400 (validation), 403 (no GitHub access), or 500 (E2B failure); a drained GitHub quota answers 429
+  if (isTypedGithubRateLimit(res)) return;
   if (res.status !== 400 && res.status !== 403 && res.status !== 500) {
     throw new Error(`Expected 400/403/500 for github access check, got ${res.status}`);
   }

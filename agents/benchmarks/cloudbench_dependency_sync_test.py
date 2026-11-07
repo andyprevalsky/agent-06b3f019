@@ -28624,6 +28624,7 @@ def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, c
             "warm_deps_preflight() {",
             "hydrate_warm_deps_state() {",
             "warm_deps_recorded_state() {",
+            "list_donor_snapshots() {",
         )
     )
     script = f"""set -uo pipefail

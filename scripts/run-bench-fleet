@@ -2588,7 +2588,7 @@ PY
 }
 
 cloudbench_capture_worker_runtime_evidence() {  # <bench-output> <worker-id>
-    local out="$1" wid="$2" base token command capture_rc=0 remote_archive scope=""
+    local out="$1" wid="$2" base token command capture_rc=0 remote_archive scope="" attempt transport_ok=0
     base="$out/worker-runtime-evidence/$wid"
     cloudbench_preserve_unlaunched_worker "$out" "$wid" && return 0
     token="$(python3 - "$base/owner.json" "$wid" <<'PY'
@@ -2614,11 +2614,23 @@ PY
             remote_archive="/data/cloudbench-worker-evidence-$wid-$token.tar"
         fi
         command="${scope}python3 /data/cloudbench-worker-evidence.py capture --run-token $token --machine-id $wid --output $remote_archive"
-        if ! fly_with_timeout 300 ssh console -a "$APP" --machine "$wid" -C "$command" \
-                >> "$base/capture.log" 2>&1 \
-            || ! fly_with_timeout 60 ssh sftp get -a "$APP" --machine "$wid" \
-                "$remote_archive" "$base/evidence.tar" \
-                >> "$base/capture.log" 2>&1 \
+        # A transport failure (flyctl cannot reach api.fly.io for a moment: "Post .../graphql: EOF") says nothing about
+        # the worker's evidence, and a scaled-down worker is destroyed right after this call, so one failed read lost the
+        # evidence and failed an otherwise passing run (test-mass-agent-run-0, 2026-11-07). Re-read the transport a few
+        # times; a verification failure is a verdict on the bytes and is not retried.
+        for attempt in 1 2 3 4; do
+            if fly_with_timeout 300 ssh console -a "$APP" --machine "$wid" -C "$command" \
+                    >> "$base/capture.log" 2>&1 \
+                && fly_with_timeout 60 ssh sftp get -a "$APP" --machine "$wid" \
+                    "$remote_archive" "$base/evidence.tar" \
+                    >> "$base/capture.log" 2>&1; then
+                transport_ok=1
+                break
+            fi
+            rm -f "$base/evidence.tar" 2>/dev/null || true
+            [ "$attempt" = "4" ] || sleep $(( attempt * 10 ))
+        done
+        if [ "$transport_ok" != "1" ] \
             || ! python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-evidence.py" \
                 verify "$base/evidence.tar" --run-token "$token" --machine-id "$wid" \
                 --output "$base/capture" >> "$base/capture.log" 2>&1; then
