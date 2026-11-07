@@ -4947,6 +4947,120 @@ class InterruptedLocalRecovery(unittest.TestCase):
         self.assertEqual(original,self.state['attempts'])
         self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
 
+    def _returned_coverage_cancellation(self, name, spec):
+        self.file_interruption(returned=True)
+        old=self.gate['name']
+        self.recipe['cases']={name:spec}
+        self.gate.update(name=name,category=name,checks=[name])
+        self.request.update(gate=name,checks=[name])
+        self.receipt.update(gate=name,cases={name:'UNVERIFIED'},lingering_group=False)
+        self.process.update(orphaned_children=False,reaped=[{'pid':124,'status':256},{'pid':125,'status':15}],term_sent=[124,125],kill_sent=[])
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        case=self.result['evidence'].pop(old)
+        log=self.worker/'.context/deploy-worker'/__import__('hashlib').sha256(self.token.encode()).hexdigest()/(__import__('hashlib').sha256(name.encode()).hexdigest()+'.log')
+        log.write_bytes(self.case_log.read_bytes())
+        case.update(native_exit=-15,command=spec['command'],log=str(log),sha256=c.sha_file(log),lingering_group=True)
+        self.result.update(gate=name,cases={name:'UNVERIFIED'},evidence={name:case},recipe_digest=c.digest(self.recipe))
+        c.write(self.paths['result.json'],self.result);self.seal()
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        original=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[name]))
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        case['cancelled']=False;c.write(self.paths['result.json'],self.result)
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[name])
+
+    def test_file_returned_coverage_cancellation_keeps_original_receipts(self):
+        self._returned_coverage_cancellation('frontend-coverage-blackbox',
+            {'command':['npm','run','test:coverage','--','--maxWorkers=1'],
+             'cwd':'front-end','env':{},'aggregate':True})
+
+    def test_file_returned_agents_cancellation_keeps_original_receipts(self):
+        self._returned_coverage_cancellation('agents-coverage-blackbox',
+            {'command':['bash','scripts/run-coverage.sh'], 'cwd':'agents',
+             'env':{'AGENTS_COVERAGE_CONCURRENCY':'2'},'aggregate':True})
+
+    def _late_agents_log(self):
+        self._returned_coverage_cancellation('agents-coverage-blackbox',
+            {'command':['bash','scripts/run-coverage.sh'], 'cwd':'agents',
+             'env':{'AGENTS_COVERAGE_CONCURRENCY':'2'},'aggregate':True})
+        self.state.pop('reconciled_owners',None)
+        case=self.result['evidence']['agents-coverage-blackbox']
+        case.update(cancelled=True,sha256=__import__('hashlib').sha256(b'').hexdigest())
+        log=Path(case['log']);log.write_text('late cancelled child output\n')
+        os.utime(log,ns=(191000000000,191000000000))
+        c.write(self.paths['result.json'],self.result);self.seal()
+        self.proof.update(kind='local-cancelled-log-supplement-v1',final_log={
+            'path':str(log),'sha256':c.sha_file(log),'size':log.stat().st_size,
+            'mtime_ns':log.stat().st_mtime_ns,'recorded_sha256':case['sha256']})
+        return log
+
+    def test_cancelled_log_supplement_preserves_mismatch_and_never_grants_credit(self):
+        log=self._late_agents_log()
+        original=copy.deepcopy(self.state['attempts']);raw={n:p.read_bytes() for n,p in self.paths.items()}
+        strict={k:v for k,v in self.proof.items() if k!='final_log'};strict['kind']=KIND
+        with self.assertRaises(ValueError):c.reconcile(self.state,self.token,strict)
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(original,self.state['attempts']);self.assertEqual(raw,{n:p.read_bytes() for n,p in self.paths.items()})
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertIsNone(c.full_pass_binding(self.state,self.gate))
+        log.write_text('changed again')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+
+    def test_cancelled_log_supplement_refuses_foreign_or_live_custody(self):
+        log=self._late_agents_log();proof=copy.deepcopy(self.proof)
+        for key,value in [('path',str(self.case_log)),('sha256','f'*64),('size',0),('mtime_ns',0),('recorded_sha256','f'*64)]:
+            self.proof=copy.deepcopy(proof);self.proof['final_log'][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.assertNotIn('reconciled_owners',self.state)
+        self.proof=proof
+        original=copy.deepcopy(self.process)
+        self.process['reaped']=self.process['reaped'][:1];c.write(self.paths['output.log.process.json'],self.process)
+        self.proof['files']['output.log.process.json']=c.sha_file(self.paths['output.log.process.json'])
+        with self.assertRaises(ValueError):self.reconcile()
+        self.process=original;c.write(self.paths['output.log.process.json'],self.process)
+        self.proof['files']['output.log.process.json']=c.sha_file(self.paths['output.log.process.json'])
+        for key,value in [('token','foreign'),('source',{})]:
+            old=self.result[key];self.result[key]=value;c.write(self.paths['result.json'],self.result)
+            self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.result[key]=old
+        c.write(self.paths['result.json'],self.result);self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        import fcntl
+        with (self.worker/'.context/native-worker-admission.lock').open('r') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaises(ValueError):self.reconcile()
+        proc=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],cwd=self.worker)
+        try:
+            with self.assertRaises(ValueError):self.reconcile()
+        finally:proc.terminate();proc.wait(timeout=2)
+
+    def test_cancelled_log_supplement_refuses_fd_only_and_mapped_holders(self):
+        log=self._late_agents_log()
+        for mapped in (False,True):
+            code=("import sys,time,mmap; p=sys.stdin.readline().strip(); f=open(p,'r+b'); "
+                  +( "m=mmap.mmap(f.fileno(),0); f.close(); " if mapped else "")
+                  +"print('ready',flush=True); time.sleep(10)")
+            proc=subprocess.Popen([sys.executable,'-c',code],cwd=self.root,
+                stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+            try:
+                proc.stdin.write(str(log)+'\n');proc.stdin.flush()
+                self.assertEqual('ready',proc.stdout.readline().strip())
+                with self.subTest(mapped=mapped),self.assertRaises(ValueError):self.reconcile()
+                self.assertNotIn('reconciled_owners',self.state)
+            finally:
+                proc.terminate();proc.wait(timeout=2);proc.stdin.close();proc.stdout.close()
+
+    def test_cancelled_log_supplement_rechecks_after_native_custody_scan(self):
+        log=self._late_agents_log()
+        def changed(*args,**kwargs):log.write_text('changed during custody check')
+        with patch('deploy_test_process_scan.prepared_workers_idle',side_effect=changed),self.assertRaises(ValueError):
+            self.reconcile()
+        self.assertNotIn('reconciled_owners',self.state)
+
     def test_file_returned_structural_rejects_incomplete_or_foreign_evidence(self):
         self.file_interruption(returned=True)
         original=copy.deepcopy(self.result)

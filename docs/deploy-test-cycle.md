@@ -414,9 +414,18 @@ do not infer live execution from an owner label or infer cleanup from a dead PID
 Cancelled local file-adapter executions may use `local-supervisor-cleanup-v1`
 only with exact request/receipt/process hashes, fully reaped native child and
 descendant identities, idle admission, no root listeners, and no live root
-consumer. A structural adapter that returned exit 1 after cancellation also
-requires its unchanged UNVERIFIED result and cancelled inner-case log. This
-reconciles launch custody only; original failures and missing test credit remain.
+consumer. Structural and frontend/agents coverage adapters that return exit 1
+after cancellation also require their exact registered recipe, unchanged
+UNVERIFIED result, and cancelled inner-case log. This
+reconciles launch custody only; original failures and missing test credit remain. A
+separate `local-cancelled-log-supplement-v1` proof can seal nonempty agents
+coverage output written after its cancelled inner case recorded an empty log,
+but before its outer adapter finished. It retains the original hash mismatch
+and binds the final path, hash, size and mtime; all original supervisor reaping,
+recipe, source, admission and fresh root/listener checks still apply. A complete
+birth-checked native cwd/FD/maps scan must also pass, with privileged read-only
+fallback on unavailable process visibility, followed by another log seal check. A changed
+supplement or log reblocks launch. Neither proof grants test credit.
 
 The coordinator handles TERM/INT by stopping only the process groups it started
 and recording `interrupted`, never PASS or a provider waiver. Use `resume` only

@@ -6,9 +6,11 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import time
 
 KIND = 'local-supervisor-cleanup-v1'
+SUPPLEMENT_KIND = 'local-cancelled-log-supplement-v1'
 FILES = ('request.json', 'result.json', 'receipt.json', 'output.log.process.json')
 CARD_FILES = ('request.json', 'result.json', 'receipt.json', 'case.log', 'native-result.json',
               'local-benchmark-owner.json', 'local-stack-owner.json', 'local-stack-cleanup.status', 'services.json')
@@ -677,6 +679,32 @@ def interrupted_card(state, receipt, proof):
     return gate
 
 
+def cancelled_log_supplement(receipt, proof, case, expected_log):
+    """Seal late cancelled output for resource custody only; never repair test evidence."""
+    from deploy_test_cycle import sha_file
+    final = proof['final_log']
+    need(isinstance(final, dict) and set(final) == {'path', 'sha256', 'size', 'mtime_ns', 'recorded_sha256'},
+         'cancelled log supplement fields')
+    need(receipt['gate'] == 'agents-coverage-blackbox' and case.get('native_exit') == -15
+         and case.get('lingering_group') is True
+         and case.get('sha256') == final['recorded_sha256'] == hashlib.sha256(b'').hexdigest(),
+         'cancelled log supplement origin')
+    need(final['path'] == str(expected_log) and expected_log.resolve(strict=True) == expected_log,
+         'cancelled log supplement path')
+    before = expected_log.stat()
+    need(stat.S_ISREG(before.st_mode) and type(final['size']) is int and final['size'] > 0
+         and before.st_size == final['size']
+         and type(final['mtime_ns']) is int and before.st_mtime_ns == final['mtime_ns']
+         and case['finished_at'] < before.st_mtime_ns / 1e9 <= receipt['finished_at']
+         and final['sha256'] != final['recorded_sha256'] and sha_file(expected_log) == final['sha256'],
+         'cancelled log supplement content/time')
+    after = expected_log.stat()
+    need((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+         == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+         'cancelled log changed during verification')
+    return True
+
+
 def interrupted_worker(state, receipt, proof):
     """Account fully reaped interrupted custody; a missing adapter earns no credit."""
     from deploy_test_cycle import ROOT, bounded_read, digest, sha_file
@@ -686,7 +714,7 @@ def interrupted_worker(state, receipt, proof):
     backend = gate.get('native_backend') is True and gate['name'] == 'backend-coverage-blackbox'
     command = gate['command']
     file_adapter = gate.get('result_transport') == 'file' and not backend
-    returned = file_adapter and gate['name'] == 'deploy-command-structural' and receipt.get('native_exit') == 1
+    returned = file_adapter and gate['name'] in {'deploy-command-structural', 'frontend-coverage-blackbox', 'agents-coverage-blackbox'} and receipt.get('native_exit') == 1
     native_command = (len(command) == 4 and Path(command[1]).name == 'deploy_test_backend.py'
                       and command[2:] == ['--root', str(root)]) if backend else (
                       len(command) == 5 and command[1:] == [str(root / 'scripts/deploy_test_worker.py'), '--root', str(root), '--stdio'])
@@ -703,7 +731,8 @@ def interrupted_worker(state, receipt, proof):
          and receipt.get('complete') is False and receipt.get('status') == 'FAIL'
          and type(receipt.get('native_exit')) is int and receipt['native_exit'] == (1 if returned else -9)
          and receipt.get('cancelled') is True and receipt.get('timed_out') is False
-         and receipt.get('lingering_group') is True and not receipt.get('cleanup_owner')
+         and (type(receipt.get('lingering_group')) is bool if returned else receipt.get('lingering_group') is True)
+         and not receipt.get('cleanup_owner')
          and (receipt.get('worker_result') == str(Path(receipt['log']).parent / 'result.json') if returned else receipt.get('worker_result') is None)
          and receipt.get('native_cleanup_reference') is None,
          'interrupted supervised receipt required')
@@ -743,7 +772,7 @@ def interrupted_worker(state, receipt, proof):
     child, supervisor = process.get('child_pid'), process.get('supervisor_pid')
     rows, terms, kills = (process.get(k) for k in ('reaped', 'term_sent', 'kill_sent'))
     need(type(child) is int and type(supervisor) is int and child > 1 and supervisor > 1 and child != supervisor
-         and isinstance(rows, list) and rows and isinstance(terms, list) and isinstance(kills, list) and kills
+         and isinstance(rows, list) and rows and isinstance(terms, list) and isinstance(kills, list) and (returned or kills)
          and all(isinstance(row, dict) and set(row) == {'pid', 'status'}
                  and type(row['pid']) is int and row['pid'] > 1 and row['pid'] != supervisor
                  and type(row['status']) is int and 0 <= row['status'] <= 65535
@@ -761,19 +790,25 @@ def interrupted_worker(state, receipt, proof):
              and result.get('cases') == receipt.get('cases')
              and result.get('complete') is False and result.get('reused') is False
              and result.get('cleanup_complete') is True and not result.get('cleanup_owner'),
-             'interrupted structural result identity/cleanup')
+             'interrupted returned result identity/cleanup')
         case = result.get('evidence', {}).get(gate['name'], {})
         expected_log = root / '.context/deploy-worker' / hashlib.sha256(receipt['token'].encode()).hexdigest() / (hashlib.sha256(gate['name'].encode()).hexdigest() + '.log')
-        need(gate['worker_recipe'] == {'cases': {gate['name']: {
-                 'command': ['python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '5'],
-                 'cwd': '.', 'env': {}, 'aggregate': True}}}
-             and case.get('status') == 'UNVERIFIED' and type(case.get('native_exit')) is int and case['native_exit'] == 143
-             and case.get('cancelled') is True and case.get('timed_out') is False and case.get('lingering_group') is False
+        expected = {
+            'deploy-command-structural': {'command': ['python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '5'], 'cwd': '.', 'env': {}, 'aggregate': True},
+            'frontend-coverage-blackbox': {'command': ['npm', 'run', 'test:coverage', '--', '--maxWorkers=1'], 'cwd': 'front-end', 'env': {}, 'aggregate': True},
+            'agents-coverage-blackbox': {'command': ['bash', 'scripts/run-coverage.sh'], 'cwd': 'agents', 'env': {'AGENTS_COVERAGE_CONCURRENCY': '2'}, 'aggregate': True},
+        }[gate['name']]
+        need(gate['worker_recipe'] == {'cases': {gate['name']: expected}}
+             and case.get('status') == 'UNVERIFIED' and type(case.get('native_exit')) is int and case['native_exit'] in {-15, 143}
+             and case.get('cancelled') is True and case.get('timed_out') is False and type(case.get('lingering_group')) is bool
              and case.get('command') == gate['worker_recipe']['cases'][gate['name']]['command']
              and case.get('log') == str(expected_log) and not expected_log.is_symlink()
-             and sha_file(expected_log) == case.get('sha256')
              and receipt['started_at'] <= case['started_at'] <= case['finished_at'] <= receipt['finished_at'],
-             'interrupted structural case boundary')
+             'interrupted returned case boundary')
+        if proof['kind'] == SUPPLEMENT_KIND:
+            cancelled_log_supplement(receipt, proof, case, expected_log)
+        else:
+            need(sha_file(expected_log) == case.get('sha256'), 'interrupted returned log changed')
     from deploy_test_isolation import _ports
     port = gate.get('env', {}).get('CONDUCTOR_PORT')
     need(isinstance(port, str) and port.isdigit(), 'interrupted port identity')
@@ -785,13 +820,22 @@ def interrupted_worker(state, receipt, proof):
             if row[3] == '0A': listeners.add(int(row[1].rsplit(':', 1)[1], 16))
     need(not wanted & listeners, 'interrupted root listener remains')
     quiet(root)
+    if proof['kind'] == SUPPLEMENT_KIND:
+        from deploy_test_process_scan import prepared_workers_idle
+        prepared_workers_idle([root], birth_guard=True)
+        cancelled_log_supplement(receipt, proof, case, expected_log)
     return gate
 
 
 def validate(state, receipt, proof):
     from deploy_test_cycle import bounded_read, digest, sha_file
-    need(set(proof) == {'kind', 'files', 'confirmed_at', 'observed_by'} and proof['kind'] == KIND,
-         'proof fields')
+    supplemented = proof.get('kind') == SUPPLEMENT_KIND
+    fields = {'kind', 'files', 'confirmed_at', 'observed_by'} | ({'final_log'} if supplemented else set())
+    need(set(proof) == fields and proof['kind'] in (KIND, SUPPLEMENT_KIND), 'proof fields')
+    if supplemented:
+        need(receipt.get('gate') == 'agents-coverage-blackbox' and receipt.get('cancelled') is True
+             and receipt.get('lifecycle') == 'owned' and receipt.get('native_exit') == 1,
+             'cancelled log supplement receipt')
     need(isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'independent observer missing')
     confirmed = proof['confirmed_at']
     need(type(confirmed) in (int, float) and math.isfinite(confirmed)
@@ -903,7 +947,7 @@ def reconcile(state, occurrence_id, proof):
     except (OSError, KeyError, TypeError) as error:
         raise ValueError('local cleanup: missing or unknown evidence') from error
     state.setdefault('reconciled_owners', {})[proof['files']['receipt.json']] = {
-        'kind': KIND, 'gate': gate['name'], 'token': receipt['token'],
+        'kind': proof['kind'], 'gate': gate['name'], 'token': receipt['token'],
         'occurrence': occurrence_id, 'proof': copy.deepcopy(proof), 'credit_granted': False,
         'execution_gate': copy.deepcopy(gate)}
 
@@ -956,7 +1000,8 @@ def tmpdir_transition_gate(state, execution, current):
 
 
 def still_bound(state, receipt, entry):
-    need(entry.get('kind') == KIND and entry.get('gate') == receipt['gate']
+    need(entry.get('kind') in (KIND, SUPPLEMENT_KIND) and entry.get('kind') == entry.get('proof', {}).get('kind')
+         and entry.get('gate') == receipt['gate']
          and entry.get('token') == receipt['token'] and entry.get('credit_granted') is False, 'reconciliation changed')
     # Cleanup belongs to the original execution contract; a refreshed full
     # inventory may add checks while the same old physical root is rechecked.

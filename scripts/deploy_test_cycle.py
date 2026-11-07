@@ -1110,7 +1110,7 @@ def local_reconciliation_bound(state, receipt):
     """Recheck a unique exact-receipt local proof, never just its presence."""
     entries = state.get('reconciled_owners', {})
     matches = [(key, entry) for key, entry in entries.items()
-               if entry.get('kind') == 'local-supervisor-cleanup-v1'
+               if entry.get('kind') in ('local-supervisor-cleanup-v1', 'local-cancelled-log-supplement-v1')
                and entry.get('gate') == receipt.get('gate')
                and entry.get('token') == receipt.get('token')]
     if not matches:
@@ -1155,7 +1155,7 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
         from deploy_test_interrupted_cleanup import reconcile as reconcile_interrupted
         reconcile_interrupted(state, occurrence_id, proof)
         return
-    if proof.get('kind') == 'local-supervisor-cleanup-v1':
+    if proof.get('kind') in ('local-supervisor-cleanup-v1', 'local-cancelled-log-supplement-v1'):
         from deploy_test_local_cleanup import reconcile as reconcile_local
         reconcile_local(state, occurrence_id, proof)
         return
