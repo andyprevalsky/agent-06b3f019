@@ -15,6 +15,46 @@ CANCEL = threading.Event()
 OWNED_DRAIN_SECONDS = 13.0
 
 
+
+def scan_same_user_processes(inspect, refuse, grace=2.0):
+    """Call inspect(process) for each /proc entry owned by this euid; never signals anything.
+
+    A same-user process can turn unreadable mid-scan (non-dumpable, or exec of a setuid binary that
+    keeps our real uid). Re-observe it for up to `grace` seconds: skip it only once it exits or its
+    real uid is another user's; one that stays unreadable goes to refuse(pid), never assumed quiet.
+    """
+    def real_uid(process):
+        for line in (process / 'status').read_text().splitlines():
+            if line.startswith('Uid:'):
+                return int(line.split()[1])
+        raise PermissionError(f'{process}: no Uid line')
+
+    for process in Path('/proc').iterdir():
+        if not process.name.isdigit():
+            continue
+        deadline, unreadable = time.monotonic() + grace, False
+        while True:
+            try:
+                if not unreadable and process.stat().st_uid != os.geteuid():
+                    break
+                inspect(process)
+                break
+            except (FileNotFoundError, ProcessLookupError):
+                break
+            except PermissionError:
+                unreadable = True
+                try:
+                    if real_uid(process) != os.getuid():
+                        break
+                except (FileNotFoundError, ProcessLookupError):
+                    break
+                except PermissionError:
+                    pass  # An unreadable status proves nothing either; keep re-observing to the deadline.
+                if time.monotonic() >= deadline:
+                    refuse(process.name)
+                    raise PermissionError(f'/proc/{process.name}: unverifiable')  # refuse must raise
+                time.sleep(0.05)
+
 @contextmanager
 def cancellation_handlers():
     CANCEL.clear()

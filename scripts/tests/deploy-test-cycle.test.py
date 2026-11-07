@@ -17,6 +17,27 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
 
 class Cycle(unittest.TestCase):
+    def test_native_cloud_rejects_unsupported_host_before_coordinator_admission(self):
+        plan = copy.deepcopy(self.plan)
+        plan['gates'][1].update(native_cloud=True, case_protocol=True,
+                                command=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')],
+                                worker_transport='benchmark-cloud-cli')
+        with patch.object(sys, 'platform', 'darwin'):
+            with self.assertRaisesRegex(ValueError, 'native cloud.*Linux'):
+                c.validate_plan(plan, self.root)
+
+    def test_environment_fingerprint_ignores_codex_call_identity_but_binds_launch_inputs(self):
+        with patch.dict(os.environ, {'CODEX_TOOL_CALL_ID': 'call-one', 'PATH': '/fixture/bin',
+                                     'SNAPSHOT_LOOP_TOKEN': 'original'}, clear=True):
+            original = c.environment_digest()
+            os.environ['CODEX_TOOL_CALL_ID'] = 'call-two'
+            self.assertEqual(original, c.environment_digest())
+            os.environ['PATH'] = '/changed/bin'
+            self.assertNotEqual(original, c.environment_digest())
+            os.environ['PATH'] = '/fixture/bin'
+            os.environ['SNAPSHOT_LOOP_TOKEN'] = 'inherited'
+            self.assertNotEqual(original, c.environment_digest())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -4035,500 +4056,650 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
 
 
-class LocalCleanupProcessObservation(unittest.TestCase):
-    """quiet() decides whether a worker root is still in use from /proc, which no process can read atomically.
-
-    A same-user process that turns unreadable (non-dumpable, exec of a setuid binary, exiting) answers EACCES for
-    /proc/<pid>/cwd. The Blacksmith failure (PR #1751, deploy-command-structural, eleven errors across
-    InterruptedCardRecovery, InterruptedLocalRecovery, LocalCleanup and StructuralSupervisorCleanup):
-    PermissionError: [Errno 13] ... '/proc/215386/cwd' aborted the proof. That is a read failure, never proof of
-    absence or of a leak. It is re-observed until a deadline, skipped once the
-    process is gone or turns out to be another user's, and refused naming the pid only while it stays unreadable
-    and alive. A process that provably uses the root (cwd inside it, or argv naming it) is refused as before.
-    The fixture is a real Linux child: clearing PR_SET_DUMPABLE makes it unreadable to its same-user parent.
-    """
-    CHILD = """
-import ctypes, sys
-libc = ctypes.CDLL(None, use_errno=True)
-def dumpable(flag):
-    assert libc.prctl(4, flag, 0, 0, 0) == 0  # PR_SET_DUMPABLE
-dumpable(sys.argv[1] == 'open')
-print('ready', flush=True)
-for line in sys.stdin:
-    dumpable(line.strip() == 'open')
-    print('ack', flush=True)
-"""
-
+class RelayStartupEvidence(unittest.TestCase):
+    """Prospective startup custody; never upgrades an old unsealed attempt."""
     def setUp(self):
-        import deploy_test_local_cleanup as m
-        self.m = m
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name) / 'worker'
-        (self.root / '.context').mkdir(parents=True)
-        (self.root / '.context/native-worker-admission.lock').touch()
-        self.elsewhere = Path(self.tmp.name) / 'elsewhere'
-        self.elsewhere.mkdir()
-        self.sleeps = []
+        import importlib.util
+        self.temp = tempfile.TemporaryDirectory(prefix='relay-startup-proof-')
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.target = Path(os.environ.get('RELAY_SOURCE_ROOT', str(ROOT))) / 'scripts'
+        spec = importlib.util.spec_from_file_location('startup_native', self.target/'deploy_test_native_cleanup.py')
+        self.native = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.native)
 
-    def child(self, state, cwd=None, label=''):
-        proc = subprocess.Popen([sys.executable, '-c', self.CHILD, state, label], stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, text=True, cwd=cwd or self.elsewhere)
-        self.addCleanup(self.reap, proc)
-        self.assertEqual('ready', proc.stdout.readline().strip())
-        return proc
-
-    @staticmethod
-    def reap(proc):
-        if proc.poll() is None:
-            proc.kill()
-        proc.wait()
-        proc.stdin.close()
-        proc.stdout.close()
-
-    def switch(self, proc, state):
-        proc.stdin.write(state + '\n')
-        proc.stdin.flush()
-        self.assertEqual('ack', proc.stdout.readline().strip())
-
-    def scan(self, while_waiting=None, window=None):
-        import time
-        real_sleep = time.sleep
-
-        def sleep(seconds):
-            # Really wait: unrelated exiting processes on a busy host need the production window. Only the
-            # refusal cases shorten it, for a process that provably stays unreadable the whole time.
-            self.sleeps.append(seconds)
-            real_sleep(seconds)
-            if while_waiting:
-                while_waiting()
-        with patch.object(time, 'sleep', sleep), patch.object(self.m, 'OBSERVATION_SECONDS', window or self.m.OBSERVATION_SECONDS):
-            self.m.quiet(self.root)
-
-    def test_process_that_becomes_readable_while_waiting_is_reobserved(self):
-        child = self.child('sealed')
-        self.scan(lambda: self.switch(child, 'open'))
-        self.assertTrue(self.sleeps)
-
-    def test_process_that_exits_while_unreadable_is_not_a_holder(self):
-        child = self.child('sealed')
-        self.scan(lambda: (child.kill(), child.wait()))
-        self.assertTrue(self.sleeps)
-
-    def test_process_that_stays_unreadable_and_alive_fails_closed_naming_it(self):
-        child = self.child('sealed')
-        with self.assertRaisesRegex(ValueError, r'worker root process %d is unverifiable \(.+, state \w, parent %d\)'
-                                                % (child.pid, os.getpid())) as raised:
-            self.scan(window=.5)
-        self.assertNotRegex(str(raised.exception), 'live process')
-        self.assertTrue(self.sleeps)
-
-    def test_unreadable_process_of_another_real_user_is_not_ours_to_hold_the_root(self):
-        child = self.child('sealed')
-        status, real_read_text = '/proc/%d/status' % child.pid, Path.read_text
-
-        def other_user(path, *args, **kwargs):
-            if str(path) == status:
-                return 'Name:\tx\nUid:\t%d\t%d\t%d\t%d\n' % ((os.getuid() + 1,) * 4)
-            return real_read_text(path, *args, **kwargs)
-        with patch.object(Path, 'read_text', other_user):
-            self.scan()
-
-    def test_unreadable_status_is_unverifiable_never_a_raw_crash(self):
-        child = self.child('sealed')
-        status, real_read_text = '/proc/%d/status' % child.pid, Path.read_text
-
-        def unreadable(path, *args, **kwargs):
-            if str(path) == status:
-                raise PermissionError(13, 'Permission denied', status)
-            return real_read_text(path, *args, **kwargs)
-        with patch.object(Path, 'read_text', unreadable), self.assertRaisesRegex(
-                ValueError, 'worker root process %d is unverifiable' % child.pid):
-            self.scan(window=.5)
-
-    def test_a_process_using_the_root_is_still_refused(self):
-        inside = self.root / 'inside'
-        inside.mkdir()
-        for name, kwargs, state in (('cwd is the root', dict(cwd=self.root), 'open'),
-                                    ('cwd is inside the root', dict(cwd=inside), 'open'),
-                                    ('argv names the root', dict(label=str(self.root)), 'open'),
-                                    ('argv of an unreadable process names the root', dict(label=str(self.root / 'x')), 'sealed')):
-            with self.subTest(name):
-                child = self.child(state, **kwargs)
-                with self.assertRaisesRegex(ValueError, 'worker root still has a live process'):
-                    self.scan()
-                self.reap(child)
-
-
-# A benchmarks/local.py stand-in: its own session (a group TERM of the gate never
-# reaches it), a generated run id embedding its pid, an owner record, and a TERM
-# trap that runs its own cleanup before exiting. Every file it publishes is
-# replaced atomically, so a concurrent reader never sees a torn record or marker.
-FAKE_CONTROLLER = r"""
-import json, os, random, signal, sys, time
-from pathlib import Path
-root, marker = Path(sys.argv[1]), Path(sys.argv[2])
-def publish(path, text):
-    staged = path.with_name(path.name + '.tmp')
-    staged.write_text(text)
-    os.replace(staged, path)
-run = root / '.context' / 'benchmarks' / f'{int(time.time())}-{os.getpid()}-{random.randrange(10000, 99999)}'
-run.mkdir(parents=True)
-stop = []
-signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
-owner = run / 'local-benchmark-owner.json'
-publish(owner, json.dumps({'version': 1, 'run_id': run.name, 'state': 'running', 'pid': os.getpid()}))
-publish(marker.parent / (marker.name + '.ready'), str(os.getpid()))
-end = time.monotonic() + 120  # queued paid tasks, if nobody stops it
-while not stop and time.monotonic() < end:
-    time.sleep(.05)
-time.sleep(.3)  # its own cleanup traps
-publish(owner, json.dumps({'version': 1, 'run_id': run.name, 'state': 'cleanup_verified', 'pid': os.getpid()}))
-publish(marker, 'clean')
-"""
-
-
-class ExpiringClock:
-    """deploy_test_process's monotonic clock with the gate deadline elapsing on request.
-
-    A wall-clock deadline shorter than two interpreter startups let the gate time out
-    before its controller registered, so the teardown correctly found nothing yet and
-    the controller then outlived the test. The deadline now elapses only after the
-    controller registered; the TERM, teardown and receipt paths are the real ones."""
-
-    LEAP = 10 * 3600.0
-
-    def __init__(self):
-        import time
-        self.real = time
-        self.expired = threading.Event()
-
-    def monotonic(self):
-        return self.real.monotonic() + (self.LEAP if self.expired.is_set() else 0.0)
-
-    def __getattr__(self, name):
-        return getattr(self.real, name)
-
-
-class GateBenchmarkControllerTeardown(unittest.TestCase):
-    """2026-11-05 measurement attempt 1: TERM of the staged cycle killed the gate's worker after
-    ten seconds and returned; its detached benchmarks/local.py controller kept running queued
-    paid tasks for ~24 minutes. The cycle must reach that exact token-owned controller, wait for
-    its own cleanup, record a teardown receipt and never signal a foreign run. Two gate
-    lifecycles reach it: a native producer (the measured one: plain group TERM, ten-second
-    KILL, no supervisor) and an owned worker whose supervisor hit its cleanup bound."""
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name) / 'repo'
-        self.root.mkdir()
-        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
-        (self.root / 'code').write_text('original')
-        (self.root / '.git' / 'info' / 'exclude').write_text('.context/\n')
-        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
-        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
-                        'user.email=test@example.com', 'commit', '-qm', 'fixture'], check=True)
-        self.worker_root = Path(self.temp.name) / 'bench-worker'
-        self.worker_root.mkdir()
-        self.directory = self.root / '.context' / 'cycle'
-        self.marker = Path(self.temp.name) / 'controller-cleanup'
-        self.controllers, self.children = [], []
-        # The gate's own process starts the detached controller, then idles only while this
-        # test's temp directory exists (a supervisor-less leftover exits by itself afterwards).
-        worker = ('import subprocess,sys,time;from pathlib import Path;'
-                  f'subprocess.Popen([sys.executable,"-c",{FAKE_CONTROLLER!r},{str(self.worker_root)!r},'
-                  f'{str(self.marker)!r}],start_new_session=True);'
-                  f'end=time.monotonic()+120\nwhile Path({self.temp.name!r}).exists() and time.monotonic()<end:'
-                  'time.sleep(.1)')
-        # A root port no deploy-worktree claim can share (RCA
-        # 2026-11-05-interrupted-proof-fixture-port-inside-deploy-claim-range).
-        self.gate = {'name': 'bench-controller', 'category': 'generic',
-                     'worker_transport': 'local-isolated', 'case_protocol': True,
-                     'checks': ['bench-controller'], 'cwd': str(self.worker_root),
-                     'worker_root': str(self.worker_root), 'timeout_seconds': 60,
-                     'worker': 'bench-worker', 'command': [sys.executable, '-c', worker],
-                     'env': {'CONDUCTOR_WORKSPACE_NAME': 'bench', 'CONDUCTOR_PORT': str(interrupted_root_port())}}
-        quick = [{'name': name, 'category': name, 'quick': True, 'command': ['true'], 'checks': [name]}
-                 for name in ('eslint', 'format', 'typescript', 'backend-structural')]
-        plan = {'source': c.source(self.root), 'gates': [*quick, self.gate]}
-        self.state = c.initialize(plan, self.root)
-        self.state['phase'] = 'initial'
-        self.budget = patch.dict(os.environ, {'DEPLOY_PIPELINE_TEARDOWN_WAIT_SECONDS': '0.5',
-                                              'DEPLOY_PIPELINE_TEARDOWN_KILL_AFTER_SECONDS': '8'})
-        self.budget.start()
-
-    def tearDown(self):
-        import signal
-        self.budget.stop()
-        c.CANCEL.clear()
-        # Only processes this test started. A detached controller is reaped by init, so its
-        # pid may be reused: signal it only while its argv still names this test's marker.
-        for pid, marker in self.controllers:
+    def test_refused_version_retains_authenticated_identity(self):
+        import asyncio,runpy,socket,struct
+        module=runpy.run_path(str(self.target/'cloudbench-shared-relay.py'))
+        address=self.base/'fly-agent.sock'
+        listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        listener.bind(str(address));address.chmod(0o600);listener.listen(1);listener.settimeout(2)
+        self.addCleanup(listener.close)
+        broker=module['Broker']({'parent_pid':os.getpid(),'parent_start':module['birth'](os.getpid()),
+                                'agent_socket':str(address)},'a'*64,self.base)
+        def respond(value):
+            errors=[]
+            def serve():
+                try:
+                    stream,_=listener.accept()
+                    with stream:
+                        stream.settimeout(2)
+                        header=stream.recv(2);size=int.from_bytes(header,'little');request=b''
+                        while len(request)<size:request+=stream.recv(size-len(request))
+                        self.assertEqual(request,b'ping')
+                        body=b'ok '+json.dumps(value).encode()
+                        stream.sendall(struct.pack('<H',len(body))+body)
+                except BaseException as error:errors.append(error)
+            thread=threading.Thread(target=serve);thread.start()
+            return thread,errors
+        def run(value,reason=None):
+            thread,errors=respond(value)
             try:
-                if str(marker).encode() in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0'):
-                    os.kill(pid, signal.SIGKILL)
-            except (FileNotFoundError, ProcessLookupError):
-                pass
-        for proc in self.children:  # unreaped Popen children: their pid cannot be reused
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait(timeout=10)
-        self.temp.cleanup()
-
-    @staticmethod
-    def alive(pid):
-        try:
-            state = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[0]
-        except (OSError, IndexError):
-            return False
-        return state not in ('Z', 'X')
-
-    def wait_for(self, path, seconds=30):
-        import time
-        end = time.monotonic() + seconds
-        while not path.exists() and time.monotonic() < end:
-            time.sleep(.02)
-        self.assertTrue(path.exists(), path)
-
-    def foreign_controller(self):
-        """Another run under the same context root that this gate does not own."""
-        marker = Path(self.temp.name) / 'foreign-cleanup'
-        env = {k: v for k, v in os.environ.items() if k != 'DEPLOY_PIPELINE_LANE_TOKEN'}
-        proc = subprocess.Popen([sys.executable, '-c', FAKE_CONTROLLER, str(self.worker_root), str(marker)],
-                                env=env, start_new_session=True)
-        self.children.append(proc)
-        self.wait_for(marker.parent / (marker.name + '.ready'))
-        return proc, marker
-
-    def run_gate(self, stop):
-        with ThreadPoolExecutor(1) as pool:
-            future = pool.submit(c.execute, self.gate, self.state, self.directory, self.root,
-                                 local_failure=threading.Event())
-            try:
-                ready = self.marker.parent / (self.marker.name + '.ready')
-                self.wait_for(ready)
-                controller = int(ready.read_text())
-                self.controllers.append((controller, self.marker))
-                foreign, foreign_marker = self.foreign_controller()
+                if reason:
+                    with self.assertRaisesRegex(ValueError,reason):asyncio.run(broker.start_agent())
+                else:asyncio.run(broker.start_agent())
             finally:
-                stop()  # never leave the gate running into the executor's join
-            result = future.result(timeout=120)
-        return result, controller, foreign, foreign_marker
+                thread.join(3);self.assertFalse(thread.is_alive());self.assertEqual(errors,[])
+        run({'Version':'v0.5.5','PID':os.getpid()},'unsupported Fly agent version')
+        record=json.loads((self.base/'startup-agent.json').read_text())
+        self.assertEqual(record['agent']['pid'],os.getpid())
+        self.assertEqual(record['agent']['birth'],module['birth'](os.getpid()))
+        self.assertEqual(record['agent']['version'],'0.5.5')
+        self.assertEqual(record['agent']['socket_identity'],[address.stat().st_dev,address.stat().st_ino])
+        self.assertEqual(record['authority_sha256'],'a'*64)
+        self.assertEqual((self.base/'startup-agent.json').stat().st_mode&0o777,0o600)
+        self.assertFalse((self.base/'ready.json').exists())
+        (self.base/'startup-agent.json').unlink()
+        run({'Version':'v0.5.5','PID':os.getpid()+1},'PING peer differs')
+        self.assertFalse((self.base/'startup-agent.json').exists())
+        run({'Version':'v0.4.115','PID':os.getpid()})
+        self.assertEqual(json.loads((self.base/'startup-agent.json').read_text())['agent']['version'],'0.4.115')
 
-    def assert_owned_teardown(self, result, controller, foreign, foreign_marker):
-        self.assertFalse(self.alive(controller), 'detached token-owned controller survived the gate')
-        self.assertEqual('clean', self.marker.read_text(), 'controller cleanup trap did not run')
-        teardown = result.get('teardown')
-        self.assertIsInstance(teardown, dict, 'no teardown receipt recorded')
-        self.assertEqual('terminated', teardown['outcome'])
-        self.assertIn(controller, teardown['escalated'])
-        self.assertEqual([], teardown['killed'])
-        self.assertEqual([], teardown['survivors'])
-        receipt = c.read(Path(teardown['receipt']))
-        self.assertEqual(result['token'], receipt['token'])
-        self.assertTrue(Path(teardown['receipt']).is_relative_to(Path(result['log']).parent))
-        # The foreign run is reported, never signalled.
-        self.assertIn(foreign.pid, teardown['foreign_pids'])
-        self.assertNotIn(foreign.pid, teardown['escalated'] + teardown['killed'])
-        self.assertIsNone(foreign.poll())
-        self.assertFalse(foreign_marker.exists())
-        self.assertEqual(teardown, c.read(Path(result['log']).parent / 'receipt.json')['teardown'])
+    def test_owned_supervisor_retains_native_failure_and_quiescence(self):
+        from deploy_test_process import run_command
+        output=self.base/'native.log'
+        with output.open('wb')as stream:
+            result=run_command([sys.executable,'-c','raise SystemExit(1)'],cwd=self.base,
+                               env=os.environ.copy(),output=stream,timeout=5,owned_lifecycle=True)
+        self.assertEqual(result,(1,False,False,False))
+        receipt=json.loads(Path(str(output)+'.process.json').read_text())
+        self.assertIs(receipt['quiescent'],True);self.assertEqual(receipt['remaining'],[])
+        self.assertFalse(Path('/proc',str(receipt['supervisor_pid'])).exists())
+        self.assertFalse(Path('/proc',str(receipt['child_pid'])).exists())
 
-    def test_cancelled_native_producer_tears_down_detached_controller(self):
-        self.gate['native_cloud'] = True  # the measured lifecycle: plain group TERM, then KILL
-        result, controller, foreign, marker = self.run_gate(c.CANCEL.set)
-        self.assertEqual('native-producer', result['lifecycle'])
-        self.assertTrue(result['cancelled'])
-        self.assert_owned_teardown(result, controller, foreign, marker)
+    def fixture(self):
+        import hashlib,time,runpy
+        from datetime import datetime,timezone
+        token='startup-owned-token';root=self.base;key=hashlib.sha256(token.encode()).hexdigest()
+        runs=root/'.context/deploy-cloud'/key/'runs';runs.mkdir(parents=True)
+        campaign=runs.parent/'campaigns'/('deploy-'+key);relay=campaign/'shared-relay';relay.mkdir(parents=True)
+        def stamp(pid):
+            return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()[19]
+        rows=[]
+        for _ in range(5):
+            p=subprocess.run([sys.executable,'-c',"import os;from pathlib import Path;print(str(os.getpid())+' '+Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19])"],capture_output=True,text=True,check=True)
+            pid,start=p.stdout.split();rows.append({'pid':int(pid),'birth':'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+start})
+        parent,bootstrap,broker,agent,publisher=rows;self.live_stamp=stamp
+        source={'head':'a'*40,'digest':'b'*64};now=time.time()
+        request={'token':token,'source':source,'gate':'smoke','checks':['browser-smoke'],'skips':{}}
+        cases={'browser-smoke':'UNVERIFIED'}
+        adapter={**request,'cases':cases,'native_exit':1,'started_at':now-5,'runner_log':str(runs.parent/'cli.log'),
+                 'native_command':['bash','scripts/run-bench','browser-smoke','--runs','1','--concurrency','1','--retry-infra','0','--ref',source['head']]}
+        folder=root/'attempt';folder.mkdir();adapter_path=folder/'result.json'
+        def save(path,v):path.write_text(json.dumps(v));path.chmod(0o600)
+        save(adapter_path,adapter)
+        sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+        reference={'result':str(adapter_path),'result_sha256':sha(adapter_path),'native_directory':str(campaign),'cleanup_complete':False}
+        owner={'request_token':token,'worker_root':str(root),'native_cleanup_reference':reference}
+        receipt={**request,'cases':cases,'lifecycle':'native-producer','complete':False,'timed_out':False,'cancelled':False,
+                 'finished_at':now-1,'worker_result':str(adapter_path),'log':str(folder/'output.log'),'native_cleanup_reference':reference,
+                 'cleanup_owner':owner,'lingering_group':True}
+        save(folder/'receipt.json',receipt);save(folder/'request.json',request)
+        (runs.parent/'cli.log').write_text(str(campaign))
+        job={'job_id':'r001-j0001','task':'browser-smoke','run':1,'attempt':1,'attempts':[],'status':'cancelled','log':str(campaign/'r001-j0001.log')}
+        summary={'campaign_id':campaign.name,'jobs':[job],'runs':1,'retry_infra':0,'status':'failed','peak_concurrency':0,
+                 'shared_inventory_failed':True,'task_count':1,'total_jobs':1,
+                 'started_at':datetime.fromtimestamp(now-4,timezone.utc).isoformat(),'finished_at':datetime.fromtimestamp(now-2,timezone.utc).isoformat()}
+        save(campaign/'summary.json',summary)
+        private='/tmp/cb-relay-abcdefgh'
+        authority={'schema':'shared-relay-authority-v1','parent_pid':parent['pid'],'parent_start':parent['birth'],
+                   'inventory_directory':str(campaign/'shared-inventory'),'agent_socket':private+'/fly-agent.sock',
+                   'source_sha256':hashlib.sha256(b'original-broker').hexdigest()}
+        authority['inventory_owner']={'app':'fixture','pid':str(publisher['pid']),'pid_start':publisher['birth'],
+                                      'token':'b'*32,'parent_pid':str(parent['pid']),'parent_start':parent['birth']}
+        inventory=campaign/'shared-inventory';inventory.mkdir()
+        (inventory/'owner').write_text(''.join(k+'='+v+'\n'for k,v in authority['inventory_owner'].items()))
+        save(relay/'authority.private.json',authority)
+        for name,row in [('bootstrap',bootstrap),('broker',broker)]:
+            save(relay/(name+'-owner.json'),{**row,'parent_pid':parent['pid'],'parent_start':parent['birth']})
+        save(campaign/'shared-relay-location.json',{'directory':private})
+        capture={'schema':'shared-relay-startup-agent-v1','authority_sha256':sha(relay/'authority.private.json'),
+                 'parent':parent,'broker':broker,'uid':os.getuid(),'socket':authority['agent_socket'],
+                 'agent':{**agent,'version':'0.5.5','socket_identity':[3,4]}}
+        save(relay/'startup-agent.json',capture)
+        cleanup={'schema':'shared-relay-startup-cleanup-v1','parent':parent,'bootstrap_joined':True,'broker_joined':True,
+                 'bootstrap_exit':0,'broker_exit':1,'agent_identity_sha256':sha(relay/'startup-agent.json'),
+                 'producer_sha256':hashlib.sha256(b'original-campaign').hexdigest(),
+                 'agent_shutdown_verified':False,'agent_retirement_pending':True}
+        save(relay/'startup-cleanup.json',cleanup)
+        sidecar={'native_exit':1,'child_pid':parent['pid'],'supervisor_pid':999999,'quiescent':True,'orphaned_children':False,
+                 'timed_out':False,'cancelled':False,'remaining':[],'term_sent':[],'kill_sent':[],'error':None,
+                 'reaped':[{'pid':parent['pid'],'status':256}]}
+        save(runs.parent/'cli.log.process.json',sidecar)
+        save(campaign/'hub-group.json',{});save(campaign/'hub-group-publication-ack.private.json',{})
+        proof={'kind':'native-cloud-cleanup-v1','owner':owner,'request_token':token,'source':source,
+               'receipt_sha256':sha(folder/'receipt.json'),'worker_result_sha256':sha(adapter_path),'confirmed_at':now,
+               'observed_by':'fixture','layout':'campaign-startup-v1','campaign':str(campaign)}
+        self.reseal=lambda:proof.update(files={str(p):sha(p) for p in root.rglob('*')if p.is_file() and p.name not in ('receipt.json','result.json')})
+        self.reseal();self.save=save;self.relay=relay;self.campaign=campaign;self.runs=runs;self.proof=proof
+        return receipt,owner,proof
 
-    def test_timed_out_owned_gate_tears_down_detached_controller(self):
-        import deploy_test_process
-        clock = ExpiringClock()
-        self.gate['timeout_seconds'] = 3600  # elapses only through clock.expired, after registration
-        with patch.object(deploy_test_process, 'time', clock):
-            result, controller, foreign, marker = self.run_gate(clock.expired.set)
-        self.assertEqual('owned', result['lifecycle'])
-        self.assertTrue(result['timed_out'])
-        self.assertFalse(result['cancelled'])
-        self.assert_owned_teardown(result, controller, foreign, marker)
+    def validate_fixture(self,receipt,owner,proof):
+        import types,runpy
+        retired_hub=runpy.run_path(str(self.target/'run-bench-campaign.py'))['native_hub_owner_retired']
+        original_check_output=subprocess.check_output
+        published=types.ModuleType('deploy_test_cloud');published.campaign_published=lambda *_a:True
+        with patch.dict(sys.modules,deploy_test_cloud=published),patch.object(self.native.runpy,'run_path',return_value={'native_hub_owner_retired':retired_hub}),\
+             patch.object(self.native.subprocess,'check_output',side_effect=lambda args,**kwargs:
+                 original_check_output(args,**kwargs) if args[0]=='ps' else
+                 b'original-broker' if args[-1].endswith('cloudbench-shared-relay.py') else
+                 (ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes() if args[-1].endswith('cloudbench-campaign-inventory.sh') else b'original-campaign'):
+            state={'plan':{'gates':[{'name':'smoke','native_cloud':True}]},
+                   'attempts':[{'results':[receipt]}],
+                   'failures':[{'id':'original-failure','gate':'smoke','check':'smoke/browser-smoke',
+                                'native_result':'UNVERIFIED','complete':False}]}
+            occurrence='original-failure'
+            if getattr(self,'stale_operation',False):
+                state.update(phase='stale',source=receipt['source'],failures=[])
+                state['attempts'][-1]['stale']=True
+                occurrence=receipt['token']
+            self.native.reconcile(state,occurrence,proof)
+            return next(iter(state['reconciled_owners'].values()))
+
+    def test_native_adapter_requests_owned_supervision(self):
+        import ast,contextlib,hashlib,time
+        code=(self.target/'deploy_test_cloud.py').read_text()
+        function=next(n for n in ast.parse(code).body if isinstance(n,ast.FunctionDef) and n.name=='execute')
+        calls=[];requested={'checks':['browser-smoke'],'skips':{},'token':'owned','source':{'head':'a'*40},'gate':'smoke'}
+        namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=lambda _r:requested['source'],
+                       campaign_width=lambda _c:1,hashlib=hashlib,os=os,time=time,sys=sys,
+                       cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,shared_canary_env=lambda _r:{},
+                       run_command=lambda *a,**k:(calls.append((a,k)) or (1,False,False,False)),
+                       collect_campaign=lambda *_a:({'browser-smoke':'UNVERIFIED'},{},False,'fixture'))
+        exec(compile(ast.Module(body=[function],type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)
+        namespace['execute'](requested,self.base)
+        self.assertEqual(len(calls),1)
+        self.assertIs(calls[0][1].get('owned_lifecycle'),True)
+        self.assertEqual(calls[0][1]['env'].get('DEPLOY_NATIVE_HUB_JOIN'),'1')
+
+    def test_startup_only_reconciliation_retains_unverified_bytes(self):
+        receipt,owner,proof=self.fixture();before=json.dumps(receipt,sort_keys=True)
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted']);self.assertEqual(result['participants'],[])
+        self.assertEqual(json.dumps(receipt,sort_keys=True),before)
+        self.assertEqual(receipt['cases'],{'browser-smoke':'UNVERIFIED'})
+
+    def test_startup_publisher_exit_removes_owner_without_losing_captured_identity(self):
+        receipt,owner,proof=self.fixture()
+        inventory=self.campaign/'shared-inventory'
+        original=(inventory/'owner').read_bytes()
+        (inventory/'owner').unlink()
+        (inventory/'stop').write_bytes(b'')
+        scripts=inventory/'scripts';scripts.mkdir()
+        producer=scripts/'cloudbench-campaign-inventory.sh'
+        producer.write_bytes((ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes())
+        self.reseal()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(result['startup_processes'][-1]['pid'],int(dict(
+            line.split('=',1)for line in original.decode().splitlines())['pid']))
+        (inventory/'owner').write_bytes(original.replace(b'app=fixture',b'app=foreign'))
+        self.reseal()
+        with self.assertRaisesRegex(ValueError,'publisher binding'):
+            self.validate_fixture(receipt,owner,proof)
+        (inventory/'owner').unlink();(inventory/'stop').unlink();self.reseal()
+        with self.assertRaisesRegex(ValueError,'noncanonical proof file'):
+            self.validate_fixture(receipt,owner,proof)
+        (inventory/'stop').write_bytes(b'');producer.write_bytes(b'unsupported publisher');self.reseal()
+        with self.assertRaisesRegex(ValueError,'publisher removal contract'):
+            self.validate_fixture(receipt,owner,proof)
+
+    def test_stale_full_attempt_reconciles_exact_startup_operation_without_credit(self):
+        receipt,owner,proof=self.fixture();self.stale_operation=True
+        receipt['executed']=True
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        import hashlib
+        proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(result['occurrence'],receipt['token'])
+        proof['request_token']='foreign'
+        with self.assertRaisesRegex(ValueError,'stale operation identity'):
+            self.validate_fixture(receipt,owner,proof)
+
+    def test_original_fly_logs_allow_only_absent_same_boot_startup_agent(self):
+        import ast,datetime,hashlib
+        receipt,owner,proof=self.fixture()
+        capture=json.loads((self.relay/'startup-agent.json').read_text())
+        (self.relay/'startup-agent.json').unlink();(self.runs.parent/'cli.log.process.json').unlink()
+        self.save(self.relay/'startup-cleanup.json',dict(bootstrap_joined=True,broker_joined=True,
+                                                       agent_shutdown_verified=False,agent_retirement_pending=True))
+        (self.relay/'broker.private.log').write_text('unsupported Fly agent version\n')
+        pid=capture['agent']['pid'];socket=capture['socket']
+        native=self.base/'native';native.mkdir()
+        bootstrap=native/'bootstrap.log';(native/'agent-logs').mkdir();agent=native/'agent-logs/123.log'
+        bootstrap.write_text(f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {pid}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n')
+        when=datetime.datetime.fromisoformat(json.loads((self.campaign/'summary.json').read_text())['started_at'])+datetime.timedelta(seconds=.5)
+        stamp=when.strftime('%Y/%m/%d %H:%M:%S.%f')
+        payload=('ok '+json.dumps({'PID':pid,'Version':'0.5.5'})+'\n').encode()
+        raw=(len(payload).to_bytes(2,'little')+payload).decode('latin1')
+        import json as json_module
+        quoted=json_module.dumps(raw)
+        agent.write_text(f'{stamp} srv OK {pid}\n{stamp} #1 -> ({len(raw)}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        proof['fly_native_logs']={'bootstrap':str(bootstrap),'agent':str(agent),'timezone':'UTC'};self.reseal()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted']);self.assertTrue(result['startup_processes'][3]['native_log_identity'])
+        self.assertNotIn('birth',result['startup_processes'][3])
+        saved_logs=dict(proof['fly_native_logs'])
+        for fields,reason in [({k:v for k,v in saved_logs.items() if k!='timezone'},'timezone required'),
+                              ({**saved_logs,'timezone':'Unknown/Original'},'timezone unavailable'),
+                              ({**saved_logs,'timezone':'America/New_York'},'log clock')]:
+            proof['fly_native_logs']=fields
+            with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        foreign=native/'foreign.log';foreign.write_bytes(agent.read_bytes())
+        proof['fly_native_logs']={**saved_logs,'agent':str(foreign)};self.reseal()
+        with self.assertRaisesRegex(ValueError,'bootstrap binding'):self.validate_fixture(receipt,owner,proof)
+        foreign.unlink();proof['fly_native_logs']=saved_logs;self.reseal()
+        prior=agent.read_text()
+        for mutation,reason in [(prior.replace(str(pid),str(os.getpid())),'bootstrap|PING|shutdown'),
+                                (prior.replace('srv QUIT','missing shutdown'),'shutdown chain'),
+                                (prior.replace(socket,'/foreign/socket'),'shutdown chain')]:
+            agent.write_text(mutation);self.reseal()
+            with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        agent.write_text(prior);self.reseal()
+        live=bootstrap.read_text().replace(str(pid),str(os.getpid()))
+        bootstrap.write_text(live);agent.write_text(prior.replace(str(pid),str(os.getpid())));self.reseal()
+        with self.assertRaisesRegex(ValueError,'PID present'):self.validate_fixture(receipt,owner,proof)
+
+    def test_startup_reconciliation_rejects_missing_or_live_or_dispatched_evidence(self):
+        receipt,owner,proof=self.fixture()
+        paths=[self.relay/'startup-agent.json',self.runs.parent/'cli.log.process.json',self.campaign/'summary.json']
+        original={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        def alter(path,**kwargs):self.save(path,{**json.loads(path.read_text()),**kwargs})
+        def live_agent():
+            import hashlib
+            alter(paths[0],agent={'pid':os.getpid(),'birth':self.live_stamp(os.getpid()),'version':'0.5.5','socket_identity':[3,4]})
+            alter(self.relay/'startup-cleanup.json',agent_identity_sha256=hashlib.sha256(paths[0].read_bytes()).hexdigest())
+        def started_job():
+            summary=json.loads(paths[2].read_text());summary['jobs'][0]['started_at']='2026-01-01';self.save(paths[2],summary)
+        mutations=[('missing-capture',lambda:paths[0].unlink(),None),
+                   ('missing-sidecar',lambda:paths[1].unlink(),None),
+                   ('unjoined-supervisor',lambda:alter(paths[1],quiescent=False),'process closure'),
+                   ('forced-cleanup',lambda:alter(paths[1],term_sent=[123]),'process closure'),
+                   ('dispatched-job',lambda:alter(paths[2],peak_concurrency=1),'startup inventory'),
+                   ('started-job',started_job,'dispatched job'),
+                   ('live-agent',live_agent,'exact process remains live'),
+                   ('reached-ready',lambda:self.save(self.relay/'ready.json',{}),'reached relay admission'),
+                   ('bad-source',lambda:proof.update(source={'head':'f'*40,'digest':'b'*64}),'request identity')]
+        for name,mutate,reason in mutations:
+            with self.subTest(name=name):
+                for p in self.base.rglob('*'):
+                    if p.is_file() and p not in original:p.unlink()
+                for p,raw in original.items():p.write_bytes(raw)
+                proof['source']=receipt['source'];mutate();self.reseal()
+                if reason is None:
+                    with self.assertRaisesRegex(ValueError,'noncanonical proof file'):self.validate_fixture(receipt,owner,proof)
+                else:
+                    with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        for p,raw in original.items():p.write_bytes(raw)
+        proof['source']=receipt['source'];self.reseal()
+        proof['files'][str(paths[0])]='0'*64
+        with self.assertRaisesRegex(ValueError,'hash mismatch'):
+            self.validate_fixture(receipt,owner,proof)
+
+    def test_native_campaign_joins_exact_hub_before_supervisor_exit(self):
+        result=subprocess.run([sys.executable,str(ROOT/'scripts/tests/fixtures/native_campaign_hub_join.py'),
+                               str(self.target/'run-bench-campaign.py')],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    def test_native_retired_hub_owner_refuses_foreign_paths_live_pids_and_reused_groups(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        runs=self.base/'.context/deploy-cloud'/('a'*64)/'runs';hub=runs/'_hub';hub.mkdir(parents=True)
+        child=subprocess.run([sys.executable,'-c',
+            "import os;from pathlib import Path;print(str(os.getpid())+' '+Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19])"],
+            start_new_session=True,capture_output=True,text=True,check=True)
+        pid,ticks=child.stdout.split();token='b'*32;port='12345'
+        owner=hub/f'agent-link-server.{port}.{token}.owner'
+        boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        fields=dict(version='1',pid=pid,pgid=pid,pid_start=f'proc-start:{boot}:{ticks}',
+            owner_token=token,command=str(self.base/'agents/benchmarks/agent_link_server.py'),
+            argv_sha256='c'*64,root=str(runs),runs_root=str(runs),repo_root=str(self.base),
+            context_dir=str(hub),host='127.0.0.1',port=port,status='starting')
+        def save(values):
+            owner.write_text(''.join(k+'='+v+'\n' for k,v in values.items()));owner.chmod(0o644)
+        retired=module['native_hub_owner_retired'];save(fields)
+        self.assertTrue(retired(owner,runs,self.base))
+        with patch.object(subprocess,'check_output',return_value=pid+'\n'):
+            self.assertFalse(retired(owner,runs,self.base),'a reused or remaining group must not be skipped')
+        for key,value in [('repo_root',str(self.base/'foreign')),('command','/foreign/hub.py'),
+                          ('root','/foreign'),('owner_token','d'*32),('port','23456'),
+                          ('pgid',str(int(pid)+1)),('pid_start','unknown'),('status','unknown')]:
+            with self.subTest(key=key):
+                save({**fields,key:value})
+                with self.assertRaises(ValueError):retired(owner,runs,self.base)
+        save({**fields,'pid':str(os.getpid()),'pgid':str(os.getpid())})
+        live_owner=hub/f'agent-link-server.{port}.{token}.owner'
+        self.assertFalse(retired(live_owner,runs,self.base),'live/reused PID must use original live protocol')
+        save(fields);owner.unlink();owner.symlink_to(self.base/'foreign-owner')
+        with self.assertRaises(ValueError):retired(owner,runs,self.base)
+
+    def test_native_hub_join_attempts_later_owners_after_each_failure(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        runs=self.base/'.context/deploy-cloud'/('a'*64)/'runs'
+        hub=runs/'_hub';hub.mkdir(parents=True)
+        for index,content in enumerate(['missing=port\n','port=2\n','port=3\n']):
+            (hub/f'agent-link-server.{index}.owner').write_text(content)
+        calls=[]
+        def terminate(command,**_kwargs):
+            calls.append(command[-4])
+            if command[-4]=='2':raise subprocess.CalledProcessError(1,command)
+        with patch.dict(os.environ,{'DEPLOY_NATIVE_HUB_JOIN':'1','CLOUDBENCH_RUNS_ROOT':str(runs)}), \
+             patch.object(subprocess,'run',side_effect=terminate), \
+             patch.dict(module['join_native_hubs'].__globals__,native_hub_owner_retired=lambda *_:False):
+            with self.assertRaisesRegex(ValueError,'native Hub join incomplete'):
+                module['join_native_hubs'](self.base,runs.parent/'campaigns'/('deploy-'+runs.parent.name))
+        self.assertEqual(calls,['2','3'])
+
+    def campaign_hub_cleanup_failure(self, cancel):
+        import runpy,signal
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        namespace=module['main'].__globals__
+        scripts=self.base/'scripts';scripts.mkdir()
+        (scripts/'run-bench').write_text('exit 0\n')
+        arguments=['campaign','--root',str(self.base),'--runs','1','--concurrency','2',
+                   '--retry-infra','0','--task=fixture']
+        published=[]
+        def publish(_workspace,_directory,summary,**_kwargs):
+            if _kwargs.get('live'):return True
+            published.append(summary['status'])
+            if cancel:
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM,None)
+                return False
+            return True
+        def refuse_inventory(*_args,**_kwargs):
+            raise RuntimeError('fixture refuses before controller admission')
+        def refuse_join(*_args):raise ValueError('fixture Hub join failed')
+        replacements=dict(campaign_workspace=lambda root,_forward:(root,None),provider_capacity_refusal=lambda _n:None,
+            scorecard_hooks=lambda:None,start_shared_inventory=refuse_inventory,
+            publish_campaign_group=publish,join_native_hubs=refuse_join,
+            infra_stop_predicate=lambda:lambda *_args:False)
+        handlers={number:signal.getsignal(number)for number in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP)}
+        try:
+            with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),patch.dict(os.environ,{
+                'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'hub-failure',
+                'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY':'1' if cancel else '0','CLOUDBENCH_STRICT_BARRIER':'0',
+                'BENCHMARK_HUB_GROUP_RUN_ID':'','BENCHMARK_HUB_PARENT_RUN_ID':''}):
+                code=module['main']()
+        finally:
+            for number,handler in handlers.items():signal.signal(number,handler)
+        summary=json.loads((self.base/'campaigns/hub-failure/summary.json').read_text())
+        return code,summary,published
+
+    def test_publication_cancellation_stays_cancelled_when_hub_join_fails(self):
+        code,summary,_published=self.campaign_hub_cleanup_failure(True)
+        self.assertEqual(code,143)
+        self.assertEqual(summary['status'],'cancelled')
+        self.assertTrue(summary['shared_transport_cleanup_pending'])
+        self.assertEqual(summary['peak_concurrency'],0)
+        self.assertTrue(all(job.get('controller_pid')is None for job in summary['jobs']))
+
+    def test_successful_campaign_still_fails_when_hub_join_fails(self):
+        code,summary,published=self.campaign_hub_cleanup_failure(False)
+        self.assertEqual(published,['passed'])
+        self.assertNotEqual(code,0)
+        self.assertEqual(summary['status'],'failed')
+        self.assertTrue(summary['shared_transport_cleanup_pending'])
+
+    def test_campaign_persists_fixed_commands_before_any_controller_admission(self):
+        import runpy
+        module=runpy.run_path(str(self.target/'run-bench-campaign.py'))
+        namespace=module['main'].__globals__
+        tasks=['fixture-'+str(i)for i in range(600)]
+        arguments=['campaign','--root',str(self.base),'--runs','1','--concurrency','600','--retry-infra','0',
+                   '--forward-arg=--ref','--forward-arg='+'a'*40,*['--task='+name for name in tasks]]
+        def refuse_inventory(*_args,**_kwargs):raise RuntimeError('fixture refuses before controller admission')
+        replacements=dict(campaign_workspace=lambda root,_forward:(root,None),provider_capacity_refusal=lambda _n:None,
+                          scorecard_hooks=lambda:None,start_shared_inventory=refuse_inventory,
+                          publish_campaign_group=lambda *_a,**_kw:True)
+        with patch.dict(namespace,replacements),patch.object(sys,'argv',arguments),             patch.dict(os.environ,{'RUN_BENCH_CAMPAIGN_ROOT':str(self.base/'campaigns'),'RUN_BENCH_CAMPAIGN_ID':'command-proof'}):
+            self.assertEqual(module['main'](),1)
+        summary=json.loads((self.base/'campaigns/command-proof/summary.json').read_text())
+        self.assertEqual(summary['peak_concurrency'],0)
+        self.assertEqual(len(summary['jobs']),600)
+        for job in summary['jobs']:
+            self.assertEqual(job.get('controller_command'),['bash',str(self.base/'scripts/run-bench'),job['task'],'--ref','a'*40,'--foreground'])
+            self.assertIsNone(job.get('controller_pid'))
+
+    def preallocation_fixture(self):
+        import hashlib,shutil,time
+        receipt,owner,proof=self.fixture()
+        (self.relay/'startup-cleanup.json').unlink()
+        capture=json.loads((self.relay/'startup-agent.json').read_text())
+        authority=json.loads((self.relay/'authority.private.json').read_text())
+        ready=dict(agent=capture['agent'],authority_sha256=capture['authority_sha256'],
+                   pid=capture['broker']['pid'],birth=capture['broker']['birth'],
+                   socket='/tmp/cb-relay-abcdefgh/control.sock')
+        self.save(self.relay/'ready.json',ready)
+        self.save(self.relay/'serve.once.json',{k:ready[k]for k in ('authority_sha256','pid','birth')})
+        (self.relay/'broker.private.log').write_text('{"stopped": true}\n')
+        def retired():
+            r=subprocess.run([sys.executable,'-c',"import os;from pathlib import Path;print(str(os.getpid())+' '+Path('/proc/self/stat').read_text().rsplit(') ',1)[1].split()[19])"],text=True,capture_output=True,check=True)
+            pid,start=r.stdout.split();return dict(pid=int(pid),birth='proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+start)
+        controller,hub_process=retired(),retired()
+        hub=self.runs/'_hub';hub.mkdir()
+        hub_owner=hub/('agent-link-server.8765.'+'b'*32+'.owner')
+        fields=dict(version='1',status='live-transfer-required',pid=str(hub_process['pid']),pgid=str(hub_process['pid']),
+                    pid_start=hub_process['birth'],owner_token='b'*32,argv_sha256='c'*64,
+                    root=str(self.runs),runs_root=str(self.runs),repo_root=str(self.base),context_dir=str(hub),
+                    command=str(self.base/'agents/benchmarks/agent_link_server.py'))
+        text=lambda p,v:p.write_text(''.join(k+'='+str(x)+'\n'for k,x in v.items()))
+        text(hub_owner,fields)
+        fleet=self.runs/('20261106-090000-'+str(controller['pid']));batch=fleet/'_batch';batch.mkdir(parents=True)
+        audit=fleet/'teardown-ownership';audit.mkdir()
+        token='c'*32
+        text(audit/'meta',dict(version='1',fleet_owner_token=token,run_id=fleet.name,app='fixture',workspace_root=str(self.base),
+            status='provider-teardown-verified',hub_disposition='retained-exact-owner-transfer-required',hub_owner_file=str(hub_owner),
+            hub_owner_token='b'*32,hub_pid=fields['pid'],hub_pid_start=fields['pid_start'],hub_argv_sha256=fields['argv_sha256']))
+        (audit/'provider-teardown-verified.epoch').write_text(str(time.time()-2.8))
+        for name in ['owned-clones.ids','owned-clones.names']:(audit/name).write_bytes(b'')
+        canonical=self.base/'.git/cloudbench-fleet-audits'/token;canonical.parent.mkdir(parents=True);shutil.copytree(audit,canonical)
+        seal=hashlib.sha256()
+        for path in sorted(audit.iterdir()):
+            for raw in [path.name.encode(),path.read_bytes()]:seal.update(len(raw).to_bytes(8,'big'));seal.update(raw)
+        text(audit/'source-audit',dict(path=str(canonical),sha256=seal.hexdigest()))
+        self.save(batch/'lifecycle.json',dict(version=1,fleet_owner_token=token,run_id=fleet.name,workspace_root=str(self.base),
+            status='failed',controller_exit_code=1,audit_sha256=seal.hexdigest(),hub_publication_failed=False))
+        self.save(batch/'benches.json',[dict(name='browser-smoke',mode='REAL')])
+        self.save(batch/'run.json',dict(run_id=fleet.name,controller_exit_code=1,status='failed',tasks=[dict(name='browser-smoke',
+            status='INFRA_ERROR',passed=False,failure_reason='no current run artifact produced',lifecycle_stage='released')]))
+        self.save(batch/'disposable-cleanup.json',dict(schema='disposable-cleanup-v1',owner=token,guest_cleanup_missing=False,runtime_evidence_missing=False))
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary['jobs'][0].update(status='failed',controller_pid=controller['pid'],controller_exit_code=1,
+            controller_command=['bash',str(self.base/'scripts/run-bench'),'browser-smoke','--ref',receipt['source']['head'],'--foreground'])
+        summary['peak_concurrency']=1;summary.pop('shared_inventory_failed');self.save(self.campaign/'summary.json',summary)
+        (self.campaign/'r001-j0001.log').write_text(f'{self.base}/scripts/run-bench monitor {fleet}\nowner: {token}; private controller diagnostics stay in this run directory.\n')
+        sidecar=json.loads((self.runs.parent/'cli.log.process.json').read_text())
+        sidecar.update(orphaned_children=True,term_sent=[hub_process['pid']],reaped=[*sidecar['reaped'],dict(pid=hub_process['pid'],status=15)])
+        self.save(self.runs.parent/'cli.log.process.json',sidecar)
+        adapter_path=Path(receipt['worker_result']);adapter=json.loads(adapter_path.read_text())
+        receipt['started_at']=adapter['started_at']
+        adapter.update(fleet_directory=None,reason='cloud command interrupted or source changed');self.save(adapter_path,adapter)
+        reference=receipt['native_cleanup_reference'];reference['native_directory']=None
+        reference['result_sha256']=hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+        proof['worker_result_sha256']=reference['result_sha256'];proof['layout']='campaign-preallocation-v1'
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
+        self.reseal();return receipt,owner,proof,fleet
+
+    def pending_hub_fixture(self):
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary['shared_transport_cleanup_pending']=True;self.save(self.campaign/'summary.json',summary)
+        side=self.runs.parent/'cli.log.process.json';value=json.loads(side.read_text())
+        value.update(orphaned_children=False,term_sent=[]);self.save(side,value)
+        owners=sorted((self.runs/'_hub').glob('*.owner'))
+        for path in owners:
+            fields=dict(line.split('=',1)for line in path.read_text().splitlines())
+            fields.update(host='127.0.0.1',port='8765')
+            path.write_text(''.join(k+'='+v+'\n'for k,v in fields.items()));path.chmod(0o444)
+        proof['current_hub_retirement']={'kind':'current-native-hub-retirement-v1','owners':list(map(str,owners))}
+        self.reseal();return receipt,owner,proof,fleet
+
+    def test_pending_preallocation_hubs_require_current_exact_retirement_without_rewriting_summary(self):
+        receipt,owner,proof,fleet=self.pending_hub_fixture()
+        before=(self.campaign/'summary.json').read_bytes()
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(before,(self.campaign/'summary.json').read_bytes())
+        self.assertEqual(result['current_hub_retirement'],proof['current_hub_retirement'])
+
+    def test_pending_preallocation_hubs_refuse_unbound_inventory_or_unknown_supervisor_termination(self):
+        receipt,owner,proof,fleet=self.pending_hub_fixture()
+        original=copy.deepcopy(proof['current_hub_retirement'])
+        for marker in [None,{'kind':'foreign','owners':original['owners']},
+                       {**original,'owners':[]},{**original,'owners':original['owners']*2}]:
+            proof['current_hub_retirement']=marker
+            with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+        proof['current_hub_retirement']=original
+        side=self.runs.parent/'cli.log.process.json';value=json.loads(side.read_text())
+        for change in [dict(orphaned_children=True),dict(term_sent=[os.getpid()]),dict(quiescent=False)]:
+            self.save(side,{**value,**change});self.reseal()
+            with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+        self.save(side,value);self.reseal()
+        path=Path(original['owners'][0]);content=path.read_text();path.chmod(0o644)
+        path.write_text(content.replace('repo_root='+str(self.base),'repo_root=/foreign'));path.chmod(0o444);self.reseal()
+        with self.assertRaises(ValueError):self.validate_fixture(receipt,owner,proof)
+
+    def test_preallocation_campaign_reconciliation_keeps_original_unverified(self):
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        before=json.dumps(receipt,sort_keys=True)
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertEqual(result['participants'],[str(fleet)])
+        self.assertFalse(result['credit_granted']);self.assertEqual(before,json.dumps(receipt,sort_keys=True))
+
+    def test_preallocation_campaign_refuses_execution_live_or_changed_ownership(self):
+        receipt,owner,proof,fleet=self.preallocation_fixture()
+        original={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        mutations=[('appended-foreign-ref',lambda:(self.campaign/'r001-j0001.log').write_text((self.campaign/'r001-j0001.log').read_text()+'ref : '+'f'*40+'\n'),'foreign log ref'),
+                   ('masked-foreign-ref',lambda:(self.campaign/'r001-j0001.log').write_text('ref : '+'f'*40+'\nref : '+receipt['source']['head']+'\n'+(self.campaign/'r001-j0001.log').read_text()),'foreign log ref'),
+                   ('foreign-ref',lambda:(self.campaign/'r001-j0001.log').write_text('ref : '+'f'*40+'\n'+(self.campaign/'r001-j0001.log').read_text()),'foreign log ref'),
+                   ('missing-command',lambda:self.save(self.campaign/'summary.json',{**json.loads((self.campaign/'summary.json').read_text()),'jobs':[{k:v for k,v in json.loads((self.campaign/'summary.json').read_text())['jobs'][0].items()if k!='controller_command'}]}),'unsupported historical preallocation dispatch'),
+                   ('execution',lambda:self.save(fleet/'execution-provenance.json',{}),'execution evidence present'),
+                   ('owned-clone',lambda:(fleet/'teardown-ownership/owned-clones.ids').write_text('unknown\n'),'audit seal'),
+                   ('live-relay',lambda:self.save(self.relay/'broker-owner.json',dict(pid=os.getpid(),birth=self.live_stamp(os.getpid()),parent_pid=1,parent_start='foreign')),'relay custody'),
+                   ('unknown-drain',lambda:self.save(self.runs.parent/'cli.log.process.json',{**json.loads((self.runs.parent/'cli.log.process.json').read_text()),'term_sent':[os.getpid()]}),'unexpected supervised termination')]
+        for name,change,reason in mutations:
+            with self.subTest(name=name):
+                for p in self.base.rglob('*'):
+                    if p.is_file()and p not in original:p.unlink()
+                for p,raw in original.items():p.write_bytes(raw)
+                change();self.reseal()
+                with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
 
 
-class CloudSmokeAfterCloudbenchController(unittest.TestCase):
-    """deploy.md Step 4cb (orig L1405): when the cloudbench-controller gate is selected, the paid
-    cloud smoke gate must not start until that gate passed on the same source. That is the only
-    cross-gate order: every other gate keeps starting at once. run_phase is the real scheduler;
-    only each gate's execute is a recorder."""
 
+
+class RecoveredNativeReceiptGuard(unittest.TestCase):
+    """Exercise actual full-pass admission on real files; never launch a worker."""
     def setUp(self):
-        import threading as _threading
-        from deploy_test_isolation import _ports
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name) / 'repo'
-        self.root.mkdir()
-        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
-        (self.root / 'code').write_text('original')
-        (self.root / '.git' / 'info' / 'exclude').write_text('.context/\n')
-        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
-        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
-                        'user.email=test@example.com', 'commit', '-qm', 'fixture'], check=True)
-        self.directory = self.root / '.context' / 'cycle'
-        # Validation-only ports (execute is a recorder): two disjoint footprints, both wholly below
-        # the deploy-worktree claim range (RCA 2026-11-05-interrupted-proof-fixture-port-inside-deploy-claim-range).
-        first = interrupted_root_port()
-        footprint = lambda base: {base + offset for offset in _ports.LISTENER_OFFSETS}
-        second = next(b for b in range(first + 1, _ports.FIRST_BASE_PORT - _ports.FOOTPRINT_PORTS + 1)
-                      if footprint(b).isdisjoint(footprint(first)))
+        self.folder = Path(self.temp.name)
+        source = {'head': 'fixture', 'digest': 'fixture'}
+        self.gate = {'name': 'api', 'command': ['native-fixture'], 'checks': ['case']}
+        self.state = {'source': source, 'input_fingerprints': {'api': 'input'}, 'skips': {},
+                      'environment': 'env', 'attempts': [], 'failures': []}
+        self.request = {'token': 'original-token', 'source': source, 'gate': 'api', 'checks': ['case']}
+        self.worker = {**self.request, 'cases': {'case': 'PASS'}, 'complete': True,
+                       'cleanup_complete': True, 'reused': False}
+        self.receipt = {**{k: self.request[k] for k in ('token', 'source', 'gate')},
+            'status': 'PASS', 'complete': True, 'executed': True, 'native_exit': 0,
+            'cancelled': False, 'timed_out': False, 'lingering_group': False,
+            'cases': {'case': 'PASS'}, 'command': self.gate['command'],
+            'log': str(self.folder / 'output.log'), 'worker_result': str(self.folder / 'result.json'),
+            'execution_binding': {'input_fingerprint': 'input', 'contract_digest': c.digest(self.gate),
+                                  'environment': 'env'}}
+        c.write(self.folder / 'request.json', self.request)
+        c.write(self.folder / 'result.json', self.worker)
 
-        def local(name, port):
-            worker_root = Path(self.temp.name) / name
-            worker_root.mkdir()
-            return {'name': name, 'category': name, 'checks': [name], 'worker': name + '-local',
-                    'worker_transport': 'local-isolated', 'cwd': str(worker_root), 'worker_root': str(worker_root),
-                    'command': ['must-not-launch'], 'env': {'CONDUCTOR_WORKSPACE_NAME': name,
-                    'CONDUCTOR_PORT': str(port)}}
-        self.cloudbench = local('cloudbench-controller', first)
-        self.other = local('other', second)
-        self.smoke = {'name': 'smoke', 'category': 'smoke', 'checks': ['task-a', 'task-b'], 'worker': 'smoke-cloud',
-                      'worker_transport': 'benchmark-cloud-cli',
-                      'command': ['bash', str(Path(self.temp.name) / 'run-predeploy-cloud')]}
-        self.quick = [{'name': n, 'category': n, 'quick': True, 'command': ['true'], 'checks': [n]}
-                      for n in ('eslint', 'format', 'typescript', 'backend-structural')]
-        self.events, self.lock = [], _threading.Lock()
-        self.started = {name: _threading.Event() for name in ('cloudbench-controller', 'other', 'smoke')}
-        self.verdicts, self.on_start, self.complete = {}, {}, {}
+    def tearDown(self): self.temp.cleanup()
 
-    def tearDown(self):
-        c.CANCEL.clear()
-        self.temp.cleanup()
+    def admit(self, receipt):
+        c.write(self.folder / 'receipt.json', receipt)
+        self.state['attempts'] = [{'phase': 'final', 'source': self.state['source'], 'results': [receipt]}]
+        return c.full_pass_binding(self.state, self.gate)
 
-    def initialize(self, gates):
-        import time
-        self.plan = {'source': c.source(self.root), 'gates': [*self.quick, *gates]}
-        self.state = c.initialize(self.plan, self.root)
-        self.state['phase'] = 'initial'
-        clock = time.monotonic
+    def test_known_native_pass_is_still_admitted(self):
+        self.assertIsNotNone(self.admit(self.receipt))
 
-        def execute(gate, state, directory, root, local_failure=None):
-            name = gate['name']
-            with self.lock:
-                self.events.append(('start', name, clock()))
-            self.started[name].set()
-            self.on_start.get(name, lambda: None)()
-            verdict = self.verdicts.get(name, 'PASS')
-            with self.lock:
-                self.events.append(('end', name, clock()))
-            return {'gate': name, 'status': verdict, 'complete': self.complete.get(name, True), 'executed': True,
-                    'cases': {check: verdict for check in gate['checks']}, 'source': state['source'],
-                    'timed_out': False, 'cancelled': False, 'lingering_group': False}
-        return patch.object(c, 'execute', execute)
+    def test_unknown_lifecycle_is_never_false(self):
+        for field in ('cancelled', 'timed_out', 'lingering_group'):
+            for value in ('MISSING', None, 0, ''):
+                with self.subTest(field=field, value=value):
+                    receipt = copy.deepcopy(self.receipt)
+                    if value == 'MISSING': receipt.pop(field)
+                    else: receipt[field] = value
+                    self.assertIsNone(self.admit(receipt))
 
-    def at(self, kind, name):
-        return next(t for k, n, t in self.events if (k, n) == (kind, name))
+    def test_recovered_type_cannot_borrow_legacy_native_flags_for_pass(self):
+        receipt = {**self.receipt, 'kind': 'recovered-native-execution-v1',
+                   'original_coordinator': {'cancelled': 'UNKNOWN', 'timed_out': 'UNKNOWN'},
+                   'native_evidence': {'cancelled': False, 'timed_out': False}}
+        self.assertIsNone(self.admit(receipt))
 
-    def ran(self):
-        return {n for k, n, _ in self.events if k == 'start'}
 
-    def smoke_receipt(self):
-        return next(r for r in self.state['attempts'][-1]['results'] if r['gate'] == 'smoke')
 
-    def test_smoke_starts_only_after_cloudbench_controller_passes_while_others_run_unordered(self):
-        import time
-        # The prerequisite cannot finish until the unrelated gate started: proof the latter is unordered.
-        self.on_start['cloudbench-controller'] = lambda: (self.assertTrue(self.started['other'].wait(30)),
-                                                           time.sleep(.2))
-        self.on_start['other'] = lambda: self.started['smoke'].wait(.5)
-        with self.initialize([self.cloudbench, self.other, self.smoke]):
-            c.run_phase(self.plan, self.state, self.directory, self.root)
-        self.assertEqual({'cloudbench-controller', 'other', 'smoke'}, self.ran())
-        self.assertGreaterEqual(self.at('start', 'smoke'), self.at('end', 'cloudbench-controller'))
-        self.assertLess(self.at('start', 'other'), self.at('end', 'cloudbench-controller'))
-        self.assertEqual('PASS', self.smoke_receipt()['status'])
-        self.assertTrue(self.state['ready'])
+class PendingSettlementJournalGuard(unittest.TestCase):
+    def test_normal_coordinator_refuses_uncommitted_recovery_journal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            c.write(root/'plan.json',{})
+            c.write(root/'cycle.json',{'phase':'final','ready':False,'source':{},'round':30})
+            c.write(root/'settlement-journal.json',{'kind':'native-settlement-journal-v1'})
+            original=(root/'cycle.json').read_bytes()
+            args=['status','--plan',str(root/'plan.json'),'--state-dir',str(root)]
+            self.assertEqual(c.main(args),2)
+            self.assertEqual((root/'cycle.json').read_bytes(),original)
+            c.write(root/'settlement-committed.json',{'journal_sha256':'wrong'})
+            self.assertEqual(c.main(args),2)
+            self.assertEqual((root/'cycle.json').read_bytes(),original)
+            c.write(root/'settlement-committed.json',{'journal_sha256':c.sha_file(root/'settlement-journal.json')})
+            self.assertEqual(c.main(args),0)
 
-    def held(self):
-        return self.state['attempts'][-1].get('held', [])
+@unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+class LocalCleanupQuietScan(unittest.TestCase):
+    """quiet(root) re-observes an unreadable same-user process instead of raising PermissionError."""
 
-    def test_failed_cloudbench_controller_never_starts_paid_smoke(self):
-        self.verdicts['cloudbench-controller'] = 'FAIL'
-        with self.initialize([self.cloudbench, self.other, self.smoke]):
-            c.run_phase(self.plan, self.state, self.directory, self.root)
-        self.assertEqual({'cloudbench-controller', 'other'}, self.ran())
-        # The controller's own failure blocks the phase: smoke gets no receipt and no failure occurrence.
-        self.assertEqual({'cloudbench-controller', 'other'}, {r['gate'] for r in self.state['attempts'][-1]['results']})
-        self.assertEqual('triage', self.state['phase'])
-        self.assertEqual({'cloudbench-controller/cloudbench-controller'}, {f['check'] for f in self.state['failures']})
-        self.assertEqual(['smoke'], [h['gate'] for h in self.held()])
-        self.assertIn('paid cloud smoke not started', self.held()[0]['reason'])
-        self.assertEqual('cloudbench-controller', self.held()[0]['prerequisite'])
-        self.assertFalse(self.state['ready'])
-
-    def test_interrupt_during_cloudbench_controller_never_starts_paid_smoke(self):
-        self.on_start['cloudbench-controller'] = c.CANCEL.set
-        with self.initialize([self.cloudbench, self.other, self.smoke]):
-            c.run_phase(self.plan, self.state, self.directory, self.root)
-        self.assertNotIn('smoke', self.ran())
-        self.assertEqual('interrupted', self.state['phase'])
-        self.assertIn('the cycle was interrupted', self.held()[0]['reason'])
-
-    def test_unclean_prerequisite_pass_blocks_smoke_and_never_reaches_ready(self):
-        # PASS without a complete receipt is no failed case: without a blocking row the phase would
-        # advance to READY with the paid run never executed. No repair agent is launched for that row.
-        self.complete['cloudbench-controller'] = False
-        launched = []
-        with self.initialize([self.cloudbench, self.other, self.smoke]), \
-             patch.object(c, 'launch_rca', lambda path, launcher: launched.append(path.stem)):
-            c.run_phase(self.plan, self.state, self.directory, self.root, launcher=['must-not-run'])
-        self.assertNotIn('smoke', self.ran())
-        receipt = self.smoke_receipt()
-        self.assertEqual(('FAIL', False, False), (receipt['status'], receipt['executed'], receipt['complete']))
-        self.assertEqual({'task-a': 'UNVERIFIED', 'task-b': 'UNVERIFIED'}, receipt['cases'])
-        self.assertEqual('triage', self.state['phase'])
-        self.assertFalse(self.state['ready'])
-        self.assertEqual([], launched)
-        self.assertIn('not a complete clean pass', self.held()[0]['reason'])
-
-    def test_repair_phase_runs_the_uncredited_prerequisite_first(self):
-        # A repair changed the controller's inputs: only smoke is a repair gate, yet the paid run still
-        # waits for the controller to pass on this source (it is run first, never a stuck "not started").
-        with self.initialize([self.cloudbench, self.other, self.smoke]):
-            self.state.update(phase='failed-gates', repair_gates=['smoke'])
-            c.run_phase(self.plan, self.state, self.directory, self.root)
-        self.assertEqual({'cloudbench-controller', 'smoke'}, self.ran())
-        self.assertGreaterEqual(self.at('start', 'smoke'), self.at('end', 'cloudbench-controller'))
-        self.assertEqual('PASS', self.smoke_receipt()['status'])
-        self.assertEqual([], self.held())
-
-    def test_credited_prerequisite_does_not_run_again(self):
-        real = c.reusable_full_pass
-        credited = lambda state, gate: gate['name'] == 'cloudbench-controller' or real(state, gate)
-        with self.initialize([self.cloudbench, self.other, self.smoke]), patch.object(c, 'reusable_full_pass', credited):
-            self.state.update(phase='failed-gates', repair_gates=['smoke'])
-            c.run_phase(self.plan, self.state, self.directory, self.root)
-        self.assertEqual({'smoke'}, self.ran())
-        self.assertEqual('PASS', self.smoke_receipt()['status'])
-
-    def test_independent_observation_never_pays_for_smoke_while_the_prerequisite_is_pending(self):
-        with self.initialize([self.cloudbench, self.other, self.smoke]):
-            failure = {'id': 'pending-controller', 'check': 'cloudbench-controller/cloudbench-controller',
-                       'gate': 'cloudbench-controller', 'source': self.state['source'], 'phase': 'initial',
-                       'native_result': 'FAIL', 'complete': True}
-            self.state.update(phase='triage', failures=[failure], pending=['pending-controller'], ready=False)
-            c.run_phase(self.plan, self.state, self.directory, self.root, independent=True)
-        self.assertEqual({'other'}, self.ran())  # neither the pending controller nor paid smoke
-        attempt = self.state['attempts'][-1]
-        self.assertTrue(attempt['independent_full'])
-        self.assertEqual(['other'], [r['gate'] for r in attempt['results']])
-        self.assertEqual(['smoke'], [h['gate'] for h in attempt['held']])
-        self.assertIn('pending triage', attempt['held'][0]['reason'])
-        self.assertEqual('triage', self.state['phase'])
-
-    def test_without_cloudbench_controller_smoke_stays_unordered(self):
-        # smoke may start before the other gate finishes: it waits for smoke's start.
-        self.on_start['other'] = lambda: self.assertTrue(self.started['smoke'].wait(30))
-        with self.initialize([self.other, self.smoke]):
-            c.run_phase(self.plan, self.state, self.directory, self.root)
-        self.assertLess(self.at('start', 'smoke'), self.at('end', 'other'))
-        self.assertEqual('PASS', self.smoke_receipt()['status'])
+    def test_unreadable_same_user_process_is_reobserved_then_refused(self):
+        import deploy_test_local_cleanup as local
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / '.context').mkdir()
+            (root / '.context/native-worker-admission.lock').write_text('')
+            # PR_SET_DUMPABLE=4: /proc/<pid> stays ours while cwd turns unreadable, as during a setuid exec.
+            body = ("import ctypes,sys,time;ctypes.CDLL(None).prctl(4,0,0,0,0);print('ready',flush=True);"
+                    "time.sleep(float(sys.argv[1]));ctypes.CDLL(None).prctl(4,1,0,0,0);time.sleep(30)")
+            for hidden, refused in ((0.3, False), (60, True)):
+                child = subprocess.Popen([sys.executable, '-c', body, str(hidden)], stdout=subprocess.PIPE, text=True)
+                try:
+                    self.assertEqual(child.stdout.readline().strip(), 'ready')
+                    if refused:
+                        with self.assertRaisesRegex(ValueError, 'unverifiable'):
+                            local.quiet(root)
+                    else:
+                        local.quiet(root)
+                finally:
+                    child.kill(); child.wait(); child.stdout.close()
 
 
 if __name__ == '__main__': unittest.main()

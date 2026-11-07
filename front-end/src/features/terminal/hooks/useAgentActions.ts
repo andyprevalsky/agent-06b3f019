@@ -4,7 +4,7 @@
  * Handles create, resume, pause, select, feedback, and detail refresh.
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
 
@@ -18,6 +18,7 @@ import {
 } from '../api';
 import type { AgentDetailResponse } from '@/lib/api';
 import type { BlueprintFeedback, TerminalView, CreateAgentPayload, AgentDetail } from '../types';
+import { useAgentPauseRequests } from './useAgentPauseRequests';
 
 interface UseAgentActionsArgs {
   selectedAgentId: string | null;
@@ -29,6 +30,7 @@ interface UseAgentActionsArgs {
   loadAgents: () => Promise<void>;
 }
 
+/** Scope lifecycle actions and accepted pause ownership to each selected agent. */
 export function useAgentActions({
   selectedAgentId,
   agentDetail,
@@ -40,21 +42,38 @@ export function useAgentActions({
 }: UseAgentActionsArgs) {
   const { toast } = useToast();
   const [resumingAgentId, setResumingAgentId] = useState<string | null>(null);
-  const [isPausing, setIsPausing] = useState(false);
+  const {
+    pending,
+    begin: beginPause,
+    accept: acceptPause,
+    clear: clearPause,
+  } = useAgentPauseRequests(agentDetail);
+  const pauseRequest = selectedAgentId ? pending.get(selectedAgentId) : undefined;
+  const isPausing = pauseRequest?.accepted === false;
+  const isPauseRequested = pauseRequest !== undefined;
   const selectedAgentIdRef = useRef(selectedAgentId);
-  selectedAgentIdRef.current = selectedAgentId;
+  useEffect(() => {
+    selectedAgentIdRef.current = selectedAgentId;
+  }, [selectedAgentId]);
 
-  const refreshAgentDetail = useCallback(
+  const refreshAgentDetailAndStatus = useCallback(
     async (agentId: string) => {
       try {
         const data = await fetchAgentDetail(agentId);
         if (selectedAgentIdRef.current !== agentId) return;
-        applyAgentDetail(agentId, data);
+        if (applyAgentDetail(agentId, data)) return data.agent.status;
       } catch (err: unknown) {
         console.error('Failed to refresh agent details:', err);
       }
     },
     [applyAgentDetail],
+  );
+
+  const refreshAgentDetail = useCallback(
+    async (agentId: string) => {
+      await refreshAgentDetailAndStatus(agentId);
+    },
+    [refreshAgentDetailAndStatus],
   );
 
   const handleSelectAgent = useCallback(
@@ -84,6 +103,7 @@ export function useAgentActions({
       try {
         setResumingAgentId(agentId);
         await resumeAgent(agentId);
+        clearPause(agentId);
         if (agentId === selectedAgentId) await refreshAgentDetail(agentId);
         await loadAgents();
         toast({ title: 'Success', description: 'Agent resumed' });
@@ -93,22 +113,34 @@ export function useAgentActions({
         setResumingAgentId(null);
       }
     },
-    [selectedAgentId, refreshAgentDetail, loadAgents, toast],
+    [selectedAgentId, refreshAgentDetail, loadAgents, toast, clearPause],
   );
 
   const handlePauseAgent = useCallback(async () => {
     if (!selectedAgentId || !agentDetail) return;
+    const token = beginPause(selectedAgentId);
+    if (token === null) return;
+    let revision: number | undefined;
     try {
-      setIsPausing(true);
-      await pauseAgent(selectedAgentId);
-      await refreshAgentDetail(selectedAgentId);
-      toast({ title: 'Agent pausing', description: 'The agent will pause shortly' });
+      const response = await pauseAgent(selectedAgentId);
+      revision = response.user_control_revision;
     } catch (_e: unknown) {
+      clearPause(selectedAgentId, token);
       toast({ title: 'Error', description: 'Failed to pause agent', variant: 'destructive' });
-    } finally {
-      setIsPausing(false);
+      return;
     }
-  }, [selectedAgentId, agentDetail, refreshAgentDetail, toast]);
+    acceptPause(selectedAgentId, token, revision);
+    await refreshAgentDetailAndStatus(selectedAgentId);
+    toast({ title: 'Agent pausing', description: 'The agent will pause shortly' });
+  }, [
+    selectedAgentId,
+    agentDetail,
+    beginPause,
+    acceptPause,
+    clearPause,
+    refreshAgentDetailAndStatus,
+    toast,
+  ]);
 
   const handleSubmitFeedback = useCallback(
     async (feedback: BlueprintFeedback) => {
@@ -134,6 +166,7 @@ export function useAgentActions({
   return {
     resumingAgentId,
     isPausing,
+    isPauseRequested,
     refreshAgentDetail,
     handleSelectAgent,
     handleCreateAgent,

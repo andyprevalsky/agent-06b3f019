@@ -33,7 +33,8 @@ let prisma,
   storageWrites = 0,
   inspectMode = 'exact',
   failGoto = true,
-  pendingGoto;
+  pendingGoto,
+  onGotoBlocked;
 const nativeIds = new Set(),
   receipts = [],
   releases = [];
@@ -90,7 +91,10 @@ const browser = (id) => {
           assert.deepEqual(opts, { waitUntil: 'domcontentloaded', timeout: 30000 });
           gotocalls++;
           if (!failGoto || !failGotoBeforeCommit) url = next;
-          if (pendingGoto) await pendingGoto;
+          if (pendingGoto) {
+            onGotoBlocked?.();
+            await pendingGoto;
+          }
           if (failGoto) {
             failGoto = false;
             throw Object.assign(new Error('page.goto: Timeout 30000ms exceeded'), {
@@ -530,30 +534,30 @@ async function run() {
   let release, entered;
   pendingGoto = new Promise((r) => (release = r));
   const enteredPromise = new Promise((r) => (entered = r));
-  const origUpdate = prisma.toolSideEffect.updateMany.bind(prisma.toolSideEffect);
-  prisma.toolSideEffect.updateMany = async (args) => {
-    const result = await origUpdate(args);
-    if (args.data.request?.phase === 'hydrating') entered();
-    return result;
-  };
+  onGotoBlocked = entered;
   const work = resumeBrowserSession(active.id);
-  await enteredPromise;
-  const held = await prisma.toolSideEffect.findUniqueOrThrow({
-    where: { operationKey: key(active.id) },
-  });
-  assert.equal(held.response, null);
-  assert.equal(held.request.phase, 'hydrating');
-  const before = creates; // expiry is fixture setup; active owner still has its original immutable request.
-  await prisma.toolSideEffect.update({
-    where: { id: held.id },
-    data: { request: { ...held.request, expiresAt: new Date(0).toISOString() } },
-  });
-  await assert.rejects(resumeBrowserSession(active.id), /hydration outcome remains unknown/);
-  assert.equal(creates, before);
-  release();
-  pendingGoto = undefined;
-  await work;
-  prisma.toolSideEffect.updateMany = origUpdate;
+  try {
+    // Navigation is suspended only after hydration target provenance commits.
+    // Expiring the earlier phase write races that later provenance write.
+    await enteredPromise;
+    const held = await prisma.toolSideEffect.findUniqueOrThrow({
+      where: { operationKey: key(active.id) },
+    });
+    assert.equal(held.response, null);
+    assert.equal(held.request.phase, 'hydrating');
+    const before = creates; // The active owner retains its original immutable request.
+    await prisma.toolSideEffect.update({
+      where: { id: held.id },
+      data: { request: { ...held.request, expiresAt: new Date(0).toISOString() } },
+    });
+    await assert.rejects(resumeBrowserSession(active.id), /hydration outcome remains unknown/);
+    assert.equal(creates, before);
+  } finally {
+    release();
+    pendingGoto = undefined;
+    onGotoBlocked = undefined;
+    await work;
+  }
   receipts.push({ kind: 'no-ack-inflight', passed: true }); // Carried state is outside the encrypted checkpoint receipt: do not acknowledge it.
   const carried = { cookies: [], origins: [{ origin: 'https://carry.invalid', localStorage: [] }] };
   const carryPending = await fixture();

@@ -1,0 +1,230 @@
+{
+  "runId": "b813984f-3e18-4783-bfeb-dcc6dc1ec17f",
+  "results": [
+    {
+      "test": "paused_state_snapshot",
+      "status": "PASS",
+      "detail": "pause, exact own/tree counters, tool counts, iteration budget, and config preserved"
+    },
+    {
+      "test": "in_progress_tool_terminalized_once",
+      "status": "PASS",
+      "detail": "exactly one deployment error appended"
+    },
+    {
+      "test": "success_before_seal_wins",
+      "status": "PASS",
+      "detail": "verified"
+    },
+    {
+      "test": "late_stale_success_becomes_deployment_error",
+      "status": "PASS",
+      "detail": "verified"
+    },
+    {
+      "test": "approval_wait_closed_for_llm_retry",
+      "status": "PASS",
+      "detail": "verified"
+    },
+    {
+      "test": "late_approval_cannot_overwrite_deployment_terminal",
+      "status": "PASS",
+      "detail": "late approval lost the CAS and neither rewrote nor signaled stale work"
+    },
+    {
+      "test": "descendant_terminated_and_failed",
+      "status": "PASS",
+      "detail": "child execution terminated, row failed, and child tool terminalized once"
+    },
+    {
+      "test": "sql_trigger_rejects_spawn_after_parent_seal",
+      "status": "PASS",
+      "detail": "database trigger fenced an old-backend insert before any Temporal start"
+    },
+    {
+      "test": "pending_start_tombstone_wins_and_is_terminated",
+      "status": "PASS",
+      "detail": "ambiguous no-start ID was claimed on the dormant tombstone queue and terminated"
+    },
+    {
+      "test": "accepted_start_lost_response_is_resolved_and_terminated",
+      "status": "PASS",
+      "detail": "resolved and terminated exact first chain 01a1b558-d832-79c9-be67-f8993425222c"
+    },
+    {
+      "test": "current_parent_is_never_tombstoned",
+      "status": "PASS",
+      "detail": "activation failed closed until the parent generation was sealed"
+    },
+    {
+      "test": "nested_pending_child_and_grandchild_are_quiesced",
+      "status": "PASS",
+      "detail": "recursive drain sealed and terminated both levels"
+    },
+    {
+      "test": "termination_failure_retains_pending_for_retry",
+      "status": "PASS",
+      "detail": "pending exact execution survived the failure and the retry quiesced it"
+    },
+    {
+      "test": "post_termination_db_failure_retries_idempotently",
+      "status": "PASS",
+      "detail": "typed closed-chain retry completed durable reconciliation"
+    },
+    {
+      "test": "active_start_lease_blocks_activation_until_released",
+      "status": "PASS",
+      "detail": "activation remained closed while the exact start lease was active"
+    },
+    {
+      "test": "accepted_child_completed_before_postvalidation",
+      "status": "PASS",
+      "detail": "terminal COMPLETED state won and the accepted exact chain was quiesced"
+    },
+    {
+      "test": "accepted_child_failed_before_postvalidation",
+      "status": "PASS",
+      "detail": "terminal FAILED state won and the accepted exact chain was quiesced"
+    },
+    {
+      "test": "concurrent_duplicate_descendant_finalization_is_idempotent",
+      "status": "PASS",
+      "detail": "both finalizers converged on one terminated chain and one terminal tool result"
+    },
+    {
+      "test": "pause_after_fetch_before_atomic_finalize_wins",
+      "status": "PASS",
+      "detail": "pause committed after fetch was preserved by the generation-lock finalizer"
+    },
+    {
+      "test": "resume_during_replacement_claim_wins",
+      "status": "PASS",
+      "detail": "resume intent updated both DB control state and the generation-fenced snapshot"
+    },
+    {
+      "test": "credit_restoration_during_replacement_claim_wins",
+      "status": "PASS",
+      "detail": "verified credits persisted ACTIVE in the claim without signaling stale or unstarted work"
+    },
+    {
+      "test": "cost_limit_raise_during_replacement_claim_wins",
+      "status": "PASS",
+      "detail": "new limit and ACTIVE state beat the stale cost-limited bootstrap snapshot"
+    },
+    {
+      "test": "legacy_usage_restores_exact_durable_billed_ledger",
+      "status": "PASS",
+      "detail": "legacy retry rows were restored exactly as the durable billing ledger records them"
+    },
+    {
+      "test": "concurrent_keyed_accounting_checkpoint_is_exact_once",
+      "status": "PASS",
+      "detail": "concurrent retry produced one row and restored the cumulative checkpoint exactly"
+    },
+    {
+      "test": "provider_attempt_retries_do_not_inflate_iteration_offset",
+      "status": "PASS",
+      "detail": "two activity attempts produced one ledger row and one logical iteration checkpoint"
+    },
+    {
+      "test": "terminal_db_live_temporal_root_is_cleaned_exactly_once",
+      "status": "PASS",
+      "detail": "terminal status preserved, exact chain stopped, tool closed once, rerun was a no-op"
+    },
+    {
+      "test": "soft_deleted_live_temporal_workflow_is_not_invisible",
+      "status": "PASS",
+      "detail": "soft deletion retained the exact cleanup obligation through termination"
+    },
+    {
+      "test": "terminal_db_live_temporal_descendant_is_cleaned_exactly_once",
+      "status": "PASS",
+      "detail": "terminal descendant exact chain stopped once without mutating terminal state"
+    },
+    {
+      "test": "rapid_terminal_generations_each_keep_exact_cleanup_obligation",
+      "status": "PASS",
+      "detail": "both exact generations survived rapid reactivation and were independently terminated"
+    },
+    {
+      "test": "candidate_bootstrap_durable_ready",
+      "status": "PASS",
+      "detail": "restored counters, duration origin, controls, and stale running-tool UI"
+    },
+    {
+      "test": "cold_workflow_uses_no_resources_while_waiting",
+      "status": "PASS",
+      "detail": "17 total history events; handoff timer armed; zero growth inside poll window"
+    },
+    {
+      "test": "fresh_history_has_no_patch_or_nondeterminism",
+      "status": "PASS",
+      "detail": "verified"
+    },
+    {
+      "test": "failed_candidate_next_deploy_rotates_generation",
+      "status": "PASS",
+      "detail": "candidate A terminated; candidate B minted clean and restored the original durable snapshot"
+    },
+    {
+      "test": "late_stale_replacement_start_is_compensated",
+      "status": "PASS",
+      "detail": "late candidate A start was rejected, terminated, reconciled, and could not displace candidate B"
+    },
+    {
+      "test": "cost_limit_reached_preserved",
+      "status": "PASS",
+      "detail": "COST_LIMIT_REACHED restored cold; handoff timer armed; zero growth inside poll window"
+    },
+    {
+      "test": "out_of_credits_preserved",
+      "status": "PASS",
+      "detail": "OUT_OF_CREDITS restored cold; handoff timer armed; zero growth inside poll window"
+    },
+    {
+      "test": "pause_race_after_active_snapshot_wins",
+      "status": "PASS",
+      "detail": "verified"
+    },
+    {
+      "test": "malformed_root_preflight_leaves_healthy_peer_untouched",
+      "status": "PASS",
+      "detail": "healthy peer retained exact DB state, messages, and RUNNING Temporal chain"
+    },
+    {
+      "test": "http_single_lost_201_retry_reuses_exact_child",
+      "status": "PASS",
+      "detail": "discarded 201 retry returned one DB row and the same exact Temporal chain"
+    },
+    {
+      "test": "http_batch_changed_payload_is_rejected",
+      "status": "PASS",
+      "detail": "stable child ID rejected drift instead of binding new inputs to old history"
+    },
+    {
+      "test": "http_batch_mixed_retry_reconciles_each_child_once",
+      "status": "PASS",
+      "detail": "pending, settled, and fresh children converged without duplicate rows or histories"
+    },
+    {
+      "test": "known_massive_zombie_generations_are_not_running",
+      "status": "PASS",
+      "detail": "zero RUNNING executions for 89eb7d14, 2d546011, da7a7da9; owners=[{\"id\":\"da7a7da9-ea1a-4e48-b7d2-567cd5b6f6f5\",\"userId\":\"1f85ff25-6e29-4c1b-8739-f917bd101a30\",\"goal\":\"Complete this exact task end-to-end: The user authorized downloading YouTube URL https://www.youtube.com/watch?v=JVm7ij7WcCU. Download it as a local MP4 using permitted tools/services. Obtain exact title from video metadata. Run ffprobe on final MP4 and verify nonzero file size, MP4 container, duration, and both video and audio streams. Return final downloadable MP4 as a file_pointer, exact title, and concise ffprobe verification. Do not ask questions or stop without actual artifact.\",\"status\":\"COST_LIMIT_REACHED\",\"temporalWorkflowId\":\"da7a7da9-ea1a-4e48-b7d2-567cd5b6f6f5\"},{\"id\":\"2d546011-0875-47a8-867f-e90555500436\",\"userId\":\"1f85ff25-6e29-4c1b-8739-f917bd101a30\",\"goal\":\"Execute this narrow task end-to-end: Download the user-authorized YouTube URL https://www.youtube.com/watch?v=JVm7ij7WcCU as a local MP4 via permitted download tools/services. Obtain exact title from metadata. Run ffprobe to verify nonzero file size, container and playable video/audio streams, including duration. Attach/export the final MP4 as a file_pointer in your structured result. Do not ask questions. Return only when all artifacts are real and accessible.\",\"status\":\"COST_LIMIT_REACHED\",\"temporalWorkflowId\":\"2d546011-0875-47a8-867f-e90555500436\"},{\"id\":\"89eb7d14-aa2b-415a-baa7-3df1d2b19d5c\",\"userId\":\"1f85ff25-6e29-4c1b-8739-f917bd101a30\",\"goal\":\"Download the YouTube video https://www.youtube.com/watch?v=JVm7ij7WcCU as an MP4 video file using permitted tools/services. Verify it is nonempty and playable (e.g. ffprobe). Return the downloaded file as a file_pointer and the exact source video title. This is user-authorized download of a URL they supplied.\",\"status\":\"COST_LIMIT_REACHED\",\"temporalWorkflowId\":\"89eb7d14-aa2b-415a-baa7-3df1d2b19d5c\"}]"
+    },
+    {
+      "test": "production_fleet_has_no_stuck_cutover_state",
+      "status": "PASS",
+      "detail": "zero due-and-unleased cleanup obligations or cutover states stalled for 10+ minutes"
+    },
+    {
+      "test": "same_sha_old_marker_is_retired_without_retiring_current_attempt",
+      "status": "PASS",
+      "detail": "same-SHA old attempt marker retired while exact current deployment stayed active"
+    },
+    {
+      "test": "fixture_cleanup",
+      "status": "PASS",
+      "detail": "all synthetic DB rows and Temporal execution IDs were removed or closed"
+    }
+  ]
+}

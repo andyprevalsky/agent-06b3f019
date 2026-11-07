@@ -8,11 +8,6 @@ import re
 import time
 
 KIND = 'local-supervisor-cleanup-v1'
-# Concurrent deploy suites create and kill same-user process trees while this proof runs, so a process can stay
-# unreadable for seconds rather than the milliseconds of a lone exit (docs/rca/cases/2026-11-07-local-cleanup-quiet-
-# unguarded-proc-read.md). Reconciliation is launch-only and a healthy scan never waits: a longer bound costs
-# nothing unless a process is still unreadable, and one that stays unreadable and alive is refused, not assumed quiet.
-OBSERVATION_SECONDS = 10.0
 FILES = ('request.json', 'result.json', 'receipt.json', 'output.log.process.json')
 CARD_FILES = ('request.json', 'result.json', 'receipt.json', 'case.log', 'native-result.json',
               'local-benchmark-owner.json', 'local-stack-owner.json', 'local-stack-cleanup.status', 'services.json')
@@ -156,32 +151,17 @@ def quiet(root):
         # The supervisor owns processes under the invoking uid, including
         # double-forked descendants. A later process in this root also refuses
         # reconciliation; never signal it or infer ownership from recycled pids.
-        # An unreadable same-user process is re-observed, never assumed quiet or leaking.
-        from deploy_test_interrupted_cleanup import observe_same_user_processes
-        prefix = os.fsencode(str(root) + '/')
+        from deploy_test_process import scan_same_user_processes
 
         def inspect(process):
-            # Argv is always readable: a process that names the root is refused even while its cwd is unreadable.
-            args = (process / 'cmdline').read_bytes().split(b'\0')
-            need(not any(arg == os.fsencode(root) or arg.startswith(prefix) for arg in args),
-                 'worker root still has a live process')
             cwd = (process / 'cwd').resolve(strict=True)
-            need(cwd != root and root not in cwd.parents, 'worker root still has a live process')
-
-        def unverifiable(process):
-            need(False, f'worker root process {process.name} is unverifiable ({identity(process)})')
-
-        observe_same_user_processes(inspect, unverifiable, OBSERVATION_SECONDS)
-
-
-def identity(process):
-    """What /proc/<pid>/stat (readable for every process) says about a process the scan could not verify."""
-    try:
-        raw = (process / 'stat').read_text()
-        state, parent = raw[raw.rindex(')') + 2:].split()[:2]
-        return f'{raw[raw.index("(") + 1:raw.rindex(")")]}, state {state}, parent {parent}'
-    except (OSError, ValueError):
-        return 'identity unreadable'
+            args = (process / 'cmdline').read_bytes().split(b'\0')
+            prefix = os.fsencode(str(root) + '/')
+            need(cwd != root and root not in cwd.parents
+                 and not any(arg == os.fsencode(root) or arg.startswith(prefix) for arg in args),
+                 'worker root still has a live process')
+        # An exited process is skipped (never signalled); an unreadable same-user one refuses.
+        scan_same_user_processes(inspect, lambda pid: need(False, f'worker root process {pid} is unverifiable'))
 
 
 def structural_cleanup(state, receipt, proof):
