@@ -1393,12 +1393,16 @@ def rca_requests(state: dict, directory: Path) -> list[Path]:
     return paths
 
 
-def early_check(gate: dict, row: dict) -> str:
-    """The gate check a progress row belongs to, so its early occurrence and the final failure match."""
+def early_check(gate: dict, row: dict) -> str | None:
+    """The gate check a progress row belongs to, so its early occurrence and the final failure match.
+
+    None for a row naming no check of this gate: an early occurrence exists only for a check the
+    final result can fail, so early RCAs are always a subset of the end-of-gate ones, never extra.
+    """
     for candidate in (row["unit"], "blackbox:" + row["unit"], row.get("case") or ""):
         if candidate in gate["checks"]:
             return candidate
-    return row.get("case") or row["unit"]
+    return gate["checks"][0] if len(gate["checks"]) == 1 else None
 
 
 def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path) -> list[tuple[dict, Path, dict]]:
@@ -1411,7 +1415,10 @@ def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path) -
     seen = {(f["gate"], f["check"]) for f in state.get("early_failures", []) if f.get("round") == state["round"]}
     opened = []
     for row in progress.failures(rows):
-        check = gate["name"] + "/" + early_check(gate, row)
+        mapped = early_check(gate, row)
+        if mapped is None:
+            continue
+        check = gate["name"] + "/" + mapped
         if (gate["name"], check) in seen:
             continue
         seen.add((gate["name"], check))
@@ -1579,6 +1586,20 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
 
             offsets = {}
+            early_launches = {}
+
+            def confirm_early_launches(final=False):
+                # The cycle's own launch is reported only once its receipt exists (or it failed).
+                for future in [f for f in early_launches if final or f.done()]:
+                    occurrence, path = early_launches.pop(future)
+                    try:
+                        future.result()
+                    except (ValueError, OSError, subprocess.SubprocessError) as error:
+                        print(f"DEPLOY_GATE_EARLY_RCA id={occurrence} launched=no "
+                              f"error={type(error).__name__}: {str(error)[:200]}", flush=True)
+                    else:
+                        print(f"DEPLOY_GATE_EARLY_RCA id={occurrence} launched=yes "
+                              f"receipt={path.with_suffix('.launch.json')}", flush=True)
 
             def scan(running):
                 # A still-running gate's first failing test opens its occurrence and RCA now.
@@ -1590,11 +1611,13 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                     if opened:
                         write(directory / "cycle.json", state)
                     for occurrence, path, row in opened:
-                        dispatch = bool(launcher) and not CANCEL.is_set()
-                        print(progress.describe(gate["name"], row, check=occurrence["check"], request=str(path),
-                                                launched=dispatch), flush=True)
-                        if dispatch:
-                            launched.append(rc_pool.submit(launch_rca, path, launcher))
+                        print(progress.describe(gate["name"], row, check=occurrence["check"],
+                                                occurrence=occurrence["id"], request=str(path)), flush=True)
+                        if launcher and not CANCEL.is_set():
+                            job = rc_pool.submit(launch_rca, path, launcher)
+                            launched.append(job)
+                            early_launches[job] = (occurrence["id"], path)
+                confirm_early_launches()
 
             futures = {submit(gate): gate for gate in selected if gate is not held}
             pending = set(futures)
@@ -1626,6 +1649,7 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                         reason = cloud_smoke_held(held, 'its receipt was not a complete clean pass')
                         held_rows.append(reason)
                         record(cloud_smoke_blocked(held, state, reason))
+        confirm_early_launches(final=True)
         failures = state.pop("live_failures")
         if independent:
             changed = (source(root) != state['source'] or environment_digest() != state['environment']

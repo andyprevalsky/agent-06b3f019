@@ -15,6 +15,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
+import deploy_gate_progress as progress
 
 class Cycle(unittest.TestCase):
     def test_native_cloud_rejects_unsupported_host_before_coordinator_admission(self):
@@ -3176,7 +3177,7 @@ assert len(list(p.iterdir()))==2
         self.assertEqual('PASS',next(r['status'] for r in rows if r['gate']=='ui'))
         self.assertEqual(2,len(list((self.directory/'rca').glob('*.launch.json'))))
 
-    def early_failure_fixture(self, final_case_a):
+    def early_failure_fixture(self, final_case_a, launcher_exit=0):
         """api reports test a FAIL while running, then blocks until /RCA has started (or 5 s)."""
         import contextlib, io
         signal_file = self.root / '.context' / 'rca-started'
@@ -3191,8 +3192,9 @@ assert len(list(p.iterdir()))==2
                 "sys.exit(0 if %r=='PASS' else 1)") % (str(Path(c.__file__).resolve().parent), str(signal_file),
                                                        final_case_a, final_case_a)
         self.plan['gates'][1].update(command=[sys.executable, '-c', gate], case_protocol=True)
-        launcher = [sys.executable, '-c', "import pathlib,json; pathlib.Path(%r).touch(); "
-                    "print(json.dumps({'ok':True,'status':'delivered'}))" % str(signal_file)]
+        launcher = [sys.executable, '-c', "import pathlib,json,sys; sys.exit(%d) if %d else None; "
+                    "pathlib.Path(%r).touch(); print(json.dumps({'ok':True,'status':'delivered'}))"
+                    % (launcher_exit, launcher_exit, str(signal_file))]
         self.state = c.initialize(self.plan, self.root); self.state['phase'] = 'initial'
         out = io.StringIO()
         with patch.object(c, 'EARLY_POLL_SECONDS', 0.05, create=True), contextlib.redirect_stdout(out):
@@ -3207,8 +3209,11 @@ assert len(list(p.iterdir()))==2
         early = self.state['early_failures']
         request = self.directory / 'rca' / (early[0]['id'] + '.json')
         self.assertEqual('DEPLOY_GATE_EARLY_FAILURE gate=api test=a status=FAIL check=api/a '
-                         f'rca={request} launched=yes', notices[0])
+                         f"id={early[0]['id']} rca={request}", notices[0])
         self.assertTrue(request.is_file())
+        receipt = request.with_suffix('.launch.json')
+        self.assertIn(f"DEPLOY_GATE_EARLY_RCA id={early[0]['id']} launched=yes receipt={receipt}", printed)
+        self.assertTrue(receipt.is_file())  # confirmed only once the launch receipt exists
         worker = json.loads((self.directory / 'attempts' / '1' / 'initial' / 'api' / 'result.json').read_text())
         self.assertTrue(worker['rca_started_before_exit'], 'RCA must start while the gate is still running')
         self.assertEqual([('api/a', 'reused by final FAIL')], [(f['check'], f['settled']) for f in early])
@@ -3216,6 +3221,23 @@ assert len(list(p.iterdir()))==2
         self.assertEqual(early[0]['id'], failure['id'])  # the final failure keeps the early occurrence
         self.assertEqual(1, len(list((self.directory / 'rca').glob('*.launch.json'))))  # one RCA, not two
         self.assertEqual('triage', self.state['phase'])
+
+    def test_a_failed_early_rca_launch_is_reported_not_claimed(self):
+        printed, _api, _ = self.early_failure_fixture('FAIL', launcher_exit=3)
+        occurrence = self.state['early_failures'][0]['id']
+        self.assertIn(f'DEPLOY_GATE_EARLY_RCA id={occurrence} launched=no error=CalledProcessError', printed)
+        self.assertNotIn('launched=yes', printed)
+
+    def test_a_progress_row_naming_no_gate_check_opens_nothing(self):
+        gate = {'name': 'api', 'checks': ['a', 'b']}
+        self.state['round'] = 1
+        row = progress.row('zzz', 'FAIL', case='zzz')
+        self.assertEqual([], c.early_failures(self.state, gate, [row], self.directory))
+        self.assertNotIn('early_failures', self.state)
+        single = {'name': 'ui', 'checks': ['c']}
+        [(occurrence, path, _row)] = c.early_failures(self.state, single, [row], self.directory)
+        self.assertEqual('ui/c', occurrence['check'])  # a single-check gate owns every row
+        self.assertTrue(path.is_file())
 
     def test_early_failure_whose_gate_then_passes_is_superseded_not_a_failure(self):
         printed, api, _ = self.early_failure_fixture('PASS')

@@ -74,9 +74,9 @@ class ProgressTest(unittest.TestCase):
         line = progress.describe('g', progress.row('t1', 'FAIL', case='suite-a'))
         self.assertEqual(line, 'DEPLOY_GATE_EARLY_FAILURE gate=g test=suite-a :: t1 status=FAIL')
         line = progress.describe('g', progress.row('t1', 'UNVERIFIED', case='suite-a'), check='g/suite-a',
-                                 request='/r/1.json', launched=False)
+                                 occurrence='abc', request='/r/abc.json')
         self.assertEqual(line, 'DEPLOY_GATE_EARLY_FAILURE gate=g test=suite-a :: t1 status=UNVERIFIED '
-                               'check=g/suite-a rca=/r/1.json launched=no')
+                               'check=g/suite-a id=abc rca=/r/abc.json')
 
 
 if __name__ == '__main__':

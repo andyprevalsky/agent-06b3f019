@@ -102,8 +102,8 @@ def failures(rows: list[dict]) -> list[dict]:
     return [r for r in rows if r['status'] != 'PASS']
 
 
-def describe(gate: str, failure: dict, *, check: str | None = None, request: str | None = None,
-             launched: bool | None = None) -> str:
+def describe(gate: str, failure: dict, *, check: str | None = None, occurrence: str | None = None,
+             request: str | None = None) -> str:
     """The one-line notice the cycle prints once per opened early occurrence (one per failing check)."""
     unit = failure['unit']
     case = failure.get('case') or ''
@@ -112,10 +112,10 @@ def describe(gate: str, failure: dict, *, check: str | None = None, request: str
     line = f"DEPLOY_GATE_EARLY_FAILURE gate={gate} {failure['scope']}={where} status={failure['status']}"
     if check is not None:
         line += f' check={check}'
+    if occurrence is not None:
+        line += f' id={occurrence}'
     if request is not None:
         line += f' rca={request}'
-    if launched is not None:
-        line += f" launched={'yes' if launched else 'no'}"
     return line
 
 
