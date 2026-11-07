@@ -2,11 +2,16 @@
 """Native-process contract for the multi-workstream fixture's actual allocator."""
 import fcntl
 import hashlib
+import json
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import socket
 import subprocess
 import tempfile
+import sys
+import time
+import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh').read_text()
@@ -16,6 +21,18 @@ ALLOCATOR = SOURCE[START:END]
 PROBE_START = SOURCE.index('test_tcp_listener_absent() {')
 PROBE_END = SOURCE.index('\n}\n', PROBE_START) + 3
 PROBE = SOURCE[PROBE_START:PROBE_END]
+OWNED_CHILDREN = []
+
+
+def supervised_process(command, env, temporary):
+    owner = Path(temporary) / ('allocator-' + uuid.uuid4().hex + '.json')
+    child = subprocess.Popen(
+        [sys.executable, str(ROOT / 'scripts/cloudbench-local-supervisor.py'),
+         '--receipt', str(owner), '--', *command],
+        env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    child.owner_receipt = owner
+    OWNED_CHILDREN.append(child)
+    return child
 
 
 def launch(tmp, fixture, policy=None, claim_root=None):
@@ -42,26 +59,70 @@ read -r release
 rm -f "$PORT_CLAIM_DIR/owner"
 '''
     env = dict(os.environ, ROOT=str(ROOT), TMPDIR=str(tmp), TMP_ROOT=str(fixture), TEST_POLICY=policy or '')
-    child = subprocess.Popen(['bash', '-c', script], env=env, stdin=subprocess.PIPE,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    return child
+    return supervised_process(['bash', '-c', script], env, tmp)
 
 
 def receipt(child):
     # Bound native children; no open-ended waits, including a broken allocator.
     import select
-    assert select.select([child.stdout], [], [], 10)[0], 'allocator did not publish within 10 seconds'
-    line = child.stdout.readline().strip()
-    assert line, child.stderr.read()
+    deadline = time.monotonic() + 10
+    data = bytearray()
+    while b'\n' not in data:
+        remaining = max(0, deadline - time.monotonic())
+        assert select.select([child.stdout], [], [], remaining)[0], 'allocator did not publish within 10 seconds'
+        chunk = os.read(child.stdout.fileno(), 4096)
+        assert chunk, 'allocator exited without publishing a lease'
+        data.extend(chunk)
+    line = data.split(b'\n', 1)[0].decode().strip()
+    assert line, 'allocator exited without publishing a lease'
     a, b, claim = line.split(':')
     return int(a), int(b), claim
 
 
 def retire(child):
-    if child.poll() is None:
-        child.communicate('release\n', timeout=10)
-    else:
+    timed_out = False
+    try:
+        # EOF releases the fixture read loop and is safe even when a prior
+        # communicate call already started before timing out.
         child.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        # Signal only our subreaper. Its existing bounded drain owns every
+        # descendant, including processes that created another session.
+        child.terminate()
+        child.communicate(timeout=10)
+    result = json.loads(child.owner_receipt.read_text())
+    assert result['quiescent'] and not result['remaining'] and result['error'] is None, result
+    if timed_out:
+        raise AssertionError('allocator retirement timed out; exact owned tree was drained')
+
+
+def retire_all(children):
+    primary = sys.exc_info()[1]
+    failures = []
+    for child in children:
+        try:
+            retire(child)
+        except BaseException as error:
+            failures.append(error)
+    if failures:
+        details = 'allocator retire failures: ' + '; '.join(str(error) for error in failures)
+        if primary is not None:
+            primary.add_note(details)
+        else:
+            raise AssertionError(details) from failures[0]
+
+
+@contextmanager
+def owned_temporary_directory():
+    with tempfile.TemporaryDirectory(prefix='cloudbench-port-contract-') as directory:
+        try:
+            yield directory
+        finally:
+            try:
+                retire_all(OWNED_CHILDREN)
+            finally:
+                OWNED_CHILDREN.clear()
 
 
 def paired_roots(root):
@@ -83,7 +144,7 @@ def paired_roots(root):
 def main():
     children = []
     sockets = []
-    with tempfile.TemporaryDirectory(prefix='cloudbench-port-contract-') as directory:
+    with owned_temporary_directory() as directory:
         root = Path(directory)
         try:
             roots = paired_roots(root)
@@ -108,8 +169,7 @@ def main():
         finally:
             for listener in sockets:
                 listener.close()
-            for child in children:
-                retire(child)
+            retire_all(children)
         # A terminated native owner cannot strand a lease or require PID-based
         # deletion of a lock inode. Reuse is safe once its descriptor is closed.
         private_claims = root / 'retirement-claims'
