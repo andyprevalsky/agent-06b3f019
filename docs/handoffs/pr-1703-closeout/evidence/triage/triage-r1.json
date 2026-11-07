@@ -1,0 +1,276 @@
+{
+ "failures": [
+  {
+   "id": "871de1f24d9847a494182cf15878c13d",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/structural/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/structural",
+    "--stdio"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "deploy structural gates failed: main-introduced Blacksmith checks + fan-out timing cases",
+   "evidence": "Native exit 1 in run-deploy-structural-gates.py on 584cf4076: prebuild-agents-image 'mutable action reference: useblacksmith/checkout@v1' and deploy-pipeline 'semantic: exactly one checkout, found 0' come from PR #1701 (055b81a07, Blacksmith workflow migration on main) and are fixed on main by 8116062bc (prebuild-agents-image test PASS on origin/main 8116062bc in /var/tmp/webdecoy-rca/main-wt); deploy-test-worker Boxes/GenericLifecycle deadline cases failed under 11-gate fan-out (load 23-25). This diff touches no .github, scripts/ or deploy tooling. Worker log /var/tmp/deploy-workers/structural/.context/deploy-worker/723f69019dda4e676eae17b2fd69459095867f3bce010fe5ed219ea03d1a0519/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "Native exit 1 in run-deploy-structural-gates.py on 584cf4076: prebuild-agents-image 'mutable action reference: useblacksmith/checkout@v1' and deploy-pipeline 'semantic: exactly one checkout, found 0' come from PR #1701 (055b81a07, Blacksmith workflow migration on main) and are fixed on main by 8116062bc (prebuild-agents-image test PASS on origin/main 8116062bc in /var/tmp/webdecoy-rca/main-wt); deploy-test-worker Boxes/GenericLifecycle deadline cases failed under 11-gate fan-out (load 23-25). This diff touches no .github, scripts/ or deploy tooling. Worker log /var/tmp/deploy-workers/structural/.context/deploy-worker/723f69019dda4e676eae17b2fd69459095867f3bce010fe5ed219ea03d1a0519/144064eb01cf8837a141291439ac9cc208cc6763a9f025bf72c7056614840f20.log"
+  },
+  {
+   "id": "78f8e482dc10400c8a86a7a9d9171ec2",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task test-mass-agent-run-0 not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "a22aec8f013048b3b3fa976fb44789ab",
+   "check": "smoke/chat-mode",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task chat-mode not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "38078db7c8c348978bb204220d80784b",
+   "check": "smoke/spawn-sub-agents",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task spawn-sub-agents not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "e0cab36dbaa4417ebf259185d091aa01",
+   "check": "smoke/parallel-tool-calls",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task parallel-tool-calls not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "df634683f3d840bcb947aa8e60f851ad",
+   "check": "smoke/background-agent-message-smoke",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task background-agent-message-smoke not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "690c7a0456a44e35b0b1cb9df550151f",
+   "check": "smoke/claude-code-agent",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task claude-code-agent not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "1aad7df77b28431d8f71cc7edcbbeba6",
+   "check": "smoke/browser-smoke",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task browser-smoke not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "f50d2ad113f8431a884662b02172ae02",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task browser-biometrics-webdecoy not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Assigned test of this repair goal; must pass on the final source",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "b311ac18644e4d1a9c852d3e82ce7d68",
+   "check": "smoke/agent-payment-new-user-journey",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task agent-payment-new-user-journey not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "7c0a4fcfa7424d00b70c400fabfb08a0",
+   "check": "smoke/browser-auth-saved-password-retry",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task browser-auth-saved-password-retry not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "9c4d4ed950b5484886acba7592ed982b",
+   "check": "smoke/browser-auth-account-locked",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task browser-auth-account-locked not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "c5e3fcd4520e4375b228a2dceb849a19",
+   "check": "smoke/browser-auth-email-otp",
+   "command": [
+    "/usr/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke task browser-auth-email-otp not executed: Fly shared-CPU capacity admission refused",
+   "evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "No benchmark executed: every campaign member was refused by cloud capacity admission ('Shared-CPU capacity governor reached: 156 active shared units ... > ceiling 140'; 'capacity admission remained blocked for 300s') because other workstreams held 31 shared-4 Machines in the org. Log /home/boxes/rose/.context/deploy-cloud/b7bf68804fea4aa6566869b06f6bbbaec46881bbcc4340a5ee011742b284cca1/cli.log"
+  },
+  {
+   "id": "78d4a261c77a44528f757270f0c616e1",
+   "check": "agents-coverage-blackbox/agents-coverage-blackbox",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/deploy-workers/agents-coverage/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/deploy-workers/agents-coverage",
+    "--stdio"
+   ],
+   "source": {
+    "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+    "digest": "d041c1e66b0a63af8688b4ceefd1ab421553a601d2b8d130d76f3d35c08bd463"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "agents coverage: two load-sensitive suites failed under 11-gate fan-out",
+   "evidence": "Native exit 1 at load ~25: code-session-direct-chat (codex app-server.test.mjs startup wait) and browser-tilion classifier_reads_bounded_on_busy_renderer (IndexError contexts[0].pages[0]). Both suites PASS on origin/main 8116062bc (/var/tmp/webdecoy-rca/main-agents2.log, 17 passed + PASS) and PASS on this branch 584cf4076 (/var/tmp/webdecoy-rca/branch-agents2.log) at low load; neither suite exercises the changed hover/drag/description code.",
+   "assigned_repair": true,
+   "assigned_reason": "Deploy owner keeps this repair: rerun on the synced source (main fix 8116062bc) and at final sweep; no waiver",
+   "assigned_evidence": "Native exit 1 at load ~25: code-session-direct-chat (codex app-server.test.mjs startup wait) and browser-tilion classifier_reads_bounded_on_busy_renderer (IndexError contexts[0].pages[0]). Both suites PASS on origin/main 8116062bc (/var/tmp/webdecoy-rca/main-agents2.log, 17 passed + PASS) and PASS on this branch 584cf4076 (/var/tmp/webdecoy-rca/branch-agents2.log) at low load; neither suite exercises the changed hover/drag/description code."
+  }
+ ]
+}

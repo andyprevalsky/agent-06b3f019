@@ -1,0 +1,16 @@
+{
+ "key_id": "trace-archive-prod-2026-07-03",
+ "restored_at": "2026-11-07T03:53:07Z",
+ "archives": {
+  "legacy": {
+   "key": "devbox-closeout-private/pr1711-d9a15448/20261107T035157Z-legacy.tar.gz.aesgcm",
+   "members_hash_verified": 3,
+   "expected": 3
+  },
+  "delta": {
+   "key": "devbox-closeout-private/pr1711-d9a15448/20261107T035022Z-delta.tar.gz.aesgcm",
+   "members_hash_verified": 247,
+   "expected": 247
+  }
+ }
+}

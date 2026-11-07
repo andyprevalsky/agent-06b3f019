@@ -1,7 +1,7 @@
 import type { EmailProvider, Prisma } from '@prisma/client';
 
 // Re-export Prisma types for other layers (keeps @prisma/client out of service files)
-export { IntegrationType, IntegrationStatus, EmailProvider } from '@prisma/client';
+export { IntegrationType, IntegrationStatus, EmailProvider, MessageChannel } from '@prisma/client';
 export type { Prisma } from '@prisma/client';
 
 /** Minimal response interface so service files don't depend on Express. */

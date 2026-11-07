@@ -49,12 +49,9 @@ async function acceptMessagingUpload(
 
   const existing = await repo.findIntegrationByUserAndName(userId, platform);
   const existingConfig = (existing?.config as Prisma.JsonObject | null) ?? {};
-  const config = {
-    ...existingConfig,
-    contacts: contacts.length,
-    messages: totalMessages,
-    uploadedAt: new Date().toISOString(),
-  };
+  // The stored totals (contacts/messages) are recounted when the sync
+  // finalizes; this upload's size is only a delta of the user's history.
+  const config = { ...existingConfig, uploadedAt: new Date().toISOString() };
   // The parts are written before the integration is marked SYNCING. A drain
   // finalizing in between must not see SYNCING without them, or it would mark
   // the sync CONNECTED from the earlier parts and never revisit the final one.

@@ -1,0 +1,8 @@
+[36m[2026-11-06T15:16:40.080Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=ToolSideEffect operation=findUnique duration_ms=708 status=ok[0m
+[36m[2026-11-06T15:16:40.381Z] INFO [Prisma] db.query span_name=db.query parent_span_id=undefined request_id=undefined agent_id=undefined model=AgentQueuePointer operation=findUnique duration_ms=299 status=ok[0m
+Cooperative cutover phase: managed_deployment_pending
+  live pointer: hash=a85f3c9e6fbc queue=navi-agent-tasks-pool-31f329790ca3@a85f3c9e6fbc
+  expected:     hash=a85f3c9e6fbc queue=navi-agent-tasks-pool-31f329790ca3@a85f3c9e6fbc
+  old queue:    navi-agent-tasks-pool-648c5ce9fa7d@f8c85da67cfd open=?
+  → Durable job 39e1d2df83d3be9b74681f789c9932eae7117319a5ae85774d8ca886ddd36839: DRAINING (Error: Owned deployment child exited 1).
+  → A managed predecessor requires its durable qualified retirement certificate.

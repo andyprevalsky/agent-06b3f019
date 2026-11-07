@@ -28,7 +28,12 @@ from temporalio import activity
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
-from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH, PARALLEL_EXTRACT_COST_CENTS
+from domains.web_fetch.config import (
+    FIRECRAWL_COST_CENTS,
+    MAX_MARKDOWN_LENGTH,
+    PARALLEL_EXTRACT_COST_CENTS,
+    WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS,
+)
 from domains.web_fetch.service import (
     WebFetchProvidersFailed,
     assert_fetchable_url,
@@ -170,7 +175,7 @@ class WebFetchManager(ToolManager):
             scrape_result = await execute_activity(
                 web_fetch_activity,
                 args=scrape_args,
-                start_to_close_timeout=timedelta(seconds=180),
+                start_to_close_timeout=timedelta(seconds=WEB_FETCH_SCRAPE_ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(
                     maximum_attempts=2,
                     backoff_coefficient=2.0,

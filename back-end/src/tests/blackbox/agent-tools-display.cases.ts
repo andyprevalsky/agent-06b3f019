@@ -22,6 +22,7 @@ import { randomUUID } from 'crypto';
 import { mkdirSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { prisma } from '../../providers/database';
+import { DISPLAY_HEIGHT_REPORTER } from '../../providers/agentTools/displayHeight';
 import {
   agentB,
   assert,
@@ -111,6 +112,9 @@ export function assertDisplayCsp(csp: string | null, label: string, { sandbox = 
   assert(!csp.includes('allow-same-origin'), `${label}: never allow-same-origin`);
 }
 
+/** A stored display page as served: its exact bytes, then the height reporter. */
+export const servedHtml = (page: string) => `${page}\n${DISPLAY_HEIGHT_REPORTER}`;
+
 export async function served(url: string, label: string, type: string) {
   const res = await usercontentFetch(url);
   assert(res.status === 200, `${label}: ${url} → ${res.status}`);
@@ -191,7 +195,7 @@ export function displayRendererCases(): BlackboxTest[] {
         );
         const got = await served(url, 'page', 'text/html');
         assertDisplayCsp(got.headers.get('content-security-policy'), 'page');
-        assert((await got.text()) === page, 'exact page bytes');
+        assert((await got.text()) === servedHtml(page), 'exact page bytes + height reporter');
       },
     },
     {
@@ -210,7 +214,10 @@ export function displayRendererCases(): BlackboxTest[] {
           'inline html',
           'text/html'
         );
-        assert((await got.text()) === page, 'exact inline html bytes');
+        assert(
+          (await got.text()) === servedHtml(page),
+          'exact inline html bytes + height reporter'
+        );
         const again = await display(otherA, { items: [item] }, { apiKeyUser: userA });
         expectStatus(again, 200, 'same inline html');
         assert(items(again)[0].status === 'duplicate', 'same html twice is a duplicate');

@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "584cf407635f7942e4cd06936caee6a28ff548a7",
+      "status": "completed",
+      "started_at": "2026-11-06T01:46:40.460529+00:00",
+      "result": "findings",
+      "finished_at": "2026-11-06T02:20:40.005042+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "4b79be50e644aab2aceb399c1f106b97708f5a2e",
+      "status": "completed",
+      "started_at": "2026-11-06T04:07:32.127605+00:00",
+      "result": "findings",
+      "finished_at": "2026-11-06T04:13:42.239713+00:00"
+    },
+    {
+      "number": 3,
+      "kind": "verification",
+      "head": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+      "status": "completed",
+      "started_at": "2026-11-06T04:22:38.485050+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-06T04:29:47.838334+00:00",
+      "disposition": "overridden",
+      "report_row": "Code Review | \u26a0\ufe0f Overridden | CodeRabbit review 5795738246 on 052ac6ce7 left finding(s) 4489029756 deferred to https://github.com/Rose-Ai-Labs/rose/issues/1717 (user pre-authorization: skip review after 3 rounds; rounds=3); ledger result clean",
+      "finding_ids": [
+        4489029756
+      ],
+      "deferred_to": "https://github.com/Rose-Ai-Labs/rose/issues/1717",
+      "rounds": 3,
+      "prior_rounds": 0,
+      "evidence": {
+        "source": "gh:Rose-Ai-Labs/rose",
+        "captured_at": "2026-11-06T04:29:47.837825+00:00",
+        "review_id": 5795738246,
+        "review_findings": 1,
+        "check_run_id": 127710343428,
+        "check_conclusion": "success",
+        "findings": [
+          {
+            "id": 4489029756,
+            "reply_id": 4489036172
+          }
+        ]
+      }
+    },
+    {
+      "number": 4,
+      "kind": "sync-inherited",
+      "head": "b02d32ef957b124614ca7a7b62fb5bc58f48c6e9",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "052ac6ce76856c4cccc45ff2be08976293e391bf",
+      "base": "c84b1294b221899ba04743d8f9a019f91592575b",
+      "branch_diff_sha256": "ae18d0970659cdcd40c2a641689a139ea049312ee98c5c3a837b187a5c8b2ad4",
+      "generated_changed": [
+        "docs/rca/INDEX.md"
+      ],
+      "started_at": "2026-11-06T12:21:22.075250+00:00",
+      "finished_at": "2026-11-06T12:21:22.075276+00:00"
+    }
+  ]
+}

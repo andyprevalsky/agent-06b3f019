@@ -965,6 +965,9 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         return False
     try:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
+        if entry and entry.get('kind') == 'interrupted-preallocation-cleanup-v1':
+            from deploy_test_interrupted_cleanup import still_bound
+            return still_bound(state, receipt, entry)
         if entry and entry.get("kind") == "native-cloud-cleanup-v1":
             from deploy_test_native_cleanup import still_bound
             return still_bound(entry, receipt, owner)
@@ -1041,6 +1044,14 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'interrupted-policy-witness-renewal-v1':
+        from deploy_test_interrupted_cleanup import renew_policy_witness
+        renew_policy_witness(state, occurrence_id, proof)
+        return
+    if proof.get('kind') == 'interrupted-preallocation-cleanup-v1':
+        from deploy_test_interrupted_cleanup import reconcile as reconcile_interrupted
+        reconcile_interrupted(state, occurrence_id, proof)
+        return
     if proof.get('kind') == 'local-supervisor-cleanup-v1':
         from deploy_test_local_cleanup import reconcile as reconcile_local
         reconcile_local(state, occurrence_id, proof)

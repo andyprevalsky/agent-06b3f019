@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "cycles": [
+    {
+      "number": 1,
+      "kind": "initial",
+      "head": "1f32c5fbb7ec58ada1ed5e14bbec3d12449f093a",
+      "status": "completed",
+      "started_at": "2026-11-06T23:55:49.495346+00:00",
+      "result": "clean",
+      "finished_at": "2026-11-07T02:28:12.497970+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "sync-inherited",
+      "head": "a305adcf71fd04407ee90840b21f41efa4b12cb6",
+      "status": "completed",
+      "result": "clean",
+      "inherited_from": "1f32c5fbb7ec58ada1ed5e14bbec3d12449f093a",
+      "base": "f36d3e4f91b7d7da639e968ab524abbbe5115fce",
+      "branch_diff_sha256": "b4a632341366abfe7ee8e973cb77a208fbc001e82d25fde6f65afb1f6c26cb02",
+      "generated_changed": [],
+      "started_at": "2026-11-07T02:28:27.990793+00:00",
+      "finished_at": "2026-11-07T02:28:27.990820+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "d47052f5ef2b8148d1629ccf590e3a560a45c39a",
+      "status": "completed",
+      "started_at": "2026-11-07T03:02:16.755924+00:00",
+      "result": "unavailable",
+      "finished_at": "2026-11-07T03:08:30.273636+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "824df87a1fd092d5ad3c2775ce8b8afac61319e6",
+      "status": "completed",
+      "started_at": "2026-11-07T03:08:34.473459+00:00",
+      "replaces": "d47052f5ef2b8148d1629ccf590e3a560a45c39a",
+      "result": "unavailable",
+      "finished_at": "2026-11-07T03:26:13.000605+00:00"
+    },
+    {
+      "number": 2,
+      "kind": "incremental",
+      "head": "9d8a8fcbd858d2e9a798437a9125d0799ba82abd",
+      "status": "completed",
+      "started_at": "2026-11-07T03:26:49.724678+00:00",
+      "replaces": "824df87a1fd092d5ad3c2775ce8b8afac61319e6",
+      "result": "clean",
+      "finished_at": "2026-11-07T03:43:13.372066+00:00"
+    }
+  ]
+}

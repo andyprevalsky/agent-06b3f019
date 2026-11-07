@@ -1,0 +1,67 @@
+diff --git a/agents/domains/web_fetch/repo.py b/agents/domains/web_fetch/repo.py
+index 6c7ff1f90c..812f6f28fa 100644
+--- a/agents/domains/web_fetch/repo.py
++++ b/agents/domains/web_fetch/repo.py
+@@ -33,6 +33,15 @@ _MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
+ _BARE_URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+")
+ 
+ 
++class ProviderHung(TimeoutError):
++    """A scrape provider did not answer inside its share of the scrape budget."""
++
++
++def is_hang_provider_error(error: BaseException) -> bool:
++    """True when the provider accepted the request but never answered in time."""
++    return isinstance(error, (ProviderHung, httpx.ReadTimeout))
++
++
+ def is_retryable_provider_error(provider: str, error: BaseException) -> bool:
+     """Classify an HTTP provider failure at the data-access boundary."""
+     if isinstance(error, (httpx.TimeoutException, httpx.TransportError)):
+diff --git a/agents/domains/web_fetch/service.py b/agents/domains/web_fetch/service.py
+index ae04319f52..020c3cf3c8 100644
+--- a/agents/domains/web_fetch/service.py
++++ b/agents/domains/web_fetch/service.py
+@@ -15,16 +15,17 @@ import hashlib
+ from typing import Any, Awaitable, Callable, Dict, List, Optional
+ from urllib.parse import unquote, urlparse
+ 
+-import httpx
+ import structlog
+ from temporalio import activity
+ from temporalio.exceptions import ApplicationError
+ 
+ from domains.web_fetch import config as web_fetch_config
+ from domains.web_fetch.repo import (
++    ProviderHung,
+     download_files_batch,
+     fetch_firecrawl_scrape,
+     fetch_parallel_extract,
++    is_hang_provider_error,
+     is_retryable_provider_error,
+     upload_file_to_storage,
+ )
+@@ -110,14 +111,6 @@ def get_filename_from_url(url: str) -> str:
+     return name
+ 
+ 
+-class ProviderHung(TimeoutError):
+-    """A scrape provider did not answer inside its share of the scrape budget."""
+-
+-
+-def _is_hang(error: BaseException) -> bool:
+-    return isinstance(error, (ProviderHung, httpx.ReadTimeout))
+-
+-
+ async def _within(
+     provider: str, call: Callable[[], Awaitable[Dict[str, Any]]], cap: float, deadline: float
+ ) -> Dict[str, Any]:
+@@ -171,7 +164,7 @@ async def scrape_url(url: str) -> Dict[str, Any]:
+             )
+         except Exception as parallel_error:
+             retryable = any(
+-                not _is_hang(error) and is_retryable_provider_error(provider, error)
++                not is_hang_provider_error(error) and is_retryable_provider_error(provider, error)
+                 for provider, error in (("Firecrawl", firecrawl_error), ("Parallel Extract", parallel_error))
+             )
+             raise WebFetchProvidersFailed(

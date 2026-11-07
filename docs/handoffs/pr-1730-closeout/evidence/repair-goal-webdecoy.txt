@@ -1,0 +1,27 @@
+First, set this thread's title to start with the exact prefix `--ai--` (for example `dvb-onbox threads set-title --title " --ai-- Test repair: webdecoy FCaptcha risk 0.164 > 0.163 ratchet (PR1730 smoke)"`) and verify it.
+
+/goal Fix smoke/browser-biometrics-webdecoy within agents browser anti-detection for the FCaptcha behavioral-biometrics ratchet, make the original failing command pass, and finish /deploy through merge, production verification, cleanup and a completed deploy scorecard.
+
+Failed test: smoke/browser-biometrics-webdecoy (cloud Pre-Deploy smoke task `browser-biometrics-webdecoy`)
+Command: `/usr/bin/python3 /home/boxes/rose/scripts/deploy_test_cloud.py` (the staged deploy's cloud smoke adapter, i.e. `scripts/run-bench` cloud fleet over the run-predeploy-cloud selection on the frozen ref); single-task reproduction: `scripts/run-bench browser-biometrics-webdecoy --ref <ref> --wait` (or `scripts/run-bench --local browser-biometrics-webdecoy`)
+Scope: agents browser anti-detection / FCaptcha ratchet for task browser-biometrics-webdecoy (cloud smoke, tilion provider); preserve WEBDECOY_RISK_RATCHET=0.163 and the task definition. Do not raise WEBDECOY_RISK_RATCHET or change the task/evaluator; reduce the detected signals.
+Exact error: FCaptcha captured API risk score 0.164 exceeds ratchet 0.163 (lower = more human; this gate only ratchets down, never up) [FCaptcha engine v1.46.2; a version change here means the third-party detector was recalibrated — compare against the version on the last passing run before treating this as an anti-detection regression] [detections: vision_ai: Click injected with no pointer trajectory (3 teleport clicks); datacenter: Request from known datacenter IP range; headless: Very few speech voices available (3); bot: Windows UA but Segoe UI font not detected; browser tilion/tilion_direct_country]
+Failure evidence: cloud smoke run 20261106-103815-953003 (Hub bundle 20261106-103815-953003-m7cf1c7ff9d3f), agent 3c057de1-d449-49b9-b76c-a5c72ca3d140, native cloudbench-run.json sha256 b898ff4002485cd14fdbb902f2ed3dad51fed7758942e1148a3f017f06ebf927; /home/boxes/rose/.context/deploy-cloud/be4601409378e7be2f14686acbaf486b39988bf67cd36a2259e6d7685c15168a/runs/20261106-103815-953003/browser-biometrics-webdecoy/cloudbench-run.json. The run bundle was uploaded to the production Benchmark Hub as 20261106-103815-953003-m7cf1c7ff9d3f; agent 3c057de1-d449-49b9-b76c-a5c72ca3d140 (prod Hub / ClickHouse logs). The full RCA report is in the PR #1730 closeout records on main (docs/handoffs/pr-1730-closeout/) once that records PR merges.
+Failed source: f25d7c06405db10990b226e1ccf8de547b4120ec (PR #1730; its diff touched only deploy/cloudbench test fixtures, scripts/run_deploy_pipeline.py waited_s reporting and docs/rca, none on the browser/agents runtime)
+Originating merge: db5b15de93d794acb623555fc505c83bbb461d50 (PR #1730 merged to main)
+Originating devbox: 80412093-97ba-491d-ade5-b2df24f7ef5b (this repair must run elsewhere)
+Related in-flight work to reconcile first: open PR #1703 "fix(browser): hover tool + humanized drag for webdecoy pointer-move loop", owned by thread ph748rvfxv8j1zba79brna917s8hqvc8 (repair of a webdecoy drag-argument loop). This failure's detections include "Click injected with no pointer trajectory (3 teleport clicks)". Read that work and exchange distinguishing evidence with its owner before editing, so you do not make duplicate or conflicting changes. Earlier ratchet history: thread ph7etv7xc3bh8ht1be60j8g4358hkh2h and PR #1687.
+
+Read CLAUDE.md and follow /RCA. Work autonomously from current main;
+before repair work, verify this is a different devbox and its project-folder
+membership is Bugs using the boxes-devbox-folders skill. Keep this /goal and
+all deployment coordination here; never depend on the originating box staying
+open. Retain every needed artifact here or in accessible durable storage.
+Do not ask questions or depend on human replies. Resolve implementation
+choices using the existing instructions and evidence. Prove the assigned
+test passes, then carry the fix through /deploy to its completed scorecard.
+An OPEN diagnosis, observability report, draft PR or stopped investigation
+does not complete this goal. Do not waive or re-delegate the assigned test
+as a substitute for fixing it. Preserve test intent, assertions, timeouts
+and existing permissions; never fabricate success. Keep working until
+the goal is achieved, including ordinary review and production work.
