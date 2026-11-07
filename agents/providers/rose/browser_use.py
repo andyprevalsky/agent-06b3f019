@@ -263,21 +263,24 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     "recover_from_challenge": {
         "description": (
             "Relatively expensive recovery to forcefully open a page or service blocked by a CAPTCHA, bot "
-            "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Do not use when "
+            "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Recovery is part "
+            "of your current browser session: you stay the same browser agent on the same task, and it never "
+            "starts another browser agent or a second browser session. Do not use when "
             "an alternate path can complete the goal without clearing this blocker. Do not drag sliders, "
             "click verify buttons, or otherwise try to solve the widget yourself. Never use for bad "
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool waits for Kernel or Steel's native automatic CAPTCHA solver, then tests isolated "
             "copies of browser state: known challenge cookies, all target-site cookies, then parallel "
             "cookie-group reductions. Set auth_cookies_are_preserved=true when the current session is logged "
-            "in and the replacement machine must keep that authenticated state. Set "
-            "auth_cookies_are_preserved=false to explore machines with a fresh cookie state (may lose auth, "
+            "in and must keep that authenticated state through recovery. Set "
+            "auth_cookies_are_preserved=false to allow a fresh cookie state (may lose auth, "
             "but can clear a poisoned cookie that forces anti-bot on every session). If no safe cookie fix "
             "is proven, it searches permission-compatible Kernel residential, Kernel mobile, Kernel ISP, "
             "and Steel managed/fixed-IP browsers in parallel, selects a configuration that passes repeated "
-            "stability probes, and caches that configuration as this user's default for future browser "
-            "sessions. Provider CAPTCHA solving remains enabled throughout. Successful recovery returns to "
-            "the current URL with cookies, localStorage, and IndexedDB preserved."
+            "stability probes, moves this session onto it, and caches that configuration as this user's "
+            "default for future browser sessions. Provider CAPTCHA solving remains enabled throughout. "
+            "Successful recovery returns this session to the current URL with cookies, localStorage, and "
+            "IndexedDB preserved."
         ),
         "params": {
             "reason": {
@@ -292,11 +295,11 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "auth_cookies_are_preserved": {
                 "type": "boolean",
                 "description": (
-                    "True when the current browser session is logged in and the new machine must "
-                    "maintain the current authenticated state to pass the goal/task. False when you "
-                    "want to explore machines that have a fresh cookie state (and thus potentially "
-                    "lose auth status, but potentially fix a bad cookie which is poisoning every "
-                    "session with a forced anti-bot). Defaults to true."
+                    "True when the current browser session is logged in and must keep its current "
+                    "authenticated state through recovery to pass the goal/task. False when recovery "
+                    "may use a fresh cookie state (and thus potentially lose auth status, but "
+                    "potentially fix a bad cookie which is poisoning every session with a forced "
+                    "anti-bot). Defaults to true."
                 ),
                 "required": False,
             },

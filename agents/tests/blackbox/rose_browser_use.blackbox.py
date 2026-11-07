@@ -201,6 +201,55 @@ def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     assert "poisoning" in preserve_flag["description"]
 
 
+# Captured browser_use_step_5/6 call of browser-hotel-booking agent
+# 917bf579-a615-4264-a637-024e706ae301 (descend H-31, 2026-11-07): the exact
+# available_actions and the root's delegated failure clause the browser saw
+# when it chose wait/evaluate/attempt_completion over recover_from_challenge on
+# a hotels.com DataDome "Bot or Not?" page.
+H31_CAPTURED_AVAILABLE_ACTIONS = [
+    "read_browser_state", "read_tool_output", "screenshot", "read_logs", "read_network_requests",
+    "click", "input_text", "press_key", "click_coordinates", "drag", "hover", "dropdown_options",
+    "select_dropdown", "evaluate", "goto", "navback", "scroll", "wait", "switch_tab", "close_tab",
+    "open_new_tab", "upload_file", "attempt_completion", "request_user_assistance_for_authentication",
+    "recover_from_challenge", "request_payment_card", "generate_write_lock_notification",
+]
+H31_DELEGATED_CLAUSE = (
+    "If blocked, diagnose within this browser session and report the failure; do not spawn a "
+    "replacement browser."
+)
+
+
+def test_recover_from_challenge_contract_stays_in_the_delegated_browser_session():
+    """H-31: the provider tool contract must say recovery is in-session.
+
+    The captured delegation limited the browser to this one session and told it
+    to report failure rather than spawn a replacement browser. The old contract
+    described recovery as moving to a "replacement machine" / exploring
+    "machines", so the browser read the in-session recovery tool as the
+    forbidden replacement and reported the challenge instead (1/8 replays chose
+    recovery; 8/8 with this contract, delegation unchanged).
+    """
+    tools = {tool["name"]: tool for tool in build_browser_use_tools(H31_CAPTURED_AVAILABLE_ACTIONS)}
+    assert "recover_from_challenge" in tools, sorted(tools)
+    recover = tools["recover_from_challenge"]
+    description = recover["description"]
+    assert "Recovery is part of your current browser session" in description, description
+    assert "same browser agent on the same task" in description, description
+    assert "never starts another browser agent or a second browser session" in description, description
+    assert "Successful recovery returns this session to the current URL" in description, description
+    sent_text = [description] + [
+        str(prop.get("description") or "")
+        for prop in (recover["input_schema"].get("properties") or {}).values()
+        if isinstance(prop, dict)
+    ]
+    for text in sent_text:
+        for colliding in ("replacement machine", "new machine", "explore machines"):
+            assert colliding not in text, (colliding, text, H31_DELEGATED_CLAUSE)
+    preserve = BROWSER_USE_TOOLS["recover_from_challenge"]["params"]["auth_cookies_are_preserved"]["description"]
+    for colliding in ("replacement machine", "new machine", "explore machines"):
+        assert colliding not in preserve, (colliding, preserve)
+
+
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     prompt = build_browser_use_system_prompt(["click", "goto"])
     assert "# Role" in prompt
@@ -2741,6 +2790,10 @@ async def run_all_tests():
         "recover_from_challenge_stages",
         test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages,
     )
+    r.record(
+        "recover_from_challenge_contract_stays_in_delegated_session",
+        test_recover_from_challenge_contract_stays_in_the_delegated_browser_session,
+    )
 
     r.record("params_seconds_to_time_ms", test_params_seconds_to_time_ms)
     r.record("params_down_true_direction", test_params_down_true_to_direction_and_amount)
@@ -3014,16 +3067,22 @@ def test_phone_off_matches_prephone_bytes():
     Auth Options inventory states the real auth state. Only system/messages changed in
     both modes; tools are unchanged; 4c9636f84d reproduces the previous system/messages
     hashes exactly.
+    Re-pinned for H-31 (rca/h-31-20261107): the recover_from_challenge description and
+    auth_cookies_are_preserved schema now state that recovery stays inside the current
+    browser session instead of describing a "replacement machine". Only the
+    recovery-enabled ('0') tools hash changed; the recovery-disabled ('1') hashes and
+    every system/messages hash are unchanged; 268e9550b0 reproduces the previous tools
+    hash exactly.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('27606ab8b67e2ebd29ee872786a0513bbaa2361ff079157827328bf904a32618', '3f50042e64b15fb8b8c91008163dc3b2f9886da5a52d97200ece77fabb50737a', '3822ffe092a5e0834aeec47486b27bd473624f3078a3de1466d183bda9e06dd3'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', 'cef5a1e96f3d475a84a4b49e08dac1955354404be4a398dd921a00657c7bf639', '0cad5190c943eca3b6ebe9e7b6ec3c5cdb0a39b4fa194bc86ff07b75eec58509')}
+    expected = {'0': ('90483bb1d90dbd8371f4a44b63ab720ae21a0a0a65a38a2e016a2e1eb00d5735', '3f50042e64b15fb8b8c91008163dc3b2f9886da5a52d97200ece77fabb50737a', '3822ffe092a5e0834aeec47486b27bd473624f3078a3de1466d183bda9e06dd3'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', 'cef5a1e96f3d475a84a4b49e08dac1955354404be4a398dd921a00657c7bf639', '0cad5190c943eca3b6ebe9e7b6ec3c5cdb0a39b4fa194bc86ff07b75eec58509')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
             values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
         actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
-        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7+H-57"
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7+H-57+H-31"
 
 
 async def test_phone_off_actual_rose_request():

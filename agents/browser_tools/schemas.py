@@ -521,7 +521,8 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
 class RecoverFromChallengeBrowserTool(BaseModel):
     """Relatively expensive staged recovery to force-open a blocked page or service.
 
-    It can move the browser to a different browser/IP configuration (network exit).
+    It stays inside the current browser session and task; it can move that session
+    to a different browser/IP configuration (network exit).
     """
 
     tool: Literal["recover_from_challenge"]
@@ -534,11 +535,11 @@ class RecoverFromChallengeBrowserTool(BaseModel):
     auth_cookies_are_preserved: bool = Field(
         default=True,
         description=(
-            "True when the current browser session is logged in and the new machine must "
-            "maintain the current authenticated state to pass the goal/task. False when you "
-            "want to explore machines that have a fresh cookie state (and thus potentially "
-            "lose auth status, but potentially fix a bad cookie which is poisoning every "
-            "session with a forced anti-bot)."
+            "True when the current browser session is logged in and must keep its current "
+            "authenticated state through recovery to pass the goal/task. False when recovery "
+            "may use a fresh cookie state (and thus potentially lose auth status, but "
+            "potentially fix a bad cookie which is poisoning every session with a forced "
+            "anti-bot)."
         ),
     )
 

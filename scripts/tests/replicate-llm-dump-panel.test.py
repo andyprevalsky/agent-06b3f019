@@ -67,6 +67,70 @@ class ReplayPanelTests(unittest.TestCase):
         self.assertEqual(panel["decisions"], {"display": 1, "replay_error": 1, "spawn_agent:browser": 1})
         self.assertEqual(panel["actual_models"], ["m"])
 
+    def test_browser_panel_replays_the_recorded_browser_call(self):
+        seen = []
+
+        async def fake_browser(data, *, exact):
+            seen.append((data["call_site"], exact))
+            return {"tool_calls": [{"name": "recover_from_challenge", "arguments": "{}"}], "actual_model": "m"}
+
+        async def forbidden_generic(_data):
+            raise AssertionError("browser_use panels must replay through replay_browser_use")
+
+        original_browser, original_generic = replay.replay_browser_use, replay.replay_generic
+        replay.replay_browser_use, replay.replay_generic = fake_browser, forbidden_generic
+        try:
+            panel = replay.asyncio.run(
+                replay.replay_panel({"call_site": "browser_use_step_6", "messages": []}, repeat=2, concurrency=1)
+            )
+        finally:
+            replay.replay_browser_use, replay.replay_generic = original_browser, original_generic
+        self.assertEqual(panel["decisions"], {"recover_from_challenge": 2})
+        self.assertEqual(seen, [("browser_use_step_6", True), ("browser_use_step_6", True)])
+
+    def test_current_tools_swaps_only_the_tool_contract_and_reports_changes(self):
+        current = [
+            {"name": "wait", "description": "same", "input_schema": {"type": "object"}},
+            {"name": "recover_from_challenge", "description": "new", "input_schema": {"type": "object"}},
+        ]
+        recorded = [
+            {"name": "wait", "description": "same", "input_schema": {"type": "object"}},
+            {"name": "recover_from_challenge", "description": "old", "input_schema": {"type": "object"}},
+        ]
+        messages = [{"role": "user", "content": "goal"}]
+        data = {
+            "call_site": "browser_use_step_5",
+            "messages": messages,
+            "tools": recorded,
+            "config": {
+                "available_actions": ["wait", "recover_from_challenge"],
+                "requested_params": {"tools": recorded},
+            },
+        }
+        built_for = []
+        original = replay.build_browser_use_tools
+        replay.build_browser_use_tools = lambda actions: built_for.append(list(actions)) or current
+        try:
+            changed = replay.apply_current_browser_tools(data)
+        finally:
+            replay.build_browser_use_tools = original
+        self.assertEqual(changed, ["recover_from_challenge"])
+        self.assertEqual(built_for, [["wait", "recover_from_challenge"]])
+        self.assertIs(data["tools"], current)
+        self.assertIs(data["config"]["requested_params"]["tools"], current)
+        self.assertIs(data["messages"], messages)
+        with self.assertRaises(SystemExit):
+            replay.apply_current_browser_tools({"call_site": "execute_loop", "messages": []})
+
+    def test_expectations_fail_below_minimum_and_reject_malformed_specs(self):
+        decisions = {"recover_from_challenge": 1, "wait": 7}
+        unmet = replay.unmet_expectations
+        self.assertEqual(unmet(decisions, ["recover_from_challenge:6"]), ["recover_from_challenge: 1 < 6"])
+        self.assertEqual(unmet(decisions, ["wait:7", "recover_from_challenge:1"]), [])
+        self.assertEqual(unmet(decisions, ["spawn_agent:browser:1"]), ["spawn_agent:browser: 0 < 1"])
+        with self.assertRaises(SystemExit):
+            replay.unmet_expectations(decisions, ["recover_from_challenge"])
+
 
 if __name__ == "__main__":
     unittest.main()
