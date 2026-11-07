@@ -27456,6 +27456,93 @@ async def test_activity_cancelled_mid_setup_releases_the_connected_browser_clien
     fake_browser.close.assert_awaited()
 
 
+@_in_browser_activity_context
+async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_browser():
+    """A browser side cancelled mid-connect bounds its own wedged disconnect.
+
+    Credential setup fails after DOMService connected but while the browser side
+    is still attaching. The cancelled browser side tears down its client itself;
+    a wedged CDP stop there must use the bounded, tracked disconnect, not an
+    inline await that outlives the parallel setup's teardown bound and leaves
+    the connected client unreleased.
+    """
+    from contextlib import ExitStack
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    connected = asyncio.Event()
+    release = asyncio.Event()
+
+    async def still_connecting(*_args, **_kwargs):
+        await release.wait()
+
+    async def wedged_stop(*_args, **_kwargs):
+        # Like DomService.disconnect, a cancel while draining continues into a wedged stop.
+        while not release.is_set():
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+
+    class _StillConnectingDomService(_FakeDomService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.session.get_current_page = still_connecting
+            self.disconnect = AsyncMock(side_effect=wedged_stop)
+
+        async def connect(self):
+            connected.set()
+
+    async def credential_setup_fails_after_connect(*_args, **_kwargs):
+        await connected.wait()
+        raise RuntimeError("credential setup failed")
+
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(
+            dict(_PARALLEL_SETUP_SESSION),
+            fake_browser,
+            _StillConnectingDomService,
+            **{
+                "domains.spawn_browser_agent_v3.handler.build_realm_credential_state": dict(
+                    new=credential_setup_fails_after_connect
+                ),
+                "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
+                    new=AsyncMock(return_value=[native_start])
+                ),
+                "domains.spawn_browser_agent_v3.handler.BROWSER_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.05),
+                "domains.spawn_browser_agent_v3.handler.BROWSER_TERMINAL_DISCONNECT_TIMEOUT_SECONDS": dict(new=0.5),
+            },
+        ):
+            stack.enter_context(target)
+        earlier_cleanups = set(handler._background_browser_cleanup_tasks)
+        try:
+            with pytest.raises(RuntimeError, match="credential setup failed"):
+                await asyncio.wait_for(
+                    spawn_browser_agent_activity_v3(
+                        user_id="user-1",
+                        agent_id="agent-1",
+                        goal="Check the inbox",
+                        tool_call_id="tool-1",
+                        output_schema={"fields": [{"name": "result", "type": "string"}]},
+                        use_claude_mode=False,
+                        start_url="https://example.com",
+                    ),
+                    timeout=10,
+                )
+            own_cleanups = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
+            _FakeDomService.last_instance.disconnect.assert_awaited()
+            assert any(
+                task.get_name() == handler._EXPIRED_OPTIONAL_CDP_TASK_NAME and not task.done()
+                for task in own_cleanups
+            ), "the wedged disconnect must be bounded and tracked, not awaited inline by the cancelled setup"
+        finally:
+            release.set()
+            pending = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
+            if pending:
+                await asyncio.wait(pending, timeout=10)
+
+
 async def _run_browser_activity_cancelled_mid_step(cancellation_details):
     """Run the real browser activity and cancel it mid-step with ``cancellation_details``.
 
@@ -37656,6 +37743,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_cancelled_mid_setup_releases_connected_browser_clients",
         test_activity_cancelled_mid_setup_releases_the_connected_browser_clients,
+    )
+    await r.record_async(
+        "setup_failure_bounds_hung_disconnect_of_connecting_browser",
+        test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_browser,
     )
     await r.record_async(
         "timed_out_browser_activity_leaves_the_tool_result_to_the_workflow",

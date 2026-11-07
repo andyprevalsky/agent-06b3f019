@@ -9088,8 +9088,10 @@ async def _spawn_browser_agent_activity_v3_real(
                         _input_page,
                     ) = await _connect_playwright()
             except BaseException:
-                with contextlib.suppress(Exception):
-                    await _dom_service.disconnect()
+                # Bounded like every other terminal disconnect: a setup cancelled while
+                # still connecting must not hang on a wedged CDP stop past the parallel
+                # setup's teardown bound, or the connected client is never released.
+                await _disconnect_browser(_dom_service)
                 await _stop_playwright_resources(
                     _playwright_browser,
                     _playwright_instance,
