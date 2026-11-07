@@ -1,0 +1,282 @@
+{
+ "failures": [
+  {
+   "id": "b4fe60fdad444bd585e0fad04e34d62f",
+   "check": "semantic-stack/semantic-stack",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "description": "semantic-stack: the Step5 stack exited before readiness. The reserved ngrok domain rose-rose.ngrok.app was online in another deploy's Blacksmith VM (ERR_NGROK_334; every runner's checkout directory is \"rose\") and three Cloudflare quick-tunnel fallbacks never routed within 45 s. The gate passed on identical tests in rounds 2 and 3 of this deploy; this PR changes no tunnel code.",
+   "evidence": "ngrok API endpoints list showed https://rose-rose.ngrok.app online from tunnel session ts_3Ln5zl5PemnynzKL77q5cf4Ptxy (ip 192.240.237.126) created 18:47:35Z, after this gate started at 18:46:54Z; GitHub Actions listed Deploy gate jobs of three other deploys running then. Gate artifact: remote-artifact/files/.context/deploy-smoke.log lines 66-107.",
+   "assigned_reason": "The deploy owner keeps the repair: rerun the gate alone once the shared domain is free; no waiver, no credit.",
+   "assigned_evidence": "docs: memory blacksmith-gate-flakes-pr1747; ngrok endpoints API response at 18:53Z"
+  },
+  {
+   "id": "286117bc0a7e4222bad24d455978a858",
+   "check": "agents-coverage-blackbox/agents-coverage-blackbox",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "assigned_repair": true,
+   "description": "agents-coverage-blackbox: 124 of 125 domains passed; domain benchmark failed one test, cloudbench_dependency_sync_test.py::test_refresh_deps_applies_exact_workspace_before_rebuild[peer_refreshed] (expected \"reusing snapshot snap-peer\"). The scenario reuses a peer snapshot only if int(mtime of the state file) >= the integer clock second read before the lock; coarse kernel file timestamps put the mtime one second earlier in about 0.9% of writes (measured 345 of 40000). Passed in rounds 2-3 and in 6 of 6 local reruns; scripts/run-bench-cloud and the test are byte-identical to main.",
+   "evidence": "gate log FACTORY_TEST_FAILURE {\"failing\": [\"benchmark\"]} and the pytest E-lines at test line 19800; reproduction of the coarse-mtime miss rate with 40000 write/stat pairs on the devbox kernel (345 misses).",
+   "assigned_reason": "The deploy owner keeps the repair: rerun the full gate on the same source; the timestamp-slack fix ships as a follow-up because any source change reruns every gate.",
+   "assigned_evidence": "docs: memory blacksmith-gate-flakes-pr1747"
+  },
+  {
+   "id": "10a1e3c3216a4bffa22b748bac38407e",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "2c656b64b2844ad398e25d04d739e5fc",
+   "check": "smoke/chat-mode",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "7bfa2de7a9b14fb7b554154f78efc740",
+   "check": "smoke/spawn-sub-agents",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "819ff47a33144342962d2f9439e6139e",
+   "check": "smoke/parallel-tool-calls",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "9383d8b803bb4633a71edd6307d9f5fd",
+   "check": "smoke/background-agent-message-smoke",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "990d42228a1048a6ac4f6966f596e559",
+   "check": "smoke/claude-code-agent",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "52ba41e40da647a5835965c75558a2a0",
+   "check": "smoke/browser-smoke",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "14b19c47a3a94883b8d0c016bbea4c43",
+   "check": "smoke/agent-payment-test-shop",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "f1b5998c33954814afd47b13833baf27",
+   "check": "smoke/agent-payment-setup-resume",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "c84e977b4af846648263b396ea85a37a",
+   "check": "smoke/agent-payment-idempotent-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "0306b0098ffc4d5796d53ef9ebfb6e8f",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "10b2f6b5760b400dae4a0786530e980c",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "51dc0451b3464fbdb2b5102e6ce341d9",
+   "check": "smoke/agent-payment-new-user-journey",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  },
+  {
+   "id": "46e43c491301405c91e3e0e3a4edc32f",
+   "check": "smoke/browser-auth-saved-password-retry",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "02eb65acf1169fad99c707e41dfefede01acbe6b",
+    "digest": "c178afcd7c2e666d0f24dbb30420c6754d38d01fab565407d5bb2150666d277a"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "INTRODUCED",
+   "description": "smoke: the campaign was stopped by its INFRA STOP (1/14 confirmed infrastructure failures) at r001-j0004 and r001-j0014, which both died in 9 s with \"cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers\": this devbox's disk was at 92% because of the 12 obsolete local worker checkouts (48 GB) this deploy had created. Deploy-execution condition owned by this deploy, not a task result; the remaining jobs were cancelled by their owned teardown.",
+   "evidence": "campaign cli.log lines 240-261 and runs/*/r001-j0004 log line 68; df showed 8.6 GB free; /home/boxes/dw (12 workers) removed afterwards (54 GB free)."
+  }
+ ]
+}

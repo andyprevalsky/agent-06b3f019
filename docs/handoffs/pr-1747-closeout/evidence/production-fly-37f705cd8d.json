@@ -1,0 +1,74 @@
+{
+  "agent_cutover": {
+    "required": true,
+    "runtime_files": [
+      "agents/domains/set_plan/handler.py",
+      "agents/domains/spawn_browser_agent_v3/handler.py",
+      "agents/domains/spawn_browser_agent_v3/service_actions.py",
+      "agents/fly.toml",
+      "agents/helpers/fetch_config.py",
+      "agents/tools/prompts/spawn_agent.py",
+      "agents/utils/prompts.py",
+      "agents/utils/tool_schemas.py",
+      "agents/workflows/agent_workflow.py"
+    ],
+    "workflow_changed": false
+  },
+  "changed_files": 76,
+  "cutover_verify": null,
+  "error": "exact deploy-agents.yml run for 37f705cd8dd490845af863fa808a2fb0d3b0d7c6 did not start within 600s; do not dispatch production semantics: check GitHub Actions for the merge commit or start it with `gh workflow run deploy-agents.yml --ref main -f expected_sha=37f705cd8dd490845af863fa808a2fb0d3b0d7c6`",
+  "finished_at": "2026-11-07T20:18:56Z",
+  "fly": {
+    "attempt": null,
+    "conclusion": null,
+    "deployment_token": null,
+    "job_id": null,
+    "job_stage": null,
+    "required": true,
+    "run_id": null,
+    "status": null,
+    "url": null
+  },
+  "github_waits": [
+    {
+      "head": "37f705cd8dd490845af863fa808a2fb0d3b0d7c6",
+      "kind": "run-start",
+      "outcome": "timeout",
+      "polls": 99,
+      "run_id": null,
+      "waited_s": 602.6,
+      "workflow": "deploy-agents.yml"
+    }
+  ],
+  "merged_sha": "37f705cd8dd490845af863fa808a2fb0d3b0d7c6",
+  "render": {
+    "backend_diff": [],
+    "deploy_id": "dep-dbnoa4142hec73cm5j3g",
+    "deploy_status": "live",
+    "equivalence": null,
+    "finished_at": "2026-11-07T20:15:18Z",
+    "live_commit": "37f705cd8dd490845af863fa808a2fb0d3b0d7c6",
+    "merged_sha": "37f705cd8dd490845af863fa808a2fb0d3b0d7c6",
+    "observed_live_commit": "37f705cd8dd490845af863fa808a2fb0d3b0d7c6",
+    "observed_live_deploy_id": "dep-dbnoa4142hec73cm5j3g",
+    "polls": 39,
+    "provider": "render",
+    "service_paths": [
+      "back-end/",
+      "render.yaml",
+      "package.json",
+      "package-lock.json"
+    ],
+    "started_at": "2026-11-07T20:08:53Z",
+    "status": "live",
+    "then": null,
+    "waited_s": 384.8,
+    "wall_s": 384.8
+  },
+  "schema_version": 1,
+  "semantic_dispatch": null,
+  "started_at": "2026-11-07T20:08:53Z",
+  "started_epoch": 1794082133.840152,
+  "status": "failed",
+  "wall_s": 602.6
+}
