@@ -36,6 +36,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+import deploy_gate_progress as progress
 
 TRANSPORT = 'github-actions'
 WORKFLOW = 'deploy-gates.yml'
@@ -54,6 +55,7 @@ POLL_SECONDS = 60.0          # ETag-conditional; gates take minutes and the REST
 START_POLL_SECONDS = 10.0
 CHANNEL_POLL_SECONDS = 15.0     # R2 GETs: no GitHub quota
 LIVENESS_SECONDS = 600.0        # one REST status read per gate every 10 min
+STREAM_SECONDS = 5.0            # VM -> R2 progress uploads while the worker runs
 CANCEL_SECONDS = 180.0       # cancel request -> run completed (VM destroyed)
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 PUSH_ATTEMPTS = 4
@@ -452,7 +454,8 @@ def launch(args) -> int:
         print(f'DEPLOY_GATE_CHANNEL unavailable ({error}); watching the run through the GitHub API', flush=True)
         channel = None
     try:
-        outcome = (watch_channel(gh, channel, head, name, deadline, started) if channel is not None
+        mirror = ProgressMirror(os.environ.get(progress.ENV))
+        outcome = (watch_channel(gh, channel, head, name, deadline, started, mirror) if channel is not None
                    else watch_rest(gh, head, name, deadline, started))
     except (WorkflowRejected, urllib.error.URLError) as error:
         delete_tag(root, token, repo, name)
@@ -519,12 +522,50 @@ def watch_rest(gh: GitHub, head: str, name: str, deadline: float, pushed: float)
     return {'kind': 'rest' if run.get('status') == 'completed' else 'unfinished', 'receipt': receipt}
 
 
-def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline: float, pushed: float) -> dict:
+class ProgressMirror:
+    """Appends the VM's new progress rows to the cycle's local progress file (DEPLOY_GATE_PROGRESS).
+
+    The VM uploads its whole append-only file; only complete lines past what was mirrored are added.
+    Advisory: an unreadable object or an unset path never affects the gate's result.
+    """
+
+    def __init__(self, path: str | None):
+        self.path = Path(path) if path else None
+        self.length = 0
+
+    def pull(self, channel: 'Channel', name: str) -> int:
+        if self.path is None:
+            return 0
+        try:
+            data = channel.get(name, 'progress.jsonl')
+        except Exception:  # advisory channel read
+            return 0
+        if not data or len(data) <= self.length:
+            return 0
+        new = data[self.length:]
+        new = new[:new.rfind(b'\n') + 1]
+        if not new:
+            return 0
+        try:
+            with self.path.open('ab') as stream:
+                stream.write(new)
+        except OSError:
+            return 0
+        self.length += len(new)
+        return len(new)
+
+
+def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline: float, pushed: float,
+                  mirror: ProgressMirror | None = None) -> dict:
     """Poll the R2 channel; GitHub is asked only when the channel stays silent or the run must be cancelled."""
     start_by, receipt, checked = min(deadline, time.time() + START_SECONDS), None, time.time()
     while not STOP.is_set() and time.time() < deadline:
+        if mirror is not None and receipt is not None:
+            mirror.pull(channel, name)  # a still-running gate's failing tests reach the cycle now
         raw = channel.get(name, 'done.json')
         if raw is not None:
+            if mirror is not None:
+                mirror.pull(channel, name)
             done = json.loads(raw)
             receipt = {**(receipt or {}), **{k: v for k, v in done.items() if k not in ('objects', 'at')},
                        'finished_at': done.get('at')}
@@ -588,6 +629,39 @@ def remote_extract(args) -> int:
     return 0
 
 
+class ProgressStreamer(threading.Thread):
+    """Puts the gate's growing progress file to the R2 channel while the worker runs (advisory)."""
+
+    def __init__(self, channel: 'Channel', name: str, path: Path, interval: float = STREAM_SECONDS):
+        super().__init__(daemon=True)
+        self.channel, self.name, self.path, self.interval = channel, name, Path(path), interval
+        self.done = threading.Event()
+        self.sent = 0
+        self.failed = False
+
+    def flush(self) -> None:
+        try:
+            data = self.path.read_bytes()
+        except FileNotFoundError:
+            return
+        data = data[:data.rfind(b'\n') + 1]  # complete rows only
+        if len(data) <= self.sent:
+            return
+        try:
+            self.channel.put(self.name, 'progress.jsonl', data)
+        except Exception as error:  # advisory upload; the result still arrives at the end
+            if not self.failed:
+                print(f'DEPLOY_GATE_PROGRESS upload failed ({type(error).__name__}); retrying', flush=True)
+            self.failed = True
+            return
+        self.sent = len(data)
+
+    def run(self) -> None:
+        while not self.done.wait(self.interval):
+            self.flush()
+        self.flush()
+
+
 def remote_run(args) -> int:
     out = args.out
     timing = json.loads((out / 'timing.json').read_text())
@@ -598,8 +672,20 @@ def remote_run(args) -> int:
     started = subprocess.run(['bash', str(ROOT / 'scripts/run-deploy-stage'), '--start', '--run-id',
                               'gate-' + hashlib.sha256(token.encode()).hexdigest()[:16]], cwd=ROOT)
     timing['timing_run_started'] = started.returncode == 0
-    env = {**os.environ, 'DEPLOY_GATE_REQUEST': str(out / 'request.json'), 'DEPLOY_GATE_RESULT': str(out / 'result.json')}
-    code = subprocess.run([sys.executable, str(ROOT / 'scripts' / script), '--root', str(ROOT)], env=env).returncode
+    env = {**os.environ, 'DEPLOY_GATE_REQUEST': str(out / 'request.json'), 'DEPLOY_GATE_RESULT': str(out / 'result.json'),
+           progress.ENV: str(out / 'progress.jsonl')}
+    streamer = None
+    try:
+        streamer = ProgressStreamer(Channel(env_file_values(ROOT)), os.environ['GITHUB_REF_NAME'], out / 'progress.jsonl')
+        streamer.start()
+    except (ImportError, ValueError, KeyError) as error:
+        print(f'DEPLOY_GATE_PROGRESS stream unavailable ({error}); failures arrive with the result', flush=True)
+    try:
+        code = subprocess.run([sys.executable, str(ROOT / 'scripts' / script), '--root', str(ROOT)], env=env).returncode
+    finally:
+        if streamer is not None:
+            streamer.done.set()
+            streamer.join(timeout=120)
     timing.update(worker_finished_at=time.time(), worker_exit=code)
     (out / 'timing.json').write_text(json.dumps(timing))
     print(f'DEPLOY_GATE_WORKER_EXIT {code}')
@@ -610,7 +696,7 @@ def remote_bundle(args) -> int:
     out = args.out
     artifact = out / 'artifact'
     artifact.mkdir(parents=True, exist_ok=True)
-    for name in ('result.json', 'timing.json', 'request.json'):
+    for name in ('result.json', 'timing.json', 'request.json', 'progress.jsonl'):
         if (out / name).is_file():
             shutil.copyfile(out / name, artifact / name)
     root = ROOT.resolve()

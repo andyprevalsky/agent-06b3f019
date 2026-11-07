@@ -3176,6 +3176,48 @@ assert len(list(p.iterdir()))==2
         self.assertEqual('PASS',next(r['status'] for r in rows if r['gate']=='ui'))
         self.assertEqual(2,len(list((self.directory/'rca').glob('*.launch.json'))))
 
+    def early_failure_fixture(self, final_case_a):
+        """api reports test a FAIL while running, then blocks until /RCA has started (or 5 s)."""
+        signal_file = self.root / '.context' / 'rca-started'
+        gate = ("import os,json,pathlib,sys,time; sys.path.insert(0,%r); import deploy_gate_progress as p\n"
+                "p.report('a','FAIL',scope='test',case='a',detail='AssertionError: early')\n"
+                "s=pathlib.Path(%r); e=time.monotonic()+5\n"
+                "while not s.exists() and time.monotonic()<e: time.sleep(.02)\n"
+                "q=json.load(open(os.environ['DEPLOY_GATE_REQUEST']))\n"
+                "json.dump({**q,'complete':True,'cleanup_complete':True,"
+                "'cases':{'a':%r,'b':'PASS'},'rca_started_before_exit':s.exists()},open(os.environ['DEPLOY_GATE_RESULT'],'w'))\n"
+                "sys.exit(0 if %r=='PASS' else 1)") % (str(Path(c.__file__).resolve().parent), str(signal_file),
+                                                       final_case_a, final_case_a)
+        self.plan['gates'][1].update(command=[sys.executable, '-c', gate], case_protocol=True)
+        launcher = [sys.executable, '-c', "import pathlib,json; pathlib.Path(%r).touch(); "
+                    "print(json.dumps({'ok':True,'status':'delivered'}))" % str(signal_file)]
+        self.state = c.initialize(self.plan, self.root); self.state['phase'] = 'initial'
+        out = io.StringIO()
+        with patch.object(c, 'EARLY_POLL_SECONDS', 0.05), contextlib.redirect_stdout(out):
+            c.run_phase(self.plan, self.state, self.directory, self.root, launcher)
+        api = next(r for r in self.state['attempts'][-1]['results'] if r['gate'] == 'api')
+        return out.getvalue(), api, signal_file
+
+    def test_failing_test_in_a_running_gate_starts_rca_before_the_gate_ends(self):
+        printed, api, signal_file = self.early_failure_fixture('FAIL')
+        self.assertIn('DEPLOY_GATE_EARLY_FAILURE gate=api test=a status=FAIL', printed)
+        worker = json.loads((self.directory / 'attempts' / '1' / 'initial' / 'api' / 'result.json').read_text())
+        self.assertTrue(worker['rca_started_before_exit'], 'RCA must start while the gate is still running')
+        early = self.state['early_failures']
+        self.assertEqual([('api/a', 'final FAIL')], [(f['check'], f['settled']) for f in early])
+        failure = next(f for f in self.state['failures'] if f['check'] == 'api/a')
+        self.assertEqual(early[0]['id'], failure['id'])  # the final failure keeps the early occurrence
+        self.assertEqual(1, len(list((self.directory / 'rca').glob('*.launch.json'))))  # one RCA, not two
+        self.assertEqual('triage', self.state['phase'])
+
+    def test_early_failure_whose_gate_then_passes_is_superseded_not_a_failure(self):
+        printed, api, _ = self.early_failure_fixture('PASS')
+        self.assertIn('DEPLOY_GATE_EARLY_FAILURE gate=api', printed)
+        self.assertEqual('PASS', api['status'])
+        self.assertEqual(['final PASS'], [f['settled'] for f in self.state['early_failures']])
+        self.assertEqual([], [f for f in self.state['failures'] if f['gate'] == 'api'])
+        self.assertTrue(self.state['ready'])
+
     def test_final_phase_rejects_pass_cache_configuration(self):
         self.plan['gates'][1]['command']=['run-deploy-stage','api','--reuse-passed']
         with self.assertRaises(ValueError): c.validate_plan(self.plan)

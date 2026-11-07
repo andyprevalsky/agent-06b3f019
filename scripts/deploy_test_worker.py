@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 
+import deploy_gate_progress as progress
 from deploy_test_cycle import ROOT, command, digest, read, source, write
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 
@@ -105,12 +106,16 @@ def execute(request: dict, root: Path) -> dict:
     with cancellation_handlers():
         try:
             if recipe.get('setup'):
-                setup_ok = run_step('setup', recipe['setup'], root, folder)['status'] == 'PASS'
+                setup = run_step('setup', recipe['setup'], root, folder)
+                setup_ok = setup['status'] == 'PASS'
+                if not setup_ok:
+                    report_case('setup', setup, folder)
             for name in selected:
                 if not setup_ok or CANCEL.is_set():
                     rows[name] = {'status': 'UNVERIFIED', 'reason': 'setup failed or worker interrupted'}
                 else:
                     rows[name] = run_step(name, cases[name], root, folder)
+                    report_case(name, rows[name], folder)
         finally:
             cleanup = recipe.get('cleanup')
             if cleanup:
@@ -152,10 +157,24 @@ def owned_benchmark_draining(root: Path, token: str, since: float) -> bool:
     return any(record['pid'] in owned for record in records if record['pid'] is not None)
 
 
+def progress_path(folder: Path) -> str:
+    """The gate's live progress file: the coordinator's, else one beside this worker's evidence."""
+    return os.environ.get(progress.ENV) or str(folder / 'progress.jsonl')
+
+
+def report_case(name: str, row: dict, folder: Path) -> None:
+    """One case row the moment a case finishes, so a failure is visible before the gate ends."""
+    status = row['status']
+    progress.report(name, status, scope='case', case=name, path=progress_path(folder), log=row.get('log', ''),
+                    detail='' if status == 'PASS' else row.get('tail', ''))
+
+
 def run_step(name: str, spec: dict, root: Path, folder: Path) -> dict:
     from run_deploy_pipeline import LANE_TOKEN_ENV
     log = folder / (hashlib.sha256(name.encode()).hexdigest() + '.log')
-    env = {**os.environ, **spec.get('env', {}), 'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
+    env = {**os.environ, **spec.get('env', {}), 'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1',
+           # Test runners append per-unit rows here as they finish (deploy_gate_progress).
+           progress.ENV: progress_path(folder), progress.CASE_ENV: name}
     started = time.time()
     token = env.get(LANE_TOKEN_ENV)
     retain = (lambda: owned_benchmark_draining(root, token, started)) if token else None

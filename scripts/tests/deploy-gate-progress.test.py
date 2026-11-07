@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import deploy_gate_progress as progress  # noqa: E402
+import deploy_gate_progress as progress
 
 
 class ProgressTest(unittest.TestCase):
