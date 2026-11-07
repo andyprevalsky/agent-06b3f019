@@ -488,12 +488,17 @@ class AgentCardElection(unittest.TestCase):
         with self.assertRaises(ValueError):
             election.accept({'elected_omissions':[{'proof':original}]}, proof)
 
-def unused_loopback_port():
-    """A loopback port no live socket holds when the fixture is built."""
+def reserved_loopback_port(test):
+    """A port no live socket can take while the test runs.
+
+    A released probe port returns to the kernel's ephemeral range, where a concurrent
+    client connection can take it and trip the host-wide Hub socket check. Holding a
+    bound, non-listening socket keeps it out of /proc/net/tcp and out of autobind."""
     import socket
-    with socket.socket() as probe:
-        probe.bind(('127.0.0.1', 0))
-        return probe.getsockname()[1]
+    reservation = socket.socket()
+    test.addCleanup(reservation.close)
+    reservation.bind(('', 0))
+    return reservation.getsockname()[1]
 
 
 class InterruptedCustody(unittest.TestCase):
@@ -547,7 +552,7 @@ class InterruptedCustody(unittest.TestCase):
             base=self.root/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()
             campaign=base/'campaigns'/('deploy-'+base.name); runs=base/'runs'; fleet=runs/'20261106-223817-2147483001'
             # The custody check scans the host's live sockets: never claim a port a real Hub may hold.
-            port=str(unused_loopback_port())
+            port=str(reserved_loopback_port(self))
             owner='b'*32; hub=runs/'_hub'/('agent-link-server.'+port+'.'+'c'*32+'.owner')
             self.hub=hub; self.fleet=fleet; self.audit=self.root/'.git/cloudbench-fleet-audits'/owner
             self.put(hub,'version=1\npid=2147483004\npgid=2147483004\npid_start=proc-start:fixture:1\nowner_token='+ 'c'*32+
@@ -675,6 +680,14 @@ class InterruptedCustody(unittest.TestCase):
                    'previous_entry_sha256': c.digest(previous), 'relocations': {str(policy): str(frozen)},
                    'confirmed_at': time.time(), 'observed_by': 'independent relocation fixture'}
         return state, receipt, proof, previous, renewal
+
+    def test_cloud_fixture_hub_port_stays_reserved_for_the_test(self):
+        import socket
+        self.fixture(True)
+        port = int(self.hub.name.split('.')[1])
+        for host in ('127.0.0.1', ''):
+            with socket.socket() as other, self.assertRaises(OSError):
+                other.bind((host, port))
 
     def test_historical_policy_drift_renews_without_changing_original_bindings(self):
         state, receipt, proof, previous, renewal = self.policy_relocation_fixture()
