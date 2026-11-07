@@ -280,6 +280,9 @@ def reuse_qualifications(state: dict, gate: dict) -> dict:
                 or warning['receipt_sha256'] != evidence['sha256']
                 or sha_file(evidence['path']) != evidence['sha256'] or case in expected):
             raise ValueError('reuse resource qualification changed')
+        if 'renewal' in warning:
+            from deploy_test_agentcard_renewal import validate_active
+            validate_active(state, warning)
         expected[case] = {'disposition': RESOURCE_SKIP, **warning}
     if not set(expected) <= set(gate['checks']):
         raise ValueError('reuse qualification outside full inventory')
@@ -474,6 +477,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
+    if any(w.get('gate') == name and 'renewal' in w for w in state.get('resource_warnings', [])):
+        reuse_qualifications(state, gate)
     token = uuid.uuid4().hex
     case_skips = {key.split("/", 1)[1]: value for key, value in state["skips"].items()
                   if key.startswith(name + "/") and value["source"] == state["source"]}
@@ -1967,7 +1972,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
@@ -2018,6 +2023,21 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "triage-quick":
                 with cancellation_handlers():
                     triage_quick(plan, state, directory, args.root)
+            elif args.action == 'prepare-agentcard-renewal':
+                if digest(plan) != state['plan_digest']:
+                    raise ValueError('renewal plan differs from frozen selection')
+                from deploy_test_agentcard_renewal import binding
+                if not args.occurrence:
+                    raise ValueError('--occurrence original warning id required')
+                print(json.dumps({**binding(state, args.occurrence, args.root), 'prepared_at': time.time()}))
+                return 0
+            elif args.action == 'renew-agentcard-warning':
+                if digest(plan) != state['plan_digest']:
+                    raise ValueError('renewal plan differs from frozen selection')
+                from deploy_test_agentcard_renewal import renew
+                if args.proof is None:
+                    raise ValueError('--proof read-only provider confirmation required')
+                renew(state, bounded_read(args.proof, 'AgentCard renewal'), args.root)
             elif args.action == "refresh":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
@@ -2092,6 +2112,10 @@ def main(argv: list[str] | None = None) -> int:
                                  f" · Receipt: {w['receipt_sha256']} · Native: {w['native_result']}")
                         if proof['reason_code'] == AGENTCARD_RELEASE_STALL_CODE:
                             text += f" · {agentcard_unreleased_text(state, w)} (followup: unreleased funds stay open)"
+                        if 'renewal' in w:
+                            renewal = w['renewal']
+                            text += (f" · Current-input exclusion renewed at: {renewal['finished_at']}"
+                                     f" · No new execution or financial cleanup credit")
                         text += "\n"
                 (directory / "report.md").write_text(text)
                 print(text, end="")

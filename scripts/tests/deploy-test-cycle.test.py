@@ -2038,6 +2038,137 @@ class Cycle(unittest.TestCase):
         self.assertEqual('needs-focused-plan', self.state['phase']); self.assertFalse(self.state['ready'])
         self.assertEqual(['ui'], self.state['repair_gates']); self.assertEqual(1, len(self.state['resource_warnings']))
 
+    def test_renewal_contract_tracks_dependencies_task_and_payment_bytes(self):
+        import deploy_test_agentcard_renewal as renewal
+        task = {'name': 'fixture', 'tags': ['agentcard-lifecycle-sandbox']}
+        tasks = self.root / 'agents/benchmarks/tasks.json'
+        tasks.parent.mkdir(parents=True)
+        tasks.write_text(json.dumps([task]))
+        runtime = tasks.with_name('run_benchmark.py')
+        runtime.write_text('LIMIT = 1\n' + '\n'.join('def ' + name + '(): return LIMIT'
+                                                        for name in renewal.FUNCTIONS))
+        cleanup = tasks.with_name('cloud_batch_cleanup.py'); cleanup.write_text('cleanup = 1')
+        payment = self.root / renewal.PAYMENT_PATHS[0] / 'fixture.ts'
+        payment.parent.mkdir(parents=True); payment.write_text('payment = 1')
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'contract fixture'], check=True)
+        head = c.source(self.root)['head']
+        baseline = renewal.contract(self.root, head, 'fixture')
+        (self.root / 'unrelated').write_text('unrelated source')
+        self.assertEqual(baseline, renewal.contract(self.root, head, 'fixture'))
+        for path, changed in ((payment, 'payment = 2'), (runtime, runtime.read_text().replace('LIMIT = 1', 'LIMIT = 2')),
+                              (tasks, json.dumps([{**task, 'timeout_seconds': 1}])), (cleanup, 'cleanup = 2')):
+            original = path.read_text(); path.write_text(changed)
+            with self.assertRaises(ValueError): renewal.contract(self.root, head, 'fixture')
+            path.write_text(original)
+
+    def renewal_fixture(self):
+        import deploy_test_agentcard_renewal as renewal
+        import time
+        task = next(t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text())
+                    if t['name'] == 'agent-payment-abandonment')
+        lifecycle = copy.deepcopy(task['expected_payment_lifecycle'])
+        lifecycle.update(agentId='root-fixture', stripeRefund=None)
+        lifecycle['purchase'].update(status='HELD', cardId='card_fixture')
+        lifecycle['walletFunding'].update(status='RECLAIMING', providerTransferId='owt_fixture')
+        lifecycle['agentCard'].update(id='card_fixture', status='CLOSED')
+        lifecycle['orgTransfer'].update(id='owt_fixture', cardId='card_fixture', status='consumed', releasedCents=0)
+        lifecycle['stripeHold']['livemode'] = False
+        path = self.stall_run_document(lifecycle['orgTransfer'])
+        doc = c.read(path)
+        row = doc['tasks'][0]
+        row.update(agent_id='root-fixture', cleanup_failure=None, context_violations=[],
+                   execution_provenance={'base_sha': self.state['source']['head']})
+        row['logs']['agentcard_release_stall_lifecycle'] = lifecycle
+        row['logs']['cloud_cleanup_evidence'] = {
+            'errors': [], 'root_agent_id': 'root-fixture',
+            'agentcard_release_stall_lifecycles': {'root-fixture': lifecycle},
+            'final': {'root_deleted': True, 'unsealed_tree_agent_ids': [], 'browser_sessions': []}}
+        c.write(path, doc)
+        sha = c.sha_file(path)
+        failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment', sha=sha)
+        failure['worker_evidence'].update(path=str(path))
+        failure['worker_evidence']['native_task']['agent_id'] = 'root-fixture'
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED',
+                                           resource_skip=self.stall_confirmation(receipt_sha256=sha)))
+        original = copy.deepcopy(self.state['failures'])
+        (self.root / 'code').write_text('changed source requiring all current gates')
+        (self.root / renewal.PRODUCER).parent.mkdir(parents=True, exist_ok=True)
+        (self.root / renewal.PRODUCER).write_text('hermetic producer')
+        new = {**self.plan, 'source': c.source(self.root)}
+        c.refresh(self.state, self.plan, new, self.root)
+        self.plan = new
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            binding = {**renewal.binding(self.state, failure['id'], self.root), 'prepared_at': time.time() - 2}
+        proof = {'binding': binding, 'started_at': time.time() - 1, 'finished_at': time.time(),
+                 'observations': {'card': {'id': 'card_fixture', 'status': 'CLOSED', 'balanceCents': 0, 'livemode': False},
+                                  'transfer': copy.deepcopy(lifecycle['orgTransfer'])}}
+        return renewal, task, proof, original, path
+
+    def test_changed_source_agentcard_renewal_cli_keeps_failure_and_runs_peers(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        self.assertEqual([], self.state['resource_warnings'])  # original refresh revokes the exclusion
+        self.assertEqual(original, self.state['failures'])
+        native = path.read_bytes()
+        before_gate = copy.deepcopy(next(g for g in self.plan['gates'] if g['name'] == 'api'))
+        before_gate['case_protocol'] = True
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            c.execute(before_gate, self.state, self.directory / 'before-renewal', self.root)
+        before_request = c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))
+        self.assertEqual(['a', 'b'], before_request['checks'])  # old path would request another card
+        plan = self.directory / 'plan.json'
+        c.write(plan, self.plan)
+        c.write(self.directory / 'cycle.json', self.state)
+        proof_path = self.directory / 'proof.json'; c.write(proof_path, proof)
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            self.assertEqual(0, c.main(['renew-agentcard-warning', '--plan', str(plan), '--state-dir',
+                str(self.directory), '--root', str(self.root), '--proof', str(proof_path)]))
+            state = c.read(self.directory / 'cycle.json')
+            before = copy.deepcopy(state)
+            with patch.object(renewal.time, 'time', return_value=proof['finished_at'] + 600):
+                renewal.renew(state, proof, self.root)
+            self.assertEqual(before, state)
+        self.assertEqual(original, state['failures'])
+        self.assertEqual(native, path.read_bytes())
+        self.assertEqual({}, state['skips'])
+        self.assertFalse(state['ready'])
+        self.assertEqual(1, len(state['superseded_resource_warnings']))
+        gate = next(g for g in self.plan['gates'] if g['name'] == 'api')
+        gate['case_protocol'] = True
+        state.update(phase='failed-gates')
+        with patch.object(c, 'run_command', return_value=(0, False, False, False)) as runner:
+            result = c.execute(gate, state, self.directory, self.root)
+        request = c.read(Path(runner.call_args.kwargs['env']['DEPLOY_GATE_REQUEST']))
+        self.assertEqual(['b'], request['checks'])
+        self.assertEqual('SKIP', result['cases']['a'])
+        self.assertEqual('SKIPPED_WITH_WARNING', request['skips']['a']['disposition'])
+
+    def test_changed_source_renewal_fail_closed(self):
+        renewal, task, proof, original, path = self.renewal_fixture()
+        mutations = [lambda s, p: p['binding'].update(native_sha256='0' * 64),
+                     lambda s, p: p['binding'].update(source={'head': 'wrong'}),
+                     lambda s, p: p.update(started_at=0),
+                     lambda s, p: p.update(provider_waiver=True),
+                     lambda s, p: p['observations']['transfer'].update(livemode=True),
+                     lambda s, p: p['observations']['transfer'].update(releasedCents=4396),
+                     lambda s, p: p['observations']['card'].update(balanceCents=False),
+                     lambda s, p: p['observations']['card'].update(id='card_wrong'),
+                     lambda s, p: s.update(running=[]),
+                     lambda s, p: s['failures'][0].update(complete=False),
+                     lambda s, p: s['failures'][0]['rca']['resource_skip'].update(reason_code='compute_quota_exhausted')]
+        with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+            for mutate in mutations:
+                state, changed = copy.deepcopy(self.state), copy.deepcopy(proof)
+                mutate(state, changed); before = copy.deepcopy(state)
+                with self.assertRaises((ValueError, KeyError)):
+                    renewal.renew(state, changed, self.root)
+                self.assertEqual(before, state)
+            with patch.object(c, 'retained_owners', return_value=['api']):
+                with self.assertRaises(ValueError): renewal.renew(self.state, proof, self.root)
+            path.write_text('{}')
+            with self.assertRaises(ValueError): renewal.renew(self.state, proof, self.root)
+
     def test_resource_warning_needs_renewed_confirmation_after_changed_inputs(self):
         failure = self.resource_failure()
         c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.confirmation()))

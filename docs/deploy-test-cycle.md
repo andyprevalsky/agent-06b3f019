@@ -344,3 +344,44 @@ older legacy receipt says PASS. Exit5 means source/configuration changed;
 exit1 means not ready, and exit2 means missing or malformed evidence. The staged
 runner requests `/RCA` immediately for every failure, rather than waiting for
 the legacy pipeline's repeated-round cap.
+
+## Changed-source AgentCard warning renewal
+
+`refresh` still revokes resource warnings whose inputs changed. For an already
+confirmed **sandbox AgentCard release stall**, the two typed actions below can
+qualify only that original case for exclusion from the new full sweep. They do
+not create a native result, financial cleanup credit, refund, or passing test.
+The original complete FAIL/native SKIPPED row, snapshot, confirmation and warning
+history remain intact. Compute quota and other exceptions cannot use this path.
+
+After the source is frozen, retain the previous plan, generate the new plan with
+`deploy_test_plan.py` and the same worker bindings, and use the ordinary refresh:
+
+```bash
+python3 scripts/deploy_test_cycle.py refresh --input .context/deploy-pipeline/previous-plan.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+python3 scripts/deploy_test_cycle.py prepare-agentcard-renewal --occurrence ORIGINAL_WARNING_ID --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline > .context/deploy-pipeline/agentcard-renewal-binding.json
+./node_modules/.bin/tsx back-end/scripts/agentcard-confirm-stall.ts .context/deploy-pipeline/agentcard-renewal-binding.json .context/deploy-pipeline/agentcard-renewal-proof.json
+python3 scripts/deploy_test_cycle.py renew-agentcard-warning --proof .context/deploy-pipeline/agentcard-renewal-proof.json --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+python3 scripts/deploy_test_cycle.py run --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline
+```
+
+Run the producer with the existing managed organization authentication; it does
+not load or edit env files. Keep both JSON files private. The proof output must
+not already exist. No provider calls occur in the Python actions. The producer
+uses only `get_card(card_id)` and `list_transfers(status=consumed, limit=100)`,
+sharing one organization retry deadline. It retains only allowlisted metadata.
+Missing, ambiguous, live, changed, or no-longer-stalled resources fail closed.
+Never request card details or retry minting/reclaiming to obtain a proof.
+
+The proof schema is `{binding, started_at, finished_at, observations}`. Binding
+contains `kind: agentcard-release-stall-renewal-v1`, occurrence, original warning
+and native-file SHA256, original/current source, plan/input/environment digests,
+unchanged task/payment/assertion contract digest, producer SHA256, original
+resource IDs, amount and `prepared_at`. Observation contains only card
+`id/status/balanceCents/livemode` and transfer
+`id/cardId/status/amountCents/transferredCents/releasedCents/livemode`. It must
+show the original CLOSED zero-balance sandbox card and consumed transfer with
+its original transferred amount and zero released. Preparation precedes both
+fresh read timestamps; admission requires a read started within five minutes.
+An exact accepted proof is idempotent. All remaining current-source checks run
+under the existing full-plan, source, cleanup and deadline rules.
