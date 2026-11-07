@@ -16,6 +16,7 @@ import sys
 import subprocess
 import time
 
+import cloudbench_provider_headroom as provider_headroom
 from cloudbench_execution_provenance import load_provenance, verify_code_binding
 from cloudbench_result import validate_run_document, validate_run_file
 from deploy_test_cycle import NAME, ROOT, read, source, write
@@ -84,11 +85,20 @@ def collect_fleet(request, root, fleet, started, native_exit):
     return cases, details, True, str(fleet)
 
 
-def campaign_width(checks):
+def campaign_width(checks, deadline=None):
+    """Smoke width: the reviewed registry cap, narrowed by live usage of shared provider accounts.
+
+    Tilion's browsers are one account shared with production and every other deploy, so the
+    width comes from its live session listing (cloudbench_provider_headroom), waiting with
+    progress lines until `deadline` (epoch; default 15 min) when no browser is free.
+    """
     capacity = runpy.run_path(str(Path(__file__).with_name('cloudbench-provider-capacity.py')))
     registry = capacity['for_browser_provider'](capacity['load_registry'](),
                                                capacity['resolve_browser_provider']())
-    return min(len(checks), registry['cap'])
+    if deadline is None:
+        deadline = time.time() + provider_headroom.DEFAULT_WAIT_SECONDS
+    return provider_headroom.admitted_width(len(checks), registry, probes=provider_headroom.live_probes(),
+                                            deadline=deadline)
 
 
 def campaign_published(summary, campaign, started, native):

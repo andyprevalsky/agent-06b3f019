@@ -310,6 +310,11 @@ else
   if [[ "${1:-}" == "chat-lifecycle-latency" ]]; then
     . "$REPO_DIR/scripts/lib/isolated-benchmarks.sh"
     wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-3600}" 30
+    # That wait sees only this checkout. Production and every other devbox's
+    # deploys spend the same Cerebras org quota, which only the provider's own
+    # rate-limit headers report: wait while a per-minute window is short.
+    python3 "$REPO_DIR/scripts/cloudbench_provider_headroom.py" cerebras-wait \
+      --timeout-seconds "${SEMANTIC_LATENCY_BENCH_WAIT_S:-3600}"
   fi
 
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then

@@ -811,6 +811,14 @@ wait_line=$(grep -n 'wait_for_isolated_benchmarks "$REPO_DIR"' "$RUNNER" | head 
 session_line=$(grep -n 'SEMANTIC_SESSION=$(cd "$REPO_DIR/back-end"' "$RUNNER" | head -1 | cut -d: -f1)
 [ -n "$wait_line" ] && [ -n "$session_line" ] && [ "$wait_line" -lt "$session_line" ] \
   || fail "latency ratchet must finish waiting before it generates its session"
+# The checkout-local wait cannot see other devboxes' deploys or production on
+# the shared Cerebras org; the ratchet must also wait on the provider's own
+# per-minute headers (cloudbench_provider_headroom.py; unit-tested in
+# scripts/tests/deploy-test-worker.test.py CerebrasRatchetHeadroom).
+require_text "$RUNNER" 'python3 "$REPO_DIR/scripts/cloudbench_provider_headroom.py" cerebras-wait' "local latency ratchet must wait for the shared Cerebras quota every deploy spends"
+quota_line=$(grep -n 'cloudbench_provider_headroom.py" cerebras-wait' "$RUNNER" | head -1 | cut -d: -f1)
+[ -n "$quota_line" ] && [ "$wait_line" -lt "$quota_line" ] && [ "$quota_line" -lt "$session_line" ] \
+  || fail "shared Cerebras quota wait must run after the local benchmark wait and before the session"
 
 . "$ISOLATED_BENCHMARKS_LIB"
 bench_repo="$(mktemp -d)"
