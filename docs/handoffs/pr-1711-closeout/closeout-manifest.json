@@ -52,7 +52,13 @@
       "cloud smoke infra-stopped in sweeps 1-9: shared donor churn by other lanes, donor image mismatch, local disk reserve, native Machine-count ceiling, and one guest hung 45 min in bootstrap git fetch (5/11 PASS first); infra, not code; the hang is unattributed (only fleet-child.log survives)",
       "backend gate once reported interrupted=true with exit 0 and coverage green (sweep 3); not reproduced in isolation (3 clean runs of the teardown test)",
       "load-sensitive flakes under 12-way local load: frontend admin-health tooltip, backend browser-session budget, Tilion popup, cloudbench autoscale observation"
-    ]
+    ],
+    "smoke_attempts": {
+      "total": 12,
+      "completed_11_of_11": 3,
+      "incomplete": 9,
+      "source": "cycle receipts under .context/deploy-pipeline*/attempts/*/*/smoke/ (archived in archives.core)"
+    }
   },
   "review": {
     "ledger": "cycle 1 skipped (CodeRabbit usage cap), cycle 2 clean, verification on b72b2cb31 skipped (usage cap), verification on a64c415ab delivered 7 findings -> Overridden (user pre-authorization after 3 rounds; user approval id user-approved-verification-review-a64c415ab-20261106)",
@@ -213,7 +219,7 @@
   "followups": [
     "seven deferred CodeRabbit findings (register comment above), each needs a fix with a regression",
     "deploy structural timing tests flake under concurrent start (run-deploy-pipeline.test.py: check_observation_validity, check_materialized_reservation_credit); existing repair thread owns it",
-    "shared warm donor needs an owner/lease protocol: five smoke attempts died from other lanes' donor writes, image changes or the 56-Machine app ceiling",
+    "shared warm donor needs an owner/lease protocol: 12 cloud smoke attempts were made on three sources (3 completed 11/11: 3d1bf0b17, b72b2cb31, a64c415ab); 9 did not complete (other lanes' donor writes, a donor image change, the local disk reserve, the 56-Machine app ceiling, one 45-minute guest hang after 5/11 PASS)",
     "cloud smoke: guest bootstrap git fetch can hang for 45 min with no stderr; capture a read-only process listing before teardown next time",
     "benchmark-history-backfill cannot bind cloud-fleet runs (Hub index entries carry no code identity); rows for merged cloud runs have to be built by hand from execution provenance",
     "deploy.md Step 13a embeds a production API key in prose; use BACKEND_API_KEY from back-end/.env",
