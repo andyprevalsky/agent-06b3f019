@@ -2526,6 +2526,7 @@ class DOMService:
             f"reconnect_pending={session._reconnect_pending}"
         )
         started_here = False
+        ended_stale_reader = False
         deadline = time.monotonic() + session.RECONNECT_WAIT_TIMEOUT
         while not session.is_cdp_connected and time.monotonic() < deadline:
             if session.is_reconnecting:
@@ -2537,6 +2538,19 @@ class DOMService:
             while not (session.is_cdp_connected or session.is_reconnecting) and time.monotonic() < grace:
                 await asyncio.sleep(0.05)
             if session.is_cdp_connected or session.is_reconnecting:
+                continue
+            reader = getattr(session._cdp_client_root, "_message_handler_task", None)
+            if not ended_stale_reader and reader is not None and not reader.done():
+                # The closed client's reader is still running (a backlog under loop lag),
+                # so browser-use's drop callback has not fired. browser-use's reconnect
+                # would cancel this reader inside its reconnect window, where that
+                # callback records a pending reconnect; every later cycle then stops
+                # the next healthy client the same way (H-47: 468 reconnects). Ending
+                # the reader first lets the callback start browser-use's one reconnect.
+                ended_stale_reader = True
+                logger.warning(f"CDP socket is down but its reader is still running ({flags}); ending it")
+                reader.cancel()
+                await asyncio.wait({reader})
                 continue
             if started_here:
                 break

@@ -120,6 +120,15 @@ async def _default_upstream_connect(url: str) -> Any:
     return await websockets.connect(url, max_size=None, ping_interval=20, ping_timeout=60, proxy=None)
 
 
+def _close_details(websocket: Any) -> str:
+    """Close code, reason and initiator of a websocket, for attributing a CDP drop (log only)."""
+    protocol = getattr(websocket, "protocol", None)
+    received_first = getattr(protocol, "close_rcvd_then_sent", None)
+    initiator = {True: "peer", False: "mux", None: "none"}[received_first]
+    reason = (getattr(websocket, "close_reason", "") or "")[:120]
+    return f"code={getattr(websocket, 'close_code', None)}, reason={reason}, closed_first_by={initiator}"
+
+
 def _downstream_close_code(code: Optional[int]) -> int:
     # 1005/1006/1015 are reserved and cannot be sent; report them as 1011.
     if code is None or code in (1005, 1006, 1015):
@@ -362,6 +371,14 @@ class SingleCdpConnectionMultiplexer:
     async def _close_upstream(self) -> None:
         async with self._upstream_lock:
             upstream, reader = self._upstream, self._reader
+            if upstream is not None and getattr(upstream, "close_code", None) is not None:
+                # The provider socket had already closed and its reader had not reported it
+                # yet; nulling _upstream below would otherwise hide that close (H-47).
+                logger.warning(
+                    "[CdpMux] Upstream CDP socket was already closed when released (label=%s, %s)",
+                    self._label,
+                    _close_details(upstream),
+                )
             self._upstream, self._reader = None, None
             self._fail_internal(CdpMultiplexerUpstreamClosed(1000, "released"))
             self._pending.clear()
@@ -937,6 +954,7 @@ class SingleCdpConnectionMultiplexer:
             await websocket.close(code=1001, reason="multiplexer closed")
             return
         client = _Client(websocket=websocket, number=next(self._client_numbers))
+        ended: Optional[BaseException] = None
         client.sender = asyncio.create_task(self._drain_outbox(client))
         self._clients.add(client)
         try:
@@ -950,12 +968,22 @@ class SingleCdpConnectionMultiplexer:
             self._browser_session_owner[client.browser_session_id] = client
             async for raw in websocket:
                 await self._forward_client_message(client, raw)
-        except websockets.ConnectionClosed:
-            pass
+        except websockets.ConnectionClosed as error:
+            # Also raised by an upstream send inside _forward_client_message while this
+            # client's own socket is still open; the exit log below names which.
+            ended = error
         finally:
             self._clients.discard(client)
             if client.sender is not None:
                 client.sender.cancel()
+            logger.info(
+                "[CdpMux] Local CDP client %d left (label=%s, %s, ended_by=%s, clients_left=%d)",
+                client.number,
+                self._label,
+                _close_details(websocket),
+                f"{type(ended).__name__}: {str(ended)[:160]}" if ended is not None else None,
+                len(self._clients),
+            )
             await self._release_client(client)
 
     async def _forward_client_message(self, client: _Client, raw: Any) -> None:

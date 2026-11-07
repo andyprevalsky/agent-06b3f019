@@ -461,6 +461,72 @@ async def test_multiplexer_propagates_provider_close_code():
             await multiplexer.close()
 
 
+async def test_multiplexer_logs_who_closed_each_cdp_socket():
+    """H-47: a release must record the close that caused it, or a provider drop reads as an ordinary release."""
+    from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
+
+    records: List[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    mux_logger = logging.getLogger("browser_tools.cdp_multiplexer")
+    capture = _Capture(level=logging.INFO)
+    previous_level = mux_logger.level
+    mux_logger.addHandler(capture)
+    mux_logger.setLevel(logging.INFO)
+
+    async def provider(socket_):
+        attach = json.loads(await socket_.recv())
+        await socket_.send(json.dumps({"id": attach["id"], "result": {"sessionId": "BROWSER"}}))
+        with contextlib.suppress(websockets.ConnectionClosed):
+            await socket_.recv()
+
+    quiet = logging.getLogger("browser_tilion.fake_provider")
+    quiet.setLevel(logging.CRITICAL)
+    try:
+        async with websockets.serve(provider, "127.0.0.1", 0, logger=quiet) as server:
+            port = server.sockets[0].getsockname()[1]
+            multiplexer = SingleCdpConnectionMultiplexer(
+                f"ws://127.0.0.1:{port}/v1/session/x/cdp?token=t", slot_confirm_seconds=0, label="h47"
+            )
+            local_url = await multiplexer.start()
+            try:
+                async with websockets.connect(local_url, proxy=None) as client:
+                    for _ in range(100):
+                        if multiplexer.upstream_attached and multiplexer._browser_session_owner:
+                            break
+                        await asyncio.sleep(0.02)
+                    await client.close(code=1000, reason="done")
+                for _ in range(100):
+                    if any("Local CDP client 1 left" in line for line in records):
+                        break
+                    await asyncio.sleep(0.02)
+                left = [line for line in records if "Local CDP client 1 left" in line]
+                assert left and "code=1000" in left[0] and "closed_first_by=peer" in left[0], records
+                assert "clients_left=0" in left[0] and "ended_by=None" in left[0], left
+
+                class _ClosedUpstream:
+                    close_code = 1011
+                    close_reason = "keepalive ping timeout"
+                    protocol = type("P", (), {"close_rcvd_then_sent": False})()
+
+                    async def close(self) -> None:
+                        return None
+
+                multiplexer._upstream, multiplexer._reader = _ClosedUpstream(), None
+                await multiplexer._close_upstream()
+                already = [line for line in records if "already closed when released" in line]
+                assert already and "code=1011" in already[0] and "keepalive ping timeout" in already[0], records
+                assert "closed_first_by=mux" in already[0], already
+            finally:
+                await multiplexer.close()
+    finally:
+        mux_logger.removeHandler(capture)
+        mux_logger.setLevel(previous_level)
+
+
 async def test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_running():
     """A provider socket drop whose browser-use drop callback never starts a reconnect.
 
@@ -532,6 +598,74 @@ async def test_state_fetch_waits_for_a_reconnect_browser_use_left_pending():
                     # Let that cycle finish its events before teardown, or it restarts the stopped event bus.
                     await asyncio.wait_for(deferred_cycles[0], 30)
                 finally:
+                    await _stop_dom_service(service)
+
+
+async def test_state_fetch_restore_with_a_live_stale_reader_reconnects_once():
+    """H-47: restoring the socket while the dead client's reader is still running must not start a reconnect storm.
+
+    anti-bot-lulus-emerald-dress (Tilion, 2026-11-07): under worker loop lag the
+    closed root client's reader had not exited, so its drop callback had not
+    fired, when the state read started browser-use's reconnect. That reconnect
+    stops the old client; the reader's done callback then records a pending
+    reconnect, which stops the next healthy client the same way. 468
+    reconnects ran in 3.5 minutes and browser-use focus never stayed valid.
+    """
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.cdp_urls import open_browser_cdp_connection
+
+    async with _chromium() as (_playwright, _browser, endpoint):
+        async with FakeTilionGateway(endpoint) as gateway:
+            with _tilion_env(gateway):
+                local_url, multiplexer = await open_browser_cdp_connection(gateway.cdp_url, label="test")
+                service = DOMService(cdp_url=local_url, cdp_multiplexer=multiplexer)
+                release = asyncio.Event()
+                try:
+                    await service.connect()
+                    session = service.session
+                    assert (await service.get_browser_state(include_screenshot=False))["url"] is not None
+                    root = session._cdp_client_root
+                    page = await session.get_or_create_cdp_session(focus=False)
+                    held = asyncio.Event()
+
+                    original = root._event_registry._handlers["Page.lifecycleEvent"]
+
+                    async def busy_handler(event, session_id) -> None:
+                        # The reader is inside an event handler, as with a backlog under loop lag.
+                        held.set()
+                        await release.wait()
+                        original(event, session_id)
+
+                    root.register.Page.lifecycleEvent(busy_handler)
+                    await root.send.Page.navigate(
+                        params={"url": "data:text/html,<title>h47</title><p>h47</p>"}, session_id=page.session_id
+                    )
+                    await asyncio.wait_for(held.wait(), 10)
+                    await gateway.drop_all()
+                    for _ in range(100):
+                        if not session.is_cdp_connected:
+                            break
+                        await asyncio.sleep(0.05)
+                    assert not session.is_cdp_connected and not session.is_reconnecting
+                    assert not root._message_handler_task.done()  # the stale reader is still running
+                    state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
+                    assert state["url"] is not None
+                    clients: list = []  # strong references, so identity checks cannot alias a freed client
+                    loop = asyncio.get_running_loop()
+                    settle_until = loop.time() + 5.0
+                    while loop.time() < settle_until:
+                        current = session._cdp_client_root
+                        if current is not None and not any(current is seen for seen in clients):
+                            clients.append(current)
+                        await asyncio.sleep(0.05)
+                    assert len(clients) == 1 and multiplexer.upstream_connections_opened == 2, (
+                        f"reconnect storm: {len(clients)} root CDP clients and "
+                        f"{multiplexer.upstream_connections_opened} upstream dials within 5s of the restore"
+                    )
+                    assert session.is_cdp_connected and not session.is_reconnecting
+                    assert (await service.get_browser_state(include_screenshot=False))["url"] is not None
+                finally:
+                    release.set()
                     await _stop_dom_service(service)
 
 
@@ -4286,8 +4420,10 @@ async def run_all_tests():
         ("tilion_live_view_native_session_identity", test_tilion_live_view_native_session_identity),
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
         ("multiplexer_propagates_provider_close_code", test_multiplexer_propagates_provider_close_code),
+        ("multiplexer_logs_who_closed_each_cdp_socket", test_multiplexer_logs_who_closed_each_cdp_socket),
         ("state_fetch_restores_dropped_cdp_socket", test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_running),
         ("state_fetch_waits_for_pending_reconnect", test_state_fetch_waits_for_a_reconnect_browser_use_left_pending),
+        ("state_fetch_restore_with_live_stale_reader_reconnects_once", test_state_fetch_restore_with_a_live_stale_reader_reconnects_once),
         ("state_fetch_reports_provider_close_when_unrestorable", test_state_fetch_reports_provider_close_when_the_socket_cannot_be_restored),
         ("state_restore_browser_use_attributes_exist", test_state_restore_relies_only_on_browser_use_attributes_that_exist),
         ("tilion_cdp_url_detection_and_redaction", test_tilion_cdp_url_detection_and_redaction),
