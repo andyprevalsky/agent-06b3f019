@@ -4347,3 +4347,75 @@ def test_worker_slot_admission_uses_the_startup_machine_ceiling_default(tmp_path
         'reserve_worker_machine_slot aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-worker-1', '']))
     result = subprocess.run(['bash', str(script)], capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_launch(tmp_path):
+    """The ordinary campaign records its effective CLOUDBENCH_* operator settings at launch.
+
+    descend I-31: a ``--durable`` campaign ran with
+    CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3600 and
+    CLOUDBENCH_WARM_STOP_ATTEMPTS=720, visible only in its systemd unit
+    environment. A successor reproducing it from summary.json launched with
+    the 300 s default; capacity admission timed out and the native infra stop
+    fired. The real CLI execs the real campaign here; an expired original
+    clock admits no controller, and a fake Fly client proves nothing reaches Fly.
+    """
+    checkout = tmp_path / 'checkout'
+    scripts = checkout / 'scripts'
+    scripts.mkdir(parents=True)
+    for name in ('run-bench', 'cloudbench_catalog.py', 'cloudbench-shard-coordinator.py'):
+        shutil.copyfile(ROOT / 'scripts' / name, scripts / name)
+    copy_timeout_policy(checkout)
+    report_contract = checkout / '.claude/shared/benchmark-report-format.txt'
+    report_contract.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / '.claude/shared/benchmark-report-format.txt', report_contract)
+    (checkout / 'agents/benchmarks/hub_upload.py').write_text(
+        "import hashlib, json, os, sys\n"
+        "args=sys.argv[1:]; record=json.load(open(args[1])); ack=args[args.index('--publication-ack')+1]\n"
+        "json.dump({'pid':os.getpid(),'token':args[args.index('--publication-token')+1],"
+        "'record_sha256':hashlib.sha256(json.dumps(record,sort_keys=True).encode()).hexdigest()},open(ack,'w'))\n")
+    # The exact reviewed campaign runs as __main__ for the checkout's --root.
+    (scripts / 'run-bench-campaign.py').write_text(
+        'import os, runpy\n'
+        "runpy.run_path(os.path.join(os.environ['FIXTURE_CAMPAIGN_ROOT'], 'scripts/run-bench-campaign.py'),"
+        " run_name='__main__')\n")
+    home = tmp_path / 'home'
+    calls = tmp_path / 'flyctl-calls.jsonl'
+    client = home / '.fly/bin/flyctl'
+    client.parent.mkdir(parents=True)
+    client.write_text(f'#!{sys.executable}\nimport json, sys\n'
+                      f'open({str(calls)!r}, "a").write(json.dumps(sys.argv) + "\\n")\nraise SystemExit(9)\n')
+    client.chmod(0o700)
+    secrets = {'CLOUDBENCH_FIXTURE_TOKEN': 'fixture-token-must-not-record',
+               'CLOUDBENCH_FIXTURE_API_KEY': 'fixture-api-key-must-not-record',
+               'CLOUDBENCH_FIXTURE_ENV_B64': 'Zml4dHVyZS1iNjQtbXVzdC1ub3QtcmVjb3Jk'}
+    settings = {'CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS': '3600',
+                'CLOUDBENCH_WARM_STOP_ATTEMPTS': '720',
+                'CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE': 'performance-2x',
+                'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY': '0'}
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(('CLOUDBENCH_', 'RUN_BENCH_', 'BENCHMARK_HUB_'))}
+    environment.update(settings, **secrets, HOME=str(home),
+                       PATH=os.pathsep.join([str(client.parent), environment.get('PATH', '')]),
+                       FIXTURE_CAMPAIGN_ROOT=str(ROOT),
+                       RUN_BENCH_CATALOG_UNDER_TEST=str(ROOT / 'agents/benchmarks/tasks.json'))
+    started_at = int(time.time()) - 120
+    result = subprocess.run(['bash', str(scripts / 'run-bench'), 'demo-fleet-alpha', 'demo-fleet-beta',
+                             '-k', '2', '--concurrency', '2', '--e2e-timeout', '60',
+                             '--e2e-started-at', str(started_at)],
+                            capture_output=True, text=True, env=environment, timeout=FIXTURE_HOST_GUARD_SECONDS)
+    summaries = list((checkout / '.context/benchmarks/campaigns').glob('*/summary.json'))
+    assert len(summaries) == 1, result.stdout + result.stderr
+    text = summaries[0].read_text()
+    summary = json.loads(text)
+    # The ordinary campaign exec, not the full or sharded route; no controller ran.
+    assert (summary['runs'], summary['concurrency'], summary['total_jobs']) == (2, 2, 4)
+    assert summary['e2e_timeout_exceeded'] is True, result.stdout + result.stderr
+    assert summary.get('operator_settings') == settings, result.stdout + result.stderr
+    for name, value in secrets.items():
+        assert name not in text and value not in text
+        assert value not in result.stdout + result.stderr
+    banner = result.stdout
+    for name, value in settings.items():
+        assert f'{name}={value}' in banner, banner
+    assert not calls.exists(), calls.read_text()

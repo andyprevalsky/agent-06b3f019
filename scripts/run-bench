@@ -156,6 +156,16 @@ if [[ "${1:-}" == "stability-proof" ]]; then
         --capability "$@"
 fi
 
+# The one secret-like name filter for every launch setting run-bench copies
+# out of its environment: the durable unit's --setenv list and the campaign's
+# recorded operator settings (descend I-31). Credentials come from env files.
+run_bench_secret_like_name() {
+    case "$1" in
+        *TOKEN*|*SECRET*|*PASSWORD*|*API_KEY*|*_KEY|*_B64) return 0 ;;
+    esac
+    return 1
+}
+
 # --durable: run this exact command as a transient SYSTEM service. setsid/nohup
 # leave the controller in the caller's cgroup; on boxes.dev that is the agent
 # session's boxes_workload.slice scope, and a daemon restart hard-disposes it
@@ -213,9 +223,7 @@ if [ "$RUN_BENCH_DURABLE_REQUESTED" -eq 1 ]; then
             *) continue ;;
         esac
         [ "$name" != RUN_BENCH_DURABLE_CONTROLLER ] || continue
-        case "$name" in
-            *TOKEN*|*SECRET*|*PASSWORD*|*API_KEY*|*_KEY) durable_skipped+=("$name"); continue ;;
-        esac
+        if run_bench_secret_like_name "$name"; then durable_skipped+=("$name"); continue; fi
         durable_env+=("--setenv=$name=${!name}")
     done < <(compgen -e)
     [ "${#durable_skipped[@]}" -eq 0 ] || echo "⚠️  --durable does not forward secret-like variables (${durable_skipped[*]}); controllers read credentials from the env files" >&2
@@ -444,6 +452,8 @@ Durable launch (boxes.dev and other systemd hosts):
                      it. Prints unit, MainPID (the controller) and log, then
                      returns. Without systemd-run or passwordless sudo it warns
                      loudly and falls back to setsid. Stop: sudo -n systemctl stop <unit>.
+                     Forwards non-secret launch settings; a campaign records its
+                     CLOUDBENCH_* settings in summary.json operator_settings.
   --durable-log FILE Append the service's output to FILE (implies --durable;
                      default .context/benchmarks/durable/<unit>.log).
 
@@ -904,6 +914,15 @@ if [ "$CAMPAIGN_REQUESTED" -eq 1 ]; then
         esac
         CAMPAIGN_ARGS+=("--forward-arg=$arg")
     done
+    # The campaign records these effective non-secret CLOUDBENCH_* settings in
+    # summary.json and its banner, so a successor can relaunch it exactly; a
+    # --durable unit's environment is otherwise their only record (I-31).
+    operator_setting_names=()
+    while IFS= read -r name; do
+        case "$name" in CLOUDBENCH_*) ;; *) continue ;; esac
+        run_bench_secret_like_name "$name" || operator_setting_names+=("$name")
+    done < <(compgen -e)
+    export RUN_BENCH_OPERATOR_SETTING_NAMES="${operator_setting_names[*]}"
     exec "$PY" -u "$ROOT_DIR/scripts/run-bench-campaign.py" "${CAMPAIGN_ARGS[@]}"
 fi
 

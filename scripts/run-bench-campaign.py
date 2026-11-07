@@ -1346,6 +1346,19 @@ def provider_capacity_refusal(benches: int) -> int:
         raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
 
 
+def launch_operator_settings(environ: Mapping[str, str]) -> dict[str, str] | None:
+    """Effective non-secret CLOUDBENCH_* settings at launch, or None when unrecorded.
+
+    scripts/run-bench names them with its one secret-like filter (the same one
+    its --durable unit forwarder applies); a direct launch has no such list.
+    """
+    names = environ.get("RUN_BENCH_OPERATOR_SETTING_NAMES")
+    if names is None:
+        return None
+    return {name: environ[name] for name in sorted(set(names.split()))
+            if name.startswith("CLOUDBENCH_") and name in environ}
+
+
 def scorecard_hooks() -> dict | None:
     """The CLI scorecard and experiments ledger, when this script snapshot carries them."""
     here = Path(__file__).resolve().parent
@@ -1522,6 +1535,10 @@ def main() -> int:
         "e2e_timeout_seconds": args.e2e_timeout,
         "e2e_timeout_exceeded": False,
     }
+    operator_settings = launch_operator_settings(os.environ)
+    if operator_settings is not None:
+        # Unset names use source defaults; a successor relaunches with exactly these.
+        state["operator_settings"] = operator_settings
     for key in ("task_indexes", "group_total", "group_started_at"):
         if shard[key] is not None:
             state[key] = shard[key]
@@ -1580,6 +1597,12 @@ def main() -> int:
         f"jobs={len(jobs)} concurrency={args.concurrency}"
     )
     print(f"   summary: {summary_path}")
+    if operator_settings is None:
+        print("   operator settings: UNRECORDED (launched without scripts/run-bench)")
+    else:
+        print("   operator settings: " + (" ".join(
+            f"{name}={shlex.quote(value)}" for name, value in operator_settings.items())
+            or "none set (source defaults)"))
     scorecard = scorecard_hooks()
     experiment_goal = os.environ.get("RUN_BENCH_GOAL") or "campaign:" + ",".join(sorted(set(args.task)))[:120]
     record_experiment(scorecard, "launch", campaign_dir, root, goal=experiment_goal, kind="campaign",
