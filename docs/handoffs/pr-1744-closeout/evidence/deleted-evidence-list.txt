@@ -1,0 +1,12 @@
+Deleted by the deploy coordinator on 2026-11-07 ~14:13Z to restore disk headroom (smoke needs ~20 GB free for cleanup floors; / was at 80%):
+ A. /home/boxes/rose scratch (mine): /var/tmp/mainsnap (3.1 GB git-archive snapshot of origin/main, used only to compare a test file), /tmp/oldroot.
+ B. /home/boxes/dw/be/.context/test-runs/ (backend worker), every directory matching *failed* except the newest directory by mtime, i.e. the raw runner.log, server.log, host-pressure.log and raw-v8 of failed backend-coverage attempts:
+      backend-coverage-failed-20261107-070825-2259449   (~1.0 GB; cycle 1: error-alert unit + claude-code GitHub 429)
+      backend-coverage-failed-20261107-071829-2259442   (~0.9 GB)
+      backend-coverage-merged-failed-20261107-095447-664635   (~1.6 GB; cycle 2)
+      backend-coverage-merged-failed-20261107-105852-2059668  (~1.4 GB; cycle 3)
+      backend-coverage-merged-failed-20261107-114146-3471876  (~1.6 GB; focused phase on 105febf07)
+      (test-runs shrank 11 GB -> 57 MB, so other *failed* dirs of earlier attempts were included; names not listed before deletion)
+ C. /home/boxes/dw/be/.context/deploy-backend/<sha256> (raw-v8-union + threshold.log per attempt), all but the newest (9.1 GB -> 1.3 GB).
+ Still preserved: every cycle state archive (.context/deploy-pipeline.* incl. attempts/*/receipt.json, result.json, output.log, process.json), cloud smoke campaign dirs (.context/deploy-cloud/*), worker ledger patches (/var/tmp/deploy-stage/worker-history-attempt2/), RCA cases (docs/rca/cases/2026-11-07-*), the shard logs read during RCA were copied into /var/tmp/deploy-stage/be-trio-*.log and excerpted in the RCA cases.
+ Lost (cannot be restored): the raw V8 coverage and the runner/server logs of the failed backend attempts listed in B/C. Their verdicts, failing case names and first-bad errors are preserved in the cycle receipts/result.json and the RCA cases.
