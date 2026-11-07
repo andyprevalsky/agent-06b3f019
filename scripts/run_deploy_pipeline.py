@@ -141,7 +141,14 @@ re-pin when a receipt exceeds it): 4150 MB.
 * ``production-render`` is the Step 13a Render wait: it polls the Render
   deploys API for the merged SHA. A deploy for that SHA is the authority
   (``live`` opens the gate, a failed status blocks it, otherwise keep
-  polling). When Render created none (auto-deploy skips a commit with no
+  polling). When a newer main merge replaced it (Render ``canceled`` or
+  ``deactivated`` the merged deploy), the gate opens as
+  ``verified-by-descendant`` only on a live deploy whose commit strictly
+  descends from the merged SHA (``git merge-base --is-ancestor merged
+  live``), waits while such a descendant is still deploying and otherwise
+  blocks: an older, unrelated or failed rollout never passes, and an older
+  SHA is never redeployed over newer live main. When Render created none
+  (auto-deploy skips a commit with no
   change under its Root Directory; #1652 and #1655 spun to the bound,
   2026-10-31), the live deploy's commit opens the gate as
   ``source-equivalent`` only when ``git diff <live> <merged> -- back-end/
@@ -149,14 +156,16 @@ re-pin when a receipt exceeds it): 4150 MB.
   is an ancestor of the merged SHA (Render skipped the merge) or a
   descendant of it (a later PR deployed the identical backend); this assumes
   the Render service's Root Directory is back-end with no build filters. A
-  descendant that changed those paths is refused (the merged backend never
-  ran as-is: a manual decision) and an unrelated live commit keeps the
+  live descendant that changed those paths contains the merge and opens as
+  ``verified-by-descendant`` (never source-equivalent); an ancestor that
+  changed them or an unrelated live commit keeps the
   bounded wait. It records ``render`` (status, live_commit,
   observed_live_commit on every poll, merged_sha, backend_diff, equivalence
-  evidence with a reason code) in ``production.json`` and prints
-  ``RENDER_LIVE`` or ``RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha>
-  reason=<code>``. Credential, Render API and git failures exit 2 and
-  never pass.
+  evidence with a reason code, ``verified_by_descendant`` evidence) in
+  ``production.json`` and prints ``RENDER_LIVE``, ``RENDER_SOURCE_EQUIVALENT
+  live=<sha> merged=<sha> reason=<code>`` or ``RENDER_VERIFIED_BY_DESCENDANT
+  live=<sha> merged=<sha> reason=<code>``. Credential, Render API and git
+  failures exit 2 and never pass.
 * ``production-semantic`` is the Step 13b dispatch itself. It requires the
   passed ``production`` receipt for the same merged SHA, dispatches
   ``chat-lifecycle-ratchet.yml`` on ``main`` with ``source_sha=<merged SHA>``
@@ -3973,6 +3982,12 @@ RENDER_API_BASE = "https://api.render.com/v1"
 # paths keeps the exact-SHA wait.
 RENDER_SERVICE_PATHS = ("back-end/", "render.yaml", "package.json", "package-lock.json")
 RENDER_FAILED_STATUSES = frozenset({"build_failed", "update_failed", "canceled", "pre_deploy_failed"})
+# A merged deploy in one of these states was replaced: Render cancels a deploy a
+# newer main commit superseded and deactivates a live deploy once a newer one
+# goes live. It is verified only by a live deploy of a strict descendant of the
+# merged SHA (``verified-by-descendant``); otherwise it blocks as before.
+RENDER_SUPERSEDED_STATUSES = frozenset({"canceled", "deactivated"})
+RENDER_TERMINAL_STATUSES = RENDER_FAILED_STATUSES | RENDER_SUPERSEDED_STATUSES | {"live"}
 # deploy.md Step 13a: 90 x 10 s (Render builds can be slow).
 DEFAULT_RENDER_TIMEOUT = 900.0
 DEFAULT_RENDER_POLL_SECONDS = 10.0
@@ -4071,10 +4086,19 @@ def _git_lines(arguments: list[str], root: Path) -> list[str]:
 
 
 def _is_ancestor(older: str, newer: str, root: Path) -> bool:
-    """``git merge-base --is-ancestor older newer``; a commit unknown to this
-    checkout (or any other git failure) is a tooling error, never an answer."""
-    completed = subprocess.run(["git", "merge-base", "--is-ancestor", older, newer], cwd=root,
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+    """``git merge-base --is-ancestor older newer``. A commit unknown to this
+    checkout (a newer main merge that landed after this checkout fetched) gets
+    one ``git fetch origin main`` and a retry; any remaining git failure is a
+    tooling error, never an answer."""
+    def check() -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "merge-base", "--is-ancestor", older, newer], cwd=root,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+    completed = check()
+    if completed.returncode not in (0, 1):
+        fetched = subprocess.run(["git", "fetch", "--quiet", "origin", "main"], cwd=root, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, timeout=300)
+        if fetched.returncode == 0:
+            completed = check()
     if completed.returncode not in (0, 1):
         raise ProductionToolingError(
             f"git merge-base --is-ancestor {older} {newer} failed ({completed.stderr.strip()}); fetch origin main so "
@@ -4111,8 +4135,8 @@ def render_source_equivalence(live_commit: str, merged_sha: str, root: Path | No
     elif backend_diff:
         reason = f"live-{relationship}-backend-changed"
         detail = f"{len(backend_diff)} path(s) under {paths} differ between live {live_short} and merged {merged_short}"
-        detail += ("; the merged backend never ran as-is: a manual decision, never automatic equivalence"
-                   if live_is_descendant else "; Render builds the merged backend")
+        detail += ("; the live descendant contains the merge, so it can be verified by descendant, never "
+                   "source-equivalent" if live_is_descendant else "; Render builds the merged backend")
     else:
         reason = f"live-{relationship}-same-backend"
         detail = (f"live commit {live_short} is an {relationship} of merged {merged_short} with no change under "
@@ -4131,9 +4155,15 @@ def render_wait(merged_sha: str, *, root: Path, state: dict, fetch, timeout: flo
     """Poll ``fetch()`` (the service's deploys) until the merged backend is
     served. A deploy for the merged SHA is the authority when Render created
     one: ``live`` opens the gate, a failed status blocks it, anything else
-    keeps polling. With no deploy for the merged SHA, the live deploy's commit
-    is tested once per distinct commit with ``render_source_equivalence``;
-    equivalence opens the gate as ``source-equivalent``. The bound elapses
+    keeps polling. A merged deploy Render ``canceled`` or ``deactivated``
+    (a newer main commit replaced it) opens as ``verified-by-descendant`` only
+    when the live deploy's commit strictly descends from the merged SHA; while
+    a descendant's deploy is still in progress it keeps polling, and with none
+    live or deploying it blocks (an older, unrelated or failed rollout is
+    never accepted). With no deploy for the merged SHA, the live deploy's
+    commit is tested once per distinct commit with ``render_source_equivalence``:
+    equivalence opens the gate as ``source-equivalent`` and a live descendant
+    that changed the backend as ``verified-by-descendant``. The bound elapses
     into ``timeout`` (blocked, as before). ``state`` records every fact as it
     is learned, including ``observed_live_commit`` on every poll, so a
     blocked gate's receipt still names what was live."""
@@ -4141,7 +4171,25 @@ def render_wait(merged_sha: str, *, root: Path, state: dict, fetch, timeout: flo
                  deploy_id=None, deploy_status=None, backend_diff=None, equivalence=None, polls=0)
     started = time.monotonic()
     evaluated: dict[str, dict] = {}
+    descends: dict[str, bool] = {}
     last_seen = "none"
+
+    def descendant(commit: str) -> bool:
+        if commit not in descends:
+            descends[commit] = bool(commit) and commit != merged_sha and _is_ancestor(merged_sha, commit, root)
+        return descends[commit]
+
+    def verified(reason: str, live: dict, live_commit: str, mine: dict | None, detail: str) -> dict:
+        state["verified_by_descendant"] = {
+            "reason": reason, "merged_sha": merged_sha, "live_commit": live_commit, "live_deploy_id": live.get("id"),
+            "merged_deploy_id": mine.get("id") if mine else None,
+            "merged_deploy_status": str(mine.get("status") or "") if mine else None, "detail": detail}
+        state.update(status="verified-by-descendant", live_commit=live_commit, deploy_id=live.get("id"),
+                     deploy_status="live", waited_s=round(time.monotonic() - started, 1))
+        log(f"  Render: verified by descendant live={live_commit[:9]} merged={merged_sha[:9]} reason={reason}: "
+            f"{detail}", flush=True)
+        return state
+
     while True:
         state["polls"] += 1
         deploys = fetch()
@@ -4159,7 +4207,28 @@ def render_wait(merged_sha: str, *, root: Path, state: dict, fetch, timeout: flo
                 state.update(status="live", live_commit=merged_sha, backend_diff=[],
                              waited_s=round(time.monotonic() - started, 1))
                 return state
-            if status in RENDER_FAILED_STATUSES:
+            if status in RENDER_SUPERSEDED_STATUSES:
+                if live and descendant(live_commit):
+                    return verified(f"merged-deploy-{status}-live-descendant", live, live_commit, mine,
+                                    f"Render {status} deploy {mine.get('id')} of the merged commit; live deploy "
+                                    f"{live.get('id')} serves {live_commit[:9]}, a descendant of {merged_sha[:9]}")
+                pending = [row for row in deploys if row is not mine and _render_commit(row)
+                           and str(row.get("status") or "") not in RENDER_TERMINAL_STATUSES
+                           and descendant(_render_commit(row))]
+                if pending:
+                    last_seen = f"{status}; descendant {_render_commit(pending[0])[:7]} {pending[0].get('status')}"
+                    log(f"  Render: merged deploy {status}; waiting for descendant "
+                        f"{_render_commit(pending[0])[:9]} ({pending[0].get('status')})", flush=True)
+                else:
+                    relation = ("none is live" if not live_commit else f"live commit {live_commit[:9]} is not a "
+                                f"descendant of {merged_sha[:9]}")
+                    state.update(status="deploy-failed", waited_s=round(time.monotonic() - started, 1))
+                    raise ProductionGateError(
+                        f"Render deploy {status} for {merged_sha[:7]} (deploy {mine.get('id')}) and no newer "
+                        f"descendant of it is live or deploying ({relation}); a merged backend Render replaced is "
+                        "verified only by a live descendant: check the Render dashboard, never redeploy an older "
+                        "commit over a newer live main, then rerun this gate or continue per deploy.md (Review)")
+            elif status in RENDER_FAILED_STATUSES:
                 state.update(status="deploy-failed", waited_s=round(time.monotonic() - started, 1))
                 raise ProductionGateError(
                     f"Render deploy {status} for {merged_sha[:7]} (deploy {mine.get('id')}); fetch its logs "
@@ -4175,10 +4244,14 @@ def render_wait(merged_sha: str, *, root: Path, state: dict, fetch, timeout: flo
                     state["backend_diff"] = evaluated[live_commit]["backend_diff"]
                     log(f"  Render: live={live_commit[:9]} equivalent={evaluated[live_commit]['equivalent']} "
                         f"reason={evaluated[live_commit]['reason']}: {evaluated[live_commit]['detail']}", flush=True)
-                if evaluated[live_commit]["equivalent"]:
+                equivalence = evaluated[live_commit]
+                if equivalence["equivalent"]:
                     state.update(status="source-equivalent", live_commit=live_commit, deploy_id=live.get("id"),
                                  deploy_status="live", backend_diff=[], waited_s=round(time.monotonic() - started, 1))
                     return state
+                if equivalence["live_is_descendant"]:
+                    state.update(equivalence=equivalence, backend_diff=equivalence["backend_diff"])
+                    return verified(equivalence["reason"], live, live_commit, None, equivalence["detail"])
         if time.monotonic() - started >= timeout:
             state.update(status="timeout", waited_s=round(time.monotonic() - started, 1))
             verdict = ""
@@ -4197,12 +4270,13 @@ def production_render(merged_sha: str, state_dir: Path, then: list[str] | None =
     """deploy.md Step 13a step 1 as a CLI. Resolves the Render credentials,
     runs ``render_wait`` and records the lane under ``render`` in
     ``production.json`` (merged into the receipt of the same merged SHA, never
-    replacing the Fly/semantic lanes). Prints ``RENDER_LIVE commit=<sha>`` or
-    ``RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha> reason=<code>`` and
+    replacing the Fly/semantic lanes). Prints ``RENDER_LIVE commit=<sha>``,
+    ``RENDER_SOURCE_EQUIVALENT live=<sha> merged=<sha> reason=<code>`` or
+    ``RENDER_VERIFIED_BY_DESCENDANT live=<sha> merged=<sha> reason=<code>`` and
     then runs the optional command after ``--`` only when the gate opened,
     recording its exit (the regression uses it to prove the gate opened;
     deploy.md's Step 13a probes follow in their own blocks). Exit 0 = the live
-    backend is the merged backend, 1 = blocked (Render deploy failed or the
+    backend is the merged backend (or a live descendant containing it), 1 = blocked (Render deploy failed or the
     bound elapsed), 2 = could not decide (credentials, Render API, git); a
     non-zero ``then`` exit is returned as is."""
     root = SOURCE_ROOT if root is None else root
@@ -4250,6 +4324,11 @@ def production_render(merged_sha: str, state_dir: Path, then: list[str] | None =
         print(f"RENDER_SOURCE_EQUIVALENT live={entry['live_commit']} merged={merged_sha} "
               f"reason={equivalence['reason']}: {equivalence['detail']}; the live backend is the merged backend",
               flush=True)
+    elif entry["status"] == "verified-by-descendant":
+        descendant = entry["verified_by_descendant"]
+        print(f"RENDER_VERIFIED_BY_DESCENDANT live={entry['live_commit']} merged={merged_sha} "
+              f"reason={descendant['reason']}: {descendant['detail']}; the live backend contains the merge "
+              "(not an exact-SHA deploy)", flush=True)
     else:
         print(f"RENDER_LIVE commit={merged_sha} deploy={entry.get('deploy_id')}", flush=True)
     save()
