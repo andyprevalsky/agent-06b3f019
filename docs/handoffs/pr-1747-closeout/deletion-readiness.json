@@ -98,22 +98,22 @@
     {
       "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794018406198-ypzzn4.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
       "cwd": "/home/boxes/rose",
-      "pid": 1647873
+      "pid": 1681434
     },
     {
-      "argv": "cut -c1-230",
+      "argv": "cut -c1-200",
       "cwd": "/home/boxes/rose",
-      "pid": 1647874
+      "pid": 1681435
     },
     {
-      "argv": "head -20",
+      "argv": "head -12",
       "cwd": "/home/boxes/rose",
-      "pid": 1647875
+      "pid": 1681436
     },
     {
       "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v FACTORY_EVENT",
       "cwd": "/home/boxes/rose",
-      "pid": 1647876
+      "pid": 1681437
     },
     {
       "argv": "/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex app-server --listen ws://127.0.0.1:40829 --enabl",
@@ -123,11 +123,10 @@
   ],
   "manifest": "docs/handoffs/pr-1747-closeout/manifest.json",
   "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1747-closeout/evidence/archive-receipt-cloud.json, docs/handoffs/pr-1747-closeout/evidence/archive-receipt-core.json, docs/handoffs/pr-1747-closeout/evidence/archive-receipt-devlogs.json, docs/handoffs/pr-1747-closeout/evidence/archive-receipt-final.json, docs/handoffs/pr-1747-closeout/evidence/final-cycle-02eb65acf1.json.gz",
-    "live process 1647873 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794018406198-ypzzn4.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
-    "live process 1647874 in this checkout: cut -c1-230",
-    "live process 1647875 in this checkout: head -20",
-    "live process 1647876 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v FACTORY_EVENT",
+    "live process 1681434 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794018406198-ypzzn4.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'unsetenv'; \\builtin ",
+    "live process 1681435 in this checkout: cut -c1-200",
+    "live process 1681436 in this checkout: head -12",
+    "live process 1681437 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v FACTORY_EVENT",
     "live process 1976906 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex app-server --listen ws://127.0.0.1:40829 --enabl"
   ],
   "pr": 1747,
@@ -152,33 +151,12 @@
   "ready": false,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr1747-closeout",
+      "branch": "detached",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1747-closeout/deletion-readiness.json",
-        "docs/handoffs/pr-1747-closeout/evidence/archive-receipt-cloud.json",
-        "docs/handoffs/pr-1747-closeout/evidence/archive-receipt-core.json",
-        "docs/handoffs/pr-1747-closeout/evidence/archive-receipt-devlogs.json",
-        "docs/handoffs/pr-1747-closeout/evidence/archive-receipt-final.json",
-        "docs/handoffs/pr-1747-closeout/evidence/final-cycle-02eb65acf1.json.gz",
-        "docs/handoffs/pr-1747-closeout/evidence/final-plan-02eb65acf1.json.gz",
-        "docs/handoffs/pr-1747-closeout/evidence/github-deploy-agents-workflow-state.json",
-        "docs/handoffs/pr-1747-closeout/evidence/production-fly-37f705cd8d.json",
-        "docs/handoffs/pr-1747-closeout/evidence/production-lanes-37f705cd8d.json",
-        "docs/handoffs/pr-1747-closeout/evidence/review/approval-batch-final.json",
-        "docs/handoffs/pr-1747-closeout/evidence/review/deploy-approval-batch.26f15491.json",
-        "docs/handoffs/pr-1747-closeout/evidence/review/deploy-approval-batch.fd110d1c.json",
-        "docs/handoffs/pr-1747-closeout/evidence/review/review-ledger-final-cycle.json",
-        "docs/handoffs/pr-1747-closeout/evidence/review/review-ledger-history.txt",
-        "docs/handoffs/pr-1747-closeout/evidence/triage/focused-r4-not-run-new-cycle-instead.json",
-        "docs/handoffs/pr-1747-closeout/evidence/triage/triage-local-sweep13.json",
-        "docs/handoffs/pr-1747-closeout/evidence/triage/triage-r4-semantic-agents-smoke-diskfloor.json",
-        "docs/handoffs/pr-1747-closeout/evidence/triage/triage-r5-final-agentcard-stall.json",
-        "docs/handoffs/pr-1747-closeout/manifest.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
