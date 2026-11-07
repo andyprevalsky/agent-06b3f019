@@ -193,6 +193,81 @@ class OpenPrAndMerge(Repo):
         event.assert_not_called()
 
 
+class Sync(Repo):
+    def feature(self):
+        sh('git', 'checkout', '-qb', 'feature', cwd=self.root)
+
+    def push_to_main(self, name, text):
+        """Another contributor lands a commit on origin/main."""
+        other = Path(self.tmp.name) / 'other'
+        if not other.exists():
+            sh('git', 'clone', '-q', '-b', 'main', str(self.remote), str(other), cwd=self.tmp.name)
+            for key, value in (('user.email', 'o@example.com'), ('user.name', 'O'), ('commit.gpgsign', 'false')):
+                sh('git', 'config', key, value, cwd=other)
+        (other / name).write_text(text)
+        sh('git', 'add', name, cwd=other)
+        sh('git', 'commit', '-qm', f'main: {name}', cwd=other)
+        sh('git', 'push', '-q', 'origin', 'main', cwd=other)
+
+    def test_up_to_date_changes_nothing(self):
+        self.feature()
+        before = d.head()
+        code, out, _ = self.call(d.cmd_sync)
+        self.assertEqual(code, 0)
+        self.assertIn('DEPLOY_SYNC up-to-date', out)
+        self.assertEqual(before, d.head())
+
+    def test_a_clean_merge_commits_main_and_fast_forwards_local_main(self):
+        self.feature()
+        self.push_to_main('other.py', 'y = 2\n')
+        code, out, _ = self.call(d.cmd_sync)
+        self.assertEqual(code, 0, out)
+        self.assertIn('DEPLOY_SYNC merged=1 commit(s) from main', out)
+        self.assertEqual(2, len(sh('git', 'rev-list', '--parents', '-n1', 'HEAD', cwd=self.root).split()) - 1)
+        self.assertTrue((self.root / 'other.py').is_file())
+        self.assertEqual(sh('git', 'rev-parse', 'main', cwd=self.root), sh('git', 'rev-parse', 'origin/main', cwd=self.root))
+
+    def test_a_conflict_lists_the_files_and_leaves_the_merge_open(self):
+        self.feature()
+        (self.root / 'app.py').write_text('x = "branch"\n')
+        sh('git', 'commit', '-qam', 'branch edit', cwd=self.root)
+        self.push_to_main('app.py', 'x = "main"\n')
+        code, _, err = self.call(d.cmd_sync)
+        self.assertEqual(code, 1)
+        self.assertIn('DEPLOY_SYNC CONFLICTS (1): app.py', err)
+        self.assertIn('rerun `scripts/deploy sync`', err)
+        self.assertTrue((self.root / '.git' / 'MERGE_HEAD').is_file())
+
+    def test_local_main_is_left_alone_while_a_worktree_has_it_checked_out(self):
+        self.feature()
+        sibling = Path(self.tmp.name) / 'main-checkout'
+        sh('git', 'worktree', 'add', '-q', str(sibling), 'main', cwd=self.root)
+        old_main = sh('git', 'rev-parse', 'main', cwd=self.root)
+        self.push_to_main('other.py', 'y = 2\n')
+        code, out, _ = self.call(d.cmd_sync)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(old_main, sh('git', 'rev-parse', 'main', cwd=self.root))
+
+    def test_refuses_main_and_detached_heads(self):
+        code, _, err = self.call(d.cmd_sync)
+        self.assertEqual(code, 1)
+        self.assertIn('feature branch', err)
+        sh('git', 'checkout', '-q', '--detach', cwd=self.root)
+        code, _, err = self.call(d.cmd_sync)
+        self.assertEqual(code, 1)
+        self.assertIn('feature branch', err)
+
+    def test_uncommitted_changes_that_git_refuses_to_overwrite_block_without_a_half_merge(self):
+        self.feature()
+        (self.root / 'app.py').write_text('x = "dirty"\n')
+        self.push_to_main('app.py', 'x = "main"\n')
+        code, _, err = self.call(d.cmd_sync)
+        self.assertEqual(code, 1)
+        self.assertIn('git refused the merge', err)
+        self.assertFalse((self.root / '.git' / 'MERGE_HEAD').exists())
+        self.assertEqual('x = "dirty"\n', (self.root / 'app.py').read_text())
+
+
 class ReviewApprovalLedger(Repo):
     def opened(self):
         sh('git', 'checkout', '-qb', 'feature', cwd=self.root)

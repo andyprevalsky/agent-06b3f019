@@ -103,6 +103,49 @@ def describe(entry: dict) -> dict:
             'needs_integration': not item['current'] and bool(changes or ahead)}
 
 
+# --- sync ------------------------------------------------------------------
+
+def main_checked_out_elsewhere() -> bool:
+    return any(entry.get('branch') == 'refs/heads/main' for entry in worktrees())
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    """/sync's git steps as the deploy's first step: fetch main, keep local main current, merge it in.
+
+    The database refresh in /sync is deliberately absent: deploy gates run on their own databases.
+    """
+    branch = git('branch', '--show-current').strip()
+    if branch in {'', 'main'}:
+        print('DEPLOY_SYNC BLOCKED: deploy from a feature branch, not main or a detached HEAD', file=sys.stderr)
+        return 1
+    if run(['git', 'fetch', 'origin', 'main']):
+        return 1
+    behind = int(git('rev-list', '--count', 'HEAD..origin/main').strip())
+    # Local main follows origin/main by fast-forward only, and never under a worktree that has it checked out.
+    local_main = subprocess.run(['git', 'merge-base', '--is-ancestor', 'refs/heads/main', 'refs/remotes/origin/main'],
+                                cwd=ROOT, capture_output=True).returncode == 0
+    if local_main and not main_checked_out_elsewhere():
+        git('update-ref', 'refs/heads/main', 'refs/remotes/origin/main')
+    if behind == 0:
+        print(f'DEPLOY_SYNC up-to-date head={head()[:12]} main={git("rev-parse", "origin/main").strip()[:12]}')
+        return 0
+    merged = subprocess.run(['git', 'merge', '--no-ff', '--no-edit', 'origin/main'], cwd=ROOT,
+                            capture_output=True, text=True)
+    print(merged.stdout + merged.stderr, end='')
+    if merged.returncode:
+        conflicts = git('diff', '--name-only', '--diff-filter=U').split()
+        if conflicts:
+            print(f'DEPLOY_SYNC CONFLICTS ({len(conflicts)}): ' + ', '.join(conflicts)
+                  + '\nResolve keeping all of main\'s code and the branch\'s intent, commit the merge, '
+                    'then rerun `scripts/deploy sync`.', file=sys.stderr)
+        else:
+            print('DEPLOY_SYNC BLOCKED: git refused the merge (see above); commit or move aside the local '
+                  'changes it names, then rerun', file=sys.stderr)
+        return 1
+    print(f'DEPLOY_SYNC merged={behind} commit(s) from main head={head()[:12]}')
+    return 0
+
+
 def cmd_collect(args: argparse.Namespace) -> int:
     trees = [describe(entry) for entry in worktrees()]
     branches = [{'branch': ref, 'unpushed_commits': count}
@@ -498,6 +541,7 @@ def delegate(module: str, argv: list[str]) -> int:
 def parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(prog='scripts/deploy', description=__doc__)
     sub = top.add_subparsers(dest='command', required=True)
+    sub.add_parser('sync', help='fetch main and merge it into this branch (the first deploy step)')
     sub.add_parser('collect', help='inventory every worktree and unpushed branch on this devbox')
     for name, text in (('fix', 'auto-format and lint-fix the changed files'),
                        ('freeze', 'fix, commit every intended change, run the approval guards')):
@@ -532,7 +576,7 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
-COMMANDS = {'collect': cmd_collect, 'fix': cmd_fix, 'freeze': cmd_freeze, 'open-pr': cmd_open_pr,
+COMMANDS = {'sync': cmd_sync, 'collect': cmd_collect, 'fix': cmd_fix, 'freeze': cmd_freeze, 'open-pr': cmd_open_pr,
             'review-wait': cmd_review_wait, 'review-finish': cmd_review_finish, 'review-next': cmd_review_next,
             'approval': cmd_approval, 'ledger': cmd_ledger, 'merge': cmd_merge,
             'deletion-check': cmd_deletion_check, 'finish': cmd_finish}

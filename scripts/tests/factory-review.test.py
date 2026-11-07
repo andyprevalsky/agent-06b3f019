@@ -1637,7 +1637,7 @@ class ApprovalLifecycleTest(unittest.TestCase):
         # deploy.md names the one step that closes timing, records the outcome and
         # publishes telemetry, and sends every stop through it.
         for marker in (
-            "| 14 | Close the timing run, record the outcome, publish telemetry | `scripts/deploy finish` |",
+            "| Close the timing run, record the outcome, publish telemetry | `scripts/deploy finish` |",
             "On any stop, run `scripts/deploy finish --outcome blocked` before ending the turn.",
             "`bash scripts/run-deploy-stage --start`",
             "Factory telemetry metadata: `docs/factory-telemetry.md`",

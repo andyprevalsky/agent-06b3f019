@@ -16,22 +16,23 @@ The PR is merged, every applicable production lane is verified or has a recorded
 
 | # | Step | Command |
 |---|------|---------|
-| 1 | Check an isolated deploy worktree (no-op in the canonical checkout) | `bash scripts/prepare-deploy-worktree.sh --check` |
-| 2 | Inventory every worktree and branch, read sibling threads, integrate their deliverables | `scripts/deploy collect` |
-| 3 | Start the timing run | `bash scripts/run-deploy-stage --start` |
-| 4 | Format and lint-fix, commit everything, run the approval guards | `scripts/deploy freeze -m "<message>"` |
-| 5 | Push, open the PR, start review cycle 1 | `scripts/deploy open-pr --title "<title>" --body-file <file>` |
-| 6 | Run every selected gate in parallel, in the background: one Blacksmith GitHub Actions VM per gate; smoke, AgentCard tasks included, on the Fly fleet (`--executor local` runs the other gates on this box) | `scripts/deploy gates` |
-| 7 | Wait for the review on the exact HEAD, in the background beside step 6 | `scripts/deploy review-wait` |
-| 8 | Close the review cycle | `scripts/deploy review-finish --result clean\|findings` |
-| 9 | Commit this deploy's benchmark history rows before the final review cycle | `scripts/deploy ledger` |
-| 10 | Push the stabilization batch and open review cycle 2 or 3, then repeat 6–8 | `scripts/deploy review-next` |
-| 11 | Prove gates, review, ledger and approvals pass, then merge | `scripts/deploy merge` |
-| 12 | Dispatch post-merge repairs, then confirm none are pending | `python3 scripts/deploy_test_cycle.py complete --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline` |
-| 13 | Verify every applicable production lane | `scripts/deploy production` |
-| 14 | Close the timing run, record the outcome, publish telemetry | `scripts/deploy finish` |
-| 15 | Prepare the scorecard, then prove deletion readiness | `scripts/deploy deletion-check --manifest <manifest.json>` |
-| 16 | Send the scorecard as the last message | see **Scorecard** |
+| 1 | Sync with the latest main: fetch it and merge it into this branch before anything else | `scripts/deploy sync` |
+| 2 | Check an isolated deploy worktree (no-op in the canonical checkout) | `bash scripts/prepare-deploy-worktree.sh --check` |
+| 3 | Inventory every worktree and branch, read sibling threads, integrate their deliverables | `scripts/deploy collect` |
+| 4 | Start the timing run | `bash scripts/run-deploy-stage --start` |
+| 5 | Format and lint-fix, commit everything, run the approval guards | `scripts/deploy freeze -m "<message>"` |
+| 6 | Push, open the PR, start review cycle 1 | `scripts/deploy open-pr --title "<title>" --body-file <file>` |
+| 7 | Run every selected gate in parallel, in the background: one Blacksmith GitHub Actions VM per gate; smoke, AgentCard tasks included, on the Fly fleet (`--executor local` runs the other gates on this box) | `scripts/deploy gates` |
+| 8 | Wait for the review on the exact HEAD, in the background beside step 7 | `scripts/deploy review-wait` |
+| 9 | Close the review cycle | `scripts/deploy review-finish --result clean\|findings` |
+| 10 | Commit this deploy's benchmark history rows before the final review cycle | `scripts/deploy ledger` |
+| 11 | Push the stabilization batch and open review cycle 2 or 3, then repeat 7–9 | `scripts/deploy review-next` |
+| 12 | Prove gates, review, ledger and approvals pass, then merge | `scripts/deploy merge` |
+| 13 | Dispatch post-merge repairs, then confirm none are pending | `python3 scripts/deploy_test_cycle.py complete --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline` |
+| 14 | Verify every applicable production lane | `scripts/deploy production` |
+| 15 | Close the timing run, record the outcome, publish telemetry | `scripts/deploy finish` |
+| 16 | Prepare the scorecard, then prove deletion readiness | `scripts/deploy deletion-check --manifest <manifest.json>` |
+| 17 | Send the scorecard as the last message | see **Scorecard** |
 
 ## Guidelines
 
@@ -42,7 +43,8 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Use one deploy coordinator per devbox; a second `/deploy` joins it instead of competing.
 - A historical branch or test copy is not a deliverable unless its owner's handoff says so.
 - Never commit secrets, ignored `.env` files, caches, dependencies, research data or generated evidence.
-- Never sync with main during a deploy; GitHub merges the PR. Only a merge conflict reported by `scripts/deploy merge` forces `/sync`, then rerun the affected gates.
+- Sync with main once, first (`scripts/deploy sync`), and never during the run; a merge conflict reported by `scripts/deploy merge` forces another sync, then rerun the affected gates.
+- Resolve sync conflicts keeping all of main's code and the branch's intent; never discard main's side.
 
 ### Execution
 
