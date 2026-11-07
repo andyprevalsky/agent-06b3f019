@@ -373,6 +373,10 @@ GATES = (
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate("cloudbench-warm-pool", ("python3", "scripts/tests/cloudbench-warm-pool.test.py")),
     Gate(
+        "cloudbench-cross-devbox-admission",
+        ("python3", "scripts/tests/cloudbench-cross-devbox-admission.test.py"),
+    ),
+    Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
     ),

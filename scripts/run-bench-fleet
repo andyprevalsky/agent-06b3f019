@@ -14049,9 +14049,16 @@ campaign_inventory_wait() {
     # budget. Healthy reads do not start it; first pending or admission does.
     local status remaining interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
     local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
-    case "$wait_seconds:$interval:${CAPACITY_ADMISSION_DEADLINE:-0}" in
+    # A caller with its own gate deadline (the deploy cloud adapter) passes it as
+    # an absolute epoch; the shared admission clock then ends there instead.
+    local caller_deadline="${CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH:-}"
+    case "$wait_seconds:$interval:${CAPACITY_ADMISSION_DEADLINE:-0}:$caller_deadline" in
         *[!0-9:]*) echo "❌ invalid inventory admission wait clock" >&2; return 2 ;;
     esac
+    if [ -n "$caller_deadline" ]; then
+        wait_seconds=$((caller_deadline - $(date +%s)))
+        [ "$wait_seconds" -gt 0 ] || wait_seconds=1
+    fi
     [ "$wait_seconds" -gt 0 ] && [ "$interval" -gt 0 ] || return 2
     while :; do
         status=0
@@ -16731,14 +16738,29 @@ admit_app_capacity_with_wait() {
     local deadline interval remaining inventory_status phase="during admission wait"
     local refresh_inventory="${1:-0}"
     local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
+    # Every devbox shares the app's ceilings, so a shortfall is normally another
+    # devbox's fleet that will release. A caller with its own gate deadline (the
+    # deploy cloud adapter) passes it explicitly as an absolute epoch and
+    # admission keeps polling at the same cadence until then; the ceilings and
+    # the 300 s default for other callers are unchanged.
+    local caller_deadline="${CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH:-}" budget_label
     interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
-    case "$wait_seconds:$interval" in
-        *[!0-9:]*) echo "❌ capacity admission wait and retry seconds must be integers" >&2; return 2 ;;
+    case "$wait_seconds:$interval:$caller_deadline" in
+        *[!0-9:]*) echo "❌ capacity admission wait, retry seconds and caller deadline must be integers" >&2; return 2 ;;
     esac
+    if [ -n "$caller_deadline" ] && [ -z "${CAPACITY_ADMISSION_DEADLINE:-}" ]; then
+        wait_seconds=$((caller_deadline - $(date +%s)))
+        if [ "$wait_seconds" -lt 1 ]; then
+            echo "❌ caller's capacity admission deadline already passed (epoch $caller_deadline)" >&2
+            return 1
+        fi
+    fi
     if [ "$wait_seconds" -lt 1 ] || [ "$interval" -lt 1 ]; then
         echo "❌ capacity admission wait and retry seconds must be positive" >&2
         return 2
     fi
+    budget_label="admission wait"
+    [ -z "$caller_deadline" ] || budget_label="caller's deadline"
     [ "$refresh_inventory" != 1 ] || phase="after infra canary"
     deadline="${CAPACITY_ADMISSION_DEADLINE:-$((SECONDS + wait_seconds))}"
     case "$deadline" in ''|*[!0-9]*) echo "❌ invalid original capacity admission deadline" >&2; return 2 ;; esac
@@ -16759,11 +16781,11 @@ admit_app_capacity_with_wait() {
         fi
         remaining=$((deadline - SECONDS))
         if [ "$remaining" -le 0 ]; then
-            echo "❌ capacity admission remained blocked for ${wait_seconds}s" >&2
+            echo "❌ capacity admission remained blocked for ${wait_seconds}s (${budget_label})" >&2
             return 1
         fi
         [ "$interval" -gt "$remaining" ] && interval="$remaining"
-        echo "⏳ capacity admission pending; retrying provider observation in ${interval}s" >&2
+        echo "⏳ capacity admission pending; retrying provider observation in ${interval}s (${remaining}s left before the ${budget_label})" >&2
         sleep "$interval"
         refresh_inventory=1
         phase="during admission wait"
