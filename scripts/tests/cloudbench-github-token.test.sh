@@ -87,6 +87,22 @@ if PATH="$PATH_NO_GH" cloudbench_resolve_github_token "$TMP/repo" >/dev/null 2>&
 fi
 pass "resolver fails closed when every candidate is stale"
 
+# ── 2b. Drained user identity falls back to the token pool (GitHub App) ──────
+mkdir -p "$TMP/repo/scripts"
+printf 'print("%s", end="")\n' "$GOOD_TOKEN" >"$TMP/repo/scripts/github_token_pool.py"
+RESOLVED="$(
+  PATH="$PATH_NO_GH" cloudbench_resolve_github_token "$TMP/repo"
+)" || fail "resolver ignored the token pool when every user-token candidate was unusable"
+[ "$RESOLVED" = "$GOOD_TOKEN" ] || fail "resolver returned an unexpected token instead of the pool pick"
+printf 'print("%s", end="")\n' "$BAD_TOKEN" >"$TMP/repo/scripts/github_token_pool.py"
+if PATH="$PATH_NO_GH" cloudbench_resolve_github_token "$TMP/repo" >/dev/null 2>&1; then
+  fail "resolver must still validate the pool pick and fail closed when it cannot read the repo"
+fi
+rm -f "$TMP/repo/scripts/github_token_pool.py"
+grep -Fq 'scripts/github_token_pool.py pick' "$ROOT_DIR/scripts/run-bench-cloud" \
+  || fail "run-bench-cloud resolve_github_token must fall back to the token pool pick"
+pass "resolver falls back to a validated token-pool pick when the user identity is drained"
+
 # ── 3. refresh-deps injects controller token (static contract) ───────────────
 grep -Fq 'resolve_github_token' "$ROOT_DIR/scripts/run-bench-cloud" \
   || fail "run-bench-cloud must resolve a usable controller token before private-repo git-sync"
