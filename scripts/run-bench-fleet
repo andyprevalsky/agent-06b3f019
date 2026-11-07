@@ -16009,24 +16009,38 @@ read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
 # the whole fleet on a transient race — clones still require a stopped source.
 # Never stop the warm machine ourselves (another workspace may own an in-flight
 # prepare_warm_source); only poll via cloudbench_wait_machine_stopped.
-if [ "$warm_state" != "stopped" ]; then
+# The direct read can see the donor stopped while a shared inventory snapshot
+# still holds the generation that recorded the transient state, so re-list only
+# from a newer generation, within the same stop budget.
+await_stopped_warm_source() {  # sets warm_json warm_state warm_kind warm_cpus warm_memory
+    local warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"
+    local warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"
+    local warm_stop_deadline warm_generation warm_shape
     echo "⏳ warm source is $warm_state; waiting until stopped before fleet provisioning"
-    warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"
-    warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"
+    warm_stop_deadline=$((SECONDS + warm_stop_attempts * warm_stop_sleep))
     cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID" \
         "$warm_stop_attempts" "$warm_stop_sleep" || {
         echo "❌ warm source must be stopped before fleet provisioning (state=$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown))" >&2
-        exit 1
+        return 1
     }
-    campaign_inventory_capture warm_json fleet_admission_machines_json || exit $?
-    warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
-        echo "❌ could not re-read warm source shape after stop wait" >&2; exit 1;
-    }
-    read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
-    [ "$warm_state" = "stopped" ] || {
-        echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
-        exit 1
-    }
+    while :; do
+        warm_generation="$(machines_snapshot_identity)"
+        campaign_inventory_capture warm_json fleet_admission_machines_json || exit $?
+        warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
+            echo "❌ could not re-read warm source shape after stop wait" >&2; return 1;
+        }
+        read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+        [ "$warm_state" != "stopped" ] || return 0
+        # Only a shared snapshot can lag the direct read; a live list cannot.
+        if [ -z "${SNAPSHOT_LOOP_PID:-}" ] || [ "$SECONDS" -ge "$warm_stop_deadline" ] \
+            || ! refresh_machines_snapshot_after "$warm_generation" "$warm_stop_deadline"; then
+            echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
+            return 1
+        fi
+    done
+}
+if [ "$warm_state" != "stopped" ]; then
+    await_stopped_warm_source || exit 1
 fi
 if [ "$warm_kind/$warm_cpus/$warm_memory" != "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
     echo "🅿️  parking warm source at $WARM_PARKED_VM_SIZE/${WARM_PARKED_VM_MEMORY}MB for config headroom"

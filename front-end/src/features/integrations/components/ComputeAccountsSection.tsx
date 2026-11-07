@@ -6,6 +6,13 @@
  * reconnecting. `needs_reconnect` is the sole amber state.
  *
  * Connection state lives in `hooks/useComputeAccounts`.
+ *
+ * STATE MACHINE: ComputeConnectModal (server stage drives every transition)
+ *
+ *   [SETUP: progress bar] --stage awaiting_human--> [LIVE VIEW: sign in above]
+ *   [LIVE VIEW] --poll names passkeyUnavailableFor--> [LIVE VIEW + passkey notice]
+ *   [LIVE VIEW (+notice)] --stage capturing|minting|connected--> [FINISHING]
+ *   any --phase idle|error--> [CLOSED]
  */
 
 import { useEffect, useState } from 'react';
@@ -174,7 +181,8 @@ export function ComputeConnectModal({
   state: ReturnType<typeof useComputeAccounts>;
   providerLabel: string;
 }) {
-  const { phase, liveViewUrl, stage, connectingAs, runId, cancel, error } = state;
+  const { phase, liveViewUrl, stage, connectingAs, passkeyUnavailableFor, runId, cancel, error } =
+    state;
   const open = phase === 'starting' || phase === 'signing_in';
   // Setup is "everything before the user can act". The server only starts
   // reporting stages once the browser exists, so until then progress is driven
@@ -267,6 +275,16 @@ export function ComputeConnectModal({
           )}
         </div>
 
+        {waitingOnUser && !isCompleting && passkeyUnavailableFor !== null && (
+          <span
+            className="text-xs text-amber-600"
+            data-testid="compute-connect-passkey-unavailable"
+          >
+            Rose doesn&apos;t have your {passkeyUnavailableFor} passkey, so the passkey prompt
+            can&apos;t finish here. Pick another verification method in the window above, or import
+            this passkey from Apple Passwords &amp; Passkeys.
+          </span>
+        )}
         {error !== null && <span className="text-xs text-destructive">{error}</span>}
       </div>
     </div>

@@ -655,8 +655,19 @@ def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "sam
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}\n")
-    (root / "package-lock.json").write_text(lock)
-    (root / "back-end/package-lock.json").write_text(lock)
+    # The production dependency fingerprint parses the tracked backend lockfile
+    # so it can normalize only the root runtime-policy fields. Keep these test
+    # fixtures valid npm lock documents while retaining the compact string
+    # labels used to exercise matching and mismatching dependency graphs.
+    lock_document = json.dumps(
+        {
+            "name": "cloudbench-fixture",
+            "lockfileVersion": 3,
+            "packages": {"": {"name": lock}},
+        }
+    )
+    (root / "package-lock.json").write_text(lock_document)
+    (root / "back-end/package-lock.json").write_text(lock_document)
     helper = root / "scripts/lib/cloudbench-env.sh"
     helper.parent.mkdir(parents=True, exist_ok=True)
     helper.write_text(ENV_HELPER_SCRIPT.read_text())
@@ -980,8 +991,7 @@ elif name == 'rsync':
         assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text() == old_python_marker
         assert str(repo / "agents/venv") in (repo / "agents/venv/bin/activate").read_text()
         (commands / "python3").unlink()
-        _write_manifests(repo)
-        (repo / "back-end/package-lock.json").write_text("different revision")
+        _write_manifests(repo, lock="different revision")
         rejected = subprocess.run(
             ["bash", str(SCRIPT), str(donor), str(repo)],
             env=dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}"),
@@ -23020,6 +23030,57 @@ def test_fleet_waits_for_warm_source_stopped_before_provisioning() -> None:
     assert "machines destroy" not in wait_block
 
 
+def _run_warm_source_wait(tmp_path: Path, snapshot_loop_pid: str, refresh_status: int) -> subprocess.CompletedProcess:
+    """Run the real stop wait against a shared feed that still holds a stale
+    `replacing` generation while the direct read already reports stopped."""
+    fleet = fleet_source_text()
+    script = "\n".join([
+        _extract_fleet_function(ENV_HELPER_SCRIPT.read_text(), "cloudbench_wait_machine_stopped() {"),
+        _extract_fleet_function(fleet, "pool_machine_shape_from_json() {"),
+        _extract_fleet_function(fleet, "await_stopped_warm_source() {"),
+    ])
+    feed, generation = tmp_path / "feed.json", tmp_path / "generation"
+    machine = lambda state: json.dumps([{"id": "warm1", "state": state,
+                                         "config": {"guest": {"cpu_kind": "shared", "cpus": 1, "memory_mb": 2048}}}])
+    feed.write_text(machine("replacing"))
+    generation.write_text("g1")
+    (tmp_path / "fresh.json").write_text(machine("stopped"))
+    harness = script + f"""
+pool_machine_state() {{ echo stopped; }}
+machines_snapshot_identity() {{ cat {shlex.quote(str(generation))}; }}
+campaign_inventory_capture() {{ printf -v "$1" '%s' "$(cat {shlex.quote(str(feed))})"; }}
+refresh_machines_snapshot_after() {{
+    [ "$1" = "$(cat {shlex.quote(str(generation))})" ] || return 9
+    cp {shlex.quote(str(tmp_path / "fresh.json"))} {shlex.quote(str(feed))}; echo g2 > {shlex.quote(str(generation))}
+    return {refresh_status}
+}}
+WARM_ID=warm1 warm_state=replacing SNAPSHOT_LOOP_PID={shlex.quote(snapshot_loop_pid)}
+CLOUDBENCH_WARM_STOP_ATTEMPTS=3 CLOUDBENCH_WARM_STOP_SLEEP_SECONDS=1
+await_stopped_warm_source || exit $?
+echo "SETTLED state=$warm_state shape=$warm_kind/$warm_cpus/$warm_memory"
+"""
+    return subprocess.run(["bash", "-c", harness], capture_output=True, text=True, timeout=60)
+
+
+def test_fleet_warm_source_wait_rereads_a_newer_shared_generation(tmp_path: Path) -> None:
+    """A sibling's one-second park left the borrowed campaign inventory saying
+    `replacing` after the direct read saw stopped; every borrower then failed
+    with "warm source must be stopped before fleet provisioning (state=replacing)".
+    The wait must re-list from a newer generation instead of the stale one."""
+    settled = _run_warm_source_wait(tmp_path, "4242", 0)
+    assert settled.returncode == 0, settled.stderr
+    assert "SETTLED state=stopped shape=shared/1/2048" in settled.stdout
+    # Without a newer generation the stale sample still fails closed.
+    (tmp_path / "stale").mkdir()
+    stale = _run_warm_source_wait(tmp_path / "stale", "4242", 1)
+    assert stale.returncode == 1
+    assert "warm source must be stopped before fleet provisioning (state=replacing)" in stale.stderr
+    # A live (unshared) list cannot lag the direct read: no refresh is attempted.
+    (tmp_path / "live").mkdir()
+    live = _run_warm_source_wait(tmp_path / "live", "", 0)
+    assert live.returncode == 1 and "(state=replacing)" in live.stderr
+
+
 def test_controller_names_the_signal_that_killed_it() -> None:
     """Silent teardowns (children mass-TERM'd, no error, no barrier release)
     repeatedly masqueraded as infra failures when the controller was signalled
@@ -34152,7 +34213,9 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_nested_liability_owner_fe
     os.mkfifo(release, 0o600)
     release_fd = os.open(release, os.O_RDWR)
     callback = tmp_path/'canary.sh'
-    callback.write_text('printf "%s\\n" "$$" > "$RESERVE_READY"\nread -r release < "$RESERVE_RELEASE"\n')
+    # Publish readiness atomically: the reader parses the PID as soon as the path exists.
+    callback.write_text('printf "%s\\n" "$$" > "$RESERVE_READY.tmp" && mv "$RESERVE_READY.tmp" "$RESERVE_READY"\n'
+                        'read -r release < "$RESERVE_RELEASE"\n')
     monkeypatch.setattr(sys, 'argv', ['reserve', str(tmp_path/'reserve'), '512', '256', '32', '', '', '', str(os.getpid()), str(helper), str(transaction)])
     subject = {}; exec(compile(definitions, str(FLEET_SCRIPT)+':reserve', 'exec'), subject)
     barrier = tmp_path/'barriers/cohort'; barrier.mkdir(parents=True)

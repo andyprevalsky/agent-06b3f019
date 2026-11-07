@@ -13,7 +13,7 @@ import {
 import type { CompletionOptions } from '../../providers/rose/types';
 import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
 import { dispatchToolCall, type PendingOp } from '../../providers/smsSupervisor/supervisorTools';
-import { registerUserDataGrep, type UserDataGrepParams } from '../../providers/userDataSearch';
+import { registerUserDataGrepTool } from '../../providers/userDataSearch';
 import { buildOpenRouterBody } from '../../providers/rose/waterfall';
 import { buildOpenAiResponseFormat, responseModel } from '../../providers/rose/schema';
 import {
@@ -308,15 +308,15 @@ async function verifyCerebrasDerivedProjection(): Promise<void> {
   const raw = { ...options, response_model: undefined };
   assert.equal(withNativeToolContract(raw), raw);
 
-  const captures: UserDataGrepParams[] = [];
-  registerUserDataGrep(async (_userId, params) => {
+  const captures: Array<Record<string, unknown>> = [];
+  registerUserDataGrepTool(async (_userId, params) => {
     captures.push(params);
     return {
       matches: [],
       total_matches: 0,
       truncated: false,
-      pattern: params.pattern ?? '',
-      sources: [params.source ?? ''],
+      pattern: String(params.pattern ?? ''),
+      sources: [String(params.source ?? '')],
       applied_limit: 20,
       applied_offset: 0,
       returned: 0,
@@ -340,7 +340,8 @@ async function verifyCerebrasDerivedProjection(): Promise<void> {
   );
   assert.equal(captures[0]['-i'], false);
   assert.equal(captures[0].offset, 0);
-  assert.equal(captures[0].filters, undefined);
+  // The shared executor receives the strict call as sent; the data domain drops its nulls.
+  assert.deepEqual(captures[0].filters, { since: null });
   const omittedBudget = { goal: 'Offline', start_phase: 'plan' };
   assert.equal(
     (
