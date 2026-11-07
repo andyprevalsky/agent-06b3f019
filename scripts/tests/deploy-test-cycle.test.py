@@ -2347,6 +2347,45 @@ class Cycle(unittest.TestCase):
         hub.write_text(hub.read_text().replace('pid=1234', 'pid=9999'))
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
 
+    def test_native_cloud_cleanup_finds_fleet_audits_in_a_linked_worktrees_common_git_dir(self):
+        """2026-11-07: a deploy worktree's .git is a file; the fleet seals audits under the git common dir."""
+        import deploy_test_native_cleanup as n
+        main = self.root / 'main-checkout'
+        main.mkdir()
+        git = lambda *a: subprocess.run(['git', '-C', str(main), *a], check=True, capture_output=True)
+        git('init', '-q')
+        git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'base')
+        linked = self.root / 'linked-worktree'
+        git('worktree', 'add', '-q', '--detach', str(linked))
+        common = (main / '.git').resolve() / 'cloudbench-fleet-audits'
+        self.assertTrue((linked / '.git').is_file())
+        self.assertEqual(common, n.fleet_audit_root(linked.resolve()))
+        self.assertEqual(common, n.fleet_audit_root(main.resolve()))
+        source = (ROOT / 'scripts/deploy_test_native_cleanup.py').read_text()
+        self.assertNotIn("/ '.git/cloudbench-fleet-audits'", source)
+
+    def test_native_cloud_cleanup_binds_a_fleet_run_record_beyond_the_receipt_cap(self):
+        """2026-11-07: a mass-agent _batch/run.json (98 MB) exceeded the 64 MiB receipt cap, so a verified
+        fleet cleanup could never be reconciled and every later smoke launch was refused."""
+        import hashlib
+        import deploy_test_native_cleanup as n
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        records = [Path(p) for p in proof['files'] if p.endswith('/_batch/run.json')]
+        self.assertTrue(records)
+        cap = max([Path(p).stat().st_size for p in proof['files'] if not p.endswith('/_batch/run.json')]
+                  + [paths['receipt'].stat().st_size, paths['adapter'].stat().st_size])
+        for record in records:
+            value = json.loads(record.read_text())
+            value['padding'] = 'x' * (cap + 1)
+            record.write_text(json.dumps(value))
+            proof['files'][str(record)] = hashlib.sha256(record.read_bytes()).hexdigest()
+        with patch.object(c, 'MAX_RECEIPT_BYTES', cap):
+            reconciled = copy.deepcopy(state)
+            c.reconcile(reconciled, occurrence['id'], proof)
+            self.assertEqual([], c.retained_owners(reconciled, [occurrence['gate']]))
+            with patch.object(n, 'RUN_RECORD_MAX_BYTES', cap), self.assertRaisesRegex(ValueError, 'proof file too large'):
+                c.reconcile(copy.deepcopy(state), occurrence['id'], proof)
+
     def campaign_recon_state(self):
         import hashlib
         import shutil
