@@ -3,19 +3,29 @@ import { expect, test, type Page } from '@playwright/test';
 import { FRONTEND_URL } from './helpers';
 import { MOBILE_AGENTS, installMobileTrajectories } from './mobile-performance';
 test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
-// Production serves a hashed /assets/index-*.js entry; the dev server serves /src/main.tsx.
-const ENTRY = /\/(assets\/index-[^/]+\.js|src\/main\.tsx)(\?.*)?$/;
+// The entry is the document's last module script: /assets/index-*.js or /assets/main-*.js
+// in production builds (E2E fixtures add a modulepreloaded index-* chunk), /src/main.tsx
+// on the dev server. Resolve it from the served HTML instead of guessing a file name.
+async function entryPath(page: Page): Promise<string> {
+  const html = await (await page.request.get(`${FRONTEND_URL}/?no-auto-login`)).text();
+  const sources = [...html.matchAll(/<script\b[^>]*\btype="module"[^>]*\bsrc="([^"]+)"/g)];
+  expect(sources.length).toBeGreaterThan(0);
+  return new URL(sources[sources.length - 1][1], FRONTEND_URL).pathname;
+}
 // After a production alias switch the previous build's entry chunk is a plain 404.
 async function failEntry(page: Page, times: number) {
+  const entry = await entryPath(page);
   let failed = 0;
-  await page.route(ENTRY, (route) =>
-    failed++ < times
-      ? route.fulfill({
-          status: 404,
-          contentType: 'text/plain',
-          body: 'The page could not be found',
-        })
-      : route.continue(),
+  await page.route(
+    (url) => url.pathname === entry,
+    (route) =>
+      failed++ < times
+        ? route.fulfill({
+            status: 404,
+            contentType: 'text/plain',
+            body: 'The page could not be found',
+          })
+        : route.continue(),
   );
 }
 // Document requests only: the app's own history updates also fire framenavigated.
@@ -58,13 +68,17 @@ test('connectivity lost during the backoff waits for online without spending an 
 }) => {
   page.setDefaultTimeout(30_000);
   await installMobileTrajectories(page);
+  const entry = await entryPath(page);
   let failed = 0;
   // The connection drops just as the stale entry fails, before the backoff timer fires.
-  await page.route(ENTRY, async (route) => {
-    if (failed++ > 0) return route.continue();
-    await context.setOffline(true);
-    return route.fulfill({ status: 404, contentType: 'text/plain', body: 'Not found' });
-  });
+  await page.route(
+    (url) => url.pathname === entry,
+    async (route) => {
+      if (failed++ > 0) return route.continue();
+      await context.setOffline(true);
+      return route.fulfill({ status: 404, contentType: 'text/plain', body: 'Not found' });
+    },
+  );
   const loads = countDocuments(page);
   await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
   // Past the first 0.5 s backoff: no offline reload, and the attempt is not charged.
