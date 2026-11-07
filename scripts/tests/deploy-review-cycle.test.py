@@ -935,5 +935,97 @@ esac
         self.assertEqual(calls[0][1:], ["scripts/deploy_review_cycle.py", "start", "--kind", "incremental",
                                         "--head", "d" * 40])
 
+class OneFinalReviewTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / 'repo'; self.repo.mkdir()
+        self.state = Path(self.tmp.name) / 'ledger.json'
+        self.git('init', '-q')
+        (self.repo / 'source').write_text('frozen')
+        self.git('add', '.')
+        self.git('-c','user.name=test','-c','user.email=test@example.com','commit','-qm','frozen')
+        self.head = self.git('rev-parse','HEAD').strip()
+        entries = [dict(number=i,kind=kind,head=str(i)*40,status='completed',result='clean')
+                   for i,kind in enumerate(['initial','incremental','verification'],1)]
+        entries += [dict(number=i,kind='sync-inherited',head=str(i%10)*40,status='completed',result='clean')
+                    for i in range(4,18)]
+        self.original = {'schema_version':1,'cycles':entries,'original_cycle_identity':'PR1708-original'}
+        MODULE.write_state(self.state,self.original)
+        self.before = self.state.read_bytes()
+
+    def tearDown(self):self.tmp.cleanup()
+    def git(self,*args):
+        return subprocess.check_output(['git',*args],cwd=self.repo,text=True,stderr=subprocess.DEVNULL)
+    def start(self,**kw):
+        args=dict(head=self.head,kind='verification',one_final_review_approval='native-user-message:explicit',
+                  approved_head=self.head,repo=self.repo)
+        args.update(kw);return MODULE.start_cycle(self.state,**args)
+    def unchanged_refusal(self,**kw):
+        with self.assertRaises(MODULE.ReviewCycleError):self.start(**kw)
+        self.assertEqual(self.before,self.state.read_bytes())
+
+    def test_one_extra_is_open_then_normal_finish_not_authorization_clean(self):
+        value=self.start();self.assertEqual(4,value['number']);self.assertEqual('open',value['status'])
+        self.assertEqual(self.original['cycles'],MODULE.read_state(self.state)['cycles'][:-1])
+        self.assertEqual(17,value['one_final_review_approval']['prior_entries'])
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.require_mergeable(self.state,head=self.head)
+        MODULE.finish_cycle(self.state,head=self.head,result='clean')
+        self.assertEqual('clean',MODULE.require_mergeable(self.state,head=self.head)['result'])
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.start_cycle(self.state,head='f'*40,kind='verification')
+        with self.assertRaises(MODULE.ReviewCycleError):self.start(head='f'*40,approved_head='f'*40)
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.start_cycle(self.state,head='f'*40,kind='initial',reset=True)
+
+    def test_missing_wrongscope_dirty_and_combined_approval_refuse_atomically(self):
+        for kw in [dict(one_final_review_approval=None),dict(one_final_review_approval=''),
+                   dict(approved_head=None),dict(approved_head='f'*40),dict(head='short'),dict(kind='initial'),
+                   dict(reset=True),dict(verification_approval='other')]:
+            with self.subTest(kw=kw):self.unchanged_refusal(**kw)
+        (self.repo/'untracked').write_text('dirty');self.unchanged_refusal()
+
+    def test_unavailable_quota_nonclean_or_fewer_prior_reviews_never_qualify(self):
+        for change in ['findings','open','unavailable','quota','fewer']:
+            value=deepcopy(self.original)
+            if change=='fewer':value['cycles'].pop(0)
+            elif change=='quota':value['cycles'][1].update(disposition='skipped',skip_reason='usage-cap')
+            elif change=='open':value['cycles'][2]['status']='open'
+            else:value['cycles'][2]['result']=change
+            MODULE.write_state(self.state,value);self.before=self.state.read_bytes()
+            with self.subTest(change=change):self.unchanged_refusal()
+
+    def test_no_unavailable_or_quota_replacement_and_findings_block_merge(self):
+        self.start();saved=self.state.read_bytes()
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.finish_cycle(self.state,head=self.head,result='unavailable')
+        self.assertEqual(saved,self.state.read_bytes())
+        value=MODULE.read_state(self.state);cycle=value['cycles'][-1]
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE._close_with_disposition(self.state,self.state.with_suffix('.receipt'),value,cycle,
+                pr='1708',disposition='overridden',report_row='not allowed',fields={})
+        self.assertEqual(saved,self.state.read_bytes())
+        MODULE.finish_cycle(self.state,head=self.head,result='findings')
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.require_mergeable(self.state,head=self.head)
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.next_cycle(MODULE.read_state(self.state)['cycles'])
+
+
+    def test_exact_usage_cap_stays_qualified_without_authorizing_fifth(self):
+        self.start()
+        cap=dict(CAP_COMMENT,body=CAP_COMMENT['body'].replace(HEAD_C,self.head))
+        check=dict(RATE_LIMITED_CHECK,head_sha=self.head)
+        normalized=MODULE.normalize_evidence(evidence(issue_comments=[cap],check_runs=[check]),source='UNIT_TEST_ONLY')
+        value=MODULE.skip_cycle(self.state,head=self.head,pr='1708',reason='usage-cap',
+            evidence=normalized,receipts_path=self.state.with_suffix('.receipt'))
+        self.assertEqual('skipped',value['disposition'])
+        self.assertEqual(self.original['cycles'],MODULE.read_state(self.state)['cycles'][:-1])
+        self.assertEqual('skipped',MODULE.require_mergeable(self.state,head=self.head)['disposition'])
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.next_cycle(MODULE.read_state(self.state)['cycles'])
+        with self.assertRaises(MODULE.ReviewCycleError):self.start()
+        # A distinct clean HEAD must not bypass the consumed exception marker.
+        (self.repo/'source').write_text('different clean frozen source')
+        self.git('add','.')
+        self.git('-c','user.name=test','-c','user.email=test@example.com','commit','-qm','next frozen fixture')
+        next_head=self.git('rev-parse','HEAD').strip()
+        with self.assertRaisesRegex(MODULE.ReviewCycleError,'consumed'):
+            self.start(head=next_head,approved_head=next_head)
+
+
 if __name__ == "__main__":
     unittest.main()

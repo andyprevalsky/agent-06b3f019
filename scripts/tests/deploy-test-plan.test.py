@@ -1226,4 +1226,23 @@ class NativeRunArtifact(unittest.TestCase):
      with self.assertRaisesRegex(ValueError,'raw file byte bound'):
          read_run_artifact(self.p,digest,4096,raw_limit=1)
 
+ def test_explicit_raw_budget_charges_each_regular_descriptor_and_stays_aggregate(self):
+     import deploy_test_run_artifact as artifact
+     raw=b'{"tasks":[{"logs":"'+b'x'*700+b'"}],"status":"failed"}'
+     self.p.write_bytes(raw);other=self.p.with_name('other.json');other.write_bytes(raw)
+     digest=hashlib.sha256(raw).hexdigest();remaining=[1024]
+     value=read_run_artifact(self.p,digest,4096,raw_limit=1024,raw_remaining=remaining)
+     self.assertEqual('failed',value['status'])
+     self.assertEqual([1024-len(raw)],remaining)
+     with self.assertRaisesRegex(ValueError,'aggregate'):
+         read_run_artifact(other,digest,4096,raw_limit=1024,raw_remaining=remaining)
+     self.assertEqual(64*1024*1024,artifact.MAX_RECEIPT_BYTES)
+
+ def test_malformed_shared_raw_budgets_refuse_before_reading(self):
+     raw=b'{}';self.p.write_bytes(raw);digest=hashlib.sha256(raw).hexdigest()
+     for remaining in [[],[0],[-1],[True],[1025],[1024,1024],'1024']:
+         with self.subTest(remaining=remaining):
+             with self.assertRaisesRegex(ValueError,'aggregate'):
+                 read_run_artifact(self.p,digest,4096,raw_limit=1024,raw_remaining=remaining)
+
 if __name__=='__main__':unittest.main()

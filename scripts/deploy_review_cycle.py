@@ -128,6 +128,8 @@ def next_cycle(entries: list[object]) -> dict[str, object]:
     if cycles and cycles[-1].get("status") == "open":
         raise ReviewCycleError("the previous review cycle is still open")
     consumed = budget_cycles(entries)
+    if any(isinstance(e, dict) and e.get('one_final_review_approval') for e in entries):
+        raise ReviewCycleError('one final review was consumed; no replacement or fifth review')
     if len(consumed) >= MAX_REVIEW_CYCLES:
         raise ReviewCycleError(
             f"review cycle cap reached ({MAX_REVIEW_CYCLES}); defer the remaining non-security findings with "
@@ -140,21 +142,53 @@ def next_cycle(entries: list[object]) -> dict[str, object]:
     return {"number": position, "kind": KIND_BY_POSITION[position], "replaces": replaces}
 
 
+def one_final_review(entries, *, head, approved_head, approval, repo):
+    """Trusted operator approval-ID model; never infer approval from a deploy request."""
+    if any(isinstance(entry, dict) and entry.get('one_final_review_approval') for entry in entries):
+        raise ReviewCycleError('one final review was consumed; no replacement or fifth review')
+    cycles = budget_cycles(entries)
+    if (len(cycles) != 3
+            or any(e.get('status') != 'completed' or e.get('result') not in {'clean', 'findings'}
+                   or e.get('disposition') or e.get('skip_reason') or e.get('one_final_review_approval')
+                   for e in cycles)
+            or [(e.get('number'), e.get('kind')) for e in cycles] != [(1, 'initial'), (2, 'incremental'), (3, 'verification')]
+            or cycles[-1].get('result') != 'clean'
+            or not entries or entries[-1].get('status') != 'completed' or entries[-1].get('result') != 'clean'):
+        raise ReviewCycleError('one final review requires exactly three completed substantive reviews, latest clean')
+    if (not isinstance(approval, str) or not approval or len(approval) > 128
+            or any(not (c.isalnum() or c in '-_.:') for c in approval)):
+        raise ReviewCycleError('explicit native user approval evidence ID required')
+    if (not re.fullmatch('[0-9a-f]{40}', head or '') or approved_head != head
+            or git(repo, 'rev-parse', 'HEAD').strip() != head
+            or git(repo, 'status', '--porcelain', '--untracked-files=normal').strip()):
+        raise ReviewCycleError('one final review requires clean current exact approved HEAD')
+    return {'number': 4, 'kind': 'verification', 'replaces': None}
+
+
 def start_cycle(
     path: Path, *, head: str, kind: str, reset: bool = False,
     verification_approval: str | None = None,
+    one_final_review_approval: str | None = None, approved_head: str | None = None,
+    repo: Path | None = None,
 ) -> dict[str, object]:
     if not head:
         raise ReviewCycleError("review HEAD must not be empty")
     if kind not in KINDS:
         raise ReviewCycleError(f"invalid review kind: {kind}")
+    exceptional = one_final_review_approval is not None or approved_head is not None
+    if exceptional and (reset or kind != 'verification' or verification_approval is not None):
+        raise ReviewCycleError('one final verification cannot reset or combine approvals')
+    if reset and path.exists() and any(e.get('one_final_review_approval') for e in review_cycles(read_state(path)['cycles'])):
+        raise ReviewCycleError('one final review ledger cannot be reset')
     if reset:
         state: dict[str, object] = {"schema_version": 1, "cycles": []}
     else:
         state = read_state(path)
     entries = state["cycles"]
     assert isinstance(entries, list)
-    expected = next_cycle(entries)
+    expected = (one_final_review(entries, head=head, approved_head=approved_head,
+                                approval=one_final_review_approval, repo=repo or Path.cwd())
+                if exceptional else next_cycle(entries))
     if any(entry.get("head") == head for entry in entries if isinstance(entry, dict)):
         raise ReviewCycleError("this exact HEAD already completed a review cycle")
     cycle_number = int(expected["number"])
@@ -192,6 +226,11 @@ def start_cycle(
         "status": "open",
         "started_at": now(),
     }
+    if exceptional:
+        cycle['one_final_review_approval'] = {
+            'approval_id': one_final_review_approval, 'approved_head': approved_head,
+            'prior_ledger_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+            'prior_entries': len(entries), 'review_position': 4}
     if verification_approval is not None:
         cycle["verification_approval"] = verification_approval
     if expected["replaces"]:
@@ -221,6 +260,8 @@ def finish_cycle(path: Path, *, head: str, result: str) -> dict[str, object]:
         raise ReviewCycleError(f"invalid review result: {result}")
     state = read_state(path)
     cycle = _open_cycle(state, head)
+    if cycle.get('one_final_review_approval') and result == UNAVAILABLE:
+        raise ReviewCycleError('one final review cannot be replaced as unavailable')
     cycle.update({"status": "completed", "result": result, "finished_at": now()})
     write_state(path, state)
     return cycle
@@ -599,6 +640,8 @@ def _close_with_disposition(
     report_row: str,
     fields: dict[str, object],
 ) -> dict[str, object]:
+    if cycle.get('one_final_review_approval') and disposition != 'skipped':
+        raise ReviewCycleError('one final review cannot override findings; exact usage-cap evidence remains required')
     cycle.update(
         {
             "status": "completed",
@@ -853,6 +896,10 @@ def parse_args() -> argparse.Namespace:
         )
         sub.add_argument("--receipt", type=Path, help=f"receipt ledger (default: <state dir>/{RECEIPTS_NAME})")
 
+    start.add_argument('--one-final-review-approval', help='Explicit user evidence ID for one fourth verification')
+    start.add_argument('--approved-head', help='Exact40 source authorized by that user decision')
+    start.add_argument('--repo', type=Path, default=Path.cwd())
+
     skip = subparsers.add_parser("skip", help="close clean under confirmed CodeRabbit usage exhaustion")
     add_evidence_arguments(skip)
     skip.add_argument("--reason", choices=sorted(SKIP_REASONS), required=True)
@@ -883,6 +930,8 @@ def main() -> int:
             payload = start_cycle(
                 args.state, head=args.head, kind=args.kind, reset=args.reset,
                 verification_approval=args.verification_approval,
+                one_final_review_approval=args.one_final_review_approval,
+                approved_head=args.approved_head, repo=args.repo,
             )
         elif args.command == "finish":
             payload = finish_cycle(args.state, head=args.head, result=args.result)

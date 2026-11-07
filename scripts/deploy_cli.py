@@ -313,15 +313,23 @@ def cmd_review_next(args: argparse.Namespace) -> int:
         print('DEPLOY_REVIEW_NEXT BLOCKED: parked benchmark-history rows are not committed; run '
               '`scripts/deploy ledger` so the review covers them', file=sys.stderr)
         return 1
-    nxt = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'next'], cwd=ROOT,
-                         capture_output=True, text=True)
-    if nxt.returncode:
-        print(nxt.stdout + nxt.stderr, end='')
-        print('DEPLOY_REVIEW_NEXT BLOCKED: the ledger allows no further cycle; defer the remaining non-security '
-              'findings with `deploy_review_cycle.py override` and merge', file=sys.stderr)
-        return 1
-    kind, sha = json.loads(nxt.stdout)['kind'], head()
-    start = ['start', '--kind', kind, '--head', sha]
+    final_approval = getattr(args, 'one_final_review_approval', None)
+    approved_head = getattr(args, 'approved_head', None)
+    if final_approval is not None or approved_head is not None:
+        kind, sha = 'verification', head()
+        start = ['start', '--kind', kind, '--head', sha,
+                 '--one-final-review-approval', final_approval or '',
+                 '--approved-head', approved_head or '', '--repo', str(ROOT)]
+    else:
+        nxt = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'next'], cwd=ROOT,
+                             capture_output=True, text=True)
+        if nxt.returncode:
+            print(nxt.stdout + nxt.stderr, end='')
+            print('DEPLOY_REVIEW_NEXT BLOCKED: the ledger allows no further cycle; defer the remaining non-security '
+                  'findings with `deploy_review_cycle.py override` and merge', file=sys.stderr)
+            return 1
+        kind, sha = json.loads(nxt.stdout)['kind'], head()
+        start = ['start', '--kind', kind, '--head', sha]
     if args.verification_approval:
         start += ['--verification-approval', args.verification_approval]
     if run([sys.executable, 'scripts/deploy_review_cycle.py', *start]):
@@ -646,6 +654,8 @@ def parser() -> argparse.ArgumentParser:
     ended.add_argument('--result', choices=['clean', 'findings'], required=True)
     nxt = sub.add_parser('review-next', help='open the next bounded review cycle on the pushed stabilization batch')
     nxt.add_argument('--verification-approval', help="user approval id for a verification cycle after a clean cycle 2")
+    nxt.add_argument('--one-final-review-approval', help='Explicit user evidence ID for one fourth verification')
+    nxt.add_argument('--approved-head', help='Exact40 HEAD named in that user decision')
     approval = sub.add_parser('approval', help='record an approval packet or decision; on approval rerun flagged guards')
     approval.add_argument('action', choices=['request', 'decide'])
     approval.add_argument('--decision', choices=['approved', 'grounded', 'rejected'])

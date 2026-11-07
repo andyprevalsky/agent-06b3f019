@@ -227,8 +227,8 @@ class _Reader:
             s.charged = old_charge
 
 
-def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=None):
-    """Explicit higher raw_limit is for isolated policy experiments, never implicit."""
+def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=None, raw_remaining=None):
+    """Higher raw_limit is explicit and caller-bound; the generic default stays unchanged."""
     checkpoint(deadline)
     raw_limit = MAX_RECEIPT_BYTES if raw_limit is None else raw_limit
     if type(raw_limit) is not int or raw_limit <= 0 or type(limit) is not int or limit <= 0:
@@ -243,6 +243,13 @@ def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=
             raise ValueError('native artifact: regular fd required')
         if not 0 < before.st_size <= raw_limit:
             raise ValueError('native artifact: raw file byte bound exceeded')
+        if raw_remaining is not None:
+            if (not isinstance(raw_remaining, list) or len(raw_remaining) != 1
+                    or type(raw_remaining[0]) is not int
+                    or not 0 <= raw_remaining[0] <= raw_limit
+                    or before.st_size > raw_remaining[0]):
+                raise ValueError('native artifact: aggregate raw admission bound exceeded')
+            raw_remaining[0] -= before.st_size  # Charge the verified FD, not a racy path stat.
         first = hashlib.sha256()
         remaining = before.st_size
         while remaining:

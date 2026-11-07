@@ -13,6 +13,9 @@ import time
 
 KIND = 'native-cloud-cleanup-v1'
 
+# Bound raw run evidence per proof; ordinary receipts retain their existing limit.
+MAX_RAW_FORENSIC_RUN_BYTES = 128 * 1024 * 1024
+
 
 def need(value, message):
     if not value:
@@ -667,6 +670,7 @@ def validate(receipt, owner, proof):
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
     run_artifacts = set()
+    raw_remaining = [MAX_RAW_FORENSIC_RUN_BYTES]
     need(isinstance(bindings, dict), 'missing file bindings')
 
     def bound(path):
@@ -913,7 +917,8 @@ def validate(receipt, owner, proof):
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
         from deploy_test_run_artifact import read_run_artifact
         run_path = fleet / '_batch/run.json'
-        run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES)
+        run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
+                                raw_limit=MAX_RAW_FORENSIC_RUN_BYTES, raw_remaining=raw_remaining)
         used.add(str(run_path))
         run_artifacts.add(str(run_path))
         life = document(fleet / '_batch/lifecycle.json')
@@ -1027,7 +1032,8 @@ def validate(receipt, owner, proof):
         for path in bindings:
             if path in run_artifacts:
                 from deploy_test_run_artifact import read_run_artifact
-                read_run_artifact(path, bindings[path], MAX_RECEIPT_BYTES)
+                read_run_artifact(path, bindings[path], MAX_RECEIPT_BYTES,
+                                  raw_limit=MAX_RAW_FORENSIC_RUN_BYTES)
             else:
                 bound(path)  # Retain and re-hash ALL original debt evidence, including retained Hub owners.
     need(used == set(bindings), 'proof file closure')
