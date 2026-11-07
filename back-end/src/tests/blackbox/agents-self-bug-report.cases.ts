@@ -1,6 +1,7 @@
 /**
  * report_bug's own claim table against the real DB: the daily launch cap is
- * atomic across agents, saved (RECORDED) reports never count toward it, and a
+ * atomic across agents (also when requests take the lock out of timestamp
+ * order), saved (RECORDED) reports never count toward it, and a
  * run that already claimed keeps its claim at the cap.
  */
 
@@ -23,8 +24,9 @@ function request(agentId: string, description: string) {
 }
 
 test('report_bug daily launch cap is atomic across concurrent first reports', async () => {
-  // A window days in the past, so no other suite's claims fall inside it.
-  const now = new Date(Date.now() - 50 * 24 * HOUR_MS);
+  // The window has no upper bound, so start it days in the future: no other
+  // suite's claims fall inside it.
+  const now = new Date(Date.now() + 50 * 24 * HOUR_MS);
   const since = new Date(now.getTime() - 24 * HOUR_MS);
   const recorded = [randomUUID(), randomUUID()];
   const launching = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
@@ -63,6 +65,38 @@ test('report_bug daily launch cap is atomic across concurrent first reports', as
   } finally {
     await prisma.toolSideEffect.deleteMany({
       where: { operationKey: { in: [...recorded, ...launching].map(agentSelfBugReportKey) } },
+    });
+  }
+});
+
+test('report_bug daily launch cap counts a newer claim that took the lock first', async () => {
+  // Requests can take the lock out of timestamp order: the later request claims
+  // first, then the earlier one must still count it. Both windows start after
+  // the first case's rows.
+  const later = new Date(Date.now() + 60 * 24 * HOUR_MS);
+  const earlier = new Date(later.getTime() - 1000);
+  const first = randomUUID();
+  const second = randomUUID();
+  try {
+    const won = await claimAgentSelfBugReportWithinCap(
+      first,
+      request(first, 'boom'),
+      later,
+      1,
+      new Date(later.getTime() - 24 * HOUR_MS)
+    );
+    assert(won?.status === 'STARTED', 'the first claim takes the only cap slot');
+    const late = await claimAgentSelfBugReportWithinCap(
+      second,
+      request(second, 'boom'),
+      earlier,
+      1,
+      new Date(earlier.getTime() - 24 * HOUR_MS)
+    );
+    assert(late === null, 'an earlier-stamped request may not take a slot already claimed');
+  } finally {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: { in: [first, second].map(agentSelfBugReportKey) } },
     });
   }
 });

@@ -133,10 +133,12 @@ export async function markAgentSelfBugReportFailed(agentId: string, error: strin
 
 /**
  * Freeze a launching report_bug claim only while fewer than `cap` launching
- * claims were first made in [since, now]. The count and insert run under one
+ * claims were first made since `since`. The count and insert run under one
  * advisory lock, so concurrent first reports from different agents cannot
- * overshoot the cap. Returns null at the cap. Only a production launch's
- * first claim takes the lock (at most `cap` per day).
+ * overshoot the cap. The window has no upper bound: a request that takes the
+ * lock after a later-stamped one still counts that claim. Returns null at the
+ * cap. Only a production launch's first claim takes the lock (at most `cap`
+ * per day).
  */
 export async function claimAgentSelfBugReportWithinCap(
   agentId: string,
@@ -156,7 +158,7 @@ export async function claimAgentSelfBugReportWithinCap(
     const launched = await tx.toolSideEffect.count({
       where: {
         operationType: AGENT_SELF_BUG_REPORT_OPERATION_TYPE,
-        createdAt: { gte: since, lte: now },
+        createdAt: { gte: since },
         status: { not: 'RECORDED' },
       },
     });
