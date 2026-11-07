@@ -786,6 +786,8 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-worker-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-source.py" \
+       "$ROOT_DIR/scripts/cloudbench-warm-pool.py" \
+       "$ROOT_DIR/scripts/cloudbench-warm-source.py" \
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
        "$ROOT_DIR/scripts/cloudbench_execution_provenance.py" \
        "$ROOT_DIR/scripts/cloudbench_result.py" \
@@ -855,6 +857,7 @@ MACHINE_READINESS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-machine-readine
 SNAPSHOT_SELECTOR_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-select-snapshot.py"
 WORKER_SNAPSHOT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-snapshot.py"
 SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source.py"
+WARM_SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-warm-source.py"
 AGGREGATE_RUNS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-aggregate-runs.py"
 EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py"
 CONTROLLER_SNAPSHOT_MANIFEST="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-controller-snapshot-manifest.json"
@@ -15992,6 +15995,36 @@ validate_private_fleet_source() {
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
     campaign_inventory_wait start_machines_snapshot_loop || exit $?
 fi
+# One warm source per dependency set (opt-in until proven on Fly). The single
+# shared `cloudbench-warm` donor is rebuilt whenever a fleet's dependency set
+# differs, so every other devbox waits for it to stop and two sets keep
+# flipping it. With CLOUDBENCH_WARM_SOURCE_PER_DEPS=1 the fleet selects
+# `cloudbench-warm-<set>` (created once from the base donor's snapshot under
+# the cross-devbox claim, scripts/cloudbench-warm-source.py); a fleet whose
+# set already has a warm source never waits on another set's maintenance, and
+# its run-bench-cloud children inherit the same names. An explicit
+# CLOUDBENCH_WARM_MACHINE_NAME or a private fleet source keeps its selection.
+select_dependency_set_warm_source() {
+    local node_fp py_fp selected set_id
+    [ "${CLOUDBENCH_WARM_SOURCE_PER_DEPS:-0}" = 1 ] || return 0
+    { [ -z "${PRIVATE_SOURCE_FILE:-}" ] && [ -z "${CLOUDBENCH_WARM_MACHINE_NAME:-}" ]; } || return 0
+    node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || return 1
+    py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 1
+    selected="$(python3 "$WARM_SOURCE_HELPER" --app "$APP" ensure --node-fp "$node_fp" --py-fp "$py_fp" \
+        --owner "fleet-$FLEET_OWNER_TOKEN")" || {
+        echo "❌ could not select this dependency set's warm source" >&2
+        return 1
+    }
+    read -r set_id MACHINE_NAME VOLUME_NAME <<< "$selected"
+    if [ "$MACHINE_NAME" != "cloudbench-warm-$set_id" ] || [ "$VOLUME_NAME" != "cloudbench_data_$set_id" ]; then
+        echo "❌ warm source helper returned an unexpected selection" >&2
+        return 1
+    fi
+    export CLOUDBENCH_WARM_MACHINE_NAME="$MACHINE_NAME" CLOUDBENCH_WARM_VOLUME_NAME="$VOLUME_NAME"
+    WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.$MACHINE_NAME.fp"
+    echo "🏷️  dependency set $set_id uses warm source $MACHINE_NAME"
+}
+select_dependency_set_warm_source || exit 1
 if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
     validate_private_fleet_source || exit 1
     WARM_ID="$PRIVATE_SOURCE_ID"

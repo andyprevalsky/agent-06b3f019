@@ -376,6 +376,7 @@ GATES = (
         "cloudbench-cross-devbox-admission",
         ("python3", "scripts/tests/cloudbench-cross-devbox-admission.test.py"),
     ),
+    Gate("cloudbench-warm-source", ("python3", "scripts/tests/cloudbench-warm-source.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
