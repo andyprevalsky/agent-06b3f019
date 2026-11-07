@@ -174,7 +174,7 @@ async def test_handler_files_report_through_backend_route():
     assert status == MessageStatus.FINISHED, text
     assert text == (
         'Bug report filed: "--ai-- grep returned HTTP 500 twice" (boxes.dev run tar_123). '
-        "An engineering agent will investigate it."
+        "An engineering agent will investigate it.\n\nReport sent:\ngrep returned HTTP 500 twice"
     )
     calls = get_captured_requests()
     assert len(calls) == 1 and calls[0]["method"] == "POST" and calls[0]["url"].endswith(ROUTE), calls
@@ -191,6 +191,28 @@ async def test_handler_files_report_through_backend_route():
         "bugReportDescription": "grep returned HTTP 500 twice",
         "alreadyReported": False,
     }, event.metadata
+    teardown_mock()
+
+
+async def test_tool_result_shows_the_full_untruncated_report():
+    """The FE tool card renders the message: it carries every character sent, not the 60-char title."""
+    teardown_mock()
+    description = (
+        "Browser agent /root/book_cheapest_contrast (spawn 19:05Z) stalled on the checkout page.\n"
+        + "\n".join(f"step {i}: clicked 'Continue' and the page re-rendered unchanged" for i in range(40))
+    )
+    body = {
+        "mode": "launched",
+        "name": "--ai-- Browser agent /root/book_cheapest_contrast (spawn…",
+        "run_id": "tar_ef31",
+        "already_reported": False,
+    }
+    setup_mock({ROUTE: {"status": 201, "json": body}})
+    wf = _workflow()
+    _, text = await _run_handler(wf, {"description": description})
+    assert len(description) > 2000 and text.endswith("\n\nReport sent:\n" + description), text
+    assert wf.posted[-1][2].message == text
+    assert json.loads(get_captured_requests()[0]["requestBody"])["description"] == description
     teardown_mock()
 
 
@@ -214,7 +236,7 @@ async def test_handler_only_saves_reports_outside_production():
         assert status == MessageStatus.FINISHED, (label, text)
         assert text == (
             'Bug report saved: "--ai-- grep 500" (outside production it is kept for a later /rca '
-            "instead of starting one)."
+            "instead of starting one).\n\nReport sent:\ngrep 500"
         ), text
         calls = get_captured_requests()
         assert json.loads(calls[0]["requestBody"]) == {"description": "grep 500", "record_only": True}, label
@@ -313,6 +335,7 @@ async def run_all_tests():
     r.record("registration_schema_and_prompt", test_registration_schema_and_prompt)
     r.record("agent_admin_ids_match_backend", test_agent_admin_ids_match_backend_admin_access)
     await r.record_async("handler_files_report", test_handler_files_report_through_backend_route)
+    await r.record_async("tool_result_full_report", test_tool_result_shows_the_full_untruncated_report)
     await r.record_async("handler_saves_outside_production", test_handler_only_saves_reports_outside_production)
     await r.record_async("handler_already_filed", test_handler_reports_an_already_filed_run)
     await r.record_async("handler_backend_refusals", test_handler_surfaces_backend_refusals)

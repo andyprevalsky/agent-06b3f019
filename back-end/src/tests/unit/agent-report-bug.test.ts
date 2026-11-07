@@ -15,6 +15,7 @@ import {
   reportAgentBugFromAgent,
 } from '../../domains/agents/agentBugReportService';
 import {
+  BUG_REPORT_DEDUP_LINE,
   ReportBugForbiddenError,
   ReportBugNotFoundError,
   ReportBugValidationError,
@@ -114,6 +115,7 @@ async function testAgentReportLaunchesOnceWithAiTitle(): Promise<void> {
       name: '--ai-- grep returned 500',
       promptText:
         '/goal once you finish the /rca, finish the /deploy - be relentlessly resourceful\n' +
+        `${BUG_REPORT_DEDUP_LINE}\n` +
         '/rca the following bug for agent with ID: [agent-root]\n' +
         'Reported by the agent itself with its report_bug tool:\ngrep returned 500',
       idempotencyKey: 'rose-agent-report-bug-agent-root',
