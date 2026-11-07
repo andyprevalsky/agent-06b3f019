@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# /deploy Group 4 semantic lane as one versioned command (deploy.md Steps 5, 6b
-# and 6c; `run_deploy_pipeline.py plan --semantic-stack` / `--e2b-smoke`).
+# /deploy semantic lane as one versioned command (the local stack, the semantic
+# suite and the E2B smoke; `run_deploy_pipeline.py plan --semantic-stack` / `--e2b-smoke`).
 #
 # Default mode starts this worktree's local stack through `run.sh --benchmark`
 # on the deploy stack database, runs the Playwright UI semantics (four workers,
@@ -25,9 +25,19 @@
 #                             container on CONDUCTOR_PORT+5 (scripts/lib/deploy-local-env.sh)
 #   DEPLOY_E2B_DB_PORT        explicit Postgres port for the E2B smoke database; default is
 #                             the running stack's manifest port, else LOCAL_DB_PORT
+#   DEPLOY_SEMANTIC_WORKER_PROCESSES
+#                             agent worker processes for the stack's run.sh (WORKER_PROCESSES);
+#                             default 8, the stack's standard value. Lower it only to fit a
+#                             memory-bounded host; the specs and their assertions are unchanged
 #
-# Exit codes: 0 every step passed; 1 a step failed or the stack never became
-# ready; 2 usage, environment or prerequisite error (nothing was started).
+# The E2B smoke prints its own verdict line, E2B_SMOKE_VERDICT PASS|SKIPPED|FAIL
+# (deploy.md 6c L2133-2148). PASS requires exit 0, the summary line
+# `PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox)` and a CLAUDE_E2B_DONE
+# observed from a real sandbox. A credential or billing block only the user can fix
+# is SKIPPED with its evidence (exit 1, never a pass); every other path is FAIL.
+#
+# Exit codes: 0 every step passed; 1 a step failed, was SKIPPED or the stack never
+# became ready; 2 usage, environment or prerequisite error (nothing was started).
 set -uo pipefail
 
 usage() {
@@ -75,7 +85,7 @@ require_postgres() {
     local port="$1" what="$2"
     require_command pg_isready || return 2
     if ! pg_isready -h localhost -p "$port" -U postgres -q 2>/dev/null; then
-        echo "$what: Postgres is not ready on localhost:$port (start the workspace database first; deploy.md Step 5)." >&2
+        echo "$what: Postgres is not ready on localhost:$port (start the workspace database first: bash scripts/prepare-deploy-worktree.sh)." >&2
         return 2
     fi
 }
@@ -86,7 +96,7 @@ require_postgres() {
 # else the running stack's manifest (scripts/resolve-deploy-stack-db.sh), else
 # the deploy environment's LOCAL_DB_PORT.
 run_e2b_smoke() {
-    local backend_port="$CONDUCTOR_PORT" db_port="${DEPLOY_E2B_DB_PORT:-}" stack_ports db_name db_url
+    local backend_port="$CONDUCTOR_PORT" db_port="${DEPLOY_E2B_DB_PORT:-}" stack_ports db_name db_url artifacts
     if [ -z "$db_port" ]; then
         if stack_ports=$(bash scripts/resolve-deploy-stack-db.sh 2>/dev/null); then
             read -r backend_port db_port <<< "$stack_ports"
@@ -109,12 +119,42 @@ run_e2b_smoke() {
             return 2
         fi
     fi
-    echo "E2B_SMOKE_START $(date -u +%FT%TZ) db=localhost:$db_port/$db_name"
+    artifacts="$ROOT_DIR/.context/deploy-e2b-smoke/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mkdir -p "$artifacts" || return 2
+    echo "E2B_SMOKE_START $(date -u +%FT%TZ) db=localhost:$db_port/$db_name artifacts=$artifacts"
     (
         cd back-end || exit 2
         CONDUCTOR_PORT="$backend_port" BLACKBOX_SMOKE=1 BLACKBOX_TEST_DATABASE_URL="$db_url" \
+            BLACKBOX_TEST_ARTIFACT_DIR="$artifacts" \
             bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- bash scripts/run-blackbox-tests.sh claude-code
     )
+    e2b_smoke_verdict "$?" "$artifacts/claude-code.log"
+}
+
+# The gate's own result from the claude-code domain log the blackbox runner keeps.
+e2b_smoke_verdict() {
+    local status="$1" log="$2" name='smoke -- Claude Code answers 2+2 (real E2B sandbox)' skip kind
+    if [ "$status" = 0 ] && [ -f "$log" ] && grep -Fq "  PASS  $name (" "$log" \
+        && grep -Fq 'CLAUDE_E2B_DONE observed from real E2B sandbox' "$log" \
+        && grep -Eq '^Results: [0-9]+ passed, 0 failed, 0 skipped, [0-9]+ total$' "$log" \
+        && grep -Fxq 'ALL CLAUDE-CODE BLACK-BOX TESTS PASSED' "$log"; then
+        echo "E2B_SMOKE_VERDICT PASS $(grep -F 'CLAUDE_E2B_DONE observed from real E2B sandbox' "$log" | head -1 | sed 's/^ *//') log=$log"
+        return 0
+    fi
+    skip=$(grep -F "  SKIP  $name -- USER ACTION REQUIRED (" "$log" 2>/dev/null | head -1)
+    kind=$(sed -nE 's/.* -- USER ACTION REQUIRED \((credential|billing)\): .*/\1/p' <<<"$skip")
+    if [ "$status" = 1 ] && [ -n "$kind" ] \
+        && [ "$(grep -c -- '^  SKIP  ' "$log")" = 1 ] && ! grep -q -- '^  FAIL  ' "$log" \
+        && grep -Eq '^Results: [0-9]+ passed, 0 failed, 1 skipped, [0-9]+ total$' "$log" \
+        && grep -Fxq 'CLAUDE-CODE SMOKE SKIPPED -- USER ACTION REQUIRED (NOT A PASS)' "$log"; then
+        echo "E2B_SMOKE_VERDICT SKIPPED class=$kind (only the user can fix this $kind block; NOT A PASS)"
+        echo "  evidence: ${skip#  SKIP  }"
+        echo "  log: $log"
+        return 1
+    fi
+    echo "E2B_SMOKE_VERDICT FAIL exit=$status (no PASS with an observed real-sandbox CLAUDE_E2B_DONE, and no user-action SKIP) log=$log"
+    [ "$status" = 0 ] && return 1
+    return "$status"
 }
 
 if [ "$MODE" = e2b-only ]; then
@@ -124,8 +164,14 @@ if [ "$MODE" = e2b-only ]; then
     exit "$status"
 fi
 
-# Prerequisites before any side effect: the stack database must already be up
-# (deploy.md Step 5 pre-starts it so run.sh never owns or stops it).
+# Prerequisites before any side effect: a valid worker count, and the stack
+# database must already be up (the prepared worktree pre-starts it so run.sh never
+# owns or stops it).
+SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"
+if ! [[ "$SEMANTIC_WORKER_PROCESSES" =~ ^[1-9][0-9]{0,2}$ ]]; then
+    echo "DEPLOY_SEMANTIC_WORKER_PROCESSES must be a positive integer (default 8), got '$SEMANTIC_WORKER_PROCESSES'." >&2
+    exit 2
+fi
 require_postgres "$LOCAL_DB_PORT" "Semantic stack" || exit 2
 require_command jq || exit 2
 require_command curl || exit 2
@@ -146,10 +192,11 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p .context
-BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0 \
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0 \
     bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &
 stack_pid=$!
 printf 'STEP5_STACK_PID=%s\n' "$stack_pid"
+printf 'STEP5_STACK_WORKER_PROCESSES=%s\n' "$SEMANTIC_WORKER_PROCESSES"
 ready=0
 for _ in $(seq 1 300); do
     if ! kill -0 "$stack_pid" 2>/dev/null; then

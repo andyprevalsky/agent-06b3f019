@@ -425,6 +425,7 @@ export async function broadcastAgentUpdate(
     messageCount?: number;
     temporalWorkflowId?: string | null;
     updatedAt?: string;
+    userControlRevision?: number;
   },
   busId?: string
 ): Promise<void> {

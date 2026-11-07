@@ -678,7 +678,7 @@ def build_parser():
     provision.add_argument("--volume-gb", type=int, default=None)
     provision.add_argument("--region", default="iad")
     provision.add_argument("--fetch-ref", default="main", help="best-effort git fetch inside the guest ('' to skip)")
-    provision.add_argument("--max-org-machines", type=int, default=int(os.environ.get("CLOUDBENCH_APP_MACHINE_CEILING", "56")))
+    provision.add_argument("--max-org-machines", type=int, default=int(os.environ.get("CLOUDBENCH_APP_MACHINE_CEILING", "300")))
     provision.add_argument("--suspend-fallback-memory", type=int, default=0,
                            help="if suspend is refused at --memory, resize the same Machine to this and retry once (0 = off)")
     provision.add_argument("--parallel", type=int, default=4, help="concurrent slot provisioning")
@@ -718,7 +718,7 @@ def build_parser():
     refresh.add_argument("--volume-gb", type=int, default=None)
     refresh.add_argument("--region", default="iad")
     refresh.add_argument("--fetch-ref", default="main")
-    refresh.add_argument("--max-org-machines", type=int, default=int(os.environ.get("CLOUDBENCH_APP_MACHINE_CEILING", "56")))
+    refresh.add_argument("--max-org-machines", type=int, default=int(os.environ.get("CLOUDBENCH_APP_MACHINE_CEILING", "300")))
     refresh.add_argument("--parallel", type=int, default=4)
     refresh.add_argument("--suspend-fallback-memory", type=int, default=0)
 

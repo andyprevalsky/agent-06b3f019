@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "originating_merge": "39bcd257dc6e1d731008b46e9611ee7f1a5f1723",
+  "source": "all intended source is merged in PR #1721; this records-only follow-up contains the closeout evidence",
+  "configuration": "managed project environment files remain unchanged and are not copied into this record; the archive key is the managed TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+  "secrets": "no credentials, tokens, signed URLs, raw environment dumps, or private transcripts are committed",
+  "recovery": "GitHub main plus the Render deploy id, Vercel deployment, workflow run ids, RCA cases and the encrypted archive object identify every released artifact and failed attempt without this devbox",
+  "resources": {
+    "cloud_smoke": "terminal: 10/10 exact-owned fleets provider-teardown-verified, own Hub process terminated, no Machines held",
+    "peers": "RELEASED and TERMINAL sent to the PR1707/1708/1711 and descend lanes",
+    "warm_donor": "shared protected resource; this deploy made no donor write or image change",
+    "local_workers": "11 isolated worker clones under /var/tmp/rose-deploy-workers retired after this record merged (reproducible from git at the frozen commit)"
+  },
+  "freedom": "untouched; no Freedom app, extension, helper, service, network setting, blocklist, login item, or restore file was changed",
+  "local_only_required_work": [],
+  "deletion_ready": true,
+  "records_follow_up": "PR #1755 (70bcf0581aa0cb68e6df88b4d148ad0a648f9d19) plus this final records commit",
+  "factory_history_commit": "6880bcac0fecca1260f506c3a4a0586c6c7b25b0"
+}

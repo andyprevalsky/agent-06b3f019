@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1757-a6353fb70/cloud-evidence.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "680a50ea72c2f4881dcd49566204275d2b465220d862e932c485427ff58ad8ad",
+  "gzip_sha256": "c637a3d0a582ea99b9f2a6945d935ab59b1774ce11ae74c83b53c098cc3b1067",
+  "stored_bytes": 695776381,
+  "frames": 83,
+  "files": 2306,
+  "original_bytes": 2375288547,
+  "manifest_sha256": "b32a7c174331705b19bfece476fe6579945aa259dc5d0601fb2dca6bdab7cd59",
+  "full_readback_verified": true
+}

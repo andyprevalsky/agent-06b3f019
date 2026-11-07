@@ -1,0 +1,51 @@
+{
+ "failures": [
+  {
+   "id": "c8003ca71a6c44a4be50cb5f1eb1c4de",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "9c6d9c3622680aaa2a2668fae861573500023615",
+    "digest": "9682869ede0db983a20d0017bf73c05c4d7662655a5116fab8e39b5fb5cd1e66"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/test-mass-agent-run-0 failed evaluator t10-no-tool-failures: a recovered attempt_completion chip post (post_agent_message ReadError then StartToClose) counted as an ERROR tool row on a saturated cloud guest",
+   "evidence": "RCA a0b5bb318b1879436: NOT_INTRODUCED. The same task passed in the preceding cloud smoke (826c8cf8b8, 724.5 s) and f8c0511b0d (697 s); git diff --stat 826c8cf8b8 9c6d9c3622 touches only deploy docs and scripts/deploy_failure_report.py with its test; the failing agent paths are byte-identical on origin/main (1043be828b); the ledger holds 7 earlier t10-no-tool-failures failures of this task (latest 2026-11-03). First-bad boundary: on the guest primary worker the post_agent_message activity for the attempt_completion 'Running verifier' chip hit httpx.ReadError (worker.log:103817-103818), attempts 2 and 3 hit StartToClose (worker.log:116394), producing ERROR chips; the model re-issued attempt_completion and finished; evaluator t10 counts any ERROR tool row. Local repro: not reproduced (2 runs, CPUQuota 200% and 100%, both PASS); open observability gap, relative of docs/rca/cases/2026-10-25-demo-replay-worker-cpu-starvation-normalization-and-live-jev.md (appended on branch rca/mass-agent-attempt-completion-error, 2c57c70131, local). Cloud evidence: agent 27dba2f8-e372-4882-904e-80fe7451d4c8, archive r2://trace-archive/trace-archive/27dba2f8-e372-4882-904e-80fe7451d4c8/manifest.json.gz.enc, cloudbench-run.json sha256 0cd27e15cab46db8bf508f8aafa622a4906571a2e5a4767dc3956ef174217ade. Suggested diagnostic: per-attempt post_agent_message start lag and httpcore phase timestamps.",
+   "post_merge": {
+    "test": "smoke/test-mass-agent-run-0",
+    "command": [
+     "/home/boxes/rose/agents/venv/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "Cloud copy of test-mass-agent-run-0 (51-agent DEMO replay, 2-vCPU guest, 1 worker): evaluator t10-no-tool-failures only. Do not change the task, evaluator, timeouts or retry budgets.",
+    "error": "Declared evaluator t10-no-tool-failures failed: Observed tool failure: b7261a30:attempt_completion 38d78546-4be3-4c73-8fec-4af69183b30b status=ERROR",
+    "source": "9c6d9c3622680aaa2a2668fae861573500023615",
+    "evidence": "RCA a0b5bb318b1879436: NOT_INTRODUCED. The same task passed in the preceding cloud smoke (826c8cf8b8, 724.5 s) and f8c0511b0d (697 s); git diff --stat 826c8cf8b8 9c6d9c3622 touches only deploy docs and scripts/deploy_failure_report.py with its test; the failing agent paths are byte-identical on origin/main (1043be828b); the ledger holds 7 earlier t10-no-tool-failures failures of this task (latest 2026-11-03). First-bad boundary: on the guest primary worker the post_agent_message activity for the attempt_completion 'Running verifier' chip hit httpx.ReadError (worker.log:103817-103818), attempts 2 and 3 hit StartToClose (worker.log:116394), producing ERROR chips; the model re-issued attempt_completion and finished; evaluator t10 counts any ERROR tool row. Local repro: not reproduced (2 runs, CPUQuota 200% and 100%, both PASS); open observability gap, relative of docs/rca/cases/2026-10-25-demo-replay-worker-cpu-starvation-normalization-and-live-jev.md (appended on branch rca/mass-agent-attempt-completion-error, 2c57c70131, local). Cloud evidence: agent 27dba2f8-e372-4882-904e-80fe7451d4c8, archive r2://trace-archive/trace-archive/27dba2f8-e372-4882-904e-80fe7451d4c8/manifest.json.gz.enc, cloudbench-run.json sha256 0cd27e15cab46db8bf508f8aafa622a4906571a2e5a4767dc3956ef174217ade. Suggested diagnostic: per-attempt post_agent_message start lag and httpcore phase timestamps. Native command: bash scripts/run-bench test-mass-agent-run-0 chat-mode spawn-sub-agents parallel-tool-calls background-agent-message-smoke claude-code-agent browser-smoke agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment browser-biometrics-webdecoy agent-payment-new-user-journey browser-auth-guest-purchase browser-auth-member-discount-purchase --runs 1 --concurrency 15 --retry-infra 0 --ref 9c6d9c3622680aaa2a2668fae861573500023615"
+   }
+  },
+  {
+   "id": "2635bfa51eaf4179a9d4fcf2399a5495",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "9c6d9c3622680aaa2a2668fae861573500023615",
+    "digest": "9682869ede0db983a20d0017bf73c05c4d7662655a5116fab8e39b5fb5cd1e66"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-abandonment timed out at 900 s because the Tilion browser provider lost the agent's session before request_payment_card, so no payment-card request was created",
+   "evidence": "RCA a644368a29978ede6: NOT_INTRODUCED, third-party Tilion browser-provider failure. First-bad boundary: Tilion answered no CDP input for the agent's request_payment_card step (worker.log:1379), then closed the CDP socket with code 1000 and again 1011 on reconnect (worker.log:1435, 1459), the pause failed closed with HTTP 500 (backend.log:2460) and BrowserSessionCloseError (agents/domains/spawn_browser_agent_v3/handler.py:12633-12637), so the payment-card request was never created. The unrelated browser-smoke task in the same run shows the identical timeline to the second (provider last reply 33.1 s before 12:09:20.1, close code=1000 at 12:09:33.43, code=1011 at 12:09:36.4, backend close 500), they share the Tilion session prefix sess_993d70 and CDP target 7B6D1EC62A7D, and Tilion POST /v1/session returned 502 at 12:08:55.8, 12:09:35.8 and 12:10:46.2 and timed out once in the same window. This PR's source delta from the previous smoke (826c8cf8b8) touches no runtime file; the float change is not on this path (no AgentCard use before the failure); no unreleased funds (0 cards, transfers or purchases). Not vendor-confirmed: no Tilion-side incident record was captured. Native record: .context/deploy-cloud/b59395a1518cea1953a12fc8c4287fb641edbcc748505898930a0abe8e098e6a/runs/20261107-120351-779261/agent-payment-abandonment/cloudbench-run.json (sha256 5a4ecf13c3bb5bdfb2a69cb592a89ab17d7f62d719b98174568af5f8a5b7f260). Case text: branch rca/payment-abandonment-no-card-request (839281e798, local).",
+   "external_provider": {
+    "name": "Tilion",
+    "reason": "outage"
+   }
+  }
+ ]
+}

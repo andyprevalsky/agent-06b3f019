@@ -2130,39 +2130,121 @@ def test_cloudbench_wrappers_require_strict_pass_without_claude_credential_skip(
     assert '"--allow-claude-code-credential-skip"' not in fleet
 
 
-def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
-    # The policy, shell entrypoints, and Python owner form one executable chain.
-    # Assert every hop so documentation can delegate without duplicating a
-    # transitive implementation string, while a shared-stack regression cannot
-    # hide behind otherwise-correct source routing.
+STAGED_PLANNER_PROBE = r'''
+import json
+import deploy_test_plan as planner
+template = planner.standard_template()
+smoke = next(gate for gate in template["gates"] if gate["name"] == "smoke")
+try:
+    planner.select({"gates": [dict(smoke)]}, ["scripts/probe"], {"all": True, "reasons": ["probe"], "lanes": {}},
+                   {"smoke": {"id": "probe", "command": ["true"], "transport": "explicit"}})
+    refusal = None
+except ValueError as error:
+    refusal = str(error)
+print(json.dumps({"smoke": smoke, "refusal": refusal}))
+'''
+
+
+def staged_planner_probe() -> dict:
+    """The real staged planner behind `scripts/deploy gates` (deploy_test_plan), run in a child
+    interpreter rooted at scripts/: its smoke gate, and its answer to a non-cloud smoke worker."""
+    result = subprocess.run(
+        [sys.executable, "-c", STAGED_PLANNER_PROBE],
+        cwd=ROOT / "scripts",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return json.loads(result.stdout.splitlines()[-1])
+
+
+def test_deploy_smoke_gate_runs_on_the_cloud_fleet_by_default(monkeypatch) -> None:
+    # User decision: /deploy smoke runs on the Fly cloud fleet through the benchmark CLI by default. This
+    # replaces the older local-first design (local isolated runner by default, cloud only as an explicit
+    # opt-in), whose pinned wording lived in the former deploy.md and is retired. deploy.md states the
+    # rules; the executable chain
+    #   deploy_test_plan (smoke inventory = run-predeploy-cloud --list; only a benchmark-cloud-cli worker)
+    #   -> deploy_test_cloud.py -> scripts/run-bench (cloud campaign / fleet) -> verified all-PASS result
+    # is asserted hop by hop, together with the one selector both runners share. scripts/run-predeploy-local
+    # stays a direct opt-in alternative and keeps its isolated-stack regression guards below.
     deploy = DEPLOY_COMMAND.read_text()
-    step = deploy.split("## Step 6: Smoke benchmarks + fix", 1)[1].split("## Step 6b: Semantic tests + fix", 1)[0]
+    assert "smoke, AgentCard tasks included, on the Fly fleet" in deploy
+    assert "Smoke runs on the cloud fleet through the benchmark CLI" in deploy
+    assert "Everything not listed here must pass" in deploy
+    claude_row = next(line for line in deploy.splitlines() if line.startswith("| Claude Code smoke |"))
+    assert "Preflight proves no synced Claude credential and no pool token" in claude_row
+    assert "Task failures still block" in claude_row
+    assert "Stop and ask the user only for a prompt, agent-behavior or trajectory-injection approval" in deploy
+    assert "bash scripts/run-deploy-stage --start" in deploy
+    assert "run_benchmark.py --suite smoke" not in deploy
+    # The reversed wording must not return: smoke is not local-by-default with the cloud as an opt-in.
+    assert "LOCAL isolated benchmark stack" not in deploy
+    assert "Use the cloud fleet only as an explicit opt-in" not in deploy
+    deploy_cli = (ROOT / "scripts" / "deploy_cli.py").read_text()
+    assert "['bash', 'scripts/run-deploy-stage', '--finish']" in deploy_cli
 
-    assert "scripts/run-predeploy-local" in step
-    assert "scripts/run-predeploy-cloud" in step
-    assert "Benchmarks → Runs" in step
-    assert "ALL non-skipped Pre-Deploy smoke benchmarks must pass" in step
-    assert "deploy-approved credential skip is a Claude Code benchmark" in step
-    assert "These exceptions apply to future deploys without additional human approval" in step
-    assert "select_predeploy_benches.py" in PREDEPLOY_LOCAL_SCRIPT.read_text()
-    assert "PREDEPLOY_BENCH_CAP" in PREDEPLOY_LOCAL_SCRIPT.read_text()
-    assert "select_predeploy_benches" in step or "category floor" in step.lower() or "hard cap" in step.lower()
-    assert "every non-skipped task" in step
-    assert "every requested task passes" in step
-    assert ".context/predeploy-runs/<run-id>/runner.log" in step
-    assert "run_benchmark.py --suite smoke" not in step
-    assert "scripts/run-deploy-stage --start" in deploy
-    assert "scripts/run-deploy-stage smoke -- bash scripts/run-predeploy-local" in step
-    assert "scripts/run-deploy-stage --finish" in deploy
-    assert "bash scripts/run-predeploy-local" in step
-    assert "LOCAL isolated benchmark stack" in step
-    assert "Use the cloud fleet only as an explicit opt-in" in step
-    assert "run_benchmark.py --suite smoke" not in step
+    # Hop 1 - planner: the smoke gate is exactly the cloud selector's inventory, run by the cloud adapter;
+    # a smoke worker on any other transport is refused.
+    probe = staged_planner_probe()
+    smoke = probe["smoke"]
+    cloud_tasks = subprocess.run(
+        ["bash", str(PREDEPLOY_SCRIPT), "--list"], cwd=ROOT, text=True, capture_output=True, check=True
+    ).stdout.splitlines()
+    assert cloud_tasks and smoke["checks"] == cloud_tasks
+    assert smoke["native_cloud"] is True and smoke["case_protocol"] is True
+    assert Path(smoke["command"][-1]).name == "deploy_test_cloud.py", smoke["command"]
+    assert "smoke must use the cloud benchmark CLI worker" in (probe["refusal"] or ""), probe["refusal"]
 
+    # Hop 2 - adapter: the benchmark CLI (cloud, never --local) for exactly the requested tasks, one run per
+    # task with no infra retry, and success only for a complete result in which every task PASSed.
+    adapter = (ROOT / "scripts" / "deploy_test_cloud.py").read_text()
+    assert "argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]" in adapter
+    assert "scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']" in adapter
+    assert "'--local'" not in adapter
+    assert "return 0 if result['complete'] and all(v == 'PASS' for v in result['cases'].values()) else 1" in adapter
+    assert "select_predeploy_benches.py" in adapter
+    assert "run_benchmark.py --suite smoke" not in adapter
+
+    # Hop 3 - run-bench routes to the local stack only on an explicit leading --local; otherwise to the cloud.
+    run_bench = RUN_BENCH_SCRIPT.read_text()
+    assert 'if [[ "${1:-}" == "--local" ]]' in run_bench
+    assert 'exec "$PY" -u "$ROOT_DIR/scripts/run-bench-campaign.py" "${CAMPAIGN_ARGS[@]}"' in run_bench
+    assert 'exec bash "$ROOT_DIR/scripts/run-bench-fleet" "${RESOLVED_TASKS[@]}" "${FLEET_ARGS[@]}"' in run_bench
+
+    # Hop 4 - both direct runners pick tasks with the one selector (surface-specific) under the same capped,
+    # clamped PREDEPLOY_BENCH_CAP; neither calls the smoke suite directly.
+    predeploy_cloud = PREDEPLOY_SCRIPT.read_text()
     predeploy_local = PREDEPLOY_LOCAL_SCRIPT.read_text()
+    for text, surface in ((predeploy_cloud, "cloud"), (predeploy_local, "local")):
+        assert 'SELECTOR_SCRIPT="$ROOT_DIR/agents/benchmarks/select_predeploy_benches.py"' in text
+        assert f"--surface {surface}" in text
+        assert '--cap "$PREDEPLOY_BENCH_CAP"' in text
+        assert 'PREDEPLOY_BENCH_CAP="${PREDEPLOY_BENCH_CAP:-20}"' in text
+        assert 'if [ "$PREDEPLOY_BENCH_CAP" -gt 20 ]; then' in text
+        assert "run_benchmark.py --suite smoke" not in text
+    for script in (PREDEPLOY_SCRIPT, PREDEPLOY_LOCAL_SCRIPT):
+        clamped = subprocess.run(
+            ["bash", str(script), "--list"], cwd=ROOT, text=True, capture_output=True, check=False,
+            env={**os.environ, "PREDEPLOY_BENCH_CAP": "99"},
+        )
+        assert clamped.returncode == 0, clamped.stderr
+        assert "exceeds hard ceiling 20; clamping to 20" in clamped.stderr
+        tight = subprocess.run(
+            ["bash", str(script), "--list"], cwd=ROOT, text=True, capture_output=True, check=False,
+            env={**os.environ, "PREDEPLOY_BENCH_CAP": "1"},
+        )
+        assert tight.returncode != 0 and "cannot fit in hard cap (1)" in tight.stderr, tight.stderr
+
+    # Hop 5 - the cloud runner prints the visible Hub run and fails unless every requested task passed.
+    assert "Benchmarks → Runs" in predeploy_cloud
+    assert 'task.get("passed") is not True or task.get("status") != "passed"' in predeploy_cloud
+    assert "Pre-Deploy cloud gate failed:" in predeploy_cloud
+
+    # Opt-in alternative: the local runner keeps its isolated per-run stack and run log.
     assert 'bash "$ROOT_DIR/scripts/run-bench" --local' in predeploy_local
     assert "BENCHMARK_SKIP_WMH_BUILD=1" in predeploy_local
-    run_bench = RUN_BENCH_SCRIPT.read_text()
+    assert "LOCAL isolated" in predeploy_local
+    assert ".context/predeploy-runs" in predeploy_local and "runner.log" in predeploy_local
     local_branch = run_bench.split('if [[ "${1:-}" == "--local" ]]', 1)[1].split(
         'if [[ "${1:-}" == "--single-box" ]]', 1
     )[0]
@@ -2179,20 +2261,102 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert stack.workspace_name is not None
     assert stack.base_port == 62000
     assert '["bash", "scripts/run.sh", "--benchmark"]' in LOCAL_RUNNER.read_text()
-    assert "git diff --name-only HEAD" in deploy
-    assert "git ls-files --others --exclude-standard" in deploy
+
+
+def test_predeploy_selector_sees_committed_staged_unstaged_and_untracked_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The predeploy selector's changed-file discovery covers the whole devbox, as deploy.md's scope rule
+    requires: committed branch work, staged and unstaged edits and untracked non-ignored files, never
+    ignored ones (the former deploy.md pinned the two git commands by wording)."""
+    from benchmarks.select_predeploy_benches import discover_changed_files
+
+    for name in ("PREDEPLOY_CHANGED_FILES", "PREDEPLOY_CHANGED_FILE_LIST"):
+        monkeypatch.delenv(name, raising=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", *args],
+            cwd=repo, check=True, capture_output=True,
+        )
+
+    git("init", "-q")
+    (repo / ".gitignore").write_text("ignored.log\n")
+    (repo / "unstaged.txt").write_text("v1\n")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    (repo / "committed.txt").write_text("committed\n")
+    git("add", "committed.txt")
+    git("commit", "-qm", "branch work")
+    (repo / "unstaged.txt").write_text("v2\n")
+    (repo / "staged.txt").write_text("staged\n")
+    git("add", "staged.txt")
+    (repo / "untracked.txt").write_text("untracked\n")
+    (repo / "ignored.log").write_text("ignored\n")
+    assert discover_changed_files(repo) == ["committed.txt", "staged.txt", "unstaged.txt", "untracked.txt"]
+
+
+CLOUDBENCH_CONTROLLER_SOURCES = (
+    # The former deploy.md CHANGED_CLOUDBENCH path classes, one real file per alternative.
+    "scripts/run.sh",
+    "scripts/setup-db.sh",
+    "scripts/run-in-new-session.py",
+    "scripts/run-bench",
+    "scripts/run-bench-cloud",
+    "scripts/run-bench-fleet",
+    "scripts/run-predeploy-cloud",
+    "scripts/run-predeploy-local",
+    "scripts/create-worktree-patch.sh",
+    "scripts/cloudbench-boot.sh",
+    "scripts/lib/cloudbench-env.sh",
+    "scripts/tests/cloudbench-env.test.sh",
+    "agents/benchmarks/cloud_batch_cleanup_test.py",
+    "agents/benchmarks/cloudbench_dependency_sync_test.py",
+    "agents/benchmarks/cloudbench_recovery_review_test.py",
+    "agents/benchmarks/run_benchmark.py",
+    "agents/benchmarks/wall_clock_backstop_test.py",
+)
 
 
 def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
-    deploy = DEPLOY_COMMAND.read_text()
-    assert "CHANGED_CLOUDBENCH=" in deploy
-    gate = deploy.split("## Step 4cb: Cloud benchmark controller regressions", 1)[1].split(
-        "## Step 4c: Credential health check", 1
-    )[0]
-    gate_normalized = " ".join(gate.split())
-    assert "bash scripts/tests/cloudbench-env.test.sh" in gate
-    assert "bash scripts/tests/cloudbench-multi-workstream.test.sh" in gate
-    assert "bash scripts/tests/seed-dump-toolchain.test.sh" in gate
+    # The former deploy.md `CHANGED_CLOUDBENCH=` path regex and Step 4cb inventory text are retired. The same
+    # guarantee now comes from the executing sources: the affected-test graph selects the cloudbench-controller
+    # lane for every cloud benchmark controller source, the staged planner turns that lane into the
+    # `cloudbench-controller` gate, and scripts/run-cloudbench-controller-local.py (CASES) plus the Fly gate
+    # script carry the suites and the pytest keywords the old Step 4cb listed.
+    spec = importlib.util.spec_from_file_location(
+        "select_affected_tests_under_test", ROOT / "scripts" / "select_affected_tests.py"
+    )
+    assert spec is not None and spec.loader is not None
+    selector_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = selector_module  # dataclasses resolve postponed annotations via sys.modules
+    try:
+        spec.loader.exec_module(selector_module)
+        selector = selector_module.Selector()
+        for path in CLOUDBENCH_CONTROLLER_SOURCES:
+            assert (ROOT / path).is_file(), path
+            lanes = selector.select([path]).selected
+            assert lanes["cloudbench-controller"], f"a change to {path} must select the cloudbench-controller lane"
+            # The former Step 4cb also ran the agents `benchmark` blackbox domain for these changes.
+            assert "benchmark" in lanes["agents-blackbox"], f"a change to {path} must select the benchmark domain"
+    finally:
+        sys.modules.pop(spec.name, None)
+    planner = (ROOT / "scripts" / "deploy_test_plan.py").read_text()
+    assert "'cloudbench-controller': ['cloudbench-controller']," in planner
+    assert '"name": "cloudbench-controller", "command": [sys.executable, "scripts/run-cloudbench-controller-local.py"]' in planner
+
+    gate = (ROOT / "scripts" / "run-cloudbench-controller-local.py").read_text()
+    fly_gate = (ROOT / "scripts" / "run-cloudbench-controller-gate").read_text()
+    for suite in (
+        "bash scripts/tests/cloudbench-env.test.sh",
+        "bash scripts/tests/cloudbench-multi-workstream.test.sh",
+        "bash scripts/tests/seed-dump-toolchain.test.sh",
+    ):
+        assert suite in gate, suite
+        assert suite in fly_gate, suite
     assert "cloudbench_dependency_sync_test.py" in gate
     assert "fleet_barrier_reads_the_authoritative_rotated_status_port" in gate
     assert "data_plane_barrier_release_at_full_fleet_width" in gate
@@ -2213,8 +2377,13 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
     assert "refresh_deps_tracks_exact_created_snapshot" in gate
     assert "exact_volume_ownership_survives_delayed_visibility_and_failed_delete" in gate
     assert "cloud_agentcard_payment_tasks_provide_onboarding_callback_env" in gate
-    assert "must never pause for human approval" in gate_normalized
-    assert "Operational gate maintenance is pre-authorized" in deploy
+    # The gate wiring is operational and never pauses for human approval (the former "must never pause" and
+    # "Operational gate maintenance is pre-authorized" wording): the concise deploy.md's only stop-and-ask
+    # condition is an unreviewed prompt/agent-behavior/trajectory-injection approval, and edits to test
+    # selection and gate wiring are classified as operational, not prompt, changes.
+    deploy = DEPLOY_COMMAND.read_text()
+    assert "Stop and ask the user only for a prompt, agent-behavior or trajectory-injection approval" in deploy
+    assert "Deploy-tooling edits to this file (test selection, gate wiring, evidence) are operational, not prompt changes." in deploy
 
 
 def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
@@ -10875,6 +11044,8 @@ def _fleet_capacity_guard(source: str) -> str:
             _extract_fleet_function(source, signature)
             for signature in (
                 "archived_reuse_capacity_credit() {",
+                "bench_uses_shared_demo_cache() {",
+                "admit_lane_capacity() {",
                 "enforce_app_capacity_guard() {",
             )
         )
@@ -22864,6 +23035,11 @@ require_central_hub_visibility
         assert len(owner_files) == 1
         owner_fields = _read_test_owner_record(owner_files[0])
         hub_pid = int(owner_fields["pid"])
+        # The preferred port is only probed free; a concurrent loopback client
+        # may occupy it before the hub binds, and startup then selects a later
+        # port. Verify the port the owned hub actually bound.
+        hub_port = int(owner_fields["port"])
+        assert hub_port >= port
         launcher_sid = int(launcher_sid_file.read_text().strip())
         os.kill(hub_pid, 0)
         assert os.getsid(hub_pid) != launcher_sid, (
@@ -22875,7 +23051,7 @@ require_central_hub_visibility
                 "--noproxy",
                 "*",
                 "-fsS",
-                f"http://127.0.0.1:{port}/hub-meta.json",
+                f"http://127.0.0.1:{hub_port}/hub-meta.json",
             ],
             text=True,
             capture_output=True,
@@ -36670,6 +36846,15 @@ fleet_native_stop_verify_guest 0 {shlex.quote(str(state_dir))} "$deadline"
         return
     assert stops == [f"machine stop {_NATIVE_STOP_MACHINE} -a bench-app"], calls
     assert receipt["stop_requests"] == 2, receipt
+    if reaches_stopped and result.returncode != 0:
+        # The send fit the final tick but the post-stop status read did not (a loaded
+        # host): only an observed production-clock refusal permits the unverified end.
+        trace = (fake / "native-clock.trace").read_text()
+        deadline = int((fake / "native-deadline").read_text())
+        assert _native_stop_last_tick_exhausted(trace, deadline), trace
+        assert receipt["verified"] is False, receipt
+        assert "retaining ownership" in result.stderr
+        return
     if reaches_stopped:
         assert result.returncode == 0, result.stderr
         assert receipt["verified"] is True and receipt["verified_state"] == "stopped", receipt

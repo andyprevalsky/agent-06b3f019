@@ -442,6 +442,11 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         'finish() { if declare -F stop_owned_machines_snapshot_loop >/dev/null; then stop_owned_machines_snapshot_loop; else cloudbench_terminate_tree_and_wait 30 "$SNAPSHOT_LOOP_PID"; fi; touch "$FLEET_DIR/closed"; }\n'
         "trap finish EXIT\ntrap 'exit 143' TERM\n"
         + boundary
+        # Admission may already have issued this job's native reads. Join the
+        # snapshot loop's own reads relative to that baseline, not a total.
+        + "fixture_job_machine_reads() { python3 -c 'import json,os;p=os.environ[\"FIXTURE_CALLS\"];print(sum(row[\"kind\"]==\"machines\" and row.get(\"job_id\")==os.environ[\"RUN_BENCH_CAMPAIGN_JOB_ID\"] for row in map(json.loads,open(p))) if os.path.exists(p) else 0)'; }\n"
+        'fixture_reads_before_loop=0\n'
+        '[ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ] || fixture_reads_before_loop="$(fixture_job_machine_reads)"\n'
         + "start_machines_snapshot_loop\n"
         'if [ "${CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION:-0}" = 1 ]; then\n'
         ' python3 -c \'import json,os;from pathlib import Path;a=json.loads(os.environ["CLOUDBENCH_CAMPAIGN_MUTATION_AUTHORITY"]);d=Path(os.environ["CLOUDBENCH_CAMPAIGN_INVENTORY_DIR"]);assert a["directory"]==str(d.resolve());assert a["owner"]==dict(line.split("=",1) for line in (d/"owner").read_text().splitlines());Path(os.environ["FIXTURE_ROOT"],os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"],"authority.json").write_text(json.dumps(a))\'\n'
@@ -450,7 +455,7 @@ def run_consumers(tmp_path, *, shared=True, death=False, refresh=False, auth=Fal
         # the first asynchronous refresh before ending the scenario whose
         # assertion counts that refresh; startup only joins the initial read.
         'if [ -z "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then\n'
-        ' while [ "$(python3 -c \'import json,os;print(sum(row["kind"]=="machines" and row.get("job_id")==os.environ["RUN_BENCH_CAMPAIGN_JOB_ID"] for row in map(json.loads,open(os.environ["FIXTURE_CALLS"]))))\')" -lt 2 ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
+        ' while [ "$(fixture_job_machine_reads)" -lt "$((fixture_reads_before_loop + 2))" ] || [ -e "$INVENTORY_REFRESH_LOCK" ]; do sleep 0.1; done\n'
         'fi\n'
         'if [ "$FIXTURE_DEATH" = 1 ]; then\n'
         ' if [[ "$RUN_BENCH_CAMPAIGN_JOB_ID" == *j0002 ]]; then\n'
@@ -2660,8 +2665,8 @@ def test_campaign_inventory_stress_defaults_derive_actual_vm_profiles_and_withho
     assert result['admission'] == 'local-defaults-derived-native-guards-required'
 
     env = module.stress_default_environment(result, {})
-    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '160'
-    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '56'
+    assert env['CLOUDBENCH_SHARED_CPU_GOVERNOR'] == '1000'
+    assert env['CLOUDBENCH_APP_MACHINE_CEILING'] == '300'
     assert env['CLOUDBENCH_CAMPAIGN_MUTATION_ADMISSION'] == '1'
     assert module.stress_default_environment(result, {'CLOUDBENCH_APP_MACHINE_CEILING': '1'})['CLOUDBENCH_APP_MACHINE_CEILING'] == '1'
     with pytest.raises(ValueError, match='unknown native baseline'):

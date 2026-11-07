@@ -2587,9 +2587,14 @@ require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
 require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
   'bash "$ROOT_DIR/scripts/tests/cloudbench-acceptance-autoscale.test.sh"' \
   "pre-deploy cloud gate must reject every autoscale off-state"
-require_text "$ROOT_DIR/.claude/commands/deploy.md" \
-  'bash scripts/tests/cloudbench-acceptance-autoscale.test.sh' \
+# deploy.md carries no test list: the deploy plan's cloudbench-controller gate
+# (scripts/run-cloudbench-controller-local.py) executes the regression.
+require_text "$ROOT_DIR/scripts/run-cloudbench-controller-local.py" \
+  "('autoscale', 'bash scripts/tests/cloudbench-acceptance-autoscale.test.sh')," \
   "deploy must execute the permanent mandatory-autoscale regression"
+require_text "$ROOT_DIR/scripts/deploy_test_plan.py" \
+  '{"name": "cloudbench-controller", "command": [sys.executable, "scripts/run-cloudbench-controller-local.py"],' \
+  "the deploy plan must run the cloudbench-controller gate that executes the autoscale regression"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_VERIFIED=1' \
   "fleet children must receive proof that the controller verified the environment"
@@ -3635,6 +3640,44 @@ PY
   }
   [ "$selected" = "$free_port" ] || fail "select_central_hub_port must return preferred free port (got $selected)"
 ) || fail "central hub free-port selection contract broken"
+
+# A refused connect only proves no listener. A bound-but-not-listening socket
+# (like a loopback client's ephemeral port or its TIME_WAIT) still fails the
+# hub's bind, so selection must skip it rather than re-pick it every attempt.
+(
+  bound_port_file="$TMP_ROOT/tcp-bound-port"
+  python3 - "$bound_port_file" <<'PY' &
+import pathlib, socket, sys, time
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("127.0.0.1", 0))
+pathlib.Path(sys.argv[1]).write_text(str(s.getsockname()[1]))
+while True:
+    time.sleep(1)
+PY
+  bound_pid=$!
+  trap 'kill "$bound_pid" 2>/dev/null || true' EXIT
+  for _ in $(seq 1 100); do
+    [ -s "$bound_port_file" ] && break
+    sleep 0.05
+  done
+  [ -s "$bound_port_file" ] || fail "bound-only socket did not become ready"
+  bound_port="$(cat "$bound_port_file")"
+  rc=0
+  cloudbench_tcp_listener_present "$bound_port" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a bound-only socket must probe as no listener (got $rc)"
+  rc=0
+  cloudbench_tcp_port_bindable "$bound_port" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a bound-only socket must probe as in use (got $rc)"
+  selected="$(cloudbench_select_central_hub_port "$bound_port" "/tmp/no-such-hub-root")" ||
+    fail "selection must skip, not refuse, a bound-only preferred port"
+  [ -n "$selected" ] && [ "$selected" != "$bound_port" ] ||
+    fail "a bound-only preferred port must not be selected (got ${selected:-empty})"
+  kill "$bound_pid" 2>/dev/null || true
+  wait "$bound_pid" 2>/dev/null || true
+  rc=0
+  cloudbench_tcp_port_bindable "$bound_port" || rc=$?
+  [ "$rc" -eq 0 ] || fail "a released port must probe as bindable (got $rc)"
+) || fail "central hub bound-only port contract broken"
 
 # --single-box must reject before cd/catalog work. Prefer a scripts-only sandbox
 # (cloudbench-multi scenario 14) and cement ordering vs the production-only

@@ -18,6 +18,22 @@ export interface ConnectedAccountDto {
   /** Populated only when state is needs_reconnect, for the tooltip. */
   lastErrorReason: string | null;
   connectedAt: string;
+  /** Last subscription usage an agent observed on this account's token; null until one is used. */
+  usage: AccountUsageDto | null;
+  /** Provider cooldown on this account's token: it serves nothing until this passes. */
+  rateLimitedUntil: string | null;
+}
+
+/** One provider quota window; `usedPct` is 0-100 as of `AccountUsageDto.observedAt`. */
+export interface UsageWindowDto {
+  usedPct: number;
+  resetsAt: string | null;
+}
+
+export interface AccountUsageDto {
+  fiveHour: UsageWindowDto | null;
+  sevenDay: UsageWindowDto | null;
+  observedAt: string;
 }
 
 export interface ListConnectionsResponse {
