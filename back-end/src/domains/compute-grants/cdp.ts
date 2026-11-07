@@ -73,8 +73,8 @@ export interface CdpClient {
   /** Present cloud-custody passkeys via a CDP virtual authenticator (see cdp.passkeys). */
   seedPasskeys(passkeys: PasskeySeed[]): Promise<number>;
   /**
-   * Read the pages' WebAuthn ceremony records; resolves to the relying party
-   * whose passkey request the seeded authenticator could not answer, if any.
+   * Read the main page's unanswered-passkey record (see cdp.passkeyCeremonies);
+   * resolves to the relying party the seeded authenticator could not answer.
    */
   syncPasskeyCeremonies(): Promise<string | undefined>;
   navigate(url: string): Promise<void>;
