@@ -10218,6 +10218,11 @@ def test_build_usage_items():
     with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}):
         steel_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
     assert steel_items[1]["provider"] == "Steel.dev Browser"
+
+    # Tilion is the production default provider (since 2026-10-28).
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "tilion"}):
+        tilion_items = build_usage_items(0, 0, {"input_cents_per_1k": 0, "output_cents_per_1k": 0}, 1)
+    assert tilion_items[1]["provider"] == "Tilion Browser"
     # Rotation can switch providers mid-run; the session metadata overrides
     # the deployment default when attributing browser time.
     with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
@@ -10318,7 +10323,7 @@ def test_build_usage_items_carries_browser_pool_model():
     assert tool_usage["llm"][0]["model"] == BROWSER_USE_PRICING_POOL
     assert tool_usage["llm"][0]["tokens_in"] == 1_186_754
     assert tool_usage["llm"][0]["tokens_out"] == 40_000
-    assert tool_usage["service"][0]["provider"] in ("Kernel Browser", "Steel.dev Browser")
+    assert tool_usage["service"][0]["provider"] == "Kernel Browser"
 
 
 def test_browser_usage_preserves_repeatable_cache_calls():
@@ -10435,7 +10440,7 @@ def test_build_usage_items_emits_one_row_per_actual_model():
 
     # The browser-time service row is NOT per-model and stays a single row.
     assert len(service_rows) == 1
-    assert service_rows[0]["provider"] in ("Kernel Browser", "Steel.dev Browser")
+    assert service_rows[0]["provider"] == "Kernel Browser"
 
 
 def test_build_usage_items_unattributed_tokens_fall_back_to_browser_pool():
