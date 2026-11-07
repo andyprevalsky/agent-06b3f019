@@ -17862,7 +17862,10 @@ async def test_hard_recover_frozen_renderer_page_restores_evaluate():
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         try:
-            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            # Production pages share a CDP session context; browser.new_page()
+            # would make Playwright own the context and refuse a second page.
+            context = await browser.new_context(viewport={"width": 1280, "height": 800})
+            page = await context.new_page()
             await page.set_content("<html><body><h1>waiver</h1></body></html>")
             cdp = await page.context.new_cdp_session(page)
             await cdp.send(
@@ -17933,7 +17936,10 @@ async def test_hard_recover_frozen_renderer_page_restores_click():
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
         try:
-            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            # Production pages share a CDP session context; browser.new_page()
+            # would make Playwright own the context and refuse a second page.
+            context = await browser.new_context(viewport={"width": 1280, "height": 800})
+            page = await context.new_page()
             await page.set_content("<html><body><button>Sign</button></body></html>")
             assert await _timed_click(page) == "ok"
 
@@ -17965,6 +17971,117 @@ async def test_hard_recover_frozen_renderer_page_restores_click():
             assert await _timed_click(new_page) == "ok"
         finally:
             await _force_close(browser)
+
+
+async def test_hard_recover_frozen_renderer_keeps_session_browser_context():
+    """Hard renderer recovery must resume inside the session's own BrowserContext.
+
+    H-63 (anti-bot-doordash-store r001-j0007, agent 18808d56): the backend put
+    the saved login cookies into the CDP default context
+    (``browser.contexts()[0].addCookies``). The renderer froze, and hard recovery
+    opened its replacement page in ``playwright_browser.new_context()``, which
+    has its own empty cookie jar. DoorDash then served a different guest
+    consumer (business-profiles 401), and the agent asked for sign-in instead
+    of a payment card. This test uses the production shape: Chromium reached
+    over CDP, cookies in the default context, a frozen renderer on a page
+    served over HTTP, and the server checking that the resumed navigation sent
+    the session cookie.
+    """
+    import socket
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.handler import _hard_recover_frozen_renderer_page
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+
+    seen: list = []
+
+    class _Store(BaseHTTPRequestHandler):
+        def do_GET(self):
+            names = sorted(
+                part.split("=", 1)[0].strip() for part in (self.headers.get("Cookie") or "").split(";") if "=" in part
+            )
+            seen.append((self.path, names))
+            body = b"<html><body><h1>store</h1><button>Add</button></body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Store)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    store_url = f"{origin}/store"
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        debug_port = reservation.getsockname()[1]
+
+    async with async_playwright() as playwright:
+        launched = await playwright.chromium.launch(headless=True, args=[f"--remote-debugging-port={debug_port}"])
+        browser = None
+        try:
+            for _ in range(50):
+                try:
+                    browser = await playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{debug_port}")
+                    break
+                except Exception:
+                    await asyncio.sleep(0.1)
+            assert browser is not None, "Chromium CDP endpoint never became reachable"
+            session_context = browser.contexts[0]
+            await session_context.add_cookies([{"name": "session_token", "value": "local-owned", "url": origin}])
+            page = session_context.pages[0] if session_context.pages else await session_context.new_page()
+            await page.goto(store_url, wait_until="domcontentloaded")
+            assert seen[-1] == ("/store", ["session_token"]), seen
+
+            cdp = await session_context.new_cdp_session(page)
+            await cdp.send(
+                "Runtime.evaluate",
+                {
+                    "expression": "setTimeout(() => { while (true) {} }, 0)",
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                },
+            )
+            await asyncio.sleep(0.25)
+            stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5)
+            assert stalled["verdict"] == "renderer_main_thread_blocked"
+
+            before_recovery = len(seen)
+            new_page, actions = await _hard_recover_frozen_renderer_page(
+                input_page=page,
+                playwright_browser=browser,
+                fallback_url=store_url,
+            )
+            assert new_page is not None, actions
+            assert "goto_resume_url" in actions, actions
+            resumed = [entry for entry in seen[before_recovery:] if entry[0] == "/store"]
+            assert resumed, f"recovery never resumed {store_url}: {actions}"
+            assert all("session_token" in names for _path, names in resumed), (
+                f"resumed navigation lost the session cookie: {resumed} actions={actions}"
+            )
+            assert new_page.context is session_context, "recovery moved the page out of the session BrowserContext"
+            assert "session_token" in {cookie["name"] for cookie in await new_page.context.cookies(origin)}
+            recovered = await classify_evaluate_cdp_stall(input_page=new_page, playwright_browser=browser, timeout_s=2.0)
+            assert recovered["renderer"] == "ok"
+        finally:
+            if browser is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(browser.close(), timeout=5.0)
+            try:
+                await asyncio.wait_for(launched.close(), timeout=5.0)
+            except Exception:
+                proc = getattr(launched, "process", None)
+                if proc is not None and getattr(proc, "pid", None):
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+            server.shutdown()
+            server.server_close()
 
 
 def test_action_timeout_cdp_classify_not_gated_on_evaluate():
@@ -37119,6 +37236,10 @@ async def run_all_tests():
     await r.record_async(
         "hard_recover_frozen_renderer_page_restores_click",
         test_hard_recover_frozen_renderer_page_restores_click,
+    )
+    await r.record_async(
+        "hard_recover_frozen_renderer_keeps_session_browser_context",
+        test_hard_recover_frozen_renderer_keeps_session_browser_context,
     )
     r.record(
         "action_timeout_cdp_classify_not_gated_on_evaluate",

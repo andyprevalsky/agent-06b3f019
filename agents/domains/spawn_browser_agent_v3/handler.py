@@ -4441,12 +4441,18 @@ async def _hard_recover_frozen_renderer_page(
     fallback_url: str = "",
     timeout_s: float = 20.0,
 ) -> tuple[Optional[Any], List[str]]:
-    """Open a fresh page, then kill the frozen target via browser-process CDP.
+    """Replace a frozen page inside its own BrowserContext via browser-process CDP.
 
     When classify_evaluate_cdp_stall reports renderer_main_thread_blocked, the
-    page-target CDP is dead but Browser.getVersion still works. Creating the
-    replacement page *before* closing the hung target is required: closing the
-    last page target via CDP can tear down the Playwright BrowserContext.
+    page-target CDP is dead but Browser.getVersion still works. The replacement
+    page must stay in the frozen page's BrowserContext, which holds the
+    session's injected cookies and site storage. A fresh ``new_context()`` has
+    an empty cookie jar, so the task would resume logged out (H-63).
+
+    The blank replacement page is created *before* the hung target is closed,
+    because closing the last page target via CDP can tear down the Playwright
+    BrowserContext. The resume navigation runs *after* the hung targets are
+    closed, so a same-site navigation cannot land in the blocked renderer.
     """
     actions: List[str] = []
     if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):
@@ -4499,23 +4505,37 @@ async def _hard_recover_frozen_renderer_page(
                 await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
             browser_cdp = None
 
-    try:
-        # Prefer a fresh BrowserContext: under a pegged renderer,
-        # context.new_page() can fail with "Please use browser.new_context()".
-        new_context = await asyncio.wait_for(playwright_browser.new_context(), timeout=10.0)
-        new_page = await asyncio.wait_for(new_context.new_page(), timeout=10.0)
-        actions.append("new_context_page")
-    except Exception as exc:
-        actions.append(f"new_page_failed:{type(exc).__name__}")
+    async def _context_cookie_count() -> str:
         try:
-            new_page = await asyncio.wait_for(context.new_page(), timeout=10.0)
-            actions.append("new_page")
-        except Exception as exc2:
-            actions.append(f"context_new_page_failed:{type(exc2).__name__}")
-            if browser_cdp is not None:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
-            return None, actions
+            return str(len(await asyncio.wait_for(context.cookies(), timeout=3.0)))
+        except Exception:
+            return "unavailable"
+
+    cookies_before = await _context_cookie_count()
+    try:
+        new_page = await asyncio.wait_for(context.new_page(), timeout=10.0)
+        actions.append("new_page")
+    except Exception as exc:
+        actions.append(f"context_new_page_failed:{type(exc).__name__}")
+        if browser_cdp is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
+        return None, actions
+
+    if browser_cdp is not None:
+        closed = 0
+        for target_id in frozen_target_ids:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    browser_cdp.send("Target.closeTarget", {"targetId": target_id}),
+                    timeout=5.0,
+                )
+                closed += 1
+                actions.append(f"close_target:{target_id[:12]}")
+        if closed:
+            actions.append(f"closed_targets:{closed}")
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
 
     if resume_url.startswith(("http://", "https://")):
         try:
@@ -4535,26 +4555,13 @@ async def _hard_recover_frozen_renderer_page(
             await asyncio.wait_for(new_page.goto(resume_url), timeout=10.0)
             actions.append("goto_resume_url")
 
-    if browser_cdp is not None:
-        closed = 0
-        for target_id in frozen_target_ids:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    browser_cdp.send("Target.closeTarget", {"targetId": target_id}),
-                    timeout=5.0,
-                )
-                closed += 1
-                actions.append(f"close_target:{target_id[:12]}")
-        if closed:
-            actions.append(f"closed_targets:{closed}")
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(browser_cdp.detach(), timeout=1.0)
-
     if input_page is not None:
         with contextlib.suppress(Exception):
             await asyncio.wait_for(input_page.close(), timeout=3.0)
             actions.append("close_playwright_page")
 
+    # Counts only: proves the resumed page kept the session cookie jar.
+    actions.append(f"context_cookies:{cookies_before}->{await _context_cookie_count()}")
     return new_page, actions
 
 
