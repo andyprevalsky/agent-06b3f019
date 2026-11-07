@@ -1461,6 +1461,102 @@ def _load_runner(name: str):
     return module
 
 
+class StructuralGateProgressTests(unittest.TestCase):
+    """DEPLOY_GATE_PROGRESS: one live row per suite, the result left unchanged."""
+
+    WATCH = "STRUCTURAL_PROGRESS_FIXTURE_WATCH"
+
+    def _gates(self, module):
+        # The waiter finishes only after the failing suite's FAIL row is in the
+        # file, so the row is written live, not when the runner exits. Without
+        # a watch path it exits at once with the same output.
+        waiter = (
+            "import json, os, sys, time\n"
+            "if os.environ.get('DEPLOY_GATE_PROGRESS'):\n"
+            "    sys.exit(7)\n"
+            f"watch = os.environ.get({self.WATCH!r})\n"
+            "deadline = time.monotonic() + 60\n"
+            "while watch and time.monotonic() < deadline:\n"
+            "    try:\n"
+            "        rows = [json.loads(line) for line in open(watch).read().splitlines()]\n"
+            "    except (OSError, ValueError):\n"
+            "        rows = []\n"
+            "    if any(row['unit'] == 'fails' and row['status'] == 'FAIL' for row in rows):\n"
+            "        break\n"
+            "    time.sleep(0.05)\n"
+            "else:\n"
+            "    if watch:\n"
+            "        sys.exit(9)\n"
+            "print('waiter done')\n"
+        )
+        return (
+            module.Gate("fails", ("bash", "-c", "echo fails-marker-output; exit 3")),
+            module.Gate(
+                "split",
+                ("bash", "-c", '[ "$DEPLOY_GATE_SHARD" != 2/2 ] || { echo split-shard-two-broke; exit 1; }'),
+                shards=2,
+            ),
+            module.Gate("whole-split", ("bash", "-c", "echo whole-split-ok"), shards=2),
+            module.Gate("waiter", (sys.executable, "-c", waiter)),
+        )
+
+    def _run(self, module, gates, extra_env):
+        env = {key: value for key, value in os.environ.items() if key not in {"DEPLOY_GATE_PROGRESS", self.WATCH}}
+        env.update(extra_env)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.dict(os.environ, env, clear=True),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.run_gates(gates, max_workers=6)
+
+        def timeless(text: str) -> str:
+            return re.sub(r"\d+(?:\.\d+)?s\b", "Ns", text)
+
+        head, _, slowest = timeless(stdout.getvalue()).partition("Slowest deploy structural gates:")
+        return result, (head, sorted(slowest.splitlines())), sorted(timeless(stderr.getvalue()).splitlines())
+
+    def test_each_suite_reports_one_live_row_without_changing_the_result(self) -> None:
+        module = _load_runner("deploy_runner_progress")
+        gates = self._gates(module)
+        with tempfile.TemporaryDirectory(prefix="deploy-runner-progress-") as temporary:
+            root = Path(temporary)
+            progress = root / "reported" / "progress.jsonl"
+            progress.parent.mkdir()
+            silent = root / "silent"
+            silent.mkdir()
+            reported = self._run(
+                module,
+                gates,
+                {"DEPLOY_GATE_PROGRESS": str(progress), "DEPLOY_GATE_CASE": "structural", self.WATCH: str(progress)},
+            )
+            unset = self._run(module, gates, {})
+            # A directory is not a writable progress file: reporting fails silently.
+            broken = self._run(module, gates, {"DEPLOY_GATE_PROGRESS": str(silent)})
+            self.assertEqual(reported[0], 1, reported)
+            self.assertEqual(reported, unset, "reporting changed the exit code or output")
+            self.assertEqual(broken, unset, "an unwritable progress file changed the run")
+            self.assertEqual(list(silent.iterdir()), [], "nothing is written without a writable progress file")
+            rows = [json.loads(line) for line in progress.read_text().splitlines()]
+        units = [row["unit"] for row in rows]
+        self.assertEqual(sorted(units), ["fails", "split", "waiter", "whole-split"], "one row per suite")
+        self.assertLess(units.index("fails"), units.index("waiter"), "the FAIL row precedes later suites")
+        by_unit = {row["unit"]: row for row in rows}
+        self.assertEqual({row["scope"] for row in rows}, {"suite"})
+        self.assertEqual({row["case"] for row in rows}, {"structural"})
+        self.assertEqual(
+            {unit: row["status"] for unit, row in by_unit.items()},
+            {"fails": "FAIL", "split": "FAIL", "whole-split": "PASS", "waiter": "PASS"},
+        )
+        self.assertIn("fails-marker-output", by_unit["fails"]["detail"])
+        self.assertTrue(by_unit["fails"]["log"].endswith("/fails.log"))
+        self.assertIn("split-shard-two-broke", by_unit["split"]["detail"])
+        self.assertTrue(by_unit["split"]["log"].endswith("/split[2-of-2].log"))
+        self.assertEqual((by_unit["whole-split"]["detail"], by_unit["whole-split"]["log"]), ("", ""))
+        self.assertTrue(by_unit["waiter"]["log"].endswith("/waiter.log"))
+
+
 class StructuralGateSchedulingTests(unittest.TestCase):
     """Sharding, longest-first admission, hard timeouts and failed-first retries."""
 
