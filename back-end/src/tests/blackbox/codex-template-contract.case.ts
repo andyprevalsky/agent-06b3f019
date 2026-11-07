@@ -91,6 +91,7 @@ export async function testTemplate_pinsCodexCliForGpt56() {
   const templateDir = resolveGptCodeE2bTemplateDir();
   const dockerfile = readFileSync(join(templateDir, 'e2b.Dockerfile'), 'utf8');
   const pin = dockerfile.match(/^ARG CODEX_VERSION=(\S+)$/m)?.[1];
+  const nodePin = dockerfile.match(/^ARG NODE_VERSION=(\S+)$/m)?.[1];
   assert(
     pin !== undefined &&
       dockerfile.includes('npm install -g "@openai/codex@$CODEX_VERSION"') &&
@@ -104,11 +105,14 @@ export async function testTemplate_pinsCodexCliForGpt56() {
     `codexTemplate.ts codexVersion ${CODEX_CODE_TEMPLATE.codexVersion} != Dockerfile pin ${pin}; build a new template`
   );
   const [major, minor] = pin.split('.');
+  const expectedPrefix = `codex-code-v${major}${minor}-node${nodePin?.replace(/\./g, '')}`;
   assert(
-    CODEX_CODE_TEMPLATE.alias === `codex-code-v${major}${minor}` &&
+    CODEX_CODE_TEMPLATE.sizedAliasPrefix === expectedPrefix &&
+      CODEX_CODE_TEMPLATE.alias === `${expectedPrefix}-c2-m4` &&
       DEFAULT_CODEX_CODE_TEMPLATE_ID === CODEX_CODE_TEMPLATE.alias,
-    `Codex template alias ${CODEX_CODE_TEMPLATE.alias} must be the versioned codex-code-v${major}${minor}`
+    `Codex template alias ${CODEX_CODE_TEMPLATE.alias} must include its CLI and Node versions`
   );
+  assert(CODEX_CODE_TEMPLATE.nodeVersion === nodePin, 'Codex template Node pin must match code');
   const sharedAlias = readFileSync(join(templateDir, 'e2b.toml'), 'utf8').match(
     /^template_name\s*=\s*"([^"]+)"/m
   )?.[1];

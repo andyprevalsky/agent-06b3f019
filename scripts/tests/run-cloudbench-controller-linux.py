@@ -20,7 +20,7 @@ import uuid
 
 TOOL_CHECK = """import re,shutil,subprocess,sys
 assert sys.platform=='linux' and sys.version_info[:3]==(3,11,9), 'requires Linux Python3.11.9'
-assert subprocess.check_output(['node','--version'],text=True).strip()=='v22.13.0', 'requires Node22.13.0'
+assert subprocess.check_output(['node','--version'],text=True).strip()=='v22.23.4', 'requires Node22.23.4'
 assert int(subprocess.check_output(['bash','--version'],text=True).split('version ',1)[1].split('.',1)[0])>=5, 'requires Bash5+'
 assert all(shutil.which(name) for name in ('git','curl','ps','rg')), 'requires git/curl/procps/ripgrep'
 assert all(shutil.which(name) for name in ('npm','npx')), 'requires npm/npx'
@@ -176,7 +176,7 @@ def main() -> int:
                 return 0
             os.execvp("bash", ["bash", str(root / fixture)])
         print(
-            "host toolchain is not pinned Python3.11.9/Node22.13.0; "
+            "host toolchain is not pinned Python3.11.9/Node22.23.4; "
             "using offline controller image",
             flush=True,
         )
