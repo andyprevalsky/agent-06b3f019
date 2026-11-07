@@ -13,7 +13,14 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
-  reporter: [['list'], ['html', { open: 'never', outputFolder: 'playwright-report' }]],
+  reporter: [
+    ['list'],
+    ['html', { open: 'never', outputFolder: 'playwright-report' }],
+    // Live deploy-gate failure rows, only when the gate worker names a progress file.
+    ...(process.env.DEPLOY_GATE_PROGRESS
+      ? [['./src/tests/gate-progress/playwrightReporter.ts'] as [string]]
+      : []),
+  ],
   use: {
     baseURL: BASE_URL,
     trace: 'retain-on-failure',
