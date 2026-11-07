@@ -5194,4 +5194,120 @@ class PremanifestCensusArrival(unittest.TestCase):
                 self.assertLessEqual(rounds,8)
         self.assertTrue(self.run_census('vanished')[0])
 
+
+class CleanFileCardRecovery(unittest.TestCase):
+    write_native = CardPreflightCleanup.write_native
+    seal_base = PremanifestCardRecovery.seal
+    reconcile = PremanifestCardRecovery.reconcile
+
+    def seal(self):
+        if hasattr(self,'manifest'):
+            c.write(self.paths['services.json'],self.manifest)
+            self.paths['local-stack-cleanup.status'].write_text(''.join(k+'='+v+'\n' for k,v in self.clean.items()))
+        self.seal_base()
+
+    def setUp(self):
+        PremanifestCardRecovery.setUp(self)
+        old=self.run;self.run=old.with_name('1794036647-2674647-70562');old.rename(self.run)
+        for key in ['services.log','local-stack-owner.json','local-benchmark-owner.json']:
+            self.paths[key]=self.run/key
+        self.stack['run_id']=self.run.name
+        self.benchmark.update(run_id=self.run.name,receipt=str(self.run/'benchmark-cleanup.status'))
+        self.paths['services.log'].write_text(self.paths['services.log'].read_text().replace(old.name,self.run.name).replace(old.name.replace('-','_'),self.run.name.replace('-','_'))+
+                                             '🧭 Service manifest: .context/benchmarks/'+self.run.name+'/services.json\n')
+        self.paths['case.log'].write_text('Isolated benchmark stack: run_id='+self.run.name+
+            ' context=.context/benchmarks/'+self.run.name+' backend=13714 frontend=13715 db=5432 db_name=victo' +
+            'ria_bench_'+self.run.name.replace('-','_')+' queue=navi-agent-tasks-deploy_agentcard_lifecycle-bench-'+self.run.name+'\n'
+            'Received signal 15; draining owned benchmark before services...\n')
+        case=self.result['evidence']['agentcard-lifecycle'];case.update(native_exit=143,sha256=c.sha_file(self.paths['case.log']))
+        self.paths['services.json']=self.run/'services.json';self.paths['local-stack-cleanup.status']=self.run/'local-stack-cleanup.status'
+        self.manifest=dict(schema_version=1,benchmark_mode=True,status='stopped',worktree=str(self.worker),run_sh_pid=self.stack['pid'],
+            ports=dict(backend=13714,frontend=13715,health=13716,local_db=13719,mac_app=13717,sdk_metrics=13718,ngrok_api=13723,wmh=0),
+            database=dict(name='victoria_bench_'+self.run.name.replace('-','_'),use_system_postgres=True,port=5432,runtime_port=5432,
+                          owned_by_run_sh=True,container='',volume=''),
+            temporal_task_queue='navi-agent-tasks-deploy_agentcard_lifecycle-bench-'+self.run.name,
+            services=[dict(name=n,pid=2000000001+i) for i,n in enumerate(['cloudflared','back-end','front-end','agents'])])
+        self.clean=dict(version='2',state='clean',token=self.stack['token'],stack_pid=str(self.stack['pid']),
+                        stack_birth=self.stack['birth'],stack_native_identity=self.stack['native_identity'])
+        self.seal()
+
+    def test_clean_file_cancellation_reconciles_resource_only(self):
+        original={k:p.read_bytes() for k,p in self.paths.items()};before=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,['agentcard-lifecycle']))
+        self.assertEqual(before,self.state['attempts']);self.assertEqual('UNVERIFIED',self.failure['native_result'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertEqual(original,{k:p.read_bytes() for k,p in self.paths.items()})
+        self.assertEqual('victoria_bench_'+self.run.name.replace('-','_'),self.physical.call_args.args[3]['name'])
+        with self.assertRaises(ValueError):self.reconcile()
+        self.physical.side_effect=ValueError('late database')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,['agentcard-lifecycle'])
+
+    def test_clean_file_manifest_receipt_and_admission_guards(self):
+        cases=[(self.clean,'state','failed'),(self.clean,'token','foreign'),(self.clean,'version','1'),
+               (self.manifest,'status','running'),(self.manifest,'run_sh_pid',123),
+               (self.manifest['database'],'name','victoria'),(self.manifest['database'],'port',1),
+               (self.manifest['ports'],'backend',1),(self.manifest,'worktree',str(self.root)),
+               (self.benchmark,'state','running'),(self.stack,'pid',os.getpid()),
+               (self.result,'source',{}),(self.manifest,'temporal_task_queue','foreign')]
+        for target,key,value in cases:
+            old=target[key];target[key]=value;self.seal();before=copy.deepcopy(self.state)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.assertEqual(before,self.state);target[key]=old
+        self.seal()
+        for key in ['services.json','local-stack-cleanup.status']:
+            p=self.paths[key];raw=p.read_bytes();p.unlink();p.symlink_to(self.paths['services.log'])
+            with self.subTest(symlink=key),self.assertRaises(ValueError):self.reconcile()
+            p.unlink();p.write_bytes(raw)
+        for key,p in self.paths.items():
+            raw=p.read_bytes();p.write_bytes(raw+b' ')
+            with self.subTest(hash=key),self.assertRaises(ValueError):self.reconcile()
+            p.write_bytes(raw)
+        self.manifest['services'][0]['pid']=os.getpid();self.seal()
+        with self.assertRaises(ValueError):self.reconcile()
+
+    def test_clean_file_resigned_malformed_conflicting_or_foreign_evidence_refuses(self):
+        for key in ['local-stack-cleanup.status','services.json','case.log','services.log']:
+            p=self.paths[key];original=p.read_bytes()
+            if key=='local-stack-cleanup.status':p.write_bytes(original+b'state=clean\n')
+            elif key=='services.json':p.write_bytes(b'{invalid-json')
+            elif key=='case.log':p.write_text(p.read_text().replace('db_name=victoria_bench_', 'db_name=foreign_'))
+            else:p.write_text(p.read_text().replace('Created isolated system database victoria_bench_', 'Created isolated system database foreign_'))
+            if key=='case.log':
+                self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(p);self.seal()
+            self.proof['files'][key]=c.sha_file(p)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            p.write_bytes(original)
+            self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log']);self.seal()
+        for name in ['run.json','report-card.json','local-benchmark-results.json','services.json.tmp','benchmark-cleanup.status']:
+            p=self.run/name;p.write_text('{}')
+            with self.subTest(name=name),self.assertRaises(ValueError):self.reconcile()
+            p.unlink()
+
+    def test_clean_file_numeric_types_are_not_coerced(self):
+        for target,key,value in [(self.manifest,'schema_version',True),(self.manifest['ports'],'backend',13714.0),
+                                 (self.manifest['database'],'use_system_postgres',1),
+                                 (self.manifest['database'],'port',5432.0)]:
+            old=target[key];target[key]=value;self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+
+    def test_clean_file_late_service_pid_reuse_refuses(self):
+        import deploy_test_local_cleanup as local
+        original=Path.exists;late=[False];pid=self.manifest['services'][0]['pid']
+        def exists(path):
+            if str(path)=='/proc/'+str(pid):return late[0]
+            return original(path)
+        def observed(*args):late[0]=True
+        self.physical.side_effect=observed
+        before=copy.deepcopy(self.state)
+        with patch.object(local.Path,'exists',exists),self.assertRaises(ValueError):self.reconcile()
+        self.assertEqual(before,self.state)
+
+    def test_clean_receipt_never_substitutes_for_physical_absence(self):
+        for reason in ['database present','query failed','unknown process','live token','listener busy']:
+            self.physical.side_effect=ValueError(reason);before=copy.deepcopy(self.state)
+            with self.subTest(reason=reason),self.assertRaises(ValueError):self.reconcile()
+            self.assertEqual(before,self.state)
+
 if __name__ == '__main__': unittest.main()

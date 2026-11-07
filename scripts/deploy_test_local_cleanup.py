@@ -397,7 +397,7 @@ def premanifest_card_absent(root, run, owner, database, ports):
     premanifest_card_scan(root, owner)
 
 
-def premanifest_card(state, receipt, proof):
+def premanifest_card(state, receipt, proof, *, clean_manifest=False):
     """Only resource closure of a cancelled FILE startup; original evidence stays failed."""
     import hashlib
     import sys
@@ -426,6 +426,8 @@ def premanifest_card(state, receipt, proof):
          'pre-manifest cancelled receipt')
     names = {'request.json', 'receipt.json', 'result.json', 'native-result.json', 'case.log',
              'services.log', 'local-stack-owner.json', 'local-benchmark-owner.json'}
+    if clean_manifest:
+        names |= {'services.json', 'local-stack-cleanup.status'}
     need(set(proof['files']) == names, 'pre-manifest sealed inventory')
     folder = Path(receipt['log']).parent
     need(folder.resolve(strict=True) == folder and Path(receipt['log']) == folder / 'output.log'
@@ -463,20 +465,33 @@ def premanifest_card(state, receipt, proof):
     log = native / (hashlib.sha256(name.encode()).hexdigest() + '.log')
     need(case.get('log') == str(log) and case.get('sha256') == proof['files']['case.log']
          and case.get('command') == spec['command'] and case.get('status') == 'UNVERIFIED'
-         and type(case.get('native_exit')) is int and case['native_exit'] == 1
+         and type(case.get('native_exit')) is int and case['native_exit'] == (143 if clean_manifest else 1)
          and case.get('cancelled') is True and case.get('timed_out') is False and case.get('lingering_group') is False
          and receipt['started_at'] <= case['started_at'] <= case['finished_at'] <= receipt['finished_at']
          and sealed(native / 'result.json', 'native-result.json') == result, 'pre-manifest native result')
     text = sealed(log, 'case.log', True)
-    matches = set(re.findall(r'cleanup receipt is missing or unsafe: (.+/local-stack-cleanup\.status)', text))
-    need(len(matches) == 1 and 'Received signal 15; draining owned benchmark before services...' in text,
-         'pre-manifest startup interruption linkage')
-    run = Path(matches.pop().split('. If the stack owner exited,', 1)[0]).parent
+    need('Received signal 15; draining owned benchmark before services...' in text,
+         'Card startup interruption linkage')
+    launch = None
+    if clean_manifest:
+        launches = re.findall(r'^Isolated benchmark stack: (.+)$', text, re.M)
+        need(len(launches) == 1, 'clean Card launch log missing or ambiguous')
+        pairs = [field.split('=', 1) for field in launches[0].split()]
+        need(all(len(pair) == 2 for pair in pairs) and len({p[0] for p in pairs}) == len(pairs),
+             'clean Card launch log malformed')
+        launch = dict(pairs)
+        run = root / '.context/benchmarks' / launch.get('run_id', '')
+        need(launch.get('context') == '.context/benchmarks/' + run.name, 'clean Card context mismatch')
+    else:
+        matches = set(re.findall(r'cleanup receipt is missing or unsafe: (.+/local-stack-cleanup\.status)', text))
+        need(len(matches) == 1, 'pre-manifest startup interruption linkage')
+        run = Path(matches.pop().split('. If the stack owner exited,', 1)[0]).parent
     need(run.parent == root / '.context/benchmarks' and run.resolve(strict=True) == run
          and re.fullmatch(r'[0-9]+-[0-9]+-[0-9]+', run.name), 'pre-manifest run identity')
-    need(not any((run / n).exists() or (run / n).is_symlink() for n in
-         ('local-stack-cleanup.status', 'services.json', 'services.json.tmp', 'run.json', 'report-card.json',
-          'local-benchmark-results.json')) and not list(run.glob('benchmark-cleanup*.status')),
+    forbidden = ['services.json.tmp', 'run.json', 'report-card.json', 'local-benchmark-results.json']
+    if not clean_manifest:
+        forbidden += ['local-stack-cleanup.status', 'services.json']
+    need(not any((run / n).exists() or (run / n).is_symlink() for n in forbidden) and not list(run.glob('benchmark-cleanup*.status')),
          'pre-manifest conflicting or admitted artifact')
     benchmark = sealed(run / 'local-benchmark-owner.json', 'local-benchmark-owner.json')
     need(benchmark == dict(version=1, run_id=run.name, state='not_started', pid=None, native_identity='',
@@ -489,8 +504,9 @@ def premanifest_card(state, receipt, proof):
                           owner.get('native_identity', '')) and not Path('/proc', str(owner['pid'])).exists(),
          'pre-manifest native owner live/reused/unknown')
     startup = sealed(run / 'services.log', 'services.log', True)
-    need(startup.rstrip().endswith('Python and Node Playwright Chromium assets are ready'),
-         'not the observed pre-manifest bootstrap boundary')
+    if not clean_manifest:
+        need(startup.rstrip().endswith('Python and Node Playwright Chromium assets are ready'),
+             'not the observed pre-manifest bootstrap boundary')
     port = gate.get('env', {}).get('CONDUCTOR_PORT')
     need(isinstance(port, str) and port.isdecimal() and gate['env'].get('ROSE_USE_SYSTEM_PG') == 'true',
          'pre-manifest system PG launch')
@@ -514,8 +530,47 @@ def premanifest_card(state, receipt, proof):
     need(isinstance(workspace, str) and workspace
          and 'queue=navi-agent-tasks-' + workspace + '-bench-' + run.name + ' ' in port_rows[0],
          'pre-manifest workspace/run linkage')
+    if clean_manifest:
+        need(launch == dict(run_id=run.name, context='.context/benchmarks/' + run.name,
+                           backend=str(ports['backend']), frontend=str(ports['frontend']), db='5432',
+                           db_name=database['name'], queue='navi-agent-tasks-' + workspace + '-bench-' + run.name),
+             'clean Card launch resources changed')
+        lines = sealed(run / 'local-stack-cleanup.status', 'local-stack-cleanup.status', True).splitlines()
+        pairs = [line.partition('=') for line in lines]
+        need(all(key and sep for key, sep, value in pairs) and len({p[0] for p in pairs}) == len(pairs),
+             'clean Card receipt malformed')
+        need({key:value for key, sep, value in pairs} == dict(version='2', state='clean', token=owner['token'],
+             stack_pid=str(owner['pid']), stack_birth=owner['birth'], stack_native_identity=owner['native_identity']),
+             'clean Card receipt identity/state mismatch')
+        manifest = sealed(run / 'services.json', 'services.json')
+        manifest_ports = dict(backend=ports['backend'], frontend=ports['frontend'], health=ports['health'],
+                              local_db=ports['db'], mac_app=ports['mac-app'], sdk_metrics=ports['metrics'],
+                              ngrok_api=ports['ngrok_api'], wmh=0)
+        need(type(manifest.get('schema_version')) is int and manifest['schema_version'] == 1
+             and manifest.get('benchmark_mode') is True
+             and manifest.get('status') == 'stopped' and manifest.get('worktree') == str(root)
+             and manifest.get('run_sh_pid') == owner['pid'] and manifest.get('ports') == manifest_ports
+             and all(type(value) is int for value in manifest['ports'].values())
+             and manifest.get('database', {}).get('use_system_postgres') is True
+             and manifest.get('database', {}).get('owned_by_run_sh') is True
+             and all(type(manifest['database'].get(key)) is int for key in ('port', 'runtime_port'))
+             and manifest.get('temporal_task_queue') == launch['queue']
+             and manifest.get('database') == dict(name=database['name'], use_system_postgres=True,
+                 port=5432, runtime_port=5432, owned_by_run_sh=True, container='', volume=''),
+             'clean Card stopped manifest resources mismatch')
+        services = manifest.get('services')
+        need(isinstance(services, list) and len(services) == 4
+             and all(isinstance(row, dict) and set(row) == {'name','pid'} for row in services)
+             and {row['name'] for row in services} == {'cloudflared','back-end','front-end','agents'}
+             and all(type(row['pid']) is int and row['pid'] > 1 and row['pid'] != owner['pid'] for row in services)
+             and len({row['pid'] for row in services}) == 4
+             and all(not Path('/proc', str(row['pid'])).exists() for row in services),
+             'clean Card service identity live/reused/unknown')
     quiet(root)
     premanifest_card_absent(root, run, owner, database, ports)
+    if clean_manifest:
+        need(all(not Path('/proc', str(row['pid'])).exists() for row in services),
+             'clean Card service identity appeared during validation')
     return gate
 
 
@@ -718,7 +773,8 @@ def validate(state, receipt, proof):
     if name == 'agentcard-lifecycle':
         gate, = [g for g in state['plan']['gates'] if g['name'] == name]
         if gate.get('result_transport') == 'file' and receipt.get('cancelled') is True:
-            return premanifest_card(state, receipt, proof)
+            return premanifest_card(state, receipt, proof,
+                clean_manifest={'services.json', 'local-stack-cleanup.status'} <= set(proof['files']))
         if receipt.get('cancelled') is True:
             return interrupted_card(state, receipt, proof)
         return card_preflight(state, receipt, proof)
