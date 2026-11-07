@@ -179,13 +179,16 @@ async function watchSignInTick(
   if (entry.cdp === null || entry.cdpBase === null) return;
   await syncCaptchaSolveIndicator(entry).catch(() => undefined);
   await autofillGooglePassword(entry).catch(() => false);
-  // Informational only: a failed read must never delay capturing the sign-in.
-  entry.passkeyUnavailableFor = await entry.cdp
-    .syncPasskeyCeremonies()
-    .catch(() => entry.passkeyUnavailableFor);
   await readAccountEmail(entry);
   const minted = await mintCredentials(entry);
-  if (minted === null) return;
+  if (minted === null) {
+    // Still waiting on the user: explain a passkey prompt Rose cannot answer.
+    // Read only after capture found nothing, so it can never delay a sign-in.
+    entry.passkeyUnavailableFor = await entry.cdp
+      .syncPasskeyCeremonies()
+      .catch(() => entry.passkeyUnavailableFor);
+    return;
+  }
   await persistConnectedAccount(entry, cfg, minted, timer);
 }
 
