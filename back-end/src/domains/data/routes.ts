@@ -8,8 +8,8 @@
 import { Router, type Response } from 'express';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { executeGrepTool } from './grepTool';
 import {
-  grep,
   getSnapshot,
   getSourceStatus,
   getSummary,
@@ -52,7 +52,7 @@ router.post(
         return;
       }
 
-      const result = await grep(userId, req.body);
+      const result = await executeGrepTool(userId, req.body);
 
       const elapsed = Date.now() - startTime;
       log.info(`grep [${elapsed}ms]`);

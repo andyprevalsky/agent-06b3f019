@@ -488,6 +488,14 @@ class AgentCardElection(unittest.TestCase):
         with self.assertRaises(ValueError):
             election.accept({'elected_omissions':[{'proof':original}]}, proof)
 
+def unused_loopback_port():
+    """A loopback port no live socket holds when the fixture is built."""
+    import socket
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
 class InterruptedCustody(unittest.TestCase):
     setUp = cycle_fixture.Cycle.setUp
     tearDown = cycle_fixture.Cycle.tearDown
@@ -538,12 +546,14 @@ class InterruptedCustody(unittest.TestCase):
         else:
             base=self.root/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()
             campaign=base/'campaigns'/('deploy-'+base.name); runs=base/'runs'; fleet=runs/'20261106-223817-2147483001'
-            owner='b'*32; hub=runs/'_hub'/('agent-link-server.8765.'+'c'*32+'.owner')
+            # The custody check scans the host's live sockets: never claim a port a real Hub may hold.
+            port=str(unused_loopback_port())
+            owner='b'*32; hub=runs/'_hub'/('agent-link-server.'+port+'.'+'c'*32+'.owner')
             self.hub=hub; self.fleet=fleet; self.audit=self.root/'.git/cloudbench-fleet-audits'/owner
             self.put(hub,'version=1\npid=2147483004\npgid=2147483004\npid_start=proc-start:fixture:1\nowner_token='+ 'c'*32+
                 '\nargv_sha256='+'d'*64+'\nroot='+str(runs)+'\nruns_root='+str(runs)+'\nrepo_root='+str(self.root)+
                 '\ncontext_dir='+str(runs/'_hub')+'\ncommand='+str(self.root/'agents/benchmarks/agent_link_server.py')+
-                '\nhost=127.0.0.1\nport=8765\nstatus=live-transfer-required\n')
+                '\nhost=127.0.0.1\nport='+port+'\nstatus=live-transfer-required\n')
             self.put(base/'cli.log',str(campaign))
             log=campaign/'r001-j0001.log'
             self.put(log,str(self.root/'scripts/run-bench')+' monitor '+str(fleet))
@@ -586,7 +596,7 @@ class InterruptedCustody(unittest.TestCase):
             self.put(Path(proof['hub_consumers']),dict(runs=str(runs),owner=str(hub),owner_sha256=c.sha_file(hub),remaining_external_process_references=[],
                 consumer_disposition='All original controllers terminal; namespace closed to new borrowers.',observed_at=now+9,borrowers=[]))
             self.put(Path(proof['hub_retirement']),dict(provider_operations=False,historical_runtime_financial_obligations_unchanged=True,
-                rows=[dict(port='8765',owner=str(hub),owner_sha256=c.sha_file(hub),terminal=str(terminal),terminal_sha256=c.sha_file(terminal),native_exit=0,
+                rows=[dict(port=port,owner=str(hub),owner_sha256=c.sha_file(hub),terminal=str(terminal),terminal_sha256=c.sha_file(terminal),native_exit=0,
                            immutable_owner_unchanged=True,borrowers_terminal=1,started_at=now+10,finished_at=now+12)]))
             proof['producer_files']={n:str(self.root/n) for n in policies}
             self.reseal(proof)

@@ -192,55 +192,21 @@ async def test_grep_agent_metadata_only():
 
 
 async def test_fetch_local_data_summary():
-    """fetch_local_data_summary returns formatted summary string."""
-    _setup()
-    with patch("temporalio.activity.heartbeat"):
-        from tools.grep import fetch_local_data_summary, _data_summary_cache
-
-        # Clear cache to force fresh fetch
-        _data_summary_cache.clear()
-
-        result = await fetch_local_data_summary("user-42")
-
-    assert "5 threads" in result
-    assert "120" in result
-    assert "Alice" in result
-    assert "Latest exact text" in result
-    assert "2026-04-01T12:34:56Z" in result
-
-
-async def test_local_data_summary_lists_calendar_and_drive_as_their_own_sources():
-    """A connected Google account shows up as calendar/ and drive/, even with nothing else stored."""
-    setup_mock({
-        "/api/data/summary": {
-            "status": 200,
-            "json": {
-                "sources": {
-                    "messages": {"total_threads": 0, "total_messages": 0, "channels": {}, "threads": []},
-                    "calendar": {"accounts": ["a@example.com"], "total_events": 1605},
-                    "drive": {"accounts": ["a@example.com", "b@example.com"], "total_files": 0},
-                }
-            },
-        },
-    })
+    """The explore agent's inventory is the backend's grep `summary` rendering, cached per user."""
+    rendered = "LOCAL DATA SOURCES:\n\nmessages/ 5 threads, 120 messages\n    Alice  50 msgs"
+    setup_mock({"/api/data/grep": {"status": 200, "json": {"sources": ["summary"], "message": rendered}}})
     with patch("temporalio.activity.heartbeat"):
         from tools.grep import _data_summary_cache, fetch_local_data_summary
 
         _data_summary_cache.clear()
-        result = await fetch_local_data_summary("user-google-only")
+        result = await fetch_local_data_summary("user-42")
+        cached = await fetch_local_data_summary("user-42")
         _data_summary_cache.clear()
 
-    assert result != "No local data available."
-    lines = result.splitlines()
-    calendar = next(index for index, line in enumerate(lines) if line.startswith("calendar/"))
-    assert "1,605 events" in lines[calendar]
-    assert lines[calendar + 1] == "  Accounts: a@example.com"
-    assert lines[calendar + 2] == '  Search with grep source="calendar".'
-    drive = next(index for index, line in enumerate(lines) if line.startswith("drive/"))
-    # Nothing stored yet is not the same as an empty Drive: the first search fills it.
-    assert "0 files" not in lines[drive]
-    assert lines[drive + 1] == "  Accounts: a@example.com, b@example.com"
-    assert lines[drive + 2] == '  Search with grep source="drive".'
+    assert result == rendered and cached == rendered
+    call = assert_captured_call(url_contains="/api/data/grep", method="POST", header_present="X-API-Key")
+    assert json.loads(call["requestBody"]) == {"sources": ["summary"], "user_id": "user-42"}
+    assert len([c for c in get_captured_requests() if "/api/data/grep" in c["url"]]) == 1
 
 
 async def test_grep_empty_pattern():
@@ -263,62 +229,60 @@ async def test_grep_empty_pattern():
     assert body["pattern"] == ""
 
 
-async def test_grep_summary_source_returns_compact_inventory():
-    """summary is a local grep source for aggregate counts and top threads."""
-    _setup()
+async def test_grep_summary_source_is_answered_by_the_backend_executor():
+    """summary goes to the shared backend grep tool executor like any other source."""
+    setup_mock({
+        "/api/data/grep": {
+            "status": 200,
+            "json": {"matches": [], "total_matches": 1, "sources": ["summary"], "message": "LOCAL DATA SOURCES:"},
+        }
+    })
     with patch("temporalio.activity.heartbeat"):
-        from tools.grep import _data_summary_cache, grep_activity
+        from tools.grep import grep_activity
 
-        _data_summary_cache.clear()
-        result = await grep_activity(
-            {"pattern": "message totals", "sources": ["summary"], "source": "summary"},
-            user_id="user-42",
-        )
+        result = await grep_activity({"pattern": "message totals", "sources": ["summary"]}, user_id="user-42")
 
-    assert result["total_matches"] == 1
-    assert result["sources"] == ["summary"]
-    assert "120" in result["message"]
-    assert "Alice" in result["message"]
+    call = assert_captured_call(url_contains="/api/data/grep", method="POST")
+    assert json.loads(call["requestBody"])["sources"] == ["summary"]
+    assert result["message"] == "LOCAL DATA SOURCES:"
 
 
-async def test_grep_invalid_regex_retries_as_literal():
-    """A phone-like literal beginning with '+' must not fail the grep tool."""
+async def test_grep_backend_error_is_not_retried_by_the_agent():
+    """The literal retry of an invalid regex lives in the backend executor; the agent
+    forwards the backend's answer, including its literal_fallback fields, from one request."""
     from unittest.mock import AsyncMock, MagicMock
 
     from tools.grep import grep_activity
 
-    invalid_response = MagicMock()
-    invalid_response.status_code = 400
-    invalid_response.json.return_value = {
-        "error": "Invalid regular expression '+15551234567': Nothing to repeat"
-    }
-    success_response = MagicMock()
-    success_response.status_code = 200
-    success_response.json.return_value = {
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
         "matches": [{"content": "+15551234567"}],
         "total_matches": 1,
         "truncated": False,
+        "literal_fallback": True,
+        "original_pattern": "+15551234567",
+        "effective_pattern": r"\+15551234567",
     }
-    client = SimpleNamespace(post=AsyncMock(side_effect=[invalid_response, success_response]))
+    rejected = MagicMock()
+    rejected.status_code = 400
+    rejected.json.return_value = {"error": "INVALID_GREP_PARAM", "message": "Unsupported grep parameter: 'x'."}
+    client = SimpleNamespace(post=AsyncMock(side_effect=[response, rejected]))
 
     with (
         patch("temporalio.activity.heartbeat"),
         patch("domains.grep.repo.get_http_client", return_value=client),
     ):
-        result = await grep_activity(
-            {"pattern": "+15551234567", "source": "network"},
-            user_id="user-42",
-        )
+        result = await grep_activity({"pattern": "+15551234567", "source": "network"}, user_id="user-42")
+        try:
+            await grep_activity({"pattern": "x", "x": 1}, user_id="user-42")
+            raise AssertionError("a backend 400 must raise")
+        except ValueError as error:
+            assert "Unsupported grep parameter" in str(error)
 
     assert client.post.await_count == 2
-    first_payload = client.post.await_args_list[0].kwargs["json"]
-    second_payload = client.post.await_args_list[1].kwargs["json"]
-    assert first_payload["pattern"] == "+15551234567"
-    assert second_payload["pattern"] == r"\+15551234567"
+    assert client.post.await_args_list[0].kwargs["json"]["pattern"] == "+15551234567"
     assert result["literal_fallback"] is True
-    assert result["original_pattern"] == "+15551234567"
-    assert result["effective_pattern"] == r"\+15551234567"
-    assert result["total_matches"] == 1
 
 
 async def test_grep_network_source_forwarded():
@@ -919,6 +883,71 @@ def test_grep_source_filter_keys_match_backend_validator():
     assert {source: sorted(keys) for source, keys in SOURCE_FILTER_KEYS.items()} == backend
 
 
+def test_grep_tool_definition_json_is_generated_from_the_explore_tool():
+    """The JSON the SMS supervisor and web chat load is byte-identical to a fresh build
+    of the explore agent's native grep tool. Regenerate with
+    `python scripts/grep_tool_definition.py --write` after changing the contract."""
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "grep_tool_definition.py"
+    spec = importlib.util.spec_from_file_location("grep_tool_definition", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    checked_in = module.DEFINITION_PATH.read_text(encoding="utf-8")
+    assert checked_in == module.render_grep_tool_definition(), (
+        "back-end/src/providers/grepTool/grepToolDefinition.json drifted from the explore agent's grep tool; "
+        "run `python scripts/grep_tool_definition.py --write` from agents/."
+    )
+
+
+def test_grep_native_tool_and_planner_share_the_contract_description():
+    """The explore agent's native tool, the planner's tool reference and the generated
+    definition all carry the one contract description."""
+    import inspect
+
+    from providers.rose.schema import build_anthropic_tools_from_response_model
+    from tools.prompts import tool_prompts_for
+    from utils.grep_tool_contract import GREP_TOOL_PROMPT
+    from utils.tool_schemas import GrepTool, create_agent_action_model
+
+    (native,) = build_anthropic_tools_from_response_model(
+        create_agent_action_model(["grep"], tool_registry={"grep": GrepTool})
+    )
+    assert native["description"] == GREP_TOOL_PROMPT
+    assert inspect.cleandoc(GrepTool.__doc__) == GREP_TOOL_PROMPT
+    assert tool_prompts_for()["grep"] == GREP_TOOL_PROMPT
+    assert tool_prompts_for(rose_desktop=True)["grep"] == GREP_TOOL_PROMPT
+
+
+def test_grep_filters_are_a_closed_object_with_every_source_block():
+    """filters is typed, not an open map, so strict surfaces can send it unchanged:
+    each source's block takes exactly that source's keys, flat keys are their union,
+    unknown keys are rejected, and unset keys never reach the backend."""
+    import pytest
+    from pydantic import ValidationError
+
+    from utils.grep_tool_contract import GREP_SOURCE_FILTER_KEYS
+    from utils.tool_schemas import GrepFilters, GrepTool
+
+    flat = {key for keys in GREP_SOURCE_FILTER_KEYS.values() for key in keys}
+    assert set(GrepFilters.model_fields) == flat | set(GREP_SOURCE_FILTER_KEYS)
+    for source, keys in GREP_SOURCE_FILTER_KEYS.items():
+        block = GrepFilters.model_fields[source].annotation.__args__[0]
+        assert set(block.model_fields) == set(keys), source
+    schema = GrepTool.model_json_schema()
+    filters_ref = next(b for b in schema["properties"]["filters"]["anyOf"] if "$ref" in b)["$ref"]
+    assert schema["$defs"][filters_ref.rsplit("/", 1)[-1]]["additionalProperties"] is False
+    call = GrepTool.model_validate(
+        {"tool": "grep", "filters": {"since": "7d", "calendar": {"until": "2026-11-02"}, "drive": None}}
+    )
+    assert call.model_dump()["filters"] == {"since": "7d", "calendar": {"until": "2026-11-02"}}
+    with pytest.raises(ValidationError):
+        GrepTool.model_validate({"tool": "grep", "filters": {"bogus": 1}})
+    with pytest.raises(ValidationError):
+        GrepTool.model_validate({"tool": "grep", "filters": {"network": {"since": "7d"}}})
+
+
 async def run_all_tests():
     print("grep blackbox tests:")
     r = BlackboxResult()
@@ -927,13 +956,9 @@ async def run_all_tests():
     await r.record_async("boundary_normalizes_model_dump_keys", test_grep_boundary_normalizes_model_dump_keys)
     await r.record_async("agent_metadata_only", test_grep_agent_metadata_only)
     await r.record_async("fetch_local_data_summary", test_fetch_local_data_summary)
-    await r.record_async(
-        "local_data_summary_lists_calendar_and_drive_as_their_own_sources",
-        test_local_data_summary_lists_calendar_and_drive_as_their_own_sources,
-    )
     await r.record_async("empty_pattern", test_grep_empty_pattern)
-    await r.record_async("summary_source", test_grep_summary_source_returns_compact_inventory)
-    await r.record_async("invalid_regex_literal_fallback", test_grep_invalid_regex_retries_as_literal)
+    await r.record_async("summary_source", test_grep_summary_source_is_answered_by_the_backend_executor)
+    await r.record_async("backend_error_not_retried", test_grep_backend_error_is_not_retried_by_the_agent)
     await r.record_async("network_source_forwarded", test_grep_network_source_forwarded)
     r.record("truncate_pattern_short", test_truncate_pattern_short)
     r.record("truncate_pattern_long", test_truncate_pattern_long)
@@ -974,6 +999,9 @@ async def run_all_tests():
         "execute_grep_partial_gate_drops_keys_only_skipped_sources_accept",
         test_execute_grep_partial_gate_drops_keys_only_skipped_sources_accept,
     )
+    r.record("tool_definition_json_is_generated", test_grep_tool_definition_json_is_generated_from_the_explore_tool)
+    r.record("native_tool_and_planner_share_description", test_grep_native_tool_and_planner_share_the_contract_description)
+    r.record("filters_closed_object_every_source_block", test_grep_filters_are_a_closed_object_with_every_source_block)
     teardown_mock()
     return r.all_passed
 
