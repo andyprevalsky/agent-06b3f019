@@ -171,6 +171,7 @@ class _Reader:
                 obj, close = ch == 123, 125 if ch == 123 else 93
                 s.take()
                 result = self.memory({} if obj else []) if keep else None
+                transient_mark = None if keep else self.materialized
                 keys, index = set(), 0
                 self.space()
                 if s.peek() == close:
@@ -210,6 +211,10 @@ class _Reader:
                         if separator != 44:
                             raise ValueError('native artifact: missing comma')
                         s.take()
+                if transient_mark is not None:
+                    # Closed opaque containers retain neither values nor duplicate keys.
+                    # Restore only their charges, keeping all still-open ancestors charged.
+                    self.materialized = transient_mark
             else:
                 token = bytearray()
                 while s.peek() is not None and s.peek() not in b' \r\n\t,]}':

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 
@@ -153,6 +154,121 @@ class ReadinessPublication(unittest.TestCase):
             self.assertEqual(run["summary"]["passed"], int(expected_pass))
             self.assertEqual((markers / "worker-readiness-retry-proven").exists(), expected_pass)
             self.assertEqual(state["machines"], [])
+
+
+class NativeCaller(unittest.TestCase):
+    def run_case(self, mode):
+        output = ROOT / ".context"
+        output.mkdir(exist_ok=True)
+        base = Path(tempfile.mkdtemp(prefix=mode + "-", dir=output))
+        self.addCleanup(shutil.rmtree, base)
+        out = base / "worker"
+        out.mkdir()
+        wid = "a353ce91385e4c"
+        (out / "worker-clones.ids").write_text(wid + "\n")
+        (out / "worker-ready.ids").touch()
+        (out / f"worker-{wid}.pending").touch()
+        (out / f"worker-{wid}.launch-attempted").touch()
+        (out / "wrapper").touch()
+        (out / "worker.env").touch()
+        owner = out / "worker-runtime-evidence" / wid
+        owner.mkdir(parents=True)
+        (owner / "owner.json").write_text(json.dumps({"machine_id": wid, "run_token": "test-run"}))
+        if mode == "lock-timeout":
+            lock = out / "worker-clones.ids.lock"
+            lock.mkdir()
+            (lock / "owner").write_text(f"{os.getpid()} held-by-test {int(time.time())}\n")
+        if mode == "cancelled":
+            (out / f"worker-{wid}.cancelled").touch()
+        if mode == "foreign-ready":
+            (out / "worker-foreign.ready").touch()
+        names = ["worker_is_tracked", "worker_ledger_lock_acquire", "worker_ledger_lock_release",
+                 "reconcile_worker_ready_outcomes", "cleanup_failed_worker"]
+        helpers = "\n".join(function(name) for name in names)
+        start = FLEET.index("      worker_provision_cancelled() {")
+        helpers += "\n" + FLEET[start:FLEET.index("      launched=0", start)]
+        start = FLEET.index("      ready_deadline=$((SECONDS + worker_ready_timeout))")
+        caller = FLEET[start:FLEET.index("\n    ) &", start)]
+        script = "set -uo pipefail\n" + helpers + "\n" + r'''
+out="$1"; wid="$2"; case_mode="$3"; bench=fixture; ws=fixture
+wrapper="$out/wrapper"; worker_env="$out/worker.env"
+stage_log="$out/worker-$wid.stage.log"; launched=1; worker_ready_timeout=5
+# Fail precisely the first aggregate append, including when the test runs as
+# root. Other fixture writes and subsequent cleanup remain real filesystem I/O.
+ready_append_failed=0
+printf() {
+    if [ "$case_mode" = write-failure ] && [ "$ready_append_failed" = 0 ] \
+        && [ "${1:-}" = '%s\n' ] && [ "${2:-}" = "$wid" ]; then
+        ready_append_failed=1
+        builtin printf '%s\n' 'injected ready-ledger append failure' >&2
+        return 1
+    fi
+    builtin printf "$@"
+}
+worker_operational() { return 0; }
+fleet_current_disposable_registry() { return 1; }
+fleet_registry_volume_for_id() { printf 'owned-volume'; }
+cloudbench_preserve_unlaunched_worker() { return 1; }
+cloudbench_capture_worker_runtime_evidence() {
+    test -f "$out/worker-runtime-evidence/$wid/owner.json" || return 1
+    printf '%s\n' "$wid" > "$out/capture.called"
+}
+reap_machine() {
+    test "$1" = "$wid" && test "$3" = owned-volume || return 1
+    test -s "$out/capture.called" || return 1
+    printf '%s\n' "$1" > "$out/reap.called"
+}
+fleet_audit_update_fresh_clone_by_id() { return 0; }
+fleet_registry_release_id() { printf '%s\n' "$1" > "$out/release.called"; }
+''' + caller
+        (base / "caller.sh").write_text(script)
+        start_time = time.monotonic()
+        result = subprocess.run(["bash", str(base / "caller.sh"), str(out), wid, mode],
+                                capture_output=True, text=True, timeout=45)
+        row = {"mode": mode, "exit": result.returncode, "elapsed_seconds": time.monotonic()-start_time,
+               "pending": (out / f"worker-{wid}.pending").exists(),
+               "tracked": (out / "worker-clones.ids").read_text().splitlines(),
+               "ready": (out / "worker-ready.ids").read_text().splitlines(),
+               "failure": (out / f"worker-{wid}.failed").read_text() if (out / f"worker-{wid}.failed").exists() else "",
+               "captured": (out / "capture.called").exists(), "reaped": (out / "reap.called").exists(),
+               "stdout": result.stdout, "stderr": result.stderr}
+        print("NATIVE_CALLER_RESULT " + json.dumps(row), flush=True)
+        if mode == "lock-timeout":
+            self.assertIn("timed out acquiring worker ledger lock", result.stderr)
+        self.assertNotIn("command not found", result.stderr)
+        self.assertNotIn("unbound variable", result.stderr)
+        return row
+
+    def test_lock_timeout_does_not_publish_success(self):
+        row = self.run_case("lock-timeout")
+        self.assertNotEqual(row["exit"], 0, "failed readiness publication must not report native provisioner success")
+        self.assertTrue(row["pending"], "unreconciled ownership must remain pending")
+        self.assertTrue(row["tracked"])
+        self.assertFalse(row["ready"])
+        self.assertNotIn("joined queue", row["stdout"])
+        self.assertTrue(row["failure"])
+
+    def test_io_failure_retires_only_after_capture(self):
+        row = self.run_case("write-failure")
+        self.assertNotEqual(row["exit"], 0, "failed readiness publication must not report native provisioner success")
+        self.assertNotIn("joined queue", row["stdout"])
+        self.assertTrue(row["captured"] and row["reaped"])
+        self.assertFalse(row["tracked"] or row["ready"] or row["pending"])
+
+    def test_healthy_and_foreign_ready(self):
+        for mode in ["healthy", "foreign-ready"]:
+            row = self.run_case(mode)
+            self.assertEqual(row["exit"], 0)
+            self.assertEqual(row["ready"], row["tracked"])
+            self.assertFalse(row["pending"])
+            self.assertFalse(row["reaped"])
+
+    def test_cancelled_cleans_without_success_message(self):
+        row = self.run_case("cancelled")
+        self.assertEqual(row["exit"], 0)
+        self.assertNotIn("joined queue", row["stdout"])
+        self.assertTrue(row["captured"] and row["reaped"])
+        self.assertFalse(row["tracked"] or row["ready"] or row["pending"])
 
 
 if __name__ == "__main__":

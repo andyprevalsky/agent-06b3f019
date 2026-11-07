@@ -304,6 +304,17 @@ def cmd_review_finish(args: argparse.Namespace) -> int:
 
 
 def cmd_review_next(args: argparse.Namespace) -> int:
+    final_approval = getattr(args, 'one_final_review_approval', None)
+    approved_head = getattr(args, 'approved_head', None)
+    if final_approval is not None or approved_head is not None:
+        if not final_approval or not approved_head:
+            print('DEPLOY_REVIEW_NEXT BLOCKED: --one-final-review-approval and --approved-head are both required',
+                  file=sys.stderr)
+            return 1
+        if args.verification_approval is not None:
+            print('DEPLOY_REVIEW_NEXT BLOCKED: cannot combine --verification-approval with --one-final-review-approval',
+                  file=sys.stderr)
+            return 1
     opened = read_json(PR_FILE, 'open-pr')
     if pending := uncommitted():
         print('DEPLOY_REVIEW_NEXT BLOCKED: commit the stabilization batch first: ' + ', '.join(pending[:10]),
@@ -313,13 +324,11 @@ def cmd_review_next(args: argparse.Namespace) -> int:
         print('DEPLOY_REVIEW_NEXT BLOCKED: parked benchmark-history rows are not committed; run '
               '`scripts/deploy ledger` so the review covers them', file=sys.stderr)
         return 1
-    final_approval = getattr(args, 'one_final_review_approval', None)
-    approved_head = getattr(args, 'approved_head', None)
     if final_approval is not None or approved_head is not None:
         kind, sha = 'verification', head()
         start = ['start', '--kind', kind, '--head', sha,
-                 '--one-final-review-approval', final_approval or '',
-                 '--approved-head', approved_head or '', '--repo', str(ROOT)]
+                 '--one-final-review-approval', final_approval,
+                 '--approved-head', approved_head, '--repo', str(ROOT)]
     else:
         nxt = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'next'], cwd=ROOT,
                              capture_output=True, text=True)

@@ -18316,7 +18316,11 @@ PY
       while [ "$SECONDS" -lt "$ready_deadline" ]; do
           worker_provision_cancelled && finish_cancelled_worker_provision
           if worker_operational "$wid" "$out"; then
-              publish_worker_ready
+              if ! publish_worker_ready; then
+                  worker_provision_cancelled && finish_cancelled_worker_provision
+                  discard_replaceable_worker \
+                      "worker $wid could not publish queue readiness; see worker-$wid.stage.log"
+              fi
               worker_provision_cancelled && finish_cancelled_worker_provision
               rm -f "$out/worker-$wid.pending"
               echo "  ✅ [$bench] worker $wid joined queue navi-agent-tasks-$ws"

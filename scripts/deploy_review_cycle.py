@@ -153,7 +153,8 @@ def one_final_review(entries, *, head, approved_head, approval, repo):
                    for e in cycles)
             or [(e.get('number'), e.get('kind')) for e in cycles] != [(1, 'initial'), (2, 'incremental'), (3, 'verification')]
             or cycles[-1].get('result') != 'clean'
-            or not entries or entries[-1].get('status') != 'completed' or entries[-1].get('result') != 'clean'):
+            or not entries or not isinstance(entries[-1], dict)
+            or entries[-1].get('status') != 'completed' or entries[-1].get('result') != 'clean'):
         raise ReviewCycleError('one final review requires exactly three completed substantive reviews, latest clean')
     if (not isinstance(approval, str) or not approval or len(approval) > 128
             or any(not (c.isalnum() or c in '-_.:') for c in approval)):

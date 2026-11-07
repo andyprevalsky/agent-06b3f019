@@ -1027,5 +1027,36 @@ class OneFinalReviewTest(unittest.TestCase):
             self.start(head=next_head,approved_head=next_head)
 
 
+class OneFinalMalformedLedgerTest(unittest.TestCase):
+    def test_nonobject_tail_returns_typed_failure_without_mutation(self):
+        for tail in (None, [], 'broken', 17, False):
+            with self.subTest(tail=tail), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / 'ledger.json'
+                entries = [dict(number=i, kind=kind, head=str(i)*40, status='completed', result='clean')
+                           for i, kind in enumerate(('initial', 'incremental', 'verification'), 1)]
+                path.write_text(json.dumps({'schema_version': 1, 'cycles': [*entries, tail]}))
+                before = path.read_bytes()
+                out, err = io.StringIO(), io.StringIO()
+                with patch.object(sys, 'argv', ['deploy_review_cycle.py', '--state', str(path),
+                          'start', '--kind', 'verification', '--head', 'd'*40,
+                          '--one-final-review-approval', 'user:decision', '--approved-head', 'd'*40,
+                          '--repo', folder]), \
+                        patch.object(MODULE, 'git', side_effect=AssertionError('unexpected git')) as git, \
+                        patch.object(MODULE, 'write_state', side_effect=AssertionError('unexpected write')) as write, \
+                        patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('unexpected subprocess')) as process, \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    try:
+                        with self.assertRaises(SystemExit) as caught:
+                            MODULE.main()
+                    finally:
+                        self.assertEqual(before, path.read_bytes())
+                        git.assert_not_called()
+                        write.assert_not_called()
+                        process.assert_not_called()
+                self.assertIsInstance(caught.exception.__cause__, MODULE.ReviewCycleError)
+                self.assertIn('one final review requires exactly three', str(caught.exception))
+                self.assertEqual(out.getvalue(), '')
+
+
 if __name__ == "__main__":
     unittest.main()

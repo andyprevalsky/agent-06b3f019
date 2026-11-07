@@ -10,6 +10,7 @@ first_bad_boundary: native cleanup applied its ordinary 64 MiB receipt reader to
 symptoms:
   - "native cleanup: proof file too large"
   - "native artifact: raw file byte bound exceeded"
+  - "native artifact: materialization bound exceeded"
 tags:
   - deploy
   - cleanup
@@ -19,8 +20,9 @@ sources:
   - PR #1708
   - commit b93150574e7b7d7e0d7a11170db65c9c8305a0a3
   - commit 4a0623371f8814da22b48e16522dcd2181e782d0
+  - commit 77744c54e7da30fd57c8b1c3295b9f9c70249fd5
 repro: python3 scripts/tests/deploy-test-plan.test.py NativeRunArtifact
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -75,6 +77,21 @@ launch eligibility only: all 312 historical failures, the original nine
 UNVERIFIED outcomes, retained Hub custody and financial liabilities remain.
 It does not prove current-source smoke, production deployment, fresh provider
 state, or settlement of any historical obligation.
+
+
+## November 7 recurrence: transient opaque-key accounting
+
+Review finding 4503659936 was reproduced on frozen 77744c54e7da30fd57c8b1c3295b9f9c70249fd5. The reader method ASTs are identical to b9315057 and 4a062337: this is a limitation of the prior bounded-parser repair, not evidence that a later source sync introduced it. The older main b365 and original 0d3 have no deploy_test_run_artifact.py; do not infer a NOT_INTRODUCED result against those baselines from the narrower comparison.
+
+Inside tasks[*].logs and tasks[*].owned_roots[*].logs, objects are parsed with keep=False but their decoded duplicate-check keys and set growth were charged forever. Sibling objects are already dead when the next one parses. The counter therefore measured cumulative allocations rather than simultaneously live metadata. A valid 24,040-byte document with 3,000 tiny log objects fails through the normal read_run_artifact entrypoint at its unchanged 4,096-byte metadata limit. With the ordinary 67,108,864-byte limit, a 5,000,041-byte document also fails: the old charged total reaches 67,108,979 on the owning Python 3.11.9 despite low live parser state.
+
+The minimal correction snapshots materialized when a non-retained container opens and restores that value only after the complete container closes. Nested scopes preserve the charges for every still-open ancestor key set. Retained scalars, objects, values and opaque references retain their existing accounting. No byte limit, scalar/depth rule, parser grammar, hash, FD identity, cancellation or deadline check changes.
+
+The identical owning reproduction exits 1 before and 0 after. All 18 NativeRunArtifact tests pass, including all 13 original tests and five additions: sibling objects on both opaque paths, giant single/live nested key sets, decoded duplicate or malformed opaque tail after many siblings, and retained scalar accumulation. The owning deploy-test-plan gate registration is unchanged. This focused owning class is not a claim that the full planner or entire deployment gate passed.
+
+At the ordinary 64 MiB limit, the same 5 MB reproduction passes after the fix with a peak charged state of 1,433 bytes on the owning Python 3.11.9 (the host Python 3.12 check measured 1,337). That is instrumentation of the existing accounting counter, not a process-RSS measurement or new budget. Read-only compatibility replay verifies all 495 original file hashes and parses all ten native run files, totaling 133,853,038 bytes, through the unchanged 128 MiB aggregate allowance; the largest original file remains 99,297,775 bytes and the remaining allowance is 364,690 bytes. The unchanged public native validator also accepts the existing 495-binding normal proof, returning ten participants, ten audit seals, one retained service and credit_granted=false. No canonical reconciliation, failure projection, resource, financial debt or test credit is changed.
+
+The candidate and permanent tests are private under .context/rca-browser-4f77/review-findings-2109/artifact-child. Source and test patch hashes, exact commands and before/after logs are supplied there. This case is reopened only for the bounded-reader recurrence pending required source-bound gates and deployment. The prior raw-evidence repair and all its original evidence remain recorded above. The fix is O(1) additional accounting per container, adds no provider/network/DB work, and does not change deployment concurrency. Golden reference: not applicable to this ordinary parser/owning-test correction.
 
 ## Human feedback
 

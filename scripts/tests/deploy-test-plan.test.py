@@ -1245,4 +1245,37 @@ class NativeRunArtifact(unittest.TestCase):
              with self.assertRaisesRegex(ValueError,'aggregate'):
                  read_run_artifact(self.p,digest,4096,raw_limit=1024,raw_remaining=remaining)
 
+
+ def test_opaque_sibling_objects_release_transient_key_memory(self):
+     raw=b'{"status":"failed","tasks":[{"logs":['+b','.join([b'{"a":0}']*3000)+b']}]}';before=hashlib.sha256(raw).hexdigest()
+     value=self.read(raw)
+     self.assertEqual('failed',value['status'])
+     self.assertIsInstance(value['tasks'][0]['logs'],ForensicValue)
+     self.assertEqual(before,hashlib.sha256(self.p.read_bytes()).hexdigest())
+
+ def test_opaque_owned_root_siblings_release_transient_key_memory(self):
+     raw=b'{"tasks":[{"owned_roots":[{"logs":['+b','.join([b'{"a":0}']*3000)+b']}]}]}'
+     value=self.read(raw)
+     self.assertIsInstance(value['tasks'][0]['owned_roots'][0]['logs'],ForensicValue)
+
+ def test_opaque_live_object_and_nested_key_sets_remain_bounded(self):
+     wide=b'{'+b','.join(b'"k'+str(i).encode()+b'":0' for i in range(500))+b'}'
+     nested=b'0'
+     for _ in range(12):
+         nested=b'{'+b','.join(b'"k'+str(i).encode()+b'":0' for i in range(10))+b',"child":'+nested+b'}'
+     for payload in (wide,nested):
+         with self.subTest(payload_length=len(payload)),self.assertRaisesRegex(ValueError,'materialization bound'):
+             self.read(b'{"tasks":[{"logs":'+payload+b'}]}')
+
+ def test_opaque_tail_still_checks_decoded_duplicates_and_grammar(self):
+     prefix=b'{"tasks":[{"logs":['+b','.join([b'{"a":0}']*3000)+b','
+     for tail in (b'{"a":0,"\\u0061":1}]}]}',b'{"x":"bad\\q"}]}]}',b'{"x":01}]}]}',b'{"x":"bad\xff"}]}]}'):
+         with self.subTest(tail=repr(tail)),self.assertRaisesRegex((ValueError,UnicodeDecodeError),'duplicate|escape|scalar|utf-8'):
+             self.read(prefix+tail)
+
+ def test_retained_sibling_values_keep_materialization_accounting(self):
+     raw=b'{"retained":['+b','.join([b'"a"']*500)+b']}'
+     with self.assertRaisesRegex(ValueError,'materialization bound'):
+         self.read(raw)
+
 if __name__=='__main__':unittest.main()
