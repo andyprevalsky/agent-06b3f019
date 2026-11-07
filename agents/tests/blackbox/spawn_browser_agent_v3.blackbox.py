@@ -1147,8 +1147,10 @@ def test_auth_title_observation_fetches_fresh_state_not_unassigned_browser_state
     assert "dom_service.get_browser_state(include_screenshot=False)" in src
     # Keep a tight window around the fetch so a distant unused assignment cannot
     # satisfy the positive asserts while a nearby UnboundLocalError regresses.
+    # 2400: H-61 added the DOM build sub-phase timing to the same observe step.
+    assert src.count(marker) == 1
     start = src.index(marker)
-    block = src[start : start + 2000]
+    block = src[start : start + 2400]
     assert 'auth_runtime_state.observe_page_text(observe_page_state.get("title")' in block
     assert 'auth_runtime_state.observe_page_text(browser_state.get("title")' not in src
 
