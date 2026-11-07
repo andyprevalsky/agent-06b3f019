@@ -105,6 +105,8 @@ function decode(value: Prisma.JsonValue | null): WorkerDeploymentJob {
     throw new Error('Malformed durable deployment job');
   return job;
 }
+/** Validated decode of a durable job row (shared with the supersession module). */
+export const decodeWorkerDeploymentJob = (value: Prisma.JsonValue | null) => decode(value);
 async function now(tx: Transaction): Promise<Date> {
   return (await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`)[0].now;
 }

@@ -2821,6 +2821,18 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text(), "no monitor before proof"
     assert subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
                           text=True).stdout.strip() == head, "the descendant fixture must not move HEAD"
+    # 8. The queue refused an older/diverged release instead of rolling the live one
+    #    back: blocked with the refusal, no resume advice, no monitor, no dispatch.
+    reset([running], [done], log)
+    (fake / "job.json").write_text(json.dumps({
+        "jobId": job_id, "stage": "ABORTED", "identity": {"app": "app", "sourceCommit": runtime, "attempt": "123-1"},
+        "evidence": {"ABORTED": {"reason": "ROLLBACK_REFUSED", "liveJobId": descendant_id,
+                                 "message": "Refused: could roll production back"}}}))
+    ran = run_production(runtime, tmp / "production-state-8")
+    assert ran.returncode == 1 and "was refused before cutover: Refused: could roll production back" in ran.stdout, ran.stdout
+    assert "production was not rolled back" in ran.stdout and "worker_pool_cutover.py" not in ran.stdout, ran.stdout
+    assert "dispatch" not in call_lines(), call_lines()
+    assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text()
     print("production fly wait: ok")
 
 

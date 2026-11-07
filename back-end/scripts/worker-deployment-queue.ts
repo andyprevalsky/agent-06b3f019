@@ -15,6 +15,7 @@ import {
   enqueueWorkerDeployment,
   readWorkerDeployment,
   readWorkerDeploymentHead,
+  readWorkerDeploymentLive,
   readWorkerDeploymentQueue,
   recordWorkerDeploymentAncestry,
   resolveWorkerDeployment,
@@ -49,40 +50,74 @@ const input = () => JSON.parse(readFileSync(required('--plan'), 'utf8'));
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // The controller's own checkout. Only a real `git merge-base --is-ancestor`
 // success proves containment; a shallow/missing commit is unknown, never proof.
+// CI opts into one GitHub compare call per unknown pair involving its own job.
 const ancestryRepository =
   process.env.WORKER_DEPLOYMENT_ANCESTRY_REPOSITORY || path.resolve(__dirname, '..', '..');
-function gitProvesAncestor(ancestor: string, descendant: string): boolean {
-  const result = spawnSync(
+const SHA = /^[a-f0-9]{40}$/;
+function provesAncestor(ancestor: string, descendant: string, remote: boolean): string | null {
+  if (!SHA.test(ancestor) || !SHA.test(descendant)) return null;
+  const git = spawnSync(
     'git',
     ['-C', ancestryRepository, 'merge-base', '--is-ancestor', ancestor, descendant],
     { env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' }, stdio: 'ignore', timeout: 30_000 }
   );
-  return result.status === 0;
+  if (git.status === 0) return 'git merge-base --is-ancestor';
+  const repository = process.env.GITHUB_REPOSITORY ?? '';
+  if (
+    !remote ||
+    process.env.WORKER_DEPLOYMENT_ANCESTRY_GITHUB !== '1' ||
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)
+  )
+    return null;
+  // compare/BASE...HEAD status "ahead"/"identical": BASE is an ancestor of HEAD.
+  const compare = spawnSync(
+    'gh',
+    ['api', `repos/${repository}/compare/${ancestor}...${descendant}`, '--jq', '.status'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30_000 }
+  );
+  return compare.status === 0 && ['ahead', 'identical'].includes(compare.stdout.trim())
+    ? 'github compare'
+    : null;
 }
-/** Record which queued jobs ahead of ours our own commit contains (best effort). */
+const MAX_ANCESTRY_CANDIDATES = 16;
+/** Record which queued jobs and live release our checkout proves containment for (best effort). */
 async function recordOwnAncestry(jobId: string): Promise<void> {
   try {
     const own = await readWorkerDeployment(jobId);
     const queue = await readWorkerDeploymentQueue(own.identity.app);
     const index = queue.findIndex((job) => job.jobId === jobId);
-    if (index <= 0) return;
-    const proven = queue
-      .slice(0, index)
-      .filter((job) => gitProvesAncestor(job.identity.sourceCommit, own.identity.sourceCommit))
-      .map((job) => job.jobId);
-    const recorded = await recordWorkerDeploymentAncestry(
-      jobId,
-      proven,
-      'git merge-base --is-ancestor'
-    );
+    if (index < 0) return;
+    const live = await readWorkerDeploymentLive(own.identity.app);
+    const candidates = [
+      ...(live ? [live] : []),
+      ...queue.slice(Math.max(0, index - MAX_ANCESTRY_CANDIDATES), index),
+      own,
+    ];
+    const proven: Array<{ ancestor: string; descendant: string; proof: string }> = [];
+    for (const ancestor of candidates)
+      for (const descendant of candidates) {
+        if (ancestor.identity.sourceCommit === descendant.identity.sourceCommit) continue;
+        const proof = provesAncestor(
+          ancestor.identity.sourceCommit,
+          descendant.identity.sourceCommit,
+          ancestor.jobId === jobId || descendant.jobId === jobId
+        );
+        if (proof) proven.push({ ancestor: ancestor.jobId, descendant: descendant.jobId, proof });
+      }
+    let recorded = 0;
+    for (const fact of proven)
+      recorded += await recordWorkerDeploymentAncestry(
+        fact.descendant,
+        [fact.ancestor],
+        fact.proof
+      );
     if (proven.length)
       emit({ requestedJobId: jobId, ancestryProven: proven, ancestryRecorded: recorded });
   } catch (error) {
-    // Without a durable fact the queue keeps plain FIFO; nothing is weakened.
+    // Without a durable fact the queue keeps plain FIFO or refuses a possible rollback.
     emit({ requestedJobId: jobId, ancestryProven: [], ancestryError: String(error).slice(0, 500) });
   }
 }
-
 async function runChild(
   jobId: string,
   command: string[],
@@ -205,7 +240,10 @@ async function runQueue(jobId: string): Promise<void> {
         emit(await readWorkerDeployment(jobId));
         return;
       }
-      throw new Error('Requested deployment is ABORTED');
+      const why = (resolved.evidence.ABORTED as { message?: unknown } | undefined)?.message;
+      throw new Error(
+        `Requested deployment is ABORTED${typeof why === 'string' ? `: ${why}` : ''}`
+      );
     }
     let lease;
     try {

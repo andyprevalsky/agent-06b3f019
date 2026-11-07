@@ -2,6 +2,7 @@
 import type { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
 import {
+  decodeWorkerDeploymentJob,
   readPendingWorkerDeployments,
   readWorkerDeployment,
   requireWorkerDeploymentLease,
@@ -14,6 +15,7 @@ const RESERVATION = 'WORKER_DEPLOYMENT_RESERVATION';
 const ANCESTRY = 'WORKER_DEPLOYMENT_ANCESTRY';
 const MAX_ANCESTRY_FACTS = 4096;
 const MAX_SUPERSEDED_CHAIN = 64;
+const MAX_LIVE_CANDIDATES = 64;
 const json = (value: unknown) => value as Prisma.InputJsonObject;
 const jobKey = (jobId: string) => `deployment:worker-job:${jobId}`;
 const ancestryKey = (ancestorJobId: string, descendantJobId: string) =>
@@ -39,6 +41,70 @@ export interface WorkerDeploymentAncestryFact {
   descendantCommit: string;
 }
 
+/** True when `ancestor` equals `descendant` or a chain of proven facts links them. */
+export function commitContains(
+  facts: WorkerDeploymentAncestryFact[],
+  ancestor: string,
+  descendant: string
+): boolean {
+  const seen = new Set([ancestor]);
+  const stack = [ancestor];
+  while (stack.length) {
+    const commit = stack.pop()!;
+    if (commit === descendant) return true;
+    for (const fact of facts)
+      if (fact.ancestorCommit === commit && !seen.has(fact.descendantCommit)) {
+        seen.add(fact.descendantCommit);
+        stack.push(fact.descendantCommit);
+      }
+  }
+  return false;
+}
+
+/**
+ * How an unstarted head relates to the live (serving) release: `forward` when
+ * the live commit is contained in it (a normal deploy), `contained` when the
+ * head is an older commit the live release already carries, otherwise
+ * `unproven` (diverged, or no proof): cutting over could roll production back.
+ */
+export function liveWorkerDeploymentRelation(
+  head: WorkerDeploymentJob,
+  live: WorkerDeploymentJob,
+  facts: WorkerDeploymentAncestryFact[]
+): 'forward' | 'contained' | 'unproven' {
+  if (commitContains(facts, live.identity.sourceCommit, head.identity.sourceCommit))
+    return 'forward';
+  if (commitContains(facts, head.identity.sourceCommit, live.identity.sourceCommit))
+    return 'contained';
+  return 'unproven';
+}
+
+/** The SUCCEEDED job of this app whose managed queue the singleton pointer serves. */
+async function liveJob(
+  tx: Pick<Prisma.TransactionClient, 'toolSideEffect' | 'agentQueuePointer'>,
+  app: string
+): Promise<WorkerDeploymentJob | null> {
+  const pointer = await tx.agentQueuePointer.findUnique({ where: { id: 'singleton' } });
+  if (!pointer) return null;
+  const rows = await tx.toolSideEffect.findMany({
+    where: { operationType: JOB, externalId: app, status: 'SUCCEEDED' },
+    orderBy: [{ createdAt: 'desc' }, { operationKey: 'desc' }],
+    take: MAX_LIVE_CANDIDATES,
+  });
+  for (const row of rows) {
+    const job = decodeWorkerDeploymentJob(row.request);
+    if (
+      pointer.surfaceHash === job.identity.surfaceHash &&
+      pointer.taskQueue === workerDeploymentQueueName(job.jobId, job.identity.surfaceHash)
+    )
+      return job;
+  }
+  return null;
+}
+export async function readWorkerDeploymentLive(app: string): Promise<WorkerDeploymentJob | null> {
+  return liveJob(prisma, app);
+}
+
 /**
  * Pure coalescing plan over the FIFO-ordered pending jobs of one app. Only when
  * the head is unstarted: pick the LAST pending job whose commit is a proven git
@@ -51,25 +117,7 @@ export function planWorkerDeploymentSupersession(
 ): { target: WorkerDeploymentJob; superseded: WorkerDeploymentJob[] } | null {
   if (queue.length < 2 || !isUnstartedWorkerDeployment(queue[0])) return null;
   const app = queue[0].identity.app;
-  const edges = new Map<string, Set<string>>();
-  for (const fact of facts) {
-    if (!edges.has(fact.ancestorCommit)) edges.set(fact.ancestorCommit, new Set());
-    edges.get(fact.ancestorCommit)!.add(fact.descendantCommit);
-  }
-  const reaches = (from: string, to: string) => {
-    const seen = new Set([from]);
-    const stack = [from];
-    while (stack.length) {
-      const commit = stack.pop()!;
-      if (commit === to) return true;
-      for (const next of edges.get(commit) ?? [])
-        if (!seen.has(next)) {
-          seen.add(next);
-          stack.push(next);
-        }
-    }
-    return false;
-  };
+  const reaches = (from: string, to: string) => commitContains(facts, from, to);
   let unstarted = 1;
   while (
     unstarted < queue.length &&
@@ -121,21 +169,31 @@ export async function recordWorkerDeploymentAncestry(
   return created.count;
 }
 
+export interface WorkerDeploymentAdmission {
+  targetJobId: string | null;
+  supersededJobIds: string[];
+  refusedJobIds: string[];
+  liveJobId: string | null;
+}
+
 /**
- * Under the global lease and the app FIFO lock, mark the planned unstarted
- * prefix SUPERSEDED by its queued descendant, which becomes the FIFO head.
+ * Under the global lease and the app FIFO lock, only for UNSTARTED heads:
+ * 1. coalesce the unstarted prefix into its last proven queued descendant;
+ * 2. never roll back: a head the live release already contains is SUPERSEDED by
+ *    the live job; a head not proven to contain the live commit is ABORTED with
+ *    reason ROLLBACK_REFUSED. A forward head (or any started head) is untouched.
  * Recomputed from fresh rows on every call, so retries and concurrent enqueues
- * are idempotent: a committed supersession leaves nothing left to plan.
+ * are idempotent: a committed admission leaves nothing left to change.
  */
 export async function supersedeQueuedWorkerDeployments(
   app: string,
   ownerId: string
-): Promise<{ targetJobId: string; supersededJobIds: string[] } | null> {
+): Promise<WorkerDeploymentAdmission | null> {
   return runTransactionWithRetry(async (tx) => {
     await requireWorkerDeploymentLease(tx, ownerId);
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'deployment:worker-queue:' + app}))`;
-    const queue = await readPendingWorkerDeployments(tx, app);
-    if (queue.length < 2 || !isUnstartedWorkerDeployment(queue[0])) return null;
+    let queue = await readPendingWorkerDeployments(tx, app);
+    if (!queue.length || !isUnstartedWorkerDeployment(queue[0])) return null;
     const rows = await tx.toolSideEffect.findMany({
       where: { operationType: ANCESTRY, externalId: app, status: 'PROVEN' },
       select: { request: true },
@@ -148,15 +206,17 @@ export async function supersedeQueuedWorkerDeployments(
         ? [{ ancestorCommit: fact.ancestorCommit, descendantCommit: fact.descendantCommit }]
         : [];
     });
-    const plan = planWorkerDeploymentSupersession(queue, facts);
-    if (!plan) return null;
     const pointer = await tx.agentQueuePointer.findUnique({ where: { id: 'singleton' } });
     const at = (
       await tx.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`
     )[0].now.toISOString();
-    for (const job of plan.superseded) {
+    const finish = async (
+      job: WorkerDeploymentJob,
+      stage: 'SUPERSEDED' | 'ABORTED',
+      evidence: Record<string, Prisma.JsonValue>
+    ) => {
       if (pointer?.taskQueue === workerDeploymentQueueName(job.jobId, job.identity.surfaceHash))
-        throw new Error('Cannot supersede a serving deployment');
+        throw new Error('Cannot supersede or refuse a serving deployment');
       const reserved = await tx.toolSideEffect.count({
         where: {
           operationType: RESERVATION,
@@ -169,30 +229,61 @@ export async function supersedeQueuedWorkerDeployments(
         throw new Error('Cannot supersede a deployment that holds Machine reservations');
       const result: WorkerDeploymentJob = {
         ...job,
-        stage: 'SUPERSEDED',
+        stage,
         ownerId,
         failure: null,
-        evidence: {
-          SUPERSEDED: {
-            supersededBy: plan.target.jobId,
-            sourceCommit: plan.target.identity.sourceCommit,
-            surfaceHash: plan.target.identity.surfaceHash,
-            attempt: plan.target.identity.attempt,
-            proof: 'git-ancestry',
-            at,
-          },
-        },
+        evidence: { [stage]: { ...evidence, at } },
       };
       const changed = await tx.toolSideEffect.updateMany({
         where: { operationKey: jobKey(job.jobId), operationType: JOB, status: 'QUEUED' },
-        data: { status: 'SUPERSEDED', request: json(result), error: null },
+        data: { status: stage, request: json(result), error: null },
       });
       if (changed.count !== 1) throw new Error('Queued deployment changed before supersession');
-    }
-    return {
-      targetJobId: plan.target.jobId,
-      supersededJobIds: plan.superseded.map((job) => job.jobId),
     };
+    const carriedBy = (target: WorkerDeploymentJob, basis: string) => ({
+      supersededBy: target.jobId,
+      sourceCommit: target.identity.sourceCommit,
+      surfaceHash: target.identity.surfaceHash,
+      attempt: target.identity.attempt,
+      proof: 'git-ancestry',
+      basis,
+    });
+    const admission: WorkerDeploymentAdmission = {
+      targetJobId: null,
+      supersededJobIds: [],
+      refusedJobIds: [],
+      liveJobId: null,
+    };
+    const plan = planWorkerDeploymentSupersession(queue, facts);
+    if (plan) {
+      for (const job of plan.superseded)
+        await finish(job, 'SUPERSEDED', carriedBy(plan.target, 'queued-descendant'));
+      admission.targetJobId = plan.target.jobId;
+      admission.supersededJobIds.push(...plan.superseded.map((job) => job.jobId));
+      queue = queue.slice(plan.superseded.length);
+    }
+    const live = await liveJob(tx, app);
+    admission.liveJobId = live?.jobId ?? null;
+    while (live && queue.length && isUnstartedWorkerDeployment(queue[0])) {
+      const head = queue.shift()!;
+      const relation = liveWorkerDeploymentRelation(head, live, facts);
+      if (relation === 'forward') break;
+      if (relation === 'contained') {
+        await finish(head, 'SUPERSEDED', carriedBy(live, 'live-descendant'));
+        admission.supersededJobIds.push(head.jobId);
+        admission.targetJobId = live.jobId;
+        continue;
+      }
+      await finish(head, 'ABORTED', {
+        reason: 'ROLLBACK_REFUSED',
+        liveJobId: live.jobId,
+        liveCommit: live.identity.sourceCommit,
+        headCommit: head.identity.sourceCommit,
+        message: `Refused: ${head.identity.sourceCommit} is not proven to contain live ${live.identity.sourceCommit}; cutting over could roll production back`,
+      });
+      admission.refusedJobIds.push(head.jobId);
+    }
+    return admission.supersededJobIds.length || admission.refusedJobIds.length ? admission : null;
   });
 }
 

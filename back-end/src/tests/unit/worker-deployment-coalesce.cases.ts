@@ -73,7 +73,12 @@ export async function coalesceCases(
     ]);
     const done = first ?? concurrent;
     assert.equal(Boolean(first) !== Boolean(concurrent), true, 'exactly one supersession commits');
-    assert.deepEqual(done, { targetJobId: c.jobId, supersededJobIds: [a.jobId, b.jobId] });
+    assert.deepEqual(done, {
+      targetJobId: c.jobId,
+      supersededJobIds: [a.jobId, b.jobId],
+      refusedJobIds: [],
+      liveJobId: null,
+    });
     assert.equal(await api.supersedeQueuedWorkerDeployments(app, owner), null); // lost ACK retry
     assert.equal((await api.readWorkerDeploymentHead(app))?.jobId, c.jobId);
     for (const job of [a, b]) {
@@ -87,6 +92,7 @@ export async function coalesceCases(
           surfaceHash: c.identity.surfaceHash,
           attempt: 'c',
           proof: 'git-ancestry',
+          basis: 'queued-descendant',
           at: undefined,
         }
       );
@@ -209,6 +215,85 @@ export async function coalesceCliCases(ctx: Ctx) {
         chain: undefined,
       }
     );
+
+    // Rollback guard: b (c2) is live. An older c1 enqueued afterwards never cuts over; the
+    // live release carries it, so it is SUPERSEDED by the live job and spawns nothing.
+    const older = await api.enqueueWorkerDeployment(at(app, 'late-older', repo.c1));
+    const late = events(
+      (
+        await execTypeScript(
+          [cli, 'run', '--job-id', older.jobId, '--', 'nonexistent-must-not-start'],
+          { timeout: 10000, env }
+        )
+      ).stdout
+    );
+    assert.equal(existsSync(path.join(folder, older.jobId)), false, 'older commit never cut over');
+    assert.equal(late.at(-1).stage, 'SUPERSEDED');
+    assert.equal(late.at(-2).descendantJobId, b.jobId);
+    assert.equal((late.at(-1).evidence.SUPERSEDED as { basis?: string }).basis, 'live-descendant');
+    assert.equal((await api.readWorkerDeploymentLive(app))?.jobId, b.jobId);
+
+    // A diverged (or unproven) head is refused explicitly instead of rolling the pointer back.
+    const diverged = await api.enqueueWorkerDeployment(at(app, 'diverged', repo.side));
+    const refused = await execTypeScript(
+      [cli, 'run', '--job-id', diverged.jobId, '--', 'nonexistent-must-not-start'],
+      { timeout: 10000, env }
+    ).then(
+      () => assert.fail('a possible rollback must not succeed'),
+      (error: { stderr?: string }) => error.stderr ?? ''
+    );
+    assert.match(refused, /ABORTED: Refused: .* could roll production back/);
+    const abortedJob = await api.readWorkerDeployment(diverged.jobId);
+    assert.equal(abortedJob.stage, 'ABORTED');
+    assert.equal((abortedJob.evidence.ABORTED as { reason?: string }).reason, 'ROLLBACK_REFUSED');
+    assert.equal(existsSync(path.join(folder, diverged.jobId)), false);
+    assert.equal((await api.readWorkerDeploymentLive(app))?.jobId, b.jobId, 'pointer unchanged');
+
+    // Shallow CI checkout: git cannot decide, the opted-in GitHub compare proves c2 in c3,
+    // so the forward release cuts over normally.
+    const shallow = await mkdtemp(path.join(tmpdir(), 'worker-queue-shallow-'));
+    try {
+      execFileSync('git', ['init', '-q', shallow]);
+      const bin = path.join(shallow, 'bin');
+      execFileSync('mkdir', [bin]);
+      await writeFile(
+        path.join(bin, 'gh'),
+        `#!/usr/bin/env bash\necho "$*" >> ${JSON.stringify(path.join(shallow, 'gh.log'))}\n` +
+          `[ "$2" = "repos/acme/rose/compare/${repo.c2}...${repo.c3}" ] && echo ahead || echo behind\n`,
+        { mode: 0o755 }
+      );
+      const forward = await api.enqueueWorkerDeployment(at(app, 'forward', repo.c3));
+      const ranForward = events(
+        (
+          await execTypeScript(
+            [cli, 'run', '--job-id', forward.jobId, '--', interpreter, ...fixtureArgs],
+            {
+              timeout: 30000,
+              maxBuffer: 4 * 1024 * 1024,
+              env: {
+                ...env,
+                WORKER_DEPLOYMENT_ANCESTRY_REPOSITORY: shallow,
+                WORKER_DEPLOYMENT_ANCESTRY_GITHUB: '1',
+                GITHUB_REPOSITORY: 'acme/rose',
+                PATH: `${bin}:${process.env.PATH ?? ''}`,
+              },
+            }
+          )
+        ).stdout
+      );
+      assert.equal(ranForward.at(-1).stage, 'SUCCEEDED');
+      assert(
+        ranForward.some((event) =>
+          (event.ancestryProven ?? []).some(
+            (fact: { proof?: string; descendant?: string }) =>
+              fact.proof === 'github compare' && fact.descendant === forward.jobId
+          )
+        )
+      );
+      assert.equal((await readFile(path.join(folder, forward.jobId), 'utf8')).trim(), 'invoked');
+    } finally {
+      await rm(shallow, { recursive: true, force: true });
+    }
   } finally {
     await rm(folder, { recursive: true, force: true });
     await rm(repo.folder, { recursive: true, force: true });

@@ -465,7 +465,7 @@ async function main() {
       'parent resumes FIFO predecessors and exit75 wait without failure or duplicate completed execution',
       parentRecovery
     );
-    await test('queue CLI coalesces into its proven descendant; the superseded deploy returns on that cutover', () =>
+    await test('queue CLI coalesces into proven descendants and never rolls the live release back', () =>
       coalesceCliCases({ api, appFor, identity }));
     lease = await acquireWorkflowDeploymentLease({ leaseMs: 60000, heartbeatMs: 59000 });
     await test('expired and replaced global owners cannot mutate', async () => {

@@ -3870,6 +3870,13 @@ def cutover_verify(fly: dict, merged_sha: str, expected_hash: str, *, root: Path
     stage, identity = str(job["stage"]), job["identity"]
     source_commit, attempt = identity["sourceCommit"], identity["attempt"]
     fly["job_stage"] = stage
+    refusal = ((job.get("evidence") or {}).get("ABORTED") or {}) if stage == "ABORTED" else {}
+    if refusal.get("reason") == "ROLLBACK_REFUSED":
+        raise ProductionGateError(
+            f"durable job {job_id} was refused before cutover: {refusal.get('message')} (live job "
+            f"{refusal.get('liveJobId')}); the Fly worker cutover did NOT run for {merged_sha} and production was not "
+            "rolled back. Do not dispatch production semantics or resume this job: deploy a release that contains "
+            "the live commit")
     if stage not in ("SUCCEEDED", "SUPERSEDED"):
         raise ProductionGateError(
             f"durable job {job_id} is {stage}, not SUCCEEDED (run {fly.get('run_id')} concluded "

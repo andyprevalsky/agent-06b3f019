@@ -505,7 +505,7 @@ def lane_fly(ctx: Ctx) -> Result:
         receipt = ctx.production_receipt()
         fly = receipt.get('fly') or {}
         job, stage = fly.get('job_id'), fly.get('job_stage')
-        if not (job and stage and stage != 'SUCCEEDED'):
+        if not (job and stage and stage not in ('SUCCEEDED', 'ABORTED')):
             return False, f'Fly lane blocked (production exit {code}): {receipt.get("error") or "see [fly] output"}', code
         resume = show(resume_argv(job), cwd=ctx.root / 'back-end', root=ctx.root, env_file='back-end')
         if not ctx.resume_fly:
