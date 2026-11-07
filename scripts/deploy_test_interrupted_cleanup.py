@@ -51,6 +51,48 @@ def no_holders(paths):
     need(result.returncode == 1 and not result.stdout and not result.stderr, 'log writer or unknown holder remains')
 
 
+# A same-uid process that is exiting answers EACCES for its fd table for a few milliseconds before it
+# disappears (209 of 210 unreadable entries observed over 7 M scans had PF_EXITING; none stayed past 40 ms).
+OBSERVATION_ATTEMPTS = 5
+OBSERVATION_DELAY = 0.2
+
+
+def observed(process, read):
+    """Run read() on one /proc entry; an unreadable process is a read failure, not proof either way.
+
+    Re-observe a bounded number of times; skip a process that has exited; refuse, naming it, while it stays
+    unreadable and alive. Ownership is re-read on every attempt, so a process that became another user's is skipped."""
+    for attempt in range(OBSERVATION_ATTEMPTS):
+        try:
+            return read()
+        except (FileNotFoundError, ProcessLookupError):
+            return None
+        except PermissionError as error:
+            if not process.exists():
+                return None
+            if attempt + 1 == OBSERVATION_ATTEMPTS:
+                raise ValueError('interrupted custody: cannot observe pid ' + process.name + ': EACCES after '
+                                 + str(OBSERVATION_ATTEMPTS) + ' attempts and the process is still alive') from error
+            time.sleep(OBSERVATION_DELAY)
+
+
+def holds_namespace(process, ancestors, prefix):
+    """Refuse a same-uid process that names, runs in or holds a file under the old namespace."""
+    if process.stat().st_uid != os.geteuid():
+        return
+    pid = int(process.name)
+    argv = (process / 'cmdline').read_bytes().decode(errors='replace')
+    need(pid in ancestors or prefix not in argv, 'original namespace has a live consumer')
+    cwd = str((process / 'cwd').resolve(strict=True))
+    need(pid in ancestors or (cwd != prefix and not cwd.startswith(prefix + '/')), 'original namespace has a live consumer')
+    for fd in (process / 'fd').iterdir():
+        try:
+            target = os.readlink(fd)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
+
+
 def namespace_quiet(namespace, ports):
     """Observe only the old namespace; other legitimate source workers stay untouched."""
     ancestors, pid = set(), os.getpid()
@@ -60,23 +102,8 @@ def namespace_quiet(namespace, ports):
         pid = int(raw[1])
     prefix = str(namespace)
     for process in Path('/proc').iterdir():
-        if not process.name.isdigit():
-            continue
-        try:
-            if process.stat().st_uid != os.geteuid():
-                continue
-            argv = (process / 'cmdline').read_bytes().decode(errors='replace')
-            cwd = str((process / 'cwd').resolve(strict=True))
-            need(int(process.name) in ancestors or (prefix not in argv and cwd != prefix and not cwd.startswith(prefix + '/')),
-                 'original namespace has a live consumer')
-            for fd in (process / 'fd').iterdir():
-                try:
-                    target = os.readlink(fd)
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
-                need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
-        except (FileNotFoundError, ProcessLookupError):
-            continue
+        if process.name.isdigit():
+            observed(process, lambda process=process: holds_namespace(process, ancestors, prefix))
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):
         for line in Path(table).read_text().splitlines()[1:]:
             row = line.split()
