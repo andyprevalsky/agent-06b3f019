@@ -804,15 +804,6 @@ def task_verdict(task: dict) -> dict[str, object]:
                 "SKIPPED"}}
 
 
-def attempt_verdict(root: Path, job: dict[str, object]) -> dict[str, object]:
-    """The exited attempt's recorded verdict; empty (unknown) when no run record exists."""
-    try:
-        found = terminal_task(root, job)
-        return {} if found is None else task_verdict(found[2])
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
-
-
 def released_attempt(root: Path, job: dict[str, object]) -> dict[str, object]:
     """Read the existing physical result and full-release seal, without regrading."""
     try:
@@ -2463,13 +2454,15 @@ def main() -> int:
                     time.monotonic() - float(job.pop("_started_monotonic")), 3
                 )
                 active.pop(process_id)
+                # Every exited attempt records its verdict and release seal from the same
+                # physical receipts; the scorecard and retries read them with or without retries.
+                disposition = released_attempt(workspace, job)
+                for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
+                            "resources_released", "lifecycle_verified", "infra_failure", "terminal_task",
+                            "released_at_epoch", "retry_blocked"):
+                    job.pop(key, None)
+                job.update(disposition)
                 if args.retry_infra:
-                    disposition = released_attempt(workspace, job)
-                    for key in ("run_id", "fleet_dir", "fleet_owner_token", "task_status",
-                                "resources_released", "lifecycle_verified", "infra_failure", "terminal_task",
-                                "released_at_epoch", "retry_blocked"):
-                        job.pop(key, None)
-                    job.update(disposition)
                     job["attempts"].append({key: job.get(key) for key in (
                         "attempt", "log", "controller_pid", "started_at", "finished_at", "wall_clock_seconds",
                         "controller_exit_code", "status", "run_id", "fleet_dir", "fleet_owner_token", "task_status",
@@ -2494,8 +2487,6 @@ def main() -> int:
                         first_failure = first_failure or exit_code or 1
                 elif exit_code and not first_failure:
                     first_failure = exit_code
-                if not args.retry_infra:
-                    job.update(attempt_verdict(workspace, job))
                 if "infra_stop" not in state and not stop_signal:
                     breach = infra_stop_receipt(jobs, infra_scheduled_total, infra_policy, infra_reached)
                     if breach is not None:

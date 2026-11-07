@@ -581,8 +581,30 @@ def controller_liveness(run_dir: Path, summary: dict) -> dict:
             "detail": f"controller PID {pid} " + ("not alive" if current == "" else "reused by another process (birth differs)")}
 
 
+RELEASE_KEYS = ("run_id", "fleet_dir", "fleet_owner_token", "resources_released", "lifecycle_verified",
+                "released_at_epoch")
+
+
+def refresh_release(run_dir: Path, summary: dict) -> None:
+    """Re-read each finished job's fleet teardown receipts through the campaign's own release
+    verifier (in memory only). A recorded verified release stands; an unverified one stays unverified."""
+    parts = run_dir.resolve().parts
+    if len(parts) < 5 or parts[-4:-1] != (".context", "benchmarks", "campaigns"):
+        return  # The verifier binds receipts to the owning workspace root.
+    verify = None
+    for job in summary.get("jobs") or []:
+        if (not isinstance(job, dict) or not job.get("finished_at") or not isinstance(job.get("log"), str)
+                or (job.get("resources_released") is True and job.get("lifecycle_verified") is True)):
+            continue
+        verify = verify or runpy.run_path(str(HERE / "run-bench-campaign.py"))["released_attempt"]
+        found = verify(Path(*parts[:-4]), job)
+        if found.get("resources_released") is True:
+            job.update({key: found[key] for key in RELEASE_KEYS if key in found})
+
+
 def load_campaign(run_dir: Path) -> dict:
     summary = read_json(run_dir / "summary.json") or {}
+    refresh_release(run_dir, summary)
     exp = empty_experiment("campaign", run_dir)
     exp["id"] = summary.get("campaign_id") or run_dir.name
     exp["scheduled_total"] = summary.get("group_total") or summary.get("total_jobs")
