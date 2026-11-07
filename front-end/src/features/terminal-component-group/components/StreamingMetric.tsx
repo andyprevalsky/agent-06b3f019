@@ -11,6 +11,8 @@
  *   reading ↓ 0 before the first byte and springing up as tokens arrive. An
  *   unknown count (undefined) is never invented.
  *
+ * durationMs (a finished generation): the recorded duration, fixed; no live clock.
+ *
  * RENDER:
  *   X.Ys · ↓ X tokens   (no start: ↓ X tokens)
  */
@@ -21,6 +23,7 @@ import { cn } from '@/lib/utils';
 
 interface StreamingMetricProps {
   startedAtMs?: number;
+  durationMs?: number;
   tokenCount?: number;
   animatedTokenCount?: number;
   tokensPerSecond?: number;
@@ -45,6 +48,7 @@ function useElapsedSeconds(startedAtMs?: number) {
 
 export function StreamingMetric({
   startedAtMs,
+  durationMs,
   tokenCount,
   animatedTokenCount,
   tokensPerSecond,
@@ -52,16 +56,23 @@ export function StreamingMetric({
   iconClassName,
   showZeroTokens = false,
 }: StreamingMetricProps) {
-  const elapsedSeconds = useElapsedSeconds(startedAtMs);
+  const fixedSeconds =
+    typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs >= 0
+      ? durationMs / 1000
+      : undefined;
+  const fixed = fixedSeconds !== undefined;
+  const liveSeconds = useElapsedSeconds(fixed ? undefined : startedAtMs);
+  const elapsedSeconds = fixedSeconds ?? liveSeconds;
 
   const hasTokens =
     typeof tokenCount === 'number' && Number.isFinite(tokenCount) && tokenCount >= 0;
   const hasRate =
     typeof tokensPerSecond === 'number' && Number.isFinite(tokensPerSecond) && tokensPerSecond >= 0;
   const zeroTokensShown = showZeroTokens && hasTokens;
-  if (!startedAtMs && !(hasTokens && tokenCount > 0) && !hasRate && !zeroTokensShown) return null;
+  if (!startedAtMs && !fixed && !(hasTokens && tokenCount > 0) && !hasRate && !zeroTokensShown)
+    return null;
   // No request start: a Thinking counter shows tokens alone, never a frozen 0.0s clock.
-  const showClock = Boolean(startedAtMs) || (hasTokens && !showZeroTokens);
+  const showClock = Boolean(startedAtMs) || fixed || (hasTokens && !showZeroTokens);
 
   return (
     <span

@@ -22,12 +22,8 @@ import { takeSendBudget } from '../../providers/agentGraph/sendBudget';
 import { createLogger } from '../../providers/logger';
 import { isRoseDesktopUser } from '../../utils/roseDesktop';
 import * as messageService from './agentMessageService';
-import {
-  codeLabel,
-  deliverToCodeAgent,
-  recordCodeTimelineRow,
-  type CodeTarget,
-} from './agentCodeTurnDelivery';
+import { codeLabel, recordCodeTimelineRow } from '../../providers/codeSessions/agentMessageRows';
+import { deliverToCodeAgent, type CodeTarget } from './agentCodeTurnDelivery';
 import * as graphRepo from './repoGraph';
 import {
   AgentGraphError,
@@ -47,7 +43,7 @@ export interface SendInput {
 
 export interface SendResult {
   message_id: string;
-  status: 'delivered' | 'duplicate';
+  status: 'delivered' | 'duplicate' | 'queued';
   to: { id: string; kind: 'agent' | 'code' };
 }
 

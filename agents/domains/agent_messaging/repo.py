@@ -128,6 +128,8 @@ def _delivery(body: Dict[str, Any]) -> Dict[str, Any]:
         "task_running": body.get("task_running"),
         "to": body.get("to") if isinstance(body.get("to"), dict) else None,
     }
+    if body.get("queued") is True:
+        result["queued"] = True
     if isinstance(body.get("woke"), bool):
         result["woke"] = body["woke"]
     if isinstance(body.get("wake_error"), str):

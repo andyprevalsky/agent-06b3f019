@@ -1962,6 +1962,35 @@ async def resolve_context_attachments(
     return resolved
 
 
+def llm_generation_metadata(usage: Any) -> Optional[Dict[str, Any]]:
+    """A persisted thought's recorded generation, or None.
+
+    ``{"output_tokens", "started_at", "ended_at"}``: the call's provider-reported
+    output tokens over its measured first-token → last-token window, so the UI's
+    tok/s is never estimated and never includes queueing, failover legs or parsing.
+    Only measured usage qualifies: estimated usage has no window, and a Fast Mode
+    replay's window times the replay, not the model. A window of any positive length
+    is recorded, a burst included: the UI reader (thoughtGeneration) is the one judge of
+    whether the implied rate is a streaming speed, so the producer carries no bound of its own.
+    UI-only: no message builder reads ``metadata.generation``.
+    """
+    if not isinstance(usage, dict) or usage.get("from_fast_cache"):
+        return None
+    tokens = usage.get("completion_tokens")
+    started = usage.get("generation_started_at_ms")
+    ended = usage.get("generation_ended_at_ms")
+    if not all(isinstance(value, int) and not isinstance(value, bool) for value in (tokens, started, ended)):
+        return None
+    if tokens <= 0 or ended <= started:
+        return None
+
+    def _iso(ms: int) -> str:
+        moment = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    return {"output_tokens": tokens, "started_at": _iso(started), "ended_at": _iso(ended)}
+
+
 def convert_context_to_messages(
     context: List[Dict[str, Any]],
     include_system: bool = True,
@@ -3104,6 +3133,10 @@ async def call_llm_structured_streaming(
         _safe_heartbeat("Starting Rose LLM stream...")
         request_start_time = _safe_time()
         ttft_logged = False
+        # First/last token-bearing chunk: the generation window behind a thought's tok/s
+        # (excludes queueing, failover legs and the final parse).
+        first_token_time: Optional[float] = None
+        last_token_time: Optional[float] = None
 
         rose_client = RoseClient()
         claude_auth_context = _build_claude_auth_context(
@@ -3274,6 +3307,12 @@ async def call_llm_structured_streaming(
                     ttft_logged = True
 
                 kind = chunk.kind
+
+                if kind in ("content", "reasoning", "tool_call", "codex_reasoning_item"):
+                    _token_time = _safe_time()
+                    if first_token_time is None:
+                        first_token_time = _token_time
+                    last_token_time = _token_time
 
                 if kind == "metadata":
                     if chunk.data.get("actual_model"):
@@ -3969,6 +4008,11 @@ async def call_llm_structured_streaming(
                 "prompt_tokens": stream_usage.get("prompt_tokens", 0),
                 "completion_tokens": stream_usage.get("completion_tokens", 0),
                 "total_tokens": stream_usage.get("total_tokens", 0),
+                # The measured generation window (first → last token chunk) for the
+                # persisted thought's tok/s (llm_generation_metadata). Estimates
+                # below carry no window, so they never produce a rate.
+                "generation_started_at_ms": int(first_token_time * 1000) if first_token_time else None,
+                "generation_ended_at_ms": int(last_token_time * 1000) if last_token_time else None,
                 "actual_model": actual_model,
                 "pool_name": pool_name,
                 "pool_size": pool_size,

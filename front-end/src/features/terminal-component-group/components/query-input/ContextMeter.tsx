@@ -3,7 +3,8 @@
  *
  * Display-only; parent owns the percentage + total-size values.
  * variant 'nub' (Rose Desktop tab): bare white "N%" in 10px mono with the
- * instant "Context window used" tooltip.
+ * instant "Context window used" tooltip. restartThreshold 0 = window unknown (a code
+ * agent before its first turn result): the tokens used ("87k") with an exact tooltip.
  */
 
 import { Badge } from '@/components/ui/badge';
@@ -20,6 +21,13 @@ interface ContextMeterProps {
 
 const CIRCUMFERENCE = 50.265; // 2 * π * r (r = 8)
 
+/** 87169 → "87k", 1200000 → "1.2M"; under 1000 stays exact. */
+function compactTokens(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (count >= 1000) return `${Math.round(count / 1000)}k`;
+  return String(count);
+}
+
 export function ContextMeter({
   contextPercentage,
   contextSize,
@@ -27,16 +35,23 @@ export function ContextMeter({
   variant = 'badge',
 }: ContextMeterProps) {
   if (variant === 'nub') {
+    // A window of 0 is unknown (a code agent before its first turn result): show the
+    // tokens used instead of a percentage of nothing.
+    const known = restartThreshold > 0;
+    const text = known ? `${contextPercentage.toFixed(0)}%` : `${compactTokens(contextSize)}`;
+    const label = known
+      ? `Context window used: ${contextPercentage.toFixed(0)}%`
+      : `Context used: ${contextSize.toLocaleString()} tokens`;
     return (
-      <NubTip label="Context window used">
+      <NubTip label={known ? 'Context window used' : 'Context used (window unknown)'}>
         <span
           tabIndex={0}
           data-nub-item
           data-testid="nub-context"
-          aria-label={`Context window used: ${contextPercentage.toFixed(0)}%`}
+          aria-label={label}
           className={cn(NUB_ITEM_CLASS, NUB_TEXT_CLASS, 'cursor-default')}
         >
-          {contextPercentage.toFixed(0)}%
+          {text}
         </span>
       </NubTip>
     );

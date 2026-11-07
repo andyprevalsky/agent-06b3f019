@@ -17,6 +17,12 @@ that actually merges. Rows already on the base ref are never touched.
       # first replay the deploy smoke lane's parked rows
       # (.context/deploy-ledger-park, see run-predeploy-local) into the
       # tracked ledgers, then keep only each task's most recent run
+  python3 scripts/benchmark-history-latest-only.py --write --qualify TASK=5
+      # a qualification streak: keep TASK's 5 most recent deploy-eligible
+      # branch attempts (not just the latest run) and exit 1, touching nothing,
+      # unless all 5 exist and passed. A later predeploy attempt (eligibility
+      # false) stays the task's ordinary latest run. Other tasks, and TASK's
+      # attempts before those 5, are filtered exactly as without the flag.
 
 A deploy's local smoke lane records its rows under .context/deploy-ledger-park
 (BENCHMARK_HISTORY_PARK_DIR) so the tracked ledgers stay unchanged while the
@@ -124,8 +130,47 @@ def _window(row: dict) -> tuple[datetime, datetime] | None:
     return end - timedelta(seconds=duration), end
 
 
-def select_attempts(ledger: Ledger) -> tuple[set[str], set[str], dict[str, datetime]]:
-    """Mark superseded branch attempts; return kept/dropped agent ids and kept run starts."""
+def qualified_attempts(ledger: Ledger, qualify: dict[str, int]) -> tuple[set[int], list[str]]:
+    """Line indexes of each qualified task's latest N eligible branch attempts, and unmet qualifications.
+
+    Only attempts that count for deploy eligibility are streak candidates (the history
+    gate in select_predeploy_benches.py reads exactly those rows); a later predeploy
+    attempt (eligibility false) is the task's ordinary latest run and never displaces
+    the streak. A qualification is met when at least N eligible attempts exist and the
+    latest N all passed.
+    """
+    by_task: dict[str, list[tuple[datetime, int, dict]]] = collections.defaultdict(list)
+    for index, line in enumerate(ledger.lines):
+        row = _row(line) if ledger.branch[index] else None
+        window = _window(row) if row else None
+        if (
+            row is not None
+            and window is not None
+            and row.get("task") in qualify
+            and row.get("counts_for_deploy_eligibility") is True
+        ):
+            by_task[str(row["task"])].append((window[1], index, row))
+    protected: set[int] = set()
+    problems: list[str] = []
+    for task, need in qualify.items():
+        latest = sorted(by_task.get(task, []), key=lambda a: (a[0], a[1]))[-need:]
+        protected.update(index for _, index, _ in latest)
+        if len(latest) < need:
+            problems.append(f"{task}: {len(latest)} deploy-eligible branch attempt(s), qualification needs {need}")
+            continue
+        unmet = [str(row.get("agent_id") or index) for _, index, row in latest if row.get("passed") is not True]
+        if unmet:
+            problems.append(f"{task}: {len(unmet)} of its latest {need} eligible attempts did not pass ({', '.join(unmet)})")
+    return protected, problems
+
+
+def select_attempts(
+    ledger: Ledger, protected: frozenset[int] | set[int] = frozenset()
+) -> tuple[set[str], set[str], dict[str, datetime]]:
+    """Mark superseded branch attempts; return kept/dropped agent ids and kept run starts.
+
+    ``protected`` line indexes (a qualification streak) join their task's kept run.
+    """
     by_task: dict[str, list[tuple[int, dict, tuple[datetime, datetime]]]] = collections.defaultdict(list)
     for index, line in enumerate(ledger.lines):
         if not ledger.branch[index]:
@@ -140,7 +185,9 @@ def select_attempts(ledger: Ledger) -> tuple[set[str], set[str], dict[str, datet
     kept_start: dict[str, datetime] = {}
     for task, attempts in by_task.items():
         _, _, (latest_start, latest_end) = max(attempts, key=lambda item: item[2][1])
-        run = [a for a in attempts if a[2][0] <= latest_end and a[2][1] >= latest_start]
+        run = [
+            a for a in attempts if (a[2][0] <= latest_end and a[2][1] >= latest_start) or a[0] in protected
+        ]
         kept_start[task] = min(a[2][0] for a in run)
         run_indexes = {a[0] for a in run}
         for index, row, _ in attempts:
@@ -274,14 +321,20 @@ def apply_parked(repo: Path, park: Path, base: str) -> dict[str, int]:
     return applied
 
 
-def run(repo: Path, base: str, write: bool) -> int:
+def run(repo: Path, base: str, write: bool, qualify: dict[str, int] | None = None) -> tuple[int, list[str]]:
+    """(superseded rows found, unmet qualifications). Nothing is written while one is unmet."""
     rels = _changed_ledgers(repo, base)
     ledgers = {rel: _load(repo, base, rel) for rel in rels}
     attempts = ledgers.get(f"{HISTORY_DIR}/{ATTEMPTS}")
     if attempts is None:
         print(f"no branch rows in {HISTORY_DIR}/{ATTEMPTS} relative to {base}")
-        return 0
-    kept_ids, dropped_ids, kept_start = select_attempts(attempts)
+        return 0, [f"{task}: no branch rows, qualification needs {n}" for task, n in (qualify or {}).items()]
+    protected, problems = qualified_attempts(attempts, qualify or {})
+    for problem in problems:
+        print(f"qualification not met: {problem}")
+    if problems:
+        write = False
+    kept_ids, dropped_ids, kept_start = select_attempts(attempts, protected)
     for rel, ledger in ledgers.items():
         name = Path(rel).name
         if name == DURATIONS:
@@ -307,7 +360,7 @@ def run(repo: Path, base: str, write: bool) -> int:
         print(f"benchmark history holds only each task's most recent branch run (base {base})")
     elif write:
         print(f"removed {dropped_total} superseded branch rows")
-    return dropped_total
+    return dropped_total, problems
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -322,7 +375,18 @@ def main(argv: list[str] | None = None) -> int:
         help=f"first replay the deploy smoke lane's parked rows (default {PARK_DIR} under the repo) "
              "into the tracked ledgers; requires --write",
     )
+    parser.add_argument(
+        "--qualify", action="append", default=[], metavar="TASK=N",
+        help="keep TASK's N most recent deploy-eligible branch attempts as a qualification streak; exit 1 "
+             "unless all N exist and passed (repeatable)",
+    )
     args = parser.parse_args(argv)
+    qualify: dict[str, int] = {}
+    for spec in args.qualify:
+        task, _, count = spec.rpartition("=")
+        if not task or not count.isdigit() or int(count) < 1 or task in qualify:
+            parser.error(f"--qualify expects one TASK=N (N >= 1) per task, got {spec!r}")
+        qualify[task] = int(count)
     if args.apply_parked is not None and not args.write:
         parser.error("--apply-parked changes the tracked ledgers and requires --write")
     repo = Path(_git(Path(args.repo), "rev-parse", "--show-toplevel").stdout.decode().strip())
@@ -332,8 +396,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.apply_parked is not None:
         park = Path(args.apply_parked)
         apply_parked(repo, park if park.is_absolute() else repo / park, args.base)
-    dropped = run(repo, args.base, args.write)
-    return 1 if args.check and dropped else 0
+    dropped, problems = run(repo, args.base, args.write, qualify)
+    return 1 if problems or (args.check and dropped) else 0
 
 
 if __name__ == "__main__":

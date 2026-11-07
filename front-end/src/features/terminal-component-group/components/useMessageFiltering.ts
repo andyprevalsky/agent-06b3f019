@@ -54,6 +54,7 @@ export function isClaudeCodeChipAnchor(message: Message): boolean {
 
 function sanitizeTrajectoryMessage(message: Message): Message {
   if (message.role === 'USER' || message.role === 'SYSTEM') return message;
+  if (message.metadata?.verbatimText === true) return message;
   const text = userFacingMessageText(message.text);
   if (text === message.text) return message;
   return { ...message, text };
