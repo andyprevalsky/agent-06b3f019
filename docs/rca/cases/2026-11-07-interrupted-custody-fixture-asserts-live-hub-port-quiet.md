@@ -46,9 +46,10 @@ Reproduction: with the live Hub on :8765 the unchanged
 
 ## Solution
 
-The fixture asks the kernel for an unused loopback port (`unused_local_port`)
-and uses it for the owner filename, the owner record and the retirement row.
-The production check is unchanged. Sibling prevention: a fixture that asserts
+The fixture asks the kernel for an unused loopback port and uses it for the owner
+filename, the owner record and the retirement row. The production check is unchanged.
+This branch's helper (`unused_local_port`) was superseded at merge by main's identical
+concurrent fix (`unused_loopback_port`); main's version is the one that ships. Sibling prevention: a fixture that asserts
 host-wide socket state must not borrow a well-known service port. No runtime
 behavior changes.
 

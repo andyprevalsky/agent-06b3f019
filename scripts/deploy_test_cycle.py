@@ -1053,6 +1053,10 @@ def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'interrupted-policy-witness-renewal-v1':
+        from deploy_test_interrupted_cleanup import renew_policy_witness
+        renew_policy_witness(state, occurrence_id, proof)
+        return
     if proof.get('kind') == 'interrupted-preallocation-cleanup-v1':
         from deploy_test_interrupted_cleanup import reconcile as reconcile_interrupted
         reconcile_interrupted(state, occurrence_id, proof)
