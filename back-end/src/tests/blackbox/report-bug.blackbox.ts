@@ -26,6 +26,8 @@ if (API_KEY === '') {
 const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const FAKE_UUID = '00000000-0000-4000-8000-000000000099';
 const FIXTURE_GOAL = 'report-bug blackbox fixture';
+/** Durable identity of rows this suite seeds; cleanup never touches an unmarked agent. */
+const FIXTURE_TITLE = 'report-bug blackbox fixture (seeded by report-bug.blackbox.ts)';
 /** Every fixture agent this run created, for the closing data-hygiene check. */
 const fixtureAgentIds = new Set<string>();
 /** Tags this suite's requests so the server's outbound fetch captures can be read back. */
@@ -114,7 +116,7 @@ async function createAnonymousUser(): Promise<string> {
 async function createAgent(userId: string): Promise<string> {
   const id = randomUUID();
   await prisma.agent.create({
-    data: { id, userId, goal: FIXTURE_GOAL, status: 'ACTIVE', busId: id },
+    data: { id, userId, goal: FIXTURE_GOAL, title: FIXTURE_TITLE, status: 'ACTIVE', busId: id },
   });
   fixtureAgentIds.add(id);
   return id;
@@ -131,10 +133,10 @@ async function deleteFixtureAgents(agentIds: string[]): Promise<void> {
   await prisma.agentTrajectoryAgent.deleteMany({ where: { agentId: { in: agentIds } } });
 }
 
-/** Remove fixture agents (and their chats) left in a persistent DB by earlier runs. */
+/** Remove marked fixture agents an interrupted earlier run left in a persistent DB. */
 async function purgeEarlierFixtures(): Promise<void> {
   const earlier = await prisma.agent.findMany({
-    where: { goal: FIXTURE_GOAL, parentAgentId: null },
+    where: { goal: FIXTURE_GOAL, title: FIXTURE_TITLE, parentAgentId: null },
     select: { id: true },
   });
   const ids = earlier.map((agent) => agent.id);
@@ -440,10 +442,10 @@ async function testFixturesLeaveNoHistory(): Promise<void> {
   const ids = [...fixtureAgentIds];
   if (ids.length === 0) throw new Error('no fixture agents were recorded');
   const [agents, trajectoryRows] = await Promise.all([
-    prisma.agent.count({ where: { OR: [{ id: { in: ids } }, { goal: FIXTURE_GOAL }] } }),
-    prisma.agentTrajectorySearch.count({
-      where: { OR: [{ rootAgentId: { in: ids } }, { agentGoal: FIXTURE_GOAL }] },
+    prisma.agent.count({
+      where: { OR: [{ id: { in: ids } }, { goal: FIXTURE_GOAL, title: FIXTURE_TITLE }] },
     }),
+    prisma.agentTrajectorySearch.count({ where: { rootAgentId: { in: ids } } }),
   ]);
   if (agents !== 0 || trajectoryRows !== 0) {
     throw new Error(
