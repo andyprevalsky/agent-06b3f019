@@ -119,6 +119,67 @@ test('terminal code-task reconciliation isolates failures and honors its batch b
   assert(summary.failed === 1 && summary.released === 3, JSON.stringify(summary));
 });
 
+test('terminal code-task reconciliation bounds a hung release and still reaches the agents behind it', async () => {
+  const attempted: string[] = [];
+  const startedAt = Date.now();
+  const summary = await agentCleanup.reconcileTerminalAgentCodeSessions(
+    {
+      findTerminalAgentIds: async () => ['hung-a', 'hung-b', 'healthy-1', 'healthy-2'],
+      releaseCodeSessions: async (agentId: string) => {
+        attempted.push(agentId);
+        if (agentId.startsWith('hung')) return new Promise<number>(() => undefined);
+        return 1;
+      },
+    },
+    { batchSize: 10, attemptTimeoutMs: 200 }
+  );
+  assert(
+    attempted.length === 4,
+    `agents behind a hung release were never attempted: ${attempted.join(',')}`
+  );
+  assert(
+    summary.released === 2 && summary.failed === 2,
+    `hung releases must fail by their budget: ${JSON.stringify(summary)}`
+  );
+  assert(Date.now() - startedAt < 5_000, 'a hung release held the run past its attempt budget');
+});
+
+test('terminal code-task reconciliation rotates its batch so failing agents cannot hold every slot', async () => {
+  const session = await createAnonymousSession('code-release-rotation');
+  trackedUserIds.add(session.user.id);
+  const seeded = new Set<string>();
+  for (let index = 0; index < 6; index += 1) {
+    const agentId = await createTestAgent(session.user.id);
+    await seedActiveCodeTask(agentId);
+    await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
+    seeded.add(agentId);
+  }
+  // A release that always fails keeps the task ACTIVE, so the same agents are
+  // selected on every tick. A fixed order would then return the same one forever.
+  const firsts = new Set<string>();
+  for (let tick = 0; tick < 40 && firsts.size < 2; tick += 1) {
+    await agentCleanup.reconcileTerminalAgentCodeSessions(
+      {
+        releaseCodeSessions: async (agentId: string) => {
+          firsts.add(agentId);
+          throw new Error('release keeps failing');
+        },
+      },
+      { batchSize: 1 }
+    );
+  }
+  assert(
+    firsts.size >= 2,
+    `a batch of 1 always selected the same agent (${[...firsts].join(',')}); failing agents starve the rest`
+  );
+  for (const agentId of seeded) {
+    await prisma.claudeCodeSession.updateMany({
+      where: { agentId },
+      data: { status: 'CLOSED', closedAt: new Date() },
+    });
+  }
+});
+
 /**
  * Persistent-session close connects to the sandbox, checkpoints and pauses with
  * no timeout. The status row is already terminal by then, so a retried PATCH is

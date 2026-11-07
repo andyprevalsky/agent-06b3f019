@@ -320,6 +320,10 @@ export async function markRetired(codeSessionId: string, now = new Date()): Prom
 /**
  * Bounded sweep of sessions idle past the TTL: one user's (the opportunistic
  * sweep a spawn starts) or, with no user, everyone's (the scheduled sweep).
+ * A live lease means an attached spawn is using the session: its keepalive
+ * refreshes lastActiveAt only every ~2 minutes, so with a short
+ * CODE_SESSION_TTL_DAYS a running task would otherwise be swept between two
+ * keepalives. Its sandbox is retired once the lease lapses (spawn gone).
  */
 export async function findExpiredCodeSessions(
   userId: string | null,
@@ -331,6 +335,7 @@ export async function findExpiredCodeSessions(
       ...(userId === null ? {} : { userId }),
       state: { in: [CODE_SESSION_STATES.PAUSED, CODE_SESSION_STATES.ACTIVE] },
       lastActiveAt: { lt: new Date(now.getTime() - codeSessionTtlMs()) },
+      OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }],
     },
     orderBy: { lastActiveAt: 'asc' },
     take: limit,

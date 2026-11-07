@@ -50,6 +50,8 @@ export interface TerminalBrowserReleaseDependencies {
 export interface TerminalBrowserReleaseOptions {
   batchSize?: number;
   deadlineAtMs?: number;
+  /** Per-agent budget of one code release attempt (default 20 s). */
+  attemptTimeoutMs?: number;
 }
 
 export interface TerminalBrowserReleaseSummary {
@@ -78,6 +80,8 @@ const TERMINAL_BROWSER_RELEASE_LEASE_TYPE = 'TERMINAL_BROWSER_RELEASE_JOB_LEASE'
 const TERMINAL_BROWSER_RELEASE_LEASE_MS = 5 * 60 * 1000;
 const TERMINAL_BROWSER_RELEASE_MAX_BATCH_SIZE = 500;
 const TERMINAL_BROWSER_RELEASE_MAX_RUN_MS = 50_000;
+const TERMINAL_CODE_RELEASE_WORKERS = 8;
+const TERMINAL_CODE_RELEASE_ATTEMPT_MS = 20_000;
 
 function browserSessionReleaseDependencies(retire = false): BrowserSessionReleaseDependencies {
   return {
@@ -486,16 +490,22 @@ export interface TerminalCodeReleaseDependencies {
 function terminalCodeReleaseDependencies(): TerminalCodeReleaseDependencies {
   return {
     // One indexed-by-status scan of ACTIVE tasks, bounded by the batch: cost grows with
-    // leaked tasks, never with live agents.
+    // leaked tasks, never with live agents. The batch is a random sample of the leaked
+    // agents, so agents whose release keeps failing cannot hold every slot of every
+    // tick and starve the ones behind them (a fixed order would; no attempt state is
+    // stored, so there is nothing to keep consistent across backend instances).
     findTerminalAgentIds: async (batchSize) => {
       const agents = await prisma.$queryRaw<Array<{ agentId: string }>>(Prisma.sql`
-        SELECT DISTINCT task."agentId" AS "agentId"
-        FROM "ClaudeCodeSession" AS task
-        INNER JOIN "Agent" AS agent ON agent.id = task."agentId"
-        WHERE task.status::text = 'ACTIVE'
-          AND (agent.status::text IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
-               OR agent."deletedAt" IS NOT NULL)
-        ORDER BY task."agentId" ASC
+        SELECT terminal."agentId" AS "agentId"
+        FROM (
+          SELECT DISTINCT task."agentId" AS "agentId"
+          FROM "ClaudeCodeSession" AS task
+          INNER JOIN "Agent" AS agent ON agent.id = task."agentId"
+          WHERE task.status::text = 'ACTIVE'
+            AND (agent.status::text IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
+                 OR agent."deletedAt" IS NOT NULL)
+        ) AS terminal
+        ORDER BY random()
         LIMIT ${batchSize}
       `);
       return agents.map((agent) => agent.agentId);
@@ -524,21 +534,51 @@ export async function reconcileTerminalAgentCodeSessions(
     TERMINAL_BROWSER_RELEASE_MAX_BATCH_SIZE,
     Math.max(1, Math.floor(options.batchSize ?? 100))
   );
+  const attemptTimeoutMs = Math.max(
+    1,
+    Math.floor(options.attemptTimeoutMs ?? TERMINAL_CODE_RELEASE_ATTEMPT_MS)
+  );
   const agentIds = await dependencies.findTerminalAgentIds(batchSize);
   let released = 0;
   let failed = 0;
-  for (const agentId of agentIds) {
-    if (Date.now() >= deadlineAtMs) break;
-    try {
-      released += await dependencies.releaseCodeSessions(agentId);
-    } catch (error) {
-      failed += 1;
-      log.warn(`Failed to retry code release for terminal agent ${agentId}`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
+  let next = 0;
+  // A persistent close has no timeout of its own: one slow agent holds one worker
+  // for at most its attempt budget, never the whole run's deadline.
+  const workerCount = Math.min(TERMINAL_CODE_RELEASE_WORKERS, agentIds.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (next < agentIds.length && Date.now() < deadlineAtMs) {
+        const agentId = agentIds[next++];
+        try {
+          // Add after the await: `released += await ...` would read `released`
+          // first and lose a concurrent worker's count.
+          const count = await withAttemptBudget(
+            dependencies.releaseCodeSessions(agentId),
+            attemptTimeoutMs,
+            `code release for terminal agent ${agentId}`
+          );
+          released += count;
+        } catch (error) {
+          failed += 1;
+          log.warn(`Failed to retry code release for terminal agent ${agentId}`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    })
+  );
   return { discovered: agentIds.length, released, failed };
+}
+
+/** Rejects when `work` outlives its budget; the work itself is not cancelled. */
+function withAttemptBudget<T>(work: Promise<T>, budgetMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const budget = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} exceeded ${budgetMs} ms`)), budgetMs);
+  });
+  return Promise.race([work, budget]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
 }
 
 /**

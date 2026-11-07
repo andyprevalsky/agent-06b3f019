@@ -8,6 +8,8 @@ import {
   decideOrphan,
   enforceProdReferenceGuard,
   MIN_PLAUSIBLE_PROD_REFS,
+  parseHoursFlag,
+  parseMinProdRefs,
   type OrphanCandidate,
   type ProdReferences,
 } from '../../providers/codeSessions/orphanSandboxEligibility';
@@ -163,3 +165,21 @@ assert.match(
   warning ?? '',
   /^WARNING: production references look wrong .*localhost.*--execute will refuse/
 );
+
+// flag parsing: an absent flag keeps its default, a bad one is refused instead of
+// silently weakening the criteria (a negative age would make every sandbox eligible)
+assert.equal(parseHoursFlag('untagged-hours', undefined, 24), 24);
+assert.equal(parseHoursFlag('untagged-hours', '0', 24), 0);
+assert.equal(parseHoursFlag('untagged-hours', '36.5', 24), 36.5);
+for (const raw of ['-1', 'abc', '', ' ', 'Infinity', 'NaN']) {
+  assert.throws(
+    () => parseHoursFlag('untagged-hours', raw, 24),
+    /--untagged-hours must be a non-negative number of hours/,
+    raw
+  );
+}
+assert.equal(parseMinProdRefs(undefined), MIN_PLAUSIBLE_PROD_REFS);
+assert.equal(parseMinProdRefs('25'), 25);
+for (const raw of ['0', '-3', 'abc', '', '2.5', 'NaN']) {
+  assert.throws(() => parseMinProdRefs(raw), /--min-prod-refs must be a positive integer/, raw);
+}

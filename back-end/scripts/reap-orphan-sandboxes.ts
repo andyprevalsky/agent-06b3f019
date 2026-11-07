@@ -29,7 +29,8 @@ import {
   assessProdReferences,
   decideOrphan,
   enforceProdReferenceGuard,
-  MIN_PLAUSIBLE_PROD_REFS,
+  parseHoursFlag,
+  parseMinProdRefs,
   type OrphanBucket,
   type OrphanCandidate,
   type OrphanDecision,
@@ -42,7 +43,10 @@ const EXPECT_TOLERANCE = 0.05;
 
 function flag(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
+  if (i < 0) return undefined;
+  const value = process.argv[i + 1];
+  if (value === undefined || value.startsWith('--')) throw new Error(`--${name} requires a value`);
+  return value;
 }
 const has = (name: string) => process.argv.includes(`--${name}`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -142,8 +146,9 @@ async function main(): Promise<void> {
   if (!process.env.E2B_API_KEY) throw new Error('E2B_API_KEY is not set');
   const execute = has('execute');
   const criteria = {
-    untaggedMinAgeMs: Number(flag('untagged-hours') ?? 24) * 3600_000,
-    hostTaggedMinAgeMs: Number(flag('host-tagged-hours') ?? 72) * 3600_000,
+    untaggedMinAgeMs: parseHoursFlag('untagged-hours', flag('untagged-hours'), 24) * 3600_000,
+    hostTaggedMinAgeMs:
+      parseHoursFlag('host-tagged-hours', flag('host-tagged-hours'), 72) * 3600_000,
   };
   const expect = flag('expect-eligible');
   if (execute && expect === undefined) throw new Error('--execute requires --expect-eligible N');
@@ -152,7 +157,7 @@ async function main(): Promise<void> {
   const assessment = assessProdReferences(
     refs,
     process.env.DIRECT_URL,
-    Number(flag('min-prod-refs') ?? MIN_PLAUSIBLE_PROD_REFS)
+    parseMinProdRefs(flag('min-prod-refs'))
   );
   console.log(
     `prod refs: db-host=${assessment.host} sandboxIds=${refs.sandboxIds.size} codeSessionIds=${refs.codeSessionIds.size} agentIds=${refs.agentIds.size}`
@@ -230,6 +235,8 @@ async function main(): Promise<void> {
   };
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   console.log(`killed=${killed} failed=${failed} aborted=${aborted} kill-receipt=${receipt}.kills`);
+  // A partial run must be visible to a wrapper or CI step, not only in the log.
+  if (aborted || failed > 0) process.exitCode = 1;
   const after = await listAll();
   const remaining = after.filter(
     (s) => decideOrphan(s, refs, new Date(), criteria).eligible

@@ -19,11 +19,25 @@ run() {
   [ -f "$ROOT/.cloud-env" ] && . "$ROOT/.cloud-env"
   export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$ROOT")}"
   # The backend tags with the LOCAL stack database (run.sh's LOCAL_DB_URL), not
-  # back-end/.env's production URL, so build the same one before computing the id.
+  # back-end/.env's production URL, so rebuild the one run.sh selected before
+  # computing the id: the workspace's Docker Postgres when it is running (and
+  # system Postgres is not forced), else the shared system server.
   . "$ROOT/scripts/lib/workspace-env.sh" 2>/dev/null || return 0
-  local db_name
-  db_name="$(workspace_system_pg_db_name "$ROOT" 2>/dev/null)" || return 0
-  export DATABASE_URL="postgresql://postgres:postgres@localhost:${SYSTEM_PG_PORT:-5432}/$db_name"
+  local local_url=""
+  if [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && command -v docker >/dev/null 2>&1 &&
+    . "$ROOT/back-end/scripts/local-db-container.sh" 2>/dev/null; then
+    local container port
+    if container="$(resolve_local_db_container "$CONDUCTOR_WORKSPACE_NAME" "$(basename "$ROOT")" 2>/dev/null)"; then
+      port="$(docker_quick port "$container" 5432/tcp 2>/dev/null | head -1 | sed 's/.*://')"
+      [ -n "$port" ] && local_url="postgresql://postgres:postgres@localhost:${port}/victoria"
+    fi
+  fi
+  if [ -z "$local_url" ]; then
+    local db_name
+    db_name="$(workspace_system_pg_db_name "$ROOT" 2>/dev/null)" || return 0
+    local_url="postgresql://postgres:postgres@localhost:${SYSTEM_PG_PORT:-5432}/$db_name"
+  fi
+  export DATABASE_URL="$local_url"
   export DIRECT_URL="$DATABASE_URL"
   cd "$ROOT/back-end" || return 0
   # The same function the backend tags sandboxes with, not a copy of its format.

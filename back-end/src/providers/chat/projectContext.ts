@@ -11,6 +11,9 @@
  */
 import { prisma } from '../database';
 import { parseGithubUrl } from '../github';
+import { createLogger } from '../logger';
+
+const log = createLogger('ProjectContext');
 
 export interface RouterProjectSummary {
   name: string;
@@ -34,10 +37,22 @@ export function renderRouterProjectContext(project: RouterProjectSummary | null)
   );
 }
 
+/**
+ * Optional prompt enrichment: a failed lookup reads as "no project" (a Home chat)
+ * so the turn that awaits it alongside its messages still runs.
+ */
 export async function loadRouterProjectContext(agentId: string): Promise<string> {
-  const row = await prisma.agent.findUnique({
-    where: { id: agentId },
-    select: { project: { select: { name: true, repoUrl: true, defaultBranch: true } } },
-  });
-  return renderRouterProjectContext(row?.project ?? null);
+  try {
+    const row = await prisma.agent.findUnique({
+      where: { id: agentId },
+      select: { project: { select: { name: true, repoUrl: true, defaultBranch: true } } },
+    });
+    return renderRouterProjectContext(row?.project ?? null);
+  } catch (error) {
+    log.warn('Project lookup failed; continuing without it', {
+      agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return '';
+  }
 }

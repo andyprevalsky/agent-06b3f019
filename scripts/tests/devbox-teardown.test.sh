@@ -13,14 +13,27 @@ cat >"$WORK/bin/npx" <<'F'
 #!/usr/bin/env bash
 echo "npx $*" >>"$FAKE_LOG"
 case "$*" in
-  *--print-stack*) echo "${FAKE_STACK-host:boxes|ws:fake|db:abc}" ;;
+  *--print-stack*) echo "DB_URL_FOR_STACK=${DATABASE_URL:-unset}" >>"$FAKE_LOG"
+     echo "${FAKE_STACK-host:boxes|ws:fake|db:abc}" ;;
   *) echo "STACK_ENV=${ROSE_SANDBOX_STACK_ID:-unset}" >>"$FAKE_LOG"
+     echo "DB_URL_FOR_KILL=${DATABASE_URL:-unset}" >>"$FAKE_LOG"
      [ -n "${FAKE_SLEEP:-}" ] && sleep "$FAKE_SLEEP"
      [ -n "${FAKE_FAIL:-}" ] && exit 7
      echo "kill-stack-sandboxes: killed 1 sandbox(es)" ;;
 esac
 F
 chmod +x "$WORK/bin/npx"
+# A fake docker standing in for the workspace's Postgres container (run.sh's Docker path).
+cat >"$WORK/bin/docker" <<'F'
+#!/usr/bin/env bash
+case "$1" in
+  inspect) [ -n "${FAKE_DOCKER_CONTAINER:-}" ] && [[ "$*" == *"$FAKE_DOCKER_CONTAINER"* ]] && echo true || exit 1 ;;
+  exec) exit 0 ;;
+  port) echo "0.0.0.0:${FAKE_DOCKER_PORT:-55432}" ;;
+  *) exit 1 ;;
+esac
+F
+chmod +x "$WORK/bin/docker"
 export FAKE_LOG="$WORK/log"
 run() { : >"$FAKE_LOG"; PATH="$WORK/bin:$PATH" bash "$ROOT/scripts/devbox-teardown.sh" "$@"; }
 
@@ -40,6 +53,17 @@ grep -q 'STACK_ENV' "$FAKE_LOG" && fail "killer must not run without a stack id"
 start=$SECONDS
 FAKE_SLEEP=30 TEARDOWN_BUDGET_SECONDS=2 run >/dev/null || fail "hung killer must exit 0"
 [ $((SECONDS - start)) -lt 10 ] || fail "budget not respected ($((SECONDS - start))s)"
-# 6. the stack id comes from the repo's own code (real tsx, no E2B): ws part present
+# 6. the database url the stack id and the kill use follows run.sh's selection:
+#    system Postgres by default, the workspace's Docker container when it runs
+ws="$(basename "$ROOT")"
+run >/dev/null
+grep -q "DB_URL_FOR_STACK=postgresql://postgres:postgres@localhost:5432/victoria" "$FAKE_LOG" || fail "default is system Postgres: $(grep DB_URL_FOR_STACK "$FAKE_LOG")"
+grep -q "DB_URL_FOR_KILL=postgresql://postgres:postgres@localhost:5432/victoria" "$FAKE_LOG" || fail "kill must use the same database"
+FAKE_DOCKER_CONTAINER="victoria-db-$ws" FAKE_DOCKER_PORT=55441 run >/dev/null
+grep -q "DB_URL_FOR_STACK=postgresql://postgres:postgres@localhost:55441/victoria$" "$FAKE_LOG" || fail "docker devbox must use the container port: $(grep DB_URL_FOR_STACK "$FAKE_LOG")"
+grep -q "DB_URL_FOR_KILL=postgresql://postgres:postgres@localhost:55441/victoria$" "$FAKE_LOG" || fail "kill must use the container database"
+ROSE_USE_SYSTEM_PG=true FAKE_DOCKER_CONTAINER="victoria-db-$ws" FAKE_DOCKER_PORT=55441 run >/dev/null
+grep -q "DB_URL_FOR_STACK=postgresql://postgres:postgres@localhost:5432/victoria" "$FAKE_LOG" || fail "ROSE_USE_SYSTEM_PG=true must ignore the container"
+# 7. the stack id comes from the repo's own code (real tsx, no E2B): ws part present
 grep -q -- '--print-stack' "$ROOT/scripts/devbox-teardown.sh" || fail "must use the backend function"
 echo "devbox-teardown: all cases passed"

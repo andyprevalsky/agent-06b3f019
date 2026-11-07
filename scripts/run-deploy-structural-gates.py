@@ -120,6 +120,12 @@ class Gate:
     # Split into this many processes; each gets DEPLOY_GATE_SHARD=i/N and the
     # suite selects every N-th test (scripts/tests/deploy_gate_shard.py).
     shards: int = 1
+    # Jobs sharing a non-empty group never run at the same time. A suite that
+    # parks a real non-dumpable same-user child (PR_SET_DUMPABLE=0: unreadable
+    # cwd) as its fixture, or scans the whole /proc table and refuses on any
+    # such process, must not overlap another suite doing either: the scan
+    # cannot tell a sibling suite's fixture from a leaked process.
+    exclusive: str = ""
 
 
 @dataclass(frozen=True)
@@ -158,6 +164,15 @@ class RunningGate:
     output_path: Path
     started: float
     timed_out: bool = False
+
+
+def next_launchable(pending: Sequence[Job], running: Sequence[RunningGate]) -> Job | None:
+    """First pending job (queue order) whose exclusive group no running job holds."""
+    held = {item.gate.gate.exclusive for item in running if item.gate.gate.exclusive}
+    for job in pending:
+        if not job.gate.exclusive or job.gate.exclusive not in held:
+            return job
+    return None
 
 
 def expand_jobs(gates: Sequence[Gate], first: frozenset[str] = frozenset()) -> list[Job]:
@@ -274,9 +289,14 @@ def plan_gates(
     return planned
 
 
+# Suites that create or scan unreadable same-user processes (see Gate.exclusive):
+# deploy-test-cycle (local-cleanup quiet()), deploy-test-plan (namespace_quiet())
+# and deploy-structural-runner (a foreign non-dumpable sibling fixture).
+PROC_OBSERVATION = "proc-observation"
+
 GATES = (
-    Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py")),
-    Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py")),
+    Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
+    Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
     Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),
     Gate("deploy-cli", ("python3", "scripts/tests/deploy-cli.test.py")),
@@ -503,7 +523,8 @@ GATES = (
     Gate("backend-coverage-sharded", ("bash", "scripts/tests/backend-coverage-sharded.test.sh")),
     Gate(
         "deploy-structural-runner",
-        ("python3", "scripts/tests/run-deploy-structural-gates.test.py"), expected_seconds=117
+        ("python3", "scripts/tests/run-deploy-structural-gates.test.py"), expected_seconds=117,
+        exclusive=PROC_OBSERVATION,
     ),
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
     Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
@@ -670,7 +691,10 @@ def run_gates(
                     and not received_signal
                     and not repeated_failure
                 ):
-                    job = pending.popleft()
+                    job = next_launchable(pending, running)
+                    if job is None:
+                        break  # everything pending waits for a running exclusive job
+                    pending.remove(job)
                     output_path = output_root / (job.label.replace("/", "-of-") + ".log")
                     output = output_path.open("wb")
                     process = subprocess.Popen(

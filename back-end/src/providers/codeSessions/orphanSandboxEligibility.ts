@@ -188,6 +188,30 @@ function isNonProductionIpv6(host: string): boolean {
 }
 
 /**
+ * An absent flag keeps its default; a present one must be a non-negative number
+ * of hours. NaN would make no sandbox eligible, but a negative value would make
+ * every unreferenced untagged paused sandbox eligible whatever its age.
+ */
+export function parseHoursFlag(name: string, raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const hours = Number(raw);
+  if (raw.trim() === '' || !Number.isFinite(hours) || hours < 0) {
+    throw new Error(`--${name} must be a non-negative number of hours (got "${raw}")`);
+  }
+  return hours;
+}
+
+/** An absent flag keeps the default floor; a present one must be a positive integer. */
+export function parseMinProdRefs(raw: string | undefined): number {
+  if (raw === undefined) return MIN_PLAUSIBLE_PROD_REFS;
+  const floor = Number(raw);
+  if (raw.trim() === '' || !Number.isInteger(floor) || floor < 1) {
+    throw new Error(`--min-prod-refs must be a positive integer (got "${raw}")`);
+  }
+  return floor;
+}
+
+/**
  * Sanity check on the production reference read: an empty or tiny set (or one
  * read from a local/devbox database) would make every untagged paused sandbox
  * look orphaned. Pure; the reaper prints `host` so the operator can confirm.
