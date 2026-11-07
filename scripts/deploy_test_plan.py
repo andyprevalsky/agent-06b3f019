@@ -140,8 +140,8 @@ def select(template: dict, changed: list[str], result: dict, binding: dict | Non
 # Blacksmith gates run on their own VMs, so their worker counts must not follow the coordinating host's live
 # MemAvailable: a few hundred MB of drift flipped the structural gate's --max-workers between 4 and 5, so a
 # regenerated plan no longer matched the staged cycle ("bound to a different plan or source") and a refresh could
-# not be resumed. This is the 8-CPU / 16 GB devbox profile with healthy headroom (structural gate: 5 workers).
-BLACKSMITH_REFERENCE_HOST = ("--host-cpus", "8", "--host-mem-mb", "15000", "--host-total-mem-mb", "16000",
+# not be resumed. This is the 8-CPU / 16 GB devbox profile with healthy headroom (structural gate: 4 workers, the count the first sweep of PR #1751 ran).
+BLACKSMITH_REFERENCE_HOST = ("--host-cpus", "8", "--host-mem-mb", "13500", "--host-total-mem-mb", "16000",
                              "--host-watchdog-mb", "14400")
 
 
