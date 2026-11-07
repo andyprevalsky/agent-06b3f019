@@ -16,7 +16,12 @@ export function shouldActivateBlurLab(): boolean {
       window.sessionStorage.setItem(STORAGE_KEY, '1');
       return true;
     }
-    return window.sessionStorage.getItem(STORAGE_KEY) === '1';
+    // A saved preset keeps the lab reachable after the app is fully closed
+    // (sessionStorage does not survive), so it can always be reset.
+    return (
+      window.sessionStorage.getItem(STORAGE_KEY) === '1' ||
+      window.localStorage.getItem('rose.blurlab.preset') !== null
+    );
   } catch {
     return false;
   }
@@ -177,4 +182,57 @@ export function topBandReport(limit = 80): string {
     );
   });
   return lines.join('\n');
+}
+
+/** Opaque, unblurred layer in the exact page background over the status-bar inset. */
+export const COVER_LAYER_CSS =
+  '#blurlab-cover{position:fixed;top:0;left:0;right:0;height:env(safe-area-inset-top,0px);background-color:hsl(var(--background));z-index:2147483000;pointer-events:none;-webkit-backdrop-filter:none;backdrop-filter:none;filter:none;mask-image:none}';
+
+export function addCoverLayer(): () => void {
+  const removeCss = injectCss('cover-layer', COVER_LAYER_CSS);
+  const el = document.createElement('div');
+  el.id = 'blurlab-cover';
+  el.setAttribute('data-blurlab-panel', '');
+  document.body.appendChild(el);
+  return () => {
+    el.remove();
+    removeCss();
+  };
+}
+
+export interface Preset {
+  id: 'A' | 'B';
+  label: string;
+  status: (typeof STATUS_STYLES)[number];
+  cover: boolean;
+}
+
+export const PRESETS: readonly Preset[] = [
+  {
+    id: 'A',
+    label: 'A: black-translucent + opaque cover layer (white status text: dark theme only)',
+    status: 'black-translucent',
+    cover: true,
+  },
+  { id: 'B', label: 'B: default + theme-color (shipped)', status: 'default', cover: false },
+];
+
+const PRESET_KEY = 'rose.blurlab.preset';
+
+export function storedPreset(): Preset | null {
+  try {
+    const id = window.localStorage.getItem(PRESET_KEY);
+    return PRESETS.find((p) => p.id === id) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function storePreset(preset: Preset | null): void {
+  try {
+    if (preset) window.localStorage.setItem(PRESET_KEY, preset.id);
+    else window.localStorage.removeItem(PRESET_KEY);
+  } catch {
+    /* best effort */
+  }
 }
