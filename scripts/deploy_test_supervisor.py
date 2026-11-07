@@ -13,6 +13,9 @@ import sys
 import time
 
 # Preserve the existing ten-second TERM grace; reserve two seconds to reap after KILL.
+# A child that is merely finishing when the suite exits (a test fixture winding down) is not a leak: give it this
+# long to exit by itself before it counts as orphaned. One still alive after it is flagged and signalled as before.
+ORPHAN_SETTLE_SECONDS = 1.0
 TERM_GRACE_SECONDS = 10.0
 DRAIN_SECONDS = 12.0
 
@@ -38,6 +41,7 @@ def supervise(command, receipt, deadline=None):
     orphaned = False
     term_sent = set()
     kill_sent = set()
+    settle_until = None
     reaped = []
     quiescent = False
     error = None
@@ -75,6 +79,11 @@ def supervise(command, receipt, deadline=None):
                 break
             timed_out = timed_out or (deadline is not None and time.monotonic() >= deadline)
             remaining = children()
+            if native_exit is not None and not (stopped or timed_out):
+                settle_until = settle_until or time.monotonic() + ORPHAN_SETTLE_SECONDS
+                if remaining and time.monotonic() < settle_until:
+                    time.sleep(0.02)
+                    continue
             orphaned = orphaned or (native_exit is not None and bool(remaining))
             if stopped or timed_out or native_exit is not None:
                 now = time.monotonic()
