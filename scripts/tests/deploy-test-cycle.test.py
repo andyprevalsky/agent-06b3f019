@@ -2348,7 +2348,8 @@ class Cycle(unittest.TestCase):
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
 
     def test_native_cloud_cleanup_finds_fleet_audits_in_a_linked_worktrees_common_git_dir(self):
-        """2026-11-07: a deploy worktree's .git is a file; the fleet seals audits under the git common dir."""
+        """2026-11-07: a deploy worktree's .git is a file; the fleet keeps audits and ownership registries
+        under the git common dir."""
         import deploy_test_native_cleanup as n
         main = self.root / 'main-checkout'
         main.mkdir()
@@ -2361,8 +2362,25 @@ class Cycle(unittest.TestCase):
         self.assertTrue((linked / '.git').is_file())
         self.assertEqual(common, n.fleet_audit_root(linked.resolve()))
         self.assertEqual(common, n.fleet_audit_root(main.resolve()))
-        source = (ROOT / 'scripts/deploy_test_native_cleanup.py').read_text()
-        self.assertNotIn("/ '.git/cloudbench-fleet-audits'", source)
+        # The retained-registry refusal must look where the fleet writes it, or it passes vacuously.
+        registries = common.parent / 'cloudbench-fleet-ownership'
+        self.assertEqual(registries, n.fleet_ownership_root(linked.resolve()))
+        self.assertEqual(registries, n.fleet_ownership_root(main.resolve()))
+        for module in ('deploy_test_native_cleanup.py', 'deploy_test_interrupted_cleanup.py'):
+            self.assertNotIn("'.git/cloudbench-fleet-", (ROOT / 'scripts' / module).read_text(), module)
+
+    def test_native_cloud_cleanup_refuses_a_retained_fleet_registry_in_the_common_git_dir(self):
+        """Negative control: a fleet ownership registry still present where run-bench-fleet keeps it
+        (GIT_COMMON_DIR/cloudbench-fleet-ownership) refuses reconciliation; it is never vacuously absent."""
+        import deploy_test_native_cleanup as n
+        state, occurrence, paths, proof, hub = self.native_recon_state()
+        lives = [Path(p) for p in proof['files'] if p.endswith('/_batch/lifecycle.json')]
+        token = json.loads(lives[0].read_text())['fleet_owner_token']
+        registry = n.fleet_ownership_root(self.root) / token
+        registry.mkdir(parents=True)
+        (registry / 'meta').write_text('fleet_owner_token=' + token + '\n')
+        with self.assertRaisesRegex(ValueError, 'registry still retained'):
+            c.reconcile(copy.deepcopy(state), occurrence['id'], proof)
 
     def test_native_cloud_cleanup_binds_a_fleet_run_record_beyond_the_receipt_cap(self):
         """2026-11-07: a mass-agent _batch/run.json (98 MB) exceeded the 64 MiB receipt cap, so a verified

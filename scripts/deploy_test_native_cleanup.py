@@ -17,16 +17,25 @@ KIND = 'native-cloud-cleanup-v1'
 RUN_RECORD_MAX_BYTES = 512 * 1024 * 1024
 
 
-def fleet_audit_root(root):
-    """run-bench-fleet's FLEET_AUDIT_ROOT: the checkout's git common directory. A linked worktree's .git is
-    a file, so <root>/.git/cloudbench-fleet-audits never existed for a deploy worktree (2026-11-07)."""
+def fleet_git_common(root):
+    """run-bench-fleet's GIT_COMMON_DIR, which holds both FLEET_AUDIT_ROOT and FLEET_OWNERSHIP_ROOT. A linked
+    worktree's .git is a file, so <root>/.git/cloudbench-fleet-* never existed for a deploy worktree: audits
+    could not be bound and a retained ownership registry was invisible (2026-11-07)."""
     dot = Path(root) / '.git'
     if dot.is_dir():
-        return dot / 'cloudbench-fleet-audits'
+        return dot
     out = subprocess.run(['git', '-C', str(root), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
                          capture_output=True, text=True, timeout=30)
     need(out.returncode == 0 and out.stdout.strip(), 'git common directory')
-    return Path(out.stdout.strip()) / 'cloudbench-fleet-audits'
+    return Path(out.stdout.strip())
+
+
+def fleet_audit_root(root):
+    return fleet_git_common(root) / 'cloudbench-fleet-audits'
+
+
+def fleet_ownership_root(root):
+    return fleet_git_common(root) / 'cloudbench-fleet-ownership'
 
 
 def need(value, message):
@@ -175,7 +184,7 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
     need(meta.get('fleet_owner_token') == owner and meta.get('run_id') == fleet.name
          and meta.get('workspace_root') == str(root), 'isolated audit identity')
     tree(audit)
-    registry = root / '.git/cloudbench-fleet-ownership' / owner
+    registry = fleet_ownership_root(root) / owner
     if registry.exists():
         registered = fields(bound(registry / 'meta'))
         need(all(registered.get(k) == meta.get(k) for k in ('fleet_owner_token', 'run_id', 'workspace_root', 'app'))
@@ -268,7 +277,7 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
          and meta.get('workspace_root') == str(root), 'canary provider release')
     epoch = float(bound(canonical / 'provider-teardown-verified.epoch'))
     need(finite(epoch) and receipt['started_at'] <= epoch <= proof['confirmed_at'], 'canary release clock')
-    registry = root / '.git/cloudbench-fleet-ownership' / owner
+    registry = fleet_ownership_root(root) / owner
     need(not registry.exists() and not registry.is_symlink(), 'canary registry retained')
     ids = bound(canonical / 'owned-clones.ids').decode().splitlines()
     names = bound(canonical / 'owned-clones.names').decode().splitlines()
@@ -858,7 +867,7 @@ def validate(receipt, owner, proof):
              and meta.get('workspace_root') == str(root), 'native provider release')
         release = float(bound(audit / 'provider-teardown-verified.epoch'))
         need(finite(release) and adapter['started_at'] <= release <= confirmed, 'release epoch')
-        registry = root / '.git/cloudbench-fleet-ownership' / owner_token
+        registry = fleet_ownership_root(root) / owner_token
         need(not registry.exists() and not registry.is_symlink(), 'fleet registry still retained')
         ids = bound(audit / 'owned-clones.ids').decode().splitlines()
         names = bound(audit / 'owned-clones.names').decode().splitlines()
