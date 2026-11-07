@@ -73,6 +73,8 @@ class Disposition(unittest.TestCase):
         self.assertEqual(d.disposition('logs/run.log', manifest), 'committed')
         self.assertEqual(d.disposition('front-end/node_modules/', {}), 'reproducible')
         self.assertEqual(d.disposition('agents/venv/', {}), 'reproducible')
+        self.assertEqual(d.disposition('agents/venv', {}), 'reproducible')  # a symlinked venv has no trailing slash
+        self.assertEqual(d.disposition('agents/venv', {}, '/var/tmp/wt'), 'reproducible')
         self.assertIsNone(d.disposition('back-end/.env', {}))
         self.assertIsNone(d.disposition('agents/navi-worker-log.txt', {}))
 
@@ -459,6 +461,78 @@ class DeletionCheck(Repo):
         self.assertIn('1 unpushed commit(s)', out)
         self.assertIn('branch main has 1 commit(s) on no remote', out)
         self.assertIn('live process 42 in this checkout: worker.py', out)
+
+    def entry(self, tip, **override):
+        return {'disposition': 'archived', 'tip': tip, 'archive': 'devbox-closeout-private/pr-7/git.tar.gz.aesgcm',
+                'sha256': 'a' * 64, **override}
+
+    def check(self, manifest):
+        path = Path(self.tmp.name) / 'manifest.json'
+        path.write_text(json.dumps({'.context/': 'regenerated', **manifest}))
+        with patch.object(d, 'live_processes', return_value=[]):
+            return self.call(d.cmd_deletion_check, manifest=path, receipt=None)
+
+    def test_local_only_branches_and_stashes_need_an_archived_disposition_bound_to_their_tip(self):
+        sh('git', 'checkout', '-q', '-b', 'wip/local', cwd=self.root)
+        (self.root / 'app.py').write_text('x = 9\n')
+        sh('git', 'commit', '-qam', 'local only', cwd=self.root)
+        tip = sh('git', 'rev-parse', 'HEAD', cwd=self.root).strip()
+        sh('git', 'checkout', '-q', 'main', cwd=self.root)
+        (self.root / 'app.py').write_text('x = 3\n')
+        sh('git', 'stash', cwd=self.root)
+        stash = sh('git', 'stash', 'list', '--format=%H', cwd=self.root).strip()
+        code, out, _ = self.check({})
+        self.assertEqual(code, 1)
+        self.assertIn('branch wip/local has 1 commit(s) on no remote', out)
+        self.assertIn(f'git stash entry {stash[:12]} is not preserved', out)
+        refs = {'branch:wip/local': self.entry(tip), f'stash:{stash}': self.entry(stash)}
+        code, out, _ = self.check(refs)
+        self.assertEqual(code, 0, out)
+        receipt = json.loads(d.READINESS_FILE.read_text())
+        self.assertEqual(receipt['preserved_refs'], dict(sorted(refs.items())))
+        # An assertion is not a binding: a bare string, a stale tip, a missing archive key or a bad hash all stay open.
+        for bad in ('archived', self.entry('b' * 40), self.entry(tip, archive=''), self.entry(tip, sha256='xyz'),
+                    self.entry(tip, disposition='asserted')):
+            code, out, _ = self.check({**refs, 'branch:wip/local': bad})
+            self.assertEqual(code, 1, bad)
+            self.assertIn('branch wip/local has 1 commit(s) on no remote', out)
+        code, out, _ = self.check({**refs, 'branch:wip/local': self.entry('b' * 40)})
+        self.assertIn(f'(archived at {"b" * 12}, now {tip[:12]})', out)
+        # Git-object keys are never mistaken for ignored-path globs.
+        self.assertIsNone(d.disposition('branch:wip/local', {'branch:*': 'archived'}))
+
+    def test_ignored_files_in_a_sibling_worktree_need_a_disposition_too(self):
+        sibling = Path(self.tmp.name) / 'sibling'
+        sh('git', 'worktree', 'add', '-q', '-b', 'sibling-work', str(sibling), cwd=self.root)
+        (sibling / '.context').mkdir()
+        (sibling / '.context/evidence.log').write_text('only here')
+        (sibling / 'node_modules').mkdir()
+        (sibling / 'node_modules/x.js').write_text('')
+        code, out, _ = self.check({})
+        self.assertEqual(code, 1)
+        self.assertIn(f'ignored path without a disposition: {sibling}/.context/', out)
+        self.assertNotIn('node_modules', out)
+        code, out, _ = self.check({f'{sibling}/.context/': self.entry('c' * 40, disposition='archived')})
+        self.assertEqual(code, 0, out)
+        receipt = json.loads(d.READINESS_FILE.read_text())
+        self.assertEqual(receipt['ignored'][f'{sibling}/.context/'], 'archived')
+        self.assertEqual(receipt['ignored'][f'{sibling}/node_modules/'], 'reproducible')
+        self.assertEqual(receipt['ignored']['.context/'], 'regenerated')
+
+    def test_a_worktree_head_with_unpushed_commits_is_covered_by_its_branch_disposition(self):
+        (self.root / 'app.py').write_text('x = 5\n')
+        sh('git', 'commit', '-qam', 'local only', cwd=self.root)
+        tip = sh('git', 'rev-parse', 'HEAD', cwd=self.root).strip()
+        code, out, _ = self.check({})
+        self.assertIn('1 unpushed commit(s) in', out)
+        code, out, _ = self.check({'branch:main': self.entry(tip)})
+        self.assertEqual(code, 0, out)
+        sh('git', 'checkout', '-q', '--detach', cwd=self.root)
+        code, out, _ = self.check({'branch:main': self.entry(tip)})
+        self.assertEqual(code, 1)
+        self.assertIn('1 unpushed commit(s) in', out)
+        code, out, _ = self.check({'branch:main': self.entry(tip), f'commit:{tip}': self.entry(tip)})
+        self.assertEqual(code, 0, out)
 
     def test_after_merge_the_receipt_is_a_committed_record_that_reruns_byte_identically(self):
         d.write_json(d.MERGED_FILE, {'pr': 7, 'merged_sha': 'a' * 40})
