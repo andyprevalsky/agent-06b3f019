@@ -1,0 +1,112 @@
+{
+ "failures": [
+  {
+   "id": "8e834ff62a5c416c9d359d2e0ef602fd",
+   "check": "deploy-command-structural/deploy-command-structural",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "9997bca37f021fb71b7ef5f68575a9733ca93c18",
+    "digest": "5442daf076536c9d4314d42849d56275e28d6d4dcacd741453512baf0ca79983"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "deploy-test-plan InterruptedCustody scan aborted with PermissionError reading /proc/<pid>/fd of a same-uid process that was exiting (EACCES race); the first full sweep ended UNVERIFIED with exit 1 and no per-case evidence",
+   "evidence": "RCA: docs/rca/cases/2026-11-07-interrupted-custody-scan-aborted-on-exiting-process.md; red test cef1674592, fix 033bd62e2f, regression 5332ccc785; main fails identically (scripts/deploy_test_plan.py unchanged by this PR)",
+   "assigned_repair": true,
+   "assigned_reason": "The deploy owner keeps this repair inside PR #1751 (user directive: finish the /deploy): the fix and its regression are committed before the unchanged gate is rerun on the new source; no post-merge handoff and no waiver.",
+   "assigned_evidence": "docs/rca/cases/2026-11-07-interrupted-custody-scan-aborted-on-exiting-process.md"
+  },
+  {
+   "id": "be13dee6162a4eb09cef5c333c5c35f8",
+   "check": "agents-coverage-blackbox/agents-coverage-blackbox",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "9997bca37f021fb71b7ef5f68575a9733ca93c18",
+    "digest": "5442daf076536c9d4314d42849d56275e28d6d4dcacd741453512baf0ca79983"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "agents code-session-direct-chat claude_recording_through_ws_server_matches_event_fixture failed: a late-attaching fixture viewer received the compacted replay instead of the event stream (test-harness race); the first full sweep ended UNVERIFIED",
+   "evidence": "RCA: docs/rca/cases/2026-11-07-code-session-fixture-viewer-attached-after-cli-streamed.md; fix 52b7a185cd, case 021245d726; the unchanged blackbox domain passes 18 of 18 after the fix",
+   "assigned_repair": true,
+   "assigned_reason": "The deploy owner keeps this repair inside PR #1751 (user directive: finish the /deploy): the fix and its regression are committed before the unchanged gate is rerun on the new source; no post-merge handoff and no waiver.",
+   "assigned_evidence": "docs/rca/cases/2026-11-07-code-session-fixture-viewer-attached-after-cli-streamed.md"
+  },
+  {
+   "id": "29972823ac67436da42e87654370a0dd",
+   "check": "backend-coverage-blackbox/blackbox:archive",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-16vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_backend.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "9997bca37f021fb71b7ef5f68575a9733ca93c18",
+    "digest": "5442daf076536c9d4314d42849d56275e28d6d4dcacd741453512baf0ca79983"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "backend archive domain: 'manifest lock holds no connection during storage I/O -- observer must detect an old owned transaction' failed because the observer compared a JS millisecond clock with pg_stat_activity.xact_start (microseconds) and missed its own transaction begun in the same millisecond",
+   "evidence": "RCA: docs/rca/cases/2026-10-27-manifest-lock-connection-test-counted-other-suites-transactions.md (recurrence); red test ed50a1cdb8, fix 506e112c7f, case f6d36573cc; archive helpers and run.ts unchanged by this PR; 5 of 5 passes through the owning runner",
+   "assigned_repair": true,
+   "assigned_reason": "The deploy owner keeps this repair inside PR #1751 (user directive: finish the /deploy): the fix and its regression are committed before the unchanged gate is rerun on the new source; no post-merge handoff and no waiver.",
+   "assigned_evidence": "docs/rca/cases/2026-10-27-manifest-lock-connection-test-counted-other-suites-transactions.md"
+  },
+  {
+   "id": "ce653a7d2f7b45e59b3aa84fe52b4d69",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-4vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "9997bca37f021fb71b7ef5f68575a9733ca93c18",
+    "digest": "5442daf076536c9d4314d42849d56275e28d6d4dcacd741453512baf0ca79983"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloudbench-controller gate hung 70 minutes on a Blacksmith VM and was cancelled; only the status-service-shutdown case never finished, its first pre-container docker call never returned; the gate passes locally in 19 minutes at the same source",
+   "evidence": "RCA: docs/rca/cases/2026-11-07-controller-runner-docker-client-calls-unbounded-and-silent.md; fix 2008abfc83 bounds and names every pre-container docker call; root cause of the docker wedge on that VM is unexplained (mitigated, not fixed); no changed file is reachable from the stuck case",
+   "assigned_repair": true,
+   "assigned_reason": "The deploy owner keeps this repair inside PR #1751 (user directive: finish the /deploy): the fix and its regression are committed before the unchanged gate is rerun on the new source; no post-merge handoff and no waiver.",
+   "assigned_evidence": "docs/rca/cases/2026-11-07-controller-runner-docker-client-calls-unbounded-and-silent.md"
+  }
+ ]
+}
