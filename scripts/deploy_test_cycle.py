@@ -125,7 +125,8 @@ def source_mode(path: Path) -> int:
 
 
 def environment_digest() -> str:
-    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID"}
+    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
+                 "CODEX_TOOL_CALL_ID"}
     return digest({k: v for k, v in os.environ.items() if k not in transient})
 
 
@@ -184,6 +185,7 @@ def command(value: object) -> list[str]:
 
 
 def validate_plan(plan: dict, root: Path = ROOT) -> None:
+    """Refuse unsupported workers before allocating ownership or admitting native work."""
     gates = plan.get("gates")
     if not isinstance(gates, list) or not gates:
         raise ValueError("plan needs gates")
@@ -193,6 +195,9 @@ def validate_plan(plan: dict, root: Path = ROOT) -> None:
         if not isinstance(name, str) or not NAME.fullmatch(name) or name in names:
             raise ValueError("gate names must be unique safe identifiers")
         names.add(name)
+        if (gate.get('native_cloud') is True
+                and gate.get('worker_transport') == 'benchmark-cloud-cli' and sys.platform != 'linux'):
+            raise ValueError(f'{name}: native cloud supervision requires Linux before adapter admission')
         command(gate.get("command"))
         if any("--reuse-passed" in arg for arg in gate["command"]):
             raise ValueError("staged runs require fresh execution, not pass-cache reuse")
@@ -293,6 +298,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
     if not latest or gate.get('quick'):
         return None
     receipt = latest
+    # Recovered native evidence has no positive-adoption contract yet.
+    if receipt.get('kind') == 'recovered-native-execution-v1':
+        return None
     try:
         skips = reuse_qualifications(state, gate)
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
@@ -305,8 +313,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
             or attempt.get('stale') or attempt.get('interrupted')
             or receipt.get('status') != 'PASS' or receipt.get('complete') is not True
             or receipt.get('executed') is not True or type(receipt.get('native_exit')) is not int
-            or receipt['native_exit'] != 0 or receipt.get('timed_out') or receipt.get('cancelled')
-            or receipt.get('lingering_group') or receipt.get('cleanup_owner')
+            or receipt['native_exit'] != 0
+            or any(receipt.get(flag) is not False for flag in ('timed_out', 'cancelled', 'lingering_group'))
+            or receipt.get('cleanup_owner')
             or not active or receipt.get('cases') != expected
             or receipt.get('command') != gate['command']
             or receipt.get('execution_binding') != {'input_fingerprint': state['input_fingerprints'].get(gate['name']),
@@ -1780,6 +1789,11 @@ def main(argv: list[str] | None = None) -> int:
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
+            journal = directory / 'settlement-journal.json'
+            if journal.exists():
+                committed = directory / 'settlement-committed.json'
+                if not committed.is_file() or read(committed) != {'journal_sha256': sha_file(journal)}:
+                    raise ValueError('pending settlement journal; resume its exact recovery before normal actions')
             state_path = directory / "cycle.json"
             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
             if args.action == "init" and state_path.exists():
