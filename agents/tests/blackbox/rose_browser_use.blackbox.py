@@ -504,7 +504,8 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert auth_help["input_schema"]["required"] == []
 
     payment = tools[3]
-    assert "only if checkout requires you to enter new card details" in payment["description"]
+    assert "when checkout requires you to enter new card details" in payment["description"]
+    assert "told you not to use a saved payment method" in payment["description"]
     assert "valid saved payment method is already selected" in payment["description"]
     line_items = payment["input_schema"]["properties"]["line_items"]
     assert line_items["items"]["required"] == [
@@ -2999,10 +3000,14 @@ def test_phone_off_matches_prephone_bytes():
     summary) now state the shared PRODUCT_URL_GUIDANCE contract. Only the tools hash
     changed in both modes; HEAD 3271548804 reproduces the previous tools hash exactly;
     system/messages are unchanged.
+    Re-pinned for H-49 (rca/h-49-20261107): the request_payment_card description now
+    states the user one-time-card exception before the saved-method default. Only the
+    tools hash changed in both modes; 7555a20d05 reproduces the previous tools hash
+    exactly; system/messages are unchanged.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('4b6d3179a1fc4b3cb52052e2ff040114a7bd23a66fd470264c913f45be7f761d', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('805ddef8d7876a92b1597c8e24ec4600855edf71cf841aeb781d4b567fb4632b', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
+    expected = {'0': ('27606ab8b67e2ebd29ee872786a0513bbaa2361ff079157827328bf904a32618', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('2c44542b777315159b403a351b6a830b52400f69d85f28a0c7d6d97abd9a5fad', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):

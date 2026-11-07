@@ -6540,11 +6540,35 @@ def test_build_autopay_prompt_section():
     assert out.lstrip().startswith("## Billing Address")
     assert "## Payment Information" in out
     assert "call request_payment_card" in out
-    assert "only if checkout requires you to enter new card details" in out
+    assert "when checkout requires you to enter new card details" in out
     assert "valid saved payment method is already selected" in out
     assert "do not call request_payment_card" in out
     # Card field names are emitted by the RESUME prompt (after mint), not the autopay prompt.
     assert "4111111111111111" not in out
+
+
+def test_saved_payment_method_default_yields_to_user_one_time_card_request():
+    """Cement H-49: the saved-method default must not forbid a requested one-time card.
+
+    DoorDash checkout preselected a saved Visa while the user asked for
+    request_payment_card and forbade the saved method. Both payment surfaces
+    said "do not call request_payment_card" whenever a saved method was
+    selected, so the browser did neither and timed out without a payment
+    approval. The system rule and the tool description must state the user
+    exception before the saved-method default, and must agree.
+    """
+    from domains.spawn_browser_agent_v3.service_crypto import PAYMENT_CARD_ENTRY_RULE
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    exception = "the user asked for a one-time card or told you not to use a saved payment method"
+    default = "Otherwise, if a valid saved payment method is already selected and no card entry is"
+    tool_description = BROWSER_USE_TOOLS["request_payment_card"]["description"]
+    for surface in (PAYMENT_CARD_ENTRY_RULE, tool_description):
+        assert "only if checkout requires" not in surface
+        assert exception in surface
+        assert default in surface
+        assert surface.index(exception) < surface.index(default)
+        assert "continue with that saved method" in surface
 
 
 def test_build_autopay_prompt_section_no_card():

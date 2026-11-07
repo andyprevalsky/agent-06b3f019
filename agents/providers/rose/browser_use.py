@@ -304,8 +304,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "request_payment_card": {
         "description": (
-            "Request a one-time virtual payment card for the current checkout only if checkout requires you to "
-            "enter new card details. If a valid saved payment method is already selected and no card entry is "
+            "Request a one-time virtual payment card for the current checkout when checkout requires you to "
+            "enter new card details, or when the user asked for a one-time card or told you not to use a saved "
+            "payment method. Otherwise, if a valid saved payment method is already selected and no card entry is "
             "required, do not call this tool; continue with that saved method. Before typing any new card details, "
             "first read the full itemized receipt off "
             "the page and visit each product page as needed. Every item MUST include its product URL (its own "
