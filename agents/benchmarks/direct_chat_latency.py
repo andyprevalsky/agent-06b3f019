@@ -83,6 +83,7 @@ class LocalCodeSessionSandbox:
         *,
         fixture: Optional[Path] = None,
         gate_first_turn: bool = False,
+        hold_first_turn_output: bool = False,
         cli_bin: Optional[str] = None,
         extra_env: Optional[dict[str, str]] = None,
         goal: str = "Fix the bug in calc.py so test_calc.py passes",
@@ -90,6 +91,7 @@ class LocalCodeSessionSandbox:
         self.provider = provider
         self.fixture = fixture
         self.gate_first_turn = gate_first_turn
+        self.hold_first_turn_output = hold_first_turn_output
         self.cli_bin = cli_bin
         self.extra_env = dict(extra_env or {})
         self.goal = goal
@@ -124,6 +126,8 @@ class LocalCodeSessionSandbox:
             env["REPLAY_CLI_FIXTURE"] = str(self.fixture)
         if self.gate_first_turn:
             env["REPLAY_CLI_GATE"] = str(self.tmp)
+        if self.hold_first_turn_output:
+            env["REPLAY_CLI_START_GATE"] = str(self.tmp)
         if self.provider == "codex":
             env.update({"CODEX_GOAL": self.goal, "CODEX_AUTH_JSON": "{}"})
             if not self.cli_bin:
@@ -160,6 +164,10 @@ class LocalCodeSessionSandbox:
 
     def finish_first_turn(self) -> None:
         (self.tmp / "finish-turn-1").touch()
+
+    def release_first_turn_output(self) -> None:
+        """Let the held stand-in CLI start streaming turn 1 (see ``hold_first_turn_output``)."""
+        (self.tmp / "start-turn-1").touch()
 
     def cli_stdin_lines(self) -> list[dict[str, Any]]:
         if not self.stdin_log.exists():
