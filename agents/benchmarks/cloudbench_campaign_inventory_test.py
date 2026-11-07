@@ -207,10 +207,12 @@ sys.exit(2 if mode == 'lifecycle-failed' and task == 'broken' else 0 if status =
             assert previous['resources_released'] is True and previous['infra_failure'] is True
             assert previous['released_at_epoch'] > 0 and previous['retry_blocked'] is None
             assert current['controller_exit_code'] == 0 and current['resources_released'] is False
-            assert current['retry_blocked'] == (
-                'physical run handle unavailable' if failure == 'retry-handle-missing'
-                else 'terminal result or release remains unverified'
-            )
+            if failure == 'retry-handle-missing':
+                assert current['retry_blocked'] == 'physical run handle unavailable'
+            else:
+                # I-29 (84757cb295): the bounded reason names the unreadable receipt's error.
+                assert current['retry_blocked'].startswith('terminal result or release remains unverified ('), current
+                assert 'FileNotFoundError' in current['retry_blocked'] and len(current['retry_blocked']) <= 240, current
             for key in ('run_id', 'fleet_dir', 'fleet_owner_token', 'released_at_epoch'):
                 assert current[key] is None, f'current attempt inherited prior {key}'
                 assert broken.get(key) is None, f'current job inherited prior {key}'
