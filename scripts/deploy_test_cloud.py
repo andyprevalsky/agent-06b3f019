@@ -180,6 +180,7 @@ def collect_campaign(request, root, runs, campaign, started, native_exit, width)
 
 
 def execute(request, root):
+    """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
     checks, skipped = request['checks'], request.get('skips', {})
     if (not checks or len(set(checks)) != len(checks) or set(checks) & set(skipped)
             or any(not isinstance(n, str) or not NAME.fullmatch(n) or n.startswith('-')
@@ -195,6 +196,7 @@ def execute(request, root):
         raise ValueError('provider capacity cannot admit one smoke task')
     campaign = directory / 'campaigns' / ('deploy-' + directory.name)
     env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
+           'DEPLOY_NATIVE_HUB_JOIN': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
            'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
@@ -212,7 +214,7 @@ def execute(request, root):
             print(guidance, file=sys.stderr, flush=True)
             log.write((guidance + '\n').encode())
             log.flush()
-        code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None)
+        code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None, owned_lifecycle=True)
     reason = None
     try:
         if timed_out or cancelled or lingering or source(root) != request['source']:

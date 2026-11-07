@@ -125,8 +125,23 @@ def source_mode(path: Path) -> int:
 
 
 def environment_digest() -> str:
-    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID"}
+    transient = {"_", "PWD", "OLDPWD", "SHLVL", "INVOCATION_ID", "JOURNAL_STREAM", "SYSTEMD_EXEC_PID",
+                 "CODEX_TOOL_CALL_ID"}
     return digest({k: v for k, v in os.environ.items() if k not in transient})
+
+
+ROTATING_CREDENTIAL = re.compile(rb"(?m)^([ \t]*(?:export[ \t]+)?GITHUB_TOKEN[ \t]*=).*$")
+
+
+def runtime_config_sha256(path: Path) -> str:
+    """Digest a runtime config file, ignoring only the rotating GitHub user token's value.
+
+    The devbox daemon rewrites ``GITHUB_TOKEN`` in the managed env files every time it refreshes
+    that short-lived credential (observed 3 times in 40 minutes on 2026-11-07), which made any
+    staged cycle longer than the refresh interval go stale. The key's presence and every other
+    byte stay bound, so adding, removing or changing any other setting still invalidates a cycle.
+    """
+    return hashlib.sha256(ROTATING_CREDENTIAL.sub(rb"\1<rotating-credential>", path.read_bytes())).hexdigest()
 
 
 def input_fingerprints(plan: dict, root: Path) -> dict:
@@ -154,7 +169,7 @@ def input_fingerprints(plan: dict, root: Path) -> dict:
     for rel in [".env", "env.sh", "back-end/.env", "agents/.env", "agents/.env.benchmark-temporal",
                 "front-end/.env", "front-end/.env.local"]:
         if (root / rel).is_file():
-            runtime_config[rel] = hashlib.sha256((root / rel).read_bytes()).hexdigest()
+            runtime_config[rel] = runtime_config_sha256(root / rel)
     return {g["name"]: digest({"files": {p: h for p, h in files.items()
                             if any(fnmatchcase(p, glob) for glob in g.get("input_paths", ["*"]))},
                             "runtime_config": runtime_config,
@@ -170,6 +185,7 @@ def command(value: object) -> list[str]:
 
 
 def validate_plan(plan: dict, root: Path = ROOT) -> None:
+    """Refuse unsupported workers before allocating ownership or admitting native work."""
     gates = plan.get("gates")
     if not isinstance(gates, list) or not gates:
         raise ValueError("plan needs gates")
@@ -179,6 +195,9 @@ def validate_plan(plan: dict, root: Path = ROOT) -> None:
         if not isinstance(name, str) or not NAME.fullmatch(name) or name in names:
             raise ValueError("gate names must be unique safe identifiers")
         names.add(name)
+        if (gate.get('native_cloud') is True
+                and gate.get('worker_transport') == 'benchmark-cloud-cli' and sys.platform != 'linux'):
+            raise ValueError(f'{name}: native cloud supervision requires Linux before adapter admission')
         command(gate.get("command"))
         if any("--reuse-passed" in arg for arg in gate["command"]):
             raise ValueError("staged runs require fresh execution, not pass-cache reuse")
@@ -279,6 +298,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
     if not latest or gate.get('quick'):
         return None
     receipt = latest
+    # Recovered native evidence has no positive-adoption contract yet.
+    if receipt.get('kind') == 'recovered-native-execution-v1':
+        return None
     try:
         skips = reuse_qualifications(state, gate)
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
@@ -291,8 +313,9 @@ def full_pass_binding(state: dict, gate: dict) -> dict | None:
             or attempt.get('stale') or attempt.get('interrupted')
             or receipt.get('status') != 'PASS' or receipt.get('complete') is not True
             or receipt.get('executed') is not True or type(receipt.get('native_exit')) is not int
-            or receipt['native_exit'] != 0 or receipt.get('timed_out') or receipt.get('cancelled')
-            or receipt.get('lingering_group') or receipt.get('cleanup_owner')
+            or receipt['native_exit'] != 0
+            or any(receipt.get(flag) is not False for flag in ('timed_out', 'cancelled', 'lingering_group'))
+            or receipt.get('cleanup_owner')
             or not active or receipt.get('cases') != expected
             or receipt.get('command') != gate['command']
             or receipt.get('execution_binding') != {'input_fingerprint': state['input_fingerprints'].get(gate['name']),
@@ -1532,7 +1555,7 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                     'front-end/.env', 'front-end/.env.local'):
             origin, destination = root / rel, Path(after['worker_root']) / rel
             if (origin.is_file() != destination.is_file()
-                    or origin.is_file() and sha_file(origin) != sha_file(destination)):
+                    or origin.is_file() and runtime_config_sha256(origin) != runtime_config_sha256(destination)):
                 raise ValueError('local worker runtime configuration differs from the frozen inputs')
         changed.append(name)
     if not changed:
@@ -1766,6 +1789,11 @@ def main(argv: list[str] | None = None) -> int:
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
+            journal = directory / 'settlement-journal.json'
+            if journal.exists():
+                committed = directory / 'settlement-committed.json'
+                if not committed.is_file() or read(committed) != {'journal_sha256': sha_file(journal)}:
+                    raise ValueError('pending settlement journal; resume its exact recovery before normal actions')
             state_path = directory / "cycle.json"
             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
             if args.action == "init" and state_path.exists():

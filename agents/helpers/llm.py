@@ -77,7 +77,6 @@ from providers.planner_memory.inject import (
 )
 from providers.planner_memory.retrieval import DEFAULT_CONFIG as PLANNER_MEMORY_CONFIG
 from providers.planner_memory.retrieval import MemoryRetrieval
-from providers.rose.flash_agent import is_flash_agent_call
 from providers.rose import (
     ClaudeAuthContext,
     ComputeAuthContext,
@@ -89,6 +88,7 @@ from providers.rose import (
     pool_for_model,
 )
 from providers.rose.errors import RoseAllFailed
+from providers.rose.flash_agent import is_flash_agent_call
 from providers.rose.inter_agent_context import inter_agent_message, is_inter_agent_message
 from providers.rose.policy import anthropic_family_excluded, benchmark_compute_token_type
 from providers.rose.schema import (
@@ -96,6 +96,8 @@ from providers.rose.schema import (
     build_openai_response_format,
 )
 from providers.rose.structured_output import StructuredOutputAccumulator
+from providers.rose.subscription_usage import take as take_subscription_usage
+from providers.rose.subscription_usage import token_fingerprint
 from providers.rose.transforms import reconstruct_agent_response
 from providers.rose.truncation import model_key
 from providers.rose.waterfall import SKIP_REASON_STRUCTURED_OUTPUT_EXCLUDED
@@ -627,7 +629,11 @@ def _build_claude_auth_context(
         )
 
     async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
-        await heartbeat_compute_token_lineage_activity(ctx.lineage_key or "")
+        await heartbeat_compute_token_lineage_activity(
+            ctx.lineage_key or "",
+            integration_id=integration_id,
+            usage=take_subscription_usage(ctx.token),
+        )
 
     return ClaudeAuthContext(
         token=claude_token,
@@ -701,7 +707,11 @@ def _build_gpt_auth_context(
         )
 
     async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
-        await heartbeat_compute_token_lineage_activity(ctx.lineage_key or "")
+        await heartbeat_compute_token_lineage_activity(
+            ctx.lineage_key or "",
+            integration_id=integration_id,
+            usage=take_subscription_usage(ctx.token),
+        )
 
     return GptAuthContext(
         token=gpt_token,
@@ -7539,11 +7549,25 @@ async def fetch_compute_token_activity(
 
 
 @activity.defn
-async def heartbeat_compute_token_lineage_activity(lineage_key: str) -> bool:
-    """Refresh a compute-token lineage lease. Best-effort; callers should not block on it."""
+async def heartbeat_compute_token_lineage_activity(
+    lineage_key: str,
+    integration_id: Optional[str] = None,
+    usage: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Refresh a compute-token lineage lease. Best-effort; callers should not block on it.
+
+    Also carries the token's latest provider usage-window snapshot (see
+    `providers.rose.subscription_usage`) and the Integration row that served it,
+    so per-account usage reaches the backend without a separate request.
+    """
     if not lineage_key:
         return False
     config = load_config()
+    body: Dict[str, Any] = {"lineageKey": lineage_key}
+    if integration_id:
+        body["integrationId"] = integration_id
+    if usage:
+        body["usage"] = usage
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -7552,7 +7576,7 @@ async def heartbeat_compute_token_lineage_activity(lineage_key: str) -> bool:
                     "X-API-Key": config.backend.api_key or "",
                     "Content-Type": "application/json",
                 },
-                json={"lineageKey": lineage_key},
+                json=body,
                 timeout=5.0,
             )
             return response.status_code == 200
@@ -7647,7 +7671,7 @@ def credential_fingerprint(access_token: Optional[str]) -> Optional[str]:
     itself (backend codeLoginRejection.ts ``credentialFingerprint``)."""
     if not access_token:
         return None
-    return hashlib.sha256(access_token.encode()).hexdigest()[:16]
+    return token_fingerprint(access_token)
 
 
 @activity.defn

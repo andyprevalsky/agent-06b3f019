@@ -106,11 +106,7 @@ function statusUpdate(body: UpdateStatusBody): Prisma.AgentUpdateManyMutationInp
 
 async function persistStatus(agentId: string, body: UpdateStatusBody, workflowGeneration?: string) {
   const update = statusUpdate(body);
-  if (workflowGeneration === undefined) {
-    return { accepted: true, agent: await repo.updateAgent(agentId, update) };
-  }
-  const accepted = await repo.updateAgentForWorkflow(agentId, workflowGeneration, update);
-  return { accepted, agent: await repo.findAgentById(agentId) };
+  return repo.updateAgentForWorkflow(agentId, workflowGeneration, update);
 }
 
 async function failureSurface(agentId: string, body: UpdateStatusBody) {
@@ -134,11 +130,13 @@ async function failureSurface(agentId: string, body: UpdateStatusBody) {
 async function broadcastStatus(
   agentId: string,
   body: UpdateStatusBody,
-  temporalWorkflowId: string | null
+  temporalWorkflowId: string | null,
+  userControlRevision: number
 ): Promise<void> {
   await broadcastAgentUpdate(agentId, {
     progress: body.progress,
     status: body.status,
+    userControlRevision,
     statusMessage: body.statusMessage ?? undefined,
     tokenCount: body.tokenCount,
     tokensIn: body.tokensIn,
@@ -172,7 +170,12 @@ export async function updateAgentStatus(
 
   const result = await persistStatus(agentId, body, workflowGeneration);
   if (result.agent === null || !result.accepted) return result.agent;
-  await broadcastStatus(agentId, body, result.agent.temporalWorkflowId);
+  await broadcastStatus(
+    agentId,
+    { ...body, status: result.agent.status },
+    result.agent.temporalWorkflowId,
+    result.agent.userControlRevision
+  );
   // Platform GMV: any agent (root or child) that completes with a structured
   // output containing BOTH a USD amount and an order/confirmation id.
   // Dynamic import keeps agents/purchases domains decoupled for layer-deps.

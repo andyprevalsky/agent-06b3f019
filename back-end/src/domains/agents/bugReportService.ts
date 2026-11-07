@@ -15,6 +15,8 @@
  *
  * No SMS and no auto-open: the FE keeps an explicit Open / Copy link after
  * launch. Texts and window.open were user-visible side effects of reporting.
+ *
+ * The root agent's report_bug tool files through agentBugReportService.ts.
  */
 
 import { createHash } from 'node:crypto';
@@ -152,7 +154,7 @@ export function buildBugReportIdempotencyKey(agentId: string, description: strin
   return `rose-report-bug-${digest.slice(0, 48)}`;
 }
 
-function validateBugDescription(description: unknown): string {
+export function validateBugDescription(description: unknown): string {
   if (typeof description !== 'string') {
     throw new ReportBugValidationError('Description is required');
   }

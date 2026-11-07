@@ -1993,6 +1993,57 @@ class Backend(unittest.TestCase):
         self.assertEqual(1, result['native_exit']); self.assertFalse(result['complete'])
         self.assertTrue(result['cleanup_complete']); self.assertEqual(before, self.request)
 
+    def test_qualified_domain_skips_reach_native_runner_env_without_hiding_peer_failures(self):
+        (self.root / 'back-end/src/tests/blackbox/treasury-rails.blackbox.ts').write_text('export {}\n')
+        self.request['source'] = cycle.source(self.root)
+        qualification = {'source': self.request['source'], 'disposition': 'treasury / skipped with warning',
+            'rca': {'id': 'qualified-before-native', 'check': 'backend-coverage-blackbox/blackbox:treasury-rails',
+                    'source': self.request['source'], 'description': 'Recorded historical unused mint',
+                    'evidence': 'saved-native-treasury.log', 'native_result': 'FAIL', 'attribution': 'UNKNOWN',
+                    'standing_policy': {'name': 'treasury-failures-skip-and-warn-2026-10-29',
+                        'reason': 'Original financial return remains unknown', 'affected_records': ['fixture-card / fixture-transfer'],
+                        'evidence_at': 1}}}
+        self.request['skips'] = {'blackbox:treasury-rails': qualification}
+        before = copy.deepcopy(self.request)
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
+        observed = []
+        native_run = self.backend.run_command
+        def capture(argv, **kwargs):
+            if argv == self.backend.RUNNER:
+                observed.append({key: kwargs['env'].get(key) for key in self.backend.SKIP_ENV})
+            return native_run(argv, **kwargs)
+        with patch.object(self.backend, 'run_command', side_effect=capture):
+            result = self.backend.execute(self.request, self.root)
+        self.assertEqual([{key: 'integration-health,treasury-rails' for key in self.backend.SKIP_ENV}], observed)
+        self.assertEqual('FAIL', result['cases']['blackbox:beta'])
+        self.assertEqual('PASS', result['cases']['blackbox:alpha'])
+        self.assertEqual('PASS', result['cases']['blackbox:gamma'])
+        self.assertNotIn('blackbox:treasury-rails', result['cases'])
+        self.assertEqual(1, result['native_exit'])
+        self.assertTrue(result['cleanup_complete'])
+        self.assertEqual(before, self.request)
+
+    def test_qualified_request_does_not_authorize_caller_or_recipe_skip_env(self):
+        # Qualifications authorize the adapter to derive native env, never callers.
+        self.test_qualified_domain_skips_reach_native_runner_env_without_hiding_peer_failures()
+        for env_key in self.backend.SKIP_ENV:
+            for origin in ('caller', 'sweep', 'setup'):
+                with self.subTest(env_key=env_key, origin=origin):
+                    shutil.rmtree(self.root / '.context', ignore_errors=True)
+                    request = copy.deepcopy(self.request)
+                    case = {'command': list(self.backend.RUNNER), 'cwd': 'back-end',
+                            'aggregate': False, 'sweep': 'backend-coverage-blackbox'}
+                    request['worker_recipe'] = {'cases': {
+                        check: copy.deepcopy(case) for check in self.backend.checks_for(self.backend.selection(self.root)[1])}}
+                    untrusted = {env_key: 'integration-health,treasury-rails'}
+                    caller = untrusted if origin == 'caller' else {}
+                    if origin == 'sweep':
+                        for spec in request['worker_recipe']['cases'].values(): spec['env'] = untrusted
+                    if origin == 'setup': request['worker_recipe']['setup'] = {'command': ['true'], 'env': untrusted}
+                    with patch.dict(os.environ, caller), patch.object(self.backend, 'run_command', side_effect=AssertionError('must refuse before native launch')):
+                        with self.assertRaisesRegex(ValueError, 'skip_env_not_allowed'):
+                            self.backend.execute(request, self.root)
+
     def test_qualified_exclusion_never_accepts_foreign_or_malformed_membership(self):
         self.test_qualified_treasury_exclusion_keeps_full_native_peer_outcomes()
         qualification = copy.deepcopy(self.request['skips'])
@@ -2409,11 +2460,11 @@ class GenericLifecycle(unittest.TestCase):
         self.temp.cleanup()
 
     def test_default_forced_kill_refuses_resume_even_after_group_is_gone(self):
-        script = self.root / 'ignores-term.py'
-        script.write_text("import signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\ntime.sleep(30)\n")
+        # The shell ignores TERM before exec, so a slow interpreter start under
+        # load cannot let TERM land before the handler exists.
         with (self.root / 'forced.log').open('wb') as output:
             code, timed_out, cancelled, lingering = self.process.run_command(
-                [sys.executable, str(script)], cwd=self.root, env=os.environ.copy(),
+                ['/bin/sh', '-c', "trap '' TERM; exec sleep 30"], cwd=self.root, env=os.environ.copy(),
                 output=output, timeout=.2)
         self.assertEqual(-signal.SIGKILL, code)
         self.assertTrue(timed_out)

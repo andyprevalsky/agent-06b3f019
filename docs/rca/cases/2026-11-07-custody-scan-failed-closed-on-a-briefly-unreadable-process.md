@@ -18,7 +18,7 @@ tags:
 sources:
   - PR #1744
 repro: scripts/tests/deploy-test-plan.test.py InterruptedCustody.test_custody_scan_reobserves_a_process_that_is_briefly_unreadable (red against the old validator, green after); the live flake was reproduced 1 run in 12 of the unchanged InterruptedCustody class under host load
-status: fixed
+status: superseded
 ---
 
 ## Problem
@@ -34,6 +34,10 @@ which is how the same read failure surfaces as "worker ownership remains" at the
 evidence about the namespace.
 
 ## Solution
+
+Superseded on merge: origin/main landed an equivalent fix concurrently (`deploy_test_process.scan_same_user_processes`, which treats an unreadable same-user process explicitly), so this branch's `observe_process` and its regression were dropped in favour of main's. The diagnosis above stands.
+
+Original change (dropped):
 
 `observe_process` re-reads an unreadable process up to five times 0.2 s apart, skips it once it has exited and still fails closed
 while it stays unreadable and alive, the same shape as the export helper's writer scan. The regression stubs the process and

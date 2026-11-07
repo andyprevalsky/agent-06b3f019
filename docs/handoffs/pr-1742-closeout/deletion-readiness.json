@@ -1,0 +1,24 @@
+{
+ "schema_version": 1,
+ "pr": 1742,
+ "deployed_sha": "43bb8f30beddd4ad483fbd5bc7f5a2cc822eb328",
+ "record_commits": {
+  "closeout": "3982510d56",
+  "factory_ledger": "f6b393b440",
+  "this_receipt": "follow-up records-only commit on main"
+ },
+ "final_inventory": "closeout-manifest.json inventory",
+ "archive_verification": "no private archive needed: every retained record is committed in docs/handoffs/pr-1742-closeout (secrets redacted, exact-value scan of both .env files = 0 hits)",
+ "key_recovery": "agents/.env and back-end/.env are boxes.dev managed project env files (synced to every devbox); agents/.env.benchmark-temporal is distributed through the managed env since 2026-10-20; nothing in this deploy created a new credential",
+ "configuration_recovery": "deploy cycle wrappers and inventories are reproducible from scripts/deploy_test_plan.py + scripts/deploy_test_worker.py --prepare-checkout; the two command-scoped settings used (CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=5400, CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS=120) and the canonical structural slot recipe are recorded in evidence/final-plan-337aa6318.json.gz",
+ "resource_disposition": {
+  "fly_machines": "every smoke/canary clone created by this deploy reached destroyed with volumes pending_destroy (campaign teardown audits); warm image registry.fly.io/navi-whisper-lux-bench:cloudbench-warm-20261107-031010-220731 activated on the shared donor and retained as the current bench image",
+  "worker_checkouts": "/home/boxes/deploy-workers (11 clones, 64 GB) deleted after verifying no process or cwd holder",
+  "temporary_clone": "/var/tmp/rose-img-activate deleted",
+  "keep_awake": "hold cancelled at completion",
+  "branch": "feat/root-agent-report-bug kept on origin; new local branch feat/root-agent-report-bug-2 has no commits"
+ },
+ "open_items": [
+  "Local-only ref backup/cerebras-chat-quota-prepush-20261002 (14 commits, 2026-10-02 pre-push snapshot of the later-merged PR #1373) holds span_durations files over GitHub's 100 MB limit, so it cannot be pushed; it predates and is unrelated to PR #1742. Deleting this devbox loses it unless it is bundled to a private archive or confirmed disposable."
+ ]
+}
