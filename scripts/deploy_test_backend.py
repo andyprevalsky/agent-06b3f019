@@ -607,8 +607,17 @@ def _execute(request, root, failed_first=False):
         own = (spec or {}).get('timeout_seconds')
         return min(CLEANUP_SECONDS, own) if own is not None else CLEANUP_SECONDS
     sweep = sweep_from_recipe(recipe, checks_for(domains)) if recipe else {'command': list(RUNNER), 'cwd': 'back-end'}
-    refuse_env_skips(os.environ, sweep.get('env'), (recipe or {}).get('setup', {}).get('env'))
+    recipe_envs = [case.get('env') for case in (recipe or {}).get('cases', {}).values()]
+    recipe_envs += [(recipe or {}).get(name, {}).get('env') for name in ('setup', 'cleanup')]
+    refuse_env_skips(os.environ, sweep.get('env'), *recipe_envs)
     env = {**os.environ, **sweep.get('env', {}), 'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1'}
+    qualified_names = sorted(name.split(':', 1)[1] for name in excluded)
+    sweep_env = env
+    if qualified_names:
+        # Only validated request qualifications reach the existing native filter.
+        # The shell appends integration-health; run.ts deduplicates with a Set.
+        value = ','.join(sorted(set(qualified_names) | set(EXCLUSION_REASON)))
+        sweep_env = {**env, **dict.fromkeys(SKIP_ENV, value)}
     shards = env.get('BACKEND_COVERAGE_SHARDS', '2')
     argv = list(sweep['command'])
     if failed_first:  # the existing repair recipe, under the same wrapper when present
@@ -624,7 +633,7 @@ def _execute(request, root, failed_first=False):
             if recipe and recipe.get('setup'):
                 setup_ok, setup_rc = run_step(recipe['setup'], root, env, log, remaining(recipe['setup']))
             if setup_ok:
-                code, timed_out, cancelled, lingering = run_command(argv, cwd=root / sweep.get('cwd', 'back-end'), env=env,
+                code, timed_out, cancelled, lingering = run_command(argv, cwd=root / sweep.get('cwd', 'back-end'), env=sweep_env,
                                                                    output=log, timeout=remaining(sweep))
             else:
                 code = setup_rc
@@ -637,6 +646,14 @@ def _execute(request, root, failed_first=False):
     interrupted = timed_out or cancelled or lingering or code not in (0, 1)
     active = [c for c in checks]
     cases, evidence, hashes, unknown = domain_cases(root, [c.split(':', 1)[1] for c in active if c.startswith('blackbox:')], started, excluded)
+    evidence['execution_exclusions'] = {'qualified_domains': qualified_names,
+        'producer_fixed_domains': sorted(EXCLUSION_REASON), 'qualification_sha256': dict(excluded)}
+    unexpected = evidence.get('qualified_excluded_rows', {})
+    if unexpected:
+        # A row means the child ran a qualified domain instead of filtering it.
+        evidence['unexpected_executed_exclusions'] = unexpected
+        unknown.extend(name.split(':', 1)[1] for name in unexpected)
+        cases = dict.fromkeys(cases, 'UNVERIFIED')
     units, unit_rc = phase(UNIT_LINE, text)
     fps, fps_rc = phase(FPS_LINE, text)
     if fixture is not None:

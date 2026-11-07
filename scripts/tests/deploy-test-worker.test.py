@@ -1961,6 +1961,13 @@ FAKE_NPM = """#!/usr/bin/env python3
 import json, os, signal, sys, time
 from pathlib import Path
 cfg = json.load(open(os.environ['FAKE_RUNNER_CONFIG'])); be = Path.cwd()
+if cfg.get('native_filter_js'):
+    import subprocess
+    requested = [r['domain'] for r in cfg['results']]
+    done = subprocess.run(['node', cfg['native_filter_js'], json.dumps(requested)], capture_output=True, text=True, check=True)
+    executed = json.loads(done.stdout.splitlines()[-1])
+    print('FAKE_NATIVE_EXECUTION ' + json.dumps(executed))
+    cfg['results'] = [r for r in cfg['results'] if r['domain'] in executed]
 if cfg.get('cancel_parent'): os.kill(os.getppid(), signal.SIGTERM)
 time.sleep(cfg.get('sleep', 0))
 (be / 'coverage/blackbox-run-shard1').mkdir(parents=True, exist_ok=True)
@@ -2110,8 +2117,97 @@ class Backend(unittest.TestCase):
             self.assertEqual('PASS',result['cases']['blackbox:alpha'])
             self.assertTrue(result['cleanup_complete'])
 
+    def native_qualified_filter(self):
+        # Execute the actual existing run.ts filter block without importing its live runner.
+        text=(ROOT/'back-end/src/tests/blackbox/run.ts').read_text()
+        start=text.index('const skipDomains = new Set(')
+        end=text.index('if (requested.length === 0)',start)
+        script=Path(self.temp.name)/'native-filter.js'
+        script.write_text("const requestedRaw=JSON.parse(process.argv[2]);\n"
+            "const readEnv=(...names)=>names.map(n=>process.env[n]).find(v=>v!==undefined);\n"
+            +text[start:end]+"\nconsole.log(JSON.stringify(requested));\n")
+        config=cycle.read(self.config);config['native_filter_js']=str(script);cycle.write(self.config,config)
+
+    def qualified_filter_request(self):
+        self.configure(0,self.rows(alpha=True,beta=True,gamma=True))
+        self.native_qualified_filter()
+        entry={'source':self.request['source'],'disposition':'external / waived',
+            'rca':{'id':'native-credit-failure','description':'provider credits exhausted',
+                   'evidence':'retained-native.log','native_result':'FAIL','attribution':'NOT_INTRODUCED',
+                   'check':'backend-coverage-blackbox/blackbox:beta',
+                   'external_provider':{'name':'fixture-provider','reason':'credits exhausted'}}}
+        self.request['checks'].remove('blackbox:beta')
+        self.request['skips']={'blackbox:beta':entry}
+        return entry
+
+    def test_qualified_execution_uses_native_filter_without_running_excluded_domain(self):
+        entry=self.qualified_filter_request();before=copy.deepcopy(self.request)
+        with patch.dict(os.environ,{'CONTRACT_TEST_SKIP_DOMAINS':'integration-health'}):
+            result=self.backend.execute(self.request,self.root)
+        text=Path(result['runner_log']).read_text()
+        executed=json.loads(next(line.split('FAKE_NATIVE_EXECUTION ',1)[1] for line in text.splitlines() if line.startswith('FAKE_NATIVE_EXECUTION ')))
+        self.assertEqual(['alpha','gamma'],executed)
+        self.assertNotIn('blackbox:beta',result['cases'])
+        self.assertTrue(all(value=='PASS' for value in result['cases'].values()))
+        proof=result['evidence']['execution_exclusions']
+        self.assertEqual(['beta'],proof['qualified_domains'])
+        self.assertEqual(['integration-health'],proof['producer_fixed_domains'])
+        self.assertEqual(self.backend.qualified_exclusions(self.request,['alpha','beta','gamma']),proof['qualification_sha256'])
+        self.assertEqual(before,self.request)
+
+    def test_qualified_execution_rejects_caller_recipe_extras_before_launch(self):
+        self.qualified_filter_request()
+        recipe={'cases':{name:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend'}
+                         for name in self.backend.checks_for(['alpha','beta','gamma'])}}
+        for scope in ('caller','setup','cleanup','case'):
+            request=copy.deepcopy(self.request);request['worker_recipe']=copy.deepcopy(recipe)
+            extra={'BLACKBOX_TEST_SKIP_DOMAINS':'alpha'}
+            if scope in ('setup','cleanup'):request['worker_recipe'][scope]={'command':['true'],'env':extra}
+            if scope=='case':
+                for case in request['worker_recipe']['cases'].values():case['env']=extra
+            with patch.dict(os.environ,extra if scope=='caller' else {}),patch.object(self.backend,'run_command') as launch:
+                with self.assertRaisesRegex(ValueError,'skip_env_not_allowed'):self.backend.execute(request,self.root)
+                launch.assert_not_called()
+            shutil.rmtree(self.root/'.context',ignore_errors=True)
+
+    def test_qualified_execution_changes_only_sweep_environment(self):
+        self.qualified_filter_request()
+        self.request['worker_recipe']={'cases':{
+            k:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend','env':{'CASE_ONLY':'kept'}}
+            for k in self.backend.checks_for(['alpha','beta','gamma'])},
+            'setup':{'command':['true'],'env':{'SETUP_ONLY':'kept'}},
+            'cleanup':{'command':['true'],'env':{'CLEANUP_ONLY':'kept'}}}
+        before=copy.deepcopy(self.request);calls=[];native=self.backend.run_command
+        def run(argv,**kwargs):
+            calls.append((list(argv),dict(kwargs['env'])))
+            return native(argv,**kwargs)
+        with patch.dict(os.environ,{'BLACKBOX_TEST_SKIP_DOMAINS':'integration-health','CONTRACT_TEST_SKIP_DOMAINS':'integration-health','OTHER_VALUE':'kept'}), \
+             patch.object(self.backend,'run_command',side_effect=run):
+            result=self.backend.execute(self.request,self.root)
+        self.assertEqual(before,self.request)
+        self.assertTrue(result['complete'])
+        self.assertEqual(1,sum(argv==['npm','run','test:coverage:sharded'] for argv,env in calls))
+        for argv,env in calls:
+            expected='beta,integration-health' if argv==['npm','run','test:coverage:sharded'] else 'integration-health'
+            self.assertEqual(expected,env['BLACKBOX_TEST_SKIP_DOMAINS'])
+            self.assertEqual(expected,env['CONTRACT_TEST_SKIP_DOMAINS'])
+            self.assertEqual('kept',env['OTHER_VALUE']);self.assertEqual('kept',env['CASE_ONLY'])
+        self.assertTrue(all(result['cases'][k]=='PASS' for k in ('units','fps','coverage-threshold','teardown')))
+
+    def test_qualified_execution_missing_active_or_unexpected_rows_are_unverified(self):
+        self.qualified_filter_request()
+        config=cycle.read(self.config);config['results']=self.rows(alpha=True,beta=True);cycle.write(self.config,config)
+        result=self.backend.execute(self.request,self.root)
+        self.assertEqual('UNVERIFIED',result['cases']['blackbox:gamma'])
+        self.assertFalse(result['complete'])
+        shutil.rmtree(self.root/'.context')
+        self.configure(0,self.rows(alpha=True,beta=True,gamma=True))  # A child ignoring native filtering is not credited.
+        result=self.backend.execute(self.request,self.root)
+        self.assertTrue(all(v=='UNVERIFIED' for k,v in result['cases'].items() if k.startswith('blackbox:')))
+        self.assertFalse(result['complete'])
+
     def test_qualified_treasury_exclusion_keeps_full_native_peer_outcomes(self):
-        # Actual43: the unchanged full shards include an already-qualified treasury FAIL.
+        # Preserve the prior native treasury FAIL in its qualification; do not execute it again.
         (self.root / 'back-end/src/tests/blackbox/treasury-rails.blackbox.ts').write_text('export {}\n')
         self.request['source'] = cycle.source(self.root)
         qualification = {'source': self.request['source'], 'disposition': 'treasury / skipped with warning',
@@ -2128,6 +2224,7 @@ class Backend(unittest.TestCase):
         config = cycle.read(self.config)
         config['extra_summaries'] = {'blackbox-run-shard2': json.dumps({'results': self.rows(gamma=True)})}
         cycle.write(self.config, config)
+        self.native_qualified_filter()
         result = self.backend.execute(self.request, self.root)
         self.assertEqual('PASS', result['cases']['blackbox:alpha'])
         self.assertEqual('FAIL', result['cases']['blackbox:beta'])
@@ -2137,10 +2234,12 @@ class Backend(unittest.TestCase):
         self.assertEqual('PASS', result['cases']['teardown'])
         self.assertNotIn('blackbox:treasury-rails', result['cases'])
         self.assertEqual([], result['evidence']['unknown_domains'])
-        excluded = result['evidence']['qualified_excluded_rows']['blackbox:treasury-rails']
-        self.assertIs(excluded['passed'], False); self.assertIs(excluded['aborted'], False)
+        self.assertNotIn('qualified_excluded_rows',result['evidence'])
+        excluded = result['evidence']['execution_exclusions']
+        self.assertEqual(['treasury-rails'],excluded['qualified_domains'])
         self.assertEqual(__import__('hashlib').sha256(json.dumps(qualification, sort_keys=True).encode()).hexdigest(),
-                         excluded['qualification_sha256'])
+                         excluded['qualification_sha256']['blackbox:treasury-rails'])
+        self.assertEqual('FAIL',qualification['rca']['native_result'])
         self.assertEqual(2, len(result['evidence']['artifacts']['summaries']))
         self.assertEqual(1, result['native_exit']); self.assertFalse(result['complete'])
         self.assertTrue(result['cleanup_complete']); self.assertEqual(before, self.request)
