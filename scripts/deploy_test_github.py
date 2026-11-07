@@ -143,10 +143,24 @@ def repository(root: Path) -> str:
     return match.group(1)
 
 
+def rate_limit_pause(headers, now: float) -> float:
+    """Seconds until GitHub says the limit lifts: Retry-After (secondary), else X-RateLimit-Reset (primary).
+
+    GitHub documents waiting at least a minute when a secondary limit names neither.
+    """
+    for name, base in (('Retry-After', 0.0), ('X-RateLimit-Reset', now - 1.0)):
+        try:
+            return max(float(headers[name]) - base, 1.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return 60.0
+
+
 class GitHub:
-    def __init__(self, token: str, repo: str):
+    def __init__(self, token: str, repo: str, deadline: float | None = None):
         self.token, self.repo, self.etags, self.cache = token, repo, {}, {}
         self.rate_limited_seconds = 0.0  # time spent waiting out the shared REST quota, for the receipt
+        self.deadline = deadline  # epoch the caller must be done by; a rate-limit wait never passes it
 
     def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True):
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
@@ -170,9 +184,14 @@ class GitHub:
                 if error.code in (301, 302, 303, 307, 308) and not redirect:
                     return error.code, error.headers, b''
                 if error.code in (403, 429) and 'rate limit' in error.read().decode(errors='replace').lower():
-                    reset = float(error.headers.get('X-RateLimit-Reset') or time.time() + 60)
-                    pause = min(max(reset - time.time(), 5), 300)
-                    print(f'DEPLOY_GATE_RATE_LIMITED waiting {pause:.0f}s', flush=True)
+                    now = time.time()
+                    pause = rate_limit_pause(error.headers, now)
+                    if self.deadline is not None:
+                        if self.deadline - now <= 0:
+                            raise  # the caller's deadline is spent; its own timeout path reports it
+                        pause = min(pause, self.deadline - now)
+                    print(f'DEPLOY_GATE_RATE_LIMITED waiting {pause:.0f}s (until '
+                          f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + pause))})', flush=True)
                     self.rate_limited_seconds += pause
                     STOP.wait(pause)
                     continue
@@ -344,7 +363,7 @@ def cancel_run(gh: GitHub, run_id: int) -> dict:
             raise
     end = time.time() + CANCEL_SECONDS
     while time.time() < end:
-        run = gh.json(f'/actions/runs/{run_id}')
+        run = gh.json(f'/actions/runs/{run_id}', conditional=True)  # a 5 s poll; unchanged reads are free 304s
         if run.get('status') == 'completed':
             return run
         time.sleep(5)
@@ -446,7 +465,8 @@ def launch(args) -> int:
     except (KeyError, ValueError, OSError, subprocess.CalledProcessError, urllib.error.URLError) as error:
         detail = error.stderr.decode(errors='replace')[-2000:] if isinstance(error, subprocess.CalledProcessError) else ''
         return finish(blocked(request, f'remote gate launch failed: {error} {detail}'.strip()))
-    gh = GitHub(token, repo)
+    # Watching stops CANCEL_SECONDS early so a cancel still fits; a rate-limit wait keeps that window too.
+    gh = GitHub(token, repo, deadline=deadline)
     folder = result_path.parent / 'remote-artifact'
     try:
         channel = Channel(env_file_values(root))
@@ -462,6 +482,7 @@ def launch(args) -> int:
         return finish(blocked(request, str(error), receipt={'transport': TRANSPORT, 'tag': name}))
     kind, receipt = outcome['kind'], outcome.get('receipt') or {'transport': TRANSPORT, 'tag': name}
     receipt['rate_limited_seconds'] = gh.rate_limited_seconds
+    gh.deadline = started + args.deadline_seconds  # cancel, receipts and artifacts may use the reserved window
     if kind == 'never-started':
         delete_tag(root, token, repo, name)  # Nothing started that we can name; the tag alone owns no VM.
         reason = 'cancelled before the remote run started' if STOP.is_set() else 'deploy-gates workflow run never started'
