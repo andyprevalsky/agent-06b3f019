@@ -10295,12 +10295,15 @@ def test_build_usage_items_carries_browser_pool_model():
     )
 
     pricing = {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75}
-    items = build_usage_items(
-        total_input_tokens=1_186_754,
-        total_output_tokens=40_000,
-        model_pricing=pricing,
-        execution_time_ms=900_000,
-    )
+    # The service row's provider label follows BROWSER_PROVIDER; pin it so the
+    # Kernel/Steel assertion below does not depend on the machine's ambient env.
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):
+        items = build_usage_items(
+            total_input_tokens=1_186_754,
+            total_output_tokens=40_000,
+            model_pricing=pricing,
+            execution_time_ms=900_000,
+        )
     llm_item = next(i for i in items if i["type"] == "llm")
     assert "model" in llm_item, "llm usage item dropped the model key"
     assert llm_item["model"] == BROWSER_USE_PRICING_POOL
@@ -10410,13 +10413,14 @@ def test_build_usage_items_emits_one_row_per_actual_model():
     # dropped, this still fails on the row assertions below rather than on a
     # TypeError, so the contract can't be regressed by renaming it away.
     supported = "usage_by_model" in inspect.signature(build_usage_items).parameters
-    items = build_usage_items(
-        total_in,
-        total_out,
-        {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75},
-        900_000,
-        **({"usage_by_model": usage_by_model} if supported else {}),
-    )
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}):  # service-row label follows the env
+        items = build_usage_items(
+            total_in,
+            total_out,
+            {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75},
+            900_000,
+            **({"usage_by_model": usage_by_model} if supported else {}),
+        )
     llm_rows = [i for i in items if i["type"] == "llm"]
     service_rows = [i for i in items if i["type"] == "service"]
 
