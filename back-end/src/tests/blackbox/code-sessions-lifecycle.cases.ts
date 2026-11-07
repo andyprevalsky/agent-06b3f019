@@ -32,6 +32,7 @@ import { markPaused } from '../../providers/codeSessions/store';
 import {
   checkpointCodeSession,
   sweepExpiredCodeSessions,
+  sweepAllExpiredCodeSessions,
 } from '../../providers/codeSessions/lifecycle';
 import {
   acquireCodeSessionSandbox,
@@ -360,6 +361,55 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
       );
       assert.equal(swept.state, 'RETIRED');
       assert.ok(killed.includes(target.sandboxId ?? ''), 'the expired sandbox is killed');
+    } finally {
+      await prisma.codeSession.deleteMany({ where: { userId } });
+      await prisma.agent.deleteMany({ where: { userId } });
+      await prisma.user.deleteMany({ where: { userId } });
+    }
+  });
+
+  test('the scheduled TTL sweep retires expired sessions of users who never spawn again', async (t) => {
+    // The per-user sweep only runs when that same user spawns. Prod 2026-11-06: paused
+    // sandboxes of idle users were never retired, so each leak outlived its owner.
+    const userId = `code-session-ttl-global-${randomUUID()}`;
+    await prisma.user.create({ data: { userId, name: 'Code Session Global TTL' } });
+    const owner = randomUUID();
+    await prisma.agent.create({ data: { id: owner, userId, busId: owner, goal: 'Global TTL' } });
+    const killed: string[] = [];
+    t.mock.method(Sandbox, 'kill', async (id: string) => {
+      killed.push(id);
+      return true;
+    });
+    const day = 24 * 60 * 60 * 1000;
+    const make = (ageDays: number, sandboxId: string) =>
+      prisma.codeSession.create({
+        data: {
+          userId,
+          rootAgentId: owner,
+          ownerAgentId: owner,
+          repoKey: `ttl-global-${randomUUID()}`,
+          state: 'PAUSED',
+          sandboxKind: 'e2b',
+          sandboxId,
+          lastActiveAt: new Date(Date.now() - ageDays * day),
+        },
+      });
+    try {
+      const expired = await make(40, `sb-ttl-global-old-${randomUUID()}`);
+      const fresh = await make(1, `sb-ttl-global-fresh-${randomUUID()}`);
+      assert.equal(
+        typeof sweepAllExpiredCodeSessions,
+        'function',
+        'there is no scheduled TTL sweep: only a spawn by the same user retires expired sessions'
+      );
+      const retired = await sweepAllExpiredCodeSessions(500);
+      assert.ok(retired >= 1, `expected at least one retirement, got ${retired}`);
+      const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: expired.id } });
+      assert.equal(row.state, 'RETIRED');
+      assert.ok(killed.includes(expired.sandboxId ?? ''), 'the expired sandbox is killed');
+      const kept = await prisma.codeSession.findUniqueOrThrow({ where: { id: fresh.id } });
+      assert.equal(kept.state, 'PAUSED', 'a session inside its TTL is never retired');
+      assert.ok(!killed.includes(fresh.sandboxId ?? ''), 'a live session sandbox is never killed');
     } finally {
       await prisma.codeSession.deleteMany({ where: { userId } });
       await prisma.agent.deleteMany({ where: { userId } });

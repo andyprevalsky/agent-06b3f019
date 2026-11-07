@@ -17,6 +17,7 @@ import { resizeSession } from './resizeService';
 import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import { parseResetsAt, reportCodeTaskUsageLimit } from '../../providers/codeSessions/usageLimit';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
+import { ProjectNotFoundForSessionError } from '../../providers/projects/session';
 import {
   LocalTargetUnavailableError,
   localTargetUnavailableBody,
@@ -108,6 +109,20 @@ router.post(
   })
 );
 
+/** Typed create failures that map to a client error rather than a 500. */
+function createErrorResponse(error: unknown): { status: number; body: object } | null {
+  if (error instanceof MissingUserIdError) {
+    return { status: 400, body: { error: error.message, code: 'MISSING_USER_ID' } };
+  }
+  if (error instanceof GitHubAccessDeniedError) {
+    return { status: 403, body: { error: error.detail, code: 'GITHUB_ACCESS_DENIED' } };
+  }
+  if (error instanceof ProjectNotFoundForSessionError) {
+    return { status: 404, body: { error: error.message, code: 'PROJECT_NOT_FOUND' } };
+  }
+  return null;
+}
+
 router.post(
   '/create',
   authenticateInternal,
@@ -172,12 +187,9 @@ router.post(
         res.status(403).json({ error: error.message, code: 'AGENT_OWNER_MISMATCH' });
         return;
       }
-      if (error instanceof MissingUserIdError) {
-        res.status(400).json({ error: error.message, code: 'MISSING_USER_ID' });
-        return;
-      }
-      if (error instanceof GitHubAccessDeniedError) {
-        res.status(403).json({ error: error.detail, code: 'GITHUB_ACCESS_DENIED' });
+      const known = createErrorResponse(error);
+      if (known !== null) {
+        res.status(known.status).json(known.body);
         return;
       }
       const sessionError = codeSessionHttpError(error);

@@ -19,6 +19,7 @@ from domains.set_plan.service import (
     validate_planner_result,
 )
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from utils.prompts import user_context_with_project
 from utils.rose_desktop import is_rose_desktop_user
 
 if TYPE_CHECKING:
@@ -58,7 +59,10 @@ class SetPlanManager(ToolManager):
         tools_description = get_planner_tools_description(
             rose_desktop=is_rose_desktop_user(getattr(workflow_instance, "user_id", None))
         )
-        user_context = getattr(workflow_instance, "user_context_section", "")
+        user_context = user_context_with_project(
+            getattr(workflow_instance, "user_context_section", ""),
+            getattr(workflow_instance, "project_context_section", ""),
+        )
         response_schema = getattr(workflow_instance, "output_schema", None)
 
         # Refresh compute token if expired (5-min TTL)

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "head": "fd110d1ca18076e6b24975adbf64967d9e8fc869",
+  "base_ref": "origin/main",
+  "merge_base": "c992045875daacb18a9d7c60494deb58e8eefcfa",
+  "frozen_at": "2026-11-07T02:39:45Z",
+  "guards": {
+    "prompt-approval": [
+      ".claude/commands/deploy.md",
+      "agents/tools/prompts/spawn_agent.py",
+      "agents/utils/prompts.py",
+      "agents/utils/tool_schemas.py",
+      "docs/rca/cases/2026-11-06-project-placement-never-reached-agent-prompts.md"
+    ],
+    "agent-behavior-approval": [
+      "agents/workflows/agent_workflow.py"
+    ],
+    "llm-trajectory-injection-approval": []
+  },
+  "files": {
+    ".claude/commands/deploy.md": "3acadaaa1c49c8667fb2eb4c41708388255ff01e76e7d5ce54d8dfcc31b20342",
+    "agents/tools/prompts/spawn_agent.py": "460b3c0dc475526cdc554498bfe0f0469fc04605d2374e1908872faa55c78fbe",
+    "agents/utils/prompts.py": "a536677846114e4eb2e07a98f3d21e5b83bbbe4470a68eda28dc75a3ec070a0f",
+    "agents/utils/tool_schemas.py": "04781ee0ff9d0d61f4479ca01231ff5138bb97a8f4c5c4b2d5f4d9b17c60cc5d",
+    "agents/workflows/agent_workflow.py": "058f9ea287109822ded8af9502a03352ab4bf55369fd25ba2e7a6732cd275909",
+    "docs/rca/cases/2026-11-06-project-placement-never-reached-agent-prompts.md": "7c4a23e119970a5711799a54620509f7f61b28d84d0240fe6db0521b8b93ac15"
+  },
+  "decision": "grounded",
+  "decided_at": "2026-11-07T02:39:53Z",
+  "evidence": "v2-project-context reviewer ph7bp69a4270kyrkh0p44d9zg58hr7dk GROUNDED (packet rev 2, reviewed at 5f1b4a9df8; all 11 in-scope hunks byte-identical at fd110d1ca1 after the main sync)"
+}
