@@ -1,0 +1,25 @@
+{
+ "schema_version": 1,
+ "pr": 1745,
+ "deployed_sha": "0b3fda43f21aaeae5fdac19885484aa4b5966051",
+ "gated_source": "9d8a8fcbd858d2e9a798437a9125d0799ba82abd",
+ "intended_source_only_local": false,
+ "required_records_only_local": false,
+ "archives_verified": {
+  "core": 1393,
+  "workers": 27022,
+  "cloud": 2547
+ },
+ "representative_restore": "core archive restored to an empty dir; cycle.json and prefix-run2.log sha256 matched",
+ "key_recovery": "same escrow as pr-1739-closeout (agents/.env TRACE_ARCHIVE_ENCRYPTION_KEY_B64 / managed .context/pr1634-archive-recovery.env)",
+ "configuration_recovery": "managed project env (boxes.dev) supplies agents/.env and back-end/.env; nothing unique on this box",
+ "resources": {
+  "cloud_machines": "campaign teardown destroyed owned clones; warm donor parked stopped; no owned Machines left running",
+  "systemd_units": "deploy1745-* transient units all inactive",
+  "keep_awake": "cancel at closeout"
+ },
+ "protected_untouched": [
+  "Freedom",
+  "other workspaces' Machines and runs"
+ ]
+}
