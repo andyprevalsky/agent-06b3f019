@@ -12,10 +12,13 @@
  *
  *   npx tsx scripts/reap-orphan-sandboxes.ts                 # dry run
  *   npx tsx scripts/reap-orphan-sandboxes.ts --execute [--expect-eligible N] [--receipt PATH]
- *   flags: --untagged-hours 24  --host-tagged-hours 72
+ *   flags: --untagged-hours 24  --host-tagged-hours 72  --min-prod-refs 10
  *
  * --execute without --expect-eligible is refused; with it, the run aborts when
- * the live eligible set differs from N by more than 5%.
+ * the live eligible set differs from N by more than 5%. The DIRECT_URL host and
+ * the reference-set sizes are always printed (never credentials); --execute is
+ * also refused when a set is empty/below --min-prod-refs or the host is local,
+ * and a dry run prints a loud WARNING in that case.
  */
 import 'dotenv/config';
 import { createHash } from 'node:crypto';
@@ -23,7 +26,10 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { PrismaClient } from '@prisma/client';
 import { Sandbox } from 'e2b';
 import {
+  assessProdReferences,
   decideOrphan,
+  enforceProdReferenceGuard,
+  MIN_PLAUSIBLE_PROD_REFS,
   type OrphanBucket,
   type OrphanCandidate,
   type OrphanDecision,
@@ -46,11 +52,11 @@ export async function readProdReferences(): Promise<ProdReferences> {
   if (!url) throw new Error('DIRECT_URL is not set (prod references need the 5432 connection)');
   const prisma = new PrismaClient({ datasourceUrl: url });
   const ROLLBACK = new Error('rollback');
-  const refs: ProdReferences = {
-    sandboxIds: new Set(),
-    codeSessionIds: new Set(),
-    agentIds: new Set(),
-  };
+  const refs = {
+    sandboxIds: new Set<string>(),
+    codeSessionIds: new Set<string>(),
+    agentIds: new Set<string>(),
+  } satisfies ProdReferences;
   try {
     await prisma
       .$transaction(
@@ -143,6 +149,16 @@ async function main(): Promise<void> {
   if (execute && expect === undefined) throw new Error('--execute requires --expect-eligible N');
   const now = new Date();
   const refs = await readProdReferences();
+  const assessment = assessProdReferences(
+    refs,
+    process.env.DIRECT_URL,
+    Number(flag('min-prod-refs') ?? MIN_PLAUSIBLE_PROD_REFS)
+  );
+  console.log(
+    `prod refs: db-host=${assessment.host} sandboxIds=${refs.sandboxIds.size} codeSessionIds=${refs.codeSessionIds.size} agentIds=${refs.agentIds.size}`
+  );
+  const warning = enforceProdReferenceGuard(assessment, execute);
+  if (warning !== null) console.warn(`!!! ${warning} !!!`);
   const listed = await listAll();
   const decisions = listed.map((s) => ({ s, d: decideOrphan(s, refs, now, criteria) }));
   const buckets = new Map<OrphanBucket, string[]>();

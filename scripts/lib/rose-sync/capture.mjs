@@ -139,7 +139,12 @@ function readSmallFile(abs, warnings, label) {
   return readFileSync(abs);
 }
 
-function captureLinkedOrPlain(root, rel, kind, out) {
+/**
+ * Capture one named path. `followInternal` (--files-only) stores an INTERNAL
+ * symlink's content under the selected path itself: neither the link record nor
+ * its target is synced, so exactly the named files are written.
+ */
+function captureLinkedOrPlain(root, rel, kind, out, followInternal = false) {
   const abs = join(root, rel);
   let lst;
   try {
@@ -163,6 +168,12 @@ function captureLinkedOrPlain(root, rel, kind, out) {
     return;
   }
   if (isInside(root, real)) {
+    if (followInternal) {
+      const content = readSmallFile(real, out.warnings, rel);
+      if (content)
+        out.files.set(rel, { path: rel, kind, content, linkTarget: null });
+      return;
+    }
     out.symlinks.set(rel, { path: rel, target, kind: "internal" });
     const realRel = relative(root, real).split(sep).join("/");
     if (kind === "env" && !out.files.has(realRel)) {
@@ -197,7 +208,13 @@ function captureFiles(root, include, out, filesOnly = false) {
   // untracked-symlink sweep (a stray .env.npm or lockfile must never be uploaded).
   if (filesOnly) {
     for (const rel of new Set(include)) {
-      captureLinkedOrPlain(root, rel, isDotenvPath(rel) ? "env" : "config", out);
+      captureLinkedOrPlain(
+        root,
+        rel,
+        isDotenvPath(rel) ? "env" : "config",
+        out,
+        true,
+      );
     }
     return;
   }

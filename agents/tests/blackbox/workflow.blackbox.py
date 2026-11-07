@@ -3683,6 +3683,113 @@ async def test_workflow_schema_reload_is_one_attempt_per_turn_with_backoff():
         assert fetch.await_count == 11
 
 
+async def test_workflow_project_context_recovers_after_a_failed_startup_config_fetch():
+    """CR 4501806266: a failed startup fetch_agent_config dropped the project for the run.
+
+    ``_fetch_agent_config`` returns ``{}`` when its attempts fail, so the startup
+    project apply is skipped; the later recovery read only restored output_schema
+    (and only while it was missing). An agent created with its schema then ran
+    without its project section forever. Any later successful config read must
+    apply the project, independent of the schema: reads stay one per turn with
+    backoff, a failed read keeps the section restored from the previous run
+    exactly once, an accepted schema is never replaced by a read, and a healthy
+    start pays no extra fetch.
+    """
+    import contextlib
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    project = {"name": "Rose", "repo_url": "https://github.com/Rose-Ai-Labs/rose", "default_branch": "main"}
+    accepted = {"fields": [{"name": "accepted_field", "type": "str", "required": True}]}
+    stored = {"fields": [{"name": "stored_field", "type": "str", "required": True}]}
+
+    async def prompt(instance) -> str:
+        with patch.object(type(instance), "_advance_cloud_agent_lifecycle", new=AsyncMock()):
+            return await instance.build_system_prompt()
+
+    def failed_start(output_schema, restored_section):
+        instance = _bare_workflow_instance()
+        instance.agent_id = "project-agent"
+        instance.current_phase = "PLAN"
+        instance.user_context_section = "## Personal Information\nFull Name: Test User"
+        instance.output_schema = output_schema
+        instance.project_context_section = restored_section
+        instance._agent_config_unavailable = True
+        return instance
+
+    clock = {"now": datetime(2026, 11, 7, tzinfo=timezone.utc)}
+
+    @contextlib.contextmanager
+    def workflow_env(execute_activity):
+        with (
+            patch("workflows.agent_workflow.workflow.execute_activity", new=execute_activity),
+            patch("workflows.agent_workflow.workflow.logger", MagicMock()),
+            patch("workflows.agent_workflow.workflow.now", side_effect=lambda: clock["now"]),
+            patch("workflows.agent_workflow.workflow.random", return_value=MagicMock(random=lambda: 0.5)),
+            patch("workflows.agent_workflow.asyncio.sleep", new=AsyncMock()),
+        ):
+            yield
+
+    # The schema was supplied at create time; only the project is unknown.
+    fetch = AsyncMock(side_effect=RuntimeError("activity StartToClose timeout"))
+    wf = failed_start(accepted, "")
+    with workflow_env(fetch):
+        assert "## Project" not in await prompt(wf)
+        assert fetch.await_count == 1, "one read per turn"
+        assert "## Project" not in await prompt(wf)
+        assert fetch.await_count == 1, "no read before the backoff deadline"
+
+        fetch.side_effect = None
+        fetch.return_value = {"response_schema": stored, "project": project}
+        clock["now"] = wf._agent_config_retry_at
+        recovered = await prompt(wf)
+        assert fetch.await_count == 2
+        assert recovered.count("## Project") == 1 and recovered.count("Rose-Ai-Labs/rose") == 1
+        assert wf._agent_config_unavailable is False
+        assert wf.output_schema == accepted, "a recovery read never replaces the accepted schema"
+        assert "accepted_field" in recovered and "stored_field" not in recovered
+        assert await prompt(wf) == recovered, "recovered once, then kept without another read"
+        assert fetch.await_count == 2
+
+    # Nothing in the config yet: the section restored by continue_as_new survives
+    # the failed reads and is not duplicated by the recovery.
+    restored_wf = _bare_workflow_instance()
+    restored_wf.current_phase = "PLAN"
+    restored_wf.user_context_section = "## Personal Information\nFull Name: Test User"
+    restored_wf.output_schema = accepted
+    restored_wf._apply_agent_project({"response_schema": None, "project": project})
+    expected = await prompt(restored_wf)
+    carried = failed_start(accepted, restored_wf.project_context_section)
+    outage = AsyncMock(side_effect=RuntimeError("activity StartToClose timeout"))
+    with workflow_env(outage):
+        failed_turn = await prompt(carried)
+        assert failed_turn.count("## Project") == 1
+        outage.side_effect = None
+        outage.return_value = {"response_schema": None, "project": project}
+        clock["now"] = carried._agent_config_retry_at
+        assert await prompt(carried) == failed_turn == expected
+
+    # A missing schema and the project are recovered by the same single read.
+    both = failed_start(None, "")
+    read = AsyncMock(return_value={"response_schema": stored, "project": project})
+    with workflow_env(read):
+        text = await prompt(both)
+    assert read.await_count == 1
+    assert text.count("## Project") == 1 and "stored_field" in text
+    assert both.output_schema == stored
+
+    # A healthy start (config fetched at startup) pays no extra fetch.
+    healthy = _bare_workflow_instance()
+    healthy.agent_id = "healthy-agent"
+    healthy.current_phase = "PLAN"
+    healthy.user_context_section = "## Personal Information\nFull Name: Test User"
+    healthy.output_schema = accepted
+    untouched = AsyncMock(return_value={"response_schema": stored, "project": project})
+    with workflow_env(untouched):
+        await prompt(healthy)
+    assert untouched.await_count == 0
+
+
 def test_workflow_coalesce_fills_only_values_of_the_schema_field_type():
     """descend-full69 MA5: transcript fills turned list fields into markdown strings.
 
@@ -13831,6 +13938,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_schema_reload_is_one_attempt_per_turn_with_backoff",
         test_workflow_schema_reload_is_one_attempt_per_turn_with_backoff,
+    )
+    await r.record_async(
+        "wf_project_context_recovers_after_failed_startup_config_fetch",
+        test_workflow_project_context_recovers_after_a_failed_startup_config_fetch,
     )
     r.record(
         "wf_coalesce_for_each_items_fills_top_creators_analysis",

@@ -66,12 +66,22 @@ async function resolveGithubRepo(
   return { repoUrl: await ensureAgentTreeRepo(agentId), userId };
 }
 
-/** The agent's project, else its tree root's (one indexed read per agent row). */
+/**
+ * The agent's project, else its tree root's (one indexed read per agent row).
+ * A failed lookup is logged and reads as "no project", so session creation
+ * falls back to the agent tree's repo exactly as it did before projects existed.
+ */
 async function resolveAgentProjectId(agentId: string): Promise<string | undefined> {
-  const agent = await repo.findAgentGithubInfo(agentId);
-  if (agent?.projectId !== undefined && agent.projectId !== null) return agent.projectId;
-  if (agent?.busId !== undefined && agent.busId !== null && agent.busId !== agentId) {
-    return (await repo.findRootAgentGithubInfo(agent.busId))?.projectId ?? undefined;
+  try {
+    const agent = await repo.findAgentGithubInfo(agentId);
+    if (agent?.projectId !== undefined && agent.projectId !== null) return agent.projectId;
+    if (agent?.busId !== undefined && agent.busId !== null && agent.busId !== agentId) {
+      return (await repo.findRootAgentGithubInfo(agent.busId))?.projectId ?? undefined;
+    }
+  } catch (err) {
+    log.error('Failed to look up agent project', {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
   return undefined;
 }

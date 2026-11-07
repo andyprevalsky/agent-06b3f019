@@ -221,11 +221,15 @@ export async function updateAgentStatus(
   if (firstTerminal) {
     const isRoot = before.parentAgentId === null;
     await releaseTerminalBrowserSessions(agentId, body.status, isRoot, dependencies);
-    await releaseTerminalCodeSessions(agentId, body.status, dependencies);
     if (isRoot) {
       await runRootTerminalCleanup(agentId, body.status, dependencies);
       reportAutoRcaOutcome(agentId);
     }
+    // Last: persistent-session close connects to the sandbox, checkpoints and
+    // pauses with no timeout. The status row is already terminal, so a retried
+    // PATCH is not `firstTerminal` and would never rerun the root-only steps
+    // above; the reconciler does retry a failed or interrupted code release.
+    await releaseTerminalCodeSessions(agentId, body.status, dependencies);
   }
   return result.agent;
 }

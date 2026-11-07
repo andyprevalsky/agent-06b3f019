@@ -903,8 +903,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         self._response_schema_pending_signals: Dict[str, int] = {}
         self._response_schema_baseline_initialized = False
         self._response_schema_revision: int = 0
-        # The startup agent-config read failed, so output_schema is unknown
-        # (not known-absent) until a later read succeeds.
+        # The startup agent-config read failed, so output_schema and the project
+        # section are unknown (not known-absent) until a later read succeeds.
         self._agent_config_unavailable: bool = False
         # Getter reloads back off across turns while the read keeps failing.
         self._agent_config_retry_count: int = 0
@@ -3174,14 +3174,18 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         return generate
 
     async def _load_output_schema(self, *, poll_until_present: bool, max_attempts: int = 5) -> None:
-        """Read output_schema from the agent row while it is missing.
+        """Read the agent config while its output_schema or project is unknown.
 
         ``poll_until_present`` keeps polling a successful read that returns no
         schema yet (async schema generation at completion); otherwise the first
         successful read is final: no schema then means the task has none.
+
+        A failed startup read leaves the project section unknown too, so any
+        later successful read applies it, even when output_schema is already set
+        (an accepted schema is never replaced by a read).
         """
         attempt = 0
-        while self.output_schema is None and attempt < max_attempts:
+        while (self.output_schema is None or self._agent_config_unavailable) and attempt < max_attempts:
             attempt += 1
             try:
                 agent_config = await workflow.execute_activity(
@@ -3198,7 +3202,9 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             self._agent_config_unavailable = False
             self._agent_config_retry_count = 0
             self._agent_config_retry_at = None
-            self.output_schema = agent_config.get("response_schema")
+            self._apply_agent_project(agent_config)
+            if self.output_schema is None:
+                self.output_schema = agent_config.get("response_schema")
             workflow.logger.info(
                 f"Fetched output_schema attempt {attempt}/{max_attempts}: {self.output_schema is not None}"
             )
@@ -3219,18 +3225,20 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
             await self._wait_for_response_schema_refresh()
             self._require_current_response_schema_acceptance()
             if self.output_schema is None and self._agent_config_unavailable:
-                await self._reload_output_schema_with_backoff()
+                await self._reload_agent_config_with_backoff()
             return self.output_schema
 
         return get_schema
 
-    async def _reload_output_schema_with_backoff(self) -> None:
+    async def _reload_agent_config_with_backoff(self) -> None:
         """One config read per turn; failures back off exponentially across turns.
 
-        The getter runs every main-loop turn, so retries must not stack inside a
-        turn. Delay 1 s doubling to a 60 s cap plus up to 25% jitter (claude-code
-        withRetry.ts getRetryDelay; codex async-utils backoff.rs) spreads a
-        correlated backend outage. workflow.now()/random() keep it deterministic.
+        Recovers the output schema and the project section after a failed
+        startup read. The getter and the system-prompt builder run every
+        main-loop turn, so retries must not stack inside a turn. Delay 1 s
+        doubling to a 60 s cap plus up to 25% jitter (claude-code withRetry.ts
+        getRetryDelay; codex async-utils backoff.rs) spreads a correlated
+        backend outage. workflow.now()/random() keep it deterministic.
         """
         now = workflow.now()
         if self._agent_config_retry_at is not None and now < self._agent_config_retry_at:
@@ -3605,6 +3613,11 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
         Called by run_agent before each LLM call.
         """
         await self._advance_cloud_agent_lifecycle(STARTING_REASONING_TITLE, "IN_PROGRESS")
+        if self._agent_config_unavailable:
+            # The startup config read failed: recover the project section (and
+            # a missing schema) instead of running without them for the rest of
+            # the run. Bounded to one read per turn with backoff.
+            await self._reload_agent_config_with_backoff()
         return build_system_prompt(
             phase=self.current_phase,
             enabled_tools=self._current_tools,

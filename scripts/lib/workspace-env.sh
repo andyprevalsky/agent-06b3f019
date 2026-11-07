@@ -59,6 +59,10 @@ cloud_env_value() {
   sed -n "s/^export $2=//p" "$1" | tail -n 1
 }
 
+cloud_env_selects_system_pg() {
+  grep -qx 'export ROSE_USE_SYSTEM_PG=true' "$1"
+}
+
 cloud_env_stamp() {
   sed -n "s/^# rose-cloud-$2 //p" "$1" | tail -n 1
 }
@@ -67,8 +71,11 @@ new_cloud_workspace_name() {
   printf 'cloud-%s\n' "$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 }
 
+# Usage: write_cloud_env file port name root boot_id [agent_id] [extra_line]
+# extra_line (e.g. 'export ROSE_USE_SYSTEM_PG=true') is written into the temp file
+# BEFORE the atomic mv, so a concurrent reader never sees the file without it.
 write_cloud_env() {
-  local file="$1" port="$2" name="$3" root="$4" boot_id="$5" agent_id="${6:-}" tmp
+  local file="$1" port="$2" name="$3" root="$4" boot_id="$5" agent_id="${6:-}" extra_line="${7:-}" tmp
   tmp="$(mktemp "$file.XXXXXX")"
   {
     printf '# rose-cloud-env\n'
@@ -78,6 +85,7 @@ write_cloud_env() {
     printf 'export CONDUCTOR_PORT=%s\n' "$port"
     printf 'export CONDUCTOR_WORKSPACE_NAME=%s\n' "$name"
     printf 'export CONDUCTOR_ROOT_PATH=%s\n' "$root"
+    [ -z "$extra_line" ] || printf '%s\n' "$extra_line"
   } >"$tmp"
   mv -f "$tmp" "$file"
 }
@@ -130,11 +138,11 @@ refresh_cloud_env_identity() {
       name="$(new_cloud_workspace_name)"
       echo "Re-keyed $file minted on another instance: CONDUCTOR_WORKSPACE_NAME ${stale_name:-unset} -> $name" >&2
     fi
-    local keep_pg=0
-    ! grep -qx 'export ROSE_USE_SYSTEM_PG=true' "$file" || keep_pg=1
-    write_cloud_env "$file" "${port:-3001}" "$name" "$root" "$boot_id" "$agent_id"
-    # The system-Postgres selection (boxes/E2B startup scripts) is not identity.
-    [ "$keep_pg" = 0 ] || echo 'export ROSE_USE_SYSTEM_PG=true' >>"$file"
+    # The system-Postgres selection (boxes/E2B startup scripts) is not identity:
+    # it rides in the same atomic rewrite, never as a second append.
+    local keep_pg=""
+    ! cloud_env_selects_system_pg "$file" || keep_pg='export ROSE_USE_SYSTEM_PG=true'
+    write_cloud_env "$file" "${port:-3001}" "$name" "$root" "$boot_id" "$agent_id" "$keep_pg"
   ) 9<"$file"
 }
 

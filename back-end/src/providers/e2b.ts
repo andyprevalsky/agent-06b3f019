@@ -29,6 +29,7 @@ import {
   type CodeAgentSessionResult,
   createLocalCodeSessionFallback,
   recordE2bCodeSessionSandbox,
+  releaseSandboxAfterFailedRestore,
   releaseSandboxAfterFailedStart,
   stopStaleWsServer,
 } from './e2bCodeSessionSandbox';
@@ -442,7 +443,8 @@ async function createClaudeCodeSessionUnlocked(
     taskId,
     sandbox,
     projectWorkspace,
-    acquired.fromSnapshot
+    acquired.fromSnapshot,
+    (held) => releaseSandboxAfterFailedRestore(held, codeSession)
   );
   const sessionEnvs = { ...envs, ...(project.envs ?? {}) };
   const wsLaunchedAt = Date.now();
@@ -652,7 +654,8 @@ export async function createCodexCodeSession(
     taskId,
     sandbox,
     projectWorkspace,
-    acquired.fromSnapshot
+    acquired.fromSnapshot,
+    (held) => releaseSandboxAfterFailedRestore(held, codeSession)
   );
   const sessionEnvs = { ...envs, ...(project.envs ?? {}) };
   const wsLaunchedAt = Date.now();

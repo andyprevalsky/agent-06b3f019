@@ -48,7 +48,12 @@ import {
   createLocalClaudeCodeSession,
 } from '../../providers/claudeCodeLocalSession';
 import { prisma } from '../../providers/database';
+import { registerClaudeStartupReportCases } from './project-workspace-claude.cases';
 import { registerCodexProjectWorkspaceCases } from './project-workspace-codex.cases';
+import {
+  registerFilesOnlyRejectionCase,
+  verifyFilesOnlyPush,
+} from './project-workspace-files-only.cases';
 import { registerSeedRoseCase } from './project-workspace-seed-rose.cases';
 import { prepareSessionProject } from '../../providers/projects/session';
 import {
@@ -69,7 +74,7 @@ import {
 
 const SECRET = `rose-sync-fixture-secret-${randomBytes(10).toString('hex')}`;
 const REPO_ROOT = resolve(process.cwd(), '..');
-const ROSE_SYNC = join(REPO_ROOT, 'scripts', 'rose-sync');
+const ROSE_SYNC = process.env.ROSE_SYNC_TEST_CLI ?? join(REPO_ROOT, 'scripts', 'rose-sync');
 const WS_SERVER = join(REPO_ROOT, 'e2b-templates', 'claude-code', 'ws-server.mjs');
 const fixture = mkdtempSync(join(process.env.TMPDIR ?? '/var/tmp', 'project-workspace-bb-'));
 const fakeBin = join(fixture, 'bin');
@@ -301,54 +306,7 @@ test('sync → restore → startup ok, with incremental re-sync and no secret le
     `only changed file: ${third.written}`
   );
 
-  // --files-only pushes the named env files and nothing else: a new unpushed branch
-  // is not bundled and the stored artifacts are neither replaced nor cleared.
-  const snapshotBefore = await prisma.projectSyncSnapshot.findUniqueOrThrow({
-    where: { projectId: project.id },
-  });
-  sh(
-    checkout,
-    `git branch files-only-extra $(git -c user.name=t -c user.email=t@example.com commit-tree -m extra -p HEAD 'HEAD^{tree}')`
-  );
-  writeFileSync(join(checkout, 'app', '.env.local'), 'APP_MODE=files-only\n');
-  // A discoverable env file that is NOT named: --files-only must not auto-discover it.
-  writeFileSync(join(checkout, 'app', '.env.discovered'), 'DISCOVERED=1\n');
-  const filesOnly = await runSync(s, [
-    'push',
-    '--dir',
-    checkout,
-    '--project',
-    project.id,
-    '--files-only',
-    '--include',
-    'app/.env.local',
-  ]);
-  assert(
-    JSON.stringify(filesOnly.written) === JSON.stringify(['app/.env.local']),
-    `files-only writes the changed env file: ${filesOnly.written}`
-  );
-  assert(
-    filesOnly.gitBundle === 'unchanged' && filesOnly.uncommittedPatch === 'unchanged',
-    `files-only leaves the stored artifacts alone: ${filesOnly.gitBundle}/${filesOnly.uncommittedPatch}`
-  );
-  assert(filesOnly.deleted.length === 0, 'files-only never prunes');
-  assert(
-    !filesOnly.written.includes('app/.env.discovered') &&
-      !filesOnly.unchanged.includes('app/.env.discovered'),
-    `files-only pushed an env file it was not asked for: ${filesOnly.written}`
-  );
-  rmSync(join(checkout, 'app', '.env.discovered'));
-  const snapshotAfter = await prisma.projectSyncSnapshot.findUniqueOrThrow({
-    where: { projectId: project.id },
-  });
-  assert(
-    snapshotAfter.gitBundleFingerprint === snapshotBefore.gitBundleFingerprint &&
-      snapshotAfter.patchFingerprint === snapshotBefore.patchFingerprint,
-    'files-only did not upload the new unpushed branch'
-  );
-  sh(checkout, 'git branch -D files-only-extra');
-  writeFileSync(join(checkout, 'app', '.env.local'), 'APP_MODE=staging\n');
-  await runSync(s, ['push', '--dir', checkout, '--project', project.id]);
+  await verifyFilesOnlyPush({ s, checkout, projectId: project.id, runSync, sh });
 
   const envRow = await prisma.projectEnvFile.findUniqueOrThrow({
     where: { projectId_path: { projectId: project.id, path: '.env' } },
@@ -642,6 +600,15 @@ test('project CLI child yields the event loop, drains output and preserves failu
   } finally {
     clearImmediate(heartbeat);
   }
+});
+
+registerFilesOnlyRejectionCase({ fixture, roseSync: ROSE_SYNC, sh, runChild });
+
+registerClaudeStartupReportCases({
+  fixture,
+  wsServer: WS_SERVER,
+  installFakeClaude,
+  waitForFile,
 });
 
 registerCodexProjectWorkspaceCases({

@@ -100,6 +100,10 @@ export function parseArgs(argv) {
     else if (arg === "--json") opts.json = true;
     else throw new Error(`Unknown option ${arg}`);
   }
+  // Only `push` honors --files-only; seed-rose/onboard/status would otherwise
+  // discover and upload dotenv files, a git bundle and a patch despite it.
+  if (opts.filesOnly && command !== "push")
+    throw new Error(`--files-only is only supported by push, not ${command}`);
   return opts;
 }
 
@@ -202,6 +206,25 @@ async function resolveProject(call, opts, root) {
   return call("PUT", "/api/projects", { name });
 }
 
+/**
+ * A files-only push omits the git artifacts, so the server keeps the stored
+ * bundle and patch, but its manifest replaces the previous one. Carry the stored
+ * git fields those artifacts depend on (the patch's base headSha and branch, the
+ * bundle's kind and branches, unpushed/dirty counts) over from the stored
+ * snapshot; otherwise a moved HEAD orphans the patch and a null bundleKind stops
+ * restoration from cloning the retained full bundle of a repository with no remote.
+ */
+export function retainArtifactGit(manifest, state) {
+  const previous = state.manifest?.git;
+  const retained =
+    state.gitBundleFingerprint != null || state.patchFingerprint != null;
+  if (!previous || !retained) return manifest;
+  return {
+    ...manifest,
+    git: { ...previous, remoteUrl: manifest.git.remoteUrl },
+  };
+}
+
 export function buildPush(capture, state, key, prune) {
   const stored = new Map(
     (state.files ?? []).map((f) => [f.path, f.fingerprint]),
@@ -243,7 +266,9 @@ export function buildPush(capture, state, key, prune) {
   return {
     baseRevision: state.revision,
     keyId: key.keyId,
-    manifest: capture.manifest,
+    manifest: capture.filesOnly
+      ? retainArtifactGit(capture.manifest, state)
+      : capture.manifest,
     files,
     prune,
     // Omitted (not null) artifacts keep what the project already stores.

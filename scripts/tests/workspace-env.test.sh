@@ -297,6 +297,35 @@ expect_eq "$(bash -c ". '$HELPER_SRC'; cloud_env_stamp '$boot_only_env' agent-id
   expect_eq "$(CLOUD_ENV_BOXES_DEVBOX_ID= bash -c ". '$HELPER_SRC'; refresh_cloud_env_identity '$ws/.cloud-env' '' $boot" 2>/dev/null; sed -n 's/^export CONDUCTOR_WORKSPACE_NAME=//p' "$ws/.cloud-env")" "$clone_name" "no id keeps the same-boot behaviour"
 )
 
+# The system-Postgres selection must be part of the re-keyed file the instant it replaces
+# the old one: any other reader (run.sh, startup scripts) sources .cloud-env unlocked, and a
+# second append step would let it pick Docker Postgres in between. Capture the file right
+# after the atomic mv, before anything else in refresh_cloud_env_identity can touch it.
+(
+  fixture="$TMP_ROOT/atomic-system-pg"
+  mkdir -p "$fixture"
+  seen_after_mv="$fixture/seen-after-mv"
+  rekey_snapshot() {
+    rm -f "$seen_after_mv"
+    bash -c ". '$HELPER_SRC'; mv() { command mv \"\$@\" && cp \"\${@: -1}\" '$seen_after_mv'; }; refresh_cloud_env_identity '$1' other-agent boot-atomic" 2>/dev/null
+  }
+  with_pg="$fixture/with-pg.cloud-env"
+  bash -c ". '$HELPER_SRC'; write_cloud_env '$with_pg' 3001 cloud-atomic '$fixture' boot-atomic first-agent; echo 'export ROSE_USE_SYSTEM_PG=true' >>'$with_pg'"
+  rekey_snapshot "$with_pg"
+  expect_eq "$(grep -c '^export ROSE_USE_SYSTEM_PG=true$' "$seen_after_mv")" "1" "the re-keyed file carries the system-Postgres selection from its first visible byte"
+  rekeyed_name="$(sed -n 's/^export CONDUCTOR_WORKSPACE_NAME=//p' "$with_pg")"
+  case "$rekeyed_name" in cloud-atomic | "") echo "FAIL: the atomic re-key test must actually re-key (got '$rekeyed_name')" >&2; exit 1 ;; esac
+  without_pg="$fixture/without-pg.cloud-env"
+  bash -c ". '$HELPER_SRC'; write_cloud_env '$without_pg' 3001 cloud-atomic '$fixture' boot-atomic first-agent"
+  rekey_snapshot "$without_pg"
+  expect_eq "$(grep -c ROSE_USE_SYSTEM_PG "$seen_after_mv")" "0" "re-keying never adds a system-Postgres selection the file did not have"
+  expect_eq "$(grep -c ROSE_USE_SYSTEM_PG "$without_pg")" "0" "a re-keyed file without the selection stays without it"
+  with_extra="$fixture/with-extra.cloud-env"
+  bash -c ". '$HELPER_SRC'; write_cloud_env '$with_extra' 3001 cloud-atomic '$fixture' boot-atomic first-agent 'export ROSE_USE_SYSTEM_PG=true'"
+  expect_eq "$(tail -n 1 "$with_extra")" "export ROSE_USE_SYSTEM_PG=true" "write_cloud_env writes an optional extra line with the identity"
+  expect_eq "$(sed -n 's/^export CONDUCTOR_PORT=//p' "$with_extra")" "3001" "the identity lines stay intact beside the extra line"
+)
+
 explicit_queue="$(
   TEMPORAL_TASK_QUEUE=semantic-sentinel \
   bash -c ". '$HELPER_SRC'; resolve_temporal_task_queue yamoussoukro"

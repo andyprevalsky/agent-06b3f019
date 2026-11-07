@@ -40,6 +40,40 @@ import {
 
 const WS_SERVER = resolve(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs');
 const SYSTEM_PROMPT = 'FIXTURE SYSTEM PROMPT';
+const STARTUP_REPORT_PREFIX = 'ROSE_PROJECT_STARTUP_REPORT ';
+
+/**
+ * Scripted stand-ins for `rose-project-startup` (the program a code session's
+ * ws-server runs and reads a final `ROSE_PROJECT_STARTUP_REPORT {...}` line
+ * from), shared by the Codex and Claude cases. Each is CommonJS source.
+ */
+export const scriptedStartupRunners = {
+  /** Exits at once; a grandchild holding its stdout writes the report 600 ms later. */
+  lateReport(report: Record<string, unknown>): string {
+    return `const { spawn } = require('node:child_process');
+spawn(process.execPath, ['-e', 'setTimeout(() => process.stdout.write(process.argv[1]), 600)', ${JSON.stringify(
+      `\n${STARTUP_REPORT_PREFIX}${JSON.stringify(report)}\n`
+    )}], { detached: true, stdio: ['ignore', 1, 2] }).unref();
+process.stdout.write('runner exited before its report\\n');
+`;
+  },
+  /** Writes some output and exits without ever writing a report. */
+  crash(exitCode: number): string {
+    return `process.stdout.write('compiling\\n'); process.exit(${exitCode});\n`;
+  },
+  /** Writes a report line with this raw payload and exits 0. */
+  reportLine(payload: string): string {
+    return `process.stdout.write(${JSON.stringify(`\n${STARTUP_REPORT_PREFIX}${payload}\n`)}); process.exit(0);\n`;
+  },
+};
+
+/** Report payloads that are not a report: each must read as malformed, never hang. */
+export const UNREADABLE_STARTUP_REPORTS: Array<[string, string]> = [
+  ['truncated', '{"status":"ok"'],
+  ['null', 'null'],
+  ['array', '[]'],
+  ['nostatus', '{"exitCode":0}'],
+];
 
 interface Capture {
   cwd: string;
@@ -109,7 +143,6 @@ process.stdout.write(JSON.stringify({ type: 'turn.completed' }) + '\\n');
     installFakeCodex();
     const { home, label } = options;
     mkdirSync(home, { recursive: true });
-    const capturePath = join(ctx.fixture, `codex-${label}.json`);
     let projectEnvs: Record<string, string> = {};
     if (options.projectId !== null) {
       const workspace = await prepareSessionProject(options.userId, options.projectId);
@@ -121,6 +154,24 @@ process.stdout.write(JSON.stringify({ type: 'turn.completed' }) + '\\n');
       );
       projectEnvs = restored.envs;
     }
+    return runWsServer({
+      home,
+      label,
+      env: {
+        CODE_AGENT_BRANCH: options.projectId === null ? '' : 'rose/codex-project-branch',
+        ...projectEnvs,
+      },
+    });
+  }
+
+  /** Run the real Codex ws-server in `home` until the fake `codex` captures its prompt. */
+  async function runWsServer(options: {
+    home: string;
+    label: string;
+    env: Record<string, string>;
+  }) {
+    const { home, label } = options;
+    const capturePath = join(ctx.fixture, `codex-${label}.json`);
     const started = Date.now();
     const child = spawn(process.execPath, [WS_SERVER], {
       env: {
@@ -132,9 +183,8 @@ process.stdout.write(JSON.stringify({ type: 'turn.completed' }) + '\\n');
         CODEX_GOAL: `codex project workspace ${label}`,
         CODEX_AUTH_JSON: '{}',
         CODE_AGENT_SYSTEM_PROMPT: SYSTEM_PROMPT,
-        CODE_AGENT_BRANCH: options.projectId === null ? '' : 'rose/codex-project-branch',
         FAKE_CODEX_CAPTURE_PATH: capturePath,
-        ...projectEnvs,
+        ...options.env,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -148,6 +198,29 @@ process.stdout.write(JSON.stringify({ type: 'turn.completed' }) + '\\n');
     } finally {
       child.kill('SIGKILL');
     }
+  }
+
+  /**
+   * Project-mode ws-server whose startup runner is a script the test controls
+   * (what it writes and when), instead of the generated rose-project-startup.
+   * No backend or database is involved.
+   */
+  function runWithScriptedStartupRunner(label: string, runnerSource: string) {
+    installFakeCodex();
+    const home = mkdtempSync(join(ctx.fixture, `codex-home-runner-${label}-`));
+    const workdir = join(home, 'workspace');
+    mkdirSync(workdir, { recursive: true });
+    const runner = join(home, 'scripted-startup-runner.cjs');
+    writeFileSync(runner, runnerSource);
+    return runWsServer({
+      home,
+      label: `runner-${label}`,
+      env: {
+        ROSE_PROJECT_WORKDIR: workdir,
+        ROSE_PROJECT_STARTUP: runner,
+        ROSE_PROJECT_NAME: `PJ-Codex-Runner-${label}`,
+      },
+    });
   }
 
   const mode = (path: string) => (statSync(path).mode & 0o777).toString(8);
@@ -253,6 +326,48 @@ process.stdout.write(JSON.stringify({ type: 'turn.completed' }) + '\\n');
     );
     assert(timeout.elapsed < 25_000, `the session did not wait for the 30s script`);
     assert(!timeout.capture.prompt.includes('never'), 'the script was stopped before finishing');
+  });
+
+  test('codex: a startup report that reaches stdout only after the runner exits is not lost', async () => {
+    const { capture } = await runWithScriptedStartupRunner(
+      'late',
+      scriptedStartupRunners.lateReport({
+        status: 'ok',
+        exitCode: 0,
+        durationMs: 1500,
+        timeoutS: 60,
+        outputTail: 'late',
+        logPath: null,
+      })
+    );
+    assert(
+      capture.prompt.includes(
+        'Project startup for project PJ-Codex-Runner-late finished OK in 1.5s'
+      ),
+      `the late report is used: ${capture.prompt.slice(0, 300)}`
+    );
+  });
+
+  test('codex: a missing or unreadable startup report is reported as such and never stalls the session', async () => {
+    const crash = await runWithScriptedStartupRunner('crash', scriptedStartupRunners.crash(7));
+    assert(
+      crash.capture.prompt.includes('FAILED (exit ?)') &&
+        crash.capture.prompt.includes('startup runner produced no report (exit code 7)'),
+      `a crash without a report says so: ${crash.capture.prompt.slice(0, 300)}`
+    );
+    assert(!crash.capture.prompt.includes('malformed'), 'a missing report is not "malformed"');
+    for (const [name, payload] of UNREADABLE_STARTUP_REPORTS) {
+      const run = await runWithScriptedStartupRunner(
+        name,
+        scriptedStartupRunners.reportLine(payload)
+      );
+      assert(
+        run.capture.prompt.includes('FAILED (exit ?)') &&
+          run.capture.prompt.includes('startup runner wrote a malformed report (exit code 0)') &&
+          !run.capture.prompt.includes('finished OK'),
+        `${name}: an unreadable report is malformed, not success: ${run.capture.prompt.slice(0, 300)}`
+      );
+    }
   });
 
   test('codex: a resumed workspace keeps its branch and local work, and startup reruns', async () => {

@@ -1051,6 +1051,33 @@ function startupBudgetMs() {
   }
 }
 
+/**
+ * The runner's report: the last stdout line with the report prefix, parsed.
+ * Returns { report } or { problem: "missing" | "malformed" }, so a crash that
+ * wrote nothing is told apart from a report that cannot be read.
+ */
+function parseProjectStartupReport(output) {
+  const line = output
+    .split("\n")
+    .reverse()
+    .find((l) => l.startsWith(PROJECT_STARTUP_REPORT_PREFIX));
+  if (line === undefined) return { problem: "missing" };
+  try {
+    const report = JSON.parse(line.slice(PROJECT_STARTUP_REPORT_PREFIX.length));
+    if (
+      report !== null &&
+      typeof report === "object" &&
+      !Array.isArray(report) &&
+      typeof report.status === "string"
+    ) {
+      return { report };
+    }
+  } catch {
+    // Not JSON: reported as malformed below.
+  }
+  return { problem: "malformed" };
+}
+
 /** Run the project's startup script (bounded); resolves its report or null. */
 function runProjectStartup() {
   if (!projectMode || !PROJECT_STARTUP || !existsSync(PROJECT_STARTUP)) {
@@ -1113,6 +1140,11 @@ function runProjectStartup() {
     child.stderr.on("data", (chunk) =>
       appendOutput("stderr", chunk.toString("utf8")),
     );
+    // Backstop only: the runner enforces the script's own timeout (SIGTERM then
+    // SIGKILL of the script's process group, which it spawns detached) well
+    // inside this budget. Daemons the script starts (Postgres, dev servers)
+    // are meant to outlive startup (startupRunner.ts contract), and they are
+    // not in the runner's group, so killing more than the runner is wrong.
     guard = setTimeout(() => {
       try {
         child.kill("SIGKILL");
@@ -1122,16 +1154,24 @@ function runProjectStartup() {
       done(fallback("timeout", "startup runner did not finish"));
     }, startupBudgetMs());
     child.on("error", (err) => done(fallback("failed", err.message)));
-    child.on("exit", () => {
-      const line = stdout
-        .split("\n")
-        .reverse()
-        .find((l) => l.startsWith(PROJECT_STARTUP_REPORT_PREFIX));
-      try {
-        done(JSON.parse(line.slice(PROJECT_STARTUP_REPORT_PREFIX.length)));
-      } catch {
-        done(fallback("failed", "startup runner produced no report"));
+    // "close", not "exit": "exit" can fire before the last stdout chunk (the
+    // report line) is read. The runner is the only holder of its stdout pipe
+    // (the script runs on pipes of its own), so close follows its exit.
+    child.on("close", (code, signal) => {
+      const ended = signal ? `signal ${signal}` : `exit code ${code}`;
+      const parsed = parseProjectStartupReport(stdout);
+      if (parsed.report) {
+        done(parsed.report);
+        return;
       }
+      done(
+        fallback(
+          "failed",
+          parsed.problem === "malformed"
+            ? `startup runner wrote a malformed report (${ended})`
+            : `startup runner produced no report (${ended})`,
+        ),
+      );
     });
   });
 }

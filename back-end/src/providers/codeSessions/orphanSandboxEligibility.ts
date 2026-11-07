@@ -8,7 +8,9 @@
  * (sandbox id, or metadata codeSessionId / ownerAgentId / rootAgentId), not
  * Render-origin, carries no `purpose` tag, and is either untagged and older
  * than 24 h or `host:`-origin tagged and older than 72 h. `startedAt` resets on
- * resume, so age is a rough proxy. Everything else is kept.
+ * resume, so age is a rough proxy. Everything else is kept. The reference read
+ * itself is sanity-checked first (`assessProdReferences`): empty/tiny sets or a
+ * local database host mean the "unreferenced" verdicts cannot be trusted.
  */
 
 export const UNTAGGED_MIN_AGE_MS = 24 * 60 * 60 * 1000;
@@ -97,4 +99,89 @@ export function decideOrphan(
       : keep('kept-too-young', 'host-tagged but started within the age floor');
   }
   return keep('kept-other-origin', `origin=${roseOrigin ?? 'none'}`);
+}
+
+/** Fewest distinct rows each reference set must hold before a production read is believable. */
+export const MIN_PLAUSIBLE_PROD_REFS = 10;
+
+export interface ProdReferenceAssessment {
+  /** Database host only; credentials, port and path are never retained. */
+  host: string;
+  ok: boolean;
+  problems: string[];
+}
+
+const DATABASE_HOST_PATTERN = /^[a-z][a-z0-9+.-]*:\/\/(?:[^/?#]*@)?(\[[^\]]+\]|[^/:?#]+)/i;
+
+/** Host of a database URL, lower-cased, without credentials; null when it cannot be read. */
+export function databaseHostOf(databaseUrl: string | undefined): string | null {
+  const match = databaseUrl === undefined ? null : DATABASE_HOST_PATTERN.exec(databaseUrl.trim());
+  const host = match?.[1]?.replace(/^\[|\]$/g, '').toLowerCase();
+  return host === undefined || host === '' ? null : host;
+}
+
+/**
+ * True for hosts that cannot be the production database: loopback, wildcard,
+ * private ranges, `.local` names and dotless docker/compose service names.
+ */
+export function isNonProductionHost(host: string): boolean {
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+  if (host === '0.0.0.0' || host === '::' || host === '::1') return true;
+  if (host === 'host.docker.internal') return true;
+  const octets = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
+  if (octets !== null) {
+    const [first, second] = [Number(octets[1]), Number(octets[2])];
+    return (
+      first === 10 ||
+      first === 127 ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 169 && second === 254)
+    );
+  }
+  return !host.includes('.') && !host.includes(':');
+}
+
+/**
+ * Sanity check on the production reference read: an empty or tiny set (or one
+ * read from a local/devbox database) would make every untagged paused sandbox
+ * look orphaned. Pure; the reaper prints `host` so the operator can confirm.
+ */
+export function assessProdReferences(
+  refs: ProdReferences,
+  databaseUrl: string | undefined,
+  minPerSet: number = MIN_PLAUSIBLE_PROD_REFS
+): ProdReferenceAssessment {
+  const problems: string[] = [];
+  const host = databaseHostOf(databaseUrl);
+  if (host === null) problems.push('cannot determine the database host from DIRECT_URL');
+  else if (isNonProductionHost(host)) {
+    problems.push(`DIRECT_URL host ${host} is a local/non-production database`);
+  }
+  const floor = Number.isFinite(minPerSet) ? Math.max(1, minPerSet) : MIN_PLAUSIBLE_PROD_REFS;
+  const sets: Array<[string, ReadonlySet<string>]> = [
+    ['sandboxIds', refs.sandboxIds],
+    ['codeSessionIds', refs.codeSessionIds],
+    ['agentIds', refs.agentIds],
+  ];
+  for (const [name, set] of sets) {
+    if (set.size === 0) problems.push(`${name} is empty`);
+    else if (set.size < floor) problems.push(`${name} has ${set.size} rows (< ${floor})`);
+  }
+  return { host: host ?? 'unknown', ok: problems.length === 0, problems };
+}
+
+/**
+ * Execute refuses an implausible reference read; a dry run returns the loud
+ * warning text (null when the references look fine) so the operator sees that
+ * its eligible list cannot be trusted.
+ */
+export function enforceProdReferenceGuard(
+  assessment: ProdReferenceAssessment,
+  execute: boolean
+): string | null {
+  if (assessment.ok) return null;
+  const detail = assessment.problems.join('; ');
+  if (execute) throw new Error(`refusing --execute: production references look wrong: ${detail}`);
+  return `WARNING: production references look wrong (${detail}); this dry-run eligible list is NOT trustworthy and --execute will refuse`;
 }
