@@ -2545,15 +2545,20 @@ class DOMService:
                 # so browser-use's drop callback has not fired. browser-use's reconnect
                 # would cancel this reader inside its reconnect window, where that
                 # callback records a pending reconnect; every later cycle then stops
-                # the next healthy client the same way (H-47: 468 reconnects). Ending
+                # the next healthy client the same way (H-47: 470 reconnects). Ending
                 # the reader first lets the callback start browser-use's one reconnect.
                 ended_stale_reader = True
                 logger.warning(f"CDP socket is down but its reader is still running ({flags}); ending it")
                 reader.cancel()
-                await asyncio.wait({reader})
+                await asyncio.wait({reader}, timeout=max(0.0, deadline - time.monotonic()))
                 continue
             if started_here:
                 break
+            # A reader that finished just now has its drop callback queued but not run;
+            # starting a reconnect first would let that callback re-arm a pending one.
+            await asyncio.sleep(0)
+            if session.is_cdp_connected or session.is_reconnecting or session._reconnect_pending:
+                continue
             started_here = True
             logger.warning(f"CDP socket is down and no reconnect is running ({flags}); starting browser-use reconnect")
             await session._auto_reconnect()

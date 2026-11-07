@@ -527,6 +527,17 @@ async def test_multiplexer_logs_who_closed_each_cdp_socket():
         mux_logger.setLevel(previous_level)
 
 
+async def test_multiplexer_close_details_never_raise_on_unexpected_protocol_state():
+    """The exit log runs in a finally ahead of _release_client; an odd close state must not skip the release."""
+    from browser_tools.cdp_multiplexer import _close_details
+
+    for odd in ("closing", 2, [], object()):
+        socket_ = type("Socket", (), {"protocol": type("P", (), {"close_rcvd_then_sent": odd})()})()
+        details = _close_details(socket_)
+        assert "closed_first_by=unknown" in details and "code=None" in details, details
+    assert "closed_first_by=none" in _close_details(object())
+
+
 async def test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_running():
     """A provider socket drop whose browser-use drop callback never starts a reconnect.
 
@@ -4425,6 +4436,7 @@ async def run_all_tests():
         ("multiplexer_releases_and_reattaches", test_multiplexer_releases_upstream_when_clients_leave_and_reattaches),
         ("multiplexer_propagates_provider_close_code", test_multiplexer_propagates_provider_close_code),
         ("multiplexer_logs_who_closed_each_cdp_socket", test_multiplexer_logs_who_closed_each_cdp_socket),
+        ("multiplexer_close_details_never_raise", test_multiplexer_close_details_never_raise_on_unexpected_protocol_state),
         ("state_fetch_restores_dropped_cdp_socket", test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_running),
         ("state_fetch_waits_for_pending_reconnect", test_state_fetch_waits_for_a_reconnect_browser_use_left_pending),
         ("state_fetch_restore_with_live_stale_reader_reconnects_once", test_state_fetch_restore_with_a_live_stale_reader_reconnects_once),

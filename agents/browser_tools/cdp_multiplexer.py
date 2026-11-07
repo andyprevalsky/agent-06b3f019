@@ -124,7 +124,15 @@ def _close_details(websocket: Any) -> str:
     """Close code, reason and initiator of a websocket, for attributing a CDP drop (log only)."""
     protocol = getattr(websocket, "protocol", None)
     received_first = getattr(protocol, "close_rcvd_then_sent", None)
-    initiator = {True: "peer", False: "mux", None: "none"}[received_first]
+    # Never raise: this runs in _serve_client's finally, ahead of _release_client.
+    if received_first is True:
+        initiator = "peer"
+    elif received_first is False:
+        initiator = "mux"
+    elif received_first is None:
+        initiator = "none"
+    else:
+        initiator = "unknown"
     reason = (getattr(websocket, "close_reason", "") or "")[:120]
     return f"code={getattr(websocket, 'close_code', None)}, reason={reason}, closed_first_by={initiator}"
 
