@@ -639,6 +639,7 @@ def test_evaluated_wrapper_completion_publishes_once_before_owner_release(tmp_pa
         "run_single_task": delegate,
         "_reads_base_trajectory_history": bench._reads_base_trajectory_history,
         "_prepare_base_trajectory_history": bench._prepare_base_trajectory_history,
+        "_refuse_queued_after_interrupt": bench._refuse_queued_after_interrupt,
         "batch_started_at": bench.datetime.now(bench.timezone.utc),
         "cloud_batch_cleanup": SimpleNamespace(contract=lambda: (tmp_path / "contract.json", "owned-token")),
         "_task_root_custody": bench._task_root_custody,

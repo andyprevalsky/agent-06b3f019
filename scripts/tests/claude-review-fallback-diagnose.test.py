@@ -127,9 +127,16 @@ def test_workflow_and_deploy_wiring() -> None:
     assert "path: .trusted-review" in wf
     assert "persist-credentials: false" in wf
     assert "if: ${{ false }}" in wf, "the retired fallback must remain disabled"
+    # The 401-vs-exhaustion classification is executed by the workflow's
+    # diagnose step and script; /deploy only states that the fallback is disabled.
+    assert "      - name: Diagnose Claude failure\n" in wf
+    script = SCRIPT.read_text()
+    assert 'CREDENTIAL_INVALID = "CREDENTIAL_INVALID"' in script and 'USAGE_EXHAUSTED = "USAGE_EXHAUSTED"' in script
+    assert "repairable, NOT usage exhaustion" in script, "a rejected token must stay a repairable credential failure"
     deploy = DEPLOY.read_text()
-    assert "Diagnose Claude failure" in deploy and "CREDENTIAL_INVALID" in deploy
+    assert "The Claude fallback review is disabled." in deploy
     assert "~2s + 1 turn + $0 = provider-blocked" not in deploy, "signature alone must not imply exhaustion"
+    assert "is_error" not in deploy, "/deploy must not classify the Claude result signature as exhaustion"
 
 
 def main() -> int:

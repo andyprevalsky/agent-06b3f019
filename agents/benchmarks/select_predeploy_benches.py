@@ -278,7 +278,7 @@ def standing_skip_eligibility(tasks: Sequence[TaskRef], selected: Sequence[str])
                 "stall qualifies. Default enabled; BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL=0 "
                 "restores strict diagnostics. Record loud warning SKIP, unreleased amount and "
                 "pending refund; never PASS or financial/native cleanup credit. "
-                "See .claude/commands/deploy.md Step 6a and "
+                "See .claude/commands/deploy.md (Skippable tests: AgentCard) and "
                 "docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md."
             )
         if task.raw.get("requires_claude_code"):
@@ -291,7 +291,7 @@ def standing_skip_eligibility(tasks: Sequence[TaskRef], selected: Sequence[str])
                 "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 on the permitted deploy path, "
                 "never silently enabled here. Shared ANTHROPIC_API_KEY fallback is not qualifying "
                 "user/pool evidence. Task correctness remains hard-gated. "
-                "See .claude/commands/deploy.md Step 6 pre-deploy smoke."
+                "See .claude/commands/deploy.md (Skippable tests: Claude Code smoke)."
             )
         if rules:
             eligibility[name] = rules
@@ -638,6 +638,9 @@ def select_predeploy_benches(
             deduped_dropped.append(name)
 
     cap_hit = len(selected) >= cap and len(deduped_dropped) > 0
+    # A category scan also visits tasks the smoke floor already selected; those are
+    # selected, not history-skipped.
+    skipped_history = [name for name in skipped_history if name not in selected_set]
     return Selection(
         selected=selected,
         floor=floor,

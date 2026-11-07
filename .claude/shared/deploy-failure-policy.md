@@ -2,7 +2,7 @@
 
 This is the controlling test/gate-failure policy for `/deploy`, including test
 tiers, provider checks and production checks it invokes. Review-provider
-outages or exhausted credits follow the external exception below. A review
+outages, exhausted credits or a credential or billing change only the user can make follow the external exception below. A review
 comment about the exact recorded qualifying test/gate failure may reference
 its existing handoff; independent correctness/security review findings retain
 the existing review requirements. This policy does not create a general
@@ -127,7 +127,8 @@ not silently substitute an unsupported effort or speed.
 
 ## External provider failure: no handoff
 
-Evidence of a third-party outage or exhausted provider credits makes the
+Evidence of a third-party outage, exhausted provider credits or a credential
+or billing change only the user can make (user decision, 2026-11-06) makes the
 affected check non-blocking. Preserve its actual result and continue without
 waiting for recovery, replenishing credits, automatic retry loops, or creating
 any repair agent. An unexplained failure or an agent-introduced provider
@@ -135,7 +136,7 @@ configuration defect does not establish this external exception.
 
 At the very end of every deploy scorecard, after all other sections, append:
 
-**🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <outage or credits exhausted> — NEEDS FIXING**
+**🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <outage, credits exhausted or credential or billing change> — NEEDS FIXING**
 
 List affected checks and evidence under each provider. Keep unresolved alerts
 across scorecard refreshes, resume and the final report. Do not turn failed or
@@ -271,7 +272,8 @@ Use the existing deploy run's report directory for durable cumulative entries.
 reads one JSON occurrence from stdin: `id`, `description`, `evidence`,
 `native_result`, `attribution`, and either `repair_agent` (the boxes.dev thread
 URL, or a retained Rose URL) or
-`external_provider` (`name` and `reason`: `outage` or `credits exhausted`).
+`external_provider` (`name` and `reason`: `outage`, `credits exhausted` or
+`credential or billing change`).
 Copy the returned RCA gate value into `attribution` (`INTRODUCED` or
 `NOT_INTRODUCED`) and reference its diagnosis in `evidence`; use `UNKNOWN` while
 attribution remains unresolved. Older `NOT INTRODUCED` records remain readable.

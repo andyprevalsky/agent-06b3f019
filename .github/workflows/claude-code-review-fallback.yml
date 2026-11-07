@@ -83,7 +83,7 @@ jobs:
 
       # The action hides CLI output, so a revoked OAuth token (401) looks
       # identical to usage exhaustion (1 turn, ~2s, $0). Print the recorded
-      # api_error_status/error text and classify it for /deploy Step 9a.
+      # api_error_status/error text and classify it (the fallback review is disabled in /deploy).
       - name: Diagnose Claude failure
         if: failure() && steps.review.outcome == 'failure'
         shell: bash

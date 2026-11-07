@@ -97,11 +97,24 @@ def _check_or_write_fixture(path: Path, events: list[dict[str, Any]], home: str)
     )
 
 
+# The viewer socket of a loaded or instrumented test process attaches this long
+# after the ws-server listens. A stand-in CLI that streams meanwhile hands that
+# viewer the bounded replay instead of the live frames (see
+# test_late_viewer_replay_drops_only_superseded_partial_text), so the fixture
+# comparison below must not depend on how fast the viewer attaches.
+VIEWER_ATTACH_LAG_S = 0.5
+
+
 async def _claude_session_with_direct_turn(sandbox: LocalCodeSessionSandbox) -> SessionObserver:
     """Turn 1 replays while gated; the user's turn lands mid-turn; hand back ends the run."""
     await sandbox.start()
+    await asyncio.sleep(VIEWER_ATTACH_LAG_S)
     observer = SessionObserver(sandbox.ws_url)
     await observer.start()
+    # Attached: the server now registers this socket for live frames, so the
+    # held stand-in CLI may start streaming. Every recorded event reaches the
+    # viewer live, whatever the attach lag was.
+    sandbox.release_first_turn_output()
     # The stand-in CLI holds turn 1's `result` at the gate; wait until every
     # event before it is out so the user's turn lands at a fixed position.
     # Streamed text now creates many partial upserts. Wait for the final
@@ -134,7 +147,9 @@ async def _claude_session_with_direct_turn(sandbox: LocalCodeSessionSandbox) -> 
 
 
 async def test_claude_recording_through_ws_server_matches_event_fixture():
-    sandbox = LocalCodeSessionSandbox("claude", fixture=CLAUDE_RAW, gate_first_turn=True, goal=CLAUDE_GOAL)
+    sandbox = LocalCodeSessionSandbox(
+        "claude", fixture=CLAUDE_RAW, gate_first_turn=True, hold_first_turn_output=True, goal=CLAUDE_GOAL
+    )
     try:
         observer = await _claude_session_with_direct_turn(sandbox)
         assert observer.exit_code == 0, sandbox.log()
@@ -148,6 +163,46 @@ async def test_claude_recording_through_ws_server_matches_event_fixture():
         )
         await observer.close()
     finally:
+        sandbox.stop()
+
+
+async def test_late_viewer_replay_drops_only_superseded_partial_text():
+    """The two views of one session differ in exactly one documented way.
+
+    A viewer attached from the start receives every cumulative partial snapshot
+    live (the committed event fixture). A viewer that attaches later is served
+    the bounded replay, where each streamed item keeps only its latest
+    snapshot's ``text``; superseded snapshots keep their ``delta``, so history
+    grows with the output rather than its square. Nothing else may differ.
+    """
+    sandbox = LocalCodeSessionSandbox(
+        "claude", fixture=CLAUDE_RAW, gate_first_turn=True, hold_first_turn_output=True, goal=CLAUDE_GOAL
+    )
+    live: Optional[SessionObserver] = None
+    late: Optional[SessionObserver] = None
+    try:
+        live = await _claude_session_with_direct_turn(sandbox)
+        assert live.exit_code == 0, sandbox.log()
+        late = SessionObserver(sandbox.ws_url)
+        await late.start()
+        await late.wait_for(lambda: late.exit_code is not None)
+        assert len(late.events) == len(live.events), (len(late.events), len(live.events))
+        snapshots = [e for e in live.events if e.get("partial") is True and e.get("text")]
+        assert len(snapshots) >= 4, "the recording must stream several text snapshots"
+        compacted = 0
+        for seen_live, replayed in zip(live.events, late.events):
+            if seen_live == replayed:
+                continue
+            assert seen_live.get("partial") is True and seen_live.get("text"), (seen_live, replayed)
+            assert replayed == {key: value for key, value in seen_live.items() if key != "text"}, (seen_live, replayed)
+            assert replayed.get("delta") == seen_live.get("delta")
+            compacted += 1
+        # Every recorded item ends in a final block, so every snapshot was superseded.
+        assert compacted == len(snapshots), (compacted, len(snapshots))
+    finally:
+        for observer in (live, late):
+            if observer is not None:
+                await observer.close()
         sandbox.stop()
 
 
@@ -788,6 +843,10 @@ async def run_all_tests():
     await r.record_async(
         "claude_recording_through_ws_server_matches_event_fixture",
         test_claude_recording_through_ws_server_matches_event_fixture,
+    )
+    await r.record_async(
+        "late_viewer_replay_drops_only_superseded_partial_text",
+        test_late_viewer_replay_drops_only_superseded_partial_text,
     )
     await r.record_async(
         "codex_recording_through_ws_server_matches_event_fixture",

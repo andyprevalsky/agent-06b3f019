@@ -205,7 +205,7 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(admission['started']); launch.assert_not_called()
                 c.CANCEL.clear()
                 card = dict(name='card', checks=['card'], command=['must-not-launch'], case_protocol=True,
-                            category='agentcard-lifecycle', worker_transport='local-isolated', timeout_seconds=.05)
+                            category='generic', worker_transport='local-isolated', timeout_seconds=.05)
                 result = c.execute(card, self.state, self.directory, self.root)
                 self.assertEqual({'card': 'UNVERIFIED'}, result['cases'])
                 self.assertFalse(result['executed']); self.assertFalse(result['complete'])
@@ -213,7 +213,9 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(result['lingering_group']); self.assertNotIn('cleanup_owner', result)
                 launch.assert_not_called()
 
-    def test_local_slot_holds_through_native_cleanup_validation_without_cancelling_cloud(self):
+    def test_local_slot_fences_queued_locals_after_unverified_cleanup_without_cancelling_cloud(self):
+        # The only local native producer was the retired AgentCard lane (its tasks run in cloud smoke now);
+        # an ordinary owned local gate that reports unverified cleanup still fences the queued local root.
         import time
         started = self.root / '.context/first-native-started'
         forbidden = self.root / '.context/queued-native-started'
@@ -222,7 +224,7 @@ class Cycle(unittest.TestCase):
                   f"Path({str(started)!r}).touch();time.sleep(.15);"
                   "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=False,reused=False);"
                   "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
-        first = dict(name='card', category='agentcard-lifecycle', worker_transport='local-isolated',
+        first = dict(name='card', category='generic', worker_transport='local-isolated',
                      case_protocol=True, checks=['card'], timeout_seconds=2, command=[sys.executable, '-c', script])
         second = dict(name='queued', category='generic', worker_transport='local-isolated',
                       case_protocol=True, checks=['queued'], timeout_seconds=2,
@@ -236,8 +238,8 @@ class Cycle(unittest.TestCase):
             self.assertTrue(started.exists())
             two = pool.submit(c.execute, second, self.state, self.directory, self.root, local_failure=failed)
             a, b = one.result(), two.result()
-        self.assertEqual(0, a['native_exit']); self.assertTrue(a['lingering_group'])
-        self.assertIn('cleanup_owner', a); self.assertTrue(failed.is_set())
+        self.assertEqual(0, a['native_exit']); self.assertFalse(a['complete'])
+        self.assertEqual('owned', a['lifecycle']); self.assertTrue(failed.is_set())
         self.assertEqual({'queued': 'UNVERIFIED'}, b['cases'])
         self.assertFalse(b['executed']); self.assertFalse(b['complete']); self.assertFalse(forbidden.exists())
         cloud_script = ("import json,os;from pathlib import Path;"
@@ -477,7 +479,9 @@ class Cycle(unittest.TestCase):
                 'source': failure['source'], 'description': 'real failure', 'evidence': 'RCA evidence',
                 'native_result': failure['native_result'], 'command': failure.get('command'), 'attribution': attribution, **fields}]}
 
-    def triage_quick_fixture(self):
+    MAC_STATIC = ['bash', '-c', 'npm run format:check && npm run lint && npm run type-check']
+
+    def triage_quick_fixture(self, mac=None):
         import contextlib, io
         (self.root / 'back-end').mkdir()
         (self.root / 'scripts').mkdir()
@@ -500,6 +504,11 @@ class Cycle(unittest.TestCase):
                           '--tsBuildInfoFile ../.context/tsbuildinfo/back-end.tsbuildinfo']),
             dict(name='backend-structural', category='backend-structural', quick=True,
                  checks=['backend-structural'], cwd='back-end', command=['npm', 'run', 'test:structural'])]
+        if mac is not None:  # the darwin plan's conditional fifth quick gate (deploy_test_plan.MAC_APP_STATIC)
+            gate = {'name': 'mac-app-static', 'category': 'mac-app-static', 'quick': True,
+                    'checks': ['mac-app-static'], 'cwd': 'mac-app', 'command': self.MAC_STATIC, **mac}
+            (self.root / gate['cwd']).mkdir(exist_ok=True)
+            self.plan['gates'].append(gate)
         self.plan['source'] = c.source(self.root)
         self.state = c.initialize(self.plan, self.root); self.failure()
         receipt = self.state['attempts'][-1]['results'][0]
@@ -554,6 +563,32 @@ class Cycle(unittest.TestCase):
             c.write(path, value); owned = path.read_bytes()
             self.assertEqual(2, call()); self.assertEqual(owned, path.read_bytes())
             self.assertFalse((self.root / '.context/observed').exists())
+
+    def test_triage_quick_accepts_the_conditional_mac_app_static_fifth_gate(self):
+        with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
+            new, plan, path, bins, call = self.triage_quick_fixture(mac={})
+            before = c.read(path)
+            self.assertEqual(0, call())
+            after = c.read(path); observations = after['attempts'].pop()
+            self.assertEqual(before, after)
+            self.assertEqual({'eslint','format','typescript','backend-structural','mac-app-static'},
+                             {r['gate'] for r in observations['results']})
+            self.assertTrue(all(r['executed'] and r['complete'] and r['native_exit'] == 0 for r in observations['results']))
+            # 2 static checks + tsc + structural npm + the three mac-app npm scripts.
+            self.assertEqual(7, len((self.root / '.context/observed').read_text().splitlines()))
+
+    def test_triage_quick_refuses_a_substituted_mac_app_static_recipe(self):
+        variants = [dict(command=['bash', '-c', 'npm run lint']), dict(cwd='.'), dict(env={'X': '1'}),
+                    dict(checks=['mac-app-static', 'extra']), dict(command=['npm', 'run', 'test:structural'])]
+        for index, variant in enumerate(variants):
+            with self.subTest(variant=variant):
+                if index:
+                    self.tearDown(); self.setUp()
+                with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
+                    new, plan, path, bins, call = self.triage_quick_fixture(mac=variant)
+                    original = path.read_bytes()
+                    self.assertEqual(2, call()); self.assertEqual(original, path.read_bytes())
+                    self.assertFalse((self.root / '.context/observed').exists())
 
     def test_triage_quick_failure_and_changed_pending_do_not_commit(self):
         with patch.dict(os.environ, PATH=str(self.root / '.context/bin') + os.pathsep + os.environ['PATH']):
@@ -1569,8 +1604,9 @@ class Cycle(unittest.TestCase):
             'api': {'command': self.plan['gates'][1]['command'], 'checks': ['a']}}})
         self.assertEqual(['api'], [g['name'] for g in c.records(self.plan, self.state)])
 
-    def skipped_row(self, sha='c' * 64, reason='Compute token pool exhausted or cooling down', status='SKIPPED', passed=False):
-        return {'native_task': {'name': 'a', 'status': status, 'benchmark_status': status, 'passed': passed,
+    def skipped_row(self, sha='c' * 64, reason='Compute token pool exhausted or cooling down', status='SKIPPED', passed=False,
+                    name='a'):
+        return {'native_task': {'name': name, 'status': status, 'benchmark_status': status, 'passed': passed,
                                 'failure_reason': reason, 'agent_id': 'agent-1'}, 'path': 'native/a/cloudbench-run.json', 'sha256': sha}
 
     def resource_failure(self, **row):
@@ -1674,6 +1710,123 @@ class Cycle(unittest.TestCase):
         self.assertIn('- api/a — openai-compute-tokens: Compute token pool exhausted or cooling down [compute_quota_exhausted]'
                       ' · Evidence: native/a/cloudbench-run.json#failure_reason · Confirmed at: 1001.0 · Receipt: ' + 'c' * 64, text)
         self.assertNotIn('PASS', text.split('RESOURCE WARNINGS', 1)[1])
+
+    # The native row the 2026-11-06 cloud smoke proof recorded (agent 4f8c38c0, transfer owt_208688aafd52934f33699e9c).
+    STALL_REASON = ("AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped "
+                    "under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-"
+                    "abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected "
+                    "terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', "
+                    "got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING'")
+
+    def stall_confirmation(self, **changes):
+        return self.confirmation(**{'receipt_reason': self.STALL_REASON, 'reason_code': 'agentcard_release_stall',
+                                    'provider': 'agentcard-sandbox',
+                                    'evidence': 'native/agent-payment-abandonment/cloudbench-run.json#failure_reason',
+                                    **changes})
+
+    def test_standing_agentcard_release_stall_in_cloud_smoke_is_a_warning_not_a_pass(self):
+        # The AgentCard lifecycle tasks are smoke tasks: their standing release stall arrives as a natively SKIPPED
+        # cloud row (FAIL case) and is qualified through the same typed warning path, never PASS or pass credit.
+        runtime = (ROOT / 'agents/benchmarks/run_benchmark.py').read_text()
+        self.assertIn('"AgentCard never released the closed card\'s org transfer (consumed, releasedCents=0); "\n'
+                      '    "skipped under the standing user-approved warning policy', runtime)
+        failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment')
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED', resource_skip=self.stall_confirmation()))
+        self.assertEqual('ready', self.state['phase']); self.assertTrue(self.state['ready'])
+        kept = next(f for f in self.state['failures'] if f['id'] == failure['id'])
+        self.assertEqual(('SKIPPED_WITH_WARNING', 'FAIL', 'SKIPPED'),
+                         (kept['disposition'], kept['native_result'], kept['worker_evidence']['native_task']['benchmark_status']))
+        self.assertEqual({}, self.state['skips'])  # no pass credit
+        self.assertEqual('agentcard_release_stall', self.state['resource_warnings'][0]['confirmation']['reason_code'])
+
+    def stall_run_document(self, transfer):
+        """The runner's own run.json shape for the 2026-11-06 sandbox proof (agent 4f8c38c0)."""
+        document = {'run_id': 'flt-agent-payment-abandonment-d9a38b815c82-0', 'tasks': [
+            {'name': 'agent-payment-abandonment', 'status': 'SKIPPED', 'benchmark_status': 'SKIPPED', 'passed': False,
+             'failure_reason': self.STALL_REASON, 'logs': {'agentcard_release_stall_lifecycle': {
+                 'agentCard': {'id': 'card_f82707f47089791fef514b3c', 'status': 'CLOSED', 'balanceCents': 0},
+                 'orgTransfer': transfer}}}]}
+        path = self.root / '.context/native/agent-payment-abandonment/cloudbench-run.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document))
+        return path
+
+    def stall_report_text(self, transfer):
+        import contextlib, io
+        path = self.stall_run_document(transfer)
+        sha = c.sha_file(path)
+        failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment', sha=sha)
+        failure['worker_evidence']['path'] = str(path)
+        c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED',
+                                             resource_skip=self.stall_confirmation(receipt_sha256=sha)))
+        plan = self.directory / 'plan.json'; c.write(plan, self.plan); c.write(self.directory / 'cycle.json', self.state)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['report', '--plan', str(plan), '--state-dir', str(self.directory),
+                                        '--root', str(self.root)]))
+        return (self.directory / 'report.md').read_text().split('RESOURCE WARNINGS', 1)[1]
+
+    def test_agentcard_release_stall_warning_row_states_the_unreleased_amount(self):
+        # transferredCents 4396 / releasedCents 0 is $43.96 left unreleased in the sandbox; the row is still
+        # a warning (native FAIL retained), never a pass, and says the funds stay a followup.
+        warning = self.stall_report_text({'id': 'owt_208688aafd52934f33699e9c', 'status': 'consumed', 'livemode': False,
+                                          'amountCents': 4396, 'transferredCents': 4396, 'releasedCents': 0})
+        self.assertIn('- api/a — agentcard-sandbox: ' + self.STALL_REASON + ' [agentcard_release_stall]', warning)
+        self.assertIn(' · Native: FAIL · Unreleased: $43.96 sandbox (transferredCents 4396 / releasedCents 0)'
+                      ' (followup: unreleased funds stay open)', warning)
+        self.assertNotIn('PASS', warning)
+
+    def test_agentcard_release_stall_warning_never_invents_an_unstated_amount(self):
+        for label, transfer, mode in (('no transferred amount', {'releasedCents': 0, 'livemode': False}, None),
+                                      ('no released amount', {'transferredCents': 4396, 'livemode': False}, None),
+                                      ('non-integer', {'transferredCents': '4396', 'releasedCents': 0}, None),
+                                      ('released above transferred', {'transferredCents': 1, 'releasedCents': 5}, None),
+                                      ('live mode', {'transferredCents': 100, 'releasedCents': 25, 'livemode': True}, 'live'),
+                                      ('mode unstated', {'transferredCents': 100, 'releasedCents': 25}, 'mode UNRECORDED')):
+            with self.subTest(label):
+                self.tearDown(); self.setUp()
+                warning = self.stall_report_text(transfer)
+                if mode is None:
+                    self.assertIn(' · Unreleased: UNRECORDED (followup: unreleased funds stay open)', warning)
+                    self.assertNotIn('$', warning.split('Native:', 1)[1])
+                else:
+                    self.assertIn(f' · Unreleased: $0.75 {mode} (transferredCents 100 / releasedCents 25)', warning)
+
+    def test_agentcard_release_stall_helpers_serve_the_production_lane_without_widening_smoke(self):
+        # scripts/deploy_prod.py reuses these two helpers for the production lane (production=True); the staged
+        # smoke qualification keeps its sandbox-only default, so a production row still blocks there.
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-abandonment'))
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-production-abandonment'))
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-production-abandonment', production=True))
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', production=True))
+        self.assertFalse(c.agentcard_release_stall_task('chat-mode', production=True))
+        self.assertEqual(c.unreleased_amount_text({'transferredCents': 4396, 'releasedCents': 0, 'livemode': True}),
+                         'Unreleased: $43.96 live (transferredCents 4396 / releasedCents 0)')
+        self.assertEqual(c.unreleased_amount_text({'transferredCents': 4396, 'releasedCents': 0, 'livemode': False}),
+                         'Unreleased: $43.96 sandbox (transferredCents 4396 / releasedCents 0)')
+        for livemode in (1, 0, None, [], 'true'):  # only a real boolean names the provider mode
+            self.assertIn('mode UNRECORDED', c.unreleased_amount_text(
+                {'transferredCents': 100, 'releasedCents': 25, 'livemode': livemode}))
+        for bad in (None, [], 'x', {}, {'transferredCents': 1}, {'releasedCents': 0}, {'transferredCents': True, 'releasedCents': 0},
+                    {'transferredCents': 1, 'releasedCents': 5}, {'transferredCents': -1, 'releasedCents': 0}):
+            self.assertEqual(c.unreleased_amount_text(bad), 'Unreleased: UNRECORDED', bad)
+
+    def test_agentcard_release_stall_qualification_binds_the_exact_sandbox_row(self):
+        pristine = copy.deepcopy(self.state)
+        for label, row in {'production task': dict(name='agent-payment-production-abandonment'),
+                           'not an AgentCard lifecycle task': dict(name='chat-mode'),
+                           'other AgentCard failure': dict(name='agent-payment-abandonment',
+                                                           reason='AgentCard create_card failed: Cardholder not found'),
+                           'assertion FAIL with the stall text': dict(name='agent-payment-abandonment', status='FAILED')
+                           }.items():
+            with self.subTest(label):
+                self.state = copy.deepcopy(pristine)
+                row.setdefault('reason', self.STALL_REASON)
+                failure = self.resource_failure(**row)
+                before = copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):
+                    c.adjudicate(self.state, self.report(failure, attribution='NOT_INTRODUCED',
+                                                         resource_skip=self.stall_confirmation(receipt_reason=row['reason'])))
+                self.assertEqual(before, self.state)
 
     def test_resource_skip_refusals_are_atomic(self):
         failure = self.resource_failure()
@@ -3649,6 +3802,37 @@ class StructuralSupervisorCleanup(unittest.TestCase):
         self.assertEqual([self.gate['name']],c.retained_owners(self.state,[self.gate['name']]))
 
 
+def listening_ports():
+    """TCP ports in LISTEN state on this host, read the way the interrupted proof reads them."""
+    ports = set()
+    for table in ('/proc/net/tcp', '/proc/net/tcp6'):
+        for line in Path(table).read_text().splitlines()[1:]:
+            row = line.split()
+            if row[3] == '0A': ports.add(int(row[1].rsplit(':', 1)[1], 16))
+    return ports
+
+
+def interrupted_root_port():
+    """A root base port no deploy-worktree claim can share, with no listener on its footprint now.
+
+    The interrupted proof refuses while anything on the host listens on the root's
+    LISTENER_OFFSETS footprint. This suite runs beside the other deploy gates, which listen on
+    their claimed footprints, and every claimable footprint starts at FIRST_BASE_PORT: the
+    hard-coded base 15000 shared ports with the live semantic-stack claim 15100 (RCA
+    2026-11-05-interrupted-proof-fixture-port-inside-deploy-claim-range).
+    """
+    import socket
+    from deploy_test_isolation import _ports
+    listening = listening_ports()
+    for base in range(1024, _ports.FIRST_BASE_PORT - _ports.FOOTPRINT_PORTS + 1, _ports.PORTS_PER_WORKTREE):
+        if listening.isdisjoint(base + offset for offset in _ports.LISTENER_OFFSETS):
+            with socket.socket() as probe:
+                try: probe.bind(('127.0.0.1', base))
+                except OSError: continue
+            return base
+    raise AssertionError('no listener-free root footprint lies below the deploy-worktree claim range')
+
+
 class InterruptedLocalRecovery(unittest.TestCase):
     write_native = StructuralSupervisorCleanup.write_native
 
@@ -3661,7 +3845,8 @@ class InterruptedLocalRecovery(unittest.TestCase):
         subprocess.run(['git','-C',str(self.coordinator),'-c','user.name=test','-c','user.email=test@example.com','commit','-qm','old'],check=True)
         self.source=c.source(self.coordinator)
         self.gate.update(worker='independent-interrupted-worker',timeout_seconds=14400)
-        self.gate['env']={'CONDUCTOR_WORKSPACE_NAME':'interrupted-fixture','CONDUCTOR_PORT':'15000'}
+        self.port=interrupted_root_port()
+        self.gate['env']={'CONDUCTOR_WORKSPACE_NAME':'interrupted-fixture','CONDUCTOR_PORT':str(self.port)}
         self.request['source']=self.source
         self.receipt.update(source=self.source,native_exit=-9,cancelled=True,worker_result=None,
                             execution_binding={'contract_digest':c.digest(self.gate),'environment':'env','input_fingerprint':'fp'})
@@ -3684,6 +3869,16 @@ class InterruptedLocalRecovery(unittest.TestCase):
         self.proof=dict(kind=KIND,files={n:c.sha_file(p) for n,p in self.paths.items()},confirmed_at=201,observed_by='native-interrupted-review')
 
     def reconcile(self):c.reconcile(self.state,self.token,self.proof)
+
+    def test_root_footprint_shares_no_port_with_any_claimable_deploy_worktree(self):
+        # Concurrent deploy gates listen on their claims while this suite runs; a shared port makes every proof refuse.
+        from deploy_test_isolation import _ports
+        root=int(self.gate['env']['CONDUCTOR_PORT'])
+        bases=range(_ports.FIRST_BASE_PORT,_ports.LAST_BASE_PORT+1,_ports.PORTS_PER_WORKTREE)
+        shared=sorted(port for port in (root+o for o in _ports.LISTENER_OFFSETS)
+                      if any(port-o in bases for o in _ports.LISTENER_OFFSETS))
+        self.assertEqual([],shared)
+        self.assertTrue(listening_ports().isdisjoint(root+o for o in _ports.LISTENER_OFFSETS))
 
     def test_token_reconcile_and_actual_resume_branch_preserve_interrupted_receipts(self):
         original=copy.deepcopy(self.state['attempts']);raw={n:p.read_bytes() for n,p in self.paths.items()}
@@ -3787,7 +3982,7 @@ class InterruptedLocalRecovery(unittest.TestCase):
             path.unlink()
         import socket,fcntl
         with socket.socket() as listener:
-            listener.bind(('127.0.0.1',15000));listener.listen()
+            listener.bind(('127.0.0.1',self.port));listener.listen()
             with self.assertRaises(ValueError):self.reconcile()
         with (self.worker/'.context/native-worker-admission.lock').open('r') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -3836,6 +4031,19 @@ class InterruptedCardRecovery(unittest.TestCase):
         self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
         self.physical['database_status']='UNKNOWN';self.seal()
         with self.assertRaises(ValueError):c.interrupted_boundary(self.state)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+    def test_transiently_unreadable_same_user_process_does_not_block_reconcile(self):
+        # The Blacksmith failure (PR #1751): quiet() read /proc/<pid>/cwd of a same-user process that was
+        # momentarily unreadable and the PermissionError aborted the proof as "missing or unknown evidence".
+        # A real child that clears PR_SET_DUMPABLE is unreadable to its parent exactly like that process.
+        body = ("import ctypes,time;libc=ctypes.CDLL(None);libc.prctl(4,0,0,0,0);print('ready',flush=True);"
+                "time.sleep(.4);libc.prctl(4,1,0,0,0);time.sleep(60)")
+        child = subprocess.Popen([sys.executable, '-c', body], stdout=subprocess.PIPE, text=True, cwd=self.root)
+        self.addCleanup(lambda: (child.kill(), child.wait(), child.stdout.close()))
+        self.assertEqual('ready', child.stdout.readline().strip())
+        c.reconcile(self.state, self.token, self.proof)
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
 
     def test_card_admission_foreign_physical_and_unknowns_refuse(self):
         for key,value in [('source','other'),('observed_at',199),('run',str(self.root)),('listeners',[123]),('database_status','PRESENT'),('canonical_reconcile_exit',True)]:
@@ -4014,7 +4222,7 @@ class RelayStartupEvidence(unittest.TestCase):
         calls=[];requested={'checks':['browser-smoke'],'skips':{},'token':'owned','source':{'head':'a'*40},'gate':'smoke'}
         namespace=dict(NAME=__import__('re').compile(r'^[A-Za-z0-9_.-]+$'),source=lambda _r:requested['source'],
                        campaign_width=lambda _c:1,hashlib=hashlib,os=os,time=time,sys=sys,
-                       cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,
+                       cancellation_handlers=contextlib.nullcontext,write=lambda *_a:None,shared_canary_env=lambda _r:{},
                        run_command=lambda *a,**k:(calls.append((a,k)) or (1,False,False,False)),
                        collect_campaign=lambda *_a:({'browser-smoke':'UNVERIFIED'},{},False,'fixture'))
         exec(compile(ast.Module(body=[function],type_ignores=[]),str(self.target/'deploy_test_cloud.py'),'exec'),namespace)

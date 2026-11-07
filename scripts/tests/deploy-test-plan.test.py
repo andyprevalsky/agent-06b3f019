@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import io
 import json
 import os
 import subprocess
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -57,42 +59,59 @@ class Selection(unittest.TestCase):
         plan=p.select(self.template,['new-language/source'],self.result,self.bindings)
         self.assertEqual(7,len(plan['gates']))
 
-    def test_agentcard_opt_out_records_skip_without_reducing_other_all_categories(self):
-        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
-                                      'command':['true'],'checks':['card']})
-        self.result.update(all=True,reasons=['unmapped source'])
-        plan=p.select(self.template,['new-language/source'],self.result,self.bindings,
-                      skip_agentcard='operator elected no live payment test')
-        self.assertEqual(7,len(plan['gates']))
-        self.assertNotIn('payment',{gate['name'] for gate in plan['gates']})
-        self.assertEqual([{'gate':'payment','category':'agentcard-lifecycle',
-                          'reason':'explicit AgentCard opt-out: operator elected no live payment test',
-                          'disposition':'SKIPPED','executed':False}],plan['omitted'])
-        self.assertEqual('payment',self.template['gates'][-1]['name'])
+    def test_agentcard_is_not_a_gate_category_and_cannot_be_elected_away(self):
+        # The AgentCard lifecycle tasks are ordinary smoke tasks (agents/benchmarks/tasks.json tag smoke):
+        # there is no agentcard-lifecycle gate, path rule or opt-out; production keeps its own lane.
+        self.assertNotIn('agentcard-lifecycle',p.PATHS)
+        self.assertFalse(hasattr(p,'PATH_EXCLUDES'))
+        for argv in (['--list-selected','--skip-agentcard','no card'],
+                     ['--inventory','i.json','--output','o.json','--skip-agentcard','no card']):
+            with self.subTest(argv=argv), patch('sys.stderr',io.StringIO()), \
+                    self.assertRaises(SystemExit) as caught:
+                p.main(argv)
+            self.assertEqual(2,caught.exception.code)
 
-    def test_agentcard_opt_out_rejects_blank_reason(self):
-        with self.assertRaisesRegex(ValueError,'nonempty reason'):
-            p.select(self.template,[],self.result,self.bindings,skip_agentcard='  ')
+    def test_selection_only_matches_the_bound_selection_without_worker_checks(self):
+        self.template['gates'].append({'name':'mac','category':'mac-app-coverage-blackbox','platform':'other-os',
+                                      'command':['true'],'checks':['mac']})
+        bound=p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
+        with patch.object(p,'validate_plan',side_effect=AssertionError('selection-only must not validate')), \
+                patch.object(p,'source',side_effect=AssertionError('selection-only must not hash source')):
+            unbound=p.select(self.template,['back-end/src/one.ts'],self.result,None)
+        self.assertEqual([g['name'] for g in bound['gates']],[g['name'] for g in unbound['gates']])
+        self.assertEqual(bound['omitted'],unbound['omitted'])
+        self.assertEqual('mac',unbound['omitted'][-1]['gate'])
+        self.assertTrue(all('worker' not in g for g in unbound['gates']))
+        self.assertIsNone(unbound['source'])
+        with self.assertRaisesRegex(ValueError,'worker binding missing'):
+            p.select(self.template,['back-end/src/one.ts'],self.result,{})
 
-    def test_cli_agentcard_opt_out_does_not_require_an_unused_inventory_binding(self):
-        self.template['gates'].append({'name':'payment','category':'agentcard-lifecycle',
-                                      'command':['true'],'checks':['card']})
+    def test_cli_list_selected_prints_selection_without_bindings_or_output(self):
         with tempfile.TemporaryDirectory() as folder:
-            root=Path(folder); template=root/'template.json'; inventory=root/'inventory.json'; output=root/'plan.json'
-            template.write_text(json.dumps(self.template));inventory.write_text('{}')
-            selected=SimpleNamespace(all_lanes=True,reasons=['unmapped source'],selected=self.result['lanes'])
-            def bindings(actual, *_):
-                self.assertNotIn('payment',{gate['name'] for gate in actual['gates']})
-                return self.bindings
-            with patch.object(sys,'argv',['deploy_test_plan.py','--template',str(template),
-                    '--inventory',str(inventory),'--output',str(output),'--skip-agentcard','user elected skip']), \
-                    patch.object(p,'changed_files',return_value=['new-language/source']), \
+            template=Path(folder)/'template.json'; template.write_text(json.dumps(self.template))
+            selected=SimpleNamespace(all_lanes=False,reasons=[],selected=self.result['lanes'])
+            out=io.StringIO()
+            with patch.object(p,'changed_files',return_value=['back-end/src/one.ts']) as changed, \
                     patch.object(p.Selector,'select',return_value=selected), \
-                    patch.object(p,'generate_bindings',side_effect=bindings):
-                self.assertEqual(0,p.main())
-            saved=json.loads(output.read_text())
-            self.assertEqual('SKIPPED',saved['omitted'][0]['disposition'])
-            self.assertEqual(7,len(saved['gates']))
+                    patch.object(p,'generate_bindings',side_effect=AssertionError('no bindings in list mode')), \
+                    patch('sys.stdout',out):
+                self.assertEqual(0,p.main(['--template',str(template),'--list-selected','--base','review-base']))
+            changed.assert_called_once_with('review-base',None)
+            self.assertEqual(['template.json'],[x.name for x in Path(folder).iterdir()])
+        listed=json.loads(out.getvalue())
+        self.assertEqual(['lint','be','smoke','format','typescript','backend-structural'],listed['selected'])
+        self.assertEqual(['lint','format','typescript','backend-structural'],listed['quick'])
+        self.assertEqual(['be','smoke'],listed['needs_worker'])
+        self.assertEqual(['fe'],[o['gate'] for o in listed['omitted']])
+
+    def test_cli_requires_bindings_and_output_outside_list_mode(self):
+        for argv in (['--output','plan.json'],['--workers','w.json'],['--list-selected','--workers','w.json'],
+                     ['--list-selected','--output','plan.json'],['--workers','w.json','--inventory','i.json',
+                     '--output','plan.json']):
+            with self.subTest(argv=argv), patch('sys.stderr',io.StringIO()), \
+                    self.assertRaises(SystemExit) as caught:
+                p.main(argv)
+            self.assertEqual(2,caught.exception.code)
 
     def test_unknown_graph_lane_refuses_selection_instead_of_silently_omitting_coverage(self):
         del self.result['lanes']['backend-blackbox']
@@ -119,6 +138,108 @@ class Selection(unittest.TestCase):
                             p, 'PLANNING_TIMEOUT_SECONDS', 0.05, create=True):
                         with self.assertRaises(subprocess.TimeoutExpired):
                             p.standard_template()
+
+    def test_e2b_smoke_is_selected_on_every_deploy_with_recorded_reason(self):
+        # Original /deploy 6c (deploy.md L2226): the Claude Code E2B smoke runs on every deploy.
+        self.template['gates'].append({'name':'e2b-smoke','category':'e2b-smoke','command':['true'],
+                                      'checks':['e2b-smoke']})
+        self.bindings['e2b-smoke']={'id':'e2b-worker','command':['true'],'transport':'local-isolated',
+            'cwd':str(Path(self.workers.name)/'e2b'),
+            'env':{'CONDUCTOR_WORKSPACE_NAME':'e2b','CONDUCTOR_PORT':'36000'}}
+        self.result['lanes']['backend-unit']=[]
+        for changed in (['docs/guide.md'],['mac-app/main/index.ts'],['agents/benchmarks/history/task_attempts.jsonl'],[]):
+            for binding in (self.bindings, None):
+                with self.subTest(changed=changed, bound=binding is not None):
+                    plan=p.select(self.template,changed,self.result,binding)
+                    gate=next((g for g in plan['gates'] if g['name']=='e2b-smoke'),None)
+                    self.assertIsNotNone(gate,plan['omitted'])
+                    self.assertFalse(gate['quick'])
+                    self.assertIn(p.ALWAYS['e2b-smoke'],gate['selection_evidence'])
+        self.assertIn('every deploy',p.ALWAYS['e2b-smoke'])
+
+    def test_agentcard_payment_paths_select_the_cloud_smoke_gate_that_carries_its_tasks(self):
+        # Every path the retired AgentCard lane triggered on (original /deploy CHANGED_AGENTCARD_PAYMENT,
+        # deploy.md L516) still selects the gate that now runs those four tasks: cloud smoke.
+        self.result['lanes']['backend-unit']=[]
+        triggers=['back-end/scripts/setup-benchmark-payment.ts',
+                  'back-end/src/domains/agentcard/service.ts','back-end/src/domains/purchases/router.ts',
+                  'back-end/src/domains/test-payment/router.ts',
+                  'back-end/src/providers/agentcard/client.ts','back-end/src/providers/card-provider/index.ts',
+                  'back-end/src/providers/purchaseCleanup.ts','back-end/src/providers/purchase-wallet-funding.ts',
+                  'back-end/src/providers/purchase-wallet-funding-retry.ts','back-end/src/providers/wallet-funding.ts',
+                  'back-end/prisma/schema.prisma',
+                  'agents/benchmarks/run_benchmark.py','agents/benchmarks/tasks.json',
+                  'agents/domains/request_payment_card/flow.py','agents/tools/request_payment_card.py',
+                  'front-end/src/features/test-payment/Page.tsx',
+                  'scripts/run.sh','scripts/run-agentcard-lifecycle-task.sh']
+        for path in triggers:
+            with self.subTest(path=path):
+                plan=p.select(self.template,[path],self.result,None)
+                self.assertIn('smoke',[g['name'] for g in plan['gates']],path)
+        plan=p.select(self.template,['docs/guide.md'],self.result,None)
+        self.assertIn('smoke',[o['gate'] for o in plan['omitted']])
+
+    def test_standard_template_has_no_agentcard_lane_and_smoke_checks_are_the_selector_inventory(self):
+        smoke_tasks='agent-payment-test-shop\nagent-payment-setup-resume\nagent-payment-idempotent-abandonment\n'\
+                    'agent-payment-abandonment\nchat-mode\n'
+        with patch.object(p.subprocess,'run') as execute:
+            execute.side_effect=[SimpleNamespace(stdout=json.dumps({'lanes':[{'name':'smoke','command':['x']}]})),
+                                 SimpleNamespace(stdout=smoke_tasks)]
+            gates={g['name']:g for g in p.standard_template()['gates']}
+        planner=execute.call_args_list[0].args[0]
+        self.assertEqual('plan',planner[2])
+        self.assertNotIn('--agentcard',planner)
+        self.assertEqual(['bash','scripts/run-predeploy-cloud','--list'],execute.call_args_list[1].args[0])
+        self.assertNotIn('agentcard-lifecycle',gates)
+        self.assertEqual(smoke_tasks.split(),gates['smoke']['checks'])
+        self.assertTrue(gates['smoke']['native_cloud'])
+
+    def test_mac_app_static_is_a_conditional_quick_check_never_a_platform_pass(self):
+        # Original /deploy Step 4m-lint (DEPRECATED_deploy.md L1380-1388): run when mac-app/ changed.
+        gate = p.MAC_APP_STATIC
+        self.assertEqual(['bash','-c','npm run format:check && npm run lint && npm run type-check'],gate['command'])
+        self.assertEqual(('mac-app','darwin','mac-app-static'),(gate['cwd'],gate['platform'],gate['category']))
+        import deploy_test_cycle
+        self.assertIn('mac-app-static',deploy_test_cycle.QUICK)
+        self.assertNotIn('mac-app-static',deploy_test_cycle.REQUIRED_QUICK)
+        self.assertEqual({'mac-app-static'},p.CONDITIONAL_QUICK)
+        self.template['gates'].append(copy.deepcopy(gate))
+        self.result['lanes']['backend-unit']=[]
+        for platform in ('darwin','linux'):
+            with self.subTest(platform=platform), patch.object(p.sys,'platform',platform):
+                for binding in (self.bindings, None):
+                    untouched=p.select(self.template,['docs/guide.md'],self.result,binding)
+                    self.assertNotIn('mac-app-static',[g['name'] for g in untouched['gates']])
+                    entry=next(o for o in untouched['omitted'] if o['gate']=='mac-app-static')
+                    self.assertEqual('no dependency or runtime-path trigger',entry['reason'])
+                    changed=p.select(self.template,['mac-app/main/index.ts'],self.result,binding)
+                    names=[g['name'] for g in changed['gates']]
+                    if platform=='darwin':
+                        static=next(g for g in changed['gates'] if g['name']=='mac-app-static')
+                        self.assertTrue(static['quick'])
+                        self.assertNotIn('worker',static)
+                        self.assertIn('runtime/contract path trigger',static['selection_evidence'])
+                        self.assertNotIn('mandatory quick check',static['selection_evidence'])
+                        self.assertEqual(600,static['timeout_seconds'])
+                    else:
+                        self.assertNotIn('mac-app-static',names)
+                        entry=next(o for o in changed['omitted'] if o['gate']=='mac-app-static')
+                        self.assertEqual({'disposition':'PLATFORM_OMITTED','executed':False,
+                                          'reason':'platform not available; not a test pass'},
+                                         {k:entry[k] for k in ('disposition','executed','reason')})
+                        self.assertIn('runtime/contract path trigger',entry['selection_evidence'])
+                    # The required quick set is unchanged either way.
+                    self.assertTrue({'lint','format','typescript','backend-structural'} <= set(names))
+                self.result.update(all=True,reasons=['unmapped source'])
+                every=p.select(self.template,['new-language/source'],self.result,None)
+                self.assertEqual(platform=='darwin','mac-app-static' in [g['name'] for g in every['gates']])
+                self.result.update(all=False,reasons=[])
+
+    def test_standard_template_registers_the_mac_app_static_gate(self):
+        with patch.object(p.subprocess,'run') as execute:
+            execute.side_effect=[SimpleNamespace(stdout=json.dumps({'lanes':[]})),SimpleNamespace(stdout='task-a\n')]
+            gates={g['name']:g for g in p.standard_template()['gates']}
+        self.assertEqual(p.MAC_APP_STATIC,gates['mac-app-static'])
 
     def test_documentation_only_keeps_quick_phase(self):
         self.result['lanes']['backend-unit']=[]
@@ -924,5 +1045,126 @@ class InterruptedCustody(unittest.TestCase):
             c.reconcile(copy.deepcopy(state),r['token'],proof)
         proof['confirmed_at']=r['finished_at']
         with self.assertRaises(ValueError):c.reconcile(state,r['token'],proof)
+
+class InterruptedProcessObservation(unittest.TestCase):
+    """The old-namespace scan cannot read every same-uid process at every instant.
+
+    An exiting process answers EACCES for its fd table for a few milliseconds before it disappears (the Blacksmith
+    failure: PermissionError on /proc/<pid>/fd). That is a read failure, never proof of absence or of a leak: it is
+    re-observed a bounded number of times, skipped once the process is gone and refused, naming the pid, only while
+    it stays unreadable and alive. A genuinely held namespace is still refused. The real Linux process is the
+    fixture: a child that clears PR_SET_DUMPABLE is unreadable to its same-uid parent exactly like an exiting one.
+    """
+    CHILD = """
+import ctypes, os, sys
+libc = ctypes.CDLL(None, use_errno=True)
+def dumpable(flag):
+    assert libc.prctl(4, flag, 0, 0, 0) == 0  # PR_SET_DUMPABLE
+held = open(os.environ['HELD']) if os.environ.get('HELD') else None
+dumpable(sys.argv[1] == 'open')
+print('ready', flush=True)
+for line in sys.stdin:
+    dumpable(line.strip() == 'open')
+    print('ack', flush=True)
+"""
+
+    def setUp(self):
+        import deploy_test_interrupted_cleanup as m
+        self.m = m
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.namespace = Path(self.tmp.name) / 'old-namespace'
+        self.elsewhere = Path(self.tmp.name) / 'elsewhere'
+        self.namespace.mkdir()
+        self.elsewhere.mkdir()
+        self.sleeps = []
+
+    def child(self, state, cwd=None, held='', label=''):
+        proc = subprocess.Popen([sys.executable, '-c', self.CHILD, state, label], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, text=True, cwd=cwd or self.elsewhere,
+                                env={**os.environ, 'HELD': held})
+        self.addCleanup(self.reap, proc)
+        self.assertEqual(proc.stdout.readline().strip(), 'ready')
+        return proc
+
+    @staticmethod
+    def reap(proc):
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        proc.stdin.close()
+        proc.stdout.close()
+
+    def switch(self, proc, state):
+        proc.stdin.write(state + '\n')
+        proc.stdin.flush()
+        self.assertEqual(proc.stdout.readline().strip(), 'ack')
+
+    def scan(self, while_waiting=None):
+        real_sleep = time.sleep
+
+        def sleep(seconds):
+            # Really wait: unrelated exiting processes on a busy host need the production window, not instant re-reads.
+            self.sleeps.append(seconds)
+            real_sleep(seconds)
+            if while_waiting:
+                while_waiting()
+        with patch.object(self.m.time, 'sleep', sleep):
+            self.m.namespace_quiet(self.namespace, set())
+
+    def test_process_that_becomes_readable_while_waiting_is_reobserved(self):
+        child = self.child('sealed')
+        self.scan(lambda: self.switch(child, 'open'))
+        self.assertTrue(self.sleeps)
+
+    def test_fd_table_denied_after_cwd_was_read_is_reobserved(self):
+        for site in ('listing', 'link'):
+            with self.subTest(site):
+                child = self.child('open')
+                denied = [1, 2]
+                real_iterdir, real_readlink = Path.iterdir, os.readlink
+
+                def iterdir(path):
+                    if site == 'listing' and str(path) == '/proc/%d/fd' % child.pid and denied:
+                        denied.pop()
+                        raise PermissionError(13, 'Permission denied', str(path))
+                    return real_iterdir(path)
+
+                def readlink(path, *args, **kwargs):
+                    if site == 'link' and str(path).startswith('/proc/%d/fd/' % child.pid) and denied:
+                        denied.pop()
+                        raise PermissionError(13, 'Permission denied', str(path))
+                    return real_readlink(path, *args, **kwargs)
+
+                with patch.object(Path, 'iterdir', iterdir), patch.object(os, 'readlink', readlink):
+                    self.scan()
+                self.assertEqual(denied, [])
+                self.assertGreaterEqual(len(self.sleeps), 2)
+
+    def test_process_that_exits_while_unreadable_is_not_a_holder(self):
+        child = self.child('sealed')
+        self.scan(lambda: (child.kill(), child.wait()))
+        self.assertTrue(self.sleeps)
+
+    def test_process_that_stays_unreadable_and_alive_fails_closed_naming_it(self):
+        child = self.child('sealed')
+        with self.assertRaisesRegex(ValueError, r'original namespace process %d is unverifiable' % child.pid) as raised:
+            self.scan()
+        self.assertNotRegex(str(raised.exception), 'live consumer|holder remains')
+        self.assertTrue(self.sleeps)
+
+    def test_a_held_namespace_is_still_refused(self):
+        held = self.namespace / 'held.log'
+        held.write_text('original')
+        for name, kwargs, message in (
+                ('cwd', dict(cwd=self.namespace), 'live consumer'),
+                ('open file', dict(held=str(held)), 'file holder remains'),
+                ('argv of an unreadable process', dict(label=str(self.namespace)), 'live consumer|is unverifiable')):
+            with self.subTest(name):
+                child = self.child('sealed' if name.startswith('argv') else 'open', **kwargs)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.scan()
+                self.reap(child)
+
 
 if __name__=='__main__':unittest.main()

@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="$ROOT_DIR/.github/workflows/claude-code-review-fallback.yml"
 DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
+REVIEW_CYCLE="$ROOT_DIR/scripts/deploy_review_cycle.py"
+REVIEW_WAITER="$ROOT_DIR/scripts/wait_for_code_review.py"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -40,8 +42,22 @@ fi
 if grep -Fq -- "-X POST -f 'labels[]=claude-review-fallback'" "$DEPLOY_COMMAND"; then
   fail "/deploy must not trigger the disabled Claude fallback"
 fi
-require_text "$DEPLOY_COMMAND" "Claude fallback review is DISABLED" "/deploy must state the Claude fallback is disabled"
-require_text "$DEPLOY_COMMAND" "Review limit reached" "/deploy does not recognize CodeRabbit quota failures"
-require_text "$DEPLOY_COMMAND" "usage spending cap" "/deploy does not recognize CodeRabbit spending-cap failures"
+# The executing deploy CLI and review ledger must not trigger the disabled fallback either.
+for source in "$ROOT_DIR/scripts/deploy_cli.py" "$ROOT_DIR/scripts/deploy_review_cycle.py" "$ROOT_DIR/scripts/wait_for_code_review.py"; do
+  if grep -Fq -- "claude-review-fallback" "$source"; then
+    fail "$(basename "$source") must not trigger the disabled Claude fallback"
+  fi
+done
+require_text "$DEPLOY_COMMAND" "The Claude fallback review is disabled." "/deploy must state the Claude fallback is disabled"
+# deploy.md names the CodeRabbit quota skip; the quota/spending-cap wording is
+# recognized by the review-cycle ledger and the review waiter, not by the doc.
+require_text "$DEPLOY_COMMAND" 'Confirmed quota or spending cap on the current HEAD: `deploy_review_cycle.py skip --reason usage-cap`' \
+  "/deploy must route a confirmed CodeRabbit quota or spending cap to the review-cycle skip"
+require_text "$REVIEW_CYCLE" 'USAGE_EXHAUSTED = re.compile(r"review limit reached|usage spending cap|spending cap", re.IGNORECASE)' \
+  "the review cycle does not recognize CodeRabbit quota and spending-cap failures"
+require_text "$REVIEW_WAITER" '"review limit reached" in description' \
+  "the review waiter does not recognize CodeRabbit quota failures"
+require_text "$REVIEW_WAITER" '"usage spending cap" in description' \
+  "the review waiter does not recognize CodeRabbit spending-cap failures"
 
 echo "All Claude review fallback checks passed (workflow inert; fallback disabled in /deploy)."
