@@ -10330,7 +10330,12 @@ async def _spawn_browser_agent_activity_v3_real(
                     browser_download_persister = download_persister_task.result()
                 observe_page_state = _with_downloaded_files(observe_page_state, browser_download_persister)
                 restored_transcript_unobserved = False
-                step_timer.annotate(observe_dom=observe_needs_dom)
+                step_timer.annotate(
+                    observe_dom=observe_needs_dom,
+                    observe_dom_timing_ms=getattr(dom_service, "last_dom_build_timing_ms", None)
+                    if observe_needs_dom
+                    else None,
+                )
                 current_url = _private_browser_runtime_url(dom_service, observe_page_state.get("url") or current_url)
                 step_timer.mark("observe_state")
             except asyncio.TimeoutError:

@@ -9,6 +9,7 @@ This module provides:
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import json
 import logging
@@ -171,6 +172,44 @@ def drop_browser_use_serial_dom_probes() -> None:
     from browser_use.dom.service import DomService
 
     DomService._get_all_trees = _get_all_trees_without_serial_probes
+
+
+def _dom_build_timing_ms(timing_info: Any) -> Optional[Dict[str, int]]:
+    if not isinstance(timing_info, dict):
+        return None
+    return {
+        key: int(round(value))
+        for key, value in timing_info.items()
+        if isinstance(value, (int, float)) and value >= 1.0
+    }
+
+
+_DOM_BUILD_TIMING_WRAPPERS: set = set()
+
+
+def record_browser_use_dom_build_timing() -> None:
+    """Keep browser-use's per-build DOM timing breakdown instead of debug-logging it.
+
+    ``DomService.get_serialized_dom_tree`` already measures the CDP trees,
+    cross-origin iframe recursion (inside ``construct_enhanced_tree_ms``) and
+    serialization. The breakdown is stored on the browser session so
+    ``DOMService`` can report it in ``browser.step.phases`` (H-61: 26s
+    observe_state phases had no sub-phase evidence).
+    """
+    from browser_use.dom.service import DomService
+
+    build = DomService.get_serialized_dom_tree
+    if build in _DOM_BUILD_TIMING_WRAPPERS:
+        return
+
+    @functools.wraps(build)
+    async def get_serialized_dom_tree(self: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await build(self, *args, **kwargs)
+        self.browser_session._rose_dom_build_timing_ms = _dom_build_timing_ms(result[2])
+        return result
+
+    _DOM_BUILD_TIMING_WRAPPERS.add(get_serialized_dom_tree)
+    DomService.get_serialized_dom_tree = get_serialized_dom_tree
 
 
 VIEWPORT_SCREENSHOT_TIMEOUT_SECONDS = 10.0
@@ -915,6 +954,8 @@ class DOMService:
         self.viewport_height = viewport_height
         self.downloads_path = downloads_path or browser_downloads_path_for_provider()
         self._session = None
+        # browser-use DOM build breakdown of the latest state read (browser.step.phases).
+        self.last_dom_build_timing_ms: Optional[Dict[str, int]] = None
         self._selector_map: Dict[int, Any] = {}
         self._runtime_current_url = ""
         # Image URLs rendered by any page this browser activity observed, oldest
@@ -1089,6 +1130,7 @@ class DOMService:
 
             disable_browser_use_pending_request_probe()
             drop_browser_use_serial_dom_probes()
+            record_browser_use_dom_build_timing()
 
             # Create profile with CDP URL for remote browser.
             # downloads_path must match the provider's session-file root:
@@ -2506,12 +2548,17 @@ class DOMService:
         through browser-use's own reconnect and retries once.
         """
         session = self._session
+        # Set by record_browser_use_dom_build_timing() only when this read builds a DOM.
+        session._rose_dom_build_timing_ms = None
+        self.last_dom_build_timing_ms = None
         try:
-            return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+            state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
         except Exception:
             if session.is_cdp_connected or not await self._restore_cdp_connection(session):
                 raise
-        return await session.get_browser_state_summary(include_screenshot=include_screenshot)
+            state = await session.get_browser_state_summary(include_screenshot=include_screenshot)
+        self.last_dom_build_timing_ms = session._rose_dom_build_timing_ms
+        return state
 
     async def _restore_cdp_connection(self, session: Any) -> bool:
         """Wait for or start browser-use's reconnect; True once the socket is open.
