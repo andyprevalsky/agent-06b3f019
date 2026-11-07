@@ -28,6 +28,7 @@ import threading
 import time
 import unittest
 import types
+import zlib
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,6 +63,33 @@ CANONICAL_SEED_MEMBERS = ('back-end/prisma/schema.prisma', 'agents/benchmarks/se
 # Import closure of scripts/cloudbench-timeout-policy.py inside agents/benchmarks.
 TIMEOUT_POLICY_MODULES = ('__init__', 'benchmark_tasks', 'fixtures', 'live_fixtures',
                           'polar_catalog', 'timeout_history')
+
+
+def cache_public_check_catalog(root):
+    """Keep exact historical catalog objects local to each timed CLI fixture."""
+    ref = RUNNER['TASK_REF']
+    expressions = [ref, ref + '^{tree}', ref + ':agents', ref + ':agents/benchmarks',
+                   ref + ':agents/benchmarks/tasks.json', ref + ':agents/benchmarks/polar_tasks.json']
+    ids = subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT),
+                                   'rev-parse', *expressions], text=True).splitlines()
+    if len(ids) != len(expressions):
+        raise AssertionError('incomplete historical catalog object selection')
+    raw = subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT), 'cat-file', '--batch'],
+                                  input=('\n'.join(ids) + '\n').encode())
+    stream = io.BytesIO(raw)
+    for expected in ids:
+        oid, kind, size = stream.readline().decode().split()
+        body = stream.read(int(size))
+        if oid != expected or stream.read(1) != b'\n':
+            raise AssertionError('historical catalog object response differs')
+        encoded = f'{kind} {len(body)}\0'.encode() + body
+        if hashlib.sha1(encoded).hexdigest() != expected:
+            raise AssertionError('historical catalog object content differs')
+        target = root / '.git/objects' / oid[:2] / oid[2:]
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(zlib.compress(encoded))
+    if stream.read():
+        raise AssertionError('unexpected trailing catalog object response')
 
 
 def polar_names(count=70):
@@ -2034,6 +2062,7 @@ class Portable(unittest.TestCase):
             # The manifest eligibility check reads the runner's TASK_REF catalog: borrow its objects read-only.
             common = Path(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True).strip())
             (root/'.git/objects/info/alternates').write_text(str(common/'objects') + '\n')
+            cache_public_check_catalog(root)
             subprocess.run(['git', '-C', str(root), 'add', 'scripts', *CANONICAL_SEED_MEMBERS], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
                             '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], check=True)
@@ -2069,6 +2098,24 @@ class Portable(unittest.TestCase):
             if limits is not None:
                 env['CLOUDBENCH_PROVIDER_LIMITS_FILE'] = str(private(inputs/'provider-limits.json', limits))
             yield types.SimpleNamespace(root=root, args=args, env=env, marker=marker, state=state, inputs=inputs, fakebin=fakebin)
+
+    def test_public_check_owns_exact_historical_catalog_objects(self):
+        expressions = [RUNNER['TASK_REF'], RUNNER['TASK_REF'] + '^{tree}',
+                       RUNNER['TASK_REF'] + ':agents', RUNNER['TASK_REF'] + ':agents/benchmarks',
+                       RUNNER['TASK_REF'] + ':agents/benchmarks/tasks.json',
+                       RUNNER['TASK_REF'] + ':agents/benchmarks/polar_tasks.json']
+        expected = [subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', expression],
+                                           text=True).strip() for expression in expressions]
+        with self.public_check(warm_fixture(time.time()), [], limits=wide_provider_limits()) as fx:
+            for oid in expected:
+                loose = fx.root / '.git/objects' / oid[:2] / oid[2:]
+                self.assertTrue(loose.is_file(), 'timed checks must not depend on shared catalog object reads: ' + oid)
+                raw = zlib.decompress(loose.read_bytes())
+                self.assertEqual(hashlib.sha1(raw).hexdigest(), oid)
+            for name in ('tasks.json', 'polar_tasks.json'):
+                spec = RUNNER['TASK_REF'] + ':agents/benchmarks/' + name
+                self.assertEqual(subprocess.check_output(['git', '-C', str(fx.root), 'show', spec]),
+                                 subprocess.check_output(['git', '-C', str(ROOT), 'show', spec]))
 
     def test_public_check_samples_one_catalog_for_all_shard_placements(self):
         requests = []
