@@ -72,13 +72,19 @@ def namespace_quiet(namespace, ports):
                 continue
             need(target != prefix and not target.startswith(prefix + '/'), 'original namespace file holder remains')
 
+    def real_uid(process):
+        for line in (process / 'status').read_text().splitlines():
+            if line.startswith('Uid:'):
+                return int(line.split()[1])
+        raise PermissionError(f'{process}: no Uid line')
+
     for process in Path('/proc').iterdir():
         if not process.name.isdigit():
             continue
-        deadline = time.monotonic() + 2
+        deadline, unreadable = time.monotonic() + 2, False
         while True:
             try:
-                if process.stat().st_uid != os.geteuid():
+                if not unreadable and process.stat().st_uid != os.geteuid():
                     break
                 inspect(process)
                 break
@@ -86,7 +92,14 @@ def namespace_quiet(namespace, ports):
                 break
             except PermissionError:
                 # A same-user process can turn unreadable mid-scan (non-dumpable, or exec of a setuid
-                # binary). Re-observe: it is skipped only once it exits or is another user's.
+                # binary that keeps our real uid). Re-observe: skip it only once it exits or its real
+                # uid is another user's; one that stays unreadable is refused, never assumed quiet.
+                unreadable = True
+                try:
+                    if real_uid(process) != os.getuid():
+                        break
+                except (FileNotFoundError, ProcessLookupError):
+                    break
                 need(time.monotonic() < deadline, f'original namespace process {process.name} is unverifiable')
                 time.sleep(0.05)
     for table in ('/proc/net/tcp', '/proc/net/tcp6'):

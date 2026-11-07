@@ -498,9 +498,16 @@ def reserved_loopback_port(test):
     import socket
     try:
         reservation = socket.socket(socket.AF_INET6)
-        reservation.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        reservation.bind(('::', 0))
-    except OSError:  # host without IPv6: an IPv4 wildcard bind still blocks IPv4 and autobind
+    except OSError:
+        reservation = None
+    if reservation is not None:
+        try:
+            reservation.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            reservation.bind(('::', 0))
+        except OSError:
+            reservation.close()
+            reservation = None
+    if reservation is None:  # host without IPv6: an IPv4 wildcard bind still blocks IPv4 and autobind
         reservation = socket.socket()
         reservation.bind(('', 0))
     test.addCleanup(reservation.close)
@@ -694,13 +701,17 @@ class InterruptedCustody(unittest.TestCase):
         attempts = [(socket.AF_INET, '127.0.0.1'), (socket.AF_INET, '')]
         if socket.has_ipv6:
             attempts.append((socket.AF_INET6, '::1'))
+        import errno
         for family, host in attempts:
             try:
                 other = socket.socket(family)
             except OSError:
                 continue  # family unavailable on this host
-            with other, self.assertRaises(OSError):
+            with other, self.assertRaises(OSError) as refused:
                 other.bind((host, port))
+            if refused.exception.errno == errno.EADDRNOTAVAIL and host == '::1':
+                continue  # loopback IPv6 not configured: nothing can bind it either
+            self.assertEqual(refused.exception.errno, errno.EADDRINUSE, (host, port))
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
     def test_namespace_scan_reobserves_unreadable_same_user_process(self):
@@ -720,7 +731,22 @@ class InterruptedCustody(unittest.TestCase):
                     m.namespace_quiet(namespace, {port})
             else:
                 m.namespace_quiet(namespace, {port})
-            child.kill(); child.wait()
+            child.kill(); child.wait(); child.stdout.close()
+        # setuid exec mid-scan: the owner turns root after the first look while the real uid stays ours.
+        child = subprocess.Popen([sys.executable, '-c', body, '60'], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.kill)
+        self.assertEqual(child.stdout.readline().strip(), 'ready')
+        proc_dir, real_stat, seen = f'/proc/{child.pid}', Path.stat, []
+
+        def owner_turns_root(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if str(path) != proc_dir:
+                return result
+            seen.append(path)
+            return result if len(seen) == 1 else os.stat_result((result.st_mode, *result[1:4], 0, *result[5:]))
+        with patch.object(Path, 'stat', owner_turns_root), self.assertRaisesRegex(ValueError, 'unverifiable'):
+            m.namespace_quiet(namespace, {port})
+        child.kill(); child.wait(); child.stdout.close()
 
     def test_historical_policy_drift_renews_without_changing_original_bindings(self):
         state, receipt, proof, previous, renewal = self.policy_relocation_fixture()
