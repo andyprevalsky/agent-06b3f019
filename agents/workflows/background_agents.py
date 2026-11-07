@@ -520,6 +520,12 @@ class BackgroundAgentsMixin:
         """
         if getattr(self, "current_phase", None) == "PLAN":
             return None  # no send_message_to_agent in PLAN: nothing could address it, and its name stays free
+        if getattr(self, "fast_mode_cache_enabled", False):
+            # DEMO-cache replay re-runs recorded foreground trajectories, some of which spawn one
+            # task_name twice (19 explore agents in test-mass-agent-run-0). Nothing in a replay
+            # addresses those agents, so keep no record: the replay must reproduce the recorded
+            # outcome, not fail the repeat on name bookkeeping.
+            return None
         if self._spawn_runs_in_background(tool_name, tool_args):
             return None
         if tool_call_id in self._background_tasks or tool_call_id in self._background_finished:

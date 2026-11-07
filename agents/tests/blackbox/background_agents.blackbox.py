@@ -875,6 +875,59 @@ async def test_foreground_spawns_are_addressable_and_answer_truthfully_once_fini
         assert not any(wf._retired_task_names), "its task_name stays free for the plan's tasks"
 
 
+async def test_demo_cache_replay_accepts_a_recorded_foreground_spawn_that_repeats_its_task_name():
+    """A DEMO-cache replay of a recorded foreground trajectory is never failed by task_name bookkeeping.
+
+    Deploy 2026-11-06, smoke test-mass-agent-run-0 (agent 6efe1927): the cached July trajectory
+    has 19 explore agents that each issue the SAME spawn (same goal, same task_name) twice. DEMO
+    replay runs spawns in the foreground (``_spawn_runs_in_background``), and the foreground
+    record (``_begin_foreground_spawn``) rejected the second one as "task_name ... is already
+    used by another agent you spawned", so the evaluator t10-no-tool-failures failed. The replay
+    must reproduce the recorded outcome: nothing in a replay addresses these agents, so no record
+    is kept and the name is never reserved.
+    """
+    from temporalio import workflow as temporal_workflow
+
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    harness = _Harness()
+    spawned = []
+
+    async def executor(wf, tool_call, call_id):
+        spawned.append(call_id)
+        await wf._handle_tool_event(
+            ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Finished",
+                message="explore result",
+                status=MessageStatus.FINISHED,
+                data={"result": "explore result"},
+            ),
+            call_id,
+            "spawn_agent",
+        )
+        return MessageStatus.FINISHED, "explore result"
+
+    with (
+        _workflow_env(harness),
+        patch.object(temporal_workflow, "execute_activity", lambda *a, **k: asyncio.sleep(0)),
+        patch.dict("workflows.agent_workflow.TOOL_EXECUTORS", {"spawn_agent": executor}),
+        patch.object(temporal_workflow, "info", lambda: SimpleNamespace(workflow_id="agent-parent")),
+    ):
+        wf = _workflow(harness)
+        wf.current_phase = "EXECUTE"
+        wf.fast_mode_cache_enabled = True  # DEMO cache replay
+        args = {**FOREGROUND_SPAWNS["explore"], "task_name": "research_ethan_mollick_s_substa_5c9a76d1"}
+        for call_id in ("toolu_replay_first", "toolu_replay_second"):
+            result = await wf._execute_tool("spawn_agent", dict(args), call_id)  # run_in_background defaults to true
+            assert result.get("success") is True and not result.get("error"), (call_id, result)
+        assert spawned == ["toolu_replay_first", "toolu_replay_second"], "both recorded spawns ran"
+        failed = [row for row in harness.rows if row["metadata"].get("toolStatus") == "ERROR"]
+        assert not failed, ("a replayed spawn must not fail on its task_name", failed)
+        assert not wf._background_tasks and not wf._background_finished, "a replay keeps no spawn record"
+        assert not any(wf._retired_task_names), "and reserves no task_name"
+
+
 async def test_a_foreground_spawn_parked_for_a_deploy_handoff_is_resumed_not_relaunched():
     """A parked foreground spawn is carried by the normal parking path and re-entered next generation.
 
@@ -2629,6 +2682,10 @@ async def run_all_tests():
     await r.record_async(
         "foreground_spawns_addressable_and_truthful_once_finished",
         test_foreground_spawns_are_addressable_and_answer_truthfully_once_finished,
+    )
+    await r.record_async(
+        "demo_replay_accepts_recorded_foreground_spawn_repeating_task_name",
+        test_demo_cache_replay_accepts_a_recorded_foreground_spawn_that_repeats_its_task_name,
     )
     await r.record_async(
         "foreground_spawn_parked_for_handoff_is_resumed_not_relaunched",
