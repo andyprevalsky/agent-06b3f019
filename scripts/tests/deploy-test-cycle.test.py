@@ -3216,7 +3216,9 @@ assert len(list(p.iterdir()))==2
         early = self.state['early_failures']
         request = self.directory / 'rca' / (early[0]['id'] + '.json')
         self.assertEqual('DEPLOY_GATE_EARLY_FAILURE gate=api test=a status=FAIL check=api/a '
-                         f"id={early[0]['id']} rca={request}: start /RCA on this request now", notices[0])
+                         f"id={early[0]['id']} rca={request} (start /RCA on this request now)", notices[0])
+        # The rca= token, split on whitespace, is the request path itself (2026-11-07: a trailing ':' was not).
+        self.assertTrue(Path(notices[0].split('rca=', 1)[1].split()[0]).is_file())
         self.assertTrue(request.is_file())
         self.assertEqual([('api/a', 'reused by final FAIL')], [(f['check'], f['settled']) for f in early])
         failure = next(f for f in self.state['failures'] if f['check'] == 'api/a')

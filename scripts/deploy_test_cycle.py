@@ -1615,7 +1615,7 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                         else:
                             print(progress.describe(gate["name"], row, check=occurrence["check"],
                                                     occurrence=occurrence["id"], request=str(path))
-                                  + ": start /RCA on this request now", flush=True)
+                                  + " (start /RCA on this request now)", flush=True)
                     if not launcher and opened and len([f for f in state.get("early_failures", [])
                                                         if f["gate"] == gate["name"] and f.get("round") == state["round"]]) >= EARLY_LIMIT:
                         print(f"DEPLOY_GATE_EARLY_LIMIT gate={gate['name']} limit={EARLY_LIMIT}: "
