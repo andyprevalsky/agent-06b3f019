@@ -1,0 +1,58 @@
+{
+  "observed_at": 1794061851.202408,
+  "owned_machine_ids": [
+    "859433f43de0e8",
+    "850dd3a4133968",
+    "869292ce472e38",
+    "83e1def7e71708",
+    "85761d2a3dd038",
+    "839494f7775718",
+    "28744e1daed978",
+    "18577440a2dd38",
+    "83701dc76d7538",
+    "28744e1daedd78",
+    "85777d0b74d078"
+  ],
+  "owned_volume_ids": [
+    "vol_4m3dm9wex5ok7kzv",
+    "vol_vxmpzdnqy6qz9jx4",
+    "vol_4oj82l96190n6n2r",
+    "vol_rnzxgpj1lqdjk8pr",
+    "vol_vjy2lw17qlj0lmov",
+    "vol_vp2e3o9nxm0l8kw4",
+    "vol_r686q9n5w00688p4",
+    "vol_r686q9n52e0go5n4",
+    "vol_vz8ozdj0y27zekjv",
+    "vol_42kx972y9dl2ej74",
+    "vol_vjy2ln9x7gek17mv"
+  ],
+  "owned_current_absent": 11,
+  "protected_warm": {
+    "id": "683e47df5094d8",
+    "state": "stopped",
+    "unchanged": true
+  },
+  "foreign_resources": "Untouched; no global quiet/idle claim or donor operation.",
+  "current_local_census": {
+    "observed_at": 1794062202.1136289,
+    "processes": 141,
+    "classifications": {
+      "exact-observer-ancestry": 6,
+      "kernel": 103,
+      "outside-pinned-original-UID": 22,
+      "registered-current-harness-helper": 1,
+      "systemd-managed-service": 9
+    },
+    "scope": "CURRENT LOCAL PROCESS CLOSURE ONLY; original native UNVERIFIED and cleanup_complete=false unchanged; remote no-allocation separately required",
+    "historical_join_verified": false,
+    "credit_granted": false,
+    "evidence": {
+      "path": ".context/pause-rca/final-local-census-after-index.json",
+      "sha256": "6793c559c85b720755358f0d3a9c4a3b0606f537507ce9da0b3f53b5f1970bf1"
+    }
+  },
+  "remote_evidence": {
+    "path": ".context/pause-rca/final-resource-check/authenticated-reconciliation.json",
+    "sha256": "afc6140301cfdfe90b556565bd35f4c165158121452dbd786934837178adc533"
+  }
+}

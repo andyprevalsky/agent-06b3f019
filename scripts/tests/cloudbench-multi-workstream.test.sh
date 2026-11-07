@@ -6038,6 +6038,15 @@ if max(updates[:7]) >= min(starts[:7]):
     raise SystemExit("a fleet machine started before every boot config update completed")
 if any("--skip-start" not in calls[index] for index in updates[:7]):
     raise SystemExit("boot config updates must explicitly keep every machine stopped")
+# Every primary's boot-config update publishes its admission lane so other workstreams'
+# controllers can count it; these fixture tasks are not DEMO-cache tasks, so they are
+# delegating. Warm-source sizing updates are not primaries and carry no lane.
+boot_updates = [index for index in updates if "CLOUDBENCH_BOOT=1" in calls[index]]
+if len(boot_updates) < 7:
+    raise SystemExit(f"expected seven boot-config updates, got {len(boot_updates)}")
+unlabelled = [calls[index][:240] for index in boot_updates if "rose_cloudbench_lane=delegating" not in calls[index]]
+if unlabelled:
+    raise SystemExit("boot config updates must label each primary with its admission lane: " + unlabelled[0])
 
 # Once every boot config is applied, all readiness pollers must consume the
 # controller-owned Machines/Volumes snapshots.  Direct provider inventory reads
@@ -6133,7 +6142,7 @@ PY
 # delays the same rejection while still exercising the retry loop.
 capacity_status=0
 CLOUDBENCH_SHARED_CPU_GOVERNOR=160 CLOUDBENCH_SHARED_CPU_HEADROOM=20 \
-CLOUDBENCH_APP_MACHINE_CEILING=1000 \
+CLOUDBENCH_APP_MACHINE_CEILING=1000 CLOUDBENCH_DELEGATING_PRIMARY_CEILING=1000 \
 CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=shared-cpu-2x \
 CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=10 \
 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
@@ -6153,6 +6162,81 @@ if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
     fail "an over-governor burst must be rejected BEFORE cloning"
 fi
 echo "PASS: scenario 4 — shared-CPU governor blocks an over-ceiling burst; stopped + perf excluded"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Scenario 4b — cross-workstream lane ceilings (the downstream capacity the old
+# 56-Machine ceiling used to imply). Every devbox's live primaries are counted from
+# the native app inventory: DEMO guests against the production-pooler budget, and
+# REAL/SIM ("delegating") guests against the widest proven-safe width. Stopped and
+# suspended Machines and performance-1x autoscaler workers never count; unlabelled
+# live primaries count as delegating. A denial happens before any clone.
+# ═════════════════════════════════════════════════════════════════════════════
+lane_fixture() {  # lane_fixture <demo-live> <delegating-labelled> <delegating-unlabelled>
+    reset_fake_state
+    rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$SANDBOX/.git/cloudbench-pools" \
+        "$SANDBOX/.git/cloudbench-pool-claims" "$FAKE_DIR/markers"
+    mkdir -p "$FAKE_DIR/markers"
+    : > "$FAKE_DIR/journal.log"
+    reset_test_workspace_fleet_roots "$WS_A" "$WS_B"
+    FAKE_STATE="$FAKE_DIR/state.json" LANE_FIXTURE="$1 $2 $3" python3 - <<'PY'
+import json
+import os
+
+path = os.environ["FAKE_STATE"]
+demo, labelled, unlabelled = (int(v) for v in os.environ["LANE_FIXTURE"].split())
+with open(path) as fh:
+    state = json.load(fh)
+def machine(mid, st, kind, cpus, lane=None):
+    config = {"mounts": [], "guest": {"cpu_kind": kind, "cpus": cpus}}
+    if lane:
+        config["metadata"] = {"rose_cloudbench_lane": lane}
+    return {"id": mid, "name": f"lane-{mid}", "state": st, "region": "iad",
+            "private_ip": "fdaa::1", "config": config}
+rows = []
+rows += [machine(f"dm{i:010d}", "started", "shared", 4, "demo") for i in range(demo)]
+rows += [machine(f"dl{i:010d}", "started", "shared", 4, "delegating") for i in range(labelled)]
+rows += [machine(f"un{i:010d}", "started", "shared", 4) for i in range(unlabelled)]
+# Never counted: stopped/suspended DEMO guests, performance-1x workers, infra probes.
+rows += [machine(f"ds{i:010d}", "stopped", "shared", 4, "demo") for i in range(5)]
+rows += [machine(f"dz{i:010d}", "suspended", "shared", 4, "demo") for i in range(3)]
+rows += [machine(f"wk{i:010d}", "started", "performance", 1) for i in range(12)]
+rows += [machine(f"ip{i:010d}", "started", "shared", 4, "infra") for i in range(2)]
+state["machines"].extend(rows)
+with open(path, "w") as fh:
+    json.dump(state, fh)
+PY
+}
+
+lane_fixture 49 0 0
+lane_status=0
+CLOUDBENCH_SHARED_CPU_GOVERNOR=100000 CLOUDBENCH_APP_MACHINE_CEILING=100000 \
+CLOUDBENCH_LANE=demo CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-lane-demo.log" \
+    capacity-a capacity-b --timeout 120 || lane_status=$?
+[ "$lane_status" -eq 1 ] || fail "a DEMO burst past the pooler budget must be refused (exit=$lane_status)"
+grep -qF "DEMO guest ceiling reached: 49 live + 2 requested > 50" "$TMP_ROOT/controller-lane-demo.log" ||
+    fail "DEMO refusal must count live DEMO guests only (stopped/suspended/workers/infra excluded)"
+if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
+    fail "a DEMO lane refusal must happen before cloning"
+fi
+
+lane_fixture 0 60 6
+lane_status=0
+CLOUDBENCH_SHARED_CPU_GOVERNOR=100000 CLOUDBENCH_APP_MACHINE_CEILING=100000 \
+CLOUDBENCH_LANE=delegating CLOUDBENCH_DELEGATING_PRIMARY_CEILING=67 \
+CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS=3 CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-lane-delegating.log" \
+    capacity-a capacity-b --timeout 120 || lane_status=$?
+[ "$lane_status" -eq 1 ] || fail "a delegating burst past its ceiling must be refused (exit=$lane_status)"
+grep -qF "Delegating-guest ceiling reached: 66 live REAL/SIM primaries + 2 requested > 67" \
+    "$TMP_ROOT/controller-lane-delegating.log" ||
+    fail "delegating refusal must count labelled and unlabelled live primaries, not workers or infra"
+grep -qF "capacity admission remained blocked for 3s" "$TMP_ROOT/controller-lane-delegating.log" ||
+    fail "a lane refusal is retryable and must exhaust the admission wait before failing"
+if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
+    fail "a delegating lane refusal must happen before cloning"
+fi
+echo "PASS: scenario 4b — DEMO and delegating lane ceilings count every workstream's live primaries"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 5 — pre-ack quarantine survives deletion of the workspace-local ledger

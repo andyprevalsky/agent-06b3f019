@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# One-line /deploy steps (.claude/commands/deploy.md → Process). `scripts/deploy --help` lists them.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Non-interactive tool shells miss these: the agents venv (python-dotenv, pinned deps), uv and flyctl.
+[ -d "$ROOT/agents/venv/bin" ] && PATH="$ROOT/agents/venv/bin:$PATH"
+PATH="$HOME/.local/bin:$HOME/.fly/bin:$PATH"
+export PATH
+cd "$ROOT"
+exec python3 "$ROOT/scripts/deploy_cli.py" "$@"

@@ -136,6 +136,7 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
+from helpers.activity_dispatch import ActivityDispatchLagInterceptor
 from helpers.agent_graph import send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 from helpers.error_alert import report_failure_activity
@@ -1761,6 +1762,8 @@ async def main():
         workflow_runner=production_workflow_runner(),
         # Stop polling on shutdown; let in-flight activities (incl. 30m browser) finish.
         graceful_shutdown_timeout=timedelta(seconds=shutdown_grace_seconds),
+        # Attribute a timed-out attempt whose body never ran to the worker.
+        interceptors=[ActivityDispatchLagInterceptor()],
     )
 
     logger.info(

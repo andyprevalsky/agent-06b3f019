@@ -69,7 +69,10 @@ def cancellation_handlers():
 
 
 def run_command(argv, *, cwd, env, output, timeout, input_path=None, stderr_output=None,
-                owned_lifecycle=False):
+                owned_lifecycle=False, retain_owned=None):
+    """``retain_owned()`` is asked before the group KILL; truthy means a token-owned
+    benchmark controller is still running its own cleanup and its supervisor's
+    token-bound teardown owns the escalation, so the group is left (and reported lingering)."""
     if owned_lifecycle:
         if sys.platform != "linux":
             raise OSError("owned worker lifecycle requires Linux")
@@ -98,6 +101,8 @@ def run_command(argv, *, cwd, env, output, timeout, input_path=None, stderr_outp
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
+                if retain_owned is not None and retain_owned():
+                    break
                 forced = True
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
