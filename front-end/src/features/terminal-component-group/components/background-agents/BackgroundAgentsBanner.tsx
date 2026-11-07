@@ -37,6 +37,8 @@
  *
  * Data: useAgentsPanelData (shared per-root bus subscription + the selected
  * agent's own background rows). Remount per selected agent resets all state.
+ * BackgroundAgentsBannerView renders any panel model the same way (the
+ * code-agent view passes its code agent's own sub-agents).
  */
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Bot, ChevronRight } from 'lucide-react';
@@ -228,10 +230,22 @@ export function BackgroundAgentsBanner({
   messages,
   onNavigate,
 }: BackgroundAgentsBannerProps) {
-  const { groups, getChildren, counts, trajectories } = useAgentsPanelData(
-    selectedAgentId,
-    messages,
-  );
+  const model = useAgentsPanelData(selectedAgentId, messages);
+  return <BackgroundAgentsBannerView model={model} onNavigate={onNavigate} />;
+}
+
+/**
+ * The banner for an already-built panel model: the selected agent's children
+ * (BackgroundAgentsBanner) or a code agent's own sub-agents (the code-agent view).
+ */
+export function BackgroundAgentsBannerView({
+  model,
+  onNavigate,
+}: {
+  model: AgentPanelModel;
+  onNavigate: (agentId: string) => void;
+}) {
+  const { groups, getChildren, counts, trajectories } = model;
   const [expanded, setExpanded] = useState(false);
   // The body mounts on the first open and then stays, so close animates too.
   const [bodyMounted, setBodyMounted] = useState(false);

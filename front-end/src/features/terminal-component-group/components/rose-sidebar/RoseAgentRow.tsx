@@ -7,8 +7,10 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
  * Stateless. Active rows show a full-size bot with a fixed top-right progress badge:
  *   COLLAPSED: Full-size bot with progress badge; non-running gray Bot rows add the
  *              AgentStatusIndicator at top right; active count >1 at bottom right
- *   EXPANDED:  full-size bot in every state + top-right badge; needs input = amber alert, done = muted check,
- *              failed = muted red x) + the title
+ *   EXPANDED:  the corner icon alone (progress ring; needs input = amber alert, done = muted
+ *              check, failed = muted red x), centered in the same icon box; the bot fades
+ *              out (C14) + the title
+ *   COLLAPSED <-> EXPANDED: the same bot and badge nodes animate (opacity / position).
  * The count inherits the robot color. Expanded rows offer a separate disclosure. ETA appears only on hover, in a tooltip above the row.
  *
  * [REST] --click--------> onClick (select agent)
@@ -77,12 +79,23 @@ export default function RoseAgentRow({
   const agentIcon = (
     <span
       data-testid="agent-working-icon"
+      data-icon-only={isExpanded}
       className="relative inline-grid h-5 w-5 flex-none place-items-center"
     >
-      <Bot data-sidebar-agent-icon className="h-5 w-5" aria-hidden="true" />
+      <Bot
+        data-sidebar-agent-icon
+        className={cn(
+          'h-5 w-5 transition-[opacity,transform] duration-300',
+          isExpanded && 'scale-75 opacity-0',
+        )}
+        aria-hidden="true"
+      />
       <span
         data-testid={runStatus.state === 'active' ? 'agent-progress-badge' : 'agent-status-badge'}
-        className="absolute -right-1.5 -top-1"
+        className={cn(
+          'absolute transition-[top,right,transform] duration-300',
+          isExpanded ? 'right-1/2 top-1/2 -translate-y-1/2 translate-x-1/2' : '-right-1.5 -top-1',
+        )}
       >
         {runStatus.state === 'active' ? (
           <AgentProgressRing estimate={estimate} />

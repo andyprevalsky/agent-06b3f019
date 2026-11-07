@@ -880,7 +880,7 @@ if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
     log("info", "Resuming existing repository", { workDir });
   } catch (err) {
     log("error", "Failed to refresh resumed repository", {
-      error: err.message,
+      error: redactCredentials(err.message),
     });
   }
 } else if (GITHUB_REPO_URL && !projectMode) {
@@ -909,9 +909,11 @@ if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
   } catch (err) {
     appendOutput(
       "stderr",
-      `[Setup] Failed to clone repository: ${err.message}\n`,
+      `[Setup] Failed to clone repository: ${redactCredentials(err.message)}\n`,
     );
-    log("error", "Failed to clone repository", { error: err.message });
+    log("error", "Failed to clone repository", {
+      error: redactCredentials(err.message),
+    });
   }
 }
 
@@ -923,6 +925,14 @@ if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
 
 // Persistent code sessions work on their own branch (code-agent-persistent-
 // sessions.md §1b); same contract as the Claude Code ws-server.
+// Credentials never leave the server in text: a URL's userinfo and the token
+// itself are masked in every error that reaches a log, an event or the output.
+function redactCredentials(text) {
+  let out = String(text ?? "").replace(/(https?:\/\/)[^@\s/]+@/g, "$1***@");
+  if (GITHUB_TOKEN) out = out.split(GITHUB_TOKEN).join("***");
+  return out;
+}
+
 function gitRun(args, cwd) {
   try {
     const stdout = execFileSync("git", args, {
@@ -934,8 +944,26 @@ function gitRun(args, cwd) {
     });
     return { ok: true, out: String(stdout).trim() };
   } catch (err) {
-    return { ok: false, out: String(err?.stderr || err?.message || "").trim() };
+    return {
+      ok: false,
+      status: err?.status ?? null,
+      out: redactCredentials(String(err?.stderr || err?.message || "").trim()),
+    };
   }
+}
+
+// A base that cannot be fetched is "not on the remote" only when the remote
+// answers that no such branch exists (`git ls-remote --exit-code` exits 2). Any
+// other failure (GitHub refusing with a rate limit, an outage, no network) is
+// reported with git's own output, so the agent is not told to fix a branch that
+// is fine. git exposes no reset time for a refusal.
+function baseFetchError(base, repoDir, fetched) {
+  const probe = gitRun(
+    ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${base}`],
+    repoDir,
+  );
+  if (probe.status === 2) return `base branch ${base} is not on the remote`;
+  return `could not fetch base branch ${base}: ${(fetched.out || probe.out).slice(0, 300)}`;
 }
 
 function prepareCodeSessionBranch(repoDir) {
@@ -989,7 +1017,7 @@ function prepareCodeSessionBranch(repoDir) {
         start = `origin/${base}`;
         result.source = "base";
       } else {
-        result.error = `base branch ${base} is not on the remote`;
+        result.error = baseFetchError(base, repoDir, fetched);
       }
     } else {
       gitRun(["remote", "set-head", "origin", "-a"], repoDir);

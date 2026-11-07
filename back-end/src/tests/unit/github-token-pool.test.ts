@@ -351,6 +351,44 @@ async function main(): Promise<void> {
     ['Bearer primary']
   );
 
+  // Under githubRateLimit's wrapper the pool is the fetchImpl: one limited member falls
+  // through to the next, and the process-wide block engages only when every member is limited.
+  const rateLimit = await import('../../providers/githubRateLimit');
+  const { githubPoolFetch } = pool;
+  process.env.GITHUB_APP_POOL = 'off'; // the static members only; the app cases above enabled minting
+  reset();
+  rateLimit.resetGithubRateLimitStateForTests();
+  respond = (call) =>
+    call.auth === 'Bearer primary' ? limited(0, 403, 'API rate limit exceeded') : limited(4000);
+  const served = await rateLimit.githubFetch(
+    'https://api.github.com/repos/o/r',
+    {},
+    { fetchImpl: githubPoolFetch('pool', fakeFetch), maxWaitMs: 0 }
+  );
+  assert.strictEqual(served.status, 200, 'a second member answers when the first is limited');
+  assert.deepStrictEqual(
+    calls.map((c) => c.auth),
+    ['Bearer primary', 'Bearer bot2']
+  );
+  assert.strictEqual(
+    rateLimit.activeGithubRateLimit(),
+    null,
+    'one limited member does not block GitHub'
+  );
+  reset();
+  respond = () => limited(0, 403, 'API rate limit exceeded');
+  await assert.rejects(
+    rateLimit.githubFetch(
+      'https://api.github.com/repos/o/r',
+      {},
+      { fetchImpl: githubPoolFetch('pool', fakeFetch), maxWaitMs: 0 }
+    ),
+    rateLimit.GithubRateLimitedError
+  );
+  assert.strictEqual(calls.length, 4, 'every member is asked once before the limit is reported');
+  assert.notStrictEqual(rateLimit.activeGithubRateLimit(), null, 'an exhausted pool blocks GitHub');
+  rateLimit.resetGithubRateLimitStateForTests();
+
   process.stdout.write('github-token-pool: ok\n');
 }
 

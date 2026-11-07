@@ -345,6 +345,19 @@ export async function githubFetch(
   return response as Response;
 }
 
+/**
+ * A fetch for githubRateLimit's `fetchImpl` option: each request goes out with the best
+ * member for `identity`, so the rate-limit wrapper only sees a limit once every member is
+ * exhausted.
+ */
+export function githubPoolFetch(
+  identity: GithubTokenIdentity = 'pool',
+  fetchImpl?: typeof fetch
+): typeof fetch {
+  return ((url: string | URL | Request, init?: RequestInit) =>
+    githubFetch(String(url), init ?? {}, { identity, fetchImpl })) as typeof fetch;
+}
+
 /** Test hook: forget every learned quota, the cached app token and the mint cooldown. */
 export function resetGithubTokenPoolForTests(): void {
   appMintBlockedUntil = 0;
