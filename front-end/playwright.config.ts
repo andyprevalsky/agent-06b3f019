@@ -2,8 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 const FRONTEND_PORT = process.env.FRONTEND_PORT ?? '3002';
 const BACKEND_PORT = process.env.BACKEND_PORT ?? '3001';
-const BASE_URL =
-  process.env.FRONTEND_URL ?? `http://localhost:${FRONTEND_PORT}`;
+const BASE_URL = process.env.FRONTEND_URL ?? `http://localhost:${FRONTEND_PORT}`;
 
 export default defineConfig({
   testDir: './tests-e2e',
