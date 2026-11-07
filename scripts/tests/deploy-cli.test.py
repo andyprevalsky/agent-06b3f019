@@ -271,11 +271,15 @@ class Sync(Repo):
 
 
 class ReviewWait(Repo):
-    def wait(self, wait_code, check):
+    def wait(self, wait_code, check, *, max_wait=3600):
+        """``wait_code``/``check`` may be lists: one entry per waiter run / check read, in order."""
         d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'feature', 'head': 'a' * 40})
+        codes = wait_code if isinstance(wait_code, list) else None
+        checks = check if isinstance(check, list) else None
         with patch.object(d, 'review_state', return_value={'cycles': [{'head': 'b' * 40}]}), \
-             patch.object(d, 'run', return_value=wait_code) as runner, patch.object(d, 'coderabbit_check', return_value=check):
-            return (*self.call(d.cmd_review_wait, timeout=600), runner)
+             patch.object(d, 'run', side_effect=codes, return_value=wait_code) as runner, \
+             patch.object(d, 'coderabbit_check', side_effect=checks, return_value=check):
+            return (*self.call(d.cmd_review_wait, timeout=600, rate_limit_max_wait=max_wait), runner)
 
     def test_a_delivered_review_passes(self):
         code, out, _, runner = self.wait(0, ('success', 'Review completed'))
@@ -311,6 +315,51 @@ class ReviewWait(Repo):
         none = subprocess.CompletedProcess([], 0, stdout='\t\n', stderr='')
         with patch.object(d.subprocess, 'run', return_value=none):
             self.assertEqual(('', ''), d.coderabbit_check('c' * 40))
+
+    def test_a_rate_limited_check_waits_out_the_window_and_rerequests_once(self):
+        code, out, _, runner = self.wait([0, 0], [('neutral', 'Review rate limited'), ('success', 'Finished')])
+        self.assertEqual(code, 0)
+        self.assertIn('DEPLOY_REVIEW_WAIT delivered head=bbbbbbbbbbbb', out)
+        self.assertEqual(runner.call_count, 2)
+        first, second = (call.args[0] for call in runner.call_args_list)
+        self.assertNotIn('--after-rate-limit', first)
+        self.assertEqual(second[:len(first)], first, 'the re-request waits on the same PR and exact HEAD')
+        self.assertEqual(second[len(first):], ['--after-rate-limit', '--rate-limit-max-wait', '3600',
+                                               '--receipt-dir', str(d.CONTEXT)])
+
+    def test_review_limit_reached_is_a_quota_window_too(self):
+        code, _, _, runner = self.wait([0, 0], [('neutral', 'Review limit reached'), ('success', 'Finished')])
+        self.assertEqual((code, runner.call_count), (0, 2))
+
+    def test_no_parseable_window_keeps_the_exit_3_message_and_posts_nothing(self):
+        code, _, err, runner = self.wait([0, 3], ('neutral', 'Review rate limited'))
+        self.assertEqual((code, runner.call_count), (3, 2))
+        self.assertIn('NOT-A-REVIEW: CodeRabbit check is "neutral" (Review rate limited)', err)
+        self.assertIn('deploy_review_cycle.py skip', err)
+
+    def test_a_second_rate_limit_after_the_one_rerequest_is_not_rerequested_again(self):
+        code, _, err, runner = self.wait([0, 0], [('neutral', 'Review rate limited')] * 2)
+        self.assertEqual((code, runner.call_count), (3, 2))
+        self.assertIn('NOT-A-REVIEW', err)
+
+    def test_a_non_rate_limited_neutral_is_never_rerequested(self):
+        for check in (('neutral', 'Review skipped'), ('', ''), ('error', 'gh failed: API rate limited'),
+                      ('failure', 'Failed')):
+            with self.subTest(check=check):
+                code, _, _, runner = self.wait(0, check)
+                self.assertEqual((code, runner.call_count), (3, 1))
+
+    def test_a_zero_max_wait_disables_the_rerequest(self):
+        code, _, _, runner = self.wait(0, ('neutral', 'Review rate limited'), max_wait=0)
+        self.assertEqual((code, runner.call_count), (3, 1))
+
+    def test_an_unsuccessful_wait_is_returned_unless_it_was_the_quota(self):
+        code, _, _, runner = self.wait(1, ('failure', 'Failed'))
+        self.assertEqual((code, runner.call_count), (1, 1))
+
+    def test_review_wait_parser_defaults_to_a_bounded_window(self):
+        args = d.parser().parse_args(['review-wait'])
+        self.assertEqual((args.timeout, args.rate_limit_max_wait), (600, 3600))
 
     def test_a_failed_wait_propagates_without_reading_the_check(self):
         with patch.object(d, 'coderabbit_check') as check:
