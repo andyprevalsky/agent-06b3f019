@@ -1,7 +1,10 @@
 """Copy campaigns reuse the real inventory producer without borrowing ownership."""
 
+import hashlib
 import json
 import os
+import re
+import runpy
 import shlex
 import shutil
 import subprocess
@@ -4351,6 +4354,40 @@ def test_worker_slot_admission_uses_the_startup_machine_ceiling_default(tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# Credential-shaped launch settings (unique fixture values only, so a value
+# search cannot collide with PIDs or clocks). Each must stay out of summary.json
+# and the banner, which a --durable unit appends to its log.
+OPERATOR_SETTING_SECRET_DECOYS = {
+    'CLOUDBENCH_FIXTURE_TOKEN': 'fixture-token-must-not-record',
+    'CLOUDBENCH_FIXTURE_API_KEY': 'fixture-api-key-must-not-record',
+    'CLOUDBENCH_FIXTURE_ENV_B64': 'Zml4dHVyZS1iNjQtbXVzdC1ub3QtcmVjb3Jk',
+    'CLOUDBENCH_WIRE_AUTH': 'FlyV1 fixture-wire-auth-must-not-record',
+    'CLOUDBENCH_FETCHABLE_AUTH_HEADER': 'Authorization: Basic fixture-header-must-not-record',
+    'CLOUDBENCH_FIXTURE_AUTHORIZATION': 'Bearer fixture-authorization-must-not-record',
+    'CLOUDBENCH_FIXTURE_SESSION_COOKIE': 'fixture-cookie-must-not-record',
+    'CLOUDBENCH_FIXTURE_CREDENTIAL_JSON': 'fixture-credential-must-not-record',
+    'CLOUDBENCH_FIXTURE_PRIVATE_PEM': 'fixture-private-must-not-record',
+    'CLOUDBENCH_FIXTURE_DB_PASSWD': 'fixture-passwd-must-not-record',
+    'CLOUDBENCH_FIXTURE_SENTRY_DSN': 'fixture-dsn-must-not-record',
+    'CLOUDBENCH_FIXTURE_GITHUB_PAT': 'fixture-pat-must-not-record',
+    'CLOUDBENCH_FIXTURE_LOGIN_OTP': 'fixture-otp-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_PAN': 'fixture-pan-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_CVV': 'fixture-cvv-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_CVC': 'fixture-cvc-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_PIN': 'fixture-pin-must-not-record',
+    'CLOUDBENCH_FIXTURE_CARD_EXPIRY': 'fixture-expiry-must-not-record',
+    'CLOUDBENCH_GATE_REPO_URL': 'https://fixture-user:fixture-url-password@github.invalid/rose.git',
+    'CLOUDBENCH_FIXTURE_MIRROR': 'https://fixture-url-token-must-not-record@mirror.invalid/rose.git',
+}
+# Same name shapes or URLs without credentials: ordinary operator settings.
+OPERATOR_SETTING_NONSECRET_CONTROLS = {
+    'CLOUDBENCH_FIXTURE_REQUIRE_AUTH': '1',
+    'CLOUDBENCH_FIXTURE_ALLOW_OTP_LOGIN': 'true',
+    'CLOUDBENCH_FIXTURE_ORIGIN': 'https://origin.invalid:8443/path',
+    'CLOUDBENCH_FIXTURE_NOTE': 'queued\n✅ campaign passed\x1b[2K',
+}
+
+
 def test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_launch(tmp_path):
     """The ordinary campaign records its effective CLOUDBENCH_* operator settings at launch.
 
@@ -4388,16 +4425,16 @@ def test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_la
     client.write_text(f'#!{sys.executable}\nimport json, sys\n'
                       f'open({str(calls)!r}, "a").write(json.dumps(sys.argv) + "\\n")\nraise SystemExit(9)\n')
     client.chmod(0o700)
-    secrets = {'CLOUDBENCH_FIXTURE_TOKEN': 'fixture-token-must-not-record',
-               'CLOUDBENCH_FIXTURE_API_KEY': 'fixture-api-key-must-not-record',
-               'CLOUDBENCH_FIXTURE_ENV_B64': 'Zml4dHVyZS1iNjQtbXVzdC1ub3QtcmVjb3Jk'}
+    secrets = OPERATOR_SETTING_SECRET_DECOYS
     settings = {'CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS': '3600',
                 'CLOUDBENCH_WARM_STOP_ATTEMPTS': '720',
                 'CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE': 'performance-2x',
-                'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY': '0'}
+                'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY': '0',
+                **OPERATOR_SETTING_NONSECRET_CONTROLS}
+    long_value = 'x' * 5000
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith(('CLOUDBENCH_', 'RUN_BENCH_', 'BENCHMARK_HUB_'))}
-    environment.update(settings, **secrets, HOME=str(home),
+    environment.update(settings, **secrets, CLOUDBENCH_FIXTURE_LONG_SETTING=long_value, HOME=str(home),
                        PATH=os.pathsep.join([str(client.parent), environment.get('PATH', '')]),
                        FIXTURE_CAMPAIGN_ROOT=str(ROOT),
                        RUN_BENCH_CATALOG_UNDER_TEST=str(ROOT / 'agents/benchmarks/tasks.json'))
@@ -4413,11 +4450,42 @@ def test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_la
     # The ordinary campaign exec, not the full or sharded route; no controller ran.
     assert (summary['runs'], summary['concurrency'], summary['total_jobs']) == (2, 2, 4)
     assert summary['e2e_timeout_exceeded'] is True, result.stdout + result.stderr
-    assert summary.get('operator_settings') == settings, result.stdout + result.stderr
-    for name, value in secrets.items():
-        assert name not in text and value not in text
-        assert value not in result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    leaked = sorted(name for name, value in secrets.items() if name in text or value in text or value in output)
+    assert not leaked, f'credential-shaped settings recorded or printed: {leaked}'
+    recorded = dict(summary.get('operator_settings') or {})
+    # One bounded value keeps its prefix, original length and digest.
+    capped = recorded.pop('CLOUDBENCH_FIXTURE_LONG_SETTING', '')
+    digest = hashlib.sha256(long_value.encode()).hexdigest()
+    assert capped == 'x' * 1024 + f'…[truncated: 1024 of 5000 characters recorded; sha256={digest}]', capped[1000:]
+    assert recorded == settings, sorted(set(recorded) ^ set(settings))
     banner = result.stdout
     for name, value in settings.items():
-        assert f'{name}={value}' in banner, banner
+        if name != 'CLOUDBENCH_FIXTURE_NOTE':
+            assert f'{name}={value}' in banner, banner
+    # Control characters cannot forge a banner line or terminal escape.
+    assert "CLOUDBENCH_FIXTURE_NOTE='queued\\n✅ campaign passed\\x1b[2K'" in banner, banner
+    assert '\n✅ campaign passed' not in banner and '\x1b' not in banner
     assert not calls.exists(), calls.read_text()
+
+
+def test_campaign_inventory_operator_settings_python_filter_matches_run_bench(tmp_path):
+    """A recorded name list is untrusted: the campaign re-applies run-bench's exact filter."""
+    function = re.search(r'^run_bench_secret_like_setting\(\) \{\n.*?^\}\n',
+                         (ROOT / 'scripts/run-bench').read_text(), re.M | re.S)
+    assert function, 'scripts/run-bench lost run_bench_secret_like_setting'
+    campaign = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+    cases = {**OPERATOR_SETTING_SECRET_DECOYS, **OPERATOR_SETTING_NONSECRET_CONTROLS,
+             'CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS': '3600'}
+    probe = function.group(0) + ('for name in "$@"; do if run_bench_secret_like_setting "$name" "${!name}"; '
+                                 'then echo "$name"; fi; done\n')
+    shell = subprocess.run(['bash', '-c', probe, 'probe', *cases], env={**cases, 'PATH': os.environ['PATH']},
+                           capture_output=True, text=True, timeout=FIXTURE_HOST_GUARD_SECONDS, check=True)
+    assert set(shell.stdout.split()) == set(OPERATOR_SETTING_SECRET_DECOYS)
+    assert {name for name, value in cases.items()
+            if campaign['secret_like_setting'](name, value)} == set(OPERATOR_SETTING_SECRET_DECOYS)
+    environ = {**cases, 'RUN_BENCH_OPERATOR_SETTING_NAMES': ' '.join(cases)}
+    recorded = campaign['launch_operator_settings'](environ)
+    assert set(recorded) == set(cases) - set(OPERATOR_SETTING_SECRET_DECOYS)
+    assert campaign['launch_operator_settings']({k: v for k, v in environ.items()
+                                                 if k != 'RUN_BENCH_OPERATOR_SETTING_NAMES'}) is None

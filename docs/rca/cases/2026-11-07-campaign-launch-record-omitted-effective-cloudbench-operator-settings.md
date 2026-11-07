@@ -23,7 +23,8 @@ tags:
 sources:
   - benchmark run campaign-20261107-211039-3331466 (epoch20; unit run-bench-20261107T211039Z-3331434)
   - benchmark run campaign-20261107-225538-1478726 (proof-B successor; r001-j0003.log line 453)
-repro: agents/benchmarks/cloudbench_campaign_inventory_test.py::test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_launch
+  - commit 4e378a35fa (first fix; review CHANGES_REQUIRED)
+repro: agents/benchmarks/cloudbench_campaign_inventory_test.py::test_campaign_inventory_normal_cli_records_nonsecret_operator_settings_at_launch (+ test_campaign_inventory_operator_settings_python_filter_matches_run_bench, scripts/tests/run-bench-durable-service.test.py)
 status: fixed
 ---
 
@@ -75,33 +76,64 @@ failed with `assert None == {'CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS': '3600
 
 ## Solution
 
-`scripts/run-bench` now has one secret-like name filter,
-`run_bench_secret_like_name`. The durable `--setenv` forwarder and a new
-step just before the ordinary campaign `exec` both use it. That step exports
-`RUN_BENCH_OPERATOR_SETTING_NAMES`, the exported non-secret `CLOUDBENCH_*`
-names. The filter also treats `*_B64` names as secret-like now, because
-base64 env payloads are this repo's credential transport form.
-`run-bench-campaign.py` `launch_operator_settings()` records those names
-and values as `summary.json` `operator_settings` in the first launch write.
-The banner prints them as `operator settings: NAME=value ...`. It prints
-`none set (source defaults)` when there are none, and `UNRECORDED (launched
-without scripts/run-bench)` for a direct launch. The campaign never
-classifies secrets itself.
+`scripts/run-bench` has one secret-like filter, `run_bench_secret_like_setting
+NAME VALUE`. The durable `--setenv` forwarder uses it; its `Environment=` is
+readable via `systemctl show` and its log receives the banner. A new step
+just before the ordinary campaign `exec` uses it too, exporting
+`RUN_BENCH_OPERATOR_SETTING_NAMES` (the exported non-secret `CLOUDBENCH_*`
+names). The filter withholds three kinds of setting:
+
+- names containing TOKEN, SECRET, PASSWORD, PASSWD, API_KEY, AUTH_HEADER,
+  AUTHORIZATION, COOKIE, CREDENTIAL, PRIVATE or OTP;
+- names ending in `_KEY`, `_B64`, `_AUTH`, `_DSN`, `_PAT` or a card field
+  (`_PAN`, `_CVV`, `_CVC`, `_PIN`, `_EXPIRY`);
+- any value with URL userinfo (`://[^/]*@` or `://[^/]*:[^@]*@`).
+
+A plain switch value (`''`, 0/1, true/false, yes/no, on/off) is never
+withheld, so flags such as `BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true` and
+`BENCHMARK_ALLOW_DEV_OTP_LOGIN=1` still forward. There is deliberately no
+bare `*AUTH*`: `*_AUTHORITY` names and the `CLOUDBENCH_CODEX_AUTH_*` helper
+settings are ordinary settings.
+
+`run-bench-campaign.py` `launch_operator_settings()` treats the name list as
+untrusted. It re-applies the same filter as `secret_like_setting()`, and a
+parity regression runs both implementations over the same cases. It records
+the survivors as `summary.json` `operator_settings` in the first launch
+write. Values over 1024 characters keep their prefix plus a
+`…[truncated: 1024 of N characters recorded; sha256=…]` marker. The banner
+prints `operator settings: NAME=value ...` with control characters escaped,
+so a value cannot forge a banner line or a terminal escape. It prints `none
+set (source defaults)` when there are none, and `UNRECORDED (launched
+without scripts/run-bench)` for a direct launch.
+
+The adversarial review (CHANGES_REQUIRED on commit 4e378a35fa) showed that
+the first name-only filter recorded `CLOUDBENCH_WIRE_AUTH` (Fly API
+Authorization) and `CLOUDBENCH_FETCHABLE_AUTH_HEADER` (GitHub Basic header)
+values. It also left the pre-existing durable forwarding of
+`ROSE_AGENT_CARD_*` and credentialed `BENCHMARK_*_DATABASE_URL` values
+uncovered. Traced consumers: card fields are read only by the backend from
+its env file. The `*_SOURCE_DATABASE_URL` values are set by `run_benchmark.py`
+for its own children. `CLOUDBENCH_WIRE_AUTH`/`_FETCHABLE_AUTH_HEADER` are
+set inline for single child processes. None needs operator-environment
+forwarding.
 
 This also covers the non-durable launches in that class: setsid, plain
 foreground and Hub-dispatched `scripts/run-bench` campaigns. At 10k agents
 the cost is one environment scan and one small dict per campaign launch, with
-no per-agent work. Post-fix, the same command passed. It also passed five
-consecutive runs and the full `campaign_inventory` selection of the
-benchmark-live-results structural gate.
+no per-agent work.
 
 ## Human feedback
 
-None recorded.
+Adversarial review (descend coordinator, I-31) rejected the name-only filter
+as leaking credential-carrying names and URL userinfo. It required the same
+filter to be re-applied in Python, a value cap and banner control-character
+escaping. It required card and credentialed-URL values to be excluded from
+durable forwarding, and forbade a bare `*AUTH*` pattern because it would stop
+forwarding `*_AUTHORITY` and `CLOUDBENCH_CODEX_AUTH_*` settings.
 
 ## Reusable lesson
 
 When a launcher carries behavior-changing environment into a detached
 controller, record those settings in the run's own launch evidence and banner
-through the launcher's one secret filter. Never leave the service environment
+through the launcher's one name-and-value secret filter. Never leave the service environment
 as their only record.

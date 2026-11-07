@@ -1346,6 +1346,38 @@ def provider_capacity_refusal(benches: int) -> int:
         raise SystemExit(f"❌ {error}; no campaign controller admitted") from None
 
 
+# scripts/run-bench run_bench_secret_like_setting, re-applied here because a
+# recorded name list is untrusted input (parity regression in
+# cloudbench_campaign_inventory_test.py).
+SECRET_LIKE_SETTING_NAME = re.compile(
+    r"TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|AUTH_HEADER|AUTHORIZATION|COOKIE|CREDENTIAL|PRIVATE|OTP"
+    r"|(_KEY|_B64|_AUTH|_DSN|_PAT|_PAN|_CVV|_CVC|_PIN|_EXPIRY)$"
+)
+URL_CREDENTIALS = re.compile(r"://[^/]*@|://[^/]*:[^@]*@")
+SWITCH_VALUES = frozenset(("", "0", "1", "true", "false", "TRUE", "FALSE", "True", "False", "yes", "no", "on", "off"))
+OPERATOR_SETTING_VALUE_LIMIT = 1024
+
+
+def secret_like_setting(name: str, value: str) -> bool:
+    if value in SWITCH_VALUES:
+        return False
+    return bool(SECRET_LIKE_SETTING_NAME.search(name) or URL_CREDENTIALS.search(value))
+
+
+def bounded_setting_value(value: str) -> str:
+    if len(value) <= OPERATOR_SETTING_VALUE_LIMIT:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", "surrogateescape")).hexdigest()
+    return (value[:OPERATOR_SETTING_VALUE_LIMIT] + f"…[truncated: {OPERATOR_SETTING_VALUE_LIMIT} of "
+            f"{len(value)} characters recorded; sha256={digest}]")
+
+
+def banner_setting_value(value: str) -> str:
+    """One shell-quoted line: control characters cannot forge banner lines."""
+    return shlex.quote(re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\\]",
+                              lambda match: match.group().encode("unicode_escape").decode("ascii"), value))
+
+
 def launch_operator_settings(environ: Mapping[str, str]) -> dict[str, str] | None:
     """Effective non-secret CLOUDBENCH_* settings at launch, or None when unrecorded.
 
@@ -1355,8 +1387,9 @@ def launch_operator_settings(environ: Mapping[str, str]) -> dict[str, str] | Non
     names = environ.get("RUN_BENCH_OPERATOR_SETTING_NAMES")
     if names is None:
         return None
-    return {name: environ[name] for name in sorted(set(names.split()))
-            if name.startswith("CLOUDBENCH_") and name in environ}
+    return {name: bounded_setting_value(environ[name]) for name in sorted(set(names.split()))
+            if name.startswith("CLOUDBENCH_") and name in environ
+            and not secret_like_setting(name, environ[name])}
 
 
 def scorecard_hooks() -> dict | None:
@@ -1601,7 +1634,7 @@ def main() -> int:
         print("   operator settings: UNRECORDED (launched without scripts/run-bench)")
     else:
         print("   operator settings: " + (" ".join(
-            f"{name}={shlex.quote(value)}" for name, value in operator_settings.items())
+            f"{name}={banner_setting_value(value)}" for name, value in operator_settings.items())
             or "none set (source defaults)"))
     scorecard = scorecard_hooks()
     experiment_goal = os.environ.get("RUN_BENCH_GOAL") or "campaign:" + ",".join(sorted(set(args.task)))[:120]

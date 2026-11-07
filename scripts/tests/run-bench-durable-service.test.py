@@ -177,6 +177,12 @@ class DurableLaunchContract(DurableLaunchBase):
         write_exec(fake_bin / "systemd-run", FAKE_SYSTEMD_RUN)
         write_exec(fake_bin / "systemctl", FAKE_SYSTEMCTL)
         self.env["PATH"] = f"{fake_bin}{os.pathsep}{self.env['PATH']}"
+        # Credential-shaped values Environment= would expose to systemctl show
+        # (descend I-31), beside a switch whose name only looks like one.
+        self.withheld = {"CLOUDBENCH_FIXTURE_ENV_B64": "Zml4dHVyZS1kdXJhYmxlLWI2NA==",
+                         "ROSE_AGENT_CARD_PAN": "fixture-durable-pan",
+                         "BENCHMARK_FIXTURE_DATABASE_URL": "postgres://fixture:fixture-durable-pass@db.invalid/x"}
+        self.env.update(self.withheld, BENCHMARK_DISABLE_SAVED_BROWSER_AUTH="true")
 
     def test_controller_is_the_system_service_main_process(self):
         result = self.run_bench(TASK, "--sim-on", "a$b", "--durable-log", str(self.log), "--durable")
@@ -196,6 +202,10 @@ class DurableLaunchContract(DurableLaunchBase):
             self.assertIn(expected, options)
         self.assertFalse([o for o in options if "CLOUDBENCH_FIXTURE_TOKEN" in o], options)
         self.assertIn("CLOUDBENCH_FIXTURE_TOKEN", result.stderr)
+        for name, value in self.withheld.items():
+            self.assertFalse([o for o in options if name in o or value in o], name)
+            self.assertIn(name, result.stderr)
+        self.assertIn("--setenv=BENCHMARK_DISABLE_SAVED_BROWSER_AUTH=true", options)
         self.assertEqual(command[1:], [str(RUN_BENCH), TASK, "--sim-on", "a$$b"])
         receipt = self.controller_receipt()
         # exec semantics: the service MainPID is the controller itself.
