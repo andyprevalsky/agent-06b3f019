@@ -1167,4 +1167,63 @@ for line in sys.stdin:
                 self.reap(child)
 
 
+import hashlib
+from deploy_test_run_artifact import read_run_artifact, ForensicValue
+
+class NativeRunArtifact(unittest.TestCase):
+ def setUp(self):self.tmp=tempfile.TemporaryDirectory();self.p=Path(self.tmp.name)/'run.json'
+ def tearDown(self):self.tmp.cleanup()
+ def read(self,raw,limit=4096,expected=None):
+  self.p.write_bytes(raw);return read_run_artifact(self.p,expected or hashlib.sha256(raw).hexdigest(),limit)
+ def test_large_forensics_preserve_all_control_fields_and_raw_bytes(self):
+  value={'run_id':'original','status':'failed','controller_exit_code':1,'tasks':[{'name':'original','passed':True,'logs':{'messages':['a'*600 for _ in range(40)]},'owned_roots':[{'root_agent_id':'root','logs':{'messages':['b'*600 for _ in range(40)]}}]}]};raw=json.dumps(value).encode();v=self.read(raw)
+  self.assertEqual(self.p.read_bytes(),raw);self.assertEqual(v['status'],'failed');self.assertEqual(v['controller_exit_code'],1);self.assertTrue(v['tasks'][0]['passed']);self.assertIsInstance(v['tasks'][0]['logs'],ForensicValue);self.assertEqual(v['tasks'][0]['owned_roots'][0]['root_agent_id'],'root')
+ def test_big_nonforensic_metadata_refused(self):
+  with self.assertRaisesRegex(ValueError,'bound'):self.read(json.dumps({'tasks':[{'unknown':['x'*600 for _ in range(40)]}]}).encode())
+ def test_wrong_hash_including_opaque_bytes_refused(self):
+  with self.assertRaisesRegex(ValueError,'hash'):self.read(b'{"tasks":[{"logs":{"data":"changed"}}]}',expected='0'*64)
+ def test_symlink_refused(self):
+  self.p.write_text('{}');q=self.p.with_name('link');q.symlink_to(self.p)
+  with self.assertRaisesRegex(ValueError,'canonical'):read_run_artifact(q,hashlib.sha256(b'{}').hexdigest(),4096)
+ def test_malformed_opaque_payloads_refused_even_with_matching_hash(self):
+  for raw in [b'{"tasks":[{"logs":{"x":"bad\\q"}}]}',b'{"tasks":[{"logs":{"x":"bad\\uZ000"}}]}',b'{"tasks":[{"logs":[1,]}]}',b'{"tasks":[{"logs":{"x":01}}]}',b'{"tasks":[{"logs":{"x":"bad\xff"}}]}',b'{"tasks":[{"logs":{"x":"bad\x01"}}]}',b'{"tasks":[{"logs":{"x":truefalse}}]}',b'{"tasks":[{"logs":{"x":1,"x":2}}]}',b'{"tasks":[{"logs":{}}]}garbage']:
+   with self.subTest(raw_hash=hashlib.sha256(raw).hexdigest()):
+    with self.assertRaises((ValueError,UnicodeDecodeError)):self.read(raw)
+ def test_large_scalar_and_depth_refused(self):
+  for raw in [b'{"tasks":[{"logs":"'+b'x'*5000+b'"}]}',b'{"tasks":[{"logs":'+b'['*140+b'0'+b']'*140+b'}]}']:
+   with self.assertRaisesRegex(ValueError,'bound|depth'):self.read(raw)
+ def test_nonobject_and_duplicate_control_keys_refused(self):
+  for raw in [b'[]',b'{"run_id":"good","run_id":"foreign"}']:
+   with self.assertRaises(ValueError):self.read(raw)
+ def test_strings_numbers_whitespace_match_stdlib_for_metadata(self):
+  value={'run_id':'\u2603\\"','status':'failed','number':-1.25e-4,'flag':True,'empty':None,'tasks':[{'owned_roots':[],'passed':False}]};self.assertEqual(self.read(json.dumps(value).encode()),value)
+
+ def test_nonforensic_whitespace_counts_toward_wire_budget(self):
+     with self.assertRaisesRegex(ValueError, 'metadata document byte bound'):
+         self.read(b'{' + b' ' * 32768 + b'"status":"failed"}', limit=4096)
+
+ def test_truncation_child_is_python_refusal_not_signal(self):
+     import textwrap
+     program = textwrap.dedent('\n            import sys, tempfile, hashlib, resource\n            from pathlib import Path\n            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))\n            sys.path.insert(0, sys.argv[1])\n            import deploy_test_run_artifact as m\n            with tempfile.TemporaryDirectory() as folder:\n                p=Path(folder)/\'run.json\';raw=b\'{"tasks":[{"logs":[\'+b\'"x",\'*30000+b\'"x"]}]}\';p.write_bytes(raw)\n                original=m._Reader.value\n                fired=False\n                def raced(self,*args):\n                    global fired\n                    if not fired:\n                        fired=True\n                        with p.open(\'r+b\') as writer:writer.truncate(0)\n                    return original(self,*args)\n                m._Reader.value=raced\n                try:m.read_run_artifact(p,hashlib.sha256(raw).hexdigest(),4096)\n                except (OSError,ValueError):print(\'SAFE_REFUSAL\')\n                else:raise AssertionError(\'truncation accepted\')\n')
+     r=subprocess.run([sys.executable,'-B','-c',program,str(Path(__file__).resolve().parents[1])],capture_output=True,text=True)
+     self.assertEqual(0,r.returncode,r.stderr)
+     self.assertIn('SAFE_REFUSAL',r.stdout)
+
+ def test_fifo_cancel_deadline_and_default_raw_bound(self):
+     import time
+     from deploy_test_process import CANCEL
+     fifo=self.p.with_name('fifo');os.mkfifo(fifo)
+     with self.assertRaisesRegex(ValueError,'regular fd'):
+         read_run_artifact(fifo,'0'*64,4096)
+     self.p.write_bytes(b'{}');digest=hashlib.sha256(b'{}').hexdigest()
+     CANCEL.set()
+     try:
+         with self.assertRaisesRegex(ValueError,'cancelled'):
+             read_run_artifact(self.p,digest,4096)
+     finally:CANCEL.clear()
+     with self.assertRaisesRegex(ValueError,'deadline'):
+         read_run_artifact(self.p,digest,4096,deadline=time.monotonic()-1)
+     with self.assertRaisesRegex(ValueError,'raw file byte bound'):
+         read_run_artifact(self.p,digest,4096,raw_limit=1)
+
 if __name__=='__main__':unittest.main()

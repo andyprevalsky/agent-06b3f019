@@ -666,6 +666,7 @@ def validate(receipt, owner, proof):
     need(finite(confirmed) and finite(receipt['finished_at']) and receipt['finished_at'] <= confirmed <= time.time()
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
+    run_artifacts = set()
     need(isinstance(bindings, dict), 'missing file bindings')
 
     def bound(path):
@@ -910,7 +911,11 @@ def validate(receipt, owner, proof):
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
-        run = document(fleet / '_batch/run.json')  # Bind original outcomes without regrading them.
+        from deploy_test_run_artifact import read_run_artifact
+        run_path = fleet / '_batch/run.json'
+        run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES)
+        used.add(str(run_path))
+        run_artifacts.add(str(run_path))
         life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')
@@ -1020,7 +1025,11 @@ def validate(receipt, owner, proof):
                                       'disposition': 'retained-exact-owner-transfer-required'}
         need(retained, 'retained service evidence missing')
         for path in bindings:
-            bound(path)  # Retain and re-hash ALL original debt evidence, including retained Hub owners.
+            if path in run_artifacts:
+                from deploy_test_run_artifact import read_run_artifact
+                read_run_artifact(path, bindings[path], MAX_RECEIPT_BYTES)
+            else:
+                bound(path)  # Retain and re-hash ALL original debt evidence, including retained Hub owners.
     need(used == set(bindings), 'proof file closure')
     result = {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
             'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),

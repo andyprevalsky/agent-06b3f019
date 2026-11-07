@@ -430,6 +430,14 @@ class Worker(unittest.TestCase):
 
 class Cloud(unittest.TestCase):
     def setUp(self):
+        # These native receipt fixtures own their adapter inputs, not the deploy's fanout.
+        environment = patch.dict(os.environ, {
+            'CLOUDBENCH_BROWSER_PROVIDER': 'tilion',
+            'CLOUDBENCH_PROVIDER_LIMITS_FILE': str(ROOT / 'scripts/cloudbench-provider-limits.json'),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
