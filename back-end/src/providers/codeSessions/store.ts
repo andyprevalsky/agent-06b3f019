@@ -110,6 +110,7 @@ async function tryLease(id: string, leaseOwner: string, now: Date): Promise<bool
     where: {
       id,
       state: { not: CODE_SESSION_STATES.RETIRED },
+      closingTaskId: null,
       OR: [{ leaseOwner: null }, { leaseOwner }, { leaseExpiresAt: { lt: now } }],
     },
     data: {
