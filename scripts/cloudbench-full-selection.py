@@ -31,6 +31,18 @@ PASS_STREAK = 3
 DEFAULT_RUNS = 2
 
 
+def _history_ledger():
+    """agents/benchmarks/history_ledger.py: a ledger is its base file plus per-writer shards."""
+    import importlib.util
+
+    source = Path(__file__).resolve().parents[1] / "agents" / "benchmarks" / "history_ledger.py"
+    spec = importlib.util.spec_from_file_location("benchmark_history_ledger", source)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _predeploy():
     sys.path.insert(0, str(ROOT / "agents"))
     from benchmarks import select_predeploy_benches as spb
@@ -41,19 +53,16 @@ def _predeploy():
 def last_runs_passed(attempts_file: Path, streak: int = PASS_STREAK) -> set[str]:
     """Tasks whose last `streak` recorded attempts (all suites) all passed."""
     rows: dict[str, list[tuple[str, int, bool]]] = {}
-    if not attempts_file.exists():
-        return set()
-    with attempts_file.open() as handle:
-        for index, line in enumerate(handle):
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            task = entry.get("task") if isinstance(entry, dict) else None
-            if isinstance(task, str) and task:
-                rows.setdefault(task, []).append(
-                    (str(entry.get("timestamp") or ""), index, bool(entry.get("passed")))
-                )
+    for index, line in enumerate(_history_ledger().read_lines(attempts_file)):  # base + shards
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        task = entry.get("task") if isinstance(entry, dict) else None
+        if isinstance(task, str) and task:
+            rows.setdefault(task, []).append(
+                (str(entry.get("timestamp") or ""), index, bool(entry.get("passed")))
+            )
     qualified = set()
     for task, attempts in rows.items():
         attempts.sort()

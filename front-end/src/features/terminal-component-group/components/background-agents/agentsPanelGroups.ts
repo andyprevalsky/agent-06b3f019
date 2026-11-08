@@ -10,10 +10,15 @@
  *   - optional `backgroundTasks` on each tree node (in-activity tasks)
  *
  * In-activity explore/browser/code tasks have no Agent row; they become
- * synthetic TreeNodes (`task:<address>`, never navigable) so they render with
- * the same circle/progress/status language. The selected agent's own
- * explore/browser tasks also map to their trajectory id (`trajectories`), so
- * the dock unfolds them from rows the client already holds.
+ * synthetic TreeNodes (`task:<address>`) so they render with the same
+ * circle/progress/status language. Clicking one opens what it stands for
+ * (`taskTargets`: type, owning agent, task id / task name when known):
+ *   selected agent's explore task → unfolds its trajectory in place
+ *     (`trajectories`, from rows the client already holds)
+ *   browser task → the owner's Browser drawer tab (navigating to the owner first)
+ *   code task    → its code-agent view (task id from the spawn rows, else the
+ *                  left bar's cached code-agents row by owner + task name)
+ *   anything else, or no view for it → the owning agent's conversation
  *
  * 10k-agent note: each build indexes `parentAgentId → children` in one pass
  * over the bus tree; counts, for_each totals and every rendered row then look
@@ -57,11 +62,29 @@ export interface AgentPanelModel {
    * trajectory rows carry as `subAgentId` (selected agent's own tasks only).
    */
   trajectories: ReadonlyMap<string, string>;
+  /** Synthetic task node id → what a click on it opens (absent: nothing to open). */
+  taskTargets?: ReadonlyMap<string, TaskTarget>;
+  /** The tree's root (its bus id): the code-agents list a code task is looked up in. */
+  rootAgentId?: string | null;
+}
+
+/** What a synthetic task row stands for; the banner resolves it to a view. */
+export interface TaskTarget {
+  /** explore | browser | code | … (the task's agent type). */
+  type: string;
+  /** The Rose agent that owns the task (whose conversation lists it). */
+  ownerAgentId: string;
+  /** Owned by the selected agent (no navigation needed to reach its views). */
+  own: boolean;
+  /** Browser task id / code session task id, when the owner's rows carry it. */
+  taskId: string | null;
+  /** The spawn's task_name (last path segment), when known. */
+  taskName: string | null;
 }
 
 const IN_ACTIVITY_TYPES = new Set(['explore', 'browser', 'code']);
-/** In-activity tasks whose trajectory the dock can unfold from the selected agent's rows. */
-const TRAJECTORY_TYPES = new Set(['explore', 'browser']);
+/** In-activity tasks whose trajectory the dock unfolds in place (browser opens its drawer). */
+const TRAJECTORY_TYPES = new Set(['explore']);
 const FAILED_TASK = new Set(['failed', 'error', 'cancelled', 'canceled', 'timeout']);
 const DONE_TASK = new Set(['completed', 'complete', 'done', 'finished', 'success']);
 
@@ -205,6 +228,27 @@ function subtreeSize(
   return seen.size;
 }
 
+/** Every tree task's owner and type (one pass over the tree); spawn rows refine them. */
+function treeTaskTargets(
+  nodes: ReadonlyMap<string, TreeNode>,
+  selectedAgentId: string,
+): Map<string, TaskTarget> {
+  const targets = new Map<string, TaskTarget>();
+  for (const node of nodes.values()) {
+    for (const task of node.backgroundTasks ?? []) {
+      const taskNode = fromTreeTask(task, node.agentId);
+      targets.set(taskNode.agentId, {
+        type: task.type,
+        ownerAgentId: node.agentId,
+        own: node.agentId === selectedAgentId,
+        taskId: null,
+        taskName: agentPathShortName(taskNode.taskPath),
+      });
+    }
+  }
+  return targets;
+}
+
 interface BuildArgs {
   nodes: ReadonlyMap<string, TreeNode>;
   selectedAgentId: string;
@@ -255,6 +299,7 @@ export function buildAgentPanelModel({
   const loose: TreeNode[] = getChildren(selectedAgentId).filter((n) => !claimed.has(n.agentId));
   const looseIds = new Set(loose.map((n) => n.agentId));
   const trajectories = new Map<string, string>();
+  const taskTargets = treeTaskTargets(nodes, selectedAgentId);
   for (const spawn of spawns) {
     if (spawn.agentType === 'for_each') continue;
     if (IN_ACTIVITY_TYPES.has(spawn.agentType)) {
@@ -263,6 +308,13 @@ export function buildAgentPanelModel({
       if (spawn.taskId && TRAJECTORY_TYPES.has(spawn.agentType)) {
         trajectories.set(task.agentId, spawn.taskId);
       }
+      taskTargets.set(task.agentId, {
+        type: spawn.agentType,
+        ownerAgentId: selectedAgentId,
+        own: true,
+        taskId: spawn.taskId,
+        taskName: agentPathShortName(spawn.path),
+      });
       continue;
     }
     for (const id of spawn.subAgentIds) {
@@ -273,5 +325,11 @@ export function buildAgentPanelModel({
   }
   if (loose.length > 0) groups.push({ key: 'children', header: null, roots: runningFirst(loose) });
   groups.sort((a, b) => Number(b.roots.some(isRunningNode)) - Number(a.roots.some(isRunningNode)));
-  return { groups, getChildren, counts: countAll(groups, getChildren), trajectories };
+  return {
+    groups,
+    getChildren,
+    counts: countAll(groups, getChildren),
+    trajectories,
+    taskTargets,
+  };
 }

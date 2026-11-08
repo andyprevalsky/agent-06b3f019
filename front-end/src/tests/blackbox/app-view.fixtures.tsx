@@ -217,9 +217,14 @@ export async function openCodeAgentViewFromRow(row: HTMLElement): Promise<HTMLEl
   return await screen.findByTestId('code-agent-view');
 }
 
-/** Open the view's devbox usage popover (CodeResourcesIndicator) and return it. */
+/**
+ * Open the view's devbox usage popover (CodeResourcesIndicator, at its query
+ * box's top-right corner, never over the transcript) and return it.
+ */
 export async function openUsagePopover(view: HTMLElement): Promise<HTMLElement> {
-  fireEvent.click(await within(view).findByTestId('code-resources'));
+  expect(within(view).queryByTestId('code-resources')).not.toBeInTheDocument();
+  const corner = await screen.findByTestId('query-input-corner-status');
+  fireEvent.click(await within(corner).findByTestId('code-resources'));
   return await screen.findByTestId('code-resources-popover');
 }
 

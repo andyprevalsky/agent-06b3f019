@@ -15,6 +15,18 @@ POLICIES = {'scripts/deploy_test_cloud.py': ('6841691abdc6ba6a83cdeccf11053c6582
  'scripts/cloudbench_execution_provenance.py': ('25c3d3b7cd13370c86ce0a36d68660f005096a71be79a77bfbe1ef1390fb019f',),
  'scripts/cloudbench_result.py': ('43ec01ea772df562b625aeadf1b22b677ed58f5304bb2c9de4e1c38dcefd4fa6',)}
 MESSAGE = b'DEPLOY_CLOUD BLOCKED: cloud source differs from the requested freeze\n'
+SOURCE_DIFFERS = 'cloud source differs from the requested freeze'
+
+
+def unpushed_reason(head):
+    """An unpushed requested commit: every guest fetch would refuse it at run-bench preflight (PR #1767)."""
+    return (f'push {head} before gates: requested benchmark commit {head} is not fetchable from origin '
+            'and cloud smoke disables local patch shipping')
+
+
+def refusal_reasons(request):
+    """The only typed pre-admission refusals; any other error keeps fail-closed native custody."""
+    return {SOURCE_DIFFERS, unpushed_reason(request['source']['head'])}
 
 
 def refused_before_admission(result, request, gate, root, code, *, invalid_process):
@@ -31,7 +43,7 @@ def refused_before_admission(result, request, gate, root, code, *, invalid_proce
             and result.get('reused') is False and result.get('native_exit') == 2
             and result.get('native_command') == [] and result.get('fleet_directory') is None
             and result.get('evidence') == {} and not result.get('cleanup_owner')
-            and result.get('reason') == 'cloud source differs from the requested freeze'
+            and result.get('reason') in refusal_reasons(request)
             and namespace.resolve() == namespace and not any(p.is_symlink() for p in (root / '.context', namespace.parent, namespace))
             and not namespace.exists())
 

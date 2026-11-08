@@ -26,6 +26,7 @@ const INTERNAL_ROUTES: Record<string, string[]> = {
   'demo-cache/routes.ts': ['/get', '/get-many', '/get-position', '/set', '/purge', '/agent-flag'],
   'archive/routes.ts': ['/artifacts', '/artifact'],
   'tool-usage/routes.ts': ['/'],
+  'agent-queue-pointer/routes.ts': ['/capabilities'],
   'external-http/routes.ts': ['/request'],
   'browser-session/routes.ts': [
     '/close',

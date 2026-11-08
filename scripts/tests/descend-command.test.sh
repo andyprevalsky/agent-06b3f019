@@ -394,7 +394,7 @@ for name in ("run-bench", "cloudbench_catalog.py", "cloudbench-production-only-t
     shutil.copyfile(source / "scripts" / name, root / "scripts" / name)
 # run-bench resolves every launch's timeout from the catalog's caps and floors.
 for name in ("__init__.py", "benchmark_tasks.py", "fixtures.py", "live_fixtures.py",
-             "polar_catalog.py", "timeout_history.py"):
+             "polar_catalog.py", "timeout_history.py", "history_ledger.py"):
     shutil.copyfile(source / "agents/benchmarks" / name, root / "agents/benchmarks" / name)
 (root / "agents/benchmarks/tasks.json").write_text(json.dumps([
     {"name": "production-route", "status": "ready", "production_only": True, "timeout_seconds": 600}

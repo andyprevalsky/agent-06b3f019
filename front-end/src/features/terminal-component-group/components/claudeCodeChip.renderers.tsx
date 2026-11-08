@@ -3,7 +3,8 @@
  * [spinning_up] -> SpinningUpChip
  * [live|verifying] -> LiveChip
  * [completed|failed] -> CollapsedChip
- * [fullscreen] -> FullscreenView portal
+ * [fullscreen] -> FullscreenView portal (md+: starts at --rose-bar-offset, so a
+ *   pinned Rose left bar never covers it; unset outside Rose Desktop → 0)
  * Rose Desktop without a code_agent snapshot -> CollapsedChip with terminal={false}:
  *   status header (+ structured response / failure when expanded); no terminal
  *   surface, no Maximize, no fullscreen
@@ -48,7 +49,10 @@ export function FullscreenView({
   const label = codeProvider === 'codex' ? 'Codex' : 'Claude Code';
   const isTerminalState = state === 'completed' || state === 'failed';
   return createPortal(
-    <div className="fixed inset-0 z-50 flex flex-col bg-background">
+    <div
+      data-testid="code-agent-fullscreen"
+      className="fixed inset-0 z-50 flex flex-col bg-background md:left-[var(--rose-bar-offset,0px)]"
+    >
       <div className="flex min-w-0 items-center justify-between border-b border-border p-4">
         <div className="flex min-w-0 items-center gap-3">
           <ProviderIcon codeProvider={codeProvider} className="h-5 w-5 flex-shrink-0" />

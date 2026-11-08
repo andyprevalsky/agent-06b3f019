@@ -64,7 +64,7 @@ MANIFEST_CATALOG_MEMBERS = ('fleet_infra_sample.py', 'cloudbench_catalog.py')
 CANONICAL_SEED_MEMBERS = ('back-end/prisma/schema.prisma', 'agents/benchmarks/seed_cache_path.py')
 # Import closure of scripts/cloudbench-timeout-policy.py inside agents/benchmarks.
 TIMEOUT_POLICY_MODULES = ('__init__', 'benchmark_tasks', 'fixtures', 'live_fixtures',
-                          'polar_catalog', 'timeout_history')
+                          'polar_catalog', 'timeout_history', 'history_ledger')
 
 
 def polar_names(count=70):

@@ -34,12 +34,16 @@
  *   dark via useRoseTheme().toggle() — the top-right Dark mode icon calls it,
  *   so RoseAppIcons renders inside the provider. Dark adds html.dark and the
  *   calm dark background. Stock accounts and shared views never leave light.
+ * HEADER FRAME (Rose Desktop): the header sits in a zero-height box spanning
+ *   the content area (left = --rose-bar-offset, the pinned left bar's width,
+ *   else 0), so the desktop pill's left-1/2 centres beside a pinned bar while
+ *   its stock classes stay frozen. Mobile headers are fixed and unaffected.
  * DOCUMENT SCROLL: mounted → html.rose-app-shell locks page scroll/overscroll
  *   (panes scroll internally; the mobile query box stays put); unmounted →
  *   class removed so other routes scroll normally.
  */
 
-import { useState, useMemo, lazy } from 'react';
+import { useState, useMemo, lazy, type ReactNode } from 'react';
 
 import {
   AppSidebar,
@@ -57,7 +61,7 @@ import { useAppData } from '@/hooks/appDataContext';
 import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
 import { isAdminOperator } from '@/lib/adminAccounts';
 import { isRoseDesktopSession, roseDesktopAccountId } from '@/lib/roseDesktopSession';
-import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
+import { RoseDesktopContext, useRoseDesktop } from '@/hooks/roseDesktopContext';
 import { RoseThemeProvider } from '@/features/rose-theme';
 import { isBenchmarkSharedView } from '@/lib/benchmarkShare';
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
@@ -182,6 +186,20 @@ function InteractiveTerminalLayout(props: TerminalLayoutProps) {
   );
 }
 
+/** Rose Desktop: centre the header on the content area beside the left bar (see HEADER FRAME). */
+function ContentAreaHeaderFrame({ children }: { children: ReactNode }) {
+  const roseDesktop = useRoseDesktop();
+  if (!roseDesktop) return <>{children}</>;
+  return (
+    <div
+      data-testid="terminal-header-frame"
+      className="absolute inset-x-0 top-0 h-0 md:left-[var(--rose-bar-offset,0px)]"
+    >
+      {children}
+    </div>
+  );
+}
+
 function InteractiveTerminalChrome(props: TerminalLayoutProps) {
   const { agents, drip, tileAnimation, currentView, setCurrentView, derived } = props;
   // THE app-wide attention subscription. Held here because this is the common
@@ -209,7 +227,11 @@ function InteractiveTerminalChrome(props: TerminalLayoutProps) {
           selectedAgentId={agents.selectedAgentId}
         />
 
-        {currentView !== 'browse' && <TerminalHeaderSection agents={agents} drip={drip} />}
+        {currentView !== 'browse' && (
+          <ContentAreaHeaderFrame>
+            <TerminalHeaderSection agents={agents} drip={drip} />
+          </ContentAreaHeaderFrame>
+        )}
 
         {currentView === 'agents' && <InspectionAccountBadge context={agents.inspectionContext} />}
 

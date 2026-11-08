@@ -107,6 +107,24 @@ def native_closure(path, root):
     return {'fleet': str(fleet), 'audit_sha256': digest, 'lifecycle_sha256': c.sha_file(fleet / '_batch/lifecycle.json')}
 
 
+# Provider-wide observations inside a stall snapshot. They count every same-amount card/transfer for the
+# shared benchmark cardholder created since the purchase, so the concurrent identical lifecycles of one smoke
+# (seven payment tasks, plus other devboxes' fleets) change them between the end-of-task and cleanup
+# snapshots (PR #1784 cycle bn8: 7 vs 12). Every identity, status and lifecycle-scoped count must still agree.
+PROVIDER_WIDE_COUNTERS = ('agentCardProviderCardCount', 'agentCardProviderTransferCount',
+                          'agentCardProviderUnlinkedTransferCount')
+
+
+def lifecycle_view(snapshot):
+    """A stall snapshot without its provider-wide counters; everything else is compared exactly."""
+    view = copy.deepcopy(snapshot)
+    integrity = view.get('integrity') if isinstance(view, dict) else None
+    if isinstance(integrity, dict):
+        for key in PROVIDER_WIDE_COUNTERS:
+            integrity.pop(key, None)
+    return view
+
+
 def historical(state, failure, root):
     """Re-read exact native bytes and join their resource/cleanup identities."""
     import deploy_test_cycle as c
@@ -144,7 +162,8 @@ def historical(state, failure, root):
     snap = cleanup['agentcard_release_stall_lifecycles'][t['agent_id']]
     need(cleanup.get('errors') == [] and cleanup.get('root_agent_id') == t['agent_id'] == snap['agentId'], 'cleanup/root mismatch')
     if 'agentcard_release_stall_lifecycle' in t['logs']:
-        need(t['logs']['agentcard_release_stall_lifecycle'] == snap, 'two native snapshots disagree')
+        need(lifecycle_view(t['logs']['agentcard_release_stall_lifecycle']) == lifecycle_view(snap),
+             'two native snapshots disagree')
     final = cleanup['final']
     need(final.get('root_deleted') is True and final.get('unsealed_tree_agent_ids') == []
          and t['agent_id'] in final.get('tree_agent_ids', []), 'native root not sealed')
@@ -245,7 +264,7 @@ def apply(state, rows, root):
             history.append(copy.deepcopy(r))
 
 
-IMPORT_KIND = 'historical-agentcard-no-retry-import-v1'
+LEGACY_IMPORT_KIND = 'historical-agentcard-no-retry-import-v1'
 
 
 def prepare_import(state, donor_path, directory, root, *, donor_sha256):
@@ -268,6 +287,7 @@ def prepare_import(state, donor_path, directory, root, *, donor_sha256):
     donor = c.bounded_read(donor_path, 'historical donor index')
     need(not c.CANCEL.is_set() and not any(donor.get(k) for k in
          ('running', 'live_failures', 'resume_phase', 'pending')), 'active/unknown donor coordinator')
+    validate_donor_rows(donor, root)
     found = known(donor, root)
     history = donor.get('historical_custody_history', [])
     ids = [row['original_failure']['id'] for row in history]
@@ -292,7 +312,7 @@ def prepare_import(state, donor_path, directory, root, *, donor_sha256):
     transfer_proof = build(donor, donor['plan'], state['plan'], root)
     need(c.digest(transfer_proof['cases']) == c.digest(rows), 'donor transfer inventory differs')
     need(c.sha_file(donor_path) == donor_sha, 'donor index changed during preparation')
-    return {'kind': IMPORT_KIND, 'donor_path': str(donor_path), 'donor_sha256': donor_sha,
+    return {'kind': LEGACY_IMPORT_KIND, 'donor_path': str(donor_path), 'donor_sha256': donor_sha,
             'target_state': str(directory / 'cycle.json'), 'before_state_sha256': c.digest(fresh),
             'current_binding': binding(state['plan'], root), 'cases': rows, 'transfer_proof': transfer_proof,
             'failures': [copy.deepcopy(found[identifier]) for identifier in ids],
@@ -312,13 +332,109 @@ def admit_import(state, proof, donor_path, directory, root, *, donor_sha256):
     candidate = copy.deepcopy(fresh)
     adopt(candidate, donor, donor['plan'], expected['transfer_proof'], root)
     need(c.sha_file(donor_path) == donor_sha256, 'donor index changed during admission')
-    candidate['historical_custody_import'] = {'kind': IMPORT_KIND, 'proof_sha256': c.digest(expected),
+    candidate['historical_custody_import'] = {'kind': LEGACY_IMPORT_KIND, 'proof_sha256': c.digest(expected),
         'donor_path': expected['donor_path'], 'donor_sha256': expected['donor_sha256']}
     verify(candidate, root)
     if state.get('historical_custody_import'):
         need(c.digest(state) == c.digest(candidate), 'import replay changed or cycle is no longer fresh')
     else:
         need(c.digest(state) == c.digest(fresh), 'import requires a normally initialized fresh cycle')
+    state.clear(); state.update(candidate)
+
+IMPORT_KIND = 'historical-agentcard-custody-import-v1'
+
+
+def donor_rows(donor_path, index_path, donor_sha256, index_sha256, root):
+    """Validate an explicit pinned archive's complete index, never its execution ledger."""
+    import deploy_test_cycle as c
+    for path, expected in ((donor_path, donor_sha256), (index_path, index_sha256)):
+        need(path.is_file() and not path.is_symlink() and path.resolve() == path
+             and re.fullmatch('[0-9a-f]{64}', expected or '')
+             and c.sha_file(path) == expected, 'donor provenance changed')
+    donor, index = c.read(donor_path), c.read(index_path)
+    need(index.get('format') == 'PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1'
+         and index.get('files', {}).get(str(root / '.context/deploy-pipeline/cycle.json')) == donor_sha256,
+         'donor snapshot not in pinned contents manifest')
+    return validate_donor_rows(donor, root)
+
+
+def validate_donor_rows(donor, root):
+    """Shared native/index inventory checks for both explicit provenance envelopes."""
+    import deploy_test_cycle as c
+    history, active = donor.get('historical_custody_history', []), donor.get('historical_no_retry_custody', [])
+    need(history and active, 'empty donor custody index')
+    ids = [r['original_failure']['id'] for r in history]
+    active_ids = [r['original_failure']['id'] for r in active]
+    need(len(set(ids)) == len(ids) == len(active_ids) == len(set(active_ids))
+         and set(ids) == set(active_ids), 'partial or duplicate donor custody index')
+    # Validate donor discovery unchanged, including negative observations. Only
+    # the indexed obligations are admitted; the entire donor stays evidence.
+    need(not any(donor.get(k) for k in ('pending', 'running', 'live_failures', 'resume_phase')),
+         'active or pending donor snapshot')
+    found = known(donor, root)
+    need(set(found) == set(ids), 'partial donor custody discovery')
+    need(len([f for f in donor['failures'] if f['id'] in ids]) == len(ids),
+         'duplicate donor indexed failure')
+    need(donor['source'] == donor['plan']['source']
+         and c.digest(donor['plan']) == donor['plan_digest'], 'donor plan changed')
+    old_binding = {k: donor[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
+    pending_ids = [p['id'] for p in donor.get('pending_post_merge', []) if p['id'] in ids]
+    need(len(pending_ids) == len(set(pending_ids)), 'duplicate donor pending authority')
+    rows = []
+    for saved in history:
+        row = historical(donor, found[saved['original_failure']['id']], root)
+        need(row == saved, 'donor indexed native record changed')
+        matches = [r for r in active if r['original_failure']['id'] == saved['original_failure']['id']]
+        expected = dict(kind=KIND, disposition=DISPOSITION, **row, current_binding=old_binding,
+                        current_execution='UNVERIFIED', current_financial_state='UNVERIFIED',
+                        credit={'test_execution': False, 'assertions': False, 'financial_release': False})
+        need(matches == [expected], 'donor active custody record changed')
+        rows.append(row)
+    for key in ('root_id', 'card_id', 'transfer_id', 'purchase_id'):
+        need(len({r[key] for r in rows}) == len(rows), 'borrowed donor resource identity')
+    return donor, found, rows
+
+
+def import_proof(state, donor_path, index_path, donor_sha256, index_sha256, root):
+    """Read-only proposal for a pristine, frozen full current cycle."""
+    import deploy_test_cycle as c
+    need(state == c.initialize(state['plan'], root), 'custody import requires pristine fresh state')
+    donor, found, rows = donor_rows(donor_path, index_path, donor_sha256, index_sha256, root)
+    gates = {g['name']: g for g in state['plan']['gates']}
+    for row in rows:
+        f = row['original_failure']
+        need(f['gate'] in gates and gates[f['gate']].get('case_protocol') is True
+             and f['check'].split('/', 1)[1] in gates[f['gate']]['checks'], 'protected donor task removed')
+    return {'kind': IMPORT_KIND, 'before_state_sha256': c.digest(state),
+            'current_binding': binding(state['plan'], root),
+            'donor': {'state_path': str(donor_path), 'state_sha256': donor_sha256,
+                      'index_path': str(index_path), 'index_sha256': index_sha256,
+                      'state_digest': c.digest(donor)},
+            'cases': rows, 'failures': [copy.deepcopy(found[r['original_failure']['id']]) for r in rows],
+            'pending_post_merge': [copy.deepcopy(p) for p in donor.get('pending_post_merge', [])
+                                   if p['id'] in found]}
+
+
+def import_history(state, donor_path, index_path, donor_sha256, index_sha256, proof, root):
+    """Atomic in-memory history-only admission; caller publishes one ordinary state write."""
+    import deploy_test_cycle as c
+    provenance = state.get('historical_custody_import')
+    if provenance is not None:
+        # Rebuild from the pristine current baseline, never from donor READY.
+        baseline = c.initialize(state['plan'], root)
+    else:
+        baseline = state
+    expected = import_proof(baseline, donor_path, index_path, donor_sha256, index_sha256, root)
+    need(proof == expected, 'custody import proof differs from exact donor/current binding')
+    candidate = copy.deepcopy(baseline)
+    candidate['failures'] = copy.deepcopy(proof['failures'])
+    candidate['pending_post_merge'] = copy.deepcopy(proof['pending_post_merge'])
+    apply(candidate, proof['cases'], root)
+    candidate['historical_custody_import'] = copy.deepcopy(proof)
+    verify(candidate, root)
+    if provenance is not None:
+        need(state == candidate, 'custody import replay requires exact pristine imported state')
+        return
     state.clear(); state.update(candidate)
 
 
@@ -403,6 +519,7 @@ def qualifications(state, gate, root, *, current=None):
 
 def guard(state, gate, root, legacy=None, *, current=None):
     """No fallback allocation when a known historical obligation loses its proof."""
+    verify_import_origin(state, root)
     legacy = {} if legacy is None else legacy
     custody = qualifications(state, gate, root, current=current)
     for f in known(state, root).values():
@@ -416,7 +533,9 @@ def guard(state, gate, root, legacy=None, *, current=None):
 
 
 def verify(state, root):
+    """Validate retained provenance and every protected obligation against the current plan."""
     import deploy_test_cycle as c
+    verify_import_origin(state, root)
     if not (known(state, root) or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
         return
     gates = {g['name']: g for g in state['plan']['gates']}
@@ -427,10 +546,51 @@ def verify(state, root):
         guard(state, gate, root, c.reuse_qualifications(state, gate, include_custody=False, root=root))
 
 
+def verify_import_origin(state, root):
+    """Keep the explicit donor provenance bound during normal verification/admission."""
+    if 'historical_custody_import' not in state:
+        return
+    proof = state['historical_custody_import']
+    if isinstance(proof, dict) and proof.get('kind') == LEGACY_IMPORT_KIND:
+        verify_legacy_import_origin(state, proof, root)
+        return
+    need(isinstance(proof, dict) and proof.get('kind') == IMPORT_KIND, 'malformed retained import provenance')
+    origin = proof.get('donor')
+    need(isinstance(origin, dict), 'malformed retained donor provenance')
+    donor, found, rows = donor_rows(Path(origin['state_path']), Path(origin['index_path']),
+                                   origin['state_sha256'], origin['index_sha256'], root)
+    import deploy_test_cycle as c
+    need(proof['kind'] == IMPORT_KIND and origin['state_digest'] == c.digest(donor)
+         and proof['cases'] == rows
+         and proof['failures'] == [found[r['original_failure']['id']] for r in rows]
+         and proof['pending_post_merge'] == [p for p in donor.get('pending_post_merge', []) if p['id'] in found]
+         and all(r in state.get('historical_custody_history', []) for r in rows),
+         'custody import provenance/index changed')
+
+
+
+def verify_legacy_import_origin(state, proof, root):
+    """Revalidate the approved-SHA/adopt envelope without resetting a progressed cycle."""
+    import deploy_test_cycle as c
+    need(set(proof) == {'kind', 'proof_sha256', 'donor_path', 'donor_sha256'}
+         and re.fullmatch('[0-9a-f]{64}', proof.get('proof_sha256', ''))
+         and re.fullmatch('[0-9a-f]{64}', proof.get('donor_sha256', '')),
+         'malformed retained legacy import provenance')
+    path = Path(proof['donor_path'])
+    need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
+         and path.name == 'cycle.json' and path.is_file() and not path.is_symlink()
+         and c.sha_file(path) == proof['donor_sha256'], 'legacy donor provenance changed')
+    donor = c.bounded_read(path, 'historical donor index')
+    _, found, rows = validate_donor_rows(donor, root)
+    need(all(r in state.get('historical_custody_history', []) for r in rows), 'historical failure removed')
+    need(set(found) <= known(state, root).keys(), 'historical failure removed')
+
 def state_identity(state):
+    """Bind admission to current inputs and the complete retained custody provenance."""
     import deploy_test_cycle as c
     return c.digest({k: state.get(k) for k in ('source', 'plan_digest', 'environment', 'input_fingerprints',
-                    'historical_no_retry_custody', 'historical_custody_history', 'historical_custody_transfers')})
+                    'historical_no_retry_custody', 'historical_custody_history',
+                    'historical_custody_import', 'historical_custody_transfers')})
 
 
 def admission(request, root):

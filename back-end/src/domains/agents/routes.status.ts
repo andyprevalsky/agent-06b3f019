@@ -5,6 +5,8 @@ import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as controlService from './agentControlService';
 import { updateStatusSchema } from './types';
+import { workerWriteGeneration } from '../../providers/codeResumeGeneration';
+import { applyResumeCost } from './agentResumeCostService';
 
 const log = createLogger('Agents');
 const router = Router();
@@ -18,7 +20,10 @@ router.post(
       res.status(403).json({ error: 'Internal workflow authentication required' });
       return;
     }
-    const generation = req.header('x-agent-workflow-generation');
+    const generation = await workerWriteGeneration(
+      req.params.id,
+      req.header('x-agent-workflow-generation')
+    );
     if (generation === undefined || generation.length === 0) {
       res.status(400).json({ error: 'X-Agent-Workflow-Generation header is required' });
       return;
@@ -67,7 +72,10 @@ router.patch(
       const body = updateStatusSchema.parse(req.body);
       const generation =
         req.isInternal === true
-          ? (req.header('x-agent-workflow-generation') ?? req.params.id)
+          ? ((await workerWriteGeneration(
+              req.params.id,
+              req.header('x-agent-workflow-generation')
+            )) ?? req.params.id)
           : undefined;
       const updated = await controlService.updateAgentStatus(req.params.id, body, {}, generation);
       if (updated === null) {
@@ -97,6 +105,30 @@ router.patch(
       });
       res.status(500).json({ error: 'Failed to update agent status' });
     }
+  })
+);
+
+/**
+ * POST /:id/resume-cost — a resume run's spend while its owner workflow is closed
+ * (agentResumeCostService.ts). Internal workflow auth only.
+ */
+router.post(
+  '/:id/resume-cost',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    if (req.isInternal !== true) {
+      res.status(403).json({ error: 'Internal workflow authentication required' });
+      return;
+    }
+    const result = await applyResumeCost(
+      req.params.id,
+      (req.body ?? {}) as Record<string, unknown>
+    );
+    if ('error' in result) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+    res.json(result);
   })
 );
 

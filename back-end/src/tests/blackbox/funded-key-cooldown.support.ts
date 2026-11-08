@@ -1,4 +1,4 @@
-// Blackbox cases that cool a shared funded key (GPT_API_KEY / ANTHROPIC_API_KEY)
+// Blackbox cases that cool a shared funded key (GPT / Anthropic / Codex Azure)
 // mutate state the whole backend under test reads: the server caches the
 // cooldown in memory and only re-reads the shared row once per recheck
 // interval (15s). Restoring the DB row is therefore not enough — a later case
@@ -14,6 +14,11 @@ import { retryWithBackoff } from '../../providers/retry';
 type FundedKey = 'gpt' | 'anthropic';
 
 const SHARED_KEY_COOLDOWN_USER_ID = '00000000-0000-0000-0000-000000000000';
+const SHARED_KEY_COOLDOWN_NAMES = new Set([
+  'gpt_api_key_cooldown',
+  'anthropic_api_key_cooldown',
+  'codex_funded_cooldown',
+]);
 
 interface CooldownRowData {
   rateLimitedUntil?: Date | null;
@@ -31,11 +36,14 @@ function sharedCooldownName(args: unknown[]): string | undefined {
     | {
         userId?: unknown;
         name?: unknown;
-        userId_name_accountId?: { userId?: unknown; name?: unknown };
+        accountId?: unknown;
+        userId_name_accountId?: { userId?: unknown; name?: unknown; accountId?: unknown };
       }
     | undefined;
   const key = where?.userId_name_accountId ?? where;
   if (key?.userId !== SHARED_KEY_COOLDOWN_USER_ID || typeof key.name !== 'string') return undefined;
+  if (!SHARED_KEY_COOLDOWN_NAMES.has(key.name)) return undefined;
+  if (key.accountId !== undefined && key.accountId !== '') return undefined;
   return key.name;
 }
 
@@ -48,7 +56,7 @@ function sharedCooldownName(args: unknown[]): string | undefined {
  * minutes. A case that asserts which provider served a request must not inherit
  * those marks, and its resets must not delete a mark another case is asserting.
  */
-export async function withIsolatedFundedKeyCooldowns<T>(run: () => Promise<T>): Promise<T> {
+export async function beginIsolatedFundedKeyCooldowns(): Promise<() => Promise<void>> {
   const integration = prisma.integration as unknown as IntegrationCooldownDelegate;
   const shared: IntegrationCooldownDelegate = {
     findUnique: integration.findUnique,
@@ -82,14 +90,37 @@ export async function withIsolatedFundedKeyCooldowns<T>(run: () => Promise<T>): 
     __clearGptApiKeyCooldownCache();
     await __resetAnthropicApiKeyCooldown();
   };
+  let finished = false;
+  const finish = async (): Promise<void> => {
+    if (finished) return;
+    finished = true;
+    try {
+      await resetCaches();
+    } finally {
+      integration.findUnique = shared.findUnique;
+      integration.upsert = shared.upsert;
+      integration.deleteMany = shared.deleteMany;
+    }
+  };
   try {
     await resetCaches();
+    return finish;
+  } catch (error) {
+    await finish();
+    throw error;
+  }
+}
+
+/** Retain the lifecycle name used by other isolated blackbox fixtures. */
+export { beginIsolatedFundedKeyCooldowns as isolateFundedKeyCooldowns };
+
+/** Callback form for suites without before/after lifecycle hooks. */
+export async function withIsolatedFundedKeyCooldowns<T>(run: () => Promise<T>): Promise<T> {
+  const finish = await beginIsolatedFundedKeyCooldowns();
+  try {
     return await run();
   } finally {
-    await resetCaches();
-    integration.findUnique = shared.findUnique;
-    integration.upsert = shared.upsert;
-    integration.deleteMany = shared.deleteMany;
+    await finish();
   }
 }
 

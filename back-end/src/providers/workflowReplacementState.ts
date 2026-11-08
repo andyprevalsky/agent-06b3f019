@@ -1,3 +1,4 @@
+import { resumeFreeTrees } from './resumeReportedSpend';
 import { randomUUID } from 'node:crypto';
 import { Prisma, type Agent, type AgentStatus } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
@@ -340,12 +341,15 @@ async function buildResumeState(
   const ownAccounting = durableOwnAccounting([agent, ...descendants], toolUsages);
   const rootAccounting = ownAccounting.get(agent.id)!;
   const subtreeAccounting = descendantSubtreeAccounting(descendants, ownAccounting);
+  // In-memory costs exclude resume spend (the next write adds the ledger back once).
+  const resumeFree = await resumeFreeTrees([agent, ...children], tx);
   const childrenCostCents = Object.fromEntries(
     children.map((child) => [
       child.id,
-      Math.max(child.treeCostCents, subtreeAccounting.get(child.id)?.ownCostCents ?? 0),
+      Math.max(resumeFree.get(child.id)!, subtreeAccounting.get(child.id)?.ownCostCents ?? 0),
     ])
   );
+
   const childrenTokensIn = Object.fromEntries(
     children.map((child) => [
       child.id,
@@ -400,7 +404,7 @@ async function buildResumeState(
     workflow_started_at: agent.createdAt.toISOString(),
     own_cost_cents: rootAccounting.ownCostCents,
     subtree_cost_cents: Math.max(
-      agent.treeCostCents,
+      resumeFree.get(agent.id)!,
       rootAccounting.ownCostCents +
         Object.values(childrenCostCents).reduce((total, value) => total + value, 0)
     ),

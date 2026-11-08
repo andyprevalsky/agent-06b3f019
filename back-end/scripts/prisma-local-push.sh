@@ -55,3 +55,9 @@ if ! command -v psql >/dev/null 2>&1; then
 fi
 env -u DB_CONTAINER ROSE_USE_SYSTEM_PG=true DATABASE_URL="$DIRECT_URL" DIRECT_URL="$DIRECT_URL" \
   bash "$(dirname "${BASH_SOURCE[0]}")/apply-local-workflow-ddl.sh"
+# The trajectory triggers superseded since 20260929 (per-agent goals and the
+# skip-unchanged lock) also live only in migrations; the coverage and blackbox
+# runners apply them, so a DB built by this wrapper alone failed
+# agent-trajectory-agent-lock. Apply the same hooks here (localhost-guarded).
+DATABASE_URL="$DIRECT_URL" DIRECT_URL="$DIRECT_URL" \
+  bash "$(dirname "${BASH_SOURCE[0]}")/apply-local-runtime-sql-hooks.sh" >/dev/null

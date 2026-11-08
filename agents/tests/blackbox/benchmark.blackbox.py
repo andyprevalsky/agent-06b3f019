@@ -24763,17 +24763,19 @@ def test_history_ledger_task_names_still_exist_in_catalog():
     import json as _json
     from pathlib import Path
 
+    from benchmarks import history_ledger
     from benchmarks.benchmark_tasks import all_tasks
 
     ledger = Path(__file__).resolve().parents[2] / "benchmarks" / "history" / "task_durations.jsonl"
-    if not ledger.exists() or ledger.stat().st_size == 0:
+    # The ledger is its base file plus per-writer shards (history_ledger.py).
+    lines = history_ledger.read_lines(ledger)
+    if not lines:
         return  # fresh checkout — nothing recorded yet
     recorded = set()
-    with ledger.open() as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                recorded.add(_json.loads(line)["task"])
+    for line in lines:
+        line = line.strip()
+        if line:
+            recorded.add(_json.loads(line)["task"])
     catalog_names = {t.name for t in all_tasks()}
     orphaned = sorted(recorded - catalog_names)
     assert not orphaned, f"History-orphaning rename/delete detected for: {orphaned}"

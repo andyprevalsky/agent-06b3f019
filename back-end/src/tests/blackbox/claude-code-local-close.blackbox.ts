@@ -359,3 +359,33 @@ test('local close without a handoff file reports it missing', async () => {
   const closed = await closeLocalClaudeCodeSession(taskId, 'user-local-close');
   assert.deepEqual(closed.handoff, { status: 'missing' });
 });
+
+test("the task row stores the spawn's task_name (the agents-list title)", async () => {
+  const rows: Array<Record<string, unknown>> = [];
+  prisma.claudeCodeSession.create = (async ({ data }: { data: Record<string, unknown> }) => {
+    rows.push(data);
+    return data;
+  }) as typeof prisma.claudeCodeSession.create;
+  const named = `task-name-${Date.now()}`;
+  const legacy = `task-name-legacy-${Date.now()}`;
+  try {
+    await createLocalClaudeCodeSession({
+      taskId: named,
+      agentId: `agent-${named}`,
+      goal: 'You are working in the Rose UI sandbox.\nTask: remove the border',
+      envs: {},
+      claudeTokenSource: null,
+      claudeTokenIntegrationId: null,
+      taskName: 'remove_rose_card_border',
+    });
+    await createSession(legacy);
+    assert.equal(rows.find((row) => row.id === named)?.taskName, 'remove_rose_card_border');
+    assert.equal(rows.find((row) => row.id === legacy)?.taskName, null);
+  } finally {
+    prisma.claudeCodeSession.create = (async ({ data }: { data: { id: string } }) =>
+      data) as typeof prisma.claudeCodeSession.create;
+    for (const taskId of [named, legacy]) {
+      await closeLocalClaudeCodeSession(taskId, 'user-local-close');
+    }
+  }
+});

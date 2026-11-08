@@ -519,6 +519,50 @@ provider, renews a provider warning, retries a payment, or clears repair debt.
 Production live-mode duties remain with their separate owner and are not
 eligible for this sandbox protocol.
 
+The shared prepare action selects the SHA/adopt compatibility envelope with
+`--input`, or the contents-index envelope with `--donor-state`/`--donor-index`.
+Mixed forms are refused. Both require the named plan to equal the current plan.
+Both reuse the same donor inventory/native guards; their versioned retained
+provenance remains verified during normal admission, including legacy cycles.
+
+### Fresh-devbox history-only custody admission
+
+A foreign cycle is evidence, never a fresh cycle or READY result. On a fresh
+repair devbox, first restore/hash-verify the explicit archive and admit its native,
+adapter and audit files to their exact canonical paths without overwrites or live
+owner registries. Full donor `known()` discovery and every indexed `historical()`
+closure must pass; missing unrelated sandbox discovery evidence also blocks.
+The donor cycle must be quiescent, and its history/active indexes must agree.
+
+Freeze the current source, produce the ordinary full current plan, and `init`
+its fresh state directory normally. Before executing any gates, prepare and
+review the explicit history-only transfer (replace the digest placeholders with
+independently verified receipt/contents values):
+
+```sh
+python3 scripts/deploy_test_cycle.py prepare-historical-import --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline --donor-state .context/pr1770-custody-native-evidence/rose/.context/deploy-pipeline/cycle.json --donor-index .context/pr1770-historical-custody-contents.json --donor-sha256 <verified-donor-sha256> --donor-index-sha256 <verified-contents-sha256> > .context/deploy-pipeline/custody-import-proof.json
+python3 scripts/deploy_test_cycle.py import-historical-custody --plan .context/deploy-pipeline/plan.json --state-dir .context/deploy-pipeline --donor-state .context/pr1770-custody-native-evidence/rose/.context/deploy-pipeline/cycle.json --donor-index .context/pr1770-historical-custody-contents.json --donor-sha256 <verified-donor-sha256> --donor-index-sha256 <verified-contents-sha256> --proof .context/deploy-pipeline/custody-import-proof.json
+```
+
+The supported contents format is
+`PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1`; it must pin the original
+canonical cycle path to the supplied raw donor SHA256. Preparation leaves cycle
+bytes untouched. Admission atomically adds only exact indexed original/resolved
+failures, immutable custody history, their pending repair packets and explicit
+donor provenance to the pristine current state. It reuses normal `apply`,
+verification and child admission, with current bindings and UNVERIFIED/no-credit
+semantics. Donor attempts, PASS, ordinary skips, environment, fingerprints,
+source, operational waivers and READY are never imported. Original donor bytes
+remain separately unchanged. Every ordinary selected current check runs.
+
+An exact import replay is idempotent only while the imported state remains
+otherwise pristine; nonempty, mixed, pending, changed-source or changed-proof
+states refuse. Native/index/authority/catalog/audit/owner drift refuses both
+import and later verification/admission. After execution begins, use normal
+current-cycle history refresh for source changes, never reset or reimport.
+This sandbox protocol grants no production lifecycle retry or financial action;
+separate live-mode financial duties remain separate.
+
 ### Independent-deploy custody transfer
 
 A donor deploy's full ledger is not the new repair's execution ledger. Its

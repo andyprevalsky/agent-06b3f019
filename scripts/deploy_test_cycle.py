@@ -490,6 +490,7 @@ def benchmark_teardown(gate: dict, token: str, started: float, folder: Path, roo
 
 
 def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
+    """Admit one source-bound gate, run it, and retain its native cleanup receipt."""
     from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
     revalidate_standing_skips(state)
@@ -497,7 +498,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         reuse_qualifications(state, gate)
     from deploy_test_historical_custody import guard, state_identity, known
     custody = {}
-    if known(state, root) or state.get('historical_no_retry_custody') or state.get('historical_custody_history'):
+    if ('historical_custody_import' in state or known(state, root)
+            or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
         legacy = reuse_qualifications(state, gate, include_custody=False, root=root)
         custody = guard(state, gate, root, legacy)
     token = uuid.uuid4().hex
@@ -2159,14 +2161,17 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-no-retry"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry"])
     parser.add_argument('--donor-state', type=Path,
                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
+    parser.add_argument('--donor-index', type=Path)
+    parser.add_argument('--donor-sha256')
+    parser.add_argument('--donor-index-sha256')
     parser.add_argument("--historical-no-retry-proof", type=Path)
-    parser.add_argument('--donor-sha256', help='historical import: approved immutable donor-index SHA256')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
     parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
@@ -2181,7 +2186,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.historical_no_retry_proof is not None and args.action not in {'refresh', 'import-historical-no-retry'}:
             raise ValueError('--historical-no-retry-proof applies only to refresh or import-historical-no-retry')
-        if args.donor_sha256 is not None and args.action not in {'prepare-historical-import', 'admit-historical-import'}:
+        if args.donor_sha256 is not None and args.action not in {'prepare-historical-import', 'admit-historical-import', 'import-historical-custody'}:
             raise ValueError('--donor-sha256 applies only to historical import')
         plan = read(args.plan)
         directory = args.state_dir.resolve()
@@ -2234,21 +2239,39 @@ def main(argv: list[str] | None = None) -> int:
                 if args.proof is None:
                     raise ValueError('--proof read-only provider confirmation required')
                 renew(state, bounded_read(args.proof, 'AgentCard renewal'), args.root)
-            elif args.action in {'prepare-historical-import', 'admit-historical-import'}:
-                from deploy_test_historical_custody import prepare_import, admit_import
+            elif args.action in {'prepare-historical-import', 'admit-historical-import', 'import-historical-custody'}:
                 if plan != state['plan']:
                     raise ValueError('historical import plan differs from fresh selection')
-                if args.input is None:
-                    raise ValueError('--input immutable historical donor cycle required')
-                if args.donor_sha256 is None:
-                    raise ValueError('--donor-sha256 approved immutable donor-index hash required')
-                if args.action == 'prepare-historical-import':
-                    print(json.dumps(prepare_import(state, args.input, directory, args.root, donor_sha256=args.donor_sha256)))
-                    return 0
-                if args.proof is None:
-                    raise ValueError('--proof typed historical import preparation required')
-                admit_import(state, bounded_read(args.proof, 'historical import proof'), args.input, directory, args.root,
-                             donor_sha256=args.donor_sha256)
+                indexed = (args.action == 'import-historical-custody' or args.donor_state is not None
+                           or args.donor_index is not None or args.donor_index_sha256 is not None)
+                if indexed:
+                    from deploy_test_historical_custody import import_proof, import_history
+                    if (args.action == 'admit-historical-import' or args.input is not None
+                            or args.donor_state is None or args.donor_index is None
+                            or not args.donor_sha256 or not args.donor_index_sha256
+                            or args.historical_no_retry_proof is not None):
+                        raise ValueError('custody import requires explicit pinned donor, index and exact current plan')
+                    donor_args = (args.donor_state.absolute(), args.donor_index.absolute(),
+                                  args.donor_sha256, args.donor_index_sha256)
+                    if args.action == 'prepare-historical-import':
+                        print(json.dumps(import_proof(state, *donor_args, args.root)))
+                        return 0
+                    if args.proof is None:
+                        raise ValueError('custody import requires exact prepared --proof')
+                    import_history(state, *donor_args, read(args.proof), args.root)
+                else:
+                    from deploy_test_historical_custody import prepare_import, admit_import
+                    if args.input is None:
+                        raise ValueError('--input immutable historical donor cycle required')
+                    if args.donor_sha256 is None:
+                        raise ValueError('--donor-sha256 approved immutable donor-index hash required')
+                    if args.action == 'prepare-historical-import':
+                        print(json.dumps(prepare_import(state, args.input, directory, args.root, donor_sha256=args.donor_sha256)))
+                        return 0
+                    if args.proof is None:
+                        raise ValueError('--proof typed historical import preparation required')
+                    admit_import(state, bounded_read(args.proof, 'historical import proof'), args.input, directory, args.root,
+                                 donor_sha256=args.donor_sha256)
             elif args.action == 'prepare-historical-no-retry':
                 if args.input is None:
                     raise ValueError('--input previous plan required')

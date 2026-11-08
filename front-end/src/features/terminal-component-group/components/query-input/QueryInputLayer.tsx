@@ -15,12 +15,16 @@
  * visual viewport while fixed boxes keep the layout viewport, and the old
  * `clientHeight - anchor.bottom` placed the composer one pan (~335pt) above
  * its slot, over the top of the chat.
+ *
+ * The Rose left bar pinning or unpinning shifts the column without resizing
+ * it, so ROSE_BAR_OFFSET_EVENT also triggers a re-measure.
  */
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { useRoseApps } from '../rose-apps/roseAppsState';
 import { createPortal } from 'react-dom';
 import { ROSE_LAYER } from '@/lib/roseLayers';
 import { browserComposerTarget } from './browserComposer';
+import { ROSE_BAR_OFFSET_EVENT } from '../rose-sidebar/roseSidebarLayout';
 
 type Geometry = { left: number; bottom: number; width: number; height: number };
 
@@ -74,12 +78,14 @@ export function QueryInputLayer({
     }
     if (layer.current) observer.observe(layer.current);
     window.addEventListener('resize', update);
+    window.addEventListener(ROSE_BAR_OFFSET_EVENT, update);
     window.addEventListener('scroll', update, true);
     window.visualViewport?.addEventListener('resize', update);
     window.visualViewport?.addEventListener('scroll', update);
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', update);
+      window.removeEventListener(ROSE_BAR_OFFSET_EVENT, update);
       window.removeEventListener('scroll', update, true);
       window.visualViewport?.removeEventListener('resize', update);
       window.visualViewport?.removeEventListener('scroll', update);

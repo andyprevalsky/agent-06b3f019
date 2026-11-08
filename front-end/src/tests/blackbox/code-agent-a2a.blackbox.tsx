@@ -152,7 +152,7 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     expect(workGroups(page)).toHaveLength(1);
   });
 
-  it('folds hundreds of canonical mirrors into the work history: one row each, 20 a page', async () => {
+  it('folds hundreds of canonical mirrors into the work history: one row each, 50 a page, opens on the newest', async () => {
     const records = [
       { id: 'start1', type: 'turn', event: 'started', turn_id: 'one', ts: 1000 },
       {
@@ -187,32 +187,34 @@ describe('agent-to-agent rows (L-A2A contract, rows 12 + 47b)', () => {
     const page = screen.getByTestId('code-agent-view');
     expect(within(page).queryByTestId('agent-exchange-group')).toBeNull();
     // No user-facing row separates the two turns: their work is one "Worked for …"
-    // row, as for a Rose agent. 240 mirrored rows → 120 exchanges, 20 a page.
+    // row, as for a Rose agent. 240 mirrored rows → 120 exchanges, 50 a page.
     const groups = workGroups(page);
     expect(groups).toHaveLength(1);
     const [group] = groups;
     expect(group).toHaveTextContent('120 activities · 120 exchanges');
     expect(within(page).queryByTestId('a2a-row')).toBeNull();
     const history = await expand(group);
+    // Opens on the most recent page: the 50 newest exchanges (70–119).
+    expect(within(history).getAllByTestId('a2a-row')).toHaveLength(50);
+    expect(within(history).getByText('3 / 3')).toBeInTheDocument();
+    expect(within(history).getByText('Native private 70')).toBeInTheDocument();
+    expect(within(history).queryByText('Native private 69')).toBeNull();
+    fireEvent.click(within(history).getByRole('button', { name: 'Previous activities' }));
+    fireEvent.click(within(history).getByRole('button', { name: 'Previous activities' }));
+    expect(within(history).getByText('Native private 0')).toBeInTheDocument();
+    expect(within(history).getByText('1 / 3')).toBeInTheDocument();
     expect(within(history).getAllByTestId('a2a-row')).toHaveLength(20);
-    expect(within(history).getByText('1 / 6')).toBeInTheDocument();
     fireEvent.click(within(history).getByRole('button', { name: 'Next activities' }));
     expect(within(history).getByText('Native private 20')).toBeInTheDocument();
-    expect(within(history).queryByText('Native private 0')).toBeNull();
-    fireEvent.click(within(history).getByRole('button', { name: 'Next activities' }));
-    fireEvent.click(within(history).getByRole('button', { name: 'Next activities' }));
-    expect(within(history).getByText('Native private 60')).toBeInTheDocument();
-    expect(within(history).getByText('4 / 6')).toBeInTheDocument();
-    fireEvent.click(within(history).getByRole('button', { name: 'Previous activities' }));
-    fireEvent.click(within(history).getByRole('button', { name: 'Previous activities' }));
+    expect(within(history).queryByText('Native private 19')).toBeNull();
     // A replayed canonical row arriving first keeps the same row and its page.
     view.rerender(
       codeView([{ ...rows[0], message_id: 'replayed-lead' }, ...messages], 'COMPLETED'),
     );
     expect(workGroups(page)[0]).toBe(group);
     expect(within(group).getByText('Native private 20')).toBeVisible();
-    expect(within(group).getByText('2 / 6')).toBeInTheDocument();
-    expect(within(group).getAllByTestId('a2a-row')).toHaveLength(20);
+    expect(within(group).getByText('2 / 3')).toBeInTheDocument();
+    expect(within(group).getAllByTestId('a2a-row')).toHaveLength(50);
   });
 
   it('keeps human turns, user-facing questions and final answers in the native transcript', async () => {
