@@ -757,16 +757,33 @@ AGENTCARD_RELEASE_STALL_REASON = ("AgentCard never released the closed card's or
                                   "releasedCents=0); skipped under the standing user-approved warning policy")
 
 
+@contextmanager
+def source_module(path: Path):
+    """Fresh source with an owned module identity, without process-global argv changes."""
+    import importlib.util
+    module_name = '_deploy_source_' + uuid.uuid4().hex
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        # Bypass timestamp/size based .pyc reuse, including same-size source edits.
+        exec(compile(path.read_bytes(), str(path), 'exec'), module.__dict__)
+        yield module
+    finally:
+        if sys.modules.get(module_name) is module:
+            del sys.modules[module_name]
+
+
 def agentcard_release_stall_task(name: object, root: Path = ROOT, production: bool = False) -> bool:
     """The same literal catalog predicate the selector prints for this standing warning. Staged smoke qualifies
     sandbox rows only (the default: production tasks never run there); scripts/deploy_prod.py's production
     lane asks for the production task with production=True."""
-    import runpy
-    selector = runpy.run_path(str(root / 'agents/benchmarks/select_predeploy_benches.py'))
-    tasks = [task for task in selector['load_tasks'](root / 'agents/benchmarks/tasks.json')
-             if task.name == name and bool(task.production_only) is production]
-    rules = selector['standing_skip_eligibility'](tasks, [name]).get(name, []) if tasks else []
-    return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
+    with source_module(root / 'agents/benchmarks/select_predeploy_benches.py') as selector:
+        tasks = [task for task in selector.load_tasks(root / 'agents/benchmarks/tasks.json')
+                 if task.name == name and bool(task.production_only) is production]
+        rules = selector.standing_skip_eligibility(tasks, [name]).get(name, []) if tasks else []
+        return any(rule.startswith('AgentCard release-stall standing warning') for rule in rules)
+
 
 
 def unreleased_amount_text(transfer: object) -> str:

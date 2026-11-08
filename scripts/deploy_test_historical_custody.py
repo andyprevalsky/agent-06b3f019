@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import re
 import subprocess
-import runpy
 import os
 
 KIND = 'historical-agentcard-no-retry-v1'
@@ -84,10 +83,10 @@ def native_closure(path, root):
          and life['hub_publication_failed'] is False and life['workspace_root'] == str(root)
          and life['run_id'] == fleet.name, 'native fleet not terminal')
     local, canonical = fleet / 'teardown-ownership', fleet_audit_root(root) / token
-    tree_digest = runpy.run_path(str(Path(__file__).with_name('cloudbench-retained-successor.py')))['tree_digest']
-    digest = tree_digest(local)
-    need(tree_digest(canonical) == digest == life['audit_sha256']
-         and fields((local / 'source-audit').read_bytes()) == {'path': str(canonical), 'sha256': digest}, 'native audit changed')
+    with c.source_module(Path(__file__).with_name('cloudbench-retained-successor.py')) as library:
+        digest = library.tree_digest(local)
+        need(library.tree_digest(canonical) == digest == life['audit_sha256']
+             and fields((local / 'source-audit').read_bytes()) == {'path': str(canonical), 'sha256': digest}, 'native audit changed')
     meta = fields((local / 'meta').read_bytes())
     need(meta.get('status') == 'provider-teardown-verified' and meta.get('fleet_owner_token') == token
          and meta.get('run_id') == fleet.name and meta.get('workspace_root') == str(root), 'native owner mismatch')

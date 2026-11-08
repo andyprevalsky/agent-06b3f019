@@ -79,6 +79,83 @@ class Cycle(unittest.TestCase):
         new = copy.deepcopy(self.plan); new['source'] = c.source(self.root)
         return new
 
+    def test_concurrent_agentcard_selector_keeps_dataclass_module_registered(self):
+        import types
+        bridge = types.ModuleType('_deploy_selector_race_fixture')
+        bridge.first_entered = threading.Event()
+        bridge.second_entered = threading.Event()
+        bridge.first_finished = threading.Event()
+        bridge.lock = threading.Lock()
+        bridge.calls = 0
+        argv, search_path = list(sys.argv), list(sys.path)
+        modules_before = {key for key in sys.modules if key.startswith('_deploy_source_')}
+        def enter():
+            with bridge.lock:
+                bridge.calls += 1
+                first = bridge.calls == 1
+            if first:
+                bridge.first_entered.set()
+                if not bridge.second_entered.wait(5): raise RuntimeError('second selector never entered')
+            else:
+                bridge.second_entered.set()
+                if not bridge.first_finished.wait(5): raise RuntimeError('first selector never finished')
+        bridge.enter = enter
+        target = self.root / 'agents/benchmarks/select_predeploy_benches.py'
+        target.parent.mkdir(parents=True)
+        real_selector = (ROOT / 'agents/benchmarks/select_predeploy_benches.py').read_text()
+        target.write_text(real_selector.replace('@dataclass(frozen=True)',
+            'import _deploy_selector_race_fixture\n_deploy_selector_race_fixture.enter()\n@dataclass(frozen=True)', 1))
+        (target.parent / 'tasks.json').write_bytes((ROOT / 'agents/benchmarks/tasks.json').read_bytes())
+        with patch.dict(sys.modules, {'_deploy_selector_race_fixture': bridge}), ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(c.agentcard_release_stall_task, 'agent-payment-abandonment', self.root)
+            try:
+                self.assertTrue(bridge.first_entered.wait(5))
+                second = pool.submit(c.agentcard_release_stall_task, 'agent-payment-abandonment', self.root)
+                self.assertTrue(first.result(timeout=10))
+            finally:
+                bridge.first_finished.set()
+            self.assertTrue(second.result(timeout=10))
+        self.assertEqual(2, bridge.calls)
+        self.assertEqual(argv, sys.argv)
+        self.assertEqual(search_path, sys.path)
+        self.assertEqual(modules_before, {key for key in sys.modules if key.startswith('_deploy_source_')})
+
+    def test_agentcard_selector_failed_load_retires_only_its_own_module_and_never_caches(self):
+        import types
+        bridge = types.ModuleType('_deploy_selector_failure_fixture')
+        bridge.foreign = object()
+        target = self.root / 'agents/benchmarks/select_predeploy_benches.py'
+        target.parent.mkdir(parents=True)
+        prefix = 'import sys, _deploy_selector_failure_fixture as bridge\nbridge.name = __name__\n'
+        with patch.dict(sys.modules, {'_deploy_selector_failure_fixture': bridge}):
+            target.write_text(prefix + 'raise RuntimeError("load failed")\n')
+            with self.assertRaisesRegex(RuntimeError, 'load failed'):
+                c.agentcard_release_stall_task('agent-payment-abandonment', self.root)
+            self.assertNotIn(bridge.name, sys.modules)
+            target.write_text(prefix + 'sys.modules[__name__] = bridge.foreign\nraise RuntimeError("replaced")\n')
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'replaced'):
+                    c.agentcard_release_stall_task('agent-payment-abandonment', self.root)
+                self.assertIs(bridge.foreign, sys.modules[bridge.name])
+            finally:
+                sys.modules.pop(bridge.name, None)
+        target.write_bytes((ROOT / 'agents/benchmarks/select_predeploy_benches.py').read_bytes())
+        catalog = target.parent / 'tasks.json'
+        catalog.write_bytes((ROOT / 'agents/benchmarks/tasks.json').read_bytes())
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-abandonment', self.root))
+        catalog.write_text('[]')
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', self.root))
+        self.assertTrue(c.agentcard_release_stall_task('agent-payment-abandonment', ROOT))
+        # A stale same-size/same-mtime .pyc must never restore an old predicate.
+        import py_compile
+        original = target.read_bytes(); stamp = target.stat()
+        changed = original.replace(b'AgentCard release-stall standing warning', b'agentCard release-stall standing warning')
+        self.assertEqual(len(original), len(changed)); self.assertNotEqual(original, changed)
+        py_compile.compile(str(target), doraise=True, invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+        target.write_bytes(changed); os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        catalog.write_bytes((ROOT / 'agents/benchmarks/tasks.json').read_bytes())
+        self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', self.root))
+
     def test_historical_stall_cannot_refresh_into_new_card_request_without_proof(self):
         new = self.custody_fixture()
         before = copy.deepcopy(self.state)
@@ -307,8 +384,16 @@ class Cycle(unittest.TestCase):
         seal()
         native = fleet / 'task/cloudbench-run.json'
         self.assertEqual(str(fleet), h.native_closure(native, self.root)['fleet'])
+        argv = list(sys.argv)
+        owned_modules = {key for key in sys.modules if key.startswith('_deploy_source_')}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(h.native_closure, native, self.root) for _ in range(2)]
+            self.assertTrue(all(f.result(timeout=10)['fleet'] == str(fleet) for f in futures))
+        self.assertEqual(argv, sys.argv)
+        self.assertEqual(owned_modules, {key for key in sys.modules if key.startswith('_deploy_source_')})
         (canonical / 'meta').write_text(meta + 'changed=true\n')
         with self.assertRaises(ValueError): h.native_closure(native, self.root)
+        self.assertEqual(owned_modules, {key for key in sys.modules if key.startswith('_deploy_source_')})
         (canonical / 'meta').write_text(meta)
         registry = self.root / '.git/cloudbench-fleet-ownership' / token; registry.mkdir(parents=True)
         with self.assertRaises(ValueError): h.native_closure(native, self.root)
