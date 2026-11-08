@@ -889,7 +889,8 @@ def test_known_deploy_categories_cover_floor() -> None:
         assert category in KNOWN_DEPLOY_CATEGORIES
 
 
-def test_cli_cap_scream_appears_on_stdout_and_stderr(tmp_path: Path) -> None:
+@pytest.mark.parametrize("output_format", ["report", "names"])
+def test_cli_cap_scream_appears_on_stdout_and_stderr(tmp_path: Path, output_format: str) -> None:
     catalog = tmp_path / "tasks.json"
     attempts = tmp_path / "attempts.jsonl"
     tasks = [
@@ -957,7 +958,7 @@ def test_cli_cap_scream_appears_on_stdout_and_stderr(tmp_path: Path) -> None:
             "--attempts-file",
             str(attempts),
             "--format",
-            "report",
+            output_format,
             "--cap",
             "7",
             "--changed-file",
@@ -976,6 +977,14 @@ def test_cli_cap_scream_appears_on_stdout_and_stderr(tmp_path: Path) -> None:
     combined = result.stdout + result.stderr
     assert "HARD CAP HIT" in combined or "HARD CAP" in combined
     assert "DROPPED" in combined
+
+    assert "HARD CAP" in result.stderr
+    if output_format == "names":
+        names = result.stdout.splitlines()
+        assert len(names) == len(set(names)) == 7
+        assert set(names) <= {task["name"] for task in tasks}
+    else:
+        assert "HARD CAP" in result.stdout
 
 
 def test_cli_cap_clamps_above_default(tmp_path: Path) -> None:
@@ -1082,3 +1091,22 @@ def test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixt
             "agent-payment-abandonment|agent-payment-setup-resume)"
         )
         assert "BENCH_NEEDS_PAYMENT_FIXTURE=1" in driver[case : driver.index(";;", case)]
+
+def test_cli_names_at_exact_cap_keep_warning_off_inventory(tmp_path: Path) -> None:
+    catalog = tmp_path / "tasks.json"
+    attempts = tmp_path / "attempts.jsonl"
+    expected = ["smoke-a", "smoke-b", "smoke-c"]
+    catalog.write_text(json.dumps([
+        {"name": name, "tags": ["smoke"], "timeout_seconds": 60, "deploy_category": "harness"}
+        for name in expected
+    ]))
+    attempts.write_text("")
+    result = subprocess.run(
+        [sys.executable, str(SELECTOR), "--catalog", str(catalog),
+         "--attempts-file", str(attempts), "--format", "names", "--cap", "3",
+         "--changed-file", "README.md", "--repo-root", str(ROOT)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == expected
+    assert "AT HARD CAP" in result.stderr

@@ -1887,6 +1887,7 @@ class LocalController(unittest.TestCase):
         'fleet_patch_packages_clean_unpushed_head_from_fetchable_base', 'autoscaler_scale_down_cancels_pending_worker',
         'fleet_registry_release_id_is_idempotent_with_other_records', 'refresh_deps_tracks_exact_created_snapshot',
         'refresh_deps_applies_exact_workspace_before_rebuild', 'fetch_ref_restores_dirty_exact_sha',
+        'warm_checkout_failure_preserves_native_exit_and_logs_duration',
         'warm_deps_preflight', 'fresh_controller_reuses_only_proven_donor_dependencies', 'verified_legacy_snapshot',
         'dependency_proof_publication', 'exact_volume_ownership_survives_delayed_visibility_and_failed_delete',
         'exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers',

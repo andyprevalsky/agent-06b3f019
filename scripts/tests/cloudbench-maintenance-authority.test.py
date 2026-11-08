@@ -34,8 +34,13 @@ class NativeTransition(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.context=self.root/'.context';self.context.mkdir()
         subprocess.run(['git','init','-q',str(self.root)],check=True)
-        for rel in (*m.SCRIPTS,'scripts/process-identity.py','Dockerfile.cloudbench-warm','fly.cloudbench-warm.toml'):
+        for rel in (*m.SCRIPTS,'scripts/process-identity.py','fly.cloudbench-warm.toml'):
             target=self.root/rel;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(ROOT/rel,target)
+        # This suite exercises the sealed v1 recipe contract, not whatever recipe
+        # current image production uses. Preserve the actual approved bytes.
+        recipe = ROOT/'scripts/tests/fixtures/cloudbench-maintenance/Dockerfile.v1'
+        self.assertEqual(hashlib.sha256(recipe.read_bytes()).hexdigest(), m.IMAGE_RECIPE_V1)
+        shutil.copyfile(recipe, self.root/'Dockerfile.cloudbench-warm')
         (self.root/'.git/info/exclude').write_text('.context/\n')
         self.phase=self.context/'phase';self.phase.write_text('before')
         digest='sha256:'+'b'*64
