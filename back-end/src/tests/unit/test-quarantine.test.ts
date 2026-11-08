@@ -46,6 +46,7 @@ function refusals(): void {
     [{ ...META, since: '11/08/2026' }, /since must be a YYYY-MM-DD date/],
     [{ ...META, repair: 'https://github.com/Rose-Ai-Labs/rose/pull/1' }, /boxes\.dev thread URL/],
     [{ ...META, repair: 'https://boxes.dev/thread/thr_x?evil=1' }, /boxes\.dev thread URL/],
+    [{ ...META, repair: 'pending-handoff:not-hex' }, /boxes\.dev thread URL/],
     [{ ...META, error: 'first line\nsecond line' }, /error must be one line/],
     [{ ...META, evidence: 'a.log\nb.log' }, /evidence must be one line/],
     [{ ...META, owner: 'me' }, /unknown key\(s\): owner/],
@@ -64,6 +65,9 @@ function refusals(): void {
     assert.equal(bodyRan, false, 'a refused marker never runs its test');
   }
   assert.deepEqual(validateQuarantineMeta({ ...META }), META);
+  // Before merge a marker names its FLAKY occurrence; the repair is dispatched after merge.
+  const pending = { ...META, repair: `pending-handoff:${'a'.repeat(32)}` };
+  assert.deepEqual(validateQuarantineMeta(pending), pending);
   // Same trimming as scripts/lib/test_quarantine.py: rows match whichever runner wrote them.
   assert.deepEqual(validateQuarantineMeta({ ...META, error: ` ${META.error} ` }), META);
 }

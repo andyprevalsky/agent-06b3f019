@@ -83,10 +83,15 @@ class MetadataTest(Fixture):
             {'since': '2026-11-8'}, {'since': '2026-02-30'}, {'since': ''},
             {'repair': 'https://example.com/thread/thr_1'}, {'repair': 'https://boxes.dev/thread/'},
             {'repair': 'TODO'}, {'error': ''}, {'error': 'line one\nline two'}, {'evidence': '   '},
+            {'repair': 'pending-handoff:'}, {'repair': 'pending-handoff:' + 'G' * 32},
+            {'repair': 'pending-handoff:' + 'a' * 31},
         ]
         for override in bad:
             with self.subTest(override=override), self.assertRaises(tq.QuarantineMetadataError):
                 tq.quarantine(**{**META, **override})
+        # Before merge, a marker names its FLAKY occurrence; the repair is dispatched after merge.
+        self.assertEqual('pending-handoff:' + 'a' * 32,
+                         tq.validate(**{**META, 'repair': 'pending-handoff:' + 'a' * 32})['repair'])
         missing = dict(META)
         del missing['repair']
         with self.assertRaises(TypeError):

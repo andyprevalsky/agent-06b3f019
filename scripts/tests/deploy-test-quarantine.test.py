@@ -35,6 +35,14 @@ def commit(root, message='fixture'):
     return git(root, 'rev-parse', 'HEAD')
 
 
+def _refusal(root, occurrence_id):
+    try:
+        q.link_repair(root, occurrence_id, REPAIR)
+    except ValueError as error:
+        return str(error)
+    return ''
+
+
 class CycleQuarantine(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -117,21 +125,34 @@ class CycleQuarantine(unittest.TestCase):
         (self.directory / 'plan.json').write_text(json.dumps(self.plan))
         self.assertIn('Flaky (passed on rerun): 1 — 0 attributed, 1 awaiting /RCA attribution (blocks merge)',
                       self.report_text())
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
         for bad, why in (({'attribution': 'UNKNOWN', 'evidence': 'rca'}, 'UNKNOWN'),
                          ({'attribution': 'NOT_INTRODUCED', 'evidence': 'rca', 'marker': 'code',
-                           'repair_agent': REPAIR}, 'no quarantine marker'),
+                           'post_merge': packet}, 'no quarantine marker'),
+                         # Repairs dispatch only after merge: a pre-merge repair thread is refused.
                          ({'attribution': 'NOT_INTRODUCED', 'evidence': 'rca', 'marker': 'tests/test_unit.py',
-                           'repair_agent': 'https://boxes.dev/thread/thr_other'}, 'repair_agent'),
+                           'repair_agent': REPAIR, 'post_merge': packet}, 'dispatch after merge'),
                          ({'attribution': 'NOT_INTRODUCED', 'evidence': 'rca', 'marker': 'tests/test_unit.py'},
-                          'exactly one handoff')):
+                          'post-merge packet'),
+                         # The marker still names a thread instead of this occurrence's pending handoff.
+                         ({'attribution': 'NOT_INTRODUCED', 'evidence': 'rca', 'marker': 'tests/test_unit.py',
+                           'post_merge': packet}, "marker's repair must be pending-handoff")):
             with self.assertRaisesRegex(ValueError, why):
                 c.attribute_flaky(self.state, occurrence['id'], bad, self.root)
             self.assertIsNone(occurrence['attribution'])
+        pending = f"pending-handoff:{occurrence['id']}"
+        (self.root / 'tests' / 'test_unit.py').write_text(MARKED.replace(REPAIR, pending))
         c.attribute_flaky(self.state, occurrence['id'], {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca receipt',
-                          'marker': 'tests/test_unit.py', 'repair_agent': REPAIR}, self.root)
+                          'marker': 'tests/test_unit.py', 'post_merge': packet}, self.root)
         c.write(self.directory / 'cycle.json', self.state)
-        self.assertEqual(0, c.verify_saved(self.directory, self.root))
-        self.assertIsNone(c.pending_completion_block(self.state))
+        # Attributed: the FLAKY unit no longer blocks merge (adding the marker changed the source, which a
+        # real deploy re-gates; this fixture checks only the attribution).
+        self.assertIsNone(q.attribution_block(self.state['flaky'], self.root))
+        # ...but the repair is dispatched only after merge, and the packet carries the attribution.
+        self.assertIn('pending post-merge', c.pending_completion_block(self.state))
+        [queued] = self.state['pending_post_merge']
+        self.assertEqual(('NOT_INTRODUCED', 'rca receipt', occurrence['id'], 'tests/test_unit.py'),
+                         tuple(queued['packet'][k] for k in ('attribution', 'rca', 'occurrence', 'marker')))
         # The marker must still be in the tree the merge ships.
         (self.root / 'tests' / 'test_unit.py').write_text('def test_flaky_unit():\n    pass\n')
         self.assertIn('no quarantine marker', q.attribution_block(self.state['flaky'], self.root))
@@ -146,11 +167,20 @@ class CycleQuarantine(unittest.TestCase):
         self.run_gate("p.report('test_flaky_unit','FLAKY',case='a',attempts=2)")
         [occurrence] = self.state['flaky']
         packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        pending = f"pending-handoff:{occurrence['id']}"
+        (self.root / 'tests' / 'test_unit.py').write_text(MARKED.replace(REPAIR, pending))
         c.attribute_flaky(self.state, occurrence['id'], {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca',
                           'marker': 'tests/test_unit.py', 'post_merge': packet}, self.root)
         self.assertIn('pending post-merge', c.pending_completion_block(self.state))
         c.resolve_post_merge(self.state, occurrence['id'], REPAIR)
         self.assertIsNone(c.pending_completion_block(self.state))
+        # The post-merge records PR swaps the pending reference for the dispatched thread.
+        out = subprocess.run([sys.executable, str(ROOT / 'scripts/test_quarantine.py'), 'link-repair', '--root',
+                              str(self.root), '--occurrence', occurrence['id'], '--repair', REPAIR],
+                             capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, out.returncode, out.stderr)
+        self.assertEqual(MARKED, (self.root / 'tests' / 'test_unit.py').read_text())
+        self.assertIn('no marker names', _refusal(self.root, occurrence['id']))  # already linked
 
     def test_introduced_flake_needs_a_fix_commit_newer_than_the_flaky_source(self):
         self.run_gate("p.report('test_flaky_unit','FLAKY',case='a',attempts=2)")
@@ -333,11 +363,15 @@ class ReleaseReport(unittest.TestCase):
         self.write_catalog()
         self.assertEqual({'cloud-smoke': META}, q.catalog_quarantines(self.root))
         self.assertEqual({}, q.catalog_quarantines(self.root, ['plain-smoke']))
-        occurrence = {'gate': 'smoke', 'unit': 'cloud-smoke', 'source': {'head': 'a' * 40}}
+        occurrence = {'id': 'b' * 32, 'gate': 'smoke', 'unit': 'cloud-smoke', 'source': {'head': 'a' * 40}}
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        # An existing repair owner named in the marker receives the goal after merge.
         recorded = q.validate_attribution(occurrence, {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1',
                                                        'marker': 'agents/benchmarks/tasks.json',
-                                                       'repair_agent': REPAIR}, self.root)
+                                                       'post_merge': {**packet, 'repair_owner': REPAIR}}, self.root)
         self.assertEqual('agents/benchmarks/tasks.json', recorded['marker'])
+        self.assertEqual(('NOT_INTRODUCED', 'rca-1', REPAIR),
+                         tuple(recorded['post_merge'][k] for k in ('attribution', 'rca', 'repair_owner')))
         for bad in ({**META, 'repair': 'https://boxes.dev/x'}, {**META, 'since': 'yesterday'},
                     {k: v for k, v in META.items() if k != 'error'}, {**META, 'error': 'a\nb'}, ['x']):
             with self.subTest(marker=bad):

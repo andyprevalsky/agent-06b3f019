@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Quarantined-test release report: `python3 scripts/test_quarantine.py report [--json]`.
+"""Quarantined-test release report: `python3 scripts/test_quarantine.py report [--json]`; after merge,
+`link-repair --occurrence <id> --repair <thread URL>` replaces a marker's pending-handoff:<id>.
 
 Lists every in-definition quarantine marker with its consecutive-pass streak from recorded
 results (factory ledger + local deploy attempts); "ready to release" at 5. Logic lives in

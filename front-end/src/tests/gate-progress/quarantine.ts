@@ -46,7 +46,8 @@ export interface QuarantineTestContext {
 
 const SINCE = /^(\d{4})-(\d{2})-(\d{2})$/;
 // Same patterns as scripts/lib/test_quarantine.py, so a marker valid in one runner is valid in all.
-const REPAIR = /^https:\/\/boxes\.dev\/thread\/[A-Za-z0-9_-]+$/;
+// Before merge a marker names its FLAKY occurrence (`pending-handoff:<id>`); repairs dispatch after merge.
+const REPAIR = /^(?:https:\/\/boxes\.dev\/thread\/[A-Za-z0-9_-]+|pending-handoff:[0-9a-f]{32})$/;
 const META_KEYS: ReadonlyArray<keyof QuarantineMeta> = ['since', 'repair', 'error', 'evidence'];
 
 function isCalendarDate(value: string): boolean {
@@ -85,7 +86,9 @@ export function validateQuarantineMeta(meta: unknown): QuarantineMeta {
     problems.push('since must be a YYYY-MM-DD date');
   }
   if (typeof record.repair === 'string' && record.repair && !REPAIR.test(record.repair)) {
-    problems.push('repair must be a boxes.dev thread URL (https://boxes.dev/thread/<id>)');
+    problems.push(
+      'repair must be a boxes.dev thread URL (https://boxes.dev/thread/<id>) or pending-handoff:<occurrence id>',
+    );
   }
   for (const key of ['error', 'evidence'] as const) {
     const value = record[key];

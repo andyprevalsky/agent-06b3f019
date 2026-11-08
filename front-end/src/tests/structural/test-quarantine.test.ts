@@ -53,6 +53,7 @@ describe('test quarantine marker', () => {
       [{ ...META, evidence: ' ' }, /evidence is required/],
       [{ ...META, since: '2026-13-01' }, /since must be a YYYY-MM-DD date/],
       [{ ...META, repair: 'http://boxes.dev/thread/thr_abc' }, /boxes\.dev thread URL/],
+      [{ ...META, repair: `pending-handoff:${'a'.repeat(31)}` }, /boxes\.dev thread URL/],
       [{ ...META, error: 'one\ntwo' }, /error must be one line/],
       [{ ...META, evidence: 'a\nb' }, /evidence must be one line/],
       [{ ...META, reason: 'flaky' }, /unknown key\(s\): reason/],
@@ -71,6 +72,9 @@ describe('test quarantine marker', () => {
       QuarantineMetadataError,
     );
     expect(validateQuarantineMeta({ ...META })).toEqual(META);
+    // Before merge a marker names its FLAKY occurrence; the repair is dispatched after merge.
+    const pending = { ...META, repair: `pending-handoff:${'a'.repeat(32)}` };
+    expect(validateQuarantineMeta(pending)).toEqual(pending);
   });
 
   it('reports a failure as QUARANTINED_FAIL and returns normally', async (context) => {

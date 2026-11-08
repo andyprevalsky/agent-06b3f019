@@ -121,8 +121,8 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     """The recorded /RCA attribution of one FLAKY occurrence, or ValueError.
 
     INTRODUCED: fixed before merge (a commit in HEAD that the flaky source lacked), never quarantined.
-    NOT_INTRODUCED: the unit's quarantine marker is in the tree with the repair link of its handoff
-    (repair_agent), or the existing post-merge packet is recorded (post_merge). UNKNOWN blocks.
+    NOT_INTRODUCED: the unit's quarantine marker is in the tree naming its pending post-merge handoff
+    (or an existing repair owner), and the post-merge packet is recorded with the attribution. UNKNOWN blocks.
     """
     attribution = entry.get('attribution')
     if attribution == 'UNKNOWN':
@@ -148,17 +148,48 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
     if not found:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
-    link, packet = entry.get('repair_agent'), entry.get('post_merge')
-    if bool(link) == bool(packet):
-        raise ValueError('NOT_INTRODUCED records exactly one handoff: repair_agent or post_merge')
-    if link and (not BOXES_THREAD.fullmatch(link) or link != found[0]['repair']):
-        raise ValueError("repair_agent must be the boxes.dev repair thread named in the marker's repair")
-    if packet and (not isinstance(packet, dict)
-                   or any(not packet.get(k) for k in ('test', 'command', 'scope', 'error', 'source', 'evidence'))):
+    # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records
+    # its post-merge packet, never a pre-merge repair thread.
+    if entry.get('repair_agent'):
+        raise ValueError('NOT_INTRODUCED repairs dispatch after merge: record post_merge, not repair_agent')
+    packet = entry.get('post_merge')
+    if not isinstance(packet, dict) or any(not packet.get(k) for k in ('test', 'command', 'scope', 'error',
+                                                                        'source', 'evidence')):
         raise ValueError('a post-merge packet requires test, command, scope, error, source and evidence')
-    out = {'attribution': attribution, 'evidence': entry['evidence'], 'marker': path}
-    out.update({'repair_agent': link} if link else {'post_merge': packet})
-    return out
+    owner = packet.get('repair_owner')
+    expected = owner if owner else f"pending-handoff:{occurrence['id']}"
+    if owner and not BOXES_THREAD.fullmatch(owner):
+        raise ValueError('repair_owner must be the existing boxes.dev repair thread that receives the goal after merge')
+    if found[0]['repair'] not in (expected, f"pending-handoff:{occurrence['id']}"):
+        raise ValueError(f"the marker's repair must be {expected} until the post-merge dispatch is linked")
+    # The attribution travels with the handoff: the dispatched /goal carries the /RCA gate and evidence.
+    packet = {**packet, 'attribution': 'NOT_INTRODUCED', 'rca': entry['evidence'], 'occurrence': occurrence['id'],
+              'unit': occurrence['unit'], 'gate': occurrence.get('gate'), 'marker': path}
+    return {'attribution': attribution, 'evidence': entry['evidence'], 'marker': path, 'post_merge': packet}
+
+
+def link_repair(root: Path, occurrence_id: str, repair: str, paths: list[str] | None = None) -> list[str]:
+    """After merge: replace `pending-handoff:<occurrence id>` with the dispatched repair thread in every
+    marker that names it (Python/TS test files, agents/benchmarks/tasks.json). Returns the edited files."""
+    if not re.fullmatch(r'[0-9a-f]{32}', occurrence_id):
+        raise ValueError('occurrence id must be the 32-hex FLAKY occurrence')
+    if not BOXES_THREAD.fullmatch(repair):
+        raise ValueError('repair must be the dispatched boxes.dev thread URL')
+    pending = f'pending-handoff:{occurrence_id}'
+    candidates = list(paths) if paths is not None else [*_files(root, None), 'agents/benchmarks/tasks.json']
+    edited = []
+    for rel in dict.fromkeys(candidates):
+        target = root / rel
+        try:
+            text = target.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if pending in text:
+            target.write_text(text.replace(pending, repair))
+            edited.append(rel)
+    if not edited:
+        raise ValueError(f'no marker names {pending}')
+    return edited
 
 
 def attribution_block(flaky_occurrences: list[dict], root: Path | None = None) -> str | None:
@@ -479,8 +510,10 @@ def render(rows: list[dict]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('action', choices=['report'])
+    parser.add_argument('action', choices=['report', 'link-repair'])
     parser.add_argument('--root', type=Path, default=ROOT)
+    parser.add_argument('--occurrence', help='link-repair: the FLAKY occurrence id named pending-handoff:<id>')
+    parser.add_argument('--repair', help='link-repair: the dispatched boxes.dev repair thread URL')
     parser.add_argument('--ledger', type=Path, action='append',
                         help=f'factory event ledger(s); default {LEDGER} and {LOCAL_EVENTS}')
     parser.add_argument('--attempts', type=Path, action='append',
@@ -488,6 +521,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--json', action='store_true')
     args = parser.parse_args(argv)
     root = args.root.resolve()
+    if args.action == 'link-repair':
+        if not args.occurrence or not args.repair:
+            parser.error('link-repair requires --occurrence and --repair')
+        try:
+            edited = link_repair(root, args.occurrence, args.repair)
+        except ValueError as error:
+            print(f'link-repair refused: {error}', file=sys.stderr)
+            return 1
+        print('\n'.join(f'linked {path}: pending-handoff:{args.occurrence} -> {args.repair}' for path in edited))
+        return 0
     ledgers = args.ledger or [root / LEDGER, root / LOCAL_EVENTS]
     attempts = args.attempts or [state_dir(root) / 'attempts']
     rows = report(root, ledgers, [a for a in attempts if a.is_dir()])

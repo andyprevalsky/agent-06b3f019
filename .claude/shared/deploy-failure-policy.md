@@ -56,10 +56,12 @@ to retroactively justify the delegation.
 - **FLAKY:** a unit that failed and passed its single automatic rerun on the
   same source gets the same attribution; the passing rerun is not evidence.
   INTRODUCED is fixed before merge. NOT INTRODUCED gets the quarantine marker
-  in its own test definition in this PR, carrying its repair thread link; that
-  repair goal is dispatched at attribution from current main, where the flake
-  already exists. UNKNOWN blocks the merge. The quarantined test keeps running
-  and reporting (`.claude/commands/deploy.md`).
+  in its own test definition in this PR, naming `pending-handoff:<occurrence id>`,
+  and its failed-test packet, which carries the attribution and /RCA evidence,
+  is dispatched after merge like every other NOT INTRODUCED packet. The
+  records follow-up PR links the marker to the dispatched thread. UNKNOWN blocks
+  the merge. The quarantined test keeps running and reporting
+  (`.claude/commands/deploy.md`).
 - **UNKNOWN:** establish attribution before granting a delegation waiver.
   An unrelated filename, an unexplained timeout or a missing baseline is not
   evidence of NOT INTRODUCED.
@@ -97,6 +99,7 @@ command pass, and finish /deploy through merge, production verification,
 cleanup and a completed deploy scorecard.
 
 Failed test: <existing test name>
+Attribution: <Gate: NOT_INTRODUCED and the /RCA evidence that established it>
 Command: <exact executed command and relevant invocation settings>
 Scope: <affected behavior and boundaries to preserve>
 Exact error: <verbatim native test failure>

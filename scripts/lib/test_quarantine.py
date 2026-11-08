@@ -44,7 +44,12 @@ from typing import Any, Callable
 
 QUARANTINE_PROGRESS_ENV = 'DEPLOY_GATE_QUARANTINE_PROGRESS'
 UNIT_PREFIX_ENV = 'DEPLOY_GATE_QUARANTINE_UNIT_PREFIX'
-REPAIR_PATTERN = re.compile(r'https://boxes\.dev/thread/[A-Za-z0-9_-]+')
+REPAIR_PATTERN = re.compile(r'https://boxes\.dev/thread/[A-Za-z0-9_-]+'
+                            r'|pending-handoff:[0-9a-f]{32}')
+# Repairs are dispatched only after merge (.claude/shared/deploy-failure-policy.md): a marker added
+# before merge names its FLAKY occurrence as `pending-handoff:<occurrence id>`, and the post-merge
+# records PR replaces it with the dispatched thread URL (deploy_test_quarantine.py link-repair).
+PENDING_HANDOFF = re.compile(r'pending-handoff:([0-9a-f]{32})')
 DATE_PATTERN = re.compile(r'\d{4}-\d{2}-\d{2}')
 # Control flow, not test failures: skips, interrupts, exits and cancellation pass through.
 _PASSTHROUGH = (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError, unittest.SkipTest)
@@ -83,7 +88,7 @@ def validate(*, since: object, repair: object, error: object, evidence: object) 
             problems.append(f'since is not a calendar date: {since!r}')
     if not isinstance(repair, str) or not REPAIR_PATTERN.fullmatch(repair):
         problems.append('repair must be the boxes.dev thread URL of the repair /goal '
-                        '(https://boxes.dev/thread/<id>)')
+                        '(https://boxes.dev/thread/<id>) or, before merge, pending-handoff:<occurrence id>')
     for key, value in (('error', error), ('evidence', evidence)):
         if not isinstance(value, str) or not value.strip() or '\n' in value or '\r' in value:
             problems.append(f'{key} must be one non-empty line')
