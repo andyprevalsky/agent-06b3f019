@@ -430,8 +430,16 @@ run_playwright() {
   exec node "$PLAYWRIGHT_CLI" "$@"
 }
 
+# The CLI --reporter replaces playwright.config.ts's reporters, so append the live
+# deploy-gate progress reporter here too, only when the gate worker names a progress
+# file (DEPLOY_GATE_PROGRESS). Relative to this cwd (front-end/); list output is unchanged.
+SEMANTIC_REPORTERS=list
+if [[ -n "${DEPLOY_GATE_PROGRESS:-}" ]]; then
+  SEMANTIC_REPORTERS="list,./src/tests/gate-progress/playwrightReporter.ts"
+fi
+
 if [[ $# -eq 0 ]]; then
-  PLAYWRIGHT_ARGS=(--reporter=list --workers="$SEMANTIC_WORKERS")
+  PLAYWRIGHT_ARGS=(--reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS")
   if [[ -n "${SEMANTIC_GREP_INVERT:-}" ]]; then
     PLAYWRIGHT_ARGS+=(--grep-invert="$SEMANTIC_GREP_INVERT")
   fi
@@ -450,4 +458,4 @@ if [[ ! -f "$TEST_FILE" ]]; then
   exit 1
 fi
 
-run_playwright test "$TEST_FILE" --reporter=list --workers="$SEMANTIC_WORKERS"
+run_playwright test "$TEST_FILE" --reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS"

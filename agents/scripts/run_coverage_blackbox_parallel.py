@@ -41,6 +41,14 @@ LONG_DOMAIN_ORDER = (
 )
 
 
+# Live per-domain rows for the gate's worker (scripts/deploy_gate_progress.py).
+# Only this runner writes them: domains run without the variable, so a domain
+# that exercises a runner with failing fixtures cannot report those fixtures as
+# failures of the real gate.
+PROGRESS_ENV = "DEPLOY_GATE_PROGRESS"
+PROGRESS_HELPER_DIR = Path(__file__).resolve().parents[2] / "scripts"
+
+
 @dataclass
 class DomainResult:
     domain: str
@@ -48,6 +56,32 @@ class DomainResult:
     duration_seconds: float
     log: str
     exit_code: int
+
+
+def report_progress(result: DomainResult, output: str) -> None:
+    """Append one domain row to the worker's progress file, if it named one.
+
+    Advisory: without the variable nothing is imported or written, and a
+    missing helper or unwritable file never changes the result or output.
+    """
+    if not os.environ.get(PROGRESS_ENV):
+        return
+    scripts = str(PROGRESS_HELPER_DIR)
+    try:
+        sys.path.insert(0, scripts)
+        try:
+            import deploy_gate_progress
+        finally:
+            sys.path.remove(scripts)
+        deploy_gate_progress.report(
+            result.domain,
+            "PASS" if result.passed else "FAIL",
+            scope="domain",
+            detail="" if result.passed else output,
+            log=str(ROOT_DIR / result.log),
+        )
+    except (ImportError, OSError, ValueError):
+        return
 
 
 def discover_domains() -> list[str]:
@@ -89,6 +123,7 @@ async def run_domain(
         "BLACKBOX_TEST_ARTIFACT_DIR": str(child_artifact_dir),
         "BLACKBOX_TEST_CAPTURE_OUTBOUND": "1",
     }
+    env.pop(PROGRESS_ENV, None)
     timeout_seconds = positive_int("AGENTS_COVERAGE_DOMAIN_TIMEOUT", DOMAIN_TIMEOUT_SECONDS)
     async with semaphore:
         started = time.monotonic()
@@ -168,8 +203,11 @@ async def async_main() -> int:
             results.append(result)
             status = "PASS" if result.passed else "FAIL"
             print(f"  {status:<4} {result.domain:<30} {result.duration_seconds:>7.2f}s  {result.log}")
+            output = ""
             if not result.passed:
-                print((ROOT_DIR / result.log).read_text(errors="replace"))
+                output = (ROOT_DIR / result.log).read_text(errors="replace")
+                print(output)
+            report_progress(result, output)
     except asyncio.CancelledError:
         for task in tasks:
             task.cancel()

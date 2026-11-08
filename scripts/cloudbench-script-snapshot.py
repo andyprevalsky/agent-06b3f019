@@ -253,6 +253,32 @@ def initialize(
         )
 
 
+def _remove_snapshot(path: Path) -> None:
+    """Remove a snapshot so no observer ever sees it half deleted.
+
+    rmtree unlinks the helper before the directory, so a peer that checked the
+    path between the two (the launcher's handoff poll or its EXIT cleanup, which
+    run this helper from inside the snapshot) found the directory without its
+    helper and reported a failed removal. Renaming first makes the path vanish
+    in one step; the private tombstone is then deleted.
+    """
+
+    tombstone = path.with_name(f".{path.name}.removing-{os.getpid()}-{os.urandom(4).hex()}")
+    os.rename(path, tombstone)
+    _remove_tombstones(path)
+
+
+def _remove_tombstones(path: Path) -> None:
+    """Delete every private tombstone of ``path``, including ones a crashed or
+    interrupted earlier removal left behind. A tombstone is never renamed back."""
+
+    for tombstone in path.parent.glob(f".{path.name}.removing-*"):
+        try:
+            shutil.rmtree(tombstone)
+        except FileNotFoundError:
+            pass  # A concurrent remover is deleting the same tombstone.
+
+
 def _remove_unadopted_snapshot(path: Path) -> None:
     """Remove the helper-created path while serialized with parent cleanup."""
 
@@ -260,7 +286,7 @@ def _remove_unadopted_snapshot(path: Path) -> None:
         return
     with _snapshot_lock(path):
         if path.exists():
-            shutil.rmtree(path)
+            _remove_snapshot(path)
 
 
 def create(path: Path, temp_root: Path, token: str, pid: int, pid_start: str) -> Path:
@@ -413,10 +439,11 @@ def recover_create(
             "recovery PID birth identity does not match caller"
         )
     if not path.exists():
+        _remove_tombstones(path)
         return "absent"
     with _snapshot_lock(path):
         if path.exists():
-            shutil.rmtree(path)
+            _remove_snapshot(path)
     return "deleted"
 
 
@@ -521,6 +548,7 @@ def cleanup(
 ) -> str:
     _validate_path(path, temp_root, token)
     if not path.exists():
+        _remove_tombstones(path)
         return "absent"
     if os.getppid() != pid:
         raise SnapshotOwnershipError("cleanup PID birth identity does not match caller")
@@ -544,13 +572,13 @@ def cleanup(
                     if _stale_owner_state(
                         int(marker["owner_pid"]), str(marker["owner_pid_start"])
                     ):
-                        shutil.rmtree(path)
+                        _remove_snapshot(path)
                         return "stale-deleted"
                     return "transferred"
                 raise SnapshotOwnershipError(
                     "snapshot ownership transferred to another live process"
                 )
-            shutil.rmtree(path)
+            _remove_snapshot(path)
     except SnapshotOwnershipError:
         if not path.exists():
             return "absent"
@@ -584,7 +612,7 @@ def check_armed(
                     )
                 return "pending"
             if _stale_owner_state(owner_pid, owner_start):
-                shutil.rmtree(path)
+                _remove_snapshot(path)
                 return "stale-cleaned"
             return "armed" if marker["state"] == "armed" else "pending"
     except SnapshotOwnershipError:
@@ -630,7 +658,7 @@ def cancel_claim(
             if marker["state"] == "armed":
                 return "armed"
             if _stale_owner_state(owner_pid, owner_start):
-                shutil.rmtree(path)
+                _remove_snapshot(path)
                 return "stale-cleaned"
             os.kill(owner_pid, signal.SIGTERM)
             return "signaled"

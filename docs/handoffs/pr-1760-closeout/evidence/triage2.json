@@ -1,0 +1,26 @@
+{
+ "failures": [
+  {
+   "id": "c6ccf506e50d4320a6be49546879c2b4",
+   "check": "cloudbench-controller/cloudbench-controller",
+   "command": [
+    "/usr/bin/python3",
+    "/var/tmp/rdw/cloudbench-controller/scripts/deploy_test_worker.py",
+    "--root",
+    "/var/tmp/rdw/cloudbench-controller",
+    "--stdio"
+   ],
+   "source": {
+    "head": "7c092b6114c3f54b629d54ebd9b4395617ceb891",
+    "digest": "8c61b679cc7833adffbc15a407dadaa025fc6d99cadd33ee303091c0f8b50df7"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "cloudbench-controller: multi-workstream step FAIL 'readiness active-retry must preserve completed task and exact worker retirement' (fleet CHILDFAIL). The fake guest child allows a fixed 30 s window for the failed worker's capture/removal plus a healthy retry worker becoming ready; under host load (~34-42 with 11 concurrent deploy gates and the gate's own 12 parallel steps) the real retry chain (5 s readiness timeout, capture, ~4 s cleanup, ~20 s to the next autoscaler clone) overran it.",
+   "evidence": "Gate log /var/tmp/rdw/cloudbench-controller/.context/deploy-worker/aa55264169e597513f379fe2cae13e933318966dd8ddad0fb4e845b2efa7cf25/f54e62e27d3cd0f66cacf183915df4892e56244af834b498402e248a7880bbb0.log (GATE_STEP multi-workstream status=FAIL exit=1). Repro on 7c092b611 with CLOUDBENCH_TEST_READINESS_RETRY_ONLY=1: load ~7 PASS 3/3; 32 busy loops (load ~34) FAIL with the same message; retained child log /var/tmp/rdwplan/mw/loaded-failure-bench.log 'FATAL: readiness failure never crossed captured cleanup and healthy retry'. Same scripts passed in sweep 1 on 8cc6df20b; neither PR commit touches cloudbench code.",
+   "assigned_repair": true,
+   "assigned_reason": "UNVERIFIED aggregate gate cannot be waived before merge; the deploy owner keeps it blocking and reruns the unchanged bound gate on a quiet host. The fixture's load-sensitive 30 s child window is handed to a post-merge repair goal as an actual failed test.",
+   "assigned_evidence": "/var/tmp/rdwplan/mw/loop.log (3/3 PASS at load ~7), /var/tmp/rdwplan/mw/load-loop.log (FAIL at load ~34), /var/tmp/rdwplan/mw/loaded-failure-run"
+  }
+ ]
+}
