@@ -70,37 +70,29 @@
     "research/.env": "managed: boxes.dev project-managed env",
     "scripts/__pycache__/": "reproducible: Python bytecode cache"
   },
-  "live_processes": [
-    {
-      "argv": "tail -10",
-      "cwd": "/home/boxes/rose",
-      "pid": 43194
-    },
-    {
-      "argv": "cut -c1-250",
-      "cwd": "/home/boxes/rose",
-      "pid": 43195
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-1781-closeout/deletion-manifest.json",
-  "open_items": [
-    "1 unpushed commit(s) in /home/boxes/rose",
-    "branch records/pr1781-closeout has 1 commit(s) on no remote",
-    "git stash entry 0e2ffe95ba40 is not preserved (archive it, then add a `stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2` manifest entry)",
-    "live process 43194 in this checkout: tail -10",
-    "live process 43195 in this checkout: cut -c1-250"
-  ],
+  "open_items": [],
   "pr": 1781,
   "preserved_refs": {
     "branch:backup/cerebras-chat-quota-prepush-20261002": {
-      "archive": "devbox-closeout-private/pr1780-a252579c/20261108-core.tar.gz.aesgcm",
+      "archive": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm",
+      "bundle_verified": "git bundle verify ok",
       "disposition": "archived",
-      "member": "pr1780-evidence/refs/backup-and-stash.bundle",
-      "sha256": "c72cb788c6d9b1e1891e502cfe9336a6985ab640ff64a990b5e1bd3b70368cad",
+      "member": ".context/rca-shard2-records/refs/backup-and-stash.bundle",
+      "sha256": "306f4c4ac67c0c1f7b03050fe21127f86d23da7862221b2a00453c5bbccf9ce6",
       "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+    },
+    "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+      "archive": "devbox-closeout-private/pr1781-49c2c60c/refs.tar.gz.aesgcm",
+      "bundle_verified": "git bundle verify ok",
+      "disposition": "archived",
+      "member": ".context/rca-shard2-records/refs/backup-and-stash.bundle",
+      "sha256": "306f4c4ac67c0c1f7b03050fe21127f86d23da7862221b2a00453c5bbccf9ce6",
+      "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr1781-closeout",
@@ -109,7 +101,7 @@
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [],
-      "unpushed_commits": 1
+      "unpushed_commits": 0
     }
   ]
 }
