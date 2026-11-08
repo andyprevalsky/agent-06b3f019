@@ -466,6 +466,9 @@ def interrupted_worker(state, receipt, proof):
 
 
 def validate(state, receipt, proof):
+    if proof.get('layout') == 'nativebackend-post-execution-cleanup-v1':
+        from deploy_test_backend_post_cleanup import validate as validate_post_execution
+        return validate_post_execution(state, receipt, proof)
     if proof.get('layout') == 'backend-prisma-preflight-v1':
         from deploy_test_backend_preflight_cleanup import validate as validate_preflight
         return validate_preflight(state, receipt, proof)
@@ -603,6 +606,9 @@ def still_bound(state, receipt, entry):
             current, = [g for g in state['plan']['gates'] if g['name'] == receipt['gate']]
             if 'original_gate' in entry['proof']:
                 structural_original_gate(gate, current)
+            if entry['proof'].get('layout') == 'nativebackend-post-execution-cleanup-v1':
+                from deploy_test_backend_post_cleanup import current_gate
+                current_gate(gate, current)
             preserve_contract(gate, current)
             need(set(gate['checks']) <= set(current['checks']), 'original checks removed')
         validate(original, receipt, entry['proof'])

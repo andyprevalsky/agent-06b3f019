@@ -4507,6 +4507,253 @@ class LocalCleanup(unittest.TestCase):
         c.write(self.worker / '.context/services.json', {'worktree': str(self.worker), 'status': 'running'})
         with self.assertRaises(ValueError): c.retained_owners(self.state, [self.gate['name']])
 
+    def post55_fixture(self):
+        import datetime
+        import hashlib
+        import shutil
+        import time
+        import deploy_test_backend_post_cleanup as post
+        import deploy_test_backend_post_cleanup_audit as auditor
+        self.post55_module = post
+        self.post55_auditor = auditor
+        self.enterContext(patch.object(auditor, 'DB_LOCK_ROOT', self.root / 'db-locks'))
+        now = time.time()
+        self.receipt.update(status='FAIL', started_at=now-100, finished_at=now-50,
+                            lingering_group=False, native_cleanup_reference=None, cleanup_owner=None)
+        self.process['reaped'] += [{'pid': 125, 'status': 7 << 8}, {'pid': 126, 'status': 9}]
+        env = dict(CONDUCTOR_WORKSPACE_NAME='post55', CONDUCTOR_PORT='21530', ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME='1')
+        names = ['blackbox:ok', 'blackbox:bad', 'blackbox:treasury-rails', 'units', 'fps', 'teardown', 'coverage-threshold']
+        self.recipe = {'cases': {n: dict(command=['npm','run','test:coverage:sharded'], cwd='back-end', env=dict(env), aggregate=False, sweep='backend-coverage-blackbox') for n in names},
+                       'execution_timeout_seconds': 14400}
+        self.gate.update(checks=names, worker_recipe=self.recipe, env=dict(env), selection_evidence=['original selection'])
+        skips = {'blackbox:treasury-rails': {'source': dict(self.source), 'rca': {'id': 'standing', 'attribution': 'NOT_INTRODUCED'}}}
+        self.request.update(checks=[n for n in names if n not in skips], skips=skips, worker_recipe=self.recipe)
+        self.receipt.update(cases={n: 'SKIP' if n in skips else 'UNVERIFIED' for n in names},
+                            execution_binding={'contract_digest': c.digest(self.gate)})
+        native = self.worker / '.context/deploy-backend' / hashlib.sha256(self.token.encode()).hexdigest()
+        native.mkdir(parents=True)
+        evidence = {'artifacts': {'summaries': {}}, 'shard_logs': {}, 'unknown_domains': []}
+        def put(path, text):
+            path.parent.mkdir(parents=True, exist_ok=True); path.write_text(text); return c.sha_file(path)
+        evidence['artifacts']['runner_log'] = put(native/'runner.log', 'Started coverage shard 1/2\ncompleted failed sweep\n')
+        for key, filename, role in [('units','units.log','units_log'), ('fps','units-probe.log','fps_log')]:
+            f=self.worker/'back-end/coverage'/filename
+            evidence[key]={'exit':0,'log':str(f)};evidence['artifacts'][role]=put(f,'PASS\n')
+        for key, filename, role in [('teardown','teardown.log','teardown_log'), ('coverage-threshold','threshold.log','threshold_log')]:
+            f=native/filename;evidence[key]={'log':str(f)};evidence['artifacts'][role]=put(f,'native failure retained\n')
+        evidence['teardown'].update(exit=1, command=['bash','scripts/tests/blackbox-backend-teardown.test.sh'],
+                                   recipe_cleanup_exit=None, recipe_setup_exit=None)
+        evidence['coverage-threshold'].update(identity=None, reason='unverified native coverage')
+        for i in (1,2):
+            f=self.worker/'back-end/coverage'/('shard-%d.log'%i);evidence['shard_logs'][str(f)]=put(f,'native shard joined\n')
+            f=self.worker/'back-end/coverage'/('blackbox-run-shard%d'%i)/'summary.json'
+            evidence['artifacts']['summaries'][str(f)]=put(f,'{"results":[]}\n')
+        for name,passed in [('blackbox:ok',True),('blackbox:bad',False)]:
+            evidence[name]={'passed':passed,'aborted':False,'shard':next(iter(evidence['artifacts']['summaries']))}
+        self.post55_fixture_row=dict(id='d'*64,name='/victoria-db-post55',image='sha256:'+'e'*64,image_name='pgvector/pgvector:pg16',
+          owner=str(self.worker),running=True,status='running',paused=False,restarting=False,dead=False,
+          ports={'5432/tcp':[{'HostIp':'127.0.0.1','HostPort':'21535'}]},
+          mounts=[{'Name':'victoria-pgdata-post55','Destination':'/var/lib/postgresql/data','Type':'volume','RW':True}])
+        for n in ['postgres-before.json','postgres-after.json']:c.write(native/n,self.post55_fixture_row)
+        evidence['postgres_fixture']=dict(id='d'*64,name='victoria-db-post55',image='sha256:'+'e'*64,
+            volume='victoria-pgdata-post55',port=21535,restored=False,
+            before_sha256=c.sha_file(native/'postgres-before.json'),after_sha256=c.sha_file(native/'postgres-after.json'))
+        self.result.update(worker_root=str(self.worker), recipe_digest=c.digest(self.recipe), native_command=['npm','run','test:coverage:sharded'],
+            runner_log=str(native/'runner.log'), cases={'blackbox:ok':'PASS','blackbox:bad':'FAIL','units':'PASS','fps':'PASS','teardown':'FAIL','coverage-threshold':'UNVERIFIED'}, evidence=evidence,
+            reused=False,interrupted=False,source_unchanged=True,native_exit=1,complete=False,cleanup_complete=False)
+        self.receipt['worker_evidence']=copy.deepcopy(evidence)
+        c.write(native/'result.json',self.result)
+        self.failure.update(check=self.gate['name']+'/blackbox:bad',finished_at=self.receipt['finished_at'])
+        self.state['skips']={self.gate['name']+'/'+k:copy.deepcopy(v)for k,v in skips.items()}
+        self.proof.update(layout=post.LAYOUT,original_skips=copy.deepcopy(skips),artifacts={})
+        _,expected=post.expected_artifacts(self.worker,self.receipt,self.result)
+        for original in expected:
+            original=Path(original);dest=self.root/'sealed'/hashlib.sha256(str(original).encode()).hexdigest()
+            dest.parent.mkdir(exist_ok=True);shutil.copyfile(original,dest)
+            self.proof['artifacts'][str(original)]={'path':str(dest),'sha256':c.sha_file(dest),'bytes':dest.stat().st_size}
+        self.post55_spec=post.audit_spec(self.worker,self.receipt,self.gate,next(iter(self.recipe['cases'].values())),self.post55_fixture_row)
+        for name in self.post55_spec['locks']:
+            f=Path(name);f.parent.mkdir(parents=True,exist_ok=True);f.touch()
+        (self.worker/'.context/test-runs/.port-locks').mkdir(parents=True,exist_ok=True)
+        manifest=self.worker/'.context/test-runs/post55/manifest.json'
+        c.write(manifest,{'base_url':'http://localhost:21552'})
+        self.post55_docker={'snapshot':copy.deepcopy(self.post55_fixture_row),'runtime':{'pid':300,'started_at':'2020-01-01T00:00:00Z','ips':['172.17.0.2']}}
+        self.post55_proxy={'pid':301,'birth':'12345','exe':'docker-proxy','inode':'99','binding':{
+            '-proto':'tcp','-host-ip':'127.0.0.1','-host-port':'21535','-container-ip':'172.17.0.2','-container-port':'5432'}}
+        self.enterContext(patch.object(auditor,'_call',side_effect=AssertionError('synthetic test must not invoke metadata commands')))
+        self.post55_docker_mock=self.enterContext(patch.object(auditor,'_docker',return_value=self.post55_docker))
+        self.post55_proxy_mock=self.enterContext(patch.object(auditor,'_proxy',return_value=self.post55_proxy))
+        self.post55_process_mock=self.enterContext(patch.object(auditor,'_processes',return_value=([],[])))
+        self.post55_listener_mock=self.enterContext(patch.object(auditor,'_listeners',return_value=[{'port':21535,'inode':'99','uid':0}]))
+        self.enterContext(patch.object(post,'source_bytes',side_effect=lambda root,head,name:(ROOT/name).read_bytes()))
+        row=auditor.observe(self.post55_spec);self.post55_audit_path=self.root/'physical-audit.json';c.write(self.post55_audit_path,row)
+        self.proof.update(audit={'path':str(self.post55_audit_path),'sha256':c.sha_file(self.post55_audit_path)},confirmed_at=time.time())
+        self.post55_write_controls()
+        self.original_bytes={n:p.read_bytes()for n,p in self.paths.items()}
+
+    def post55_write_controls(self):
+        for name,value in zip(self.paths,[self.request,self.result,self.receipt,self.process]):c.write(self.paths[name],value)
+        self.proof['files']={n:c.sha_file(p)for n,p in self.paths.items()}
+
+    def test_post55_cleanup_reconciles_launch_only_and_revalidates(self):
+        self.post55_fixture()
+        original=copy.deepcopy(self.state)
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        entry=self.state['reconciled_owners'][self.proof['files']['receipt.json']]
+        self.assertIs(entry['credit_granted'],False)
+        self.assertFalse(self.result['cleanup_complete']);self.assertFalse(self.result['complete'])
+        self.assertEqual(original['pending'],self.state['pending'])
+        self.assertEqual(original['skips'],self.state['skips'])
+        self.assertEqual(original['failures'],self.state['failures'])
+        for name,path in self.paths.items():self.assertEqual(self.original_bytes[name],path.read_bytes())
+        self.post55_process_mock.return_value=([{'pid':999}],[])
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+
+    def test_post55_physical_observer_refuses_unknown_busy_and_foreign(self):
+        self.post55_fixture()
+        auditor=self.post55_auditor
+        for matched,unknown in [([{'pid':999}],[]),([],[{'pid':999}])]:
+            with self.subTest(processes=(matched,unknown)):
+                self.post55_process_mock.return_value=(matched,unknown)
+                with self.assertRaises(ValueError):self.reconcile()
+        self.post55_process_mock.return_value=([],[])
+        for port in [21530,21550,21551,21552,21553,21554,21555]:
+            with self.subTest(listener=port):
+                self.post55_listener_mock.return_value=[{'port':21535,'inode':'99','uid':0},{'port':port,'inode':'100','uid':1002}]
+                with self.assertRaises(ValueError):self.reconcile()
+        self.post55_listener_mock.return_value=[{'port':21535,'inode':'99','uid':0}]
+        for path in [self.worker/'.context/native-worker-admission.lock', *map(Path,self.post55_spec['locks'])]:
+            with self.subTest(busy=str(path)),path.open('r')as handle:
+                import fcntl
+                fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                with self.assertRaises((ValueError,BlockingIOError)):self.reconcile()
+        reservation=self.worker/'.context/test-runs/.port-locks/21551';reservation.mkdir()
+        with self.assertRaises(ValueError):self.reconcile()
+        reservation.rmdir()
+        unknown_lock=self.worker/'.context/test-runs/.port-locks/21551.lock';unknown_lock.touch()
+        with self.assertRaises(ValueError):self.reconcile()
+        unknown_lock.unlink()
+        for key,value in [('id','f'*64),('owner',str(self.root/'foreign')),('status','exited')]:
+            with self.subTest(fixture=key):
+                mutated=copy.deepcopy(self.post55_docker);mutated['snapshot'][key]=value
+                self.post55_docker_mock.return_value=mutated
+                with self.assertRaises(ValueError):self.reconcile()
+        mutated=copy.deepcopy(self.post55_docker);mutated['runtime']['started_at']='2099-01-01T00:00:00Z'
+        self.post55_docker_mock.return_value=mutated
+        with self.assertRaises(ValueError):self.reconcile()
+        self.post55_docker_mock.return_value=self.post55_docker
+        foreign=copy.deepcopy(self.post55_proxy);foreign['binding']['-container-ip']='172.17.0.99'
+        self.post55_proxy_mock.return_value=foreign
+        with self.assertRaises(ValueError):self.reconcile()
+        self.post55_proxy_mock.return_value=self.post55_proxy
+        c.write(self.worker/'.context/services.json',{'status':'running','worktree':str(self.worker),'ports':{'backend':21530}})
+        with self.assertRaises(ValueError):self.reconcile()
+
+    def test_post55_proof_native_wait_and_skip_negatives(self):
+        self.post55_fixture()
+        original_proof=copy.deepcopy(self.proof)
+        mutations=[('missing-audit',lambda p:p.pop('audit')),('unknown-audit',lambda p:p['audit'].update(path=str(self.root/'missing.json'))),
+          ('skip-removed',lambda p:p.update(original_skips={})),('skip-source',lambda p:p['original_skips']['blackbox:treasury-rails'].update(source={'head':'c'*40,'digest':'d'*64})),
+          ('services-recipe',lambda p:p.update(layout='backend-prisma-preflight-v1')),
+          ('wrong-audit-hash',lambda p:p['audit'].update(sha256='0'*64)),('confirmed-bool',lambda p:p.update(confirmed_at=True))]
+        for label,mutate in mutations:
+            with self.subTest(proof=label):
+                self.proof=copy.deepcopy(original_proof);mutate(self.proof)
+                with self.assertRaises(ValueError):self.reconcile()
+        self.proof=original_proof
+        pristine=copy.deepcopy(self.process)
+        for rows in [[{'pid':124,'status':0}], [{'pid':124,'status':256},{'pid':124,'status':0}],
+                     [{'pid':True,'status':256}], [{'pid':124,'status':True}], [{'pid':124,'status':256},{'pid':127,'status':4991}],
+                     [{'pid':124,'status':256},{'pid':127,'status':65535}], [{'pid':124,'status':256},{'pid':123,'status':0}], []]:
+            with self.subTest(waits=rows):
+                self.process=copy.deepcopy(pristine);self.process['reaped']=rows;self.post55_write_controls()
+                with self.assertRaises(ValueError):self.reconcile()
+        self.process=pristine;self.post55_write_controls()
+        for key,value in [('quiescent',1),('orphaned_children',True),('native_exit',True),('error','unknown'),('term_sent',[124])]:
+            with self.subTest(supervisor=key):
+                self.process=copy.deepcopy(pristine);self.process[key]=value;self.post55_write_controls()
+                with self.assertRaises(ValueError):self.reconcile()
+        self.process=pristine;self.post55_write_controls()
+        for name,path in self.paths.items():
+            with self.subTest(changed=name):
+                before=path.read_bytes();path.write_bytes(before+b' ')
+                with self.assertRaises(ValueError):self.reconcile()
+                path.write_bytes(before)
+        for row in self.proof['artifacts'].values():
+            path=Path(row['path']);before=path.read_bytes();path.write_bytes(before+b' ')
+            with self.assertRaises(ValueError):self.reconcile()
+            path.write_bytes(before)
+        native_verdict=self.result['cases']['blackbox:ok'];self.result['cases']['blackbox:ok']='FAIL';self.post55_write_controls()
+        with self.assertRaisesRegex(ValueError,'native domain verdict'):self.reconcile()
+        self.result['cases']['blackbox:ok']=native_verdict;self.post55_write_controls()
+        self.reconcile()
+        entry=self.state['reconciled_owners'][self.proof['files']['receipt.json']]
+        entry['credit_granted']=True
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+
+    def test_post55_current_contract_and_observer_are_typed(self):
+        self.post55_fixture();self.reconcile()
+        original_gate=copy.deepcopy(self.gate)
+        for key,value in [('case_protocol',1),('native_backend',1)]:
+            with self.subTest(contract=key):
+                self.gate[key]=value
+                with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+                self.gate.clear();self.gate.update(copy.deepcopy(original_gate))
+        self.gate['worker_recipe']['services']=True
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+        self.gate.clear();self.gate.update(copy.deepcopy(original_gate))
+        with patch.object(self.post55_module,'AUDITOR_SHA256','0'*64):
+            with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+        original=c.read(self.post55_audit_path)
+        for key,value in [('unknown',[{'pid':2}]),('matched',[{'pid':3}]),('observed_at',True),('services',{'status':'running'}),('ports',[True])]:
+            with self.subTest(audit=key):
+                row=copy.deepcopy(original);row[key]=value;c.write(self.post55_audit_path,row)
+                entry=self.state['reconciled_owners'][self.proof['files']['receipt.json']]
+                entry['proof']['audit']['sha256']=c.sha_file(self.post55_audit_path)
+                with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+        c.write(self.post55_audit_path,original)
+
+    def test_post55_recipe_source_observer_and_original_skip_seals(self):
+        import shutil
+        self.post55_fixture()
+        original_recipe=copy.deepcopy(self.recipe)
+        for key,value in [('services',True),('setup',{'command':['true']}),('cleanup',{'command':['true']})]:
+            with self.subTest(recipe=key):
+                self.recipe[key]=value
+                self.result['recipe_digest']=c.digest(self.recipe)
+                self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+                self.post55_write_controls()
+                with self.assertRaisesRegex(ValueError,'no-services recipe'):self.reconcile()
+                self.recipe.clear();self.recipe.update(copy.deepcopy(original_recipe))
+        self.result['recipe_digest']=c.digest(self.recipe)
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        self.post55_write_controls()
+        with patch.object(self.post55_module,'source_bytes',return_value=b'changed original producer'):
+            with self.assertRaisesRegex(ValueError,'original producer changed'):self.reconcile()
+        observer=Path(self.post55_auditor.__file__)
+        alias=self.root/'observer.py';shutil.copyfile(observer,alias);alias.chmod(0o644)
+        alias.write_bytes(alias.read_bytes()+b'\n# drift\n')
+        with patch.object(self.post55_auditor,'__file__',str(alias)):
+            with self.assertRaisesRegex(ValueError,'observer source/mode'):self.reconcile()
+        shutil.copyfile(observer,alias);alias.chmod(0o600)
+        with patch.object(self.post55_auditor,'__file__',str(alias)):
+            with self.assertRaisesRegex(ValueError,'observer source/mode'):self.reconcile()
+        original_skips=copy.deepcopy(self.request['skips'])
+        self.request['skips']={};self.post55_write_controls()
+        with self.assertRaisesRegex(ValueError,'original skips'):self.reconcile()
+        self.request['skips']=original_skips;self.post55_write_controls()
+        self.reconcile()
+        self.gate['selection_evidence']=['renewed typed selection metadata']
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.gate['checks'].append('blackbox:new')
+        self.gate['worker_recipe']['cases']['blackbox:new']=copy.deepcopy(next(iter(self.recipe['cases'].values())))
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+        self.gate['checks'].remove('blackbox:new');self.gate['worker_recipe']['cases'].pop('blackbox:new')
+        self.gate['worker_recipe']['execution_timeout_seconds']=14400.0
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+
+
 
 
 class CardPreflightCleanup(unittest.TestCase):
@@ -6540,5 +6787,424 @@ class StrictRoundSettlementJournal(unittest.TestCase):
                 before = (directory / 'cycle.json').read_bytes()
                 self.assertEqual(c.main(['status', '--plan', str(directory / 'plan.json'), '--state-dir', str(directory)]), 2)
                 self.assertEqual(before, (directory / 'cycle.json').read_bytes())
+
+
+
+class Round49RetirementFailClosed(Round49NegativeLaunchAdmission):
+    def test_malformed_present_retirement_cannot_use_legacy_fallback(self):
+        self.state['historical_launch_retirements'] = {str(self.request_path): {'kind': 'wrong'}}
+        with self.assertRaisesRegex(ValueError, 'malformed present certificate'):
+            self.admit()
+
+    def test_no_certificate_preserves_original_legacy_behavior(self):
+        self.assertTrue(self.admit())
+
+    def test_unknown_missing_request_is_not_retired(self):
+        self.state['historical_launch_retirements'] = {str(self.request_path): {'kind': 'wrong'}}
+        with self.assertRaises(ValueError):
+            c.settled_round49_missing_request(self.state, self.directory, self.gate,
+                self.directory / 'attempts/50/triage/gate/request.json')
+
+    def test_native_wait_bool_and_float_are_rejected(self):
+        from deploy_test_round49_retirement import terminal
+        process = dict(self.process, native_exit=1, reaped=[{'pid': self.process['child_pid'], 'status': 256}])
+        terminal(process)
+        for key, value in [('native_exit', True), ('native_exit', 1.0), ('child_pid', True), ('child_pid', 2.0)]:
+            changed = copy.deepcopy(process)
+            changed[key] = value
+            with self.assertRaises(ValueError): terminal(changed)
+        for field, value in [('pid', True), ('pid', 2.0), ('status', True), ('status', 256.0)]:
+            changed = copy.deepcopy(process)
+            changed['reaped'][0][field] = value
+            with self.assertRaises(ValueError): terminal(changed)
+
+    def test_native_closure_requires_no_signals_or_owners(self):
+        from deploy_test_round49_retirement import terminal
+        process = dict(self.process, native_exit=1, reaped=[{'pid': self.process['child_pid'], 'status': 256}])
+        for key, value in [('quiescent', False), ('orphaned_children', True), ('remaining', [2]),
+                           ('term_sent', [2]), ('kill_sent', [2]), ('cancelled', True), ('timed_out', True)]:
+            changed = copy.deepcopy(process); changed[key] = value
+            with self.assertRaises(ValueError): terminal(changed)
+
+
+class Round49RetirementCertificates(unittest.TestCase):
+    """Synthetic immutable source objects and native receipts; no native worker runs."""
+    def setUp(self):
+        import deploy_test_round49_retirement as retirement
+        self.r = retirement
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        self.directory = self.repo / '.context/cycle'
+        self.directory.mkdir(parents=True)
+        self.native = {'head': '1' * 40, 'digest': 'a' * 64}
+        self.operator = {'head': '2' * 40, 'digest': 'b' * 64}
+        self.later = {'head': '3' * 40, 'digest': 'c' * 64}
+        self.objects = {p: (p + '\n').encode() for p in set(self.r.OBSERVERS + self.r.PRODUCERS)}
+        self.object_rows = {p: {'sha256': __import__('hashlib').sha256(v).hexdigest(), 'mode': 0o100000}
+                            for p, v in self.objects.items()}
+        self.git_calls = []
+        self.object_overrides = {}
+        def git(argv, **kwargs):
+            self.git_calls.append(argv)
+            args = argv[4:]
+            if args[0] == 'show':
+                head, path = args[1].split(':', 1)
+                return self.object_overrides.get((head, path), self.objects[path])
+            if args[0] == 'ls-tree':
+                paths = args[args.index('--') + 1:]
+                return ''.join('100644 blob ' + 'f' * 40 + '\t' + p + '\n' for p in paths).encode()
+            raise AssertionError('unexpected external command')
+        self.git_patch = patch.object(self.r.subprocess, 'check_output', side_effect=git)
+        self.git_patch.start(); self.addCleanup(self.git_patch.stop)
+        import deploy_test_process
+        def scan(inspect, refuse):
+            # The observer executes while the one exact admission fd remains locked.
+            if inspect is not None:
+                import fcntl
+                lock = self.active_root / '.context/native-worker-admission.lock'
+                with lock.open('r') as other:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.scan_patch = patch.object(deploy_test_process, 'scan_same_user_processes', side_effect=scan)
+        self.scan_patch.start(); self.addCleanup(self.scan_patch.stop)
+        self.gates = []
+        self.old_rows = []
+        self.later_rows = []
+        self.proofs = {}
+        self.seals = {}
+        self.process = {'supervisor_pid': 900001, 'child_pid': 900002, 'native_exit': 1,
+                        'quiescent': True, 'error': None, 'orphaned_children': False,
+                        'cancelled': False, 'timed_out': False, 'remaining': [], 'term_sent': [], 'kill_sent': [],
+                        'reaped': [{'pid': 900002, 'status': 256}, {'pid': 900003, 'status': 0}]}
+        for name in sorted(self.r.GATES):
+            worker = self.repo / 'workers' / name
+            (worker / '.context').mkdir(parents=True)
+            (worker / '.context/native-worker-admission.lock').write_text('')
+            recipe = {'cases': {'active': {'command': ['fixture']}, 'qualified': {'command': ['qualified']}}}
+            gate = {'name': name, 'worker_root': str(worker), 'cwd': str(worker),
+                    'command': ['/usr/bin/python3', str(worker / 'scripts/deploy_test_worker.py'), '--root', str(worker)],
+                    'worker_recipe': recipe, 'checks': ['active', 'qualified']}
+            self.gates.append(gate)
+            old = self.directory / 'attempts/49/triage' / name
+            later = self.directory / 'attempts/53/triage' / name
+            old.mkdir(parents=True); later.mkdir(parents=True)
+            for folder, source, token in [(old, self.native, 'old-' + name), (later, self.later, 'later-' + name)]:
+                request = {'token': token, 'gate': name, 'source': source, 'worker_root': str(worker),
+                           'worker_recipe': recipe, 'checks': ['active'], 'skips': {'qualified': {'source': source}}, 'phase': 'triage'}
+                result = {'token': token, 'gate': name, 'source': source, 'worker_root': str(worker),
+                          'cases': {'active': 'FAIL'}, 'complete': True, 'cleanup_complete': True,
+                          'reused': False, 'recipe_digest': self.r.contract_digest(recipe)}
+                self.put(folder / 'request.json', request); self.put(folder / 'result.json', result)
+                self.put(folder / 'output.log.process.json', self.process)
+            row = {'kind': 'recovered-native-execution-v1', 'gate': name, 'source': self.native,
+                   'token': 'old-' + name, 'status': 'FAIL', 'complete': False,
+                   'cancelled': 'UNKNOWN', 'timed_out': 'UNKNOWN', 'recovered_at': 10,
+                   'cases': {'active': 'UNVERIFIED', 'qualified': 'SKIP'}}
+            self.old_rows.append(row)
+            receipt = {'gate': name, 'source': self.later, 'token': 'later-' + name, 'status': 'FAIL',
+                       'complete': True, 'executed': True, 'native_exit': 1, 'lifecycle': 'owned',
+                       'command': gate['command'], 'log': str(later / 'output.log'),
+                       'worker_result': str(later / 'result.json'), 'cases': {'active': 'FAIL', 'qualified': 'SKIP'},
+                       'cancelled': False, 'timed_out': False, 'lingering_group': False, 'finished_at': 20,
+                       'execution_binding': {'contract_digest': self.r.contract_digest(gate),
+                                             'input_fingerprint': 'd' * 64, 'environment': 'e' * 64},
+                       'host_admission': {'started': True, 'lock': str(worker / '.context/native-worker-admission.lock')}}
+            self.put(later / 'receipt.json', receipt); self.later_rows.append(receipt)
+            self.proofs[name] = {'kind': self.r.KIND, 'gate': name, 'old_request': str(old / 'request.json'),
+                                 'later_request': str(later / 'request.json'), 'confirmed_at': 30, 'observed_by': 'independent fixture',
+                                 'files': {n: self.r.sha(later / n) for n in self.r.NAMES}}
+            for n in ('request.json', 'result.json', 'output.log.process.json'):
+                self.seals[str(old / n)] = self.r.sha(old / n)
+        self.after = {'source': self.native, 'plan': {'gates': self.gates}, 'attempts': [{'results': self.old_rows}]}
+        self.state = copy.deepcopy(self.after)
+        self.state.update(source=self.later, phase='triage', ready=False, pending=['preserved'])
+        self.state['attempts'].append({'source': self.later, 'results': self.later_rows})
+        for index in range(45):
+            file = self.directory / ('sealed-extra-' + str(index))
+            file.write_text('immutable ' + str(index)); self.seals[str(file)] = self.r.sha(file)
+        self.seals[str(self.directory / 'cycle.json')] = '0' * 64
+        self.proposal = {'source': self.native, 'round': 49, 'positive_credit': False, 'after_state': self.after,
+                         'before_state_sha256': '0' * 64, 'native_files': self.object_rows,
+                         'original_missing_outer_paths': [str(Path(p['old_request']).parent / 'receipt.json') for p in self.proofs.values()],
+                         'input_artifacts': self.seals}
+        self.reseal()
+        self.gate = next(g for g in self.gates if g['name'] == 'backend-coverage-blackbox')
+        self.proof = self.proofs[self.gate['name']]
+        self.active_root = Path(self.gate['worker_root'])
+
+    def put(self, path, value):
+        path.write_bytes(self.r.encoded(value)); path.chmod(0o600)
+
+    def reseal(self):
+        proposal = self.directory / 'proposal.json'; auth = self.directory / 'authorization.json'
+        self.put(proposal, self.proposal)
+        self.put(auth, {'native_source': self.native, 'operator_source': self.operator,
+                        'operator_files': self.object_rows, 'proposal_sha256': self.r.sha(proposal),
+                        'after_state_sha256': self.r.digest(self.after)})
+        journal = self.directory / 'settlement-round49-journal.json'
+        self.put(journal, {'kind': 'native-settlement-journal-v1', 'round': 49, 'positive_credit': False,
+                           'native_source': self.native, 'operator_source': self.operator,
+                           'proposal_path': str(proposal), 'authorization_path': str(auth),
+                           'proposal_sha256': self.r.sha(proposal), 'authorization_sha256': self.r.sha(auth),
+                           'after_state_sha256': self.r.digest(self.after), 'before_state_sha256': '0' * 64})
+        self.put(self.directory / 'settlement-round49-committed.json', {'journal_sha256': self.r.sha(journal)})
+
+    def issue(self, proof=None, persist=None):
+        proof = self.proof if proof is None else proof
+        self.active_root = Path(next(g for g in self.gates if g['name'] == proof['gate'])['worker_root'])
+        c.reconcile(self.state, 'old-' + proof['gate'], proof, persist=persist)
+
+    def test_native_failed_later_receipt_retires_only_old_debt_and_is_idempotent(self):
+        before = {p: p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}
+        original = copy.deepcopy(self.state)
+        self.issue()
+        cert = self.state['historical_launch_retirements'][self.proof['old_request']]
+        self.assertIs(cert['credit_granted'], False)
+        self.assertTrue(c.settled_round49_missing_request(self.state, self.directory, self.gate, Path(self.proof['old_request'])))
+        self.issue(); self.assertEqual(cert, self.state['historical_launch_retirements'][self.proof['old_request']])
+        self.assertEqual(original['attempts'], self.state['attempts'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.directory.rglob('*') if p.is_file()})
+        self.assertTrue(all(not Path(v).exists() for v in self.proposal['original_missing_outer_paths']))
+        self.assertTrue(any(argv[4] == 'show' for argv in self.git_calls))
+
+    def test_normal_cli_persists_certificate_atomically_under_admission_lock(self):
+        import fcntl
+        self.put(self.directory / 'cycle.json', self.state)
+        self.put(self.directory / 'plan.json', self.state['plan'])
+        proof = self.directory / 'retire.json'; self.put(proof, self.proof)
+        original_write = c.write
+        def write(path, value):
+            if path == self.directory / 'cycle.json' and value.get('historical_launch_retirements'):
+                # The first certificate publication must happen under admission; later identical final write is harmless.
+                if not hasattr(write, 'seen'):
+                    with (self.active_root / '.context/native-worker-admission.lock').open('r') as other:
+                        with self.assertRaises(BlockingIOError): fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    write.seen = True
+            original_write(path, value)
+        with patch.object(c, 'write', side_effect=write):
+            result = c.main(['reconcile', '--plan', str(self.directory / 'plan.json'), '--state-dir', str(self.directory),
+                             '--occurrence', 'old-' + self.gate['name'], '--proof', str(proof)])
+        self.assertEqual(result, 0)
+        self.assertIn(self.proof['old_request'], json.loads((self.directory / 'cycle.json').read_text())['historical_launch_retirements'])
+
+    def test_every_original_seal_is_required(self):
+        for name in self.seals:
+            if Path(name).name == 'cycle.json': continue
+            path = Path(name); before = path.read_bytes(); path.write_bytes(before + b'changed')
+            with self.assertRaises(ValueError): self.issue()
+            path.write_bytes(before)
+        self.assertNotIn('historical_launch_retirements', self.state)
+
+    def test_original_unknown_flags_and_six_missing_paths_remain_required(self):
+        for flag in ('cancelled', 'timed_out'):
+            self.old_rows[0][flag] = False; self.reseal()
+            with self.assertRaises(ValueError): self.issue()
+            self.old_rows[0][flag] = 'UNKNOWN'
+        self.reseal()
+        path = Path(self.proposal['original_missing_outer_paths'][0]); self.put(path, {})
+        with self.assertRaises(ValueError): self.issue()
+        path.unlink()
+
+    def test_witness_cleanup_false_or_nonbool_cannot_retire(self):
+        path = Path(self.proof['later_request']).parent / 'result.json'
+        result = json.loads(path.read_text())
+        for value in (False, 1, 1.0, None):
+            changed = {**result, 'cleanup_complete': value}; self.put(path, changed)
+            self.proof['files']['result.json'] = self.r.sha(path)
+            with self.assertRaises(ValueError): self.issue()
+        self.put(path, result)
+
+    def test_unrecorded_reused_recovered_and_carried_witnesses_refuse(self):
+        row = self.state['attempts'][1]['results'].pop()
+        # Remove this gate's row explicitly, independent of sorted position.
+        rows = self.state['attempts'][1]['results']; rows.append(row)
+        match = next(v for v in rows if v['gate'] == self.gate['name']); rows.remove(match)
+        with self.assertRaises(ValueError): self.issue()
+        rows.append(match)
+        folder = Path(self.proof['later_request']).parent
+        for key, value in [('kind', 'recovered-native-execution-v1'), ('executed', False), ('lifecycle', 'carried')]:
+            changed = {**match, key: value}; self.put(folder / 'receipt.json', changed)
+            self.proof['files']['receipt.json'] = self.r.sha(folder / 'receipt.json')
+            rows[rows.index(match)] = changed
+            with self.assertRaises(ValueError): self.issue()
+            rows[rows.index(changed)] = match
+        result = json.loads((folder / 'result.json').read_text()); result['reused'] = True
+        self.put(folder / 'result.json', result); self.proof['files']['result.json'] = self.r.sha(folder / 'result.json')
+        with self.assertRaises(ValueError): self.issue()
+
+    def test_wrong_order_source_token_root_recipe_and_bytes_refuse(self):
+        original = copy.deepcopy(self.state)
+        self.state['attempts'].reverse()
+        with self.assertRaises(ValueError): self.issue()
+        self.state = original
+        folder = Path(self.proof['later_request']).parent
+        request = json.loads((folder / 'request.json').read_text())
+        for key, value in [('source', self.native), ('token', 'wrong'), ('worker_root', '/foreign'), ('worker_recipe', {})]:
+            self.put(folder / 'request.json', {**request, key: value})
+            self.proof['files']['request.json'] = self.r.sha(folder / 'request.json')
+            with self.assertRaises(ValueError): self.issue()
+        self.put(folder / 'request.json', request)
+        self.proof['files']['request.json'] = 'f' * 64
+        with self.assertRaises(ValueError): self.issue()
+
+    def test_float_bool_round_and_observation_fields_refuse(self):
+        for value in (True, 49.0):
+            self.proposal['round'] = value; self.reseal()
+            with self.assertRaises(ValueError): self.issue()
+        self.proposal['round'] = 49; self.reseal()
+        for value in (True, float('nan'), float('inf'), -1):
+            proof = copy.deepcopy(self.proof); proof['confirmed_at'] = value
+            with self.assertRaises(ValueError): self.issue(proof)
+
+    def test_root_or_lock_replacement_invalidates_certificate(self):
+        self.issue()
+        lock = self.active_root / '.context/native-worker-admission.lock'
+        lock.rename(lock.with_name('retired-lock')); lock.write_text('')
+        with self.assertRaisesRegex(ValueError, 'root replaced'):
+            c.settled_round49_missing_request(self.state, self.directory, self.gate, Path(self.proof['old_request']))
+
+    def test_new_unknown_missing_path_never_uses_old_certificate(self):
+        self.issue()
+        with self.assertRaises(ValueError):
+            c.settled_round49_missing_request(self.state, self.directory, self.gate,
+                self.directory / 'attempts/54/triage' / self.gate['name'] / 'request.json')
+
+    def test_all_six_retirements_do_not_clear_current_backend55_cleanup_false(self):
+        for proof in self.proofs.values(): self.issue(proof)
+        folder = self.directory / 'attempts/55/triage' / self.gate['name']; folder.mkdir(parents=True)
+        result = {'token': 'current55', 'gate': self.gate['name'], 'source': self.later, 'cleanup_complete': False}
+        self.put(folder / 'result.json', result)
+        row = {**result, 'complete': False, 'worker_result': str(folder / 'result.json')}
+        self.state['attempts'].append({'results': [row]})
+        with self.assertRaisesRegex(ValueError, 'cleanup state unknown'):
+            c.retained_owners(self.state, [self.gate['name']])
+        self.assertEqual(len(self.state['historical_launch_retirements']), 6)
+
+    def test_failed_atomic_writer_rolls_back_certificate(self):
+        original = copy.deepcopy(self.state)
+        def fail(): raise OSError('synthetic failed write before replace')
+        with self.assertRaises(OSError): self.issue(persist=fail)
+        self.assertEqual(self.state, original)
+
+    def test_later_producer_or_old_observer_object_drift_refuses(self):
+        original = self.objects['scripts/deploy_test_worker.py']
+        self.object_overrides[(self.later['head'], 'scripts/deploy_test_worker.py')] = b'changed producer'
+        with self.assertRaises(ValueError): self.issue()
+        self.object_overrides.clear()
+        self.objects['scripts/deploy_test_cycle.py'] = b'changed historical observer'
+        with self.assertRaises(ValueError): self.issue()
+
+    def test_live_or_unverifiable_root_and_held_admission_refuse(self):
+        import deploy_test_process, fcntl
+        with patch.object(deploy_test_process, 'scan_same_user_processes', side_effect=ValueError('live root')):
+            with self.assertRaises(ValueError): self.issue()
+        with (self.active_root / '.context/native-worker-admission.lock').open('r') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError): self.issue()
+
+
+    def test_current_root_replacement_invalidates_certificate(self):
+        self.issue()
+        worker = self.active_root
+        worker.rename(worker.with_name(worker.name + '-old'))
+        (worker / '.context').mkdir(parents=True)
+        (worker / '.context/native-worker-admission.lock').write_text('')
+        with self.assertRaisesRegex(ValueError, 'root replaced'):
+            c.settled_round49_missing_request(self.state, self.directory, self.gate, Path(self.proof['old_request']))
+
+    def test_certificate_has_real_issuance_time_and_changed_input_is_not_idempotent(self):
+        import time
+        before = time.time(); self.issue(); after = time.time()
+        cert = self.state['historical_launch_retirements'][self.proof['old_request']]
+        self.assertLessEqual(before, cert['issued_at']); self.assertLessEqual(cert['issued_at'], after)
+        changed = copy.deepcopy(self.proof); changed['observed_by'] = 'different observer'
+        with self.assertRaises(ValueError): self.issue(changed)
+        cert['issued_at'] = True
+        with self.assertRaises(ValueError):
+            c.settled_round49_missing_request(self.state, self.directory, self.gate, Path(self.proof['old_request']))
+
+    def test_duplicate_original_token_and_changed_row_refuse(self):
+        extra = copy.deepcopy(self.state['attempts'][0]['results'][0]); extra['cancelled'] = False
+        self.state['attempts'][0]['results'].append(extra)
+        with self.assertRaises(ValueError): self.issue()
+
+    def test_crash_after_atomic_replace_keeps_only_valid_certificate(self):
+        path = self.directory / 'cycle.json'
+        def committed_then_crashed():
+            c.write(path, self.state)
+            raise OSError('synthetic failure after atomic replace')
+        with self.assertRaises(OSError): self.issue(persist=committed_then_crashed)
+        persisted = json.loads(path.read_text())
+        self.assertTrue(c.settled_round49_missing_request(persisted, self.directory, self.gate, Path(self.proof['old_request'])))
+        self.assertEqual(persisted['attempts'], self.state['attempts'])
+
+    def test_current_source_guard_still_refuses_with_retirement(self):
+        self.issue()
+        plan = self.state['plan']
+        with patch.object(c, 'source', return_value=self.native):
+            with self.assertRaisesRegex(ValueError, 'source/plan changed'):
+                c.run_phase(plan, self.state, self.directory, self.repo, independent=True)
+
+
+    def test_original_cycle_anchor_marker_observer_modes_and_physical_closure_refuse(self):
+        journal_path = self.directory / 'settlement-round49-journal.json'
+        journal = json.loads(journal_path.read_text())
+        self.proposal['before_state_sha256'] = 'f' * 64; self.reseal()
+        with self.assertRaises(ValueError): self.issue()
+        self.proposal['before_state_sha256'] = '0' * 64; self.reseal()
+        self.put(self.directory / 'settlement-round49-committed.json', {'journal_sha256': 'f' * 64})
+        with self.assertRaises(ValueError): self.issue()
+        self.reseal()
+        before = self.object_rows['scripts/deploy_test_cycle.py']['mode']
+        for mode in (True, float(before), before | 0o100):
+            self.object_rows['scripts/deploy_test_cycle.py']['mode'] = mode; self.reseal()
+            with self.assertRaises(ValueError): self.issue()
+        self.object_rows['scripts/deploy_test_cycle.py']['mode'] = before; self.reseal()
+        old = Path(self.proof['old_request']).parent / 'result.json'
+        native = json.loads(old.read_text()); native['cleanup_complete'] = False; self.put(old, native)
+        self.proposal['input_artifacts'][str(old)] = self.r.sha(old); self.reseal()
+        with self.assertRaises(ValueError): self.issue()
+
+    def test_later_flags_wait_identity_qualified_skips_and_footprint_refuse(self):
+        folder = Path(self.proof['later_request']).parent
+        process = json.loads((folder / 'output.log.process.json').read_text())
+        for key, value in [('native_exit', True), ('native_exit', 1.0), ('quiescent', 1),
+                           ('cancelled', True), ('term_sent', [2]), ('reaped', []), ('child_pid', True)]:
+            self.put(folder / 'output.log.process.json', {**process, key: value})
+            self.proof['files']['output.log.process.json'] = self.r.sha(folder / 'output.log.process.json')
+            with self.assertRaises(ValueError): self.issue()
+        self.put(folder / 'output.log.process.json', process)
+        self.proof['files']['output.log.process.json'] = self.r.sha(folder / 'output.log.process.json')
+        request = json.loads((folder / 'request.json').read_text()); request['skips']['qualified']['source'] = self.native
+        self.put(folder / 'request.json', request); self.proof['files']['request.json'] = self.r.sha(folder / 'request.json')
+        with self.assertRaises(ValueError): self.issue()
+        original = copy.deepcopy(self.gate); self.gate['worker_recipe'] = {}
+        with self.assertRaises(ValueError): self.issue()
+        self.gate.update(original)
+
+    def test_changed_recorded_witness_hash_and_malformed_certificate_never_fallback(self):
+        self.issue()
+        folder = Path(self.proof['later_request']).parent
+        path = folder / 'receipt.json'; before = path.read_bytes(); path.write_bytes(before + b' ')
+        with self.assertRaises(ValueError):
+            c.settled_round49_missing_request(self.state, self.directory, self.gate, Path(self.proof['old_request']))
+        path.write_bytes(before)
+        self.state['historical_launch_retirements'][self.proof['old_request']]['credit_granted'] = 0
+        with self.assertRaises(ValueError):
+            c.settled_round49_missing_request(self.state, self.directory, self.gate, Path(self.proof['old_request']))
+
+
+    def test_nonprimary_stopped_or_continued_wait_is_not_terminal_closure(self):
+        process = copy.deepcopy(self.process)
+        for status in (127, (19 << 8) | 127, 65535):
+            process['reaped'][1]['status'] = status
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                self.r.terminal(process)
+        for status in (0, 256, 9, 15):
+            process['reaped'][1]['status'] = status
+            self.r.terminal(process)
+        self.assertEqual(process['reaped'][0], {'pid': 900002, 'status': 256})
+
 
 if __name__ == '__main__': unittest.main()

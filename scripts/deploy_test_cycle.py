@@ -1166,11 +1166,15 @@ def retained_owners(state: dict, gates) -> list[str]:
     return sorted(owned)
 
 
-def reconcile(state: dict, occurrence_id: str, proof: dict) -> None:
+def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None) -> None:
     """Typed, receipt-backed cleanup reconciliation for a boxes-thread owner: clears the owner for launch
     purposes only. Original receipt, adapter result, cases and outcome stay immutable; no test credit."""
     if not isinstance(proof, dict) or any(k in proof for k in RECONCILE_EXCLUSIVE):
         raise ValueError("reconcile input is a cleanup proof only; waivers, links, packets and flags are refused")
+    if proof.get('kind') == 'round49-launch-debt-retirement-v1':
+        from deploy_test_round49_retirement import reconcile as retire_round49
+        retire_round49(state, occurrence_id, proof, persist=persist)
+        return
     if proof.get('kind') == 'interrupted-policy-witness-renewal-v1':
         from deploy_test_interrupted_cleanup import renew_policy_witness
         renew_policy_witness(state, occurrence_id, proof)
@@ -1528,6 +1532,9 @@ def cloud_smoke_blocked(gate: dict, state: dict, held: dict) -> dict:
 
 
 def settled_round49_missing_request(state, directory, gate, request_path):
+    from deploy_test_round49_retirement import recognized
+    if recognized(state, directory, gate, request_path):
+        return True
     import hashlib
     import json
     import os
@@ -2292,7 +2299,8 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "reconcile":
                 if args.proof is None:
                     raise ValueError("--proof cleanup proof required")
-                reconcile(state, args.occurrence, bounded_read(args.proof, "cleanup proof"))
+                reconcile(state, args.occurrence, bounded_read(args.proof, "cleanup proof"),
+                          persist=lambda: write(state_path, state))
             elif args.action == "complete":
                 # Post-merge completion (Step 12a / before the final scorecard): every packet dispatched and resolved.
                 blocked = pending_completion_block(state)
