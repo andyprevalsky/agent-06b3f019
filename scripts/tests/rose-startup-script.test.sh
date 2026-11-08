@@ -146,7 +146,14 @@ make_repo() {
   cat >"$REPO/scripts/sync-reference-repos.sh" <<'REFS'
 #!/usr/bin/env bash
 echo "sync-reference-repos" >>"$CALLS"
-for d in openclaw hermes-agent codex prime-agent kimi-code; do mkdir -p "$d"; echo sha >"$d/.ref-sha"; done
+if [ -n "${FAKE_REF_FAIL:-}" ]; then
+  echo "# partial failed sync" >prompt-review/REF_SHAS.txt
+  exit 7
+fi
+for d in openclaw hermes-agent codex prime-agent kimi-code; do
+  mkdir -p "$d/.git"
+  [ -f "$d/.ref-sha" ] || echo sha >"$d/.ref-sha"
+done
 echo "# rewritten tip record" >prompt-review/REF_SHAS.txt
 REFS
   mkdir -p "$REPO/prompt-review"
@@ -426,6 +433,45 @@ expect_count '^sync-reference-repos' 1 "refs: cloned through the repo script"
 [ -z "$(cd "$REPO" && git status --porcelain --untracked-files=no)" ] || fail "refs: tracked files not clean"
 for d in openclaw hermes-agent codex prime-agent kimi-code; do [ -f "$REPO/$d/.ref-sha" ] || fail "refs: $d/.ref-sha missing"; done
 pass "reference repos are cloned once and tracked files stay clean"
+
+# Legacy snapshots have the exact source and pin, but the old sync removed .git.
+# Both normal session startup and template maintenance must repair the metadata.
+for mode in startup sync; do
+  for d in openclaw hermes-agent codex prime-agent kimi-code; do
+    rm -rf "$REPO/$d/.git"
+    echo saved-pin >"$REPO/$d/.ref-sha"
+    echo local-source-edit >"$REPO/$d/source.txt"
+  done
+  if [ "$mode" = sync ]; then run_sync "$TMP_ROOT/uv-bin"; else run_startup "$TMP_ROOT/uv-bin"; fi
+  [ "$RC" = 0 ] || fail "$mode: legacy reference repair exits 0 (rc=$RC)"
+  expect_count '^sync-reference-repos' 1 "$mode: legacy metadata is repaired through the repo script"
+  expect_count '^npm install' 0 "$mode: metadata repair needs no dependency reinstall"
+  for d in openclaw hermes-agent codex prime-agent kimi-code; do
+    [ -d "$REPO/$d/.git" ] || fail "$mode: $d/.git not repaired"
+    [ "$(cat "$REPO/$d/.ref-sha")" = saved-pin ] || fail "$mode: $d pin changed"
+    [ "$(cat "$REPO/$d/source.txt")" = local-source-edit ] || fail "$mode: $d source changed"
+  done
+  [ "$(cat "$REPO/prompt-review/REF_SHAS.txt")" = "# committed tip record" ] || fail "$mode: tip record changed"
+  [ -z "$(cd "$REPO" && git status --porcelain --untracked-files=no)" ] || fail "$mode: tracked files not clean"
+  if [ "$mode" = sync ]; then run_sync "$TMP_ROOT/uv-bin"; else run_startup "$TMP_ROOT/uv-bin"; fi
+  [ "$RC" = 0 ] || fail "$mode: repeated reference repair exits 0 (rc=$RC)"
+  expect_count '^sync-reference-repos' 0 "$mode: repaired references skip on the next invocation"
+done
+pass "legacy reference metadata converges on startup and snapshot sync without changing source or pins"
+
+rm -rf "$REPO/openclaw/.git"
+echo "# local tip record" >"$REPO/prompt-review/REF_SHAS.txt"
+FAKE_REF_FAIL=1 run_startup "$TMP_ROOT/uv-bin"
+[ "$RC" = 1 ] || fail "failed reference repair fails startup (rc=$RC)"
+expect_out 'FAILED: refs' "failed reference repair"
+[ "$(cat "$REPO/prompt-review/REF_SHAS.txt")" = "# local tip record" ] || fail "failed reference repair changed the original tip record"
+[ "$(cat "$REPO/openclaw/source.txt")" = local-source-edit ] || fail "failed repair changed reference source"
+run_startup "$TMP_ROOT/uv-bin"
+[ "$RC" = 0 ] || fail "reference repair retries on the next startup (rc=$RC)"
+expect_count '^sync-reference-repos' 1 "failed repair is retried"
+[ "$(cat "$REPO/prompt-review/REF_SHAS.txt")" = "# local tip record" ] || fail "successful repair changed the original tip record"
+echo "# committed tip record" >"$REPO/prompt-review/REF_SHAS.txt"
+pass "reference repair failure remains visible, preserves the tip record, and retries on startup"
 
 # 13. Database: schema pushed once per schema hash; seeded from prod only with the
 # project's env files present, never twice, and deferred (not failed) over budget.
