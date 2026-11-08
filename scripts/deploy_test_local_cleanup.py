@@ -136,12 +136,13 @@ def need(value, message):
         raise ValueError('local cleanup: ' + message)
 
 
-def quiet(root):
-    """Do not reconcile a root currently owned by another native worker/service."""
+def quiet(root, *, observation_only=False):
+    """Read-only observers may share the lock; reconciliation remains exclusive."""
     admission = root / '.context/native-worker-admission.lock'
     need(admission.resolve(strict=True) == admission, 'admission lock is not owned by this root')
     with admission.open('r') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        mode = fcntl.LOCK_SH if observation_only else fcntl.LOCK_EX
+        fcntl.flock(lock, mode | fcntl.LOCK_NB)
         manifest = root / '.context/services.json'
         if manifest.exists() or manifest.is_symlink():
             from deploy_test_cycle import bounded_read

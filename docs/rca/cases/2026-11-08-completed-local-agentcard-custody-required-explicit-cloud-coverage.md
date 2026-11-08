@@ -86,3 +86,58 @@ boundaries. Migrate exact task coverage and owner closure explicitly, retain all
 original proof digests, and validate final peer execution at every saved-state
 verification entry point. A no-retry custody record grants no execution or
 financial settlement credit.
+
+### Recurrence: isolated successor inventory after migration
+
+On source 9ed46087 the seven retained native cloud requests each held the original
+10 checks while the current ordinary cloud gate held 14. With only the separately
+blocked source-authority result stubbed offline, the original isolated_request
+refused at `next source/inventory binding`. The unchanged current native source
+admission still independently requires a successful native maintenance producer.
+
+The successor protocol now accepts the exact old target inventory only after
+revalidating the existing completed-local proof and requiring its four disjoint
+semantic task identities to form exactly the current inventory. Source authority
+is checked first and is unchanged. Missing/forged mapping, arbitrary additions,
+removed peers, changed semantics and modified old inventory refuse. The actual
+copied-state control produces seven new-request bindings without any native
+admission, cleanup or execution credit. Fifteen focused migration tests pass;
+no full cycle or cloud task was launched. The existing synthetic cloud fixture
+now declares its real native adapter cwd as the coordinator root so this test
+reaches the production request mapping boundary rather than failing cwd checks.
+Gate: INTRODUCED for this successor inventory mismatch by the completed-local
+10-to-14 migration; this does not attribute the independent maintenance refusal.
+
+
+## Recurrence — concurrent read-only closure checks took exclusive admission locks (2026-11-08)
+
+Quick51 returned two PASS and two UNVERIFIED gates. Backend structural and
+TypeScript never launched: completed_local.physical reobserved the same retired
+local AgentCard root for each parallel gate, but quiet acquired its admission
+lock with LOCK_EX | LOCK_NB. Four readers therefore contended with each other:
+the original native reproduction recorded three BlockingIOError/EAGAIN failures
+and one PASS. Cgroup observations showed pids.events max 0 and no OOM events;
+this was lock-mode contention, not exhausted execution capacity.
+
+At source 9ed46087f2ba8ea6765953862ae249a93115a945, the same four-thread
+physical() replay on the actual retired root reproduces three failures/one PASS.
+With the fix it returns four PASS. Add an explicit observation_only keyword to
+quiet, selecting LOCK_SH | LOCK_NB only for that mode, and opt physical into it.
+Existing reconciliation/cleanup callers retain the default exclusive lock.
+The original lock path, read-only open, process incarnation scans, service
+manifest checks and physical owner/listener checks remain unchanged. A live
+exclusive native worker or cleanup owner still refuses every observation.
+
+Three new owning controls prove four simultaneous readers while an exclusive
+writer remains blocked, refusal under an existing exclusive owner, default
+exclusive cleanup under a held shared reader, and unchanged live service/process
+refusal. Five existing non-signalling LocalCleanup controls also pass. The
+exact commands, logs and patch hashes are in
+.context/cli-nov08-user-sync/quiet-observation-rca-result.json.
+No gate concurrency, deadline, retry, permission, source-state, database or
+provider operation changes. The old root is only observed under its existing
+lock; all original 607 failures and both actual quick51 failures remain history.
+This fixes the observation race, not the separate mapped-inventory boundary or
+pending current cloud coverage. Overall case status remains open for those
+existing outcome requirements. The bounded assignment is an operational parent
+handoff, not a new user quote or financial-cleanup authorization.

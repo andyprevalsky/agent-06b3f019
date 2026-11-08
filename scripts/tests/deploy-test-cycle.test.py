@@ -8117,6 +8117,67 @@ class LocalCleanupQuietScan(unittest.TestCase):
 
 
 
+class LocalCleanupObservation(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        (self.root / '.context').mkdir()
+        self.admission = self.root / '.context/native-worker-admission.lock'
+        self.admission.touch()
+
+    def test_four_readers_overlap_and_exclude_mutating_owner(self):
+        import fcntl
+        import deploy_test_local_cleanup as local
+        entered = threading.Barrier(5)
+        release = threading.Event()
+        def inspect(*args):
+            entered.wait(timeout=5)
+            self.assertTrue(release.wait(timeout=5))
+        with patch.object(deploy_test_process, 'scan_same_user_processes', inspect):
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                readers = [pool.submit(local.quiet, self.root, observation_only=True) for _ in range(4)]
+                try:
+                    entered.wait(timeout=5)
+                    with self.admission.open('r') as writer:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    release.set()
+                for reader in readers:
+                    self.assertIsNone(reader.result(timeout=5))
+
+    def test_exclusive_owner_refuses_readers_and_default_reconciliation(self):
+        import fcntl
+        import deploy_test_local_cleanup as local
+        with self.admission.open('r') as owner:
+            fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(deploy_test_process, 'scan_same_user_processes') as scan:
+                for observation_only in (False, True):
+                    with self.subTest(observation_only=observation_only), self.assertRaises(BlockingIOError):
+                        local.quiet(self.root, observation_only=observation_only)
+                scan.assert_not_called()
+        with self.admission.open('r') as observer:
+            fcntl.flock(observer, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):
+                local.quiet(self.root)
+
+    def test_observation_keeps_service_and_process_refusals(self):
+        import deploy_test_local_cleanup as local
+        manifest = self.root / '.context/services.json'
+        c.write(manifest, {'worktree': str(self.root), 'status': 'running'})
+        with self.assertRaisesRegex(ValueError, 'services not stopped'):
+            local.quiet(self.root, observation_only=True)
+        c.write(manifest, {'worktree': str(self.root), 'status': 'stopped'})
+        process = self.root / 'proc-fixture'
+        process.mkdir()
+        (process / 'cwd').symlink_to(self.root)
+        (process / 'cmdline').write_bytes(b'node\0')
+        with patch.object(deploy_test_process, 'scan_same_user_processes', lambda inspect, refused: inspect(process)):
+            with self.assertRaisesRegex(ValueError, 'live process'):
+                local.quiet(self.root, observation_only=True)
+
+
 class CompletedLocalMigration(unittest.TestCase):
     def setUp(self):
         import deploy_test_completed_local as m
@@ -8138,7 +8199,7 @@ class CompletedLocalMigration(unittest.TestCase):
               'case_protocol':True,'worker_root':str(self.worker),'worker':'old','cwd':str(self.worker),
               'command':[sys.executable,str(self.worker/'scripts/deploy_test_worker.py'),'--root',str(self.worker),'--stdio'],
               'checks':['agentcard-lifecycle'],'worker_recipe':recipe,'env':{'CONDUCTOR_WORKSPACE_NAME':'old','CONDUCTOR_PORT':'15507'}}
-        cloud=copy.deepcopy(self.plan['gates'][1]);cloud.update(name='smoke',category='smoke',native_cloud=True,
+        cloud=copy.deepcopy(self.plan['gates'][1]);cloud.update(name='smoke',category='smoke',native_cloud=True,cwd='.',
               case_protocol=True,checks=['existing-peer'],command=[sys.executable,str(self.root/'scripts/deploy_test_cloud.py')])
         cloud.setdefault('env',{})['BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL']='0'
         self.plan['source']=source;self.plan['gates']=[self.plan['gates'][0],gate,cloud,*self.plan['gates'][3:]]
@@ -8362,6 +8423,32 @@ class CompletedLocalMigration(unittest.TestCase):
         bad=copy.deepcopy(before);bad['input_fingerprints']['smoke']='changed'
         from deploy_test_historical_custody import qualifications
         with self.assertRaises(ValueError):qualifications(bad,gate,self.root,current={k:before[k] for k in ('source','plan_digest','environment','input_fingerprints')})
+
+    def test_isolated_request_exact_completed_inventory_mapping(self):
+        gate=self.migrated()
+        folder=self.root/'.context/old-cloud';folder.mkdir()
+        old={'checks':['existing-peer'],'skips':{}}
+        c.write(folder/'request.json',old)
+        entry={'token':'old-cloud','validation_source':self.state['source'],'excluded_resources':{},
+               'proof':{'receipt_sha256':'a'*64,'owner':{'native_cleanup_reference':{'result':str(folder/'result.json')}}}}
+        request={'token':'next-cloud','source':self.state['source'],'checks':gate['checks'],'skips':{}}
+        def produce(state=None,g=None,req=None,covered=None):
+            with patch.object(c,'isolated_admissions',return_value=([entry],covered or {'old-cloud':self.state['source']})):
+                return c.isolated_request(state or self.state,g or gate,req or request,self.root,{})
+        self.assertEqual(len(produce()),1)
+        for label in ('missing','forged','extra','removed-peer','changed-semantics'):
+            state=copy.deepcopy(self.state);g=copy.deepcopy(gate);req=copy.deepcopy(request)
+            if label=='missing':state.pop('completed_local_custody_history')
+            elif label=='forged':state['completed_local_custody_history'][0]['kind']='invented'
+            elif label=='extra':g['checks'].append('arbitrary');req['checks']=g['checks']
+            elif label=='removed-peer':g['checks'].remove(self.names[0]);req['checks']=g['checks']
+            else:state['completed_local_custody_history'][0]['row']['contracts'][self.names[0]]['max_steps']=1
+            with self.subTest(case=label),self.assertRaises(ValueError):produce(state,g,req)
+        c.write(folder/'request.json',{'checks':['mutated-old'],'skips':{}})
+        with self.assertRaises(ValueError):produce()
+        c.write(folder/'request.json',old)
+        with patch.object(self.m,'isolated_inventory',side_effect=AssertionError('source guard must precede mapping')):
+            with self.assertRaisesRegex(ValueError,'source/inventory'):produce(covered={'old-cloud':{'head':'foreign','digest':'foreign'}})
 
     def test_prepare_cli_does_not_rewrite_original_cycle(self):
         directory=self.root/'.context/prepare';directory.mkdir()

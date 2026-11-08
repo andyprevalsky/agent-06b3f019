@@ -17,7 +17,7 @@ def need(value, reason):
 def physical(worker, run, owners, services):
     """Re-observe exact local closure without stopping anything or touching a database."""
     from deploy_test_local_cleanup import quiet
-    quiet(worker)
+    quiet(worker, observation_only=True)
     for owner in owners:
         need(type(owner.get('pid')) is int and owner['pid'] > 1
              and re.fullmatch(r'linux:[0-9a-f-]+:[0-9]+', owner.get('native_identity', '')),
@@ -222,6 +222,22 @@ def verify(state, root):
         preserve_contract(row['target_gate_contract'], gate)
         need(gate.get('native_cloud') is True and set(row['contracts']) <= set(gate['checks']),
              'mapped peer coverage removed')
+
+
+def isolated_inventory(state, gate, root):
+    """Exact old inventory authorized by the sealed four-task migration only."""
+    verify(state, root)
+    proofs = [p for p in state.get('completed_local_custody_history', [])
+              if p.get('kind') == KIND and p['row']['target_gate'] == gate['name']]
+    need(len(proofs) == 1, 'unique completed-local inventory migration required')
+    proof = proofs[0]
+    old, = [g for g in proof['old_plan']['gates'] if g['name'] == gate['name']]
+    peers = set(proof['row']['contracts'])
+    before = set(old['checks'])
+    need(not before & peers and set(gate['checks']) == before | peers
+         and gate == next(g for g in state['plan']['gates'] if g['name'] == gate['name']),
+         'exact completed-local inventory expansion required')
+    return before
 
 
 def qualifications(state, gate, root, *, current=None):
