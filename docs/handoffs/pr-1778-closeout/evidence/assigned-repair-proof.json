@@ -1,0 +1,49 @@
+{
+ "assigned_test": "deploy gate semantic-stack (bash scripts/run-deploy-semantic-stack.sh) on Blacksmith 8vcpu",
+ "original_failure": {
+  "run": "deploy-gates/8vcpu/semantic-stack-4d7e6b834333cd6b",
+  "source": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+  "error": "ERR_NGROK_334 'https://rose-rose.ngrok.app' is already online -> No public tunnel provider could serve :12001 (reserved ngrok domain held elsewhere; tried cloudflare) -> Step5 stack exited before readiness"
+ },
+ "fix": {
+  "pr": 1778,
+  "reviewed_head": "b4fc555f6f0da68149c1130047affa6e6bd87c65",
+  "merged_sha": "81fe1bdb16735ed781b06af72f61ed5fa6413093",
+  "change": "scripts/run-deploy-semantic-stack.sh launches run.sh --benchmark with BENCHMARK_SKIP_PUBLIC_TUNNEL=1; regression scripts/tests/run-deploy-semantic-stack.test.sh (deploy structural gate deploy-semantic-stack)"
+ },
+ "local_repro": {
+  "setup": "scratch checkout 'semrepro', rose-semrepro.ngrok.app held by a second ngrok agent, failing cloudflared shim (the VM's unroutable quick tunnels), CONDUCTOR_PORT=23000 CONDUCTOR_WORKSPACE_NAME=deploy-semantic-stack ROSE_USE_SYSTEM_PG=true",
+  "old_source_cdb8ce580": "ERR_NGROK_334 ... 'https://rose-semrepro.ngrok.app' is already online; No public tunnel provider could serve :23001 (reserved ngrok domain held elsewhere; tried cloudflare); Step5 stack exited before readiness; EXIT=1",
+  "fixed_source_1c44682df3": "BENCHMARK_SKIP_PUBLIC_TUNNEL=1 \u2014 skipping public tunnel; STACK_READY 2026-11-08T00:19:10Z with the domain still held (local devbox suite later stopped: mocked project specs timed out under 25-53% CPU steal, not tunnel-related)",
+  "regression": "run-deploy-semantic-stack.test.sh FAILS on the old script ('the semantic stack must not contend for a shared public tunnel'), PASSES on the fix",
+  "evidence_archive": "evidence/archive-receipt-repro.json"
+ },
+ "two_concurrent_deploy_gates": [
+  {
+   "role": "deploy cycle A semantic-stack",
+   "actions_run": 42432099868,
+   "stack_start": "2026-11-08T00:57:51Z",
+   "stack_ready": "2026-11-08T01:00:26Z",
+   "lane_end": "2026-11-08T01:14:14Z",
+   "workspace_identity": "rose (same derived identity)",
+   "tunnel": "skipped",
+   "result": "PASS (56 passed + 5 passed, ui=0 latency=0)"
+  },
+  {
+   "role": "concurrent second copy (distinct token, same source)",
+   "actions_run": 42432124850,
+   "stack_start": "2026-11-08T00:58:19Z",
+   "stack_ready": "2026-11-08T01:01:03Z",
+   "lane_end": "2026-11-08T01:16:38Z",
+   "workspace_identity": "rose",
+   "tunnel": "skipped",
+   "result": "PASS (56 passed + 5 passed, ui=0 latency=0)"
+  }
+ ],
+ "final_cycle_semantic_stack": "PASS again in cycle B (final, same head b4fc555f6f)",
+ "production_semantic": {
+  "actions_run": 42440297234,
+  "merged_sha": "81fe1bdb16735ed781b06af72f61ed5fa6413093",
+  "result": "PASS"
+ }
+}
