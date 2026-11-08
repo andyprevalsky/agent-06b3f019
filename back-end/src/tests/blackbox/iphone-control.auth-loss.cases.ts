@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
+import { revokePhoneFixtureIdentity } from './iphone-test-user';
 import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import { setupState, sealSetup } from '../../providers/phoneSetupState';
 import type { ImessageAuthLossResult } from '../../providers/phoneAuthLoss';
@@ -136,8 +137,7 @@ async function mutate(f: Awaited<ReturnType<typeof prepared>>, kind: (typeof fen
       where: { id: d.id },
       data: { setupEncrypted: sealSetup(s) },
     });
-  } else if (kind === 'phone')
-    await prisma.user.update({ where: { userId: f.userId }, data: { phone: '+15550009999' } });
+  } else if (kind === 'phone') await revokePhoneFixtureIdentity(f.userId);
   else if (kind === 'cursor')
     await prisma.iPhoneLease.update({
       where: { id: f.leaseId },

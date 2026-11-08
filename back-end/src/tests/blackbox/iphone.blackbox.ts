@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import { completedSyntheticSetup } from './iphone.synthetic-ready';
-import { createPhoneFixtureUser } from './iphone-test-user';
+import { createPhoneFixtureUser, revokePhoneFixtureIdentity } from './iphone-test-user';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
@@ -365,7 +365,7 @@ test('server identity revocation rechecks lease authorization', async () => {
   const f = await fixture();
   const a = await agent(f.userId);
   const lease = await acquire(f.userId, a.id);
-  await prisma.user.update({ where: { userId: f.userId }, data: { phone: '+15550009999' } });
+  await revokePhoneFixtureIdentity(f.userId);
   await expectStatus(action(f.userId, lease.id, 'heartbeat'), 403);
   await expectStatus(action(f.userId, lease.id, 'release'), 200);
 });

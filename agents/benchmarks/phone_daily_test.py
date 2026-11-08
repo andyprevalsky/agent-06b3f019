@@ -128,7 +128,7 @@ def test_existing_catalog_rows_unchanged():
     import subprocess
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
-    old = json.loads(subprocess.check_output(['git', 'show', 'b365bf8bd69346f872e5e2cb7218872155ca294d:agents/benchmarks/tasks.json'], cwd=root, text=True))
+    old = json.loads(subprocess.check_output(['git', 'show', '06416c4f9f50ecec4f5d2678620e20dc3c0fd3d0:agents/benchmarks/tasks.json'], cwd=root, text=True))
     current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
     # Sync retains every row from the reviewed main snapshot; phone tasks append only.
     assert current[:len(old)] == old

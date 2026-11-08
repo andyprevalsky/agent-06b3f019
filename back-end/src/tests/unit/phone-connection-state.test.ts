@@ -92,6 +92,7 @@ test('ready needs current complete configuration including portrait lock', () =>
     taskId: 'task',
     agentId: 'agent',
     workflowId: 'workflow',
+    firstExecutionRunId: 'run',
     floorCursor: 0,
     floorAt: new Date(0).toISOString(),
   };
