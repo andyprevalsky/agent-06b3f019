@@ -1,0 +1,16 @@
+== mw.log (2026-11-08 00:33:37Z)
+PASS: scenario 2h — scale-down destroy failure fails closed and remains recoverable
+FAIL: autoscaler failure lifecycle evidence is wrong
+MW_EXIT=1
+PASS lines: 55
+== mw2.log (2026-11-08 01:02:10Z)
+PASS: scenario 2h — scale-down destroy failure fails closed and remains recoverable
+PASS: scenario 2h2 — persistent destroy refusal retains the exact worker owner after bounded retries
+MW_EXIT=0
+PASS lines: 76
+== mw3.log (2026-11-08 06:36:19Z)
+PASS: scenario 2h — scale-down destroy failure fails closed and remains recoverable
+PASS: scenario 2h2 — persistent destroy refusal retains the exact worker owner after bounded retries
+MW_EXIT=0
+PASS lines: 76
+note: mw.log failed only on a too-strict new 2h2 attribution assertion (fixed before mw2); mw2.log ran the merged run-bench-fleet and cloudbench-multi-workstream.test.sh bytes; mw3.log included the later-reverted bench-verdict sealing (2aff7ad80). The cloudbench-controller deploy gate also ran this suite on the final gated source 3bf66999e and passed.
