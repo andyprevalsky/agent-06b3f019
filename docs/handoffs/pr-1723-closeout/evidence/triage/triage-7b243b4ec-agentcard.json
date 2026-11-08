@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "cca87a43baec4654b14f827dc0b31ac7",
+   "native_result": "FAIL",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "7b243b4ec680bad960deca3e8dcf091cab3cc2e5",
+    "digest": "c22b4ed7a4899425e28b96f8b0066a921930d66c0653b7a087aa55215fda8e49"
+   },
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-abandonment: AgentCard never released the closed card's org transfer (consumed, releasedCents=0); native row SKIPPED under the standing release-stall policy",
+   "evidence": "Gate: NOT_INTRODUCED. Exact standing AgentCard release stall: purchase HELD, walletFunding RECLAIMING, card card_35032f37ab7b76a79fd3a225 CLOSED balance 0, org transfer owt_e8cc8fd1e54311adc3b0f590 consumed transferredCents=4396 releasedCents=0 (agent 2db9eeab-dd3d-4ea1-ab2b-67ec09e5d603). This PR does not touch payments or AgentCard. Unreleased 4396 cents stays a followup; no card minted or reclaimed again. Native receipt: /home/boxes/rose/.context/deploy-cloud/3a1d88f0c12c5a4b948eef1c473a348ab7c33af18c010efe94b9132f7cf3fe90/runs/20261107-200314-215574/agent-payment-abandonment/cloudbench-run.json",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "fe8e77de88d12dad21f677d67827edf16102eaea7ae57ed3b3e182952b9d05bd",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_e8cc8fd1e54311adc3b0f590\", \"cardId\": \"card_35032f37ab7b76a79fd3a225\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py 2db9eeab-dd3d-4ea1-ab2b-67ec09e5d603 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard",
+    "evidence": "native SKIPPED row agent-payment-abandonment, transfer owt_e8cc8fd1e54311adc3b0f590 consumed releasedCents=0",
+    "confirmed_at": 1794083484.633595
+   }
+  }
+ ]
+}
