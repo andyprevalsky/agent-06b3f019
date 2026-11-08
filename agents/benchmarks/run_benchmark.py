@@ -534,7 +534,7 @@ def route_cache_floor(task_name: str, routes: list[str]) -> Optional[float]:
     )
 
 
-# DEPRECATED_deploy.md L1831: Claude Code task correctness stays hard-gated, but its repeatable prompt-cache
+# the former /deploy skill: Claude Code task correctness stays hard-gated, but its repeatable prompt-cache
 # telemetry floor is warn-only wherever the benchmark runs (local or cloud) and every miss is a risk.
 CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS = {"claude-code-agent"}
 GATE_FIXTURE_TASK_MODES = {

@@ -280,7 +280,7 @@ Not all errors are bugs in our code. Before writing a fix, classify:
 
 ### Step 4a: Benchmark issue classes and diagnostics
 
-Applies to benchmark failures, including `/descend` triage cards and clusters. Each issue gets exactly one `issue_class`, kept verbatim in state and in its cluster status. The class says what kind of failure it is and never decides cluster membership: two tasks share a cluster only when one fix flips both. The Step 5a problem bucket stays the deeper technical record.
+Applies to benchmark failures, including each `/descend` RCA. Each issue gets exactly one `issue_class`, kept verbatim in state and in its RCA ledger row. The class says what kind of failure it is and never decides that two failures share a defect; only the same named defect at the same code site does. The Step 5a problem bucket stays the deeper technical record.
 
 | Issue class                  | Use when the proven first-bad boundary is…                                                                                                                                                          |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

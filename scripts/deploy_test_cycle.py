@@ -1479,7 +1479,7 @@ CLOUD_SMOKE, CLOUD_SMOKE_PREREQUISITE = 'smoke', 'cloudbench-controller'
 def cloud_smoke_prerequisite(plan: dict, state: dict, selected: list[dict]) -> dict | None:
     """The one cross-gate order in a phase: paid cloud smoke waits for the cloudbench-controller gate.
 
-    Original /deploy Step 4cb (DEPRECATED_deploy.md): when the cloudbench-controller gate is planned (it is selected only when
+    Original /deploy Step 4cb (the former /deploy skill): when the cloudbench-controller gate is planned (it is selected only when
     cloud benchmark scripts changed), its regressions must pass on this source before any paid cloud
     run. Returns that planned gate while it is not already credited for this source and the phase runs
     smoke; None otherwise. Every other gate stays unordered.

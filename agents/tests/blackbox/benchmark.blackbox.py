@@ -6976,7 +6976,7 @@ def test_agent_payment_accepts_grounded_finished_browser_text_without_structured
 
 
 async def test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules():
-    """.claude/commands/DEPRECATED_deploy.md Step 13c (orig L3407-3434): when the non-admin
+    """the former /deploy skill Step 13c (orig L3407-3434): when the non-admin
     production identity is missing, `agent-payment-production-abandonment` stops before any live
     spend and its own error carries the exact provisioning command, the credential source and the
     guardrails, so the agent that hits it needs no other document and never asks the user."""

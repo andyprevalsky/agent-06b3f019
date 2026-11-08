@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regression for scripts/run-deploy-semantic-stack.sh, the versioned Group 4
 # semantic lane (the former deploy.md Steps 5, 6b, 6c, kept in
-# .claude/commands/DEPRECATED_deploy.md; `run_deploy_pipeline.py plan
+# the former /deploy skill; `run_deploy_pipeline.py plan
 # --semantic-stack` / `--e2b-smoke`, follow-up 12, 2026-10-31). The script
 # must parse, refuse to run without its required environment before any side
 # effect (no sweep, no stack, no stage record), honour its three modes, carry
@@ -51,8 +51,8 @@ require_text "$SCRIPT" 'curl -sf --max-time 5 "$SMOKE_BASE_URL/health"' "readine
 EXPORT_LINE=$(grep -n '^export CONDUCTOR_WORKSPACE_NAME=' "$SCRIPT" | head -1 | cut -d: -f1)
 CONFIGURE_LINE=$(grep -n '^configure_deploy_local_env || exit 2' "$SCRIPT" | head -1 | cut -d: -f1)
 [ -n "$EXPORT_LINE" ] && [ -n "$CONFIGURE_LINE" ] && [ "$EXPORT_LINE" -lt "$CONFIGURE_LINE" ] || fail "CONDUCTOR_WORKSPACE_NAME fallback (line ${EXPORT_LINE:-?}) must precede configure_deploy_local_env (line ${CONFIGURE_LINE:-?})"
-require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the Step 5 environment (DEPRECATED_deploy.md)"
-# The worker count is overridable for memory-bounded hosts, but the Step 5 default (DEPRECATED_deploy.md) stays 8.
+require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the Step 5 environment (the former /deploy skill)"
+# The worker count is overridable for memory-bounded hosts, but the Step 5 default (the former /deploy skill) stays 8.
 require_text "$SCRIPT" 'SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"' "the stack must default to the Step 5 WORKER_PROCESSES=8"
 [ "$(grep -Ec '(^|[[:space:]])WORKER_PROCESSES=' "$SCRIPT")" = 1 ] || fail "only the defaulted override may set the stack's WORKER_PROCESSES"
 require_text "$SCRIPT" 'bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &' "stack must be the Step 5 run.sh --benchmark launch"
@@ -175,7 +175,7 @@ expect_exit 2 env CONDUCTOR_PORT="$closed_base" bash scripts/run-deploy-semantic
 expect_output "E2B smoke: Postgres is not ready on localhost:65534" "a running stack manifest supplies the database port"
 [ ! -e "$SWEEP_MARKER" ] || fail "E2B-only mode must never sweep the worktree"
 
-# 5. The E2B gate's own verdict (Step 6c, DEPRECATED_deploy.md L2133-2148). PASS needs exit 0, the summary line
+# 5. The E2B gate's own verdict (Step 6c, the former /deploy skill). PASS needs exit 0, the summary line
 #    `PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox)` and an observed CLAUDE_E2B_DONE from
 #    a real sandbox. A credential/billing block only the user can fix is a loud SKIPPED with its
 #    evidence (exit 1, never PASS); every other no-sandbox path is FAIL.

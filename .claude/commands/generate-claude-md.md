@@ -44,7 +44,7 @@ ls back-end/src/providers/ 2>/dev/null
 ls back-end/src/utils/ 2>/dev/null
 
 # Key config files
-ls conductor.json .coderabbit.yaml back-end/prisma/schema.prisma 2>/dev/null
+ls .coderabbit.yaml back-end/prisma/schema.prisma 2>/dev/null
 ```
 
 ### 1b. Skills inventory
@@ -127,9 +127,6 @@ ls docs/internal/ 2>/dev/null
 ```bash
 # 1. Glob for existing log files and log-like files at the repo root and one level deep
 find . -maxdepth 2 -name '*.log' -o -name '*-logs.*' -o -name '*-log.*' 2>/dev/null | grep -v node_modules | grep -v dist | grep -v .git
-
-# 2. Check conductor.json for log file paths (services often configure log output here)
-grep -i 'log' conductor.json 2>/dev/null
 
 # 3. Grep scripts and code for hardcoded log file paths (catches log paths that don't exist yet)
 grep -rn '\-logs\.\|\.log["\x27]' scripts/ back-end/src/ agents/ --include='*.ts' --include='*.sh' --include='*.py' --include='*.json' 2>/dev/null | grep -v node_modules | head -30
