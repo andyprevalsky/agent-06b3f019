@@ -298,7 +298,10 @@ if can_create_scratch_db; then
   OWNER_DB="message_owner_backfill_test_$$"
   OWNER_URL="postgresql://postgres:postgres@localhost:5432/$OWNER_DB"
   psql "$ADMIN_URL" -qc "CREATE DATABASE $OWNER_DB" >/dev/null
-  trap 'psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS ${SCRATCH_DB:-none}" >/dev/null 2>&1 || true; psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $OWNER_DB" >/dev/null 2>&1 || true' EXIT
+  # Replaces the earlier EXIT trap, so it must drop every scratch database created so far.
+  trap 'for db in ${SCRATCH_DB:-} ${PUSH_DB:-} $OWNER_DB; do
+          psql "$ADMIN_URL" -qc "DROP DATABASE IF EXISTS $db" >/dev/null 2>&1 || true
+        done' EXIT
   bash "$BACKFILL" "$OWNER_URL" >/dev/null
   psql "$OWNER_URL" -v ON_ERROR_STOP=1 -q >/dev/null <<'SQL'
 CREATE TABLE "Person" (id text PRIMARY KEY, "userId" text NOT NULL);
