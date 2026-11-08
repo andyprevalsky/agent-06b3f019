@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/pr-1830/initial-evidence-v1.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "7e9a5ad6f1d74434c4ac59d5f7908f1082047517b6754c42be24efe481158a75",
+  "gzip_sha256": "ed94d39f3c4f2dcd1d540ef7d254f0e151cdada1406c566e4420d386086b4634",
+  "stored_bytes": 1581124,
+  "frames": 1,
+  "files": 249,
+  "original_bytes": 13755881,
+  "manifest_sha256": "2ec29c5cbc59639a3e962ace2f1511eb21667a102b1d3679d502b31c594a8381",
+  "full_readback_verified": true
+}

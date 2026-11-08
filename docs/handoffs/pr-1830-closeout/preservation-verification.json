@@ -1,0 +1,42 @@
+{
+  "format": "PR1830-PRESERVATION-VERIFICATION-V1",
+  "final_evidence": {
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "bucket": "trace-archive",
+    "key": "devbox-closeouts/pr-1830/final-evidence-v1.enc",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "ciphertext_sha256": "4b08fc8097f4119d8b716982aeecf53e65eaf191a82565452bff68ca34ac6d6b",
+    "gzip_sha256": "9bd308bc3c9b38110811451dfed2824e4647d3ae3dab6fe27c58ffde61d89de9",
+    "stored_bytes": 941090929,
+    "frames": 113,
+    "files": 29327,
+    "original_bytes": 3561337377,
+    "manifest_sha256": "a02849374db1e1f7addd494d1f468b345149e811ff20845989fccd131a5a8d66",
+    "full_readback_verified": true
+  },
+  "inherited_workspace_independent_restore": {
+    "files": 85471,
+    "all_hashes_verified": true,
+    "all_current_regular_files_equal": true,
+    "proof_in_private_evidence": "mac-autotag-repair/inherited-workspace-current-comparison.json"
+  },
+  "custody_restores": {
+    "base_files": 1869,
+    "closure_files": 96,
+    "all_hashes_verified": true,
+    "current_typed_admission_verified": true,
+    "no_live_state_overlay": true
+  },
+  "git_history": {
+    "all_refs_bundle_verified": true,
+    "private_receipt": "private-git-history-receipt.json",
+    "all_current_local_only_tips_bound": true,
+    "stash_tips_bound": true
+  },
+  "excluded_duplicate_caches": [
+    ".context/mac-autotag-preserved-refs.bundle (private Git archive)",
+    ".context/pr1770-custody-native-evidence (private custody base)",
+    ".context/pr1770-custody-closure-supplement (private custody closure)"
+  ],
+  "needed_local_data_unpreserved": []
+}
