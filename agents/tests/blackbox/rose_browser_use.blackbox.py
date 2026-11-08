@@ -3113,11 +3113,6 @@ def test_phone_off_matches_prephone_bytes():
     recovery-enabled ('0') tools hash changed; the recovery-disabled ('1') hashes and
     every system/messages hash are unchanged; 268e9550b0 reproduces the previous tools
     hash exactly.
-    Re-pinned for H-39a (rca/h-39-20261108): the recover_from_challenge description now
-    says recovery returns to the page that submitted a form result without repeating
-    the submission. Only the recovery-enabled ('0') tools hash changed; the
-    recovery-disabled ('1') hashes and every system/messages hash are unchanged;
-    72889c4389 reproduces the previous tools hash exactly.
     Re-pinned for H-74 (rca/h-74-20261108): the shared Authentication contract now
     states that a sign-in or sign-up prompt the agent can close or skip does not block
     the task, deferring to ladder steps 1-5 and the member-price sign-up rule. Only the
@@ -3132,8 +3127,7 @@ def test_phone_off_matches_prephone_bytes():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
             values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
         actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
-        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7+H-57+H-31"
-        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7+H-57+H-31+H-39a+H-74"
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7+H-57+H-31+H-74"
 
 
 async def test_phone_off_actual_rose_request():
