@@ -127,6 +127,16 @@ the historical writer or claim production recovery. Credits GET can grant its
 existing invite allowance; zero runner allocation writes is not a claim that
 this API makes no database writes.
 
+During this repair's deployment, the unpublished stabilization commit was refused
+by cloud source admission before any fleet handle or task allocation. All 13
+native cases remain UNVERIFIED. Publishing the source fixes that operational
+cause. A narrow typed cleanup proof binds the exact historical dispatch sources,
+refusal logs, empty run namespace, joined relay/inventory processes and native
+publication acknowledgment before permitting another launch. Its unchanged
+regression fails on the previous validator and passes with seven rejection
+controls; it grants neither task nor financial cleanup credit. This does not
+waive or rerun either protected historical payment case.
+
 ## Human feedback
 
 The user assigned this distinct admission defect through its own deploy on an
