@@ -9586,7 +9586,7 @@ async def _run_subscription_order(first, limited: set[str], fetch_fresh_leases: 
 
 
 async def test_flash_root_explore_compute_only_and_speed():
-    from providers.rose.speed import bind_agent_speed, current_agent_speed
+    from providers.rose.speed import bind_agent_speed
     from providers.rose.errors import RoseServerError
 
     calls = []
@@ -9619,8 +9619,7 @@ async def test_flash_root_explore_compute_only_and_speed():
     ):
         for site in ("plan_loop", "execute_loop", "explore_agent"):
             for speed in ("standard", "fast", "ultrafast"):
-                previous_speed = current_agent_speed()
-                bind_agent_speed(speed)
+                speed_token = bind_agent_speed(speed)
                 try:
                     calls.clear()
                     await _drain(RoseClient().complete(pool="rose-1-flash", call_site=site,
@@ -9628,7 +9627,8 @@ async def test_flash_root_explore_compute_only_and_speed():
                         gpt_auth=_pool_lease("gpt", "fixture")))
                     assert calls == [("gpt", "gpt-6.1-terra", "medium", speed)], calls
                 finally:
-                    bind_agent_speed(previous_speed)
+                    # Restore the exact prior value; re-binding None would leave "standard" bound.
+                    speed_token.var.reset(speed_token)
             failing = True
             calls.clear()
             await _drain(RoseClient().complete(pool="rose-1-flash", call_site=site,
