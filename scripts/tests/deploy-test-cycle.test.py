@@ -3869,6 +3869,148 @@ class Cycle(unittest.TestCase):
         proof['files'] = {str(p): c.sha_file(p) for p in files}
         return state, occurrence, paths, proof, campaign
 
+    def inventory_init_failure_state(self):
+        import hashlib
+        state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
+        inventory = campaign / 'shared-inventory'
+        for relative in ('scripts/cloudbench-campaign-inventory.sh', 'scripts/lib/cloudbench-inventory.sh',
+                         'scripts/lib/cloudbench-env.sh', 'scripts/cloudbench-campaign-machines.py',
+                         'scripts/cloudbench-machine-readiness.py', 'scripts/run-bench-campaign.py',
+                         'scripts/run-bench',
+                         'scripts/cloudbench_catalog.py',
+                         'scripts/cloudbench-timeout-policy.py',
+                         'scripts/cloudbench-shard-coordinator.py',
+                         'agents/benchmarks/benchmark_tasks.py',
+                         'agents/benchmarks/fixtures.py',
+                         'agents/benchmarks/live_fixtures.py',
+                         'agents/benchmarks/polar_catalog.py',
+                         'agents/benchmarks/timeout_history.py',
+                         'agents/benchmarks/history_ledger.py',
+                         'scripts/cloudbench-provider-capacity.py',
+                         'scripts/cloudbench-production-only-tasks.py',
+                         'scripts/cloudbench-campaign-seed.py',
+                         'agents/benchmarks/hub_upload.py',
+                         'scripts/cloudbench-scorecard.py',
+                         'scripts/cloudbench_experiments.py',
+                         'scripts/cloudbench-port-lease.py'):
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists():
+                target.write_bytes((ROOT / relative).read_bytes())
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts', 'agents'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'native publisher source'], check=True)
+        head = c.source(self.root)['head']
+        # The native source reader binds a real fixture commit; no git reader is mocked.
+        source = dict(head=head, digest=c.source(self.root)['digest'])
+        publisher = inventory / 'scripts'; publisher.mkdir()
+        for relative in ('scripts/cloudbench-campaign-inventory.sh', 'scripts/lib/cloudbench-inventory.sh',
+                         'scripts/lib/cloudbench-env.sh', 'scripts/cloudbench-campaign-machines.py',
+                         'scripts/cloudbench-machine-readiness.py'):
+            (publisher / Path(relative).name).write_bytes((ROOT / relative).read_bytes())
+        log = inventory / 'publisher.private.log'
+        log.write_text('[warn] FLY_COMPLETION_TIMEOUT shell_pid=2147483002 shell_start_ticks=18368956 fly_return_status=unknown fifo_read_status=142\n❌ shared inventory snapshot did not initialize\n')
+        diagnostic = inventory / 'inventory-refresh-diagnostics'; diagnostic.mkdir()
+        (diagnostic / 'latest').write_text('phase=volumes-list\nstatus=142\nepoch=1793664473\nelapsed_seconds=32\npid=2147483003\npublisher_token=fixture\n')
+        (diagnostic / 'history').write_text('1793664473\tvolumes-list\t142\t32\n')
+        (diagnostic / 'failure.raw.private').write_bytes(b'')
+        cli = Path(paths['adapter']).parent  # the existing fixture owns all paths
+        request = c.read(paths['receipt'].parent / 'request.json')
+        receipt = c.read(paths['receipt']); adapter = c.read(paths['adapter'])
+        request['source'] = source; receipt['source'] = source; adapter['source'] = source; proof['source'] = source
+        c.write(paths['receipt'].parent / 'request.json', request)
+        runs = Path(adapter['runner_log']).parent / 'runs'
+        command = ['bash', 'scripts/run-bench', *request['checks'], '--runs', '1', '--concurrency', '4', '--retry-infra', '0', '--ref', request['source']['head']]
+        adapter.update(native_exit=1, complete=False, cleanup_complete=False, native_command=command)
+        c.write(paths['adapter'], adapter)
+        receipt['native_cleanup_reference']['result_sha256'] = c.sha_file(paths['adapter'])
+        receipt['cleanup_owner']['native_cleanup_reference'] = receipt['native_cleanup_reference']
+        c.write(paths['receipt'], receipt)
+        Path(adapter['runner_log']).write_text(f'Campaign inventory did not initialize; see private publisher log\n{campaign}\n')
+        c.write(runs.parent / 'cli.log.process.json', dict(supervisor_pid=2147483000, child_pid=2147483001,
+            native_exit=1, cancelled=False, timed_out=False, quiescent=True, orphaned_children=False,
+            reaped=[dict(pid=2147483001, status=256)], term_sent=[], kill_sent=[], remaining=[], error=None))
+        proof.update(layout='campaign-inventory-init-failure-v1', owner=receipt['cleanup_owner'],
+                     receipt_sha256=c.sha_file(paths['receipt']), worker_result_sha256=c.sha_file(paths['adapter']))
+        proof['files'] = {str(path): c.sha_file(path) for path in
+            [paths['receipt'].parent / 'request.json', Path(adapter['runner_log']), runs.parent / 'cli.log.process.json',
+             *campaign.glob('*.json'), campaign / 'hub-group-publication.private.log',
+             inventory / 'stop', log, *publisher.iterdir(), *diagnostic.iterdir()]}
+        state['attempts'][-1]['results'][0] = receipt
+        return state, occurrence, paths, proof, campaign
+
+    def test_inventory_init_failure_retirement_keeps_every_outcome_unverified(self):
+        import deploy_test_native_cleanup as native
+        state, occurrence, paths, proof, campaign = self.inventory_init_failure_state()
+        receipt = c.read(paths['receipt'])
+        before = copy.deepcopy(receipt)
+        original_attempts = copy.deepcopy(state['attempts'])
+        c.reconcile(state, occurrence['id'], proof)
+        result = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(state['attempts'], original_attempts)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(result['participants'], [])
+        self.assertEqual(receipt, before)
+        self.assertEqual(set(receipt['cases'].values()), {'UNVERIFIED'})
+
+    def test_inventory_init_failure_rejects_changed_precampaign_entrypoints(self):
+        import deploy_test_native_cleanup as native
+        # The changed wrapper is committed as source evidence and never executed.
+        target = self.root / 'scripts/run-bench'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('# Untrusted pre-campaign operation; never executed by this test.\n')
+        state, occurrence, paths, proof, campaign = self.inventory_init_failure_state()
+        receipt = c.read(paths['receipt'])
+        committed = subprocess.check_output(['git', '-C', str(self.root), 'show',
+                                             receipt['source']['head'] + ':scripts/run-bench'])
+        self.assertEqual(committed, target.read_bytes())
+        with self.assertRaisesRegex(ValueError, 'inventory init unsupported producer'):
+            native.validate(receipt, receipt['cleanup_owner'], proof)
+
+    def test_inventory_init_failure_refuses_admission_unknown_owner_and_changed_source(self):
+        import deploy_test_native_cleanup as native
+        state, occurrence, paths, proof, campaign = self.inventory_init_failure_state()
+        adapter = c.read(paths['adapter']); runs = Path(adapter['runner_log']).parent / 'runs'
+        original = {Path(path): Path(path).read_bytes() for path in proof['files']}
+        original[paths['receipt']] = paths['receipt'].read_bytes()
+        original[paths['adapter']] = paths['adapter'].read_bytes()
+        supervisor = runs.parent / 'cli.log.process.json'
+        def edit(path, **values):
+            doc = c.read(path); doc.update(values); c.write(path, doc)
+        changes = [
+            ('participant', lambda: (runs / 'unexpected').mkdir()),
+            ('owner', lambda: (campaign / 'shared-inventory/owner').write_text('live')),
+            ('unknown-supervisor', lambda: edit(supervisor, quiescent=False)),
+            ('orphan', lambda: edit(supervisor, orphaned_children=True)),
+            ('live-process', lambda: edit(supervisor, supervisor_pid=os.getpid())),
+            ('source-bytes', lambda: (campaign / 'shared-inventory/scripts/cloudbench-inventory.sh').write_text('changed')),
+            ('source-identity', lambda: edit(paths['receipt'], source={'head': 'b' * 40})),
+            ('native-outcome', lambda: edit(paths['adapter'], cases={'fixture': 'PASS'})),
+        ]
+        for name, change in changes:
+            for path, data in original.items(): path.write_bytes(data)
+            for added in (runs / 'unexpected', campaign / 'shared-inventory/owner'):
+                if added.is_dir(): added.rmdir()
+                elif added.exists(): added.unlink()
+            change()
+            current = copy.deepcopy(proof)
+            if name == 'native-outcome':
+                receipt = c.read(paths['receipt'])
+                receipt['cases'] = c.read(paths['adapter'])['cases']
+                receipt['native_cleanup_reference']['result_sha256'] = c.sha_file(paths['adapter'])
+                receipt['cleanup_owner']['native_cleanup_reference'] = receipt['native_cleanup_reference']
+                c.write(paths['receipt'], receipt)
+                current['owner'] = receipt['cleanup_owner']
+                current['worker_result_sha256'] = c.sha_file(paths['adapter'])
+            current['files'] = {str(path): c.sha_file(path) for path in original if str(path) in proof['files']}
+            current['receipt_sha256'] = c.sha_file(paths['receipt'])
+            with self.subTest(case=name), self.assertRaises(ValueError):
+                native.validate(c.read(paths['receipt']), c.read(paths['receipt'])['cleanup_owner'], current)
+        for path, data in original.items(): path.write_bytes(data)
+        log = campaign / 'shared-inventory/publisher.private.log'
+        with log.open('ab'), self.assertRaisesRegex(ValueError, 'startup log writer'):
+            native.validate(c.read(paths['receipt']), c.read(paths['receipt'])['cleanup_owner'], proof)
+
     def test_unlaunched_campaign_reconciles_without_test_credit(self):
         state, occurrence, paths, proof, campaign = self.unlaunched_campaign_state()
         original = copy.deepcopy(state['attempts'])

@@ -830,6 +830,86 @@ def dispatch_refusal(root, runs, campaign, request, receipt, adapter, confirmed,
     need(campaign_published(summary, campaign, adapter['started_at'], native), 'dispatch refusal publication closure')
 
 
+def inventory_init_failure(root, runs, campaign, request, receipt, adapter, bound, document):
+    """A sealed, read-only publisher timeout before any fleet or relay admission."""
+    checks = request['checks']
+    need(receipt.get('cases') == adapter.get('cases') == dict.fromkeys(checks, 'UNVERIFIED')
+         and receipt.get('case_complete') == dict.fromkeys(checks, False)
+         and adapter.get('complete') is False and adapter.get('cleanup_complete') is False
+         and type(adapter.get('native_exit')) is int and adapter['native_exit'] == 1,
+         'inventory init changed outcome')
+    command = adapter.get('native_command', [])
+    need(len(command) == len(checks) + 10 and command[:2] == ['bash', 'scripts/run-bench']
+         and command[2:2+len(checks)] == checks and command[-8:-5] == ['--runs', '1', '--concurrency']
+         and command[-5].isdigit() and 1 <= int(command[-5]) <= len(checks)
+         and command[-4:] == ['--retry-infra', '0', '--ref', receipt['source']['head']],
+         'inventory init native command')
+    # These original native producers initialize the API-only feed before relay
+    # or task dispatch; later source changes must establish their own boundary.
+    supported = {
+        'scripts/cloudbench-campaign-inventory.sh': 'e924d72f258bd5b2507348e5b53143aa4c2afa1c410cd63bdf495f27dfd2082d',
+        'scripts/lib/cloudbench-inventory.sh': '01dc00ebba29ea4307f78774c3d8d73fd214c64f06fda1d00fc86df24c08b8e2',
+        'scripts/run-bench-campaign.py': '57196da49e7dd07eb696e85ee8b6394d61237ad339579093d12c5645f298691f',
+        'scripts/lib/cloudbench-env.sh': '166f249b055d9b5ebf6d28cb54c7f522e4ad0ab5652cfe670ecc58388a947e2d',
+        'scripts/cloudbench-campaign-machines.py': 'e85eb826790c70e87b4d397467e01b2d1f9e805ce1efedb458edc16bff60353b',
+        'scripts/cloudbench-machine-readiness.py': '5843e509a64380711147b140c346e81622a2f904b300d3af5a247415f5488797',
+        'scripts/run-bench': 'd6a63399d3ae00ae83d469f06ad44870a57ad13a85c99703366137012fc1420e',
+        'scripts/cloudbench_catalog.py': 'fd6adad0f3961a77f5cbb8b82abd648e910614cd0017c21f116f413be6e7702e',
+        'scripts/cloudbench-timeout-policy.py': '1a5b0453284a8c0af9bc4fd2d5e9bd38fd50b275fee373f677af7d8816f6d5f5',
+        'scripts/cloudbench-shard-coordinator.py': '1af282bba9119573f489f671790bdad3cbe758e664ac406c92c9fedd503831c5',
+        'agents/benchmarks/benchmark_tasks.py': 'be31c1eb4b0be2fc6fd75f9fa0d17617757348206df3649d6707a9a122356a61',
+        'agents/benchmarks/fixtures.py': 'f91cf759cab84c6f35b3d5f69d9b672f7ae5f90d65dad4442808d4228a91b95e',
+        'agents/benchmarks/live_fixtures.py': 'd6262bda88a214a79f340275f08fd7327bf8f933bd401822e142941001447efd',
+        'agents/benchmarks/polar_catalog.py': '23809eb3426240e01271dff3b562388ca42974cff5a6466413ac7c949a7de319',
+        'agents/benchmarks/timeout_history.py': '4f63f44e8d59b5e77fcc317ba376b7289306772eb6c029b42f4b3ae28854c148',
+        'agents/benchmarks/history_ledger.py': '8a7f727b0c1988f4ae78381d10328680a03f607c59806b3cb795bf76d1ae3f72',
+        'scripts/cloudbench-provider-capacity.py': 'b8ffc0fa2a39b6b390d45ef839030bd4a33585cd1716a724fbd2538b8bd15eea',
+        'scripts/cloudbench-production-only-tasks.py': '1913e6273aa278a2ee7bf4685c35c92a102dc8f254ae571a35acd040333e0887',
+        'scripts/cloudbench-campaign-seed.py': '4435e9c3bfbca5fea28b196f9d2c9a653d708b4bf6c43b7d2df2df6a8a087316',
+        'agents/benchmarks/hub_upload.py': '9717841cd456c9a0e48d5807746a142f63f01a4984e0dbaf5b61ab667fc005e5',
+        'scripts/cloudbench-scorecard.py': '2084612fbc0468f5ddffad7e86794660cb219ffea1d9a534697623859935524f',
+        'scripts/cloudbench_experiments.py': '3ae289a75fd1a1188c49d28636dc9b30927ba5a74a8e5c9bc6e384a672c6c797',
+        'scripts/cloudbench-port-lease.py': '183116af91e2044a91c3d497d4229db78caa8c867af408a3448fb15c58b021e1',
+    }
+    for relative, expected in supported.items():
+        original = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                            receipt['source']['head'] + ':' + relative])
+        need(hashlib.sha256(original).hexdigest() == expected, 'inventory init unsupported producer')
+        if relative in {'scripts/cloudbench-campaign-inventory.sh', 'scripts/lib/cloudbench-inventory.sh',
+                        'scripts/lib/cloudbench-env.sh', 'scripts/cloudbench-campaign-machines.py',
+                        'scripts/cloudbench-machine-readiness.py'}:
+            need(bound(campaign / 'shared-inventory/scripts' / Path(relative).name) == original,
+                 'inventory init source changed')
+    inventory = campaign / 'shared-inventory'
+    text = bound(inventory / 'publisher.private.log').decode()
+    match = re.fullmatch(r'\[warn\] FLY_COMPLETION_TIMEOUT shell_pid=([0-9]+) shell_start_ticks=([0-9]+) '
+                         r'fly_return_status=unknown fifo_read_status=142\n'
+                         r'❌ shared inventory snapshot did not initialize\n', text)
+    need(match is not None and int(match[1]) > 1, 'inventory init timeout boundary')
+    diagnostic = inventory / 'inventory-refresh-diagnostics'
+    latest = fields(bound(diagnostic / 'latest'))
+    need(latest.get('phase') == 'volumes-list' and latest.get('status') == '142'
+         and latest.get('elapsed_seconds', '').isdigit()
+         and latest.get('epoch', '').isdigit() and latest.get('pid', '').isdigit()
+         and int(latest['pid']) > 1, 'inventory init diagnostic')
+    need(bound(diagnostic / 'history').decode().splitlines() == [
+        '\t'.join((latest['epoch'], 'volumes-list', '142', latest['elapsed_seconds']))]
+         and bound(diagnostic / 'failure.raw.private') == b'', 'inventory init diagnostic history')
+    supervisor = document(runs.parent / 'cli.log.process.json')
+    child, owner = supervisor.get('child_pid'), supervisor.get('supervisor_pid')
+    need(type(child) is int and child > 1 and type(owner) is int and owner > 1 and child != owner
+         and type(supervisor.get('native_exit')) is int
+         and supervisor.get('native_exit') == adapter['native_exit']
+         and supervisor.get('quiescent') is True and supervisor.get('orphaned_children') is False
+         and supervisor.get('remaining') == supervisor.get('term_sent') == supervisor.get('kill_sent') == []
+         and supervisor.get('timed_out') is False and supervisor.get('cancelled') is False
+         and supervisor.get('error') is None
+         and supervisor.get('reaped') == [dict(pid=child, status=adapter['native_exit'] * 256)],
+         'inventory init supervisor closure')
+    for pid in {child, owner, int(match[1]), int(latest['pid'])}:
+        need(not Path('/proc', str(pid)).exists(), 'inventory init process remains')
+
+
 def validate(receipt, owner, proof):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
@@ -891,7 +971,7 @@ def validate(receipt, owner, proof):
     cli_text = bound(cli).decode()
     parents, canary_links, preallocation_links = {}, {}, {}
     layout = proof.get('layout')
-    if layout in {'campaign-unlaunched-v1', 'campaign-unlaunched-relay-v1'}:
+    if layout in {'campaign-unlaunched-v1', 'campaign-unlaunched-relay-v1', 'campaign-inventory-init-failure-v1'}:
         # Missing host tooling can stop inventory before any controller exists.
         # Reconcile only that zero-admission boundary, retaining every native
         # UNVERIFIED outcome. A launched campaign still needs the fleet audit.
@@ -903,8 +983,10 @@ def validate(receipt, owner, proof):
              'unlaunched startup failure binding')
         if layout == 'campaign-unlaunched-v1':
             need("No such file or directory: 'flyctl'" in cli_text, 'missing executable boundary')
-        else:
+        elif layout == 'campaign-unlaunched-relay-v1':
             unlaunched_relay_retired(campaign, bound, document)
+        else:
+            inventory_init_failure(root, runs, campaign, request, receipt, adapter, bound, document)
         summary = document(campaign / 'summary.json')
         checks, jobs = request['checks'], summary['jobs']
         need(checks and len(set(checks)) == len(checks)
