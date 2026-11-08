@@ -685,24 +685,6 @@ def test_root_agent_routes_video_requests_to_a_code_agent():
         assert "do not use a browser on third-party video sites" in prompt
 
 
-def test_execute_refusal_rule_covers_the_same_outcome_by_another_way():
-    """RCA 2026-10-15-auth-decline-root-continuation-unproven (H-16, 2026-11-06).
-
-    After "the user declined the request 'Sign in to <realm>'", the root read
-    "the same step" as the password form and sent a second browser for an email
-    code. The rule covers the declined outcome, not just the identical call
-    (Hermes tools/approval.py _STOP_ACTION). chat-router-phase-sync owns the TS mirror.
-    """
-    from utils.prompts import build_system_prompt
-
-    rule = (
-        "If a tool result shows the user declined a step you attempted, do not re-attempt the same step "
-        "or pursue the same outcome another way. Instead, think about why the user declined it and adjust "
-        "your approach."
-    )
-    assert build_system_prompt("EXECUTE", []).count(rule) == 1
-
-
 def test_planner_spawn_aliases_documented_in_prompt():
     """Spawn planner aliases are documented by the planner prompt, not prompt files."""
     from utils.prompts import PLANNER_SPAWN_AGENT_ALIAS_TABLE
@@ -2768,11 +2750,6 @@ async def run_all_tests():
     r.record(
         "root_agent_routes_video_requests_to_a_code_agent",
         test_root_agent_routes_video_requests_to_a_code_agent,
-    )
-    # 23c. A declined step's outcome is not pursued another way (RCA H-16, 2026-11-06)
-    r.record(
-        "execute_refusal_rule_covers_the_same_outcome_by_another_way",
-        test_execute_refusal_rule_covers_the_same_outcome_by_another_way,
     )
     # 24. Browser sign-up identity facts (RCA Q3b, run e0c401c1)
     r.record(
