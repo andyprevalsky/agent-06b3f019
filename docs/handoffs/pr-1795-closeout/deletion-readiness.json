@@ -86,7 +86,6 @@
   ],
   "manifest": "docs/handoffs/pr-1795-closeout/deletion-manifest.json",
   "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1795-closeout/evidence/deletion-readiness-initial-failure.json",
     "live process 4182543 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host"
   ],
   "pr": 1795,
@@ -611,10 +610,7 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1795-closeout/deletion-readiness.json",
-        "docs/handoffs/pr-1795-closeout/evidence/deletion-readiness-initial-failure.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
