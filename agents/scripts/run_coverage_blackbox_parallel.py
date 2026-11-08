@@ -5,6 +5,18 @@ Every domain gets a fresh interpreter because domain modules mutate process-
 global capture and mock state. The bounded worker pool changes scheduling only:
 it still executes every discovered domain and emits parallel coverage data for
 run-coverage.sh to combine.
+
+A failed domain is rerun once, alone, on the same source (never a third run).
+A passing rerun makes the domain FLAKY: the run passes, but the domain still
+needs /RCA attribution (TEST_FLAKY line, FLAKY progress row). A second failure
+is the normal FAIL. A domain timeout or a cancelled run is not rerun.
+
+    domain ─fail─> rerun once ─pass─> FLAKY (exit 0, attribution required)
+       │                     └─fail─> FAIL  (exit 1)
+       └─pass─> PASS            timeout ─> FAIL, no rerun
+
+Quarantined cases (scripts/lib/test_quarantine.py) write their rows to a
+per-attempt file; this runner forwards the counted attempt's rows.
 """
 
 from __future__ import annotations
@@ -15,7 +27,7 @@ import os
 import signal
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 
@@ -47,6 +59,9 @@ LONG_DOMAIN_ORDER = (
 # failures of the real gate.
 PROGRESS_ENV = "DEPLOY_GATE_PROGRESS"
 PROGRESS_HELPER_DIR = Path(__file__).resolve().parents[2] / "scripts"
+QUARANTINE_HELPER_DIR = PROGRESS_HELPER_DIR / "lib"
+QUARANTINE_ROWS = "quarantine.jsonl"
+TIMEOUT_EXIT_CODE = 124
 
 
 @dataclass
@@ -56,6 +71,30 @@ class DomainResult:
     duration_seconds: float
     log: str
     exit_code: int
+    attempts: int = 1
+    flaky: bool = False
+    # The first attempt's log when a rerun ran: the failure /RCA attributes.
+    first_log: str = ""
+
+
+def _import_script_helper(directory: Path, name: str):
+    path = str(directory)
+    sys.path.insert(0, path)
+    try:
+        return __import__(name)
+    finally:
+        sys.path.remove(path)
+
+
+def forward_quarantine(result: DomainResult) -> list[str]:
+    """Forward the counted attempt's quarantined-case rows; return their TEST_QUARANTINE lines."""
+    try:
+        quarantine = _import_script_helper(QUARANTINE_HELPER_DIR, "test_quarantine")
+        rows = quarantine.forward(ROOT_DIR / result.log.removesuffix(".log") / QUARANTINE_ROWS,
+                                  log=str(ROOT_DIR / result.log))
+        return [quarantine.progress.stdout_line(row) for row in rows]
+    except (ImportError, OSError, ValueError):
+        return []
 
 
 def report_progress(result: DomainResult, output: str) -> None:
@@ -66,22 +105,24 @@ def report_progress(result: DomainResult, output: str) -> None:
     """
     if not os.environ.get(PROGRESS_ENV):
         return
-    scripts = str(PROGRESS_HELPER_DIR)
     try:
-        sys.path.insert(0, scripts)
-        try:
-            import deploy_gate_progress
-        finally:
-            sys.path.remove(scripts)
+        deploy_gate_progress = _import_script_helper(PROGRESS_HELPER_DIR, "deploy_gate_progress")
         deploy_gate_progress.report(
             result.domain,
-            "PASS" if result.passed else "FAIL",
+            status_of(result),
             scope="domain",
-            detail="" if result.passed else output,
-            log=str(ROOT_DIR / result.log),
+            detail="" if result.passed and not result.flaky else output,
+            log=str(ROOT_DIR / (result.first_log if result.flaky else result.log)),
+            attempts=result.attempts if result.flaky else None,
         )
     except (ImportError, OSError, ValueError):
         return
+
+
+def status_of(result: DomainResult) -> str:
+    if result.flaky:
+        return "FLAKY"
+    return "PASS" if result.passed else "FAIL"
 
 
 def discover_domains() -> list[str]:
@@ -114,14 +155,19 @@ async def run_domain(
     semaphore: asyncio.Semaphore,
     coverage_bin: Path,
     artifact_dir: Path,
+    attempt: int = 1,
 ) -> DomainResult:
-    log_path = artifact_dir / f"{domain}.log"
-    child_artifact_dir = artifact_dir / domain
+    name = domain if attempt == 1 else f"{domain}.rerun"
+    log_path = artifact_dir / f"{name}.log"
+    child_artifact_dir = artifact_dir / name
     child_artifact_dir.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
         "BLACKBOX_TEST_ARTIFACT_DIR": str(child_artifact_dir),
         "BLACKBOX_TEST_CAPTURE_OUTBOUND": "1",
+        # scripts/lib/test_quarantine.py: this attempt's quarantined-case rows, ids <domain>::<case>.
+        "DEPLOY_GATE_QUARANTINE_PROGRESS": str(child_artifact_dir / QUARANTINE_ROWS),
+        "DEPLOY_GATE_QUARANTINE_UNIT_PREFIX": domain,
     }
     env.pop(PROGRESS_ENV, None)
     timeout_seconds = positive_int("AGENTS_COVERAGE_DOMAIN_TIMEOUT", DOMAIN_TIMEOUT_SECONDS)
@@ -166,7 +212,28 @@ async def run_domain(
         passed=not timed_out and process.returncode == 0,
         duration_seconds=round(elapsed, 3),
         log=str(log_path.relative_to(ROOT_DIR)),
-        exit_code=124 if timed_out else (process.returncode or 0),
+        exit_code=TIMEOUT_EXIT_CODE if timed_out else (process.returncode or 0),
+    )
+
+
+async def run_domain_with_rerun(
+    domain: str,
+    semaphore: asyncio.Semaphore,
+    coverage_bin: Path,
+    artifact_dir: Path,
+) -> DomainResult:
+    """One attempt, plus exactly one rerun of a failed (not timed-out) domain."""
+    first = await run_domain(domain, semaphore, coverage_bin, artifact_dir)
+    if first.passed or first.exit_code == TIMEOUT_EXIT_CODE:
+        return first
+    print(f"  RERUN {domain:<29} attempt 2 of 2 (first attempt exit={first.exit_code}, {first.log})", flush=True)
+    second = await run_domain(domain, semaphore, coverage_bin, artifact_dir, attempt=2)
+    return replace(
+        second,
+        duration_seconds=round(first.duration_seconds + second.duration_seconds, 3),
+        attempts=2,
+        flaky=second.passed,
+        first_log=first.log,
     )
 
 
@@ -196,17 +263,29 @@ async def async_main() -> int:
 
     semaphore = asyncio.Semaphore(concurrency)
     results: list[DomainResult] = []
-    tasks = [asyncio.create_task(run_domain(domain, semaphore, coverage_bin, artifact_dir)) for domain in domains]
+    tasks = [
+        asyncio.create_task(run_domain_with_rerun(domain, semaphore, coverage_bin, artifact_dir))
+        for domain in domains
+    ]
     try:
         for completed in asyncio.as_completed(tasks):
             result = await completed
             results.append(result)
-            status = "PASS" if result.passed else "FAIL"
-            print(f"  {status:<4} {result.domain:<30} {result.duration_seconds:>7.2f}s  {result.log}")
+            status = status_of(result)
+            print(f"  {status:<5} {result.domain:<30} {result.duration_seconds:>7.2f}s  {result.log}")
             output = ""
-            if not result.passed:
-                output = (ROOT_DIR / result.log).read_text(errors="replace")
+            if not result.passed or result.flaky:
+                # FLAKY: the first attempt's failure is what /RCA attributes. A failed
+                # rerun shows both attempts, the counted one last.
+                logs = [result.first_log] if result.flaky else [result.first_log, result.log]
+                output = f"\n--- rerun of {result.domain} (attempt 2 of 2) ---\n".join(
+                    (ROOT_DIR / log).read_text(errors="replace") for log in logs if log
+                )
                 print(output)
+            if result.flaky:
+                print(f"TEST_FLAKY unit={result.domain} attempts={result.attempts} attribution=REQUIRED", flush=True)
+            for line in forward_quarantine(result):
+                print(line, flush=True)
             report_progress(result, output)
     except asyncio.CancelledError:
         for task in tasks:
@@ -216,6 +295,7 @@ async def async_main() -> int:
 
     results.sort(key=lambda result: result.domain)
     failures = [result for result in results if not result.passed]
+    flaky = [result.domain for result in results if result.flaky]
     summary = {
         "run_id": run_id,
         "partial": partial,
@@ -223,11 +303,16 @@ async def async_main() -> int:
         "concurrency": concurrency,
         "passed": len(domains) - len(failures),
         "failed": len(failures),
+        "flaky": len(flaky),
+        "flaky_domains": flaky,
         "total": len(domains),
         "results": [asdict(result) for result in results],
     }
     (artifact_dir / "results.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(f"Agents blackbox: {summary['passed']} passed, {summary['failed']} failed, {summary['total']} total")
+    print(f"Agents blackbox: {summary['passed']} passed ({len(flaky)} flaky), {summary['failed']} failed, "
+          f"{summary['total']} total")
+    if flaky:
+        print("Flaky domains (passed on their one rerun; /RCA attribution required): " + ", ".join(flaky))
     if failures:
         # Machine-readable terminal inventory excludes expected failures in
         # domain logs from the factory's stage classification.

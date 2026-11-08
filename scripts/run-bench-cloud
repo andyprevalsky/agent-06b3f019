@@ -3011,11 +3011,17 @@ fi
 # Print the snapshot a peer published while this refresh request waited for the
 # app environment lock, when its proof covers the exact expected manifests and
 # passes the same complete-snapshot/epoch check the fleet applies afterwards.
-peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-epoch>
+# <request-file-clock-ns> is the mtime (ns) of a file created beside the state
+# file when the request began. Both stamps come from the same filesystem clock,
+# so a later peer write is never ordered before it; a wall-clock read (date +%s)
+# can be a second ahead of the coarse file clock (RCA 2026-11-07-peer-refreshed-
+# snapshot-compares-coarse-file-mtime-to-fine-clock).
+peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-file-clock-ns>
     local since="$1" s_node="" s_py="" s_epoch="" s_snap="" written="" vol=""
+    [[ "$since" =~ ^[0-9]+$ ]] || return 1
     [ -f "$WARM_DEPS_STATE_FILE" ] || return 1
-    written="$(python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || return 1
-    [ "${written:-0}" -ge "$since" ] || return 1
+    written="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || return 1
+    [[ "$written" =~ ^[0-9]+$ ]] && [ "$written" -ge "$since" ] || return 1
     read -r s_node s_py s_epoch s_snap < "$WARM_DEPS_STATE_FILE" || return 1
     [ "$s_node" = "$EXPECTED_NODE_FP" ] && [ "$s_py" = "$EXPECTED_PY_FP" ] && [ -n "$s_snap" ] || return 1
     # Reuse only an unpatched peer snapshot of this exact source ref: a patched
@@ -3159,12 +3165,19 @@ if len(mounts) == 1 and rows[0].get("id"): print(rows[0]["id"], mounts[0].get("v
     }
     echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
     ensure_app
-    REFRESH_REQUESTED_EPOCH="$(date +%s)"
+    # Stamp the request with the state file's own filesystem clock (see
+    # peer_refreshed_snapshot). An unwritable directory leaves it empty, which
+    # only forgoes peer reuse.
+    REFRESH_REQUESTED_FILE_CLOCK_NS="$(python3 -c '
+import os, sys, tempfile
+with tempfile.NamedTemporaryFile(dir=os.path.dirname(os.path.abspath(sys.argv[1])), prefix=".refresh-request-") as marker:
+    print(os.fstat(marker.fileno()).st_mtime_ns)
+' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || REFRESH_REQUESTED_FILE_CLOCK_NS=""
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     acquire_app_environment_lock || exit 1
     # Concurrent controllers queue here for the same refresh. Once one finishes,
     # the rest reuse its proof instead of each repeating a refresh and snapshot.
-    if PEER_SNAP="$(peer_refreshed_snapshot "$REFRESH_REQUESTED_EPOCH")"; then
+    if PEER_SNAP="$(peer_refreshed_snapshot "$REFRESH_REQUESTED_FILE_CLOCK_NS")"; then
         echo "✅ a peer refreshed these exact manifests while this request waited; reusing snapshot $PEER_SNAP"
         exit 0
     fi

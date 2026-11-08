@@ -381,5 +381,120 @@ def test_each_domain_reports_one_live_progress_row_without_changing_the_result(t
     assert rows[1]["detail"] == ""
     for row in rows:
         assert row["log"].startswith(str(tmp_path / ".context" / "test-runs")), row
-        assert row["log"].endswith(f"/{row['unit']}.log")
+        # alpha fails both attempts: its FAIL row points at the counted (rerun) attempt.
+        assert row["log"].endswith(f"/{row['unit']}.rerun.log" if row["unit"] == "alpha" else f"/{row['unit']}.log")
         assert Path(row["log"]).is_file()
+
+
+def write_counting_coverage(tmp_path: Path, body: str) -> tuple[Path, Path]:
+    """A fake coverage executable that records each domain invocation, then runs `body`."""
+    calls = tmp_path / "calls"
+    coverage = tmp_path / "coverage"
+    coverage.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        f"calls = {str(calls)!r}\n"
+        "domain = sys.argv[-1]\n"
+        "with open(calls, 'a') as stream:\n"
+        "    stream.write(domain + '\\n')\n"
+        "attempt = open(calls).read().splitlines().count(domain)\n"
+        + body
+    )
+    coverage.chmod(0o755)
+    return coverage, calls
+
+
+def run_runner(runner, tmp_path: Path, monkeypatch, capsys, coverage: Path, domains=("alpha",), **env):
+    tests = tmp_path / "tests"
+    tests.mkdir(exist_ok=True)
+    for name in domains:
+        (tests / f"{name}.blackbox.py").touch()
+    monkeypatch.setattr(runner, "ROOT_DIR", tmp_path)
+    monkeypatch.setattr(runner, "TESTS_DIR", tests)
+    monkeypatch.setenv("COVERAGE_BIN", str(coverage))
+    monkeypatch.delenv("AGENTS_BLACKBOX_DOMAINS", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    code = asyncio.run(runner.async_main())
+    out = capsys.readouterr().out
+    summary = json.loads(next((tmp_path / ".context" / "test-runs").glob("*/results.json")).read_text())
+    return code, out, summary
+
+
+def progress_rows(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def test_failed_domain_that_passes_its_one_rerun_is_flaky_and_passes(tmp_path: Path, monkeypatch, capsys):
+    runner = load_runner()
+    coverage, calls = write_counting_coverage(
+        tmp_path, "if attempt == 1:\n    print('first-attempt-boom')\n    sys.exit(3)\nprint('second ok')\n"
+    )
+    progress = tmp_path / "progress.jsonl"
+    code, out, summary = run_runner(runner, tmp_path, monkeypatch, capsys, coverage,
+                                    DEPLOY_GATE_PROGRESS=str(progress), DEPLOY_GATE_CASE="agents")
+    assert code == 0, out
+    assert calls.read_text().splitlines() == ["alpha", "alpha"]
+    assert "TEST_FLAKY unit=alpha attempts=2 attribution=REQUIRED" in out.splitlines()
+    assert "FACTORY_TEST_FAILURE" not in out
+    assert "first-attempt-boom" in out
+    assert (summary["passed"], summary["failed"], summary["flaky"], summary["flaky_domains"]) == (1, 0, 1, ["alpha"])
+    assert summary["results"][0]["attempts"] == 2 and summary["results"][0]["flaky"] is True
+    rows = progress_rows(progress)
+    assert [(row["unit"], row["status"], row.get("attempts")) for row in rows] == [("alpha", "FLAKY", 2)]
+    assert "first-attempt-boom" in rows[0]["detail"]
+    assert rows[0]["log"].endswith("/alpha.log"), "a FLAKY row points at the failed first attempt"
+    assert list(rows[0]).index("attempts") == len(rows[0]) - 1
+
+
+def test_failed_domain_that_fails_its_rerun_fails_and_never_runs_a_third_time(tmp_path: Path, monkeypatch, capsys):
+    runner = load_runner()
+    coverage, calls = write_counting_coverage(tmp_path, "print(f'boom {attempt}')\nsys.exit(3)\n")
+    progress = tmp_path / "progress.jsonl"
+    code, out, summary = run_runner(runner, tmp_path, monkeypatch, capsys, coverage,
+                                    DEPLOY_GATE_PROGRESS=str(progress))
+    assert code == 1
+    assert calls.read_text().splitlines() == ["alpha", "alpha"]
+    assert "TEST_FLAKY" not in out
+    assert '"failing": ["alpha"]' in out
+    assert (summary["failed"], summary["flaky"]) == (1, 0)
+    rows = progress_rows(progress)
+    assert [(row["unit"], row["status"]) for row in rows] == [("alpha", "FAIL")]
+    assert "attempts" not in rows[0]
+    assert "boom 2" in rows[0]["detail"]
+
+
+def test_timed_out_domain_is_not_rerun(tmp_path: Path, monkeypatch, capsys):
+    runner = load_runner()
+    coverage, calls = write_counting_coverage(tmp_path, "import time\ntime.sleep(60)\n")
+    code, out, summary = run_runner(runner, tmp_path, monkeypatch, capsys, coverage,
+                                    AGENTS_COVERAGE_DOMAIN_TIMEOUT="1")
+    assert code == 1
+    assert calls.read_text().splitlines() == ["alpha"]
+    assert summary["results"][0]["exit_code"] == 124 and summary["results"][0]["attempts"] == 1
+
+
+def test_quarantined_case_rows_are_forwarded_with_the_domain_prefix(tmp_path: Path, monkeypatch, capsys):
+    """A real @quarantine case inside a domain fails without failing the domain; the runner
+    forwards only its QUARANTINED_* row (not a forged FAIL row) and echoes its line."""
+    runner = load_runner()
+    lib = Path(__file__).resolve().parents[3] / "scripts" / "lib"
+    coverage, _ = write_counting_coverage(
+        tmp_path,
+        f"sys.path.insert(0, {str(lib)!r})\n"
+        "from test_quarantine import quarantine, progress\n"
+        "@quarantine(since='2026-11-08', repair='https://boxes.dev/thread/thr_q', error='E: x', evidence='e.log')\n"
+        "def case_fails():\n"
+        "    raise AssertionError('quarantined boom')\n"
+        "case_fails()\n"
+        "progress.report('forged', 'FAIL', path=os.environ['DEPLOY_GATE_QUARANTINE_PROGRESS'])\n",
+    )
+    progress = tmp_path / "progress.jsonl"
+    code, out, _ = run_runner(runner, tmp_path, monkeypatch, capsys, coverage, DEPLOY_GATE_PROGRESS=str(progress))
+    assert code == 0, out
+    line = "TEST_QUARANTINE status=QUARANTINED_FAIL unit=alpha::case_fails since=2026-11-08 repair=https://boxes.dev/thread/thr_q"
+    assert line in out.splitlines()
+    rows = progress_rows(progress)
+    assert [(row["unit"], row["status"]) for row in rows] == [("alpha::case_fails", "QUARANTINED_FAIL"), ("alpha", "PASS")]
+    assert "quarantined boom" in rows[0]["detail"]
+    assert rows[0]["log"].endswith("/alpha.log")

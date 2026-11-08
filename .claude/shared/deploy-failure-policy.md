@@ -53,6 +53,13 @@ to retroactively justify the delegation.
   required by the originating deploy. Record the actual repair link and waiver,
   then continue immediately. Pending handoffs must be dispatched before the
   originating deploy can report completion.
+- **FLAKY:** a unit that failed and passed its single automatic rerun on the
+  same source gets the same attribution; the passing rerun is not evidence.
+  INTRODUCED is fixed before merge. NOT INTRODUCED gets the quarantine marker
+  in its own test definition in this PR, carrying its repair thread link; that
+  repair goal is dispatched at attribution from current main, where the flake
+  already exists. UNKNOWN blocks the merge. The quarantined test keeps running
+  and reporting (`.claude/commands/deploy.md`).
 - **UNKNOWN:** establish attribution before granting a delegation waiver.
   An unrelated filename, an unexplained timeout or a missing baseline is not
   evidence of NOT INTRODUCED.
@@ -289,7 +296,8 @@ record `Delegated / waived` in this helper before that dispatch succeeds.
 
 The delegating deploy can complete while those repairs and external-provider
 alerts remain outstanding. Its own introduced failures, unknown failures and
-all other applicable requirements remain blocking. Do not rerun a failed
+all other applicable requirements remain blocking. The runners' single
+automatic rerun of a failed unit records FLAKY or the final FAIL; otherwise do not rerun a failed
 aggregate solely to conceal a qualified exception; preserve its native exit
 and identify exactly which constituent failure was waived. An unexecuted
 remaining check is still unverified and must be run.

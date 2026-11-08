@@ -11,7 +11,8 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   fullyParallel: false,
   workers: 1,
-  retries: 0,
+  // Deploy gates only: one retry, and a retried pass is reported FLAKY by the progress reporter.
+  retries: process.env.DEPLOY_GATE_PROGRESS ? 1 : 0,
   reporter: [
     ['list'],
     ['html', { open: 'never', outputFolder: 'playwright-report' }],

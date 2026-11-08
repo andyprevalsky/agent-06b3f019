@@ -28,6 +28,7 @@ import time
 import uuid
 
 import deploy_gate_progress as progress
+import deploy_test_quarantine as quarantine
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
 from deploy_test_isolation import validate as validate_isolation
@@ -638,6 +639,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                                    'native_cleanup_reference': native_cleanup_reference}
     result['worker_evidence'] = worker_evidence
     result['resource_skips'] = qualified
+    # Quarantined rows never change the verdict above; FLAKY rows open their attribution in record().
+    result.update(quarantine.gate_outcomes(folder / 'progress.jsonl'))
     result['worker_result'] = str(result_path) if result_path.exists() else None
     if teardown is not None:
         result['teardown'] = teardown
@@ -1451,6 +1454,57 @@ def early_failures(state: dict, gate: dict, rows: list[dict], directory: Path,
     return opened
 
 
+FLAKY_INSTRUCTION = ("/RCA: this unit FAILED and passed its single rerun on the same source (FLAKY). "
+                     "Return the evidence-backed INTRODUCED/NOT_INTRODUCED gate under "
+                     ".claude/shared/deploy-failure-policy.md. INTRODUCED: fix before merge, no quarantine. "
+                     "NOT_INTRODUCED: add the quarantine marker with its repair link (.claude/commands/deploy.md). "
+                     "UNKNOWN blocks the merge. Do not weaken assertions/timeouts.")
+
+
+def open_flaky(state: dict, gate: dict, rows: list[dict], directory: Path) -> list[tuple[dict, Path]]:
+    """One attribution occurrence (and /RCA request) per FLAKY unit of this gate on this source.
+
+    A FLAKY unit passed its rerun, so its check may PASS; the merge still refuses until its
+    attribution is recorded (attribute-flaky). Later rows for the same unit open nothing.
+    """
+    seen = {(f["gate"], f["unit"]) for f in state.get("flaky", []) if f["source"] == state["source"]}
+    opened = []
+    for row in quarantine.flaky(rows):
+        if (gate["name"], row["unit"]) in seen:
+            continue
+        seen.add((gate["name"], row["unit"]))
+        mapped = early_check(gate, row)
+        occurrence = {"id": uuid.uuid4().hex, "gate": gate["name"], "unit": row["unit"],
+                      "check": gate["name"] + "/" + (mapped or row.get("case") or row["unit"]),
+                      "native_result": "FLAKY", "attempts": row.get("attempts", 2),
+                      "detail": row.get("detail", ""), "evidence": row.get("log") or None,
+                      "source": state["source"], "phase": state["phase"], "round": state["round"],
+                      "detected_at": time.time(), "unit_finished_at": row["at"], "attribution": None}
+        state.setdefault("flaky", []).append(occurrence)
+        path = directory / "rca" / (occurrence["id"] + ".json")
+        write(path, {**occurrence, "instruction": FLAKY_INSTRUCTION})
+        opened.append((occurrence, path))
+    return opened
+
+
+def flaky_notice(occurrence: dict, path: Path) -> str:
+    return (f"TEST_FLAKY gate={occurrence['gate']} unit={occurrence['unit']} attempts={occurrence['attempts']} "
+            f"attribution=REQUIRED id={occurrence['id']} rca={path} (start /RCA on this request now)")
+
+
+def attribute_flaky(state: dict, occurrence_id: str, entry: dict, root: Path) -> None:
+    occurrence = next((f for f in state.get("flaky", []) if f["id"] == occurrence_id), None)
+    if occurrence is None:
+        raise ValueError("only a recorded FLAKY occurrence can be attributed")
+    occurrence["attribution"] = quarantine.validate_attribution(occurrence, entry, root)
+    if "post_merge" in occurrence["attribution"] and not any(
+            p["id"] == occurrence_id for p in state.get("pending_post_merge", [])):
+        # The existing completion block: dispatch after merge, then `resolve` with the repair link.
+        state.setdefault("pending_post_merge", []).append({
+            "id": occurrence_id, "check": occurrence["check"], "gate": occurrence["gate"],
+            "native_result": "FLAKY", "packet": occurrence["attribution"]["post_merge"]})
+
+
 def settle_early(state: dict, result: dict, fresh: list[dict]) -> list[dict]:
     """Bind a gate's final failures to its early occurrences: same id (one RCA), or superseded on PASS.
 
@@ -1603,13 +1657,28 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                         print(f"DEPLOY_GATE_EARLY_SUPERSEDED gate={match['gate']} check={match['check']} "
                               f"id={match['id']} {match['settled']}: stop its /RCA", flush=True)
                 state["live_failures"].extend(fresh)
+                gate = next((g for g in selected if g["name"] == result["gate"]), None)
+                late = open_flaky(state, gate, result.get("flaky") or [], directory) if gate else []
                 write(directory / "cycle.json", state)
+                announce_flaky(late)
+                qfail = sum(1 for r in result.get("quarantined") or [] if r["status"] == quarantine.QUARANTINED_FAIL)
+                if result.get("quarantined"):
+                    print(f"DEPLOY_GATE_QUARANTINED gate={result['gate']} failed={qfail} "
+                          f"passed={len(result['quarantined']) - qfail} (non-blocking)", flush=True)
                 # Publish and dispatch each failure while healthy siblings run.
                 for path in rca_requests(state, directory):
                     # A smoke gate blocked by its prerequisite has nothing of its own to diagnose.
                     if (launcher and not CANCEL.is_set() and not result.get('prerequisite')
                             and path.stem in {f["id"] for f in fresh}):
                         launched.append(rc_pool.submit(launch_rca, path, launcher))
+
+            def announce_flaky(opened):
+                for occurrence, path in opened:
+                    if launcher:
+                        if not CANCEL.is_set():
+                            launched.append(rc_pool.submit(launch_rca, path, launcher))
+                    else:
+                        print(flaky_notice(occurrence, path), flush=True)
 
             offsets = {}
             def scan(running):
@@ -1619,8 +1688,10 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                             / "progress.jsonl")
                     rows, offsets[gate["name"]] = progress.read_new(path, offsets.get(gate["name"], 0))
                     opened = early_failures(state, gate, rows, directory)
-                    if opened:
+                    flaked = open_flaky(state, gate, rows, directory)
+                    if opened or flaked:
                         write(directory / "cycle.json", state)
+                    announce_flaky(flaked)
                     for occurrence, path, row in opened:
                         if launcher:
                             # The cycle owns this RCA: launch it now; the deploy agent is not asked to.
@@ -1995,6 +2066,15 @@ def resolve_post_merge(state: dict, occurrence_id: str, repair_agent: str) -> No
     if not isinstance(repair_agent, str) or not repair_agent.strip():
         raise ValueError("resolving a pending post-merge packet requires the actual repair link")
     pending = next((p for p in state.get("pending_post_merge", []) if p["id"] == occurrence_id), None)
+    flaked = next((f for f in state.get("flaky", []) if f["id"] == occurrence_id), None)
+    if pending is not None and flaked is not None and "post_merge" in (flaked.get("attribution") or {}):
+        entry = {"repair_agent": repair_agent, "attribution": "NOT_INTRODUCED", "id": occurrence_id,
+                 "description": flaked["check"], "evidence": flaked["attribution"]["evidence"],
+                 "native_result": "FLAKY"}
+        decision(entry)  # validates the link like every other handoff
+        flaked["attribution"]["resolved_post_merge"] = repair_agent
+        state["pending_post_merge"] = [p for p in state["pending_post_merge"] if p["id"] != occurrence_id]
+        return
     failure = next((f for f in state["failures"] if f["id"] == occurrence_id), None)
     if pending is None or failure is None or failure.get("disposition") != "pending post-merge":
         raise ValueError("only a recorded pending post-merge occurrence can be resolved")
@@ -2026,6 +2106,9 @@ def pending_completion_block(state: dict) -> str | None:
                 return 'isolated validation still requires complete current-source full coverage; original obligations preserved'
     except (OSError, ValueError, KeyError, TypeError) as error:
         return str(error)
+    blocked = quarantine.attribution_block(state.get("flaky", []))  # recorded, not re-derived post-merge
+    if blocked:
+        return blocked
     pending = state.get("pending_post_merge") or []
     if pending:
         return (f"{len(pending)} pending post-merge packet(s) block completion; "
@@ -2058,6 +2141,10 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
         for gate in {e['gate'] for e in state.get('reconciled_owners', {}).values()
                      if e.get('purpose') == 'isolated-validation'}:
             isolated_admissions(state, gate)
+        blocked = quarantine.attribution_block(state.get('flaky', []), root)
+        if blocked:
+            print(f'DEPLOY_CYCLE FLAKY_UNATTRIBUTED: {blocked}', file=sys.stderr)
+            return 1  # merge refuses until every FLAKY unit has its recorded /RCA attribution
         return 0
     except (OSError, ValueError, KeyError, TypeError):
         return 2
@@ -2065,11 +2152,11 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "attribute-flaky"])
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
-    parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id")
+    parser.add_argument("--occurrence", help="resolve: pending post-merge occurrence id; attribute-flaky: FLAKY id")
     parser.add_argument("--repair-agent", help="resolve: the actual post-merge repair link")
     parser.add_argument("--require-resolved", action="store_true",
                         help="verify: also refuse while pending post-merge packets exist (post-merge completion)")
@@ -2135,6 +2222,10 @@ def main(argv: list[str] | None = None) -> int:
                         job.result()
             elif args.action == "resolve":
                 resolve_post_merge(state, args.occurrence, args.repair_agent)
+            elif args.action == "attribute-flaky":
+                if args.input is None or not args.occurrence:
+                    raise ValueError("--occurrence FLAKY id and --input attribution JSON required")
+                attribute_flaky(state, args.occurrence, bounded_read(args.input, "FLAKY attribution"), args.root)
             elif args.action == 'accept-omitted-custody':
                 if args.input is None:
                     raise ValueError('--input native operational acceptance required')
@@ -2166,16 +2257,27 @@ def main(argv: list[str] | None = None) -> int:
                         or environment_digest() != state["environment"]
                         or input_fingerprints(plan, args.root) != state["input_fingerprints"]):
                     raise ValueError("cycle not complete on exact current source and plan")
+                blocked = quarantine.attribution_block(state.get("flaky", []), args.root)
+                if blocked:
+                    raise ValueError(blocked)
             elif args.action == "report":
                 from deploy_failure_report import render
                 failures = [{**f["rca"], "disposition": f["disposition"]}
                             for f in state["failures"] if "rca" in f]
+                latest = list(latest_receipts(state).values())
                 header = (f"Deploy validation: {state['phase']}\nSource: {state['source']['head']}\n"
                           f"Pending RCA: {len(state.get('pending', []))}\n"
                           f"Pending post-merge: {len(state.get('pending_post_merge', []))}\n"
-                          f"Resource warnings: {len(state.get('resource_warnings', []))}\n")
+                          f"Resource warnings: {len(state.get('resource_warnings', []))}\n"
+                          + "".join(line + "\n" for line in quarantine.scorecard_lines(latest, state.get("flaky", []))))
                 # The header is not a scorecard: pass none so BLOCKING failures render (finding 4447557591).
                 text = header + render({"failures": failures})
+                text += "".join(line + "\n" for line in quarantine.quarantine_section(latest))
+                for f in state.get("flaky", []):
+                    a = f.get("attribution") or {}
+                    text += (f"FLAKY {f['gate']} :: {f['unit']} — "
+                             + (f"{a['attribution']} · {a.get('fix_commit') or a.get('repair_agent') or 'post-merge packet'}"
+                                if a else "awaiting /RCA attribution (blocks merge)") + "\n")
                 for election in state.get('elected_omissions', []):
                     text += ('\nOPTIONAL COVERAGE SKIPPED (no task or cleanup credit)\n'
                              + election['reason'] + '\nNative: ' + election['native_result']

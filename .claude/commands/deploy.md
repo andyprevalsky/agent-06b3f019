@@ -166,10 +166,21 @@ Never skip for an unexplained failure, an auth failure our own configuration cau
 8. Import the attributions: `python3 scripts/deploy_test_cycle.py triage --input report.json`.
 9. After a fix: `focus --input focused.json` then `run` (failing tests plus regressions), then the full failed gates, then every selected gate on the final source.
 10. A failure in the final sweep goes back to step 2; a focused pass is never a deploy pass.
-11. Never rerun blind: the staged runner requests `/RCA` on the first failure of every round, so each rerun follows a repro, a fix and its regression.
+11. Runners rerun a failed unit once on the same source (FLAKY if it passes, FAIL if not); never rerun anything else blind: each further rerun follows a repro, a fix and its regression.
 12. After merge, dispatch each NOT_INTRODUCED packet as a `/goal` on a new devbox in the Bugs folder at high effort and standard speed.
 
 Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.md`.
+
+### Quarantined and flaky tests
+
+- `QUARANTINED_FAIL` / `QUARANTINED_PASS`: the test carries a quarantine marker in its own definition (`@quarantine(since=, repair=, error=, evidence=)` from `scripts/lib/test_quarantine.py`, `quarantine(meta, fn)` in TypeScript). It ran; its failure never blocks and is the only accepted non-blocking test failure.
+- `FLAKY` (`TEST_FLAKY ... attribution=REQUIRED`): a unit failed and passed its one rerun. The gate passes, the cycle opens an `/RCA` request, and `scripts/deploy merge` refuses until its attribution is recorded with `python3 scripts/deploy_test_cycle.py attribute-flaky --occurrence <id> --input <attribution.json> --plan <plan> --state-dir <dir>`:
+  - INTRODUCED: fix it in this deploy, no marker: `{"attribution": "INTRODUCED", "evidence": "<RCA>", "fix_commit": "<sha>"}`.
+  - NOT_INTRODUCED: dispatch its repair `/goal` (`.claude/shared/deploy-failure-policy.md`), add the marker to the test with that thread URL as `repair`, the verbatim first error line, the failure evidence and today's date, then record `{"attribution": "NOT_INTRODUCED", "evidence": "<RCA>", "marker": "<test file>", "repair_agent": "<thread URL>"}`.
+  - UNKNOWN keeps the merge blocked.
+- Never add a marker to get green, or for a test without a NOT_INTRODUCED attribution.
+- Release: `python3 scripts/test_quarantine.py report` lists every marker with its consecutive passes from recorded results; any quarantined failure resets the count. At 5 it reads `ready to release`: remove that marker in this deploy.
+- Scorecard: copy the lines `python3 scripts/deploy_test_cycle.py report` prints, `Tests skipped (quarantined): N — F failed (non-blocking), P passed` and, when present, `Flaky (passed on rerun): ...`.
 
 ## Review
 

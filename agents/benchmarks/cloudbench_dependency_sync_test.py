@@ -19712,6 +19712,7 @@ def test_alternate_warm_donor_cannot_borrow_legacy_snapshot_proof(tmp_path: Path
         "patch_conflict",
         "no_delta",
         "peer_refreshed",
+        "peer_refreshed_fine_clock_ahead",
         "peer_stale",
         "peer_foreign_ref",
         "peer_patched",
@@ -19744,6 +19745,13 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
     guest = tmp_path / "warm"
     subprocess.run(["git", "clone", "-q", str(repo), str(guest)], check=True)
     # Peer reuse requires an unpatched request for the peer's exact source ref.
+    # peer_refreshed_fine_clock_ahead pins the coarse-file-clock boundary: the
+    # wall clock read before the lock is already in the next second when the
+    # peer's write is stamped from the kernel's coarser file clock (RCA
+    # 2026-11-07-peer-refreshed-snapshot-compares-coarse-file-mtime-to-fine-clock).
+    fine_clock_ahead = scenario == "peer_refreshed_fine_clock_ahead"
+    if fine_clock_ahead:
+        scenario = "peer_refreshed"
     unpatched = scenario in ("no_delta", "peer_refreshed", "peer_stale", "peer_foreign_ref")
     if not unpatched:
         (repo / "agents/requirements.txt").write_text("temporalio[grpc]>=1.18.1\n")
@@ -19770,6 +19778,18 @@ def test_refresh_deps_applies_exact_workspace_before_rebuild(tmp_path: Path, sce
     (bin_dir / "gosu").chmod(0o755)
     (bin_dir / "chown").write_text("#!/usr/bin/env bash\nexit 0\n")
     (bin_dir / "chown").chmod(0o755)
+    if fine_clock_ahead:
+        real_date = shutil.which("date")
+        assert real_date, "date is required"
+        (bin_dir / "date").write_text(
+            "#!/usr/bin/env bash\n"
+            'if [ "$#" -eq 1 ] && [ "$1" = +%s ]; then\n'
+            f"    echo $(( $({shlex.quote(real_date)} +%s) + 1 ))\n"
+            "    exit 0\n"
+            "fi\n"
+            f'exec {shlex.quote(real_date)} "$@"\n'
+        )
+        (bin_dir / "date").chmod(0o755)
     script = f"""set -euo pipefail
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 MODE=refresh-deps
