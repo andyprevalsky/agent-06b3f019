@@ -1,0 +1,379 @@
+{
+  "adapter": "docs/handoffs/pr-1634-closeout/recover_closeout.py",
+  "archives": [
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "2fa39f76433915e9042847f184b3697585d390f29d797c31f184fef7ed7a3c3a",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 2911,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 2,
+      "full_readback_verified": true,
+      "gzip_sha256": "e981ea6c9af169d9c1e25af24e4122e7171acfe28b01e15b44017fa2e1111f70",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 2911,
+        "members_compared": 2911,
+        "mode": "restore",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T211634Z-deploy-state-9c1ff96d6b3f.tar.gz.aesgcm",
+      "label": "deploy-state",
+      "manifest_sha256": "2d72dc9aec0fb018faf64b6f6f3b21f2b3a488df1b6ca1300aa8b30fa848d27c",
+      "original_bytes": 68895760,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T211634Z-deploy-state-9c1ff96d6b3f.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "107ee0833def91074c2ff0fe85c29d79ca6cda0023258edce5d4dc4bbf5b3efe",
+      "status": "current",
+      "stored_bytes": 16751936,
+      "verified_at": "2026-11-08T21:16:39Z"
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "a080a86365f8e514701ad2e2de85de4613dbc7bcbe5ae0f5db9334af32ca6990",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 14714,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 17,
+      "full_readback_verified": true,
+      "gzip_sha256": "21c019b584703bea9a6e381680784169e4c83ff5c2bac605f9603e994f4e7a02",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 14714,
+        "members_compared": 14714,
+        "mode": "stream",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T211313Z-cycle-final-51f43e77d9ff.tar.gz.aesgcm",
+      "label": "cycle-final",
+      "manifest_sha256": "3269e89383b2289760126116472c90b980408c0a6aa66ec845736a411497340d",
+      "original_bytes": 592456295,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T211313Z-cycle-final-51f43e77d9ff.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "5f8e8b1f5879f8a2576687d2c46d120d29b8b7615daabd5051f08ad91c200a02",
+      "status": "current",
+      "stored_bytes": 141696185,
+      "verified_at": "2026-11-08T21:13:43Z"
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "5d4ee9b7a05e4dd0b266dd145dce9292ce2640a27a28e4b27c6893c60585f461",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 20985,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 18,
+      "full_readback_verified": true,
+      "gzip_sha256": "4c3546fb80ec5eaf454c31823349701eea05ceb7c4294a5f9f1c4d13ea5c7555",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 20985,
+        "members_compared": 20985,
+        "mode": "stream",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T211313Z-cycles-bn-a-cc263e0f5469.tar.gz.aesgcm",
+      "label": "cycles-bn-a",
+      "manifest_sha256": "e5d5e2f2bf72d25d1978f37611e24b56f0177b9ce88de831db6004607d6acc4d",
+      "original_bytes": 418872701,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T211313Z-cycles-bn-a-cc263e0f5469.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "52eb76c5e11b4932477e6c34ede9f1549eb61a197089af653bf8793b5be73eca",
+      "status": "current",
+      "stored_bytes": 145412591,
+      "verified_at": "2026-11-08T21:13:42Z"
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "de7d95419a44ff99d996b5662a75a642f63ec3e0609188892397d9b0a0990e8d",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 20187,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 17,
+      "full_readback_verified": true,
+      "gzip_sha256": "0882429f250956676f394762d9cc0a213967279215910ab15dee5699e478fbaf",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 20187,
+        "members_compared": 20187,
+        "mode": "stream",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T211313Z-cycles-bn-b-613ae8a6a825.tar.gz.aesgcm",
+      "label": "cycles-bn-b",
+      "manifest_sha256": "059bdd83887f34443575c3dcd1b37d7cbd86ebfdfddc627a7d359043342b8e09",
+      "original_bytes": 408335395,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T211313Z-cycles-bn-b-613ae8a6a825.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "50231783a6c8c6354be2384d8b44c10d7a30fdd85db06a2080853d1fa6ff04e9",
+      "status": "current",
+      "stored_bytes": 140653535,
+      "verified_at": "2026-11-08T21:13:42Z"
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "75498202bfdca390a4d8c838cb8e133ee9ddfb64fd9a8703e28d5f52c05ccf18",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 1696,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 38,
+      "full_readback_verified": true,
+      "gzip_sha256": "ed372d0c72872b3743733e151a5b414b3dbc22fa0c7b21c2dac571b533458b49",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 1696,
+        "members_compared": 1696,
+        "mode": "stream",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T211728Z-cloud-bn10-28e42ccd11fb.tar.gz.aesgcm",
+      "label": "cloud-bn10",
+      "manifest_sha256": "d2db2b0936076d96e14b8af6c4f2f9311029ef4743fd386a442359d9050c4d2b",
+      "original_bytes": 1249102368,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T211728Z-cloud-bn10-28e42ccd11fb.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "7d284c8dead4ffa451ef1d1bf8a03bdeb6a73dac32980431cfb143ae09bfccb1",
+      "status": "current",
+      "stored_bytes": 318185881,
+      "verified_at": "2026-11-08T21:18:31Z"
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "69f04c818776b819b76e2d9ceb15189e1697aad4cbcf178477507006a355dbdf",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 1791,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 41,
+      "full_readback_verified": true,
+      "gzip_sha256": "424cdd5dab76eb64e836e80bba6c9a3c41d9f72123bfe5e73fdf7932cb7d285c",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 1791,
+        "members_compared": 1791,
+        "mode": "stream",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T211728Z-cloud-bn8-652c9817d884.tar.gz.aesgcm",
+      "label": "cloud-bn8",
+      "manifest_sha256": "588432ef2e0c30e320bfc46f9e24af76802170818a3b3d718b4e997523568f11",
+      "original_bytes": 1480585628,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T211728Z-cloud-bn8-652c9817d884.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "bc56a629299e538143208a4f76cc289ea3a9a73bf6788c7a477b43308f54a933",
+      "status": "current",
+      "stored_bytes": 338134181,
+      "verified_at": "2026-11-08T21:18:34Z"
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "2e109ec73cd61310684c47dabed6763708b9d0f11beb79d1b333a2d2259b9ec7",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 3869,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 14,
+      "full_readback_verified": true,
+      "gzip_sha256": "362400f46c3cd44c4e646c9e00441f1304c33a15b49018b078a49db39d7fcd7c",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 3869,
+        "members_compared": 3869,
+        "mode": "stream",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T211313Z-cloud-bn7-bcf6d14738d1.tar.gz.aesgcm",
+      "label": "cloud-bn7",
+      "manifest_sha256": "25ed28a01382d350213b3cc17870c915fd393f6bebf3b1cf89b5556bfcc9cc4d",
+      "original_bytes": 359916265,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T211313Z-cloud-bn7-bcf6d14738d1.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "31e85801097e8efcc0d73b3f0e2e8b74efb48203710715753ef893522c2cfdb6",
+      "status": "current",
+      "stored_bytes": 113727114,
+      "verified_at": "2026-11-08T21:13:37Z"
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "9dbfb942dfa3f7e74d54ad16c5133e23805daa2478e3a126570fa96c1d7d5975",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 5798,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 84,
+      "full_readback_verified": true,
+      "gzip_sha256": "1afc9678113444d7fc9339e2ce78edbec7f587a396459587c258a119bf7e8771",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 5798,
+        "members_compared": 5798,
+        "mode": "stream",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T211415Z-cloud-tarball-29c2b0389b1f.tar.gz.aesgcm",
+      "label": "cloud-tarball",
+      "manifest_sha256": "e5b8ee686d5ec32fbe35a82c27d6732b503e0d9008402b99e07129d3c3c211d6",
+      "original_bytes": 2928238039,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T211415Z-cloud-tarball-29c2b0389b1f.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "bbb661b8c4a59317f7f41959ad3d38b1d47f76728db5bbb1eb5b585a27754778",
+      "status": "current",
+      "stored_bytes": 699154385,
+      "verified_at": "2026-11-08T21:39:43Z"
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "06df43219912b829806db0a8e1c823d5edccb4800aad1fac13506d81701e2bdf",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 3,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 1,
+      "full_readback_verified": true,
+      "gzip_sha256": "57211343a2377d14c9331c417ef64ab923803306b5d02fc0760e885293a67a41",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 3,
+        "members_compared": 3,
+        "mode": "restore",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T211634Z-git-preview-c84a3de682d7.tar.gz.aesgcm",
+      "label": "git-preview",
+      "manifest_sha256": "98b84f41c6eacbe811cbd132f1ce2c477785d614f74517440d3e7ddfd11d7e60",
+      "original_bytes": 32765,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T211634Z-git-preview-c84a3de682d7.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "99f4a2b4dd856ab50e1a6b6fa8a4a40fe3814250b8d8be6b3b49baa580fd9220",
+      "status": "current",
+      "stored_bytes": 33532,
+      "verified_at": "2026-11-08T21:16:36Z"
+    },
+    {
+      "bucket": "trace-archive",
+      "ciphertext_sha256": "1e48f0de7c0217591063a2a7b086bbd54ed8cf6ba544387dc1a7fc2fecdd5661",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "files": 100,
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "frames": 2,
+      "full_readback_verified": true,
+      "gzip_sha256": "157cdafab5c0a3fbe2ebe693f3f66e9979e81865a146bc500a7fcd5a44e112f0",
+      "independent_compare": {
+        "bad_count": 0,
+        "expected": 100,
+        "members_compared": 100,
+        "mode": "restore",
+        "sidecar_ciphertext_sha256_matches": true
+      },
+      "key": "devbox-closeout-private/pr1784-8edce49e/20261108T214101Z-control-b346d907beed.tar.gz.aesgcm",
+      "label": "control",
+      "manifest_sha256": "e83aaf41ca15e2de7148f86f431f438c6f5e6bad3c6d3177340a8f318f70cc51",
+      "original_bytes": 83147806,
+      "receipt_sidecar_authenticated_readback": true,
+      "receipt_sidecar_key": "devbox-closeout-private/pr1784-8edce49e/20261108T214101Z-control-b346d907beed.tar.gz.aesgcm.receipt.aesgcm",
+      "receipt_sidecar_sha256": "1275aaeedaf9c54338a7217c85dfdb35a6e9742ef4a711b8a619e1dc1e001f9e",
+      "status": "current",
+      "stored_bytes": 9630614,
+      "verified_at": "2026-11-08T21:41:05Z"
+    }
+  ],
+  "benchmark_history": {
+    "backfill_tool": {
+      "attempt_rows": 0,
+      "command": "python3 scripts/benchmark-history-backfill.py --write (Hub index saved once, --hub-index)",
+      "counts": {
+        "branch": {
+          "found": 1808,
+          "never_merged": 1505,
+          "superseded_pre_merge": 303
+        },
+        "hub": {
+          "duplicate": 7347,
+          "found": 26671,
+          "never_merged": 6,
+          "superseded_pre_merge": 2,
+          "unbound": 19316
+        }
+      },
+      "duration_rows": 0,
+      "gaps": {
+        "hub rows without a duration or timestamp": 2119,
+        "hub rows without a verdict (infra/queued/error)": 5825
+      }
+    },
+    "final_smoke_rows": {
+      "attempt_rows": 14,
+      "binding": "the Hub rows carry no `code` identity (UNBOUND to the backfill tool); the campaign's own result.json binds source.head 8edce49e3b, an ancestor of the merge 617bb467fd; rows built and appended with the tool's own hub_ledger_row() and write() (branch shards *.20261108.records-pr1784-closeout.jsonl); agent-payment-abandonment was held under no-remint custody and did not run, so it has no row",
+      "duration_rows": 14,
+      "group_run_id": "deploy-5a68051cd401f475ac32fb543daf3d909be567d0af219e5e3ed91a93bbe868f9",
+      "source_head": "8edce49e3b4ab656967e9b31fdbd62046b6a9aae"
+    },
+    "latest_only_check": "python3 scripts/benchmark-history-latest-only.py --base origin/main --check: exit 0"
+  },
+  "branch": "deploy/bottleneck-fixes",
+  "bucket": "trace-archive",
+  "carried_archives": [
+    {
+      "check": "all 20,942 archived members sha256-identical; the 3 credential-bearing files and cache dirs unchanged (control: identity-pr1767.json)",
+      "covers": ".context/deploy-pipeline-pr1767/ (PR 1767 first cycle, renamed 2026-11-08 11:24Z)",
+      "key": "devbox-closeout-private/pr1767-059cc72d/20261108T011704Z-cycle-r1-b0837fe8f56b.tar.gz.aesgcm",
+      "label": "pr1767:cycle-r1"
+    },
+    {
+      "check": "all 6,778 archived members sha256-identical; 1 credential-bearing file and cache dirs unchanged",
+      "covers": ".context/deploy-pipeline-r2/ (PR 1767 final cycle)",
+      "key": "devbox-closeout-private/pr1767-059cc72d/20261108T011523Z-deploy-state-0e974843cbe6.tar.gz.aesgcm",
+      "label": "pr1767:deploy-state"
+    }
+  ],
+  "deletion_check": {
+    "command": "/var/tmp/deploy-early/deploy_env.sh .context/deploy-pipeline scripts/deploy deletion-check --manifest <records worktree>/docs/handoffs/pr-1784-closeout/manifest.json --receipt <records worktree>/docs/handoffs/pr-1784-closeout/deletion-readiness.json",
+    "open_items": 0,
+    "verdict": "READY"
+  },
+  "external_exception": {
+    "lane": "agentcard",
+    "reason": "production payment identity 00000000-0000-4000-8000-000000000107 not provisioned (stripeLivemode=False); only the user can provide a dedicated KYC'd live AgentCard cardholder and save a live card via the hosted Checkout link",
+    "status": "FAIL pre-spend"
+  },
+  "format": "PR-CLOSEOUT-MANIFEST-V1",
+  "key_fingerprint": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "merged_sha": "617bb467fd75e3770d686e17aab9e519bded0f37",
+  "object_prefix": "devbox-closeout-private/pr1784-8edce49e/",
+  "pr": 1784,
+  "recipe": "docs/handoffs/whm-b07d9037-preservation/private_archive.py",
+  "records_pr": 1853,
+  "repairs": {
+    "B abandonment AgentCard 401/429 bypassed the stall classifier": "covered by https://boxes.dev/thread/thr_7654328c258b4b28b33daa76e573c178",
+    "C new-user-journey Stripe Checkout ZIP capture": "https://boxes.dev/thread/thr_5a39f1d80ed34cc8ae962617f101d160",
+    "D historical-custody admission locator + typed refusal": "https://boxes.dev/thread/thr_5273183919324417936cb5d136895cd0",
+    "E benchmark-share shard Hub race (resolved in the cycle)": "https://boxes.dev/thread/thr_bcf9fc84f6404543a0d045f3b7d6f647"
+  },
+  "reviewed_head": "8edce49e3b4ab656967e9b31fdbd62046b6a9aae",
+  "unarchived_credential_bearing": {
+    "by_set": {
+      "cloud-bn10": 24,
+      "cloud-bn7": 21,
+      "cloud-bn8": 22,
+      "cloud-tarball": 157,
+      "cycle-final": 2,
+      "cycles-bn-a": 3,
+      "cycles-bn-b": 3,
+      "deploy-state": 2
+    },
+    "bytes": 5627180193,
+    "detail": "unarchived-credential-bearing.json in the control archive (names, sizes, pattern names only)",
+    "files": 234,
+    "pattern_counts": {
+      "base64_wrapped_credential": 578,
+      "github_token_b64_field": 550,
+      "jwt": 8,
+      "pan_like_luhn": 223,
+      "sk_token": 1,
+      "upstream_api_key_field": 154
+    }
+  },
+  "unreleased_sandbox_funds": {
+    "card": "card_f80cea644e7618798172d9d3",
+    "cents": 4396,
+    "livemode": false,
+    "org_transfer": "owt_b4f6cf8ed5eb76fd8cd294a1",
+    "purchase": "a526872b HELD",
+    "round": "bn8"
+  }
+}
