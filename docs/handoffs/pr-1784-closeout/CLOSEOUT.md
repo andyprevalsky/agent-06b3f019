@@ -2,7 +2,7 @@
 
 Status: post-merge record. The committed `deletion-readiness.json` beside this file is the record of record for deletion readiness.
 
-- Deployed PR: [#1784](https://github.com/Rose-Ai-Labs/rose/pull/1784), branch `deploy/bottleneck-fixes`, merged 2026-11-08T20:42Z as `617bb467fd75e3770d686e17aab9e519bded0f37` (reviewed and merged head `8edce49e3b4ab656967e9b31fdbd62046b6a9aae`). Records PR: this records PR.
+- Deployed PR: [#1784](https://github.com/Rose-Ai-Labs/rose/pull/1784), branch `deploy/bottleneck-fixes`, merged 2026-11-08T20:42Z as `617bb467fd75e3770d686e17aab9e519bded0f37` (reviewed and merged head `8edce49e3b4ab656967e9b31fdbd62046b6a9aae`). Records PR: [PR #1853](https://github.com/Rose-Ai-Labs/rose/pull/1853).
 - Coordinator worktree: `/var/tmp/rose-base-measure` (idle at HEAD `8edce49e3b` after `scripts/deploy finish --outcome completed`; nothing ran there during the closeout except `deletion-check`). Object prefix `devbox-closeout-private/pr1784-8edce49e/` uses that HEAD.
 - No credential, key, signed URL or secret value is in this record. Env files appear by name and variable count only.
 
