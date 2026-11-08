@@ -7,6 +7,7 @@
  */
 import { readFileSync, mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
 import {
@@ -169,6 +170,63 @@ export function registerRoseStartupUpgradeCases(ctx: {
       assert(rose.startupTimeoutS === 300, `user-set timeout kept, got ${rose.startupTimeoutS}`);
     } finally {
       await owner3.cleanup();
+    }
+  });
+
+  test('Rose out of the box: the unedited 2026-11-08 startup default upgrades while user edits survive', async () => {
+    // A captured input permits a RED run without its production registry entry.
+    const previous = readFileSync(
+      process.env.ROSE_STARTUP_PREVIOUS_2026_11_08_FIXTURE ??
+        resolve(__dirname, '../../../..', ROSE_PREVIOUS_STARTUP_SCRIPTS_DIR, '2026-11-08.sh'),
+      'utf8'
+    );
+    assert(
+      createHash('sha256').update(previous).digest('hex') ===
+        '20c78c65019a2d2e8567014d6c6add0824db2965602d54c5994f68a9b8254ee3',
+      'fixture is the byte-exact 2026-11-08 default before reference metadata repair'
+    );
+    assert(previous !== roseStartup, 'the old default differs from the current startup');
+    const owner = await roseOwner();
+    try {
+      const created = await prisma.project.create({
+        data: {
+          userId: owner.userId,
+          name: 'Rose',
+          syncSalt: 'blackbox-salt',
+          repoUrl: roseRepo,
+          startupScript: previous,
+          syncRevision: 3,
+        },
+      });
+      const upgraded = await owner.rose();
+      assert(upgraded.id === created.id, 'upgrade keeps the existing project');
+      assert(upgraded.startupScript === roseStartup, 'old November 8 startup default is replaced');
+      assert(
+        upgraded.startupTimeoutS === ROSE_PROJECT_STARTUP_TIMEOUT_S,
+        'default timeout upgrades'
+      );
+      const persisted = await prisma.project.findUniqueOrThrow({ where: { id: created.id } });
+      assert(persisted.startupScript === roseStartup, 'upgrade is persisted');
+      assert((await owner.rose()).updatedAt === upgraded.updatedAt, 'second list does not rewrite');
+      const edited = `${previous}echo my own step\n`;
+      await updateProject(owner.userId, created.id, {
+        startupScript: edited,
+        startupTimeoutS: 300,
+      });
+      const custom = await owner.rose();
+      assert(
+        custom.startupScript === edited && custom.startupTimeoutS === 300,
+        'user edits survive listing'
+      );
+      await updateProject(owner.userId, created.id, { startupScript: previous });
+      const customTimeout = await owner.rose();
+      assert(
+        customTimeout.startupScript === roseStartup,
+        'unedited old script upgrades with a custom timeout'
+      );
+      assert(customTimeout.startupTimeoutS === 300, 'custom timeout survives upgrade');
+    } finally {
+      await owner.cleanup();
     }
   });
 
