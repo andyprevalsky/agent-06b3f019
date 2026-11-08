@@ -107,6 +107,24 @@ def native_closure(path, root):
     return {'fleet': str(fleet), 'audit_sha256': digest, 'lifecycle_sha256': c.sha_file(fleet / '_batch/lifecycle.json')}
 
 
+# Provider-wide observations inside a stall snapshot. They count every same-amount card/transfer for the
+# shared benchmark cardholder created since the purchase, so the concurrent identical lifecycles of one smoke
+# (seven payment tasks, plus other devboxes' fleets) change them between the end-of-task and cleanup
+# snapshots (PR #1784 cycle bn8: 7 vs 12). Every identity, status and lifecycle-scoped count must still agree.
+PROVIDER_WIDE_COUNTERS = ('agentCardProviderCardCount', 'agentCardProviderTransferCount',
+                          'agentCardProviderUnlinkedTransferCount')
+
+
+def lifecycle_view(snapshot):
+    """A stall snapshot without its provider-wide counters; everything else is compared exactly."""
+    view = copy.deepcopy(snapshot)
+    integrity = view.get('integrity') if isinstance(view, dict) else None
+    if isinstance(integrity, dict):
+        for key in PROVIDER_WIDE_COUNTERS:
+            integrity.pop(key, None)
+    return view
+
+
 def historical(state, failure, root):
     """Re-read exact native bytes and join their resource/cleanup identities."""
     import deploy_test_cycle as c
@@ -144,7 +162,8 @@ def historical(state, failure, root):
     snap = cleanup['agentcard_release_stall_lifecycles'][t['agent_id']]
     need(cleanup.get('errors') == [] and cleanup.get('root_agent_id') == t['agent_id'] == snap['agentId'], 'cleanup/root mismatch')
     if 'agentcard_release_stall_lifecycle' in t['logs']:
-        need(t['logs']['agentcard_release_stall_lifecycle'] == snap, 'two native snapshots disagree')
+        need(lifecycle_view(t['logs']['agentcard_release_stall_lifecycle']) == lifecycle_view(snap),
+             'two native snapshots disagree')
     final = cleanup['final']
     need(final.get('root_deleted') is True and final.get('unsealed_tree_agent_ids') == []
          and t['agent_id'] in final.get('tree_agent_ids', []), 'native root not sealed')

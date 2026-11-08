@@ -18,7 +18,7 @@ import deploy_test_cycle as c
 import deploy_gate_progress as progress
 
 class Cycle(unittest.TestCase):
-    def custody_fixture(self):
+    def custody_fixture(self, top_level=None):
         import deploy_test_historical_custody as h
         mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
         mocked.start(); self.addCleanup(mocked.stop)
@@ -44,6 +44,10 @@ class Cycle(unittest.TestCase):
             snap['orgTransfer'].update(id='transfer-' + str(i), cardId='card-' + str(i), status='consumed',
                                        releasedCents=0, transferredCents=4396, amountCents=4396, livemode=False)
             snap['stripeHold']['livemode'] = False
+            snap['integrity'] = dict(agentCardProviderCardCount=1, agentCardProviderTransferCount=1,
+                                     agentCardProviderUnlinkedTransferCount=0, cardCount=1, purchaseCount=1,
+                                     stripePaymentIntentCount=1, stripeProviderPaymentIntentCount=1,
+                                     walletFundingCount=1)
             final = dict(root_deleted=True, tree_agent_ids=[snap['agentId']], unsealed_tree_agent_ids=[], browser_sessions=[],
                          purchase_cleanup=[dict(agent_id=snap['agentId'], purchase_id=snap['purchase']['id'],
                           card_id=snap['agentCard']['id'], provider_transfer_id=snap['orgTransfer']['id'],
@@ -54,7 +58,8 @@ class Cycle(unittest.TestCase):
                           execution_provenance={'base_sha': self.state['source']['head']},
                           logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=snap['agentId'], final=final,
                                 provider_receipts=[], agentcard_release_stall_lifecycles={snap['agentId']: snap})})
-            if not i: native['logs']['agentcard_release_stall_lifecycle'] = snap
+            if not i:
+                native['logs']['agentcard_release_stall_lifecycle'] = top_level(copy.deepcopy(snap)) if top_level else snap
             file = self.root / '.context/native' / name / 'cloudbench-run.json'; c.write(file, {'tasks': [native]})
             evidence = dict(native_task=row, path=str(file), sha256=c.sha_file(file))
             result = file.parent / 'result.json'
@@ -158,6 +163,35 @@ class Cycle(unittest.TestCase):
         target.write_bytes(changed); os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
         catalog.write_bytes((ROOT / 'agents/benchmarks/tasks.json').read_bytes())
         self.assertFalse(c.agentcard_release_stall_task('agent-payment-abandonment', self.root))
+
+    def test_stall_snapshots_may_differ_only_in_provider_wide_counters(self):
+        # PR #1784 cycle bn8: the end-of-task and cleanup snapshots of one stall disagreed only in
+        # agentCardProviderCardCount/TransferCount (7 vs 12), because six other identical payment
+        # lifecycles minted for the shared cardholder in between; refresh refused the custody proof.
+        import deploy_test_historical_custody as h
+        def concurrent(snapshot):
+            snapshot['integrity'].update(agentCardProviderCardCount=7, agentCardProviderTransferCount=7,
+                                         agentCardProviderUnlinkedTransferCount=2)
+            return snapshot
+        new = self.custody_fixture(top_level=concurrent)
+        proof = h.build(copy.deepcopy(self.state), self.plan, new, self.root)
+        self.assertEqual(['root-0', 'root-1'], sorted(r['root_id'] for r in proof['cases']))
+
+    def test_stall_snapshots_still_refuse_any_lifecycle_difference(self):
+        import deploy_test_historical_custody as h
+        changes = {
+            'lifecycle count': lambda s: s['integrity'].update(cardCount=2) or s,
+            'stripe count': lambda s: s['integrity'].update(stripeProviderPaymentIntentCount=2) or s,
+            'purchase status': lambda s: s['purchase'].update(status='VOIDED') or s,
+            'released funds': lambda s: s['orgTransfer'].update(releasedCents=4396) or s,
+            'card identity': lambda s: s['agentCard'].update(id='card-other') or s,
+        }
+        for name, change in changes.items():
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                new = self.custody_fixture(top_level=change)
+                with self.assertRaisesRegex(ValueError, 'two native snapshots disagree'):
+                    h.build(copy.deepcopy(self.state), self.plan, new, self.root)
 
     def test_cross_goal_custody_import_preserves_fresh_selection_without_execution_credit(self):
         import deploy_test_historical_custody as h
