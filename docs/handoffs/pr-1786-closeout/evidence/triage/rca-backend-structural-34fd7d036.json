@@ -1,0 +1,11 @@
+{
+  "id": "01c03c1e768644a2a9c8268f2f9319c5",
+  "check": "backend-structural/backend-structural",
+  "command": ["npm", "run", "test:structural"],
+  "source": {"head": "34fd7d036b165e235a02a05197a4ddc00f6bc46e", "digest": "d38b15bd0ce25305d2c0f04036e4184967a5f9c2623cc226f8b8d32b1649e781"},
+  "native_result": "UNVERIFIED",
+  "attribution": "NOT_INTRODUCED",
+  "description": "Quick gate killed at its 120 s coordinator deadline (native_exit -15, timed_out) while every executed check had passed; log identical to the passing attempt-1 run on dbaccabd5 except it stopped 3 lines before the end inside scripts/prisma-local-push.test.sh.",
+  "evidence": "Attempt 1 (dbaccabd5, 01:57Z): backend-structural PASS 60.9 s, format 1.2 s, eslint 5.6 s. Attempt 3 (34fd7d036, 02:32Z): backend-structural 121.0 s timeout, format 2.7 s, eslint 11.4 s (uniform ~2x host slowdown). Diff dbaccabd5..34fd7d036 touches only browser-session-lifecycle.fixture-support.ts and one RCA case (+INDEX), none executed by test:structural except the archive scan. Solo rerun 03:01Z: 125.96 s at load 2.7; /proc/stat over 10 s at idle: steal 18%, sys 12%; no cgroup throttling (cpu.max max, nr_throttled 0); node 3e8-iteration loop 7.0-8.4 s. Logs: .context/deploy-pipeline.attempt1-dbaccabd5-interrupted/attempts/1/quick/backend-structural/output.log vs .context/deploy-pipeline/attempts/1/quick/backend-structural/output.log; trace /var/tmp/bsfix/plp-trace.log.",
+  "cause": "Coordinator host vCPU degradation (hypervisor steal / noisy neighbor) during the quick phase; not a defect in the frozen source."
+}
