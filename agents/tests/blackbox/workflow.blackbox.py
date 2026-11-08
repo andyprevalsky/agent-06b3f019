@@ -1749,6 +1749,46 @@ async def _test_question_ignores_agent_message_while_open(env) -> None:
     _assert_question_answered_only_by_reply(observed, "an agent message")
 
 
+async def _test_question_cutover_rewaits_same_call_before_llm(env) -> None:
+    """A real continue_as_new preserves an unanswered published question's identity."""
+    from helpers.wait_condition_or_handoff import GENERATION_HANDOFF_SIGNAL
+    from temporalio.worker import Worker
+
+    agent_id = "agent-question-cutover-same-call"
+    workflow_ids = []
+
+    async def cutover(handle) -> None:
+        workflow_ids.append(handle.id)
+        CUTOVER_POINTER[handle.id] = CUTOVER_NEW_QUEUE
+        await handle.signal(GENERATION_HANDOFF_SIGNAL, CUTOVER_NEW_QUEUE)
+        for _ in range(400):
+            if (await handle.describe()).task_queue == CUTOVER_NEW_QUEUE:
+                break
+            await asyncio.sleep(0.05)
+        assert (await handle.describe()).task_queue == CUTOVER_NEW_QUEUE, "question did not migrate"
+        await handle.query(AgentWorkflow.get_status)
+        await asyncio.sleep(QUESTION_SETTLE_SECONDS)
+        rows = [row for row in CUTOVER_MESSAGES[agent_id]
+                if row["metadata"].get("toolName") == "send_message_to_user"]
+        assert len(rows) == 1 and rows[0]["metadata"]["toolStatus"] == "IN_PROGRESS", rows
+        assert len(CUTOVER_LLM_QUEUES[agent_id]) == 1, "new generation re-entered LLM before the reply"
+
+    try:
+        async with Worker(env.client, task_queue=CUTOVER_NEW_QUEUE, workflows=[AgentWorkflow],
+                          activities=MOCK_ACTIVITIES, workflow_runner=_WORKFLOW_RUNNER,
+                          max_cached_workflows=0):
+            observed = await _run_question_wait_scenario(
+                env, agent_id, start_signal=None, before_reply=cutover
+            )
+        _assert_question_answered_only_by_reply(observed, "a cooperative deploy")
+        finished = observed["finished_after_reply"][0]
+        assert finished["task_queue"] == CUTOVER_NEW_QUEUE, finished
+    finally:
+        for workflow_id in workflow_ids:
+            CUTOVER_POINTER.pop(workflow_id, None)
+            CUTOVER_POINTER_FETCHES.pop(workflow_id, None)
+
+
 async def _run_all_workflow_tests() -> List[tuple]:
     """Run all workflow tests inside one WorkflowEnvironment.
 
@@ -1871,6 +1911,7 @@ async def _run_all_workflow_tests() -> List[tuple]:
             for name, question_test in (
                 ("wf_question_ignores_user_message_read_before_it", _test_question_ignores_user_message_read_before_it),
                 ("wf_question_ignores_agent_message_while_open", _test_question_ignores_agent_message_while_open),
+                ("wf_question_cutover_rewaits_same_call_before_llm", _test_question_cutover_rewaits_same_call_before_llm),
             ):
                 try:
                     await question_test(env)
