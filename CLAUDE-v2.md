@@ -31,20 +31,16 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Approval and review requests show the key user- and model-visible strings that change, well formatted, plus a plain list of schema or API fields; never code diffs or file pointers.
 - Golden-reference review precedes every approval request: a fresh adversarial sub-agent checks grounding per `.claude/shared/approval-format.md`. It reviews only the hunks inside the mandatory user-approval scope (deploy-guard-flagged prompt, agent-behavior and trajectory hunks, Zod schemas, /RCA and /descend harness-fix packets); GROUNDED clears those manual gates, and approvals are snapshot-scoped (rules 26, 26a).
 - Status cards and scorecards follow `.claude/shared/report-display-format.md`; rebuild every row from live evidence at render time, never from stale data, and cross-check the card against the run's own result before publishing.
+- When giving the user an FE link to inspect an agent's run, verify it shows the agent (publish with `python3 scripts/publish_evidence_links.py`).
 
 ## Never
 
-- Never uninstall, disable, bypass or weaken Freedom. Preserve Freedom (protected standing user instruction).
-- Never `pkill`/`kill` by pattern or port anything you did not launch, never use a pattern that could match another session's benchmark processes, and never kill a run's children directly; stop your own run by TERMing its controller PID and let its traps clean up (rule 27).
-- Before calling a controller death infra, check its detached log for `controller received TERM`; report a foreign stuck run to the user instead of killing it.
-- Never `git stash` (the stash is shared by every worktree); save work with `git diff HEAD > .git-wip.patch` and restore with `git apply` (rule 21).
 - Never add lint or type suppressions (`eslint-disable`, `@ts-ignore`, `@ts-expect-error`, `noqa`, `type: ignore`); fix the cause and remove existing ones in files you touch (rule 22).
 - Never run `prisma db push` or `prisma migrate dev` from `back-end/`: its `.env` points at PROD, and a push drops indexes Prisma can't model and once lost prod RLS.
 - Never change benchmark tasks, pass criteria, expected tools, loads, timeouts (including tool timeouts), concurrency or production behavior to make a run pass; diagnose and fix the cause, and get approval for any definition change (rule 25).
 - Never hide failed attempts, weaken assertions or acceptance rules, or claim a run tested a fix missing from its actual service path.
 - Never rename a benchmark task `name`; it keys every history ledger.
 - Never inject synthetic user or tool messages or recovery nudges into the planner trajectory, and never add string-matching classifiers to the harness (rules 25a, 25b).
-- Never print or commit a secret, and never rotate or revoke a credential without Andy's explicit OK.
 - Never delete lockfiles or change dependency ranges to make an install work, and never reinstall dependencies into a `node_modules` or venv linked from another checkout.
 - Never give a foreground Bash command a timeout above 5 minutes; run anything longer in the background and watch it (rule 12).
 - Never treat a user pause as a bug's cause; users pause after noticing a problem (rule 11).
@@ -62,7 +58,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Sub-agents batch routine status and notify the parent only on an actionable milestone, failure or blocker; compute refs and hashes before sending a handoff, never placeholders.
 - Report the first authentic infrastructure failure immediately (run, task, attempt, first failing boundary, evidence) and start its RCA without restarting or cancelling healthy work.
 - Benchmark and experiment iteration (hypothesis, triage of every error, one `/RCA` per cluster, rerun after verified fixes, batches) follows the one loop in `/descend`.
-- Outside `/deploy` and `/descend`, which own their sync points, merge the latest main about hourly through a sub-agent that preserves both sides' intent in conflicts.
+- Outside `/deploy` and `/descend`, which own their sync points, merge the latest main about hourly with `/sync` through a sub-agent that preserves both sides' intent in conflicts.
 
 ## Workspaces
 
@@ -75,13 +71,12 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 ## Testing
 
 - Write the assertion first: designing the test is the main work, untested behavior is assumed broken, and a demo or eyeballing is not proof (rule 2).
-- Work is incomplete until a test in a consistently run `/deploy` path asserts the behavior; every bug fix lands its reproduction test there (rule 1).
-- Register each regression in its existing owning suite and verify it runs; a new verification suite needs human approval.
-- Before finalizing a new test, run that test (not its whole suite) five consecutive times with unchanged test code.
+- Work is incomplete until a test in a consistently run `/deploy` path asserts the behavior; every bug fix lands its reproduction test there, and where it makes sense add validation criteria to an existing test instead of writing a new one (rule 1).
+- Before finalizing a new test, run that test (not its whole suite) five consecutive times with unchanged test code to make sure it isn't flaky, consider whether it would flake under machine load or other conditions, and have it cross-reviewed once for flakiness.
 - Follow `/RCA` (`docs/root-cause-analysis.md`) for every bug: no root cause without a local repro that failed and now passes; a benchmark failure needs `scripts/run-bench --local <task>` to fail before and pass after, except that `/descend`'s post-fix cloud reruns are its outcome proof (rules 6, 17).
 - Validate credentials and integrations with the existing blackbox test (for example `testSmoke_claudeCodeAnswersQuestion`), extending it if needed, never with ad-hoc curl or scripts (rule 18).
 - When testing a new integration, add no fallback paths; they hide whether the primary path works (rule 8).
-- When testing agent features, stop a misbehaving test agent first to stop its spend, and read the logs before restarting (`.claude/commands/loop.md`).
+- When testing agent features, stop a misbehaving test agent first to stop its spend, and read the logs before restarting.
 - Coverage thresholds (`back-end/.c8rc.json`, `front-end/vitest.config.ts`, `mac-app/vitest.config.ts`, `agents/pyproject.toml`) only ratchet up.
 - Testing guide, including Blacksmith and CI: `docs/testing.md`; `bash scripts/test.sh --no-smoke [repo] [domain]` runs offline tests and `--list` lists domains.
 - `python3 scripts/run-deploy-structural-gates.py [--max-workers N]` runs the deploy structural registry; activate `agents/venv` first.
@@ -98,7 +93,6 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - /deploy runs at most 20 benchmarks chosen by `agents/benchmarks/select_predeploy_benches.py`; tag a task `smoke` only for must-run harness plumbing, and never adjust evaluators or tags to force selection.
 - Every ready task resolves to a deploy category (`deploy_category`, or a tag with the same name) or opts out with `deploy_category: "none"`; catalog validation fails otherwise.
 - A run stops when confirmed infra failures reach 5% of the original scheduled total (`20 * infra_failed_jobs >= scheduled_total`, 30 of 600), never of completed attempts; unknown or cancelled jobs without infra evidence don't count, stop by TERMing the exact owned controller, and an explicit user threshold overrides.
-- Give every benchmark run's FE link (publish with `python3 scripts/publish_evidence_links.py`) and verify it shows the agent.
 - Every run of code merged to main, wherever it ran (Hub, controller, other checkout), lands in `agents/benchmarks/history/task_attempts.jsonl` (passes also in `task_durations.jsonl`); a branch commits only each task's latest run via `scripts/deploy ledger`, failures of unmerged code never land on main, and main rows are append-only.
 - Never block the next experiment on a full `/deploy` (about 3 hours); run only the checks its changed dependencies need.
 - After agent-harness changes, measure with `scripts/run-bench eval`.
@@ -140,7 +134,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - GitHub writes acting as Andy use `GITHUB_TOKEN`; a rate-limited read-only call uses `python3 scripts/github_token_pool.py pick`, never for writes.
 - A 404 from any pool member other than `GITHUB_TOKEN` (machine accounts, the `rose-labs-agents` App, `GITHUB_DISPATCH_TOKEN`) is not authoritative; retry with `GITHUB_TOKEN`.
 - On boxes.dev the `gh` wrapper ignores `GH_TOKEN`; pass a picked token to `/opt/devbox-tools/gh/current/bin/gh` or curl.
-- Production env-var changes on Render, Fly, Vercel and Supabase, credential writes included, need no approval: verify the target service, key precedence and consumers first, stage, validate and roll back on regression.
+- Env-var and credential management is fully autonomous, rotations included, on Render, Fly, Vercel, Supabase and the Rose project env files on the Rose app: verify the target service, key precedence and consumers first, stage, validate and roll back on regression.
 - Store every new value in every location (local `.env`, production surfaces, boxes managed env with `dvb-onbox env set ... --value-stdin`, Rose project env files), sending values from a script and never on argv; commands in `docs/internal/prod-env-vars.md`.
 - Read Render env vars only with `cd back-end && npx tsx scripts/render-env.ts`; a raw `limit=100` request truncates.
 
