@@ -64,6 +64,7 @@ BUNDLE_FILE_BYTES = 64 * 1024 * 1024
 BUNDLE_TOTAL_BYTES = 400 * 1024 * 1024
 BUNDLE_SKIP = {'seed-cache', 'tsbuildinfo', 'frontend-builds', 'experiential-venv', 'node_modules'}
 SERVICE_LOGS = ('back-end/backend-logs.log', 'agents/navi-worker-log.txt', 'front-end/frontend-logs.log')
+BUNDLE_SUMMARIES = ('summary.json', 'manifest.json')  # small run indexes RCA reads first
 LOG_TREES = ('back-end/coverage', 'front-end/coverage', 'agents/coverage', 'front-end/test-results')
 STOP = threading.Event()
 
@@ -700,7 +701,7 @@ def bundle_priority(path: Path, evidence: frozenset) -> tuple:
     400 MB budget, so the 10 MB backend server log of a failed coverage shard was the
     file dropped (docs/rca/cases/2026-11-08-grep-regex-safety-blocked-event-loop.md).
     """
-    text = str(path) in evidence or path.suffix in ('.log', '.txt')
+    text = str(path) in evidence or path.suffix in ('.log', '.txt') or path.name in BUNDLE_SUMMARIES
     return (0 if text else 1, path.stat().st_size, str(path))
 
 

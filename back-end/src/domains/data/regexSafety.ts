@@ -68,9 +68,37 @@ function isClearlyLinearPattern(source: string): boolean {
 type PatternAnalyzer = (
   source: string,
   flags: string,
-  params: { timeout: number }
+  params: { timeout: number; signal: AbortSignal }
 ) => ReturnType<typeof check>;
 type PatternSafetyControl = number | PatternAnalyzer;
+
+// recheck starts its native agent on first use without memoizing the spawn, so
+// concurrent first calls each start an agent and all but one leak. One shared
+// warm-up call owns that spawn; it counts against the caller's deadline.
+let analyzerWarmup: Promise<unknown> | undefined;
+function warmAnalyzer(): Promise<unknown> {
+  analyzerWarmup ??= check('a', '', {
+    timeout: RECHECK_TIMEOUT_MS,
+    signal: AbortSignal.timeout(RECHECK_TIMEOUT_MS),
+  }).catch(() => undefined);
+  return analyzerWarmup;
+}
+
+/**
+ * Settle with `work`, or with null at the deadline. recheck does not settle a
+ * call whose agent process died, so its own timeout and abort are not enough.
+ */
+async function beforeDeadline<T>(work: Promise<T>, deadlineAt: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), Math.max(0, deadlineAt - Date.now()));
+  });
+  try {
+    return await Promise.race([work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Classify a regex with `recheck` and reject genuinely dangerous shapes
@@ -101,13 +129,22 @@ export async function checkPatternSafety(
   }
   // Retries share one wall-clock deadline. Each analyzer invocation otherwise
   // starts a fresh timeout, which would multiply request-path latency by the
-  // retry count under load.
+  // retry count under load. recheck's own timeout starts only once its agent
+  // runs the analysis, so concurrent requests queued behind busy cores (or an
+  // agent that died) would wait without bound; the deadline is enforced in
+  // wall-clock time and the pattern fails closed.
   const deadlineAt = Date.now() + timeoutMs;
+  if (typeof control !== 'function') {
+    await beforeDeadline(warmAnalyzer(), deadlineAt);
+  }
   const runAnalyzer = async () => {
     const remainingMs = deadlineAt - Date.now();
     if (remainingMs <= 0) return null;
     try {
-      return await analyze(source, flags, { timeout: remainingMs });
+      return await beforeDeadline(
+        analyze(source, flags, { timeout: remainingMs, signal: AbortSignal.timeout(remainingMs) }),
+        deadlineAt
+      );
     } catch {
       return null;
     }

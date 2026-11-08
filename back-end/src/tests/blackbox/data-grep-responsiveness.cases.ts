@@ -29,10 +29,11 @@ const MAX_HEALTH_LATENCY_MS = 2000;
 function probeHealth(): Promise<number> {
   const startedAt = Date.now();
   return new Promise((resolve, reject) => {
-    const req = http.get(`${BASE_URL}/health`, { agent: false }, (res) => {
+    const req = http.get(`${BASE_URL}/health`, { agent: false, timeout: 30_000 }, (res) => {
       res.resume();
       res.on('end', () => resolve(Date.now() - startedAt));
     });
+    req.on('timeout', () => req.destroy(new Error('GET /health got no response in 30 s')));
     req.on('error', reject);
   });
 }
@@ -54,9 +55,14 @@ export async function testConcurrentUnclassifiedGrepsKeepBackendResponsive(
     clearInterval(timer);
   }
   const latencies = await Promise.all(probes);
+  // The analyzer must actually run to its deadline here, or the test would stop
+  // measuring the analysis. If it ever classifies this pattern quickly, pick a
+  // pattern it still cannot classify; never drop this check.
   for (const { status, data } of responses) {
-    if (status !== 200 && status !== 400) {
-      throw new Error(`grep answered ${status}: ${JSON.stringify(data)}`);
+    if (status !== 400 || !JSON.stringify(data).includes('did not complete')) {
+      throw new Error(
+        `expected 400 "Pattern safety analysis did not complete", got ${status}: ${JSON.stringify(data)}`
+      );
     }
   }
   const worst = Math.max(...latencies);

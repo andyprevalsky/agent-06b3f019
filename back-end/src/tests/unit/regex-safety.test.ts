@@ -166,6 +166,40 @@ async function run(): Promise<void> {
     'a realistic range query must stay usable after one analyzer timeout'
   );
 
+  // The 1000 ms deadline is wall-clock: recheck never settles a call whose agent
+  // died, and queued requests start its own timeout only when they run.
+  const unclassifiedAfterDeadline = async (analyzer: typeof check, label: string) => {
+    const startedAt = Date.now();
+    let watchdog: NodeJS.Timeout | undefined;
+    const verdict = await Promise.race([
+      checkPatternSafety('safe-looking-pattern', '', analyzer),
+      new Promise<never>((_resolve, reject) => {
+        watchdog = setTimeout(() => reject(new Error(`${label}: never settled`)), 3000);
+      }),
+    ]).finally(() => clearTimeout(watchdog));
+    const elapsed = Date.now() - startedAt;
+    assert.equal(verdict.ok, false, `${label}: an unsettled analysis must fail closed`);
+    assert.match(verdict.reason ?? '', /safety analysis did not complete/);
+    assert.ok(elapsed < 1500, `${label}: settled after ${elapsed} ms, past the 1000 ms deadline`);
+  };
+  await unclassifiedAfterDeadline(
+    (() => new Promise(() => undefined)) as unknown as typeof check,
+    'dead analyzer agent'
+  );
+  const signals: AbortSignal[] = [];
+  await unclassifiedAfterDeadline(
+    ((_source: string, _flags: string, options: { signal: AbortSignal }) => {
+      signals.push(options.signal);
+      return new Promise(() => undefined);
+    }) as unknown as typeof check,
+    'queued analysis'
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(
+    signals.length > 0 && signals.every((signal) => signal.aborted),
+    'every analysis must be told to abort by its deadline, so the agent stops working on it'
+  );
+
   process.stdout.write('PASS regex safety rejects dangerous and unclassified patterns\n');
 }
 
