@@ -156,7 +156,8 @@ test('Codex Code sandbox never routes through a Rose proxy or the DEMO cache', (
     assert.ok(!text.includes(forbidden), `${label} must not contain ${forbidden}`);
   }
   assert.ok(
-    e2bProvider.includes('envs.CODEX_SPEED = codexSpeed'),
+    // A person's resuming-turn speed (cli_settings) comes first, else the agent's.
+    e2bProvider.includes('envs.CODEX_SPEED = cli.speedOverride ?? codexSpeed'),
     'the Fast Mode button selects Codex native speed instead'
   );
   assert.ok(
