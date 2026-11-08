@@ -1,0 +1,27 @@
+{
+ "name": "pr1776-002e9277d8-core",
+ "key_prefix": "devbox-closeout-private/pr1776-002e9277d8-core/",
+ "manifest_object": "devbox-closeout-private/pr1776-002e9277d8-core/manifest.json.aesgcm",
+ "files_object": "devbox-closeout-private/pr1776-002e9277d8-core/files.txt.aesgcm",
+ "manifest_sha256": "ef4c859cbd4046f2a292294135e2366a14efbc6e01978f77a3e32704861bee35",
+ "archive_sha256": "6535d2a433db37be4d82de4d08fbdd18cdf48cf3ccf076a8d6a0273c3c961e2d",
+ "archive_size_bytes": 449670148,
+ "parts": 7,
+ "chunk_size": 67108864,
+ "files": 8301,
+ "paths": [
+  "/home/boxes/rose/.context",
+  "/home/boxes/rose/agents/navi-worker-log.txt",
+  "/home/boxes/rose/back-end/backend-logs.log",
+  "/home/boxes/rose/front-end/frontend-logs.log",
+  "/home/boxes/rose/hub-poller-logs.log",
+  "/home/boxes/rose/agents/providers/fast_cache",
+  "/home/boxes/rose/package-lock.json",
+  "/var/tmp/rca-foreign-uid"
+ ],
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (Render/Fly/back-end env; same key as the trace archive)",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "restore": "download each part, decrypt with aad=its key, concatenate in order, tar -xzf",
+ "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches"
+}
