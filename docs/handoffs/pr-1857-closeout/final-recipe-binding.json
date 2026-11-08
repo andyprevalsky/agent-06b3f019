@@ -1,0 +1,6 @@
+{
+  "observed_at": "2026-11-08T23:13:54.559590+00:00",
+  "recipe": ".context/rca-784d/closeout-prep/prepare_final_records.py",
+  "sha256": "bca3ee3aee2856924f0f8c2fff7a049985a0763f2c4f4c9308c781265b0071e2",
+  "change": "Include .git/cloudbench-experiments.jsonl identified by independent closeout review; all native encryption/restore code unchanged."
+}

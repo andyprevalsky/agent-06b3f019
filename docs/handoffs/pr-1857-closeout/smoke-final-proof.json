@@ -1,0 +1,508 @@
+{
+  "captured_at": "2026-11-08T23:05:34.971583+00:00",
+  "status": "PASS",
+  "campaign": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502",
+  "started_at": "2026-11-08T22:36:18.380138+00:00",
+  "finished_at": "2026-11-08T23:05:01.533927+00:00",
+  "wall_clock_seconds": 1723.114,
+  "e2e_wall_clock_seconds": 1723.163,
+  "source_sha": "cf85beba8d87fa02212065c0560f32198f09de01",
+  "scheduled": 13,
+  "task_passed": 13,
+  "infra_failed": 0,
+  "retry_infra": 0,
+  "concurrency": 13,
+  "native_adapter": {
+    "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/result.json",
+    "sha256": "aa7ce6de0c49cc5dc8cbc7065ca620b3de2e971cff10a828c9ff544db57090b7",
+    "complete": true,
+    "cleanup_complete": true,
+    "native_exit": 0
+  },
+  "native_release_checks": [
+    {
+      "job_id": "r001-j0001",
+      "run_id": "20261108-223641-1337635",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337635",
+      "fleet_owner_token": "9754a60055f04384a95dfe874a15640a",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794179063.0
+    },
+    {
+      "job_id": "r001-j0002",
+      "run_id": "20261108-223641-1337636",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337636",
+      "fleet_owner_token": "42a907e5fba84a6ca538499db7d4e64a",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178090.0
+    },
+    {
+      "job_id": "r001-j0003",
+      "run_id": "20261108-223641-1337637",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337637",
+      "fleet_owner_token": "9ad4d831534b4fe086bc39273e799d97",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178262.0
+    },
+    {
+      "job_id": "r001-j0004",
+      "run_id": "20261108-223641-1337642",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337642",
+      "fleet_owner_token": "e0fdb9afb7df4c369bb15df56119e41c",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178408.0
+    },
+    {
+      "job_id": "r001-j0005",
+      "run_id": "20261108-223641-1337645",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337645",
+      "fleet_owner_token": "6dd5530ca6544c00b47325eb0f00914e",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178297.0
+    },
+    {
+      "job_id": "r001-j0006",
+      "run_id": "20261108-223641-1337649",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337649",
+      "fleet_owner_token": "b0ddf26a62374dd69b6830268ccf4bba",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178130.0
+    },
+    {
+      "job_id": "r001-j0007",
+      "run_id": "20261108-223641-1337656",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337656",
+      "fleet_owner_token": "1d7a8efc622f491bb2ad9af283a342b0",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178215.0
+    },
+    {
+      "job_id": "r001-j0008",
+      "run_id": "20261108-223641-1337659",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337659",
+      "fleet_owner_token": "b52480cff7de40878a142feceba3c9e3",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178306.0
+    },
+    {
+      "job_id": "r001-j0009",
+      "run_id": "20261108-223641-1337664",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337664",
+      "fleet_owner_token": "48f4473fe64340dbad72390226daeed3",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178393.0
+    },
+    {
+      "job_id": "r001-j0010",
+      "run_id": "20261108-223641-1337669",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337669",
+      "fleet_owner_token": "69ec776521dd4d2da0d79026bce2c2b1",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178560.0
+    },
+    {
+      "job_id": "r001-j0011",
+      "run_id": "20261108-223641-1337676",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337676",
+      "fleet_owner_token": "919dfdbb0b5a4553ba1148e58bc0e109",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178486.0
+    },
+    {
+      "job_id": "r001-j0012",
+      "run_id": "20261108-223641-1337685",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337685",
+      "fleet_owner_token": "f5d7d54409324b388ef347cf50514805",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178281.0
+    },
+    {
+      "job_id": "r001-j0013",
+      "run_id": "20261108-223641-1337688",
+      "fleet_dir": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/runs/20261108-223641-1337688",
+      "fleet_owner_token": "709680888a9843338df81491742e3ca9",
+      "task_status": "PASSED",
+      "infra_failure": false,
+      "terminal_task": true,
+      "resources_released": true,
+      "lifecycle_verified": true,
+      "released_at_epoch": 1794178262.0
+    }
+  ],
+  "verified_absent_processes_and_groups": [
+    1333024,
+    1334755,
+    1337096,
+    1337541,
+    1340794,
+    2133561,
+    1337635,
+    1337636,
+    1337637,
+    1337642,
+    1337645,
+    1337649,
+    1337656,
+    1337659,
+    1337664,
+    1337669,
+    1337676,
+    1337685,
+    1337688
+  ],
+  "publication": {
+    "record_path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/hub-group.json",
+    "record_sha256": "70fe78d3a90baf02880afc78b8d47a75ace3ac0ac2240e5ff3f389872b6832b1",
+    "ack_path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/hub-group-publication-ack.private.json",
+    "ack_sha256": "1d2a694e54c4ad8cd4ca208bfe0d627ef6877ae9070d05047b8d50b346ddf4ba",
+    "publisher_pid": 2133561,
+    "record_digest_matches": true,
+    "group_status": "passed"
+  },
+  "machine_lifecycles": {
+    "workload": [
+      {
+        "version": "1",
+        "fleet_owner_token": "9754a60055f04384a95dfe874a15640a",
+        "run_id": "20261108-223641-1337635",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-0d9f0984a5df46b1a0afc5be",
+        "source": "fresh-clone",
+        "source_machine_id": "890d64f6ee5d28",
+        "machine_id": "83dd000b143038",
+        "volume_id": "vol_v8ewgyop0lpdo1lv",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "9754a60055f04384a95dfe874a15640a",
+        "run_id": "20261108-223641-1337635",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-2e8a63cee5214991a0a58f4d",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "890d64f6ee5d28",
+        "volume_id": "vol_4581d506z65gnkq4",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "42a907e5fba84a6ca538499db7d4e64a",
+        "run_id": "20261108-223641-1337636",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-e6b552f009f84ec591f80d7c",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "891316b6017d68",
+        "volume_id": "vol_4m3doenwk5qekkdv",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "9ad4d831534b4fe086bc39273e799d97",
+        "run_id": "20261108-223641-1337637",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-ceab7c790e22415eb27837d7",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "850e67a47190d8",
+        "volume_id": "vol_42kx2dg07873zl14",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "e0fdb9afb7df4c369bb15df56119e41c",
+        "run_id": "20261108-223641-1337642",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-ba979fa7a27e49d2bd653e3a",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "8744e13f044728",
+        "volume_id": "vol_re1l6q2y9kn62d34",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "6dd5530ca6544c00b47325eb0f00914e",
+        "run_id": "20261108-223641-1337645",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-0dfcaca8c5864091982e55b4",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "890d42f6044418",
+        "volume_id": "vol_4581d506zdgg0684",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "b0ddf26a62374dd69b6830268ccf4bba",
+        "run_id": "20261108-223641-1337649",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-d6a0573b08684be9bdb2dc43",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "84ed295f0d33e8",
+        "volume_id": "vol_re1l6q2y7n1my9d4",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "1d7a8efc622f491bb2ad9af283a342b0",
+        "run_id": "20261108-223641-1337656",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-9193ebe8d9a54d33bb8904dd",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "85777d7a760018",
+        "volume_id": "vol_4m3doenwy9z0mg1v",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "b52480cff7de40878a142feceba3c9e3",
+        "run_id": "20261108-223641-1337659",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-8d2d786896174979b8636216",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "810914c9e10d08",
+        "volume_id": "vol_vjy297p1n85mggpv",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "48f4473fe64340dbad72390226daeed3",
+        "run_id": "20261108-223641-1337664",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-6bb5c4cdd0e145de8d9e50b0",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "891115db27e768",
+        "volume_id": "vol_40o7m3k85lm839m4",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "69ec776521dd4d2da0d79026bce2c2b1",
+        "run_id": "20261108-223641-1337669",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-ae7899e632b14f268c942f05",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "8e0e7ec73400d8",
+        "volume_id": "vol_4y8l1gjw3le56ger",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "919dfdbb0b5a4553ba1148e58bc0e109",
+        "run_id": "20261108-223641-1337676",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-59e964806cb143e8a607c4a4",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "86550d4b724778",
+        "volume_id": "vol_vjy297p1m80yyppv",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "f5d7d54409324b388ef347cf50514805",
+        "run_id": "20261108-223641-1337685",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-afdbd82a72144b60b1e50d01",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "83ddde1b639978",
+        "volume_id": "vol_v8ewgymjz69e7oyv",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "709680888a9843338df81491742e3ca9",
+        "run_id": "20261108-223641-1337688",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-30cf3e5201c740e398104b96",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "185770e5ad0468",
+        "volume_id": "vol_r686x5gn1d1p7l14",
+        "disposition": "destroyed-provider-retained"
+      }
+    ],
+    "canary": [
+      {
+        "version": "1",
+        "fleet_owner_token": "9cd1dc4ef7644dc2a81d99703fab7a5c",
+        "run_id": "20261108-223701-1348406",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-4c9f9eea0b3b4e2da327d185",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "891e735a7e9e18",
+        "volume_id": "vol_vxmpezpdgzojz5x4",
+        "disposition": "destroyed-provider-retained"
+      },
+      {
+        "version": "1",
+        "fleet_owner_token": "9cd1dc4ef7644dc2a81d99703fab7a5c",
+        "run_id": "20261108-223701-1348406",
+        "app": "navi-whisper-lux-bench",
+        "clone_name": "cloudbench-9d17c92d90cf45f48d38a401",
+        "source": "fresh-clone",
+        "source_machine_id": "683e47df5094d8",
+        "machine_id": "7812617bd00d68",
+        "volume_id": "vol_vjy29l2wlgn5lzmv",
+        "disposition": "destroyed-provider-retained"
+      }
+    ],
+    "started_unique_workload": 14,
+    "started_unique_canary": 2,
+    "native_terminal_dispositions": 16,
+    "note": "Unique Machine lifecycle counts from original producer start/ready markers and exact native owner audits. This is not a count of raw API start/stop invocations; those are not separately metered."
+  },
+  "canary_lifecycle": {
+    "audit_sha256": "202c95c02989e513bea0a1cad45468f673bf47b007cde5893af96202bd5bbf89",
+    "autoscaler_failed_benches": [],
+    "cleanup_verified": true,
+    "controller_exit_code": 0,
+    "fleet_owner_token": "9cd1dc4ef7644dc2a81d99703fab7a5c",
+    "hub_publication_failed": false,
+    "run_id": "20261108-223701-1348406",
+    "status": "verified",
+    "version": 1,
+    "workspace_root": "/home/boxes/rose"
+  },
+  "recovered_upload_warnings": [
+    {
+      "job_id": "r001-j0001",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0001.log",
+      "line": 262,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0002",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0002.log",
+      "line": 258,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0003",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0003.log",
+      "line": 259,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0004",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0004.log",
+      "line": 259,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0005",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0005.log",
+      "line": 350,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0007",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0007.log",
+      "line": 260,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0008",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0008.log",
+      "line": 259,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0009",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0009.log",
+      "line": 259,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0010",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0010.log",
+      "line": 259,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0011",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0011.log",
+      "line": 259,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    },
+    {
+      "job_id": "r001-j0012",
+      "path": "/home/boxes/rose/.context/deploy-cloud/26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/campaigns/deploy-26e5357eeca7d2a5b825e65dd6e623d1f08593dbc5e4561e3c47ae721f158502/r001-j0012.log",
+      "line": 261,
+      "message": "\u26a0\ufe0f  hub upload failed (non-fatal): The read operation timed out",
+      "successful_upload_after": true
+    }
+  ],
+  "display_gaps": [
+    "Native campaign scorecard source displays UNRECORDED although all 13 execution-provenance records bind exact source SHA.",
+    "Native campaign scorecard lifecycle displays 0/13 because this nonretry campaign summary omits release fields; exact native released_attempt validator and adapter independently verified all 13."
+  ],
+  "preservation": "New smoke evidence and final deploy receipts still require parent final finite-cutoff private archival capture."
+}
