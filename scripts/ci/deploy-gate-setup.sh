@@ -20,6 +20,35 @@ if [ "${1:-}" = "--release" ]; then
   exit 0
 fi
 
+# Every external download a gate VM makes on every run is a single point of failure for the whole
+# round: hunt round 7 (2026-11-08) lost 11 of 12 gates to four GitHub Releases 504s (cloudflared), and
+# round 8 lost all 11 remote gates to astral-sh/setup-uv's GitHub download (504). uv, flyctl, ngrok
+# and cloudflared live in $TOOLS on the sticky dependency disk and are fetched only when missing, with
+# retries that ride out a short outage; uv's package cache lives there too (`uv run --with boto3`).
+TOOLS="$DEPS/tools"
+sudo mkdir -p "$TOOLS"
+sudo chown "$(id -u):$(id -g)" "$DEPS" "$TOOLS"
+export PATH="$TOOLS:$PATH" UV_CACHE_DIR="$DEPS/uv-cache"
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "$TOOLS" >> "$GITHUB_PATH"
+  echo "UV_CACHE_DIR=$UV_CACHE_DIR" >> "$GITHUB_ENV"
+fi
+fetch() {  # fetch <url> <output>: bounded retries on any error, then fail the step
+  curl -fsSL --connect-timeout 10 --retry 6 --retry-all-errors --retry-delay 5 --retry-max-time 180 -o "$2" "$1"
+}
+
+step "uv"
+if [ ! -x "$TOOLS/uv" ]; then
+  if fetch https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz "$TOOLS/.uv.tgz"; then
+    tar -xzf "$TOOLS/.uv.tgz" -C "$TOOLS" --strip-components=1 uv-x86_64-unknown-linux-gnu/uv
+    rm -f "$TOOLS/.uv.tgz"
+  else  # GitHub Releases down: the same binary from PyPI (a different CDN)
+    python3 -m pip install --quiet --disable-pip-version-check --target "$TOOLS/.uv-pypi" uv \
+      && ln -sf "$TOOLS/.uv-pypi/bin/uv" "$TOOLS/uv"
+  fi
+fi
+"$TOOLS/uv" --version >/dev/null || { echo "uv unavailable" >&2; exit 1; }
+
 step "env files"
 [ -n "${DEPLOY_GATE_ENV_BUNDLE:-}" ] || { echo "DEPLOY_GATE_ENV_BUNDLE secret is missing" >&2; exit 1; }
 # Unpacked outside the checkout: anything untracked inside it would change the frozen source digest.
@@ -70,19 +99,6 @@ sudo systemctl start postgresql 2>/dev/null || sudo service postgresql start
 for _ in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
 sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
 sudo -u postgres createdb victoria 2>/dev/null || true
-
-# flyctl, ngrok and cloudflared come from three external hosts. Downloading them on every gate VM
-# made every gate of a round fail together on one CDN outage (hunt round 7, 2026-11-08: four GitHub
-# Releases 504s in 7 s failed 11 of 12 gates in "Prepare runner"). They live on the sticky dependency
-# disk instead and are fetched only when missing, with retries that ride out a short outage.
-TOOLS="$DEPS/tools"
-sudo mkdir -p "$TOOLS"
-sudo chown "$(id -u):$(id -g)" "$DEPS" "$TOOLS"
-export PATH="$TOOLS:$PATH"
-echo "$TOOLS" >> "$GITHUB_PATH"
-fetch() {  # fetch <url> <output>: bounded retries on any error, then fail the step
-  curl -fsSL --connect-timeout 10 --retry 6 --retry-all-errors --retry-delay 5 --retry-max-time 180 -o "$2" "$1"
-}
 
 step "flyctl"
 if [ ! -x "$TOOLS/flyctl" ]; then

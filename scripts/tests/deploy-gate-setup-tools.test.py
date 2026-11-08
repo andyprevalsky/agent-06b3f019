@@ -24,9 +24,11 @@ SETUP = ROOT / 'scripts/ci/deploy-gate-setup.sh'
 
 
 def tools_block() -> str:
+    """The script's own tool-cache blocks: the uv preamble, then flyctl and the tunnel tools."""
     text = SETUP.read_text()
-    start, end = text.index('TOOLS="$DEPS/tools"'), text.index('step "dependency disk"')
-    return text[start:end]
+    head = text[text.index('TOOLS="$DEPS/tools"'):text.index('step "env files"')]
+    tail = text[text.index('step "flyctl"'):text.index('step "dependency disk"')]
+    return head + tail
 
 
 def executable(path: Path, body: str) -> None:
@@ -48,6 +50,25 @@ class GateSetupTools(unittest.TestCase):
             info.size, info.mode = len(data), 0o755
             archive.addfile(info, io.BytesIO(data))
         (base / 'ngrok.tgz').write_bytes(tgz.getvalue())
+        uv = io.BytesIO()
+        with tarfile.open(fileobj=uv, mode='w:gz') as archive:
+            data = b'#!/bin/sh\necho "uv 0.9.0"\n'
+            info = tarfile.TarInfo('uv-x86_64-unknown-linux-gnu/uv')
+            info.size, info.mode = len(data), 0o755
+            archive.addfile(info, io.BytesIO(data))
+        (base / 'uv.tgz').write_bytes(uv.getvalue())
+        self.pip_calls = base / 'pip.calls'
+        # Fake python3 for the PyPI fallback only (`python3 -m pip install --target DIR uv`).
+        executable(self.bin / 'python3', textwrap.dedent(f'''\
+            #!/usr/bin/env bash
+            if [ "$1 $2" = "-m pip" ]; then
+              echo "$@" >> {self.pip_calls}
+              while [ $# -gt 0 ]; do [ "$1" = --target ] && target="$2"; shift; done
+              mkdir -p "$target/bin" && printf '#!/bin/sh\\necho "uv 0.9.0 (pypi)"\\n' > "$target/bin/uv"
+              chmod +x "$target/bin/uv"; exit 0
+            fi
+            exec /usr/bin/python3 "$@"
+            '''))
         # Fake curl: records each URL; each attempt (1 + --retry N, like curl --retry-all-errors)
         # consumes one queued failure and fails like a 504 (exit 22) while any remain.
         executable(self.bin / 'curl', textwrap.dedent(f'''\
@@ -67,6 +88,7 @@ class GateSetupTools(unittest.TestCase):
                   'printf "#!/bin/sh\\necho flyctl v0\\n" > "$FLYCTL_INSTALL/bin/flyctl"' \\
                   'chmod +x "$FLYCTL_INSTALL/bin/flyctl"' > "$out" ;;
               *ngrok*) cp {base / 'ngrok.tgz'} "$out" ;;
+              *astral-sh/uv*) [ -f {base / 'no-github'} ] && exit 22; cp {base / 'uv.tgz'} "$out" ;;
               *cloudflared*) printf '#!/bin/sh\\necho cloudflared\\n' > "$out" ;;
               *) exit 22 ;;
             esac
@@ -82,14 +104,15 @@ class GateSetupTools(unittest.TestCase):
         self.failures.write_text(str(failures))
         script = 'set -euo pipefail\nstep() { :; }\n' + tools_block()
         env = {'PATH': f'{self.bin}:/usr/bin:/bin', 'HOME': self.tmp.name, 'DEPS': str(self.deps),
-               'GITHUB_PATH': str(Path(self.tmp.name) / 'github-path'), 'TMPDIR': self.tmp.name}
+               'GITHUB_PATH': str(Path(self.tmp.name) / 'github-path'),
+               'GITHUB_ENV': str(Path(self.tmp.name) / 'github-env'), 'TMPDIR': self.tmp.name}
         return subprocess.run(['bash', '-c', script], cwd=ROOT, env=env, capture_output=True, text=True,
                               timeout=120)
 
     def test_short_outage_is_ridden_out_and_the_next_vm_needs_no_network(self):
         first = self.run_block(failures=4)  # the round-7 outage: four 504s in a row
         self.assertEqual(first.returncode, 0, first.stderr)
-        for tool in ('flyctl', 'ngrok', 'cloudflared'):
+        for tool in ('uv', 'flyctl', 'ngrok', 'cloudflared'):
             self.assertTrue(os.access(self.deps / 'tools' / tool, os.X_OK), tool)
         self.assertIn(str(self.deps / 'tools'), (Path(self.tmp.name) / 'github-path').read_text())
         self.calls.unlink()
@@ -98,9 +121,19 @@ class GateSetupTools(unittest.TestCase):
         self.assertFalse(self.calls.exists(), 'a cached tool was downloaded again')
 
     def test_a_persistent_outage_still_fails_the_step(self):
+        executable(self.bin / 'python3', '#!/bin/sh\nexit 1\n')  # PyPI is down too
         result = self.run_block(failures=10_000)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('flyctl unavailable', result.stderr)
+        self.assertIn('uv unavailable', result.stderr)
+
+    def test_uv_falls_back_to_pypi_when_github_releases_is_down(self):
+        (Path(self.tmp.name) / 'no-github').touch()
+        result = self.run_block(failures=0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('pip install', self.pip_calls.read_text())
+        version = subprocess.run([str(self.deps / 'tools' / 'uv'), '--version'], capture_output=True, text=True)
+        self.assertIn('pypi', version.stdout)
+        self.assertIn(f"UV_CACHE_DIR={self.deps / 'uv-cache'}", (Path(self.tmp.name) / 'github-env').read_text())
 
 
 if __name__ == '__main__':
