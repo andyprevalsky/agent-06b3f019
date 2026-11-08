@@ -190,3 +190,7 @@ No spawn attempted sign-in.
 10k-agent behavior: one formatted string per declined sign-in; no new state, polling, channels or queries.
 
 The earlier lesson (correlate captured model call IDs with dispatch spans before blaming replay) still holds; `## Reusable lesson` now carries this recurrence's lesson.
+
+### 2026-11-08 owner review: only the tool-result text shipped
+
+The EXECUTE-prompt sentence ("or pursue the same outcome another way") was not shipped. Andy rejected it: after a decline the agent should pursue the outcome another way, so main's rule ("do not re-attempt the same step") stays. Only the tool-result text that quotes the declined request shipped. This supersedes part 2 of the fix above and the reusable lesson's prompt parenthetical.
