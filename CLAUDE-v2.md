@@ -78,7 +78,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - Work is incomplete until a test in a consistently run `/deploy` path asserts the behavior; every bug fix lands its reproduction test there (rule 1).
 - Register each regression in its existing owning suite and verify it runs; a new verification suite needs human approval.
 - Before finalizing a new test, run that test (not its whole suite) five consecutive times with unchanged test code.
-- Follow `/RCA` (`docs/root-cause-analysis.md`) for every bug: no root cause without a local repro that failed and now passes; a benchmark failure needs `scripts/run-bench --local <task>` to fail before and pass after, except that `/descend`'s post-approval cloud reruns are its outcome proof (rules 6, 17).
+- Follow `/RCA` (`docs/root-cause-analysis.md`) for every bug: no root cause without a local repro that failed and now passes; a benchmark failure needs `scripts/run-bench --local <task>` to fail before and pass after, except that `/descend`'s post-fix cloud reruns are its outcome proof (rules 6, 17).
 - Validate credentials and integrations with the existing blackbox test (for example `testSmoke_claudeCodeAnswersQuestion`), extending it if needed, never with ad-hoc curl or scripts (rule 18).
 - When testing a new integration, add no fallback paths; they hide whether the primary path works (rule 8).
 - When testing agent features, stop a misbehaving test agent first to stop its spend, and read the logs before restarting (`.claude/commands/loop.md`).

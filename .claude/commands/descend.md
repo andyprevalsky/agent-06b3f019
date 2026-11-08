@@ -44,16 +44,16 @@ For the resumed Polar campaign, retain `/benchmark`'s 20-task K=3, fastest-first
 comparable duration groups, 2-hour cap and user-go-before-next-20 scope; none of
 the repair, approval or continuation steps below grants a new batch launch.
 
-## Default batch schedule (user, October 20 and 27, 2026)
+## Default batch schedule (user, October 20 and 27 and November 8, 2026)
 
-- Run a slice in batches when its scheduled runs exceed 70 or the user asks for batches; an explicitly requested single wide launch keeps its one-launch rule below.
-- A batch is one `scripts/run-bench` launch; its size counts individual scheduled runs (task × `-k` copy), so it holds size ÷ `-k` distinct tasks, rounded down, and the size is never multiplied by `-k` again.
-- Start at 20 runs; after a completed batch with fewer than 5% confirmed infra failures over its original scheduled runs, grow the next batch by 10 runs, to at most 70; otherwise, or after an interrupted batch or unknown classification, keep the size.
+- Run a slice in batches when it holds more than 20 tasks or the user asks for batches; an explicitly requested single wide launch keeps its one-launch rule below.
+- A batch is one `scripts/run-bench` launch; its size counts distinct tasks, and `-k` sets how many copies of each run (20 tasks at `-k 3` schedule 60 copies).
+- Start at 20 tasks; after a completed batch whose pass rate is above about 80%, grow the next batch by 10 tasks, to at most 70; otherwise, or after an interrupted batch, keep the size.
 - Order all tasks once before the first batch, shortest effective timeout first (catalog timeout, then recorded runtime, then the CLI default; task name breaks ties), and keep similar timeouts together so one slow task does not hold the batch.
-- Keep a batch's task set for 5 iterations (one iteration is one batch run plus its fix round), adding the next unvisited tasks in order when the size grows; then rotate to the next unvisited tasks at the current size.
-- Launch each batch once with `--concurrency` equal to its run count, subject to native admission; record any forced split as an exception that keeps one logical batch and its fixed denominator.
+- Keep a batch's task set for 5 iterations (one iteration is one batch run plus its fix round), adding the next unvisited tasks in order when the size grows; then switch to the next unvisited tasks at the current size.
+- Launch each batch once with `--concurrency` capped at the verified provider limit, subject to native admission; record any forced split as an exception that keeps one logical batch and its fixed denominator.
 - Advance on this schedule without asking; wait for a user go only where the user asked for one, as in the resumed Polar campaign above.
-- Record iteration, task names, size in runs, `-k`, concurrency, infra count over original scheduled runs and the rotation cursor in state; never change a task, assertion, timeout or acceptance rule to fit a batch.
+- Record iteration, task names, size in tasks, `-k`, concurrency, pass and infra counts over original scheduled copies and the rotation cursor in state; never change a task, assertion, timeout or acceptance rule to fit a batch.
 
 ## Alignment and implementation (explicit user correction, October 21, 2026)
 
