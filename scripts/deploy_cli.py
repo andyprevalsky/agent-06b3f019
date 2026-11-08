@@ -304,9 +304,18 @@ def cmd_review_finish(args: argparse.Namespace) -> int:
 
 
 def cmd_review_next(args: argparse.Namespace) -> int:
+    post_approval = getattr(args, 'post_findings_review_approval', None)
+    prior_hash = getattr(args, 'prior_ledger_sha256', None)
+    if post_approval is not None or prior_hash is not None:
+        if not post_approval or not prior_hash or not getattr(args, 'approved_head', None):
+            print('DEPLOY_REVIEW_NEXT BLOCKED: post-findings approval, approved HEAD and prior ledger SHA-256 are required', file=sys.stderr)
+            return 1
+        if args.verification_approval is not None or getattr(args, 'one_final_review_approval', None) is not None:
+            print('DEPLOY_REVIEW_NEXT BLOCKED: post-findings approval cannot combine with other approvals', file=sys.stderr)
+            return 1
     final_approval = getattr(args, 'one_final_review_approval', None)
     approved_head = getattr(args, 'approved_head', None)
-    if final_approval is not None or approved_head is not None:
+    if post_approval is None and (final_approval is not None or approved_head is not None):
         if not final_approval or not approved_head:
             print('DEPLOY_REVIEW_NEXT BLOCKED: --one-final-review-approval and --approved-head are both required',
                   file=sys.stderr)
@@ -324,7 +333,12 @@ def cmd_review_next(args: argparse.Namespace) -> int:
         print('DEPLOY_REVIEW_NEXT BLOCKED: parked benchmark-history rows are not committed; run '
               '`scripts/deploy ledger` so the review covers them', file=sys.stderr)
         return 1
-    if final_approval is not None or approved_head is not None:
+    if post_approval is not None:
+        kind, sha = 'verification', head()
+        start = ['start', '--kind', kind, '--head', sha,
+                 '--post-findings-review-approval', post_approval, '--approved-head', approved_head,
+                 '--prior-ledger-sha256', prior_hash, '--repo', str(ROOT)]
+    elif final_approval is not None or approved_head is not None:
         kind, sha = 'verification', head()
         start = ['start', '--kind', kind, '--head', sha,
                  '--one-final-review-approval', final_approval,
@@ -663,6 +677,8 @@ def parser() -> argparse.ArgumentParser:
     ended.add_argument('--result', choices=['clean', 'findings'], required=True)
     nxt = sub.add_parser('review-next', help='open the next bounded review cycle on the pushed stabilization batch')
     nxt.add_argument('--verification-approval', help="user approval id for a verification cycle after a clean cycle 2")
+    nxt.add_argument('--post-findings-review-approval', help='New explicit user approval ID for one fifth remediation review')
+    nxt.add_argument('--prior-ledger-sha256', help='Exact prior ledger snapshot approved by the user')
     nxt.add_argument('--one-final-review-approval', help='Explicit user evidence ID for one fourth verification')
     nxt.add_argument('--approved-head', help='Exact40 HEAD named in that user decision')
     approval = sub.add_parser('approval', help='record an approval packet or decision; on approval rerun flagged guards')

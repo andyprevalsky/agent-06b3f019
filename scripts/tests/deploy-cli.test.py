@@ -671,5 +671,53 @@ class ReviewNextInputValidation(unittest.TestCase):
             '--repo', result['calls'][0][-1]]])
 
 
+
+class PostFindingsCLIProposalTest(unittest.TestCase):
+    def options(self):
+        return ['--post-findings-review-approval', 'fixture:NEW', '--approved-head', 'e'*40,
+                '--prior-ledger-sha256', 'b'*64]
+
+    def test_missing_pair_or_combined_flags_fail_before_state_or_subprocess(self):
+        cases = [['--post-findings-review-approval', 'fixture:NEW'],
+                 self.options()[:-2], ['--prior-ledger-sha256', 'b'*64],
+                 self.options() + ['--verification-approval', ''],
+                 self.options() + ['--one-final-review-approval', '']]
+        for options in cases:
+            with self.subTest(options=options), \
+                    patch.object(d, 'read_json', side_effect=AssertionError('state read forbidden')), \
+                    patch.object(d, 'run', side_effect=AssertionError('subprocess forbidden')), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(d.main(['review-next', *options]), 1)
+
+    def dispatch(self, admission):
+        calls = []
+        def run(argv):
+            calls.append(argv)
+            return admission if len(calls) == 1 else 0
+        with patch.object(d, 'read_json', return_value={'pr': 1708}), \
+                patch.object(d, 'uncommitted', return_value=[]), \
+                patch.object(d, 'unapplied_ledger_rows', return_value=False), \
+                patch.object(d, 'head', return_value='e'*40), patch.object(d, 'run', side_effect=run), \
+                patch.object(d, 'factory') as event, patch.object(d, 'write_json') as write, \
+                patch.object(d.subprocess, 'run', side_effect=AssertionError('real subprocess forbidden')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = d.main(['review-next', *self.options()])
+        return result, calls, event.call_count, write.call_count
+
+    def test_admission_refusal_prevents_push_request_event_and_write(self):
+        result, calls, events, writes = self.dispatch(1)
+        self.assertEqual((result, len(calls), events, writes), (1, 1, 0, 0))
+        self.assertEqual(calls[0][1:3], ['scripts/deploy_review_cycle.py', 'start'])
+        self.assertIn('--post-findings-review-approval', calls[0])
+        self.assertIn('--prior-ledger-sha256', calls[0])
+
+    def test_normal_full_request_follows_admission_only(self):
+        result, calls, events, writes = self.dispatch(0)
+        self.assertEqual((result, len(calls), events, writes), (0, 3, 1, 1))
+        self.assertEqual(calls[0][1:3], ['scripts/deploy_review_cycle.py', 'start'])
+        self.assertEqual(calls[1], ['git', 'push', 'origin', 'HEAD'])
+        self.assertEqual(calls[2], ['gh', 'pr', 'comment', '1708', '--body', '@coderabbitai review'])
+
+
 if __name__ == '__main__':
     unittest.main()

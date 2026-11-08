@@ -1058,5 +1058,235 @@ class OneFinalMalformedLedgerTest(unittest.TestCase):
                 self.assertEqual(out.getvalue(), '')
 
 
+
+class PostFindingsProposalTest(unittest.TestCase):
+    """Synthetic 18-entry ledgers only; never a real approval or provider call."""
+    def setUp(self):
+        import hashlib
+        self.hashlib = hashlib
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / 'ledger.json'
+        self.head = 'e' * 40
+        entries = [dict(number=i, kind=kind, head=str(i)*40, status='completed', result='clean')
+                   for i, kind in enumerate(('initial', 'incremental', 'verification'), 1)]
+        entries += [dict(number=i, kind='sync-inherited', head='a'*40, status='completed', result='clean')
+                    for i in range(4, 18)]
+        prefix = dict(schema_version=1, cycles=entries, identity='SYNTHETIC_ONLY')
+        old_hash = hashlib.sha256((json.dumps(prefix, indent=2) + '\n').encode()).hexdigest()
+        entries.append(dict(number=4, kind='verification', head='4'*40, status='completed', result='findings',
+            one_final_review_approval=dict(approval_id='fixture:fourth', approved_head='4'*40,
+                prior_ledger_sha256=old_hash, prior_entries=17, review_position=4)))
+        self.original = deepcopy(prefix)
+        self.save(self.original)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def save(self, state):
+        MODULE.write_state(self.path, state)
+        self.before = self.path.read_bytes()
+        self.digest = self.hashlib.sha256(self.before).hexdigest()
+
+    def invoke(self, **changes):
+        options = dict(head=self.head, kind='verification', post_findings_review_approval='fixture:NEW-decision',
+                       approved_head=self.head, prior_ledger_sha256=self.digest)
+        options.update(changes)
+        argv = ['deploy_review_cycle.py', '--state', str(self.path), 'start']
+        for key, value in options.items():
+            if value is not None:
+                argv.append('--' + key.replace('_', '-'))
+                if value is not True:
+                    argv.append(str(value))
+        output = io.StringIO()
+        def git(repo, *args):
+            return self.head if args[0] == 'rev-parse' else getattr(self, 'dirty', '')
+        with patch.object(sys, 'argv', argv), patch.object(MODULE, 'git', side_effect=git), \
+                patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('external call forbidden')), \
+                contextlib.redirect_stdout(output):
+            try:
+                return MODULE.main(), output.getvalue()
+            except SystemExit as error:
+                return 1, str(error)
+
+    def refuse(self, **changes):
+        code, error = self.invoke(**changes)
+        self.assertEqual(code, 1, error)
+        self.assertEqual(self.before, self.path.read_bytes())
+        return error
+
+    def test_native_admission_preserves_all_18_and_requires_real_clean_finish(self):
+        code, output = self.invoke()
+        self.assertEqual(code, 0, output)
+        state = MODULE.read_state(self.path)
+        self.assertEqual(state['cycles'][:18], self.original['cycles'])
+        self.assertEqual(len(state['cycles']), 19)
+        self.assertEqual(state['identity'], 'SYNTHETIC_ONLY')
+        fifth = state['cycles'][-1]
+        self.assertEqual((fifth['number'], fifth['status']), (5, 'open'))
+        self.assertEqual(fifth['post_findings_review_approval']['prior_ledger_sha256'], self.digest)
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.require_mergeable(self.path, head=self.head)
+        MODULE.finish_cycle(self.path, head=self.head, result='clean')
+        self.assertEqual(MODULE.require_mergeable(self.path, head=self.head)['number'], 5)
+        self.before = self.path.read_bytes()
+        self.assertIn('consumed', self.refuse(head='f'*40, approved_head='f'*40))
+
+    def test_missing_wrong_scope_dirty_and_combined_inputs_fail_closed(self):
+        for values in [dict(post_findings_review_approval=None), dict(post_findings_review_approval=''),
+                       dict(post_findings_review_approval='fixture:fourth'), dict(post_findings_review_approval='bad id'),
+                       dict(approved_head=None), dict(approved_head='f'*40), dict(head='f'*40, approved_head='f'*40), dict(head='short'),
+                       dict(prior_ledger_sha256=None), dict(prior_ledger_sha256='f'*64),
+                       dict(verification_approval='other'), dict(one_final_review_approval='other'),
+                       dict(reset=True), dict(kind='initial')]:
+            with self.subTest(values=values):
+                self.refuse(**values)
+        self.dirty = '?? untracked\n'
+        self.refuse()
+
+    def test_malformed_and_nonqualifying_ledgers_fail_closed(self):
+        for mutation in ('tail', 'marker', 'count', 'clean', 'quota', 'duplicate', 'badhead', 'badprefix', 'badschema', 'badnumber', 'baddigest'):
+            value = deepcopy(self.original)
+            if mutation == 'tail': value['cycles'].append(None)
+            elif mutation == 'marker': value['cycles'][-1]['one_final_review_approval'] = None
+            elif mutation == 'count': value['cycles'].pop(0)
+            elif mutation == 'clean': value['cycles'][-1]['result'] = 'clean'
+            elif mutation == 'quota': value['cycles'][1].update(disposition='skipped', skip_reason='usage-cap')
+            elif mutation == 'duplicate': value['cycles'][1]['head'] = value['cycles'][0]['head']
+            elif mutation == 'badhead': value['cycles'][-1]['head'] = 'wrong'
+            elif mutation == 'badschema': value['schema_version'] = True
+            elif mutation == 'badnumber': value['cycles'][0]['number'] = True
+            elif mutation == 'baddigest': value['cycles'][-1]['one_final_review_approval']['prior_ledger_sha256'] = 1
+            else: value['cycles'][-1]['one_final_review_approval']['prior_entries'] = 16
+            self.save(value)
+            with self.subTest(mutation=mutation): self.refuse()
+
+    def test_unavailable_skip_override_findings_twice_and_reset_stay_blocked(self):
+        self.assertEqual(self.invoke()[0], 0)
+        admitted = self.path.read_bytes()
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.finish_cycle(self.path, head=self.head, result='unavailable')
+        for disposition in ('skipped', 'overridden'):
+            state = MODULE.read_state(self.path)
+            with self.assertRaises(MODULE.ReviewCycleError):
+                MODULE._close_with_disposition(self.path, self.path.with_suffix('.receipt'), state,
+                    state['cycles'][-1], pr='fixture', disposition=disposition, report_row='forbidden', fields={})
+            self.assertFalse(self.path.with_suffix('.receipt').exists())
+        self.assertEqual(admitted, self.path.read_bytes())
+        MODULE.finish_cycle(self.path, head=self.head, result='findings')
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.require_mergeable(self.path, head=self.head)
+        self.before = self.path.read_bytes()
+        self.refuse()
+        self.refuse(reset=True)
+        self.refuse(post_findings_review_approval=None, prior_ledger_sha256=None, approved_head=None)
+
+    def test_existing_native_barriers_on_closed_fourth_findings(self):
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'not mergeable'):
+            MODULE.require_mergeable(self.path, head='4'*40)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'unreviewed'):
+            MODULE.require_mergeable(self.path, head=self.head)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'no replacement or fifth'):
+            MODULE.next_cycle(self.original['cycles'])
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'consumed'):
+            MODULE.start_cycle(self.path, head=self.head, kind='verification',
+                one_final_review_approval='fixture:NEW-decision', approved_head=self.head)
+        self.assertEqual(self.before, self.path.read_bytes())
+
+
+
+class PriorNativeApprovalReplayTest(unittest.TestCase):
+    def test_any_prior_native_approval_id_is_rejected_without_a_write(self):
+        for location in ('third', 'history-verification', 'history-final'):
+            with self.subTest(location=location):
+                fixture = PostFindingsProposalTest()
+                fixture.setUp()
+                try:
+                    state = deepcopy(fixture.original)
+                    reused = 'fixture:OLD-native-decision'
+                    if location == 'third':
+                        state['cycles'][2]['verification_approval'] = reused
+                    elif location == 'history-verification':
+                        state['cycles'][3]['verification_approval'] = reused
+                    else:
+                        state['cycles'][3]['one_final_review_approval'] = {'approval_id': reused}
+                    prefix = {**state, 'cycles': state['cycles'][:-1]}
+                    state['cycles'][-1]['one_final_review_approval']['prior_ledger_sha256'] = fixture.hashlib.sha256(
+                        (json.dumps(prefix, indent=2) + '\n').encode()).hexdigest()
+                    fixture.save(state)
+                    with patch.object(MODULE, 'write_state', wraps=MODULE.write_state) as write:
+                        code, output = fixture.invoke(post_findings_review_approval=reused)
+                    self.assertEqual(code, 1, output)
+                    self.assertIn('new explicit user approval', output)
+                    write.assert_not_called()
+                    self.assertEqual(fixture.before, fixture.path.read_bytes())
+                finally:
+                    fixture.tearDown()
+
+
+class FifthUsageCapPolicyTest(unittest.TestCase):
+    setUp = PostFindingsProposalTest.setUp
+    tearDown = PostFindingsProposalTest.tearDown
+    save = PostFindingsProposalTest.save
+    invoke = PostFindingsProposalTest.invoke
+    refuse = PostFindingsProposalTest.refuse
+
+    def cap_payload(self):
+        cap = dict(CAP_COMMENT, body=CAP_COMMENT['body'].replace(HEAD_C, self.head))
+        check = dict(RATE_LIMITED_CHECK, head_sha=self.head)
+        return evidence(issue_comments=[cap], check_runs=[check])
+
+    def native_skip(self, payload):
+        evidence_path = self.path.with_suffix('.evidence.json')
+        evidence_path.write_text(json.dumps(payload))
+        receipt = self.path.with_suffix('.receipts')
+        out = io.StringIO()
+        with patch.object(sys, 'argv', ['deploy_review_cycle.py', '--state', str(self.path),
+                'skip', '--head', self.head, '--pr', 'SYNTHETIC_ONLY', '--reason', 'usage-cap',
+                '--evidence-json', str(evidence_path), '--receipt', str(receipt)]), \
+                patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('network forbidden')), \
+                contextlib.redirect_stdout(out):
+            try:
+                return MODULE.main(), out.getvalue(), receipt
+            except SystemExit as error:
+                return 1, str(error), receipt
+
+    def test_exact_usage_cap_is_skipped_never_pass_and_never_sixth(self):
+        self.assertEqual(self.invoke()[0], 0)
+        code, output, receipt = self.native_skip(self.cap_payload())
+        self.assertEqual(code, 0, output)
+        self.assertIn('⚠️ Skipped', output)
+        self.assertNotIn('PASS', output)
+        state = MODULE.read_state(self.path)
+        self.assertEqual(state['cycles'][:18], self.original['cycles'])
+        self.assertEqual(len(state['cycles']), 19)
+        fifth = state['cycles'][-1]
+        self.assertEqual((fifth['disposition'], fifth['skip_reason']), ('skipped', 'usage-cap'))
+        self.assertEqual(fifth['evidence']['issue_comment_id'], CAP_COMMENT['id'])
+        self.assertEqual(fifth['evidence']['check_run_id'], RATE_LIMITED_CHECK['id'])
+        self.assertEqual(MODULE.require_mergeable(self.path, head=self.head)['disposition'], 'skipped')
+        self.assertEqual(json.loads(receipt.read_text())['disposition'], 'skipped')
+        self.before = self.path.read_bytes()
+        self.assertIn('consumed', self.refuse(head='f'*40, approved_head='f'*40))
+        with self.assertRaises(MODULE.ReviewCycleError): MODULE.next_cycle(state['cycles'])
+        self.refuse(reset=True)
+
+    def test_fake_wrong_head_success_and_substantive_evidence_refused(self):
+        self.assertEqual(self.invoke()[0], 0)
+        before = self.path.read_bytes()
+        for mutation in ('empty', 'not-cap', 'wrong-comment-head', 'wrong-check-head', 'success', 'substantive'):
+            data = self.cap_payload()
+            if mutation == 'empty': data = evidence()
+            elif mutation == 'not-cap': data['issue_comments'][0]['body'] = 'Review rate limited ' + self.head
+            elif mutation == 'wrong-comment-head': data['issue_comments'][0]['body'] = CAP_COMMENT['body']
+            elif mutation == 'wrong-check-head': data['check_runs'][0]['head_sha'] = 'f'*40
+            elif mutation == 'success': data['check_runs'] = [dict(FINISHED_CHECK, head_sha=self.head)]
+            else: data['reviews'] = [dict(FINDINGS_REVIEW, commit_id=self.head)]
+            with self.subTest(mutation=mutation):
+                code, output, receipt = self.native_skip(data)
+                self.assertEqual(code, 1, output)
+                self.assertEqual(before, self.path.read_bytes())
+                self.assertFalse(receipt.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

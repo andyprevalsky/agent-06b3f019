@@ -166,17 +166,77 @@ def one_final_review(entries, *, head, approved_head, approval, repo):
     return {'number': 4, 'kind': 'verification', 'replaces': None}
 
 
+
+def post_findings_review(path, state, *, head, approved_head, approval, prior_ledger_sha256, repo):
+    """One explicit, snapshot-bound remediation review; never a budget fallback."""
+    entries = state['cycles']
+    if (type(state.get('schema_version')) is not int or state['schema_version'] != 1
+            or any(not isinstance(e, dict) or e.get('kind') not in KINDS | {SYNC_KIND}
+                   or e.get('status') != 'completed' for e in entries)):
+        raise ReviewCycleError('post-findings review requires an intact object ledger')
+    if any('post_findings_review_approval' in e for e in entries):
+        raise ReviewCycleError('post-findings review consumed; no replacement or sixth review')
+    cycles = budget_cycles(entries)
+    if (len(cycles) != 4
+            or [(e.get('number'), e.get('kind')) for e in cycles] !=
+               [(1, 'initial'), (2, 'incremental'), (3, 'verification'), (4, 'verification')]
+            or any(e.get('status') != 'completed' or e.get('result') not in {'clean', 'findings'}
+                   or 'disposition' in e or 'skip_reason' in e for e in cycles)
+            or entries[-1] is not cycles[-1] or cycles[-1].get('result') != 'findings'
+            or any('one_final_review_approval' in e for e in cycles[:-1])
+            or any(type(e.get('number')) is not int or not isinstance(e.get('head'), str)
+                   or not re.fullmatch('[0-9a-f]{40}', e['head']) for e in cycles)
+            or len({e['head'] for e in cycles}) != 4):
+        raise ReviewCycleError('post-findings review requires four completed substantive cycles, fourth findings')
+    fourth = cycles[-1]
+    prior = fourth.get('one_final_review_approval')
+    if (not isinstance(prior, dict) or not isinstance(prior.get('approval_id'), str)
+            or not re.fullmatch(r'[\w.:-]{1,128}', prior['approval_id'])
+            or prior.get('approved_head') != fourth.get('head')
+            or type(prior.get('review_position')) is not int or prior['review_position'] != 4
+            or type(prior.get('prior_entries')) is not int or prior['prior_entries'] != len(entries) - 1
+            or not isinstance(prior.get('prior_ledger_sha256'), str)
+            or not re.fullmatch('[0-9a-f]{64}', prior['prior_ledger_sha256'])):
+        raise ReviewCycleError('post-findings review requires intact fourth-review approval binding')
+    prior_approval_ids = set()
+    for entry in entries:
+        final_approval = entry.get('one_final_review_approval')
+        for value in (entry.get('verification_approval'),
+                      final_approval.get('approval_id') if isinstance(final_approval, dict) else None):
+            if isinstance(value, str):
+                prior_approval_ids.add(value)
+    if (not isinstance(approval, str) or not re.fullmatch(r'[\w.:-]{1,128}', approval)
+            or approval in prior_approval_ids):
+        raise ReviewCycleError('new explicit user approval evidence ID required for post-findings review')
+    raw = path.read_bytes()
+    if (not isinstance(prior_ledger_sha256, str)
+            or not re.fullmatch('[0-9a-f]{64}', prior_ledger_sha256)
+            or hashlib.sha256(raw).hexdigest() != prior_ledger_sha256
+            or json.loads(raw) != state):
+        raise ReviewCycleError('post-findings review prior ledger SHA-256 mismatch')
+    if (not re.fullmatch('[0-9a-f]{40}', head or '') or approved_head != head
+            or git(repo, 'rev-parse', 'HEAD').strip() != head
+            or git(repo, 'status', '--porcelain', '--untracked-files=normal').strip()):
+        raise ReviewCycleError('post-findings review requires clean current exact approved HEAD')
+    return {'number': 5, 'kind': 'verification', 'replaces': None}
+
+
 def start_cycle(
     path: Path, *, head: str, kind: str, reset: bool = False,
     verification_approval: str | None = None,
     one_final_review_approval: str | None = None, approved_head: str | None = None,
     repo: Path | None = None,
+    post_findings_review_approval: str | None = None, prior_ledger_sha256: str | None = None,
 ) -> dict[str, object]:
     if not head:
         raise ReviewCycleError("review HEAD must not be empty")
     if kind not in KINDS:
         raise ReviewCycleError(f"invalid review kind: {kind}")
-    exceptional = one_final_review_approval is not None or approved_head is not None
+    remediation = post_findings_review_approval is not None or prior_ledger_sha256 is not None
+    if remediation and (reset or kind != 'verification' or verification_approval is not None
+                        or one_final_review_approval is not None):
+        raise ReviewCycleError('post-findings review cannot reset or combine approvals')
+    exceptional = not remediation and (one_final_review_approval is not None or approved_head is not None)
     if exceptional and (reset or kind != 'verification' or verification_approval is not None):
         raise ReviewCycleError('one final verification cannot reset or combine approvals')
     if reset and path.exists() and any(e.get('one_final_review_approval') for e in review_cycles(read_state(path)['cycles'])):
@@ -187,9 +247,14 @@ def start_cycle(
         state = read_state(path)
     entries = state["cycles"]
     assert isinstance(entries, list)
-    expected = (one_final_review(entries, head=head, approved_head=approved_head,
-                                approval=one_final_review_approval, repo=repo or Path.cwd())
-                if exceptional else next_cycle(entries))
+    if remediation:
+        expected = post_findings_review(path, state, head=head, approved_head=approved_head,
+            approval=post_findings_review_approval, prior_ledger_sha256=prior_ledger_sha256,
+            repo=repo or Path.cwd())
+    else:
+        expected = (one_final_review(entries, head=head, approved_head=approved_head,
+                                    approval=one_final_review_approval, repo=repo or Path.cwd())
+                    if exceptional else next_cycle(entries))
     if any(entry.get("head") == head for entry in entries if isinstance(entry, dict)):
         raise ReviewCycleError("this exact HEAD already completed a review cycle")
     cycle_number = int(expected["number"])
@@ -232,6 +297,13 @@ def start_cycle(
             'approval_id': one_final_review_approval, 'approved_head': approved_head,
             'prior_ledger_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
             'prior_entries': len(entries), 'review_position': 4}
+    if remediation:
+        if hashlib.sha256(path.read_bytes()).hexdigest() != prior_ledger_sha256:
+            raise ReviewCycleError('post-findings review prior ledger changed before admission')
+        cycle['post_findings_review_approval'] = {
+            'approval_id': post_findings_review_approval, 'approved_head': approved_head,
+            'prior_ledger_sha256': prior_ledger_sha256, 'prior_entries': len(entries),
+            'review_position': 5, 'fourth_review_head': entries[-1]['head']}
     if verification_approval is not None:
         cycle["verification_approval"] = verification_approval
     if expected["replaces"]:
@@ -261,7 +333,7 @@ def finish_cycle(path: Path, *, head: str, result: str) -> dict[str, object]:
         raise ReviewCycleError(f"invalid review result: {result}")
     state = read_state(path)
     cycle = _open_cycle(state, head)
-    if cycle.get('one_final_review_approval') and result == UNAVAILABLE:
+    if (cycle.get('one_final_review_approval') or 'post_findings_review_approval' in cycle) and result == UNAVAILABLE:
         raise ReviewCycleError('one final review cannot be replaced as unavailable')
     cycle.update({"status": "completed", "result": result, "finished_at": now()})
     write_state(path, state)
@@ -641,6 +713,9 @@ def _close_with_disposition(
     report_row: str,
     fields: dict[str, object],
 ) -> dict[str, object]:
+    if ('post_findings_review_approval' in cycle
+            and (disposition != 'skipped' or fields.get('skip_reason') != 'usage-cap')):
+        raise ReviewCycleError('post-findings review cannot override findings; exact usage-cap evidence remains required')
     if cycle.get('one_final_review_approval') and disposition != 'skipped':
         raise ReviewCycleError('one final review cannot override findings; exact usage-cap evidence remains required')
     cycle.update(
@@ -897,6 +972,8 @@ def parse_args() -> argparse.Namespace:
         )
         sub.add_argument("--receipt", type=Path, help=f"receipt ledger (default: <state dir>/{RECEIPTS_NAME})")
 
+    start.add_argument('--post-findings-review-approval', help='New explicit user decision for one fifth remediation review')
+    start.add_argument('--prior-ledger-sha256', help='Exact ledger snapshot named in that decision')
     start.add_argument('--one-final-review-approval', help='Explicit user evidence ID for one fourth verification')
     start.add_argument('--approved-head', help='Exact40 source authorized by that user decision')
     start.add_argument('--repo', type=Path, default=Path.cwd())
@@ -933,6 +1010,8 @@ def main() -> int:
                 verification_approval=args.verification_approval,
                 one_final_review_approval=args.one_final_review_approval,
                 approved_head=args.approved_head, repo=args.repo,
+                post_findings_review_approval=args.post_findings_review_approval,
+                prior_ledger_sha256=args.prior_ledger_sha256,
             )
         elif args.command == "finish":
             payload = finish_cycle(args.state, head=args.head, result=args.result)
