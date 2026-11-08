@@ -39,6 +39,8 @@ PATHS = {
     'canonical-seed-whatsapp-content': ['back-end/*', 'agents/*', 'scripts/*'],
     'seed-memory-ratchet': ['back-end/*', 'agents/*', 'scripts/*'],
     'mac-app-static': ['mac-app/*'],
+    # CLAUDE.md: new tests pass five consecutive runs under CPU load before they are finalized.
+    'new-test-stability': ['*/tests/*', '*.test.*', '*.blackbox.*', '*/test_*.py', '*_test.py'],
 }
 # Quick static checks that run only when triggered; every other quick category is mandatory.
 CONDITIONAL_QUICK = {'mac-app-static'}
@@ -181,6 +183,11 @@ def standard_template(host: tuple = ()) -> dict:
         {"name": "mac-app-coverage-blackbox", "command": ["npm", "run", "test:coverage"],
          "cwd": "mac-app", "platform": "darwin", "checks": ["mac-app-coverage-blackbox"]},
         dict(MAC_APP_STATIC, command=list(MAC_APP_STATIC['command']), checks=list(MAC_APP_STATIC['checks'])),
+        # A non-quick gate: `scripts/deploy gates --executor blacksmith` gives it a remote Blacksmith slot
+        # (deploy_gates.layout), so the five loaded runs also execute once on that executor's VM.
+        {"name": "new-test-stability", "category": "new-test-stability",
+         "command": [sys.executable, "scripts/select_affected_tests.py", "--stability", "--base", "origin/main"],
+         "checks": ["new-test-stability"]},
     ]
     return {"gates": gates}
 

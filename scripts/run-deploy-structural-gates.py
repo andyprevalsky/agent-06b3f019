@@ -415,6 +415,7 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"), expected_seconds=83
     ),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
+    Gate("test-sleep-ratchet", ("python3", "scripts/tests/condition-waits.test.py")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(
         "prompt-human-approval",

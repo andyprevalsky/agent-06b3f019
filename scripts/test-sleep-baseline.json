@@ -148,7 +148,7 @@
     "back-end/src/tests/blackbox/sms-webhook.blackbox.ts": 3,
     "back-end/src/tests/blackbox/steel-fingerprint.worker-concurrency.behavior.ts": 1,
     "back-end/src/tests/blackbox/steel-injection.blackbox.ts": 4,
-    "back-end/src/tests/blackbox/treasury-rails.blackbox.ts": 4,
+    "back-end/src/tests/blackbox/treasury-rails.blackbox.ts": 2,
     "back-end/src/tests/blackbox/web-search.blackbox.ts": 3,
     "back-end/src/tests/blackbox/whatsapp-webhook.blackbox.ts": 1,
     "back-end/src/tests/blackbox/whatsapp-webhook.phone-ownership.case.ts": 1,

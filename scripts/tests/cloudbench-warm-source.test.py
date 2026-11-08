@@ -19,12 +19,15 @@ import sys
 import tempfile
 import threading
 import time
+
 import unittest
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+from condition_wait import wait_until
 CLI = ROOT / "scripts" / "cloudbench-warm-source.py"
 NODE_A, PY_A = "a" * 64, "b" * 64
 NODE_B, PY_B = "c" * 64, "d" * 64
@@ -261,13 +264,15 @@ class WarmSource(FakeApiCase):
                                            "devbox-1", "--ttl", "4", "--renew", "1", "--parent-pid",
                                            str(parent.pid), "--ready", str(ready)], env=env,
                                           stderr=subprocess.PIPE, text=True)
-                deadline = time.time() + 20
-                while not ready.exists() and time.time() < deadline:
-                    time.sleep(0.2)
-                self.assertTrue(ready.exists())
-                first = int(self.meta(self.donor)["rose_cloudbench_warm_claim_" + set_a].split()[1])
-                time.sleep(3)
-                renewed = int(self.meta(self.donor)["rose_cloudbench_warm_claim_" + set_a].split()[1])
+                wait_until(ready.exists, timeout=20, description="claim hold ready file")
+                claim = "rose_cloudbench_warm_claim_" + set_a
+                first = int(self.meta(self.donor)[claim].split()[1])
+
+                def renewed_expiry():
+                    value = int(self.meta(self.donor)[claim].split()[1])
+                    return value if value > first else None
+
+                renewed = wait_until(renewed_expiry, timeout=20, description="claim renewed past its first expiry")
                 self.assertGreater(renewed, first)
                 self.assertFalse(self.mod["claim_acquire"](self.api, self.donor, set_a, "devbox-2", 600, 0))
             finally:
