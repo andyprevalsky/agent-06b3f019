@@ -37,6 +37,7 @@ import {
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
 import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
+import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
 import { waitForSandboxWsServer, wsReadinessOutcome, wsStartupBudgetMs } from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';

@@ -10,6 +10,7 @@ first_bad_boundary: merge 580 retained the main create-slot import without its w
 symptoms:
   - "'withClaudeCodeCreateSlot' is defined but never used"
   - "@typescript-eslint/no-unused-vars"
+  - "TS2304: Cannot find name ProjectWorkspace"
   - "DEPLOY_FREEZE BLOCKED: fix the remaining format/lint errors first"
 tags:
   - e2b
@@ -18,6 +19,7 @@ tags:
 sources:
   - commit 5809574d5e0323fb2f285ce34746f955acde7593
   - commit 9fa85f91bcb5262b756779727572c9982ef81c3e
+  - commit ec431bc51657e78b25bfad7caf816247b0009a81
   - agent ph78myb8q8q683vq35tk6e500n8htjvv
 repro: cd back-end && node node_modules/eslint/bin/eslint.js src/providers/e2b.ts
 status: open
@@ -42,3 +44,40 @@ None recorded for this specific import failure. The parent requested a bounded s
 ## Reusable lesson
 
 Reconcile imports with their surviving callers when merging a wrapper refactor, then run the owning lint rule without weakening it.
+
+## Recurrence — retained ProjectWorkspace use lost its type import (2026-11-08)
+
+The native quick52 TypeScript command exited 2 on frozen source ec431bc5:
+`src/providers/e2b.ts(513,24): error TS2304: Cannot find name 'ProjectWorkspace'.`
+Its original receipt and output remain in
+.context/cli-nov05-cycle/attempts/52/quick/typescript/. The gate recorded
+UNVERIFIED, not PASS, and the parallel quick gates continued separately.
+
+This is the same merge-import reconciliation incident. Main 131f588d had both
+`import type { ProjectWorkspace } from './projects/types'` and the
+harnessOptions.projectWorkspace field. CLI parent 7c93c06a had neither. Merge
+5809574 retained that field but lost its type import, and ec431bc5 still has the
+missing binding. The earlier unused-value-import fix did not add the missing
+type binding; its focused ESLint pass was not a TypeScript compilation pass.
+
+Restore only the type-only import. Every function body, runtime import, guard
+and timing remains unchanged. A TypeScript CompilerHost substitutes only the
+canonical e2b.ts text from private scratch and asks for that source file's
+semantic diagnostics with the real backend compiler configuration. The original
+input reports TS2304; the patched input has no diagnostics for this file.
+This is explicitly a scoped Compiler API result, not the native full `tsc`
+command or deployment acceptance. The parent must run that exact native command
+after the remaining quick gates terminate. Evidence and source comparisons are
+in .context/cli-nov08-user-sync/project-workspace-type-result.json.
+
+The operational handoff required isolated scratch while canonical source and
+other quick jobs remained frozen, and prohibited dependency, provider, database
+and financial actions. It is not a new direct user quote about product policy.
+The existing TypeScript gate is the owning regression check; no duplicate test
+or new RCA case is introduced. Overall case status remains open pending native
+full compilation and deployment verification.
+
+Parent validation on the applied type-only change: the exact native full backend
+TypeScript command exited 0 (session 91611), followed by focused Prettier and
+ESLint checks with no errors. The original quick52 failure remains retained;
+new-source native quick and full deployment validation are still required.
