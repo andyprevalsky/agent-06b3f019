@@ -249,6 +249,27 @@ def check_new_test_stability() -> None:
         check(report["status"] == "FAIL" and row["consecutive_passes"] == 2 and len(row["attempts"]) == 3,
               "stability: a third-run failure fails the check and stops the streak")
 
+        leaky = work / "leaky.py"
+        leaky.write_text("import json, os\n"
+                         "path = os.environ.get('DEPLOY_GATE_PROGRESS')\n"
+                         "if path:\n"
+                         "    open(path, 'a').write(json.dumps({'v': 1, 'scope': 'test', 'case': 'first', 'unit': 'fixture-row',"
+                         " 'status': 'FAIL', 'at': 1.0, 'detail': '', 'log': ''}) + '\\n')\n")
+        gate_rows = work / "gate-progress.jsonl"
+        saved = {k: os.environ.get(k) for k in ("DEPLOY_GATE_PROGRESS", "DEPLOY_GATE_CASE")}
+        os.environ.update({"DEPLOY_GATE_PROGRESS": str(gate_rows), "DEPLOY_GATE_CASE": "new-test-stability"})
+        try:
+            report = sat.run_stability([unit(leaky)], load_workers=1, timeout=60, log_root=work / "logs-leaky")
+        finally:
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        leaked_rows = gate_rows.read_text() if gate_rows.exists() else ""
+        check(report["status"] == "PASS" and "fixture-row" not in leaked_rows,
+              "stability: a rerun test never writes into the gate's own progress channel")
+
         mutate = work / "mutate.py"
         mutate.write_text("import sys\nopen(sys.argv[0], 'a').write('\\n')\n")
         report = sat.run_stability([unit(mutate)], load_workers=1, timeout=60, log_root=work / "logs-mutate")

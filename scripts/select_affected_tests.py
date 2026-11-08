@@ -1122,11 +1122,23 @@ class CpuLoad:
                 proc.wait()
 
 
+# The gate's own per-test channel (scripts/deploy_gate_progress.py). A rerun test must not inherit it:
+# deploy-tooling tests start fake gate workers whose deliberate FAIL/FLAKY rows would otherwise land
+# in the real gate's results (hunt round 4: a fixture's 'first' FAIL row opened a false /RCA). The
+# stability check reports its own per-file rows.
+GATE_CHANNEL_ENV = ("DEPLOY_GATE_PROGRESS", "DEPLOY_GATE_CASE", "DEPLOY_GATE_QUARANTINE_PROGRESS",
+                    "DEPLOY_GATE_QUARANTINE_UNIT_PREFIX")
+
+
+def stability_environment(env: dict[str, str] | None = None) -> dict[str, str]:
+    return {k: v for k, v in (os.environ if env is None else env).items() if k not in GATE_CHANNEL_ENV}
+
+
 def _run_once(command: list[str], cwd: Path, log: Path, timeout: float) -> tuple[int | None, float]:
     started = time.monotonic()
     with log.open("wb") as handle:
         proc = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=handle,
-                                stderr=subprocess.STDOUT, start_new_session=True)
+                                stderr=subprocess.STDOUT, start_new_session=True, env=stability_environment())
         try:
             code: int | None = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:

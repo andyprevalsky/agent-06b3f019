@@ -28758,6 +28758,10 @@ async def run_all_tests():
         "catalog_world_model_mode_is_optional_and_validated", test_catalog_world_model_mode_is_optional_and_validated
     )
     r.record(
+        "catalog_quarantine_marker_is_optional_and_uses_the_python_marker_rules",
+        test_catalog_quarantine_marker_is_optional_and_uses_the_python_marker_rules,
+    )
+    r.record(
         "benchmark_sms_source_override_updates_local_agent_source",
         test_benchmark_sms_source_override_updates_local_agent_source,
     )

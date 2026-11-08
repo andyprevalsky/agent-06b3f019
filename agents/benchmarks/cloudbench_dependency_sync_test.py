@@ -34470,6 +34470,76 @@ registry_owner_alive() { return 1; }
         second.release();first.release()
 
 
+def test_concurrent_jobs_skip_stale_registry_a_live_peer_is_recovering(tmp_path: Path) -> None:
+    """One live recoverer must not time out every concurrent job's startup.
+
+    Deploy smoke (2026-11-08, campaign 000fb47a): 15 non-strict jobs each ran
+    the full stale-registry scan. j0011 held badf40d0's recovery guard for ~54 s
+    while destroying its two clones; 13 peers spun the 30-tick wait, printed
+    "timed out waiting for stale fleet recovery lock" and exited before
+    provisioning, so the campaign counted them as INFRA. A peer under live,
+    kernel-held recovery is owned exactly like a live controller: skip it,
+    keep recovering the other dead registries, and refresh provider state.
+    """
+    import fcntl
+
+    root = tmp_path / "git-common"
+    ownership = root / "cloudbench-fleet-ownership"
+    busy, idle = ownership / ("b" * 32), ownership / ("d" * 32)
+    for registry in (busy, idle):
+        (registry / "clones").mkdir(parents=True)
+        (registry / "meta").write_text("version=2\napp=fixture-app\nhost=fixture\npid=99999999\n"
+                                       "pid_start=dead\ncleanup_policy=reap\n")
+    guards = root / "cloudbench-fleet-recovery-locks"
+    guards.mkdir(mode=0o700)
+    peer_guard = (guards / busy.name).open("a+")
+    fcntl.flock(peer_guard, fcntl.LOCK_EX)  # the live peer's teardown holds this inode
+    fleet = fleet_source_text()
+    functions = "\n".join(_extract_fleet_function(fleet, name + "() {") for name in (
+        "acquire_registry_recovery_lock", "release_registry_recovery_guard",
+        "release_registry_recovery_lock", "reconcile_stale_fleet_registries_full"))
+    recovered = tmp_path / "recovered"
+    script = """set -u
+APP=fixture-app
+FLEET_OWNER_HOST=fixture
+FLEET_OWNER_PID_START=fixture-birth
+FLEET_OWNERSHIP_ROOT="$1"
+FLEET_REGISTRY_DIR="$1/self"
+sleep() { :; }
+registry_meta_value() { sed -n "s/^$2=//p" "$1" 2>/dev/null; }
+registry_owner_alive() { [ "$(registry_meta_value "$1" pid_start)" = dead ] && return 1; return 0; }
+fleet_registry_cleanup_state() { echo reap; }
+release_cleanup_disk_reserve() { :; }
+recover_registry_audit_only_fresh() { :; }
+stale_registry_only_waits_for_provider_detach() { return 1; }
+reap_registry_clones() { echo "${1##*/}" >> "$2"; }
+recover_exact_pool_claims() { :; }
+fleet_audit_finalize_recovered_registry() { :; }
+fleet_registry_remove_if_empty() { rm -rf "$1"; }
+""".replace('"$2"; }\nrecover_exact', '"$RECOVERED"; }\nrecover_exact') + functions + """
+reconcile_stale_fleet_registries_full; result=$?
+echo "RECONCILE_RESULT=$result MUTATED=$FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED"
+"""
+    try:
+        shell = subprocess.run(["bash", "-c", script, "_", str(ownership)], text=True, capture_output=True,
+                               timeout=60, env={**os.environ, "RECOVERED": str(recovered)})
+        output = shell.stdout + shell.stderr
+        assert "timed out waiting for stale fleet recovery lock" not in output, output
+        assert "RECONCILE_RESULT=0 MUTATED=1" in shell.stdout, output
+        assert "being recovered by a live peer" in output, output
+        # The independent dead registry is still recovered; the busy one stays the peer's.
+        assert recovered.read_text().split() == [idle.name], output
+        assert not idle.exists() and (busy / "meta").exists() and not (busy / "recovery-lock").exists()
+    finally:
+        fcntl.flock(peer_guard, fcntl.LOCK_UN)
+        peer_guard.close()
+    # Once the peer is gone, the same scan recovers the registry itself.
+    shell = subprocess.run(["bash", "-c", script, "_", str(ownership)], text=True, capture_output=True,
+                           timeout=60, env={**os.environ, "RECOVERED": str(recovered)})
+    assert "RECONCILE_RESULT=0 MUTATED=1" in shell.stdout, shell.stdout + shell.stderr
+    assert recovered.read_text().split() == [idle.name, busy.name] and not busy.exists()
+
+
 @pytest.mark.parametrize("caller", ["1", "foreign", "unknown-parent"])
 def test_fleet_cleanup_releases_emergency_disk_reserve_for_nested_canary_after_full_cohort(tmp_path: Path, caller: str) -> None:
     """The actual preflight owns one extra controller after all fifty parents reserve."""
