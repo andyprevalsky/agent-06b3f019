@@ -51,7 +51,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 
 ### Integrity
 - Never weaken a repro, relabel a runtime or product defect as INFRA, or let a publication or cleanup failure rewrite a genuine PASS/FAIL.
-- A task definition (prompt, evaluator, expected tools, fixtures, criteria, timeout, load, concurrency, price cap) changes only when a fresh read-only cross-reviewer, independent of the triage and fix authors, quotes the defect and proves from trajectories that the definition caused a valid failure or admits mutually exclusive correct outcomes; the edit restores the original intent and never loosens criteria, raises a timeout or renames a task.
+- A task definition (prompt, evaluator, expected tools, fixtures, criteria, timeout, load, concurrency, price cap) changes only when a fresh read-only cross-reviewer, independent of the RCA and fix authors, quotes the defect and proves from trajectories that the definition caused a valid failure or admits mutually exclusive correct outcomes; the edit restores the original intent and never loosens criteria, raises a timeout or renames a task.
 - A third-party service that is plainly dead (out of credits, a proven outage) auto-quarantines its tasks, which are reported at **Final change review**.
 - A missing compute token is not a skip: `Rose.complete` falls back to another credit line (Azure and others), so a failure there is a bug to fix.
 
