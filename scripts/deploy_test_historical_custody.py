@@ -36,8 +36,15 @@ def known(state, root=None):
     root = c.ROOT if root is None else root
     found = {}
     catalogs = {}
+    counts = {}
     indexed = {r['original_failure']['id'] for r in state.get('historical_custody_history', [])}
+    for transfer in state.get('historical_custody_transfers', []):
+        ids = transfer['protected_failure_ids']
+        need(isinstance(ids, list) and ids and all(isinstance(value, str) and value for value in ids)
+             and len(set(ids)) == len(ids), 'invalid transferred failure identities')
+        indexed.update(ids)
     for f in state.get('failures', []):
+        counts[f['id']] = counts.get(f['id'], 0) + 1
         row = (f.get('worker_evidence') or {}).get('native_task') or {}
         if f.get('check', '').split('/', 1)[-1] != row.get('name'):
             continue
@@ -69,6 +76,7 @@ def known(state, root=None):
             need(f['id'] not in found, 'duplicate historical failure')
             found[f['id']] = f
     need(indexed <= found.keys(), 'historical failure removed')
+    need(all(counts[key] == 1 for key in found), 'duplicate historical failure identity')
     return found
 
 
@@ -236,6 +244,49 @@ def apply(state, rows, root):
             history.append(copy.deepcopy(r))
 
 
+def adopt(state, donor, old, proof, root):
+    """Transfer verified no-remint facts into a fresh independent deploy.
+
+    Unlike a same-deploy refresh, this carries no execution or waiver state.
+    The donor's complete ledger remains bound by its digest in the receipt.
+    """
+    import deploy_test_cycle as c
+    rows = prepare(donor, old, state['plan'], proof, root)
+    current = binding(state['plan'], root)
+    need(all(state.get(key) == value for key, value in current.items()),
+         'ledger differs from fresh current binding')
+    receipt = {'donor_state_sha256': c.digest(donor), 'donor_source': donor['source'],
+               'donor_plan_digest': c.digest(old), 'proof_sha256': c.digest(proof),
+               'current_binding': current,
+               'protected_failure_ids': [r['original_failure']['id'] for r in rows]}
+    if receipt in state.get('historical_custody_transfers', []):
+        protected = set(receipt['protected_failure_ids'])
+        need(protected <= {r['original_failure']['id'] for r in state.get('historical_no_retry_custody', [])}
+             and all(r in state.get('historical_custody_history', []) for r in rows),
+             'transfer receipt lost original custody')
+        verify(state, root)
+        return
+    need(state == c.initialize(state['plan'], root), 'transfer requires a fresh current ledger')
+    candidate = copy.deepcopy(state)
+    found = known(donor, root)
+    # Preserve the donor's actual resolution and independent auth-failure debt;
+    # apply() retains the original native failure and financial snapshot too.
+    candidate['failures'] = [copy.deepcopy(found[key]) for key in receipt['protected_failure_ids']]
+    candidate['pending_post_merge'] = []
+    for key in receipt['protected_failure_ids']:
+        f = found[key]
+        pending = ([{k: copy.deepcopy(f[k]) for k in ('id', 'check', 'gate', 'native_result')}
+                    | {'packet': copy.deepcopy(f['rca']['post_merge'])}]
+                   if f['disposition'] == 'pending post-merge' else [])
+        need([p for p in donor.get('pending_post_merge', []) if p['id'] == key] == pending,
+             'pending repair wrapper changed')
+        candidate['pending_post_merge'].extend(pending)
+    apply(candidate, rows, root)
+    candidate['historical_custody_transfers'] = [receipt]
+    verify(candidate, root)
+    state.clear(); state.update(candidate)
+
+
 def identical_inputs_binding(state, root):
     """Validate an old FULL receipt during refresh, without rebinding its native source."""
     import deploy_test_cycle as c
@@ -301,7 +352,7 @@ def verify(state, root):
 def state_identity(state):
     import deploy_test_cycle as c
     return c.digest({k: state.get(k) for k in ('source', 'plan_digest', 'environment', 'input_fingerprints',
-                    'historical_no_retry_custody', 'historical_custody_history')})
+                    'historical_no_retry_custody', 'historical_custody_history', 'historical_custody_transfers')})
 
 
 def admission(request, root):
