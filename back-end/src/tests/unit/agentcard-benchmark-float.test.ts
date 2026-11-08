@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_MIN_SANDBOX_FLOAT_CENTS,
+  defaultUnadvertisedRateLimitWaitMs,
   ensureAgentCardSandboxFloat,
   ensureBenchmarkOrgCardholder,
   resolveBenchmarkCardholderId,
@@ -177,6 +178,78 @@ async function main(): Promise<void> {
     const float = await ensureAgentCardSandboxFloat(10_000, callOrgTool);
     assert.equal(calls, 2, 'retries a rate-limited wallet read');
     assert.equal(float.availableCents, 32_416);
+  }
+
+  // PR #1784 deploy smoke (2026-11-08, r001-j0010): seven payment guests released together hit
+  // the org-wide "120 requests per minute" limit, and get_company_wallet returned the text-only
+  // throttle, which advertises no reset. The org runtime spent its three attempts in ~3.5 s and
+  // raised its typed 429; this layer only recognised `retryAfter`, so setup failed before the start
+  // barrier and the campaign's infra stop cancelled all fifteen smoke tasks. The typed throttle
+  // must get this layer's bounded window wait too.
+  {
+    const upstream =
+      'AgentCard Organization MCP rate limit exhausted for get_company_wallet after 3 attempts; ' +
+      'upstream: AgentCard Organization MCP get_company_wallet is rate limited: get_company_wallet ' +
+      'failed: Too many requests, please try again later';
+    const throttled = () =>
+      new AgentCardOrgRuntimeError(upstream, 429, 'agentcard_org_mcp_rate_limited');
+    let calls = 0;
+    const waits: number[] = [];
+    const callOrgTool = async () => {
+      calls += 1;
+      if (calls <= 2) throw throttled();
+      return walletResult({ balance: 32_416, available: 32_416 });
+    };
+    const float = await ensureAgentCardSandboxFloat(10_000, callOrgTool, {
+      unadvertisedRateLimitWaitMs: (attempt) => {
+        waits.push(attempt);
+        return 0;
+      },
+    });
+    assert.equal(calls, 3, 'a typed org throttle without a reset is retried at this layer');
+    assert.deepEqual(waits, [1, 2], 'each unadvertised throttle waits before the next read');
+    assert.equal(float.availableCents, 32_416);
+
+    let exhausted = 0;
+    await assert.rejects(
+      ensureAgentCardSandboxFloat(
+        10_000,
+        async () => {
+          exhausted += 1;
+          throw throttled();
+        },
+        { unadvertisedRateLimitWaitMs: () => 0 }
+      ),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_rate_limited'
+    );
+    assert.equal(exhausted, 4, 'the window wait stays bounded by the existing attempt cap');
+
+    // The default unadvertised wait is a jittered share of the documented one-minute window,
+    // never longer than the existing per-wait bound.
+    for (const attempt of [1, 2, 3]) {
+      const waitMs = defaultUnadvertisedRateLimitWaitMs(attempt);
+      assert.ok(waitMs >= 7_500 && waitMs <= 22_500, `wait ${waitMs} ms outside 7.5-22.5 s`);
+    }
+
+    // Other typed provider failures are not throttles and still fail at once.
+    let unavailable = 0;
+    await assert.rejects(
+      ensureAgentCardSandboxFloat(
+        10_000,
+        async () => {
+          unavailable += 1;
+          throw new AgentCardOrgRuntimeError(
+            'temporarily unavailable',
+            503,
+            'agentcard_org_mcp_unavailable'
+          );
+        },
+        { unadvertisedRateLimitWaitMs: () => 0 }
+      ),
+      /temporarily unavailable/
+    );
+    assert.equal(unavailable, 1, 'a non-throttle provider error is not retried');
   }
 
   // Non-rate-limit failures remain immediate and are never masked by retries.

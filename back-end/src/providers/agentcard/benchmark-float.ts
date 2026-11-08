@@ -21,6 +21,13 @@ import { retryWithBackoff } from '../retry';
 export const DEFAULT_MIN_SANDBOX_FLOAT_CENTS = 100_000;
 const MAX_RATE_LIMIT_ATTEMPTS = 4;
 const MAX_RATE_LIMIT_WAIT_MS = 65_000;
+/**
+ * AgentCard documents an org-wide "120 requests per minute" limit per API key, shared by every
+ * devbox's smoke fleet and production. Its text-only throttle ("Too many requests, please try
+ * again later") advertises no reset, so wait a jittered share of that one-minute window: guests
+ * released together by the smoke start barrier must not retry in lockstep.
+ */
+const UNADVERTISED_RATE_LIMIT_WAIT_MS = 15_000;
 
 const AGENTCARD_DASHBOARD_URL = 'https://dashboard.agentcard.sh';
 /**
@@ -181,14 +188,43 @@ function retryAfterMs(error: unknown, nowMs: number = Date.now()): number | unde
   return Math.max(0, retryAtMs - nowMs) + 250;
 }
 
-async function readWalletWithRateLimitRetry(callOrgTool: AgentCardOrgToolCaller): Promise<unknown> {
+/** 7.5–22.5 s: half to one and a half of UNADVERTISED_RATE_LIMIT_WAIT_MS, uniformly jittered. */
+export function defaultUnadvertisedRateLimitWaitMs(_attempt: number): number {
+  return Math.round(UNADVERTISED_RATE_LIMIT_WAIT_MS * (0.5 + Math.random()));
+}
+
+/**
+ * The org runtime's own throttle retries span seconds; it then raises its typed 429. Treat that as
+ * the same backpressure as an advertised `retryAfter`, bounded by this layer's existing attempt cap.
+ */
+function isUnadvertisedOrgThrottle(error: unknown): boolean {
+  return (
+    error instanceof AgentCardOrgRuntimeError &&
+    error.code === 'agentcard_org_mcp_rate_limited' &&
+    retryAfterMs(error) === undefined
+  );
+}
+
+export interface SandboxFloatOptions {
+  /** Delay before re-reading after a throttle with no advertised reset (tests inject 0). */
+  unadvertisedRateLimitWaitMs?: (attempt: number) => number;
+}
+
+async function readWalletWithRateLimitRetry(
+  callOrgTool: AgentCardOrgToolCaller,
+  unadvertisedWaitMs: (attempt: number) => number
+): Promise<unknown> {
   return retryWithBackoff(() => callOrgTool('get_company_wallet', {}), {
     maxRetries: MAX_RATE_LIMIT_ATTEMPTS,
     isRetryable: (error) => {
+      if (isUnadvertisedOrgThrottle(error)) return true;
       const waitMs = retryAfterMs(error);
       return waitMs !== undefined && waitMs <= MAX_RATE_LIMIT_WAIT_MS;
     },
-    getBackoffDelayMs: (error) => retryAfterMs(error) ?? 0,
+    getBackoffDelayMs: (error, attempt) =>
+      isUnadvertisedOrgThrottle(error)
+        ? Math.min(unadvertisedWaitMs(attempt), MAX_RATE_LIMIT_WAIT_MS)
+        : (retryAfterMs(error) ?? 0),
     component: 'AgentCardBenchmarkFloat',
   });
 }
@@ -206,11 +242,14 @@ async function readWalletWithRateLimitRetry(callOrgTool: AgentCardOrgToolCaller)
  */
 export async function ensureAgentCardSandboxFloat(
   minCents: number = minSandboxFloatCents(),
-  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool,
+  options: SandboxFloatOptions = {}
 ): Promise<AgentCardSandboxFloat> {
+  const unadvertisedWaitMs =
+    options.unadvertisedRateLimitWaitMs ?? defaultUnadvertisedRateLimitWaitMs;
   const wallet = await readAgentCardOrgWallet((toolName, args, deadlineAtMs) =>
     toolName === 'get_company_wallet'
-      ? readWalletWithRateLimitRetry(callOrgTool)
+      ? readWalletWithRateLimitRetry(callOrgTool, unadvertisedWaitMs)
       : callOrgTool(toolName, args, deadlineAtMs)
   );
 
