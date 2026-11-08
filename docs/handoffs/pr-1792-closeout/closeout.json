@@ -1,0 +1,13 @@
+{
+ "pr": 1792,
+ "merged_sha": "cee8855e6715a76e4a06f23212d5e4bbb4e3d0af",
+ "reviewed_head": "658922b99cf8868427c316df07f82c0b855b903e",
+ "purpose": "completes the PR #1778 (semantic-stack shared ngrok domain) closeout: deletion-check no longer counts the boxes daemon's idle codex app-server as live work",
+ "gates": "14 selected; round 1 went stale (managed agents/.env + back-end/.env rewritten 04:10Z mid-run), archived; round 2 PASS incl. semantic-stack; smoke 12/13 + AgentCard release-stall resource skip (card_45bbad7f\u2026, $43.96 unreleased)",
+ "review": "CodeRabbit cycle 1 clean (only a generic docstring-coverage pre-merge note)",
+ "production": {
+  "lane": "semantic",
+  "actions_run": 42451483935,
+  "result": "PASS"
+ }
+}
