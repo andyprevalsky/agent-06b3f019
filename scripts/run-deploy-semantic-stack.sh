@@ -192,7 +192,11 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p .context
-BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0 \
+# No semantic spec reaches the stack through a public origin, so the stack takes no tunnel.
+# Every deploy's gate VM checks out to .../rose/rose and so derived the same reserved ngrok
+# domain (rose-rose.ngrok.app): a second deploy, or any `rose` checkout running a stack, held
+# it and this gate died before readiness (ERR_NGROK_334, 2026-11-07).
+BENCHMARK_SKIP_PUBLIC_TUNNEL=1 BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0 \
     bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &
 stack_pid=$!
 printf 'STEP5_STACK_PID=%s\n' "$stack_pid"
