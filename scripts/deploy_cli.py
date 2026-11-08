@@ -493,24 +493,47 @@ def is_daemon_process(pid: int) -> bool:
         return False
 
 
+def codex_threads_on_this_devbox() -> list | None:
+    """Unarchived Codex threads the platform lists for this devbox; None when that cannot be established.
+
+    Managed Codex threads run inside the daemon's default app-server and are tracked only in daemon memory, so the
+    platform thread list (not a marker directory) is the authoritative record of whether that server hosts work.
+    """
+    try:
+        instance = json.loads((Path(DAEMON_DIR) / 'config.json').read_text())['controlAuth']['instanceId']
+        listed = subprocess.run(['dvb-onbox', 'threads', 'list', '--scope', 'project', '--all', '--json'],
+                                capture_output=True, text=True, timeout=60)
+        payload = json.loads(listed.stdout) if listed.returncode == 0 else {}
+        complete = payload.get('ok') is True and (payload.get('pagination') or {}).get('complete') is True
+        threads = payload.get('threads') if complete else None  # a partial listing never reads as "no Codex threads"
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return None
+    if not isinstance(instance, str) or not instance or not isinstance(threads, list):
+        return None
+    return [t for t in threads if isinstance(t, dict) and t.get('devboxId') == instance
+            and t.get('agent') == 'codex' and not t.get('archived')]
+
+
 def is_idle_default_codex_server(pid: int) -> bool:
-    """The devbox daemon's own default Codex app-server while no Codex session exists on this box.
+    """The devbox daemon's own default Codex app-server while no Codex thread or session exists on this box.
 
     The daemon starts it in the project checkout and records it in codex-default-app-server.json; it is live work
-    only while it hosts a session. Exact identity (pid and kernel start time, so a reused pid never matches), a daemon
-    parent and an existing, empty codex-sessions directory are all required; anything unreadable keeps it blocking.
+    while it hosts any thread. Exact identity (pid and kernel start time, so a reused pid never matches), a daemon
+    parent, an existing empty codex-sessions directory (terminal-wrapper sessions) and a platform thread list with no
+    unarchived Codex thread on this devbox are all required; anything unreadable keeps it blocking.
     """
     daemon = Path(DAEMON_DIR)
     try:
         record = json.loads((daemon / 'codex-default-app-server.json').read_text())
         stat = proc_stat(pid)
         sessions = daemon / 'codex-sessions'
-        return (type(record.get('pid')) is int and record['pid'] == pid
-                and str(record.get('statStartTime')) == stat[19]
-                and is_daemon_process(int(stat[1]))
-                and sessions.is_dir() and not sessions.is_symlink() and not any(sessions.iterdir()))
+        identified = (type(record.get('pid')) is int and record['pid'] == pid
+                      and str(record.get('statStartTime')) == stat[19]
+                      and is_daemon_process(int(stat[1]))
+                      and sessions.is_dir() and not sessions.is_symlink() and not any(sessions.iterdir()))
     except (OSError, ValueError, IndexError, AttributeError):
         return False
+    return identified and codex_threads_on_this_devbox() == []
 
 
 def live_processes(root: Path) -> list[dict]:
