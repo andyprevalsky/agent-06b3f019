@@ -1,0 +1,278 @@
+{
+ "failures": [
+  {
+   "id": "957c45895cde48fb90bf3e34dff4d240",
+   "check": "semantic-stack/semantic-stack",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-8vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_worker.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "semantic-stack on Blacksmith: Step5 stack exited before readiness; reserved ngrok domain rose-rose.ngrok.app was online in another deploy's concurrent Blacksmith semantic lane (integrate/rose-on-rose, deploy-gates/8vcpu/semantic-stack-1fa519051616dc85, started 17:07:14Z; ERR_NGROK_334) and three trycloudflare quick tunnels never routed.",
+   "evidence": "attempts/2/initial/semantic-stack/remote-artifact/files/.context/deploy-smoke.log; gh run list deploy-gates.yml shows the overlapping rose-on-rose semantic lane",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "attempts/2/initial/semantic-stack/remote-artifact/files/.context/deploy-smoke.log; gh run list deploy-gates.yml shows the overlapping rose-on-rose semantic lane"
+  },
+  {
+   "id": "b6c1b2c35595419f90589067c05c8d11",
+   "check": "smoke/test-mass-agent-run-0",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke campaign job failed (controller exit 1) although the task was REAL PASS 1/1: its mandatory autoscaler was denied a worker clone, 'dynamic worker capacity denied: 59 app Machines + 0 reserved + 1 requested > ceiling 56' while other deploys' fleets shared navi-whisper-lux-bench.",
+   "evidence": "campaign 5be7f288.../r001-j0001.log and runs/*/test-mass-agent-run-0/autoscaler.log",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288.../r001-j0001.log and runs/*/test-mass-agent-run-0/autoscaler.log"
+  },
+  {
+   "id": "78baab0640eb4dbf84fe2bf4d2190cc1",
+   "check": "smoke/chat-mode",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "1d6f365e77a64b288e5acaf60085caa9",
+   "check": "smoke/spawn-sub-agents",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "e562be66001b41498edeee3b07f98b3e",
+   "check": "smoke/parallel-tool-calls",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "a5a8bfca63694b95a195f752707b4961",
+   "check": "smoke/background-agent-message-smoke",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "bb4302c04a2d48d08e3304bfa271cfb6",
+   "check": "smoke/claude-code-agent",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "93fd2cc8b60a43ffa00cea6565d5de2e",
+   "check": "smoke/browser-smoke",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "f66e7150cdf54983b7f24daf330f32ce",
+   "check": "smoke/agent-payment-test-shop",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "6ade681e069d45ebb49c92bd0632af3f",
+   "check": "smoke/agent-payment-setup-resume",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "ddaefce7ee5c4c17a419d0ccce98fdf8",
+   "check": "smoke/agent-payment-idempotent-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "c0374751fc414bc69a598aa9c68a6aa7",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native SKIPPED: the exact AgentCard release stall (closed card, org transfer consumed, releasedCents=0) under the standing warning policy; the smoke gate is incomplete because the campaign failed on mass-agent, so the case reruns with the gate.",
+   "evidence": "runs/20261107-172937-3297497/agent-payment-abandonment/run.json failure_reason",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "runs/20261107-172937-3297497/agent-payment-abandonment/run.json failure_reason"
+  },
+  {
+   "id": "ae52c891d3314aabb520a8d3c8f8be85",
+   "check": "smoke/browser-biometrics-webdecoy",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  },
+  {
+   "id": "1a4dfe9cfc10441fac4ba7a910266c09",
+   "check": "smoke/agent-payment-new-user-journey",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "ddfe9f2881ce69c399e33b485d10ef514405a196",
+    "digest": "b9587bcacfb345dcdb089159819ca0c4f35cff9d69e6e61c89056989c3bf7c56"
+   },
+   "native_result": "UNVERIFIED",
+   "attribution": "NOT_INTRODUCED",
+   "description": "native PASS, but the smoke gate result is incomplete because the campaign failed on test-mass-agent-run-0's autoscaler capacity denial; the case reruns with the gate.",
+   "evidence": "campaign 5be7f288... summary.json",
+   "assigned_repair": true,
+   "assigned_reason": "Incomplete (UNVERIFIED) gate cannot be waived before merge; the deploy owner reruns the unchanged bound gate once the shared resource (ngrok domain / Fly machine ceiling) is free, and hands the shared-resource defect to a post-merge repair.",
+   "assigned_evidence": "campaign 5be7f288... summary.json"
+  }
+ ]
+}
