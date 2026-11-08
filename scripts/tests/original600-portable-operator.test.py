@@ -69,7 +69,11 @@ def cache_public_check_catalog(root):
     """Keep exact historical catalog objects local to each timed CLI fixture."""
     ref = RUNNER['TASK_REF']
     expressions = [ref, ref + '^{tree}', ref + ':agents', ref + ':agents/benchmarks',
-                   ref + ':agents/benchmarks/tasks.json', ref + ':agents/benchmarks/polar_tasks.json']
+                   ref + ':agents/benchmarks/tasks.json', ref + ':agents/benchmarks/polar_tasks.json',
+                   ref + ':agents/providers', ref + ':agents/providers/fast_cache',
+                   ref + ':agents/providers/fast_cache/normalize.py', ref + ':agents/utils',
+                   ref + ':agents/utils/__init__.py', ref + ':agents/utils/oai_demo.py',
+                   ref + ':agents/utils/oai_demo_july.py']
     ids = subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT),
                                    'rev-parse', *expressions], text=True).splitlines()
     if len(ids) != len(expressions):
@@ -2059,9 +2063,7 @@ class Portable(unittest.TestCase):
                 (root/member).parent.mkdir(parents=True, exist_ok=True)
                 (root/member).write_bytes((ROOT/member).read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
-            # The manifest eligibility check reads the runner's TASK_REF catalog: borrow its objects read-only.
-            common = Path(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True).strip())
-            (root/'.git/objects/info/alternates').write_text(str(common/'objects') + '\n')
+            # Copy the exact historical catalog locally; timed checks own every needed object.
             cache_public_check_catalog(root)
             subprocess.run(['git', '-C', str(root), 'add', 'scripts', *CANONICAL_SEED_MEMBERS], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
@@ -2103,17 +2105,28 @@ class Portable(unittest.TestCase):
         expressions = [RUNNER['TASK_REF'], RUNNER['TASK_REF'] + '^{tree}',
                        RUNNER['TASK_REF'] + ':agents', RUNNER['TASK_REF'] + ':agents/benchmarks',
                        RUNNER['TASK_REF'] + ':agents/benchmarks/tasks.json',
-                       RUNNER['TASK_REF'] + ':agents/benchmarks/polar_tasks.json']
+                       RUNNER['TASK_REF'] + ':agents/benchmarks/polar_tasks.json',
+                       RUNNER['TASK_REF'] + ':agents/providers',
+                       RUNNER['TASK_REF'] + ':agents/providers/fast_cache',
+                       RUNNER['TASK_REF'] + ':agents/providers/fast_cache/normalize.py',
+                       RUNNER['TASK_REF'] + ':agents/utils',
+                       RUNNER['TASK_REF'] + ':agents/utils/__init__.py',
+                       RUNNER['TASK_REF'] + ':agents/utils/oai_demo.py',
+                       RUNNER['TASK_REF'] + ':agents/utils/oai_demo_july.py']
         expected = [subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', expression],
                                            text=True).strip() for expression in expressions]
         with self.public_check(warm_fixture(time.time()), [], limits=wide_provider_limits()) as fx:
+            self.assertFalse((fx.root / '.git/objects/info/alternates').exists(),
+                             'timed checks must not consult a shared object store')
             for oid in expected:
                 loose = fx.root / '.git/objects' / oid[:2] / oid[2:]
                 self.assertTrue(loose.is_file(), 'timed checks must not depend on shared catalog object reads: ' + oid)
                 raw = zlib.decompress(loose.read_bytes())
                 self.assertEqual(hashlib.sha1(raw).hexdigest(), oid)
-            for name in ('tasks.json', 'polar_tasks.json'):
-                spec = RUNNER['TASK_REF'] + ':agents/benchmarks/' + name
+            for name in ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
+                         'agents/providers/fast_cache/normalize.py', 'agents/utils/__init__.py',
+                         'agents/utils/oai_demo.py', 'agents/utils/oai_demo_july.py'):
+                spec = RUNNER['TASK_REF'] + ':' + name
                 self.assertEqual(subprocess.check_output(['git', '-C', str(fx.root), 'show', spec]),
                                  subprocess.check_output(['git', '-C', str(ROOT), 'show', spec]))
 
