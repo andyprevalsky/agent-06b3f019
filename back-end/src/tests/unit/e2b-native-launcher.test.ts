@@ -6,6 +6,7 @@ import { resolve, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import * as wsReadiness from '../../providers/e2bWsReady';
 
 const exec = promisify(execFile);
 const sourcePath = resolve(__dirname, '../../providers/e2b.ts');
@@ -122,7 +123,13 @@ async function configure() {
     withClaudeCodeCreateSlot: async (run: () => Promise<unknown>) => run(),
   });
   await boundary('../../providers/e2bWsReady', {
-    waitForSandboxWsServer: async () => ({ ready: true, elapsedMs: 0 }),
+    ...wsReadiness,
+    waitForSandboxWsServer: async () => ({
+      ready: true,
+      state: 'ready',
+      cloneMs: null,
+      elapsedMs: 0,
+    }),
   });
   await boundary('../../providers/userUi/workspace', {
     applyUserUiSandboxEnvs: (env: Record<string, string>) => {

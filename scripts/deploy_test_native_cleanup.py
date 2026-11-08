@@ -1256,7 +1256,8 @@ def validate(receipt, owner, proof):
             absent = [not p.exists() and not p.is_symlink() for p in (provenance_path, matrix_path)]
             if all(absent):
                 need(life['status'] == 'failed' and isolated_canary_release(
-                    fleet, life, benches, run, root, receipt, proof, preallocation_links.get(fleet), bound, tree),
+                    fleet, life, benches, run, root, receipt, proof, preallocation_links.get(fleet), bound, tree,
+                    (source_base, source_patch, adapter)),
                     'mixed preallocation zero resources')
                 need(not Path('/proc', fleet.name.rsplit('-', 1)[-1]).exists(), 'mixed preallocation controller PID present')
                 for bench in benches:

@@ -76,3 +76,13 @@ identified the two missing dependencies; it was not human review or release cred
 A text-clean integration does not compose a newly added call site or extracted
 fixture with a retained stronger dependency contract. Exercise both original
 producer families and actual source-seal helpers before accepting the merge.
+
+## Recurrence — mixed preallocation call omitted the same binding (2026-11-08)
+
+Gate: INTRODUCED by the source-sync merge5809574d5e0323fb2f285ce34746f955acde7593. New upstream mixed preallocation cleanup calls joined the retained eleven-argument sealed-source validator. The ordinary preallocation and failed-canary calls already pass the verified source tuple; the new mixed-parent branch still supplied ten arguments. The original35-test merge check recorded one error and one failure: the positive mixed case raised `isolated_canary_release() missing 1 required positional argument: 'source_binding'`, and the negative case saw that incidental exception rather than its expected `requires both` refusal.
+
+The exact two unchanged tests reproduce the same error/failure in a separate5809574 source fixture. Supply only the already validated `(source_base, source_patch, adapter)` tuple to the mixed-parent call. The binding is obtained before the participant loop through the unchanged execution_source_binding check; no caller assertion, default argument, fallback, old-receipt relabel, cleanup credit or provider observation is added. All original test methods, proof checks and deadlines remain unchanged. The same two tests pass after the correction, followed by the original35-test owning subset. The full owning-cycle attempt is retained as an incomplete scratch-environment failure (332 tests, 2 failures and 58 errors, including missing selector source and Git alternates). It is not a PASS; the parent will validate the full suite in a complete checkout.
+
+The first expanded scratch run preserved a missing agent_link_server.py source-preparation failure; the exact5809574 file was then supplied without modifying the test. This was distinct from the native merge failure. Original parent and local red logs remain retained.
+
+Parent instructions required worker source preparation to finish first, then a separately isolated correction of this actual call-site failure, reusing this existing case. Canonical source, active DB setup, all workers, native receipts, seven cloud debts and six financial obligations are untouched. No broad deployment, provider, database or resource operation is performed. Local unit success does not grant native cleanup or deployment credit.
