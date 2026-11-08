@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real staged coordinator; no provider, database, or app processes."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import copy
 import json
 import os
@@ -16,6 +17,57 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
 import deploy_gate_progress as progress
+import deploy_test_process
+
+production_process_entries = deploy_test_process.process_entries
+
+
+@contextmanager
+def unrelated_unreadable_process():
+    """A same-user non-dumpable process outside this test's tree, like the runner's pid 211414 (PR #1762)."""
+    grandchild = ("import ctypes,os,sys;ctypes.CDLL(None).prctl(4,0,0,0,0);"
+                  "print(os.getpid(),flush=True);sys.stdin.read()")
+    launcher = subprocess.Popen([sys.executable, '-c', 'import subprocess,sys;subprocess.Popen('
+                                 f'[sys.executable,"-c",{grandchild!r}],start_new_session=True)'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        pid = int(launcher.stdout.readline())
+        launcher.wait(timeout=10)  # the re-parented grandchild leaves this process tree
+        yield pid
+    finally:
+        launcher.stdin.close()  # EOF ends the grandchild; nothing is signalled
+        launcher.stdout.close()
+        launcher.wait(timeout=10)
+
+
+def own_process_entries():
+    """This test process and its descendants: the only processes a test here can create or own.
+
+    quiet() and namespace_quiet() refuse any same-user process they cannot read, which is the real
+    safety check. Unrelated host processes (a sibling suite's non-dumpable fixture, a runner's
+    (sd-pam)) are outside every fixture, so the suite scans only its own process tree.
+    """
+    children = {}
+    for process in Path('/proc').iterdir():
+        try:
+            parent = int((process / 'stat').read_text().rsplit(') ', 1)[1].split()[1]) if process.name.isdigit() else None
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # exited mid-scan
+        if parent is not None:
+            children.setdefault(parent, []).append(int(process.name))
+    owned, frontier = [], [os.getpid()]
+    while frontier:
+        pid = frontier.pop()
+        owned.append(Path('/proc', str(pid)))
+        frontier.extend(children.get(pid, ()))
+    return iter(owned)
+
+
+def setUpModule():
+    hermetic = patch.object(deploy_test_process, 'process_entries', own_process_entries)
+    hermetic.start()
+    unittest.addModuleCleanup(hermetic.stop)
+
 
 class Cycle(unittest.TestCase):
     def custody_fixture(self):
@@ -370,6 +422,148 @@ class Cycle(unittest.TestCase):
             self.assertEqual(2, c.main(['init', '--plan', str(plan), '--state-dir', str(empty),
                 '--root', str(self.root), '--historical-no-retry-proof', str(proof)]))
         self.assertFalse((empty / 'cycle.json').exists())
+
+    def test_cross_goal_custody_import_preserves_fresh_selection_without_execution_credit(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        donor = copy.deepcopy(self.state)
+        # The independent repair's full selection differs from the donor's;
+        # same-deploy refresh must continue refusing to drop any checks.
+        new['gates'][1]['checks'] = new['gates'][1]['checks'][:2] + ['current-peer']
+        proof = h.build(donor, self.plan, new, self.root)
+        with self.assertRaisesRegex(ValueError, 'remove originally selected checks'):
+            c.refresh(copy.deepcopy(donor), self.plan, new, self.root, historical_no_retry_proof=proof)
+        current = c.initialize(new, self.root)
+        h.adopt(current, donor, self.plan, proof, self.root)
+        self.assertEqual(donor, self.state)
+        self.assertEqual('quick', current['phase']); self.assertFalse(current['ready'])
+        self.assertEqual([], current['attempts']); self.assertEqual({}, current['skips'])
+        self.assertEqual(donor['failures'], current['failures'])
+        self.assertEqual(donor['pending_post_merge'], current['pending_post_merge'])
+        self.assertEqual(new, current['plan'])
+        self.assertFalse(current.get('resource_warnings'))
+        self.assertFalse(current.get('carried_passes'))
+        self.assertEqual([4396, 4396], [r['original_amount_cents'] for r in current['historical_no_retry_custody']])
+        for row in current['historical_no_retry_custody']:
+            self.assertEqual('UNVERIFIED', row['current_execution'])
+            self.assertEqual('UNVERIFIED', row['current_financial_state'])
+            self.assertTrue(all(value is False for value in row['credit'].values()))
+        h.verify(current, self.root)
+        same = copy.deepcopy(current)
+        h.adopt(current, donor, self.plan, proof, self.root)
+        self.assertEqual(same, current)
+        for key, value in [('environment', 'stale'), ('source', donor['source']),
+                           ('input_fingerprints', {}), ('plan_digest', 'stale')]:
+            changed = copy.deepcopy(current); changed[key] = value; before = copy.deepcopy(changed)
+            with self.assertRaisesRegex(ValueError, 'binding'):
+                h.adopt(changed, donor, self.plan, proof, self.root)
+            self.assertEqual(before, changed)
+        lost = copy.deepcopy(current)
+        lost['failures'] = []; lost['historical_no_retry_custody'] = []; lost['historical_custody_history'] = []
+        before = copy.deepcopy(lost)
+        with self.assertRaisesRegex(ValueError, 'lost original custody'):
+            h.adopt(lost, donor, self.plan, proof, self.root)
+        self.assertEqual(before, lost)
+        with self.assertRaisesRegex(ValueError, 'historical failure removed'):
+            h.verify(lost, self.root)
+        partial = copy.deepcopy(current)
+        auth = donor['failures'][1]['id']
+        partial['failures'] = [f for f in partial['failures'] if f['id'] != auth]
+        for key in ('historical_no_retry_custody', 'historical_custody_history'):
+            partial[key] = [r for r in partial[key] if r['original_failure']['id'] != auth]
+        partial['pending_post_merge'] = []
+        with self.assertRaisesRegex(ValueError, 'historical failure removed'):
+            h.verify(partial, self.root)
+        def worker(argv, **kw):
+            request = c.read(Path(kw['env']['DEPLOY_GATE_REQUEST']))
+            self.assertEqual(['current-peer'], request['checks'])
+            self.assertEqual(2, len(request['skips']))
+            c.write(Path(kw['env']['DEPLOY_GATE_RESULT']), dict(token=request['token'], source=request['source'],
+                gate=request['gate'], cases={'current-peer': 'PASS'}, complete=True, cleanup_complete=True, reused=False))
+            return 0, False, False, False
+        current.update(phase='final')
+        c.write(self.directory / 'cycle.json', current)
+        with patch.object(c, 'run_command', side_effect=worker):
+            result = c.execute(new['gates'][1], current, self.directory, self.root)
+        self.assertEqual('PASS', result['status'], result)
+        self.assertEqual('PASS', result['cases']['current-peer'])
+        for name in new['gates'][1]['checks'][:2]:
+            self.assertEqual('SKIP', result['cases'][name])
+            self.assertFalse(result['case_complete'][name])
+
+    def test_cross_goal_custody_import_rejects_nonfresh_state_and_changed_proof_atomically(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); donor = copy.deepcopy(self.state)
+        proof = h.build(donor, self.plan, new, self.root)
+        current = c.initialize(new, self.root)
+        for key, value in [('ready', True), ('attempts', [{'native': 'FAIL'}]),
+                           ('failures', [{'id': 'current-failure'}]), ('skips', {'api/current': {}})]:
+            changed = copy.deepcopy(current); changed[key] = value; before = copy.deepcopy(changed)
+            with self.assertRaisesRegex(ValueError, 'fresh'):
+                h.adopt(changed, donor, self.plan, proof, self.root)
+            self.assertEqual(before, changed)
+        bad = copy.deepcopy(proof); bad['cases'][0]['original_amount_cents'] = 0
+        with self.assertRaisesRegex(ValueError, 'proof'):
+            h.adopt(current, donor, self.plan, bad, self.root)
+        self.assertEqual(c.initialize(new, self.root), current)
+
+    def test_cross_goal_custody_import_rejects_noncurrent_frozen_ledger_binding(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); donor = copy.deepcopy(self.state)
+        proof = h.build(donor, self.plan, new, self.root)
+        current = c.initialize(new, self.root)
+        for key, value in [('environment', 'stale'), ('source', donor['source']), ('input_fingerprints', {})]:
+            changed = copy.deepcopy(current); changed[key] = value; before = copy.deepcopy(changed)
+            with self.assertRaisesRegex(ValueError, 'fresh'):
+                h.adopt(changed, donor, self.plan, proof, self.root)
+            self.assertEqual(before, changed)
+        missing = copy.deepcopy(new); missing['gates'][1]['checks'].remove('agent-payment-abandonment')
+        with self.assertRaisesRegex(ValueError, 'protected task removed'):
+            h.adopt(c.initialize(missing, self.root), donor, self.plan, proof, self.root)
+        native = Path(proof['cases'][0]['original_failure']['worker_evidence']['path'])
+        native.write_text('{}')
+        with self.assertRaises(ValueError):
+            h.adopt(current, donor, self.plan, proof, self.root)
+        self.assertEqual(c.initialize(new, self.root), current)
+
+    def test_cross_goal_custody_import_rejects_duplicate_identity_and_changed_pending_wrapper(self):
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); donor = copy.deepcopy(self.state)
+        duplicate = copy.deepcopy(donor)
+        duplicate['failures'].append({'id': donor['failures'][0]['id'], 'check': 'other/unrelated',
+                                      'native_result': 'PASS'})
+        with self.assertRaisesRegex(ValueError, 'duplicate historical failure identity'):
+            h.build(duplicate, self.plan, new, self.root)
+        donor['pending_post_merge'][0]['native_result'] = 'PASS'
+        proof = h.build(donor, self.plan, new, self.root)
+        current = c.initialize(new, self.root); before = copy.deepcopy(current)
+        with self.assertRaisesRegex(ValueError, 'pending repair wrapper changed'):
+            h.adopt(current, donor, self.plan, proof, self.root)
+        self.assertEqual(before, current)
+
+    def test_cross_goal_custody_import_cli_keeps_donor_and_fresh_cycle_separate(self):
+        import contextlib
+        import io
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(); donor = copy.deepcopy(self.state)
+        new['gates'][1]['checks'] = new['gates'][1]['checks'][:2] + ['current-peer']
+        directory = self.root / '.context' / 'independent'
+        plan, prior, snapshot, proof = [self.root / '.context' / name for name in
+                                        ('new.json', 'prior.json', 'donor.json', 'proof.json')]
+        c.write(plan, new); c.write(prior, self.plan); c.write(snapshot, donor)
+        c.write(proof, h.build(donor, self.plan, new, self.root))
+        args = ['--root', str(self.root), '--plan', str(plan), '--state-dir', str(directory)]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(0, c.main(['init', *args]))
+            self.assertEqual(0, c.main(['import-historical-no-retry', *args, '--input', str(prior),
+                '--donor-state', str(snapshot), '--historical-no-retry-proof', str(proof)]))
+            before = c.read(directory / 'cycle.json')
+            self.assertEqual(2, c.main(['import-historical-no-retry', *args]))
+        self.assertEqual(before, c.read(directory / 'cycle.json'))
+        self.assertEqual(donor, c.read(snapshot))
+        self.assertEqual('quick', before['phase']); self.assertFalse(before['ready'])
+        self.assertEqual([], before['attempts']); self.assertEqual({}, before['skips'])
+        self.assertEqual(new, before['plan']); self.assertEqual(2, len(before['historical_no_retry_custody']))
 
     def test_historical_stall_cannot_refresh_into_new_card_request_without_proof(self):
         new = self.custody_fixture()
@@ -5065,6 +5259,21 @@ class InterruptedLocalRecovery(unittest.TestCase):
         path=self.paths['output.log.process.json'];path.write_bytes(raw['output.log.process.json']+b' ')
         with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+    def test_unrelated_unreadable_host_process_refuses_production_scan_only(self):
+        # PR #1762 Blacksmith failure: pid 211414, a same-user process outside this suite whose cwd stayed
+        # unreadable, refused this class's reconcile ("worker root process 211414 is unverifiable").
+        with unrelated_unreadable_process() as pid:
+            self.assertIn(pid, {int(p.name) for p in production_process_entries()})
+            self.assertNotIn(pid, {int(p.name) for p in own_process_entries()})
+            before=copy.deepcopy(self.state)
+            with patch.object(deploy_test_process,'process_entries',production_process_entries), \
+                    self.assertRaisesRegex(ValueError,r'worker root process \d+ is unverifiable'):
+                self.reconcile()
+            self.assertEqual(before,self.state)
+            self.reconcile()
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
     def test_original_exclusions_stay_skip_without_test_or_cleanup_credit(self):
         name='standing-original-exclusion'
         self.recipe['cases'][name]={'command':['true']}
@@ -5398,14 +5607,17 @@ class RelayStartupEvidence(unittest.TestCase):
         pid=capture['agent']['pid'];socket=capture['socket']
         native=self.base/'native';native.mkdir()
         bootstrap=native/'bootstrap.log';(native/'agent-logs').mkdir();agent=native/'agent-logs/123.log'
-        bootstrap.write_text(f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {pid}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n')
         when=datetime.datetime.fromisoformat(json.loads((self.campaign/'summary.json').read_text())['started_at'])+datetime.timedelta(seconds=.5)
         stamp=when.strftime('%Y/%m/%d %H:%M:%S.%f')
-        payload=('ok '+json.dumps({'PID':pid,'Version':'0.5.5'})+'\n').encode()
-        raw=(len(payload).to_bytes(2,'little')+payload).decode('latin1')
-        import json as json_module
-        quoted=json_module.dumps(raw)
-        agent.write_text(f'{stamp} srv OK {pid}\n{stamp} #1 -> ({len(raw)}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        def native_logs(logged):
+            # Re-encode the length-prefixed PING frame for each PID: a text replace of a PID with a different
+            # digit count breaks the frame length and refuses on framing before the identity under test.
+            payload=('ok '+json.dumps({'PID':logged,'Version':'0.5.5'})+'\n').encode()
+            quoted=json.dumps((len(payload).to_bytes(2,'little')+payload).decode('latin1'))
+            return (f'DEBUG determined working directory: "{self.base}"\nDEBUG started agent process (pid: {logged}, log: {agent})\nDEBUG failed to connect to target: dial unix {socket}: operation was canceled\n',
+                    f'{stamp} srv OK {logged}\n{stamp} #1 -> ({len(payload)+2}) {quoted}\n{stamp} srv parent process exited; shutting down\n{stamp} #1 failed writing: write unix {socket}->@: write: broken pipe\n{stamp} srv QUIT\n')
+        original_bootstrap,original_agent=native_logs(pid)
+        bootstrap.write_text(original_bootstrap);agent.write_text(original_agent)
         proof['fly_native_logs']={'bootstrap':str(bootstrap),'agent':str(agent),'timezone':'UTC'};self.reseal()
         result=self.validate_fixture(receipt,owner,proof)
         self.assertFalse(result['credit_granted']);self.assertTrue(result['startup_processes'][3]['native_log_identity'])
@@ -5421,14 +5633,14 @@ class RelayStartupEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'bootstrap binding'):self.validate_fixture(receipt,owner,proof)
         foreign.unlink();proof['fly_native_logs']=saved_logs;self.reseal()
         prior=agent.read_text()
-        for mutation,reason in [(prior.replace(str(pid),str(os.getpid())),'bootstrap|PING|shutdown'),
+        for mutation,reason in [(native_logs(os.getpid())[1],'bootstrap|PING|shutdown'),
                                 (prior.replace('srv QUIT','missing shutdown'),'shutdown chain'),
                                 (prior.replace(socket,'/foreign/socket'),'shutdown chain')]:
             agent.write_text(mutation);self.reseal()
             with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
         agent.write_text(prior);self.reseal()
-        live=bootstrap.read_text().replace(str(pid),str(os.getpid()))
-        bootstrap.write_text(live);agent.write_text(prior.replace(str(pid),str(os.getpid())));self.reseal()
+        live_bootstrap,live_agent=native_logs(os.getpid())
+        bootstrap.write_text(live_bootstrap);agent.write_text(live_agent);self.reseal()
         with self.assertRaisesRegex(ValueError,'PID present'):self.validate_fixture(receipt,owner,proof)
 
     def test_startup_reconciliation_rejects_missing_or_live_or_dispatched_evidence(self):

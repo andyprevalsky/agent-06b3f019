@@ -81,6 +81,10 @@ Searches run:
 
 The incident is novel. Related cases cover the 2026-07-25 static-credential retirement and the 2026-11-08 reuse-mint untyped 500.
 
+### Recurrence 2026-11-08 (agent-payment-idempotent-abandonment, PR #1775 deploy)
+
+Same provider text, same read class, on a different call path. Agent 2c6b3ffd, run 20261108-015557-1713873: the second browser's reuse lookup read `get_card_details`, got two HTTP-200 throttles, then `Invalid or expired organization token` on attempt 3 with `retry_budget_remaining_ms=24307`, `POST /api/purchases/lookup -> 502` at 02:08:31Z, and the task ended with `payment_lifecycle.purchase.status mismatch: expected 'CLEARED', got 'HELD'`. The failing source predates this case's fix (PR #1796), so this is the same cause reaching a second task, not a failed fix. Replaying that sequence on the merged runtime recovers (PR #1825 regression; exact-task replay passed, purchase CLEARED). The rejection's HTTP status was not logged in that guest and is inferred from the identical text being HTTP 401 here. Related adjacent defect: case 2026-11-08-throttled-agentcard-read-ended-on-attempt-cap-before-its-budget.
+
 ## Solution
 
 PR #1796.

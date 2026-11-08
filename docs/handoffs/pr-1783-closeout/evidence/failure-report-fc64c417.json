@@ -1,0 +1,100 @@
+{
+ "failures": [
+  {
+   "id": "43d68a8fdf524d02b15be83c877d599f",
+   "check": "backend-coverage-blackbox/blackbox:browser-provider",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_github.py",
+    "--runner",
+    "blacksmith-16vcpu-ubuntu-2404",
+    "--worker-script",
+    "deploy_test_backend.py",
+    "--worker-root",
+    "/home/runner/_work/rose/rose",
+    "--deadline-seconds",
+    "14400"
+   ],
+   "source": {
+    "head": "fc64c417b9d516a17e04d2f12a4f34cfbab60c68",
+    "digest": "1bc4914358f8b3b04be5baef335c22f783f1c09c75fb02b463e219144fc1128b"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "backend blackbox browser-provider failed one live check: FAIL live Tilion provider parity: page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com/ (navigating to \"https://example.com/\", waiting until \"domcontentloaded\"). The Tilion-hosted remote browser could not resolve DNS; 58 other live checks passed. NOT_INTRODUCED: PR #1783 touches no browser-provider or Tilion code; the same source passed this domain in the 11:04Z cycle.",
+   "evidence": "docs/handoffs/pr-1783-closeout/evidence/browser-provider-fc64c417.log; https://github.com/Rose-Ai-Labs/rose/actions/runs/42480384775",
+   "post_merge": {
+    "test": "backend-coverage-blackbox/blackbox:browser-provider",
+    "command": [
+     "/home/boxes/rose/agents/venv/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_github.py",
+     "--runner",
+     "blacksmith-16vcpu-ubuntu-2404",
+     "--worker-script",
+     "deploy_test_backend.py",
+     "--worker-root",
+     "/home/runner/_work/rose/rose",
+     "--deadline-seconds",
+     "14400"
+    ],
+    "scope": "backend blackbox domain browser-provider, check 'live Tilion provider parity' (back-end/src/tests/blackbox/browser-provider.blackbox.ts; rerun: cd back-end && bash scripts/run-blackbox-tests.sh browser-provider). Live Tilion provider parity navigation (page.goto https://example.com/ inside the Tilion remote browser); preserve the live assertion",
+    "error": "FAIL live Tilion provider parity: page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com/ (navigating to \"https://example.com/\", waiting until \"domcontentloaded\")",
+    "source": "fc64c417b9d516a17e04d2f12a4f34cfbab60c68",
+    "evidence": "docs/handoffs/pr-1783-closeout/evidence/browser-provider-fc64c417.log; https://github.com/Rose-Ai-Labs/rose/actions/runs/42480384775"
+   }
+  },
+  {
+   "id": "0a4f17d51b354c2cb7bffd6856d3a9c2",
+   "check": "smoke/background-agent-message-smoke",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "fc64c417b9d516a17e04d2f12a4f34cfbab60c68",
+    "digest": "1bc4914358f8b3b04be5baef335c22f783f1c09c75fb02b463e219144fc1128b"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/background-agent-message-smoke failed its declared smoke_rfc_semantics evaluator on agent output: the final titles were 'RFC 9110: HTTP Semantics'/'RFC 9111: HTTP Caching' instead of the required 'HTTP Semantics'/'HTTP Caching'; message routing, delivery and resumption were supported. NOT_INTRODUCED: PR #1783 changes only deploy test tooling and seed-local Prisma client ordering (no agent, prompt, LLM or messaging code); the same task passed on this exact source in the 11:17Z wave and on 0e692c7e, ce58f373 and ac7f40b2.",
+   "evidence": "docs/handoffs/pr-1783-closeout/evidence/background-agent-message-smoke-fc64c417.json; agent 1cb7ead6-4286-4632-a470-8fc527eef13b",
+   "post_merge": {
+    "test": "smoke/background-agent-message-smoke",
+    "command": [
+     "/home/boxes/rose/agents/venv/bin/python3",
+     "/home/boxes/rose/scripts/deploy_test_cloud.py"
+    ],
+    "scope": "smoke task background-agent-message-smoke (agents/benchmarks/tasks.json, evaluator smoke_rfc_semantics; rerun: scripts/run-bench background-agent-message-smoke --runs 1 --retry-infra 0 --ref <main sha>). Background-agent message routing smoke: the agent must report exact unprefixed RFC titles from its fetched evidence; preserve the evaluator, assertions and timeouts",
+    "error": "Declared evaluator smoke_rfc_semantics failed: The first contradicted requirement is the exact titles in the final structured output. Its title fields are 'RFC 9110: HTTP Semantics' and 'RFC 9111: HTTP Caching', rather than the required 'HTTP Semantics' and 'HTTP Caching'. The later web_fetch results explicitly identify those unprefixed document titles.\n\nThe remaining document fields are supported: there are exactly two records, both published June 2022, with official rfc-editor.org URLs and the exact forwarded marker in both notes.\n\nRouting evidence supports delivery and resumption. mid_run_feedback identifies the active explore task, and wait_for reports it running when the user message arrives. background_task_routing records an inbox message and send_message_to_agent delivery to that same task. Although its first run finished before delivery, the send result verifies that delivery started its next run. Later research rows, a second completed result containing both markers, and the final wait_for completion notification verify resumed work and completion. No external message is shown. These successes do not cure the exact-title mismatch.",
+    "source": "fc64c417b9d516a17e04d2f12a4f34cfbab60c68",
+    "evidence": "docs/handoffs/pr-1783-closeout/evidence/background-agent-message-smoke-fc64c417.json; agent 1cb7ead6-4286-4632-a470-8fc527eef13b"
+   }
+  },
+  {
+   "id": "4cd3e6437b094aaea975c151925c8588",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "fc64c417b9d516a17e04d2f12a4f34cfbab60c68",
+    "digest": "1bc4914358f8b3b04be5baef335c22f783f1c09c75fb02b463e219144fc1128b"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "smoke/agent-payment-abandonment natively SKIPPED under the standing sandbox AgentCard release stall (closed card, zero balance, org transfer consumed, releasedCents=0, walletFunding RECLAIMING, purchase HELD). Not introduced: PR #1783 touches no AgentCard, payment or Stripe code; documented provider behaviour per docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md. Never a PASS; the unreleased sandbox transfer stays a follow-up.",
+   "evidence": "/home/boxes/rose/.context/deploy-pipeline/attempts/2/initial/smoke/output.log",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard (sandbox organization)",
+    "receipt_sha256": "48617f6ff0c62a282ca8572a317682fbd751dc791257cb4e1bfd734c4ebcaaa8",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_cff213b6f2376dc96577f639\", \"cardId\": \"card_dd8f807a03ec96c181f221f7\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py fa81427b-f34f-42f9-a2c3-51c2125a2eb9 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "evidence": "native SKIPPED row agent-payment-abandonment (agent fa81427b-f34f-42f9-a2c3-51c2125a2eb9); docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md",
+    "confirmed_at": 1794144065.7737396
+   }
+  }
+ ]
+}

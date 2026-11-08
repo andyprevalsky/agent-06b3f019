@@ -1,0 +1,32 @@
+{
+ "archives": {
+  "cloud": "devbox-closeout-private/pr1811-bb486bea/20261108-cloud/",
+  "core": "devbox-closeout-private/pr1811-bb486bea/20261108-core/"
+ },
+ "followups": [
+  "AgentCard sandbox release stall: agent-payment-abandonment transfers of 4396 cents per failing run not released (card closed, balance 0, consumed, releasedCents 0)",
+  "Prisma two-client startup race still exposed outside the four fixed unit files: backend startup (database.ts plus demoCacheStore.ts) and multi-client blackbox processes",
+  "deploy-gate setup downloads uv, flyctl and cloudflared unauthenticated from GitHub; a GitHub incident (increase in timeouts for some unauthenticated users) made gate setup fail with 500 and 504 for hours and forced gate reruns",
+  "staged cycle final phase relaunches a paid smoke fleet automatically, which can surprise concurrent deploys coordinating capacity"
+ ],
+ "format": "PR-CLOSEOUT-V1",
+ "gated_head": "5015869e427769898f50f8f85d3012d78d7ce488",
+ "gates": "16/16 selected gates PASS on 5015869e4; mac-app-coverage-blackbox and mac-app-static PLATFORM_OMITTED on Linux (not a pass); smoke 12 PASS plus agent-payment-abandonment AgentCard release-stall resource_skip (SKIP, not a pass), that row from campaign 18d2a19675 on the same head with no ledger row",
+ "ledger": {
+  "source": "final smoke campaign 5bc443559c10 native cloudbench-run.json on 5015869e4, written through benchmark-history-backfill.py (backfill_source hub:*; row timestamps are native start plus duration)",
+  "task_attempts_rows": 12,
+  "task_durations_rows": 12
+ },
+ "merged_sha": "bb486bea857647ece665917855b2b6ef9cff51c2",
+ "pr": 1811,
+ "production": "render PASS, backend-probes PASS, semantic PASS; fly, vercel, mac-release, wmh, workflow-migration, agentcard not applicable",
+ "purpose": "stop the silent process death of workflow-queue-admission-postgres.test.ts on Blacksmith (reproduced locally as SIGSEGV; the CI signal itself was never recorded) and record each unit child exit code or signal",
+ "reliability_evidence_for_assigned_test": {
+  "blacksmith": "backend-coverage-blackbox PASS on 9f6036d46 (after a first attempt that never ran due to GitHub 504) and on 5015869e4; workflow-queue-admission-postgres.test.ts PASS with 4 tests and a non-empty log",
+  "exact_test_after_fix": "0 failures in 1,500 runs at 5 workers (baseline used 7; weak alone at this crash rate)",
+  "exact_test_before_fix": "1 SIGSEGV in 1,500 runs (1755 ms, 0 bytes)",
+  "two_client_repro_after_fix": "0 SIGSEGV in 9,999 completed runs; 1 further run excluded (PrismaClient is not a constructor, prisma generate rewrote the client mid-run)",
+  "two_client_repro_before_fix": "3 SIGSEGV in about 2,850 runs"
+ },
+ "review": "CodeRabbit usage cap on 9f6036d46: merged unreviewed by CodeRabbit (deploy_review_cycle skip usage-cap), inherited across the sync to 5015869e4. Independent adversarial review of d7dbd7abc found no blocking defect; three low-severity findings fixed, one unconfirmed left"
+}

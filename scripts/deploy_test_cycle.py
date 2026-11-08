@@ -2160,7 +2160,9 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-no-retry"])
+    parser.add_argument('--donor-state', type=Path,
+                        help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
                         help='triage-independent: currently leased worker roots to leave untouched')
     parser.add_argument("--historical-no-retry-proof", type=Path)
@@ -2177,8 +2179,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rca-launcher", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
-        if args.historical_no_retry_proof is not None and args.action != 'refresh':
-            raise ValueError('--historical-no-retry-proof applies only to same-cycle refresh')
+        if args.historical_no_retry_proof is not None and args.action not in {'refresh', 'import-historical-no-retry'}:
+            raise ValueError('--historical-no-retry-proof applies only to refresh or import-historical-no-retry')
         if args.donor_sha256 is not None and args.action not in {'prepare-historical-import', 'admit-historical-import'}:
             raise ValueError('--donor-sha256 applies only to historical import')
         plan = read(args.plan)
@@ -2251,6 +2253,13 @@ def main(argv: list[str] | None = None) -> int:
                 from deploy_test_historical_custody import build
                 print(json.dumps(build(state, read(args.input), plan, args.root)))
                 return 0
+            elif args.action == 'import-historical-no-retry':
+                if args.input is None or args.donor_state is None or args.historical_no_retry_proof is None:
+                    raise ValueError('--input donor plan, --donor-state and --historical-no-retry-proof required')
+                if plan != state['plan']:
+                    raise ValueError('custody transfer plan differs from fresh selection')
+                from deploy_test_historical_custody import adopt
+                adopt(state, read(args.donor_state), read(args.input), read(args.historical_no_retry_proof), args.root)
             elif args.action == "refresh":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
