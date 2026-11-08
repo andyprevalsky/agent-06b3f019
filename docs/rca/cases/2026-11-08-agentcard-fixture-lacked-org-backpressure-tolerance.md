@@ -12,6 +12,7 @@ symptoms:
   - "FATAL: setup-benchmark-payment.ts failed"
   - "INFRA STOP: 1/13 scheduled jobs are confirmed infrastructure failures (>= 5%); breach at r001-j0009 (INFRA_ERROR)"
   - isolated stack failed before the start barrier
+  - "Failed to prepare-residual benchmark AgentCard setup: 401"
 tags:
   - agentcard
   - cloudbench
@@ -22,7 +23,7 @@ sources:
   - PR #1813
   - PR #1786 deploy attempt 4, smoke campaign deploy-cloud/604a576acbf1c746c131fe58ef25977da4cad6fa81cd612760fc5c2fb16f7bd9
   - commit 34fd7d036b165e235a02a05197a4ddc00f6bc46e (failed source)
-repro: cd back-end && env -u FLY_APP_NAME npx tsx src/tests/unit/agentcard-benchmark-float.test.ts; on the pre-fix behaviour the first verifyBenchmarkOrgFixture call rejects with "AgentCard Organization MCP list_cardholders failed: Invalid or expired organization token", and the KYC case reports "Missing expected rejection"; both pass on the fix
+repro: cd back-end && env -u FLY_APP_NAME npx tsx src/tests/unit/agentcard-benchmark-float.test.ts, plus test_agentcard_setup_retries_only_the_structured_org_rate_limit and test_abandon_retries_typed_org_auth_rejection_after_reconciling in agents/tests/blackbox/benchmark.blackbox.py; on the pre-fix behaviour the first verifyBenchmarkOrgFixture call rejects with "AgentCard Organization MCP list_cardholders failed: Invalid or expired organization token", and the KYC case reports "Missing expected rejection"; both pass on the fix
 status: mitigated
 ---
 
@@ -56,15 +57,25 @@ for a healthy secret) leaves what we own.
 Separately, `AgentCardOrgRuntime` stops a text-only throttle after 3 attempts (scratch repro: 3 requests,
 3006 ms) even with 27 s of its 30 s budget left. Existing tests pin that bound, so it was left unchanged.
 
+The fixed source then exposed the same class one boundary later. PR #1813's smoke campaign `c014b69b` passed the
+pre-barrier fixture but failed `agent-payment-setup-resume` after the barrier at 11:17Z with `Failed to prepare-residual
+benchmark AgentCard setup: 401 {"error":"AgentCard Organization MCP recover_funds failed: Invalid or expired organization
+token","code":"agentcard_org_mcp_unauthorized"}`. `configure_benchmark_agentcard_setup` waited out the typed 429 but
+treated the typed 401 as terminal, and the abandon POST had the same gap.
+
+Runtime evidence, from the restored guest logs (`pr1786-fdf1accd94-core`): four guests logged 401s interleaved with throttles
+across 03:55:12-03:55:31Z, and a 401 on `get_cardholder_kyc_status` was treated as not-ready at 03:55:17Z while resolution
+moved to the next candidate, which is the sibling defect above occurring live.
+
 Evidence gaps, stated plainly:
 
-- What consumed the org budget at 03:55Z is unattributed. The fixture makes 5-6 org calls per guest on
-  the healthy path, far under 120/min. Guest purchase reconcilers run every minute and their org usage
-  is unmeasured. The raw guest logs were not available when this was written; the times and messages
-  above come from the failure report, and HTTP 401 is taken from the #1796 investigation of the same
-  message.
-- The exact benchmark cannot be made to fail on demand on the buggy revision, because it depends on
-  provider state. The causal proof is the replayed provider errors at the owning boundary.
+- What consumed the org budget at 03:55Z is unattributed. The failing guests' driver logs hold only 13 org tool-call
+  lines in that window, though each failing read can cost up to 6 HTTP requests, so about 70 requests at most. Other guests
+  logged no org calls there, which points away from this campaign's own fixture burst. Traffic from other lanes sharing
+  the credentials was not measured.
+- Whether throttling causes the 401s is unproven. They interleave, but #1796 also saw 401s on a healthy secret.
+- The exact benchmark cannot be made to fail on demand on the buggy revision, because it depends on provider state. The
+  causal proof is the replayed provider errors at the owning boundaries; the outcome proof is the deploy smoke campaign.
 
 ## Solution
 
@@ -76,8 +87,11 @@ cardholders still fail on the first pass, and a sustained outage still surfaces 
 that resolve a cardholder share it. Resolution now rethrows backpressure instead of skipping the
 candidate, and the readiness wrapper keeps the error type.
 
-No fleet-wide admission was built. The evidence does not show the fixture burst exhausts the budget,
-so a cross-machine lease would be speculative.
+The same typed-401 tolerance now covers `configure_benchmark_agentcard_setup` and the abandon POST in
+`agents/benchmarks/run_benchmark.py`, using the existing delay and attempt bounds; untyped 401s stay terminal.
+
+No fleet-wide admission was built. The evidence does not show this campaign's guests exhausted the budget, so a
+cross-machine lease would be speculative and would not cover other lanes sharing the org.
 
 Fixture-only change: 10k-agent behaviour is unaffected, and at most 4 passes of 5-6 reads per guest are
 spent, 30 s apart.
