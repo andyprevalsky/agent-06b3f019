@@ -17,6 +17,47 @@ def native(pid):
     return p.stdout.strip() or None
 
 
+def control_boundary_reached(scaler, resolved):
+    """One control-loop observation; True once the case reached its control boundary.
+
+    `resolved` is the boundary read from the case's files, or None when the boundary is the
+    autoscaler's own exit (fatal inventory and provision failure). That exit is read exactly once:
+    a second poll() could see an exit that landed between two reads and report the boundary itself
+    as "exited before the control boundary". A file-resolved case still requires a live autoscaler
+    at every unresolved observation.
+    """
+    if resolved is None:
+        return scaler.poll() is not None
+    if resolved:
+        return True
+    assert scaler.poll() is None, "autoscaler-exited-before-control-boundary"
+    return False
+
+
+def test_autoscaler_runtime_handoff_capacity_exit_boundary_reads_exit_once():
+    """Deterministic regression for the Blacksmith race (PR #1787 attempt 2, inventory_missing_machine):
+    the autoscaler exits between two observations of an exit-resolved case."""
+    import pytest
+
+    class Scaler:
+        def __init__(self, codes):
+            self.codes, self.reads = list(codes), 0
+
+        def poll(self):
+            self.reads += 1
+            return self.codes.pop(0) if len(self.codes) > 1 else self.codes[0]
+
+    exiting = Scaler([None, 1])  # alive at this read, exited (rc 1) by the next
+    assert control_boundary_reached(exiting, None) is False
+    assert exiting.reads == 1, "an exit-resolved observation must read the exit once"
+    assert control_boundary_reached(exiting, None) is True
+    # A file-resolved case keeps its live-autoscaler requirement.
+    with pytest.raises(AssertionError, match="autoscaler-exited-before-control-boundary"):
+        control_boundary_reached(Scaler([1]), False)
+    assert control_boundary_reached(Scaler([None]), False) is False
+    assert control_boundary_reached(Scaler([1]), True) is True
+
+
 def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
     from benchmarks.cloudbench_dependency_sync_test import FLEET_SCRIPT, _extract_fleet_function, fleet_source_text
 
@@ -301,10 +342,9 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
                     elif mode == "pending_until_child":
                         resolved = (case / "third-pending").exists()
                     else:
-                        resolved = scaler.poll() is not None
-                    if resolved:
+                        resolved = None  # this mode's control boundary is the autoscaler's own exit
+                    if control_boundary_reached(scaler, resolved):
                         break
-                    assert scaler.poll() is None, "autoscaler-exited-before-control-boundary"
                     assert time.monotonic() < deadline, "fixture-host-guard"
                     time.sleep(0.01)
                 (case / "release-child").touch()
