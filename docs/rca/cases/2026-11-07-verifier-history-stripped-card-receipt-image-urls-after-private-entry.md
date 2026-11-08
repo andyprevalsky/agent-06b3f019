@@ -100,6 +100,23 @@ marks private entry. On cdb8ce580 it fails with
 with the fix it passes and still asserts that `media` is withheld and the card
 number never reaches the verifier.
 
+Exact benchmark outcome gate, `scripts/run-bench --local agent-payment-idempotent-abandonment`
+(task definition byte-identical on both revisions), verifier dumps read from
+`.llm-dumps/<agent>/…-verifier_browser.json`:
+
+- Buggy cdb8ce580, agent 2d25a74f (run 99cd48b0): outcome PASSED (349.5 s) by
+  model variance, but the first-bad boundary reproduced. The second task's
+  verifier input before card entry (steps 1–4) carried 3 `image_url` values in
+  the step-3 receipt; its verifier input after card entry (steps 5–9) carried
+  0 for the same step-3 receipt.
+- Fixed 1b4748e347, agent 52c26100 (run da81d3dc): PASSED (382.5 s); both of the
+  second task's verifier calls after card entry carry all 3 image URLs in the
+  step-3 receipt.
+
+Adjacent observation, not addressed here: in both runs the verifier's receipt
+shows the merchant as `{{secret:card_name}} Test Payment` because the issued
+card's name equals the merchant prefix and is masked as a secret value.
+
 ## Problem class
 
 Logical inconsistency in harness contracts: a privacy policy applied lazily on
