@@ -17,6 +17,7 @@ import {
   renameSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
@@ -1622,7 +1623,7 @@ function onCliTurnResult(message) {
   }
   // The user's turn finished the goal: hand the session back so the parent
   // gets the result now (root 0874662a waited out the 10-minute idle hold).
-  if (goalHandoffPath && existsSync(goalHandoffPath)) {
+  if (goalHandoffWritten()) {
     releaseDirectHold("goal handoff written");
     return;
   }
@@ -2049,6 +2050,18 @@ const DEFAULT_HANDOFF_SCHEMA_PATH = "/home/user/.rose/handoff.schema.json";
 const GOAL_CONDITION_MAX_CHARS = 4000;
 // The handoff the current goal ends by writing (null: the task had no schema).
 let goalHandoffPath = null;
+// When the current goal was accepted: only a handoff written after it counts
+// (a close that failed to consume an earlier one can leave it behind).
+let goalStartedAtMs = 0;
+
+function goalHandoffWritten() {
+  if (!goalHandoffPath) return false;
+  try {
+    return statSync(goalHandoffPath).mtimeMs >= goalStartedAtMs;
+  } catch {
+    return false;
+  }
+}
 
 function splitHandoffSchema(text) {
   const at = text.lastIndexOf(HANDOFF_SCHEMA_PREFIX);
@@ -2096,6 +2109,7 @@ function goalTurnText(rawTask, note = "") {
       task = `${split.task}${HANDOFF_SCHEMA_PREFIX}${split.handoffPath}:\n${split.schema}`;
     }
     goalHandoffPath = split.handoffPath;
+    goalStartedAtMs = Date.now();
   }
   // A new spawn's goal reaches a live CLI already headed "Task:" (backend
   // attachLiveCodeCli); the first task is headed here.

@@ -37,6 +37,7 @@ import {
   restoreLatestCheckpoint,
 } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
+import { deleteCloseRecords } from '../../providers/codeSessions/closeRecord';
 
 export interface CheckpointSizeContext {
   fixtureDir: string;
@@ -508,5 +509,24 @@ export function registerCheckpointSizeCases(ctx: CheckpointSizeContext): void {
         assert.equal(fake.calls.connects, 1, 'a retried close never reconnects the paused sandbox');
       }
     );
+  });
+
+  // CodeRabbit PR #1803: a retried close with no saved result must fail loudly,
+  // never return an empty successful close that hides the lost handoff.
+  test('a retried close without a saved close result fails instead of returning an empty success', async () => {
+    await withE2bClose('norecord', false, async ({ task, codeSessionId, fake }) => {
+      await within(
+        30_000,
+        'first close',
+        closeClaudeCodeSession(task.id, undefined, undefined, [], { reason: 'close' })
+      );
+      const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSessionId } });
+      await deleteCloseRecords({ id: row.id, userId: row.userId });
+      await assert.rejects(
+        closeClaudeCodeSession(task.id, undefined, undefined, [], { reason: 'close' }),
+        /already closed and its close result is unavailable/
+      );
+      assert.equal(fake.calls.connects, 1, 'a retried close never reconnects the paused sandbox');
+    });
   });
 }

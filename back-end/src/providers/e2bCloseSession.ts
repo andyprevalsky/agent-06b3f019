@@ -205,9 +205,16 @@ export async function closeClaudeCodeSession(
     // Retried close: the session was already checkpointed and paused. Return the
     // handoff and outputs the first close consumed, as the local fallback does.
     const record = await loadCloseRecord(codeSession, taskId);
+    if (record === null) {
+      // No saved result (a legacy close, a failed save or an unreadable record):
+      // fail loudly so a lost handoff never reads as an empty successful close.
+      throw new Error(
+        `Code session task ${taskId} was already closed and its close result is unavailable`
+      );
+    }
     return {
-      outputFiles: record?.outputFiles ?? [],
-      ...(record?.handoff !== undefined ? { handoff: record.handoff } : {}),
+      outputFiles: record.outputFiles,
+      ...(record.handoff !== undefined ? { handoff: record.handoff } : {}),
       codeSession: await closeFacts(codeSession, null, codeSession.state),
     };
   }

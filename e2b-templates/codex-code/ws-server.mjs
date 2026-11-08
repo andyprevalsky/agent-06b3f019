@@ -1784,7 +1784,7 @@ class CodexAppServer {
     if (turnStart.outputSchema) this.handoffTurnId = turnId;
     this.ready = true;
   }
-  async initialize(resumeId, goal) {
+  async initialize(resumeId, goal, goalTask = goal) {
     await this.connect();
     // Catalog -> supported defaults -> native ACK -> first turn.
     const model = this.catalogModel(this.settings.model);
@@ -1832,7 +1832,7 @@ class CodexAppServer {
       this.handoffSchema,
     );
     if (this.handoffSchema) this.handoffTurnId = goalTurnId;
-    await this.setGoal(goal);
+    await this.setGoal(goalTask);
     this.ready = true;
     this.emit({
       type: "session",
@@ -1955,11 +1955,10 @@ function goalObjective(text) {
     typeof text === "string" ? text.lastIndexOf(HANDOFF_SCHEMA_MARKER) : -1;
   if (at < 0) return null;
   const schema = text.slice(at + HANDOFF_SCHEMA_MARKER.length);
-  // The task follows the last "Task:" header (system instructions and the
-  // startup note lead the first turn).
+  // `text` is the raw task (the worker's goal, or a new spawn's goal turn,
+  // which the backend heads "Task:"), never the composed first prompt.
   const head = text.slice(0, at);
-  const taskAt = head.lastIndexOf("Task:\n");
-  const task = taskAt >= 0 ? head.slice(taskAt + "Task:\n".length) : head;
+  const task = head.startsWith("Task:\n") ? head.slice("Task:\n".length) : head;
   try {
     mkdirSync("/home/user/.rose", { recursive: true });
     writeFileSync(CODE_AGENT_HANDOFF_SCHEMA_PATH, schema);
@@ -2228,6 +2227,7 @@ async function runCodexAppServer() {
     nativeCodex.initialization = nativeCodex.initialize(
       CODEX_RESUME_SESSION_ID,
       sanitizedGoal,
+      GOAL.replace(/\0/g, ""),
     );
     await nativeCodex.initialization;
   } catch (error) {

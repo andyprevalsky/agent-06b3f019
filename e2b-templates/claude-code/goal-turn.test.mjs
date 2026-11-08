@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -97,7 +98,13 @@ async function sendUserTurn(log, text) {
   }
 }
 
-async function runGoal({ task, handoffOnTurn, steer = null }) {
+async function runGoal({
+  task,
+  handoffOnTurn,
+  steer = null,
+  staleHandoff = false,
+  expectExit = true,
+}) {
   const dir = mkdtempSync(join(tmpdir(), "rose-goal-turn-"));
   mkdirSync(join(dir, "bin"));
   mkdirSync(join(dir, "home"));
@@ -113,6 +120,13 @@ async function runGoal({ task, handoffOnTurn, steer = null }) {
     required: ["rose_handoff"],
   });
   const goal = `${task}\n\nResult JSON Schema for ${handoffFile}:\n${schema}`;
+  if (staleHandoff) {
+    // A previous spawn's handoff that its close failed to consume.
+    mkdirSync(dirname(handoffFile), { recursive: true });
+    writeFileSync(handoffFile, "{}");
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(handoffFile, hourAgo, hourAgo);
+  }
   const env = {
     ...process.env,
     PATH: join(dir, "bin") + ":" + process.env.PATH,
@@ -144,7 +158,17 @@ async function runGoal({ task, handoffOnTurn, steer = null }) {
       const ack = await sendUserTurn(log, steer);
       assert.equal(ack.status, "delivered", JSON.stringify(ack));
     }
-    await until(() => existsSync(env.EXIT_FILE), `CLI exit\n${log}`);
+    if (expectExit) {
+      await until(() => existsSync(env.EXIT_FILE), `CLI exit\n${log}`);
+    } else {
+      await until(
+        () =>
+          readFileSync(env.RECORD_FILE, "utf8").trim().split("\n").length >= 2,
+        `user turn\n${log}`,
+      );
+      await new Promise((r) => setTimeout(r, 2000));
+      assert.ok(!existsSync(env.EXIT_FILE), `the held session ended:\n${log}`);
+    }
     const turns = readFileSync(env.RECORD_FILE, "utf8")
       .trim()
       .split("\n")
@@ -198,4 +222,15 @@ test("a user's direct turn that writes the handoff hands the session back at onc
 test("a task already headed Task: is not headed twice", async () => {
   const { turns } = await runGoal({ task: "Task:\nDo it.", handoffOnTurn: 1 });
   assert.equal(turns[0], "/goal Task:\nDo it.");
+});
+
+test("a handoff left before the goal started never hands a held session back", async () => {
+  const { log } = await runGoal({
+    task: "Do it.",
+    handoffOnTurn: 0,
+    steer: "use the auto updater",
+    staleHandoff: true,
+    expectExit: false,
+  });
+  assert.ok(!log.includes("goal handoff written"), log);
 });

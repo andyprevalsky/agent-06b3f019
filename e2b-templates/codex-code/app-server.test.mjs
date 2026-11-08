@@ -1469,10 +1469,14 @@ const GOAL_SCHEMA = '{"type":"object","required":["rose_handoff"]}';
 test("a worker task sets the native thread goal after its first turn", async () => {
   goalFiles.clear();
   const { native, calls } = fixture();
-  const task = "Remove the ring.\n\nEnd condition: write the handoff.";
+  // The task body may hold its own "Task:" line; the objective is the whole task.
+  const task =
+    "Remove the ring.\nNext Task:\nkeep the launcher.\n\nEnd condition: write the handoff.";
+  const raw = `${task}${HANDOFF_MARKER}${GOAL_SCHEMA}`;
   await native.initialize(
     null,
-    `System instructions:\nbe good\n\nTask:\n${task}${HANDOFF_MARKER}${GOAL_SCHEMA}`,
+    `System instructions:\nbe good\n\nTask:\n${raw}`,
+    raw,
   );
   const methods = calls.map((c) => c.method);
   assert.ok(
@@ -1494,10 +1498,8 @@ test("a task over the objective cap goes to the task file the objective names", 
   goalFiles.clear();
   const { native, calls } = fixture();
   const task = "y".repeat(5000);
-  await native.initialize(
-    null,
-    `Task:\n${task}${HANDOFF_MARKER}${GOAL_SCHEMA}`,
-  );
+  const raw = `${task}${HANDOFF_MARKER}${GOAL_SCHEMA}`;
+  await native.initialize(null, `Task:\n${raw}`, raw);
   const { objective } = calls.find(
     (c) => c.method === "thread/goal/set",
   ).params;
@@ -1533,4 +1535,22 @@ test("a plain task without a result schema sets no goal", async () => {
     calls.some((c) => c.method === "thread/goal/set"),
     false,
   );
+});
+test("a new spawn's goal turn (headed Task:) becomes the whole objective", async () => {
+  const { native, calls } = fixture();
+  await native.initialize(null, "hello");
+  const task = "Fix it.\nTask:\nthen test it.";
+  await native.deliver(
+    {
+      id: "spawn-2",
+      sender: "agent",
+      text: `Task:\n${task}${HANDOFF_MARKER}${GOAL_SCHEMA}`,
+      settings: {},
+    },
+    [{ type: "text", text: "x" }],
+  );
+  const goal = calls
+    .filter((c) => c.method === "thread/goal/set")
+    .at(-1).params;
+  assert.equal(goal.objective, `Task:\n${task}`);
 });
