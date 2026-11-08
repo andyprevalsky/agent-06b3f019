@@ -241,6 +241,13 @@ const LOCK_TTL_MS = 60_000;
 const LOCK_POLL_RAMP_MS = [50, 100, 200, 400];
 const LOCK_POLL_MAX_MS = 500;
 
+export interface SerializedLock {
+  token: string;
+  /** Include in the same SQL statement as a write that must not survive lock loss. */
+  predicate: Prisma.Sql;
+  assertHeld(): Promise<void>;
+}
+
 /**
  * Run `fn` while holding a cross-instance lock on `key`, so callers with the
  * same key run one at a time across every backend instance.
@@ -254,7 +261,7 @@ const LOCK_POLL_MAX_MS = 500;
  */
 export async function withSerializedLock<T>(
   key: string,
-  fn: () => Promise<T>,
+  fn: (lock: SerializedLock) => Promise<T>,
   opts: { waitMs?: number } = {}
 ): Promise<T> {
   const waitMs = opts.waitMs ?? 120_000;
@@ -268,7 +275,15 @@ export async function withSerializedLock<T>(
   if (token === null) throw new Error(`sharedState: timed out waiting for lock ${key}`);
   const lease = holdLease(LOCK_NAMESPACE, key, token, LOCK_TTL_MS);
   try {
-    return await fn();
+    const predicate = leaseHeldPredicate(LOCK_NAMESPACE, key, token);
+    return await fn({
+      token,
+      predicate,
+      assertHeld: async () => {
+        const [row] = await prisma.$queryRaw<Array<{ held: boolean }>>`SELECT ${predicate} AS held`;
+        if (lease.lost() || row?.held !== true) throw new Error(`Serialized lock lost: ${key}`);
+      },
+    });
   } finally {
     if (lease.lost()) {
       log.error('Serialized lock was lost while its holder ran; exclusion was not guaranteed', {

@@ -1,8 +1,8 @@
 import { unregisterWorkspaceExecutor } from './projects/workspaceExecutor';
-import { Sandbox } from 'e2b';
+import { InvalidArgumentError, Sandbox } from 'e2b';
 import { Prisma } from '@prisma/client';
 import mime from 'mime-types';
-import { CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
+import { CODE_AGENT_HANDOFF_PATH, CODE_AGENT_OUTPUT_DIR } from './codeAgentPrompt';
 import { readCodeAgentHandoff, type CodeAgentHandoff } from './codeAgentHandoff';
 import { randomUUID } from './crypto';
 import { prisma } from './database';
@@ -12,8 +12,9 @@ export { readCodeAgentHandoff, type CodeAgentHandoff } from './codeAgentHandoff'
 import { type FilePointer, uploadToStorage } from './storage';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 import { checkpointCodeSession, type RepoFacts } from './codeSessions/lifecycle';
-import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
-import { markPaused, type CodeSessionRow } from './codeSessions/store';
+import { e2bSandboxFs, localSandboxFs, shellQuote } from './codeSessions/sandboxFs';
+import { type CodeSessionRow } from './codeSessions/store';
+import { withSerializedLock, type SerializedLock } from './sharedState';
 import { forgetStartupTurns } from './codeSessions/startupTurns';
 import { resolveMergeFacts, type CodeSessionMergeFacts } from './codeSessions/mergeFacts';
 import { isLocalDeviceSandboxId } from './localDevices/hub';
@@ -144,18 +145,44 @@ async function ownsCodeSessionSandbox(
   return newer === null;
 }
 
+interface CloseResult {
+  outputFiles: FilePointer[];
+  usage?: ClaudeCodeUsage;
+  codeSession?: CodeSessionCloseFacts;
+  handoff?: CodeAgentHandoff;
+}
+
+interface CloseReceipt {
+  version: 1;
+  complete: boolean;
+  extracted: boolean;
+  result: CloseResult;
+  uploads: Record<string, string>;
+  phase?: 'collecting' | 'pause_requested' | 'paused';
+  localStopped?: boolean;
+}
+
+/** One task closes once across backend instances; HTTP response loss only replays its receipt. */
 export async function closeClaudeCodeSession(
   taskId: string,
   userId?: string,
   agentId?: string,
   additionalPaths?: string[],
   options?: { reason?: string }
-): Promise<{
-  outputFiles: FilePointer[];
-  usage?: ClaudeCodeUsage;
-  codeSession?: CodeSessionCloseFacts;
-  handoff?: CodeAgentHandoff;
-}> {
+): Promise<CloseResult> {
+  return withSerializedLock(`code-session-close:${taskId}`, (lock) =>
+    runClaudeCodeClose(taskId, lock, userId, agentId, additionalPaths, options)
+  );
+}
+
+async function runClaudeCodeClose(
+  taskId: string,
+  lock: SerializedLock,
+  userId?: string,
+  agentId?: string,
+  additionalPaths?: string[],
+  options?: { reason?: string }
+): Promise<CloseResult> {
   log.info(`Closing Claude Code session ${taskId}`);
 
   const session = await prisma.claudeCodeSession.findUnique({
@@ -166,12 +193,126 @@ export async function closeClaudeCodeSession(
     throw new Error(`Claude Code session not found: ${taskId}`);
   }
 
-  const reason = options?.reason ?? 'close';
+  const receipt = (session.closeResult as unknown as CloseReceipt | null) ?? {
+    version: 1,
+    complete: false,
+    extracted: false,
+    result: { outputFiles: [] },
+    uploads: {},
+  };
+  if (receipt.version !== 1 || !Array.isArray(receipt.result?.outputFiles)) {
+    throw new Error(`Invalid close receipt for task ${taskId}`);
+  }
+  if (receipt.complete) return receipt.result;
+  if (session.status === 'CLOSED' && session.closeResult === null) {
+    throw new Error(`Closed task ${taskId} has no persisted close result`);
+  }
+  const writeReceipt = async (db: Pick<typeof prisma, '$executeRaw'>, closed = false) => {
+    const count = await db.$executeRaw`
+      UPDATE "ClaudeCodeSession"
+      SET "closeResult" = ${JSON.stringify(receipt)}::jsonb,
+          status = CASE WHEN ${closed} THEN 'CLOSED'::"ClaudeCodeSessionStatus" ELSE status END,
+          "closedAt" = CASE WHEN ${closed} THEN now() ELSE "closedAt" END
+      WHERE id = ${taskId} AND ${lock.predicate}
+    `;
+    if (count !== 1) throw new Error(`Close custody lost for task ${taskId}`);
+  };
+  const saveReceipt = () => writeReceipt(prisma);
+  const finish = async (result: CloseResult, paused?: CodeSessionRow): Promise<CloseResult> => {
+    // Return the same JSON value the receipt stores, including on the first call.
+    receipt.result = JSON.parse(JSON.stringify(result)) as CloseResult;
+    receipt.complete = true;
+    await prisma.$transaction(async (tx) => {
+      await writeReceipt(tx, true);
+      if (paused !== undefined) {
+        const released = await tx.codeSession.updateMany({
+          where: {
+            id: paused.id,
+            sandboxId: paused.sandboxId,
+            leaseOwner: paused.leaseOwner,
+            closingTaskId: taskId,
+            closingEpoch: lock.token,
+            state: { not: 'RETIRED' },
+          },
+          data: {
+            state: 'PAUSED',
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            lastActiveAt: new Date(),
+            closingTaskId: null,
+            closingEpoch: null,
+          },
+        });
+        if (released.count !== 1)
+          throw new Error(`Code session owner changed while closing task ${taskId}`);
+      } else {
+        // A superseded close may drop only its own custody, never the newer
+        // task's ordinary lease or provider state.
+        await tx.codeSession.updateMany({
+          where: {
+            id: session.codeSessionId ?? '',
+            closingTaskId: taskId,
+            closingEpoch: lock.token,
+          },
+          data: { closingTaskId: null, closingEpoch: null },
+        });
+      }
+    });
+    return receipt.result;
+  };
+  // Lock only the final provider transition, never extraction or checkpointing.
+  // The durable session custody remains set if this bounded transaction aborts.
+  const confirmPause = async (
+    owned: CodeSessionRow,
+    confirm: () => Promise<boolean>
+  ): Promise<void> => {
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT key FROM "SharedEphemeralState"
+        WHERE namespace = 'serialized-lock' AND key = ${`code-session-close:${taskId}`}
+        FOR UPDATE`;
+        await tx.$queryRaw`SELECT id FROM "CodeSession" WHERE id = ${owned.id} FOR UPDATE`;
+        const [held] = await tx.$queryRaw<
+          Array<{ held: boolean }>
+        >`SELECT ${lock.predicate} AS held`;
+        const current = await tx.codeSession.findUniqueOrThrow({ where: { id: owned.id } });
+        const newer = await tx.claudeCodeSession.findFirst({
+          where: {
+            codeSessionId: owned.id,
+            createdAt: { gt: session.createdAt },
+          },
+          select: { id: true },
+        });
+        if (
+          !held?.held ||
+          newer !== null ||
+          current.closingTaskId !== taskId ||
+          current.closingEpoch !== lock.token ||
+          current.sandboxId !== owned.sandboxId ||
+          current.leaseOwner !== owned.leaseOwner ||
+          current.state === 'RETIRED'
+        ) {
+          throw new Error(`Close custody lost before provider pause for task ${taskId}`);
+        }
+        if (!(await confirm()))
+          throw new Error(`Code session pause remains unconfirmed for task ${taskId}`);
+        receipt.phase = 'paused';
+        await writeReceipt(tx);
+      },
+      { timeout: 65_000 }
+    );
+  };
+
+  const reason = session.closeReason ?? options?.reason ?? 'close';
   if (session.status !== 'CLOSED') {
     // The code-agents list reports a resumable close (idle, user pause, a
     // question to the parent, a usage limit) as PAUSED. A retried close keeps
     // the first reason.
-    await prisma.claudeCodeSession.update({ where: { id: taskId }, data: { closeReason: reason } });
+    const updated = await prisma.$executeRaw`
+      UPDATE "ClaudeCodeSession" SET "closeReason" = COALESCE("closeReason", ${reason})
+      WHERE id = ${taskId} AND ${lock.predicate}
+    `;
+    if (updated !== 1) throw new Error(`Close custody lost for task ${taskId}`);
   }
   const codeSession =
     session.codeSessionId !== null
@@ -182,6 +323,22 @@ export async function closeClaudeCodeSession(
     codeSession.state !== 'RETIRED' &&
     (await ownsCodeSessionSandbox(session, codeSession));
 
+  // Cleanup callers omit identity. Output ownership still comes from the task,
+  // never from whether the caller happened to repeat its user/agent fields.
+  const ownerId =
+    codeSession?.userId ??
+    (
+      await prisma.agent.findUnique({
+        where: { id: session.agentId },
+        select: { userId: true },
+      })
+    )?.userId;
+  if (ownerId) {
+    if (userId !== undefined && userId !== ownerId) throw new Error('Code close owner mismatch');
+    userId = ownerId;
+  }
+  agentId = session.agentId;
+
   if (ownsSandbox && codeSession?.leaseOwner?.startsWith('tool:') === true) {
     // The task's startup row (messages queued before it existed) is spent.
     await forgetStartupTurns(codeSession.leaseOwner).catch((error: unknown) => {
@@ -189,12 +346,30 @@ export async function closeClaudeCodeSession(
     });
   }
 
-  if (codeSession !== null && session.status === 'CLOSED') {
-    // Retried close: the session was already checkpointed and paused.
-    return { outputFiles: [], codeSession: await closeFacts(codeSession, null, codeSession.state) };
+  if (codeSession !== null && !ownsSandbox) {
+    unregisterWorkspaceExecutor(taskId);
+    return finish({
+      ...receipt.result,
+      codeSession: await closeFacts(codeSession, null, codeSession.state),
+    });
+  }
+
+  if (codeSession !== null) {
+    await lock.assertHeld();
+    const claimed = await prisma.$executeRaw`
+      UPDATE "CodeSession" SET "closingTaskId" = ${taskId}, "closingEpoch" = ${lock.token}
+      WHERE id = ${codeSession.id} AND "sandboxId" = ${codeSession.sandboxId}
+        AND "leaseOwner" IS NOT DISTINCT FROM ${codeSession.leaseOwner}
+        AND ("closingTaskId" IS NULL OR "closingTaskId" = ${taskId})
+        AND ${lock.predicate}
+        AND NOT EXISTS (SELECT 1 FROM "ClaudeCodeSession" newer
+          WHERE newer."codeSessionId" = ${codeSession.id} AND newer."createdAt" > ${session.createdAt})
+    `;
+    if (claimed !== 1) throw new Error(`Close custody unavailable for task ${taskId}`);
   }
 
   if (isLocalClaudeCodeSandboxId(session.sandboxId)) {
+    if (receipt.localStopped) return finish(receipt.result, codeSession ?? undefined);
     let checkpoint = null;
     if (codeSession !== null && ownsSandbox && codeSession.homeDir !== null) {
       checkpoint = await checkpointCodeSession({
@@ -204,46 +379,65 @@ export async function closeClaudeCodeSession(
         agentId: session.agentId,
       });
     }
-    const local = await closeLocalClaudeCodeSession(taskId, userId, additionalPaths);
-    if (codeSession !== null && ownsSandbox) await markPaused(codeSession.id);
-    return {
-      outputFiles: local.outputFiles,
-      ...(local.handoff !== undefined ? { handoff: local.handoff } : {}),
-      ...(codeSession !== null
-        ? {
-            codeSession: await closeFacts(
-              codeSession,
-              checkpoint,
-              ownsSandbox ? 'PAUSED' : codeSession.state
-            ),
-          }
-        : {}),
-    };
+    const local = await closeLocalClaudeCodeSession(
+      taskId,
+      userId,
+      additionalPaths,
+      async (result) => {
+        receipt.result = {
+          ...result,
+          ...(codeSession !== null
+            ? { codeSession: await closeFacts(codeSession, checkpoint, 'PAUSED') }
+            : {}),
+        };
+        receipt.localStopped = true;
+        receipt.extracted = true;
+        await saveReceipt();
+      }
+    );
+    return finish(
+      {
+        outputFiles: local.outputFiles,
+        ...(local.handoff !== undefined ? { handoff: local.handoff } : {}),
+        ...(codeSession !== null
+          ? {
+              codeSession: await closeFacts(
+                codeSession,
+                checkpoint,
+                ownsSandbox ? 'PAUSED' : codeSession.state
+              ),
+            }
+          : {}),
+      },
+      codeSession !== null && ownsSandbox ? codeSession : undefined
+    );
   }
 
   if (isLocalDeviceSandboxId(session.sandboxId)) {
     // The work stays in the user's Mac folder; nothing is uploaded from their disk.
-    return await closeLocalDeviceCodeSession(taskId, session.sandboxId);
+    return finish(await closeLocalDeviceCodeSession(taskId, session.sandboxId));
   }
 
-  if (codeSession !== null && codeSession.sandboxId !== session.sandboxId) {
-    // The session moved to another sandbox (resize, lost-sandbox restore). Connecting
-    // would resume this superseded one and leave it running unowned; leave it paused.
-    unregisterWorkspaceExecutor(taskId);
-    await prisma.claudeCodeSession.update({
-      where: { id: taskId },
-      data: { status: 'CLOSED', closedAt: new Date() },
+  // A provider pause may have succeeded just before the final database write
+  // failed. Inspect without connect(), which would resume that paused sandbox.
+  if (receipt.phase === 'paused' && codeSession !== null)
+    return finish(receipt.result, codeSession);
+  if (receipt.phase === 'pause_requested' && codeSession !== null) {
+    await confirmPause(codeSession, async () => {
+      const info = await Sandbox.getInfo(session.sandboxId, {
+        apiKey: process.env.E2B_API_KEY,
+        requestTimeoutMs: 60_000,
+      });
+      return info.state === 'paused';
     });
-    return {
-      outputFiles: [],
-      codeSession: await closeFacts(codeSession, null, codeSession.state),
-    };
+    return finish(receipt.result, codeSession);
   }
 
-  const outputFiles: FilePointer[] = [];
-  let usage: ClaudeCodeUsage | undefined;
+  const outputFiles = receipt.result.outputFiles;
+  let usage = receipt.result.usage;
   let codeSessionFacts: CodeSessionCloseFacts | undefined;
-  let handoff: CodeAgentHandoff | undefined;
+  let handoff = receipt.result.handoff;
+  let pausedSession: CodeSessionRow | undefined;
 
   try {
     // Connect to sandbox
@@ -251,7 +445,23 @@ export async function closeClaudeCodeSession(
       apiKey: process.env.E2B_API_KEY,
     });
 
-    handoff = await readCodeAgentHandoff(sandbox.files);
+    if (handoff === undefined) {
+      handoff = await readCodeAgentHandoff({
+        exists: (path) => sandbox.files.exists(path),
+        read: (path, opts) => sandbox.files.read(path, opts),
+        // Persist the handoff before consuming it: a backend restart must not lose it.
+        remove: async () => {},
+      });
+      receipt.result.handoff = handoff;
+      await saveReceipt();
+    }
+    if (
+      !receipt.extracted &&
+      handoff.status === 'present' &&
+      (await sandbox.files.exists(CODE_AGENT_HANDOFF_PATH))
+    ) {
+      await sandbox.files.remove(CODE_AGENT_HANDOFF_PATH);
+    }
 
     // Extract Claude Code usage from JSONL logs before killing sandbox
     try {
@@ -306,115 +516,47 @@ export async function closeClaudeCodeSession(
       });
     }
 
-    // Extract output files if userId and agentId provided
-    if (userId && agentId) {
-      try {
-        // List files in output directory (using find for reliable filename handling)
-        const findResult = await sandbox.commands.run(
-          `find ${OUTPUT_DIR} -maxdepth 1 -type f -printf '%f\\n' 2>/dev/null || echo "NO_DIR"`,
-          { timeoutMs: 5000 }
-        );
-
-        if (findResult.stdout && !findResult.stdout.includes('NO_DIR')) {
-          const filenames = findResult.stdout.split('\n').filter((name) => name.trim());
-
-          for (const filename of filenames) {
-            try {
-              const remotePath = `${OUTPUT_DIR}/${filename}`;
-              // Read as binary (Uint8Array) to avoid corrupting images and other binary files
-              const content = await sandbox.files.read(remotePath, { format: 'bytes' });
-
-              // Determine MIME type
-              const mimeType = mime.lookup(filename) || 'application/octet-stream';
-
-              // Upload to Supabase Storage (stored under userId, not agent-scoped)
-              const fileId = randomUUID();
-              const { storage_path } = await uploadToStorage(
-                userId,
-                Buffer.from(content),
-                filename,
-                mimeType
-              );
-
-              outputFiles.push({
-                id: fileId,
-                storage_path,
-                original_filename: filename,
-                mime_type: mimeType,
-                size_bytes: content.length,
-                created_at: new Date().toISOString(),
-              });
-
-              log.info(`Extracted output file: ${filename} (${content.length} bytes)`);
-            } catch (fileErr) {
-              log.error(`Failed to extract file ${filename}`, {
-                error: fileErr instanceof Error ? fileErr.message : String(fileErr),
-              });
-            }
-          }
-        }
-
-        log.info(`Extracted ${outputFiles.length} output files from ${OUTPUT_DIR}`);
-      } catch (extractErr) {
-        log.error('Failed to extract output files', {
-          error: extractErr instanceof Error ? extractErr.message : String(extractErr),
+    if (!receipt.extracted && userId && agentId) {
+      const extract = async (path: string): Promise<void> => {
+        const filename = path.split('/').pop() ?? '';
+        if (outputFiles.some((file) => file.original_filename === filename)) return;
+        const content = Buffer.from(await sandbox.files.read(path, { format: 'bytes' }));
+        const mimeType = mime.lookup(filename) || 'application/octet-stream';
+        const fileId = receipt.uploads[path] ?? randomUUID();
+        receipt.uploads[path] = fileId;
+        await saveReceipt();
+        const { storage_path } = await uploadToStorage(userId, content, filename, mimeType, {
+          objectId: fileId,
         });
-      }
-
-      // Also extract any additional file paths specified (e.g., from verifier structured_response)
-      if (additionalPaths && additionalPaths.length > 0) {
-        log.info(`Extracting ${additionalPaths.length} additional file paths`);
-
-        for (const filePath of additionalPaths) {
-          // Skip if already extracted (might be in output dir)
-          const filename = filePath.split('/').pop() || '';
-          if (outputFiles.some((f) => f.original_filename === filename)) {
-            log.info(`Skipping ${filename} - already extracted from ${OUTPUT_DIR}`);
-            continue;
-          }
-
-          try {
-            // Verify file exists
-            const checkResult = await sandbox.commands.run(
-              `test -f "${filePath}" && echo "EXISTS"`,
-              { timeoutMs: 3000 }
-            );
-            if (!checkResult.stdout?.includes('EXISTS')) {
-              log.info(`File not found: ${filePath}`);
-              continue;
-            }
-
-            // Read file content
-            const content = await sandbox.files.read(filePath, { format: 'bytes' });
-            const mimeType = mime.lookup(filename) || 'application/octet-stream';
-
-            // Upload to Supabase Storage
-            const fileId = randomUUID();
-            const { storage_path } = await uploadToStorage(
-              userId,
-              Buffer.from(content),
-              filename,
-              mimeType
-            );
-
-            outputFiles.push({
-              id: fileId,
-              storage_path,
-              original_filename: filename,
-              mime_type: mimeType,
-              size_bytes: content.length,
-              created_at: new Date().toISOString(),
-            });
-
-            log.info(`Extracted additional file: ${filePath} (${content.length} bytes)`);
-          } catch (fileErr) {
-            log.error(`Failed to extract additional file ${filePath}`, {
-              error: fileErr instanceof Error ? fileErr.message : String(fileErr),
-            });
-          }
+        outputFiles.push({
+          id: fileId,
+          storage_path,
+          original_filename: filename,
+          mime_type: mimeType,
+          size_bytes: content.length,
+          created_at: new Date().toISOString(),
+        });
+        await saveReceipt();
+      };
+      const found = await sandbox.commands.run(
+        `find ${OUTPUT_DIR} -maxdepth 1 -type f -printf '%f\\n' 2>/dev/null || echo "NO_DIR"`,
+        { timeoutMs: 5000 }
+      );
+      if (found.stdout && !found.stdout.includes('NO_DIR')) {
+        for (const filename of found.stdout.split('\n').filter(Boolean)) {
+          await extract(`${OUTPUT_DIR}/${filename}`);
         }
+      }
+      for (const path of additionalPaths ?? []) {
+        const found = await sandbox.commands.run(`test -f ${shellQuote(path)} && echo EXISTS`, {
+          timeoutMs: 3000,
+        });
+        if (found.stdout?.includes('EXISTS')) await extract(path);
       }
     }
+    receipt.result.usage = usage;
+    receipt.extracted = true;
+    await saveReceipt();
 
     // The project workspace executor belongs to this task either way.
     unregisterWorkspaceExecutor(taskId);
@@ -426,10 +568,42 @@ export async function closeClaudeCodeSession(
         reason,
         agentId: session.agentId,
       });
-      await sandbox.pause();
-      await markPaused(codeSession.id);
-      codeSessionFacts = await closeFacts(codeSession, checkpoint, 'PAUSED');
-      log.info(`Paused sandbox: ${session.sandboxId} (code session ${codeSession.id})`);
+      const current = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSession.id } });
+      if (
+        current.state !== 'RETIRED' &&
+        current.leaseOwner === codeSession.leaseOwner &&
+        (await ownsCodeSessionSandbox(session, current))
+      ) {
+        codeSessionFacts = await closeFacts(current, checkpoint, 'PAUSED');
+        receipt.result = {
+          outputFiles,
+          ...(usage !== undefined ? { usage } : {}),
+          codeSession: codeSessionFacts,
+          ...(handoff !== undefined ? { handoff } : {}),
+        };
+        receipt.phase = 'pause_requested';
+        await saveReceipt();
+        let pauseDispatched = false;
+        try {
+          await confirmPause(current, async () => {
+            pauseDispatched = true;
+            await sandbox.pause({ requestTimeoutMs: 60_000 });
+            return true;
+          });
+        } catch (error) {
+          // Admission/validation failure before dispatch and a definite API
+          // rejection can retry. A dispatched transport failure stays uncertain.
+          if (!pauseDispatched || error instanceof InvalidArgumentError) {
+            receipt.phase = 'collecting';
+            await saveReceipt();
+          }
+          throw error;
+        }
+        pausedSession = current;
+        log.info(`Paused sandbox: ${session.sandboxId} (code session ${codeSession.id})`);
+      } else {
+        codeSessionFacts = await closeFacts(current, null, current.state);
+      }
     } else if (codeSession !== null) {
       // A newer spawn resumed this sandbox; leave it running for that spawn.
       codeSessionFacts = await closeFacts(codeSession, null, codeSession.state);
@@ -438,34 +612,26 @@ export async function closeClaudeCodeSession(
       log.info(`Killed sandbox: ${session.sandboxId}`);
     }
   } catch (error) {
-    if (codeSession !== null && ownsSandbox)
-      await markPaused(codeSession.id).catch(() => undefined);
     log.error('Failed to pause/kill sandbox', {
       error: error instanceof Error ? error.message : String(error),
     });
-    // Continue to update DB even if kill fails
+    throw error;
   }
-
-  // Update DB
-  await prisma.claudeCodeSession.update({
-    where: { id: taskId },
-    data: {
-      status: 'CLOSED',
-      closedAt: new Date(),
-    },
-  });
-
-  log.info(`Session closed: ${taskId}`);
 
   if (codeSessionFacts === undefined && codeSession !== null) {
     codeSessionFacts = await closeFacts(codeSession, null, codeSession.state);
   }
-  return {
-    outputFiles,
-    usage,
-    ...(codeSessionFacts !== undefined ? { codeSession: codeSessionFacts } : {}),
-    ...(handoff !== undefined ? { handoff } : {}),
-  };
+  const result = await finish(
+    {
+      outputFiles,
+      usage,
+      ...(codeSessionFacts !== undefined ? { codeSession: codeSessionFacts } : {}),
+      ...(handoff !== undefined ? { handoff } : {}),
+    },
+    pausedSession
+  );
+  log.info(`Session closed: ${taskId}`);
+  return result;
 }
 
 /**

@@ -15,11 +15,35 @@ fi
 # SHAs that produced the committed goldens under prompt-review/rendered/).
 # It is not a checkout pin — `git clone --depth 1` always takes current tip;
 # after rendering, re-commit REF_SHAS.txt + rendered/ together so they match.
+repair_metadata() (
+  local dir="$1" url="$2" sha tmp
+  # Old syncs stripped .git. Recreate only metadata at the saved revision:
+  # checking out files here would overwrite local edits and change goldens.
+  sha="$(cat "$dir/.ref-sha")"
+  if [[ ! "$sha" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+    echo "[sync-ref] invalid saved revision for $dir: $sha" >&2
+    exit 1
+  fi
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/rose-reference.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  git init -q "$tmp"
+  git -C "$tmp" remote add origin "$url"
+  git -C "$tmp" fetch -q --depth 1 origin "$sha"
+  git -C "$tmp" update-ref --no-deref HEAD "$sha"
+  # Match HEAD in remote tracking so checkpoint's incremental bundle remains
+  # empty: the remote already holds these objects, even if its tip has moved.
+  git -C "$tmp" update-ref refs/remotes/origin/reference "$sha"
+  git -C "$tmp" read-tree "$sha"
+  printf '/.ref-sha\n' >> "$tmp/.git/info/exclude"
+  mv "$tmp/.git" "$dir/.git"
+  echo "[sync-ref] $dir restored git metadata @ $sha (source files unchanged)"
+)
+
 clone_or_refresh() {
   local dir="$1"
   local url="$2"
   if [ "$FORCE" != "1" ] && [ -d "$dir" ] && [ -n "$(ls -A "$dir" 2>/dev/null || true)" ]; then
-    echo "[sync-ref] $dir already present — skipping (pass --force to refresh)"
+    echo "[sync-ref] $dir already present (pass --force to refresh)"
     # Legacy clones may predate .ref-sha; recover the recorded tip when possible.
     if [ ! -f "$dir/.ref-sha" ] && [ -f prompt-review/REF_SHAS.txt ]; then
       local recorded
@@ -29,17 +53,24 @@ clone_or_refresh() {
         echo "[sync-ref] $dir recovered .ref-sha from REF_SHAS.txt ($recorded)"
       fi
     fi
+    if [ ! -e "$dir/.git" ]; then
+      if [ ! -f "$dir/.ref-sha" ]; then
+        echo "[sync-ref] missing $dir/.ref-sha; cannot safely repair metadata" >&2
+        return 1
+      fi
+      repair_metadata "$dir" "$url"
+    fi
     return
   fi
   rm -rf "$dir"
   echo "[sync-ref] cloning $url → $dir"
   git clone --depth 1 "$url" "$dir"
-  # Capture tip SHA before stripping .git so golden-ref rebuilds are traceable.
+  # Keep git metadata so checkpoints can omit and rebuild unchanged source.
   local sha
   sha="$(git -C "$dir" rev-parse HEAD)"
   echo "[sync-ref] $dir @ $sha"
   printf '%s\n' "$sha" > "$dir/.ref-sha"
-  rm -rf "$dir/.git"
+  printf '/.ref-sha\n' >> "$dir/.git/info/exclude"
 }
 
 # The five clones are independent and network-bound (1.3 GB, ~2.5 min serially on

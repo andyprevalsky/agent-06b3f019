@@ -121,3 +121,68 @@ None recorded.
 A stored artifact whose size scales with the repository rather than with the session
 state will eventually cross its cap: store only what the source of truth cannot
 reproduce, never raise the cap.
+
+## Recurrence — November 8, 2026, managed reference sources
+
+Agent 0874662a-afaf-4d24-b411-af99649108ad exposed another source-content path
+past the unchanged-tree fix. Its first code session 2256e1eb-121d-463e-b3b3-6d47d883ce99
+failed its close checkpoint with "The operation was aborted due to timeout" at
+03:58:03.632 UTC. The worker's 180-second read had already expired, so it discarded
+the handoff and notified the parent before lease release; the separate case
+2026-11-08-code-close-timeout-discarded-result-before-lease-release records that
+confirmed protocol defect.
+
+Profiling createCheckpoint against the same original paused sandbox on source
+436727a0e6bde5e77d4463f246d8bf87618ca15b reproduced a checkpoint failure at the
+same owned boundary, but a different error: worktree.tar.gz was 362,779,835 bytes
+(cap 209,715,200). The probe resumed only that sandbox and paused it afterward;
+it did not alter source files. Scan was 1.057s and inspectRepo 1.742s; tar/gzip
+and downloading the archive dominated the 69-second diagnostic. This does not
+prove which suboperation timed out in the original production close.
+
+The five gitignored reference harness sources total roughly 1.4 GB on that
+snapshot. scripts/sync-reference-repos.sh deliberately deleted each .git after
+recording .ref-sha, so checkpoint's repo discovery found only workspace. The
+reference sources were therefore plain untracked data: the previous fix could
+not recognize or reconstruct them from Git and still compressed them into the
+session archive. The deepest cause remains storing reproducible source content
+as session state; its missing Git identity is the upstream recurrence boundary.
+
+The historical T3 lifecycle owner confirmed this overlap, no active competing
+fix, and that its checkpoint-size item was left open. The exact-agent active FE
+owner confirmed a separate UI/task-name scope. The user required this ownership
+reconciliation before edits, followed by completed deployment.
+
+The recurrence repair retains fresh reference clones' Git identity and
+non-destructively rehydrate only the metadata of legacy pinned reference trees.
+Existing source bytes, including local edits, must remain unchanged; the existing
+generic checkpoint/restore then omits only tracked files it can reconstruct and
+preserves edits and untracked files. No path-name archive exclusion, file-cap
+increase, timeout increase, or removal of user data is permitted. Regression
+extends the existing code-sessions checkpoint-size suite through the actual sync
+script on temporary reference fixtures. The unchanged canonical backend command (`cd back-end && bash
+scripts/run-blackbox-tests.sh code-sessions`) failed before the fix with 74 passing /
+2 failing cases (fresh 15,734,107 bytes; legacy 15,734,116 bytes, cap 1,048,576).
+Afterward all 76 pass: the five-reference worktrees are 903 and 901 bytes, the
+manifest discovers all six repositories, and restoring preserves the old pin,
+edits, deleted files, untracked and ignored files. The tests also cover missing-pin
+recovery from the saved record, invalid-pin refusal and explicit force refresh.
+
+The exact original-sandbox createCheckpoint invocation was rerun unchanged after
+metadata-only repair of its five pinned references. Source file SHA256 manifests
+before/after are byte-identical. The original tracked tip record was preserved,
+the diagnostic script was removed, and the sandbox was paused again. The same
+checkpoint now succeeds: worktree 12,041,884 bytes (previously 362,779,835), total
+artifacts 13,035,207 bytes including the CLI log. Archive time fell to 4.507s;
+downloading it took 0.695s. The cap remains 209,715,200 bytes.
+
+The normal startup repairs existing stripped reference directories in a parallel
+setup stage, preserves the exact tracked tip-record bytes even on failure, and
+reports a repair failure. It does not download references when none exist. The
+snapshot sync readiness check now requires both .ref-sha and Git metadata, so old
+baked snapshots converge through the documented CLI. The existing registered
+`bash scripts/tests/rose-startup-script.test.sh` failed on both old skip paths and
+now passes unchanged, including failure/next-start retry, no duplicate setup,
+pin/source preservation and a caller-edited tip record. Deployment and independent
+review remain required; final production verification is not implied by these
+local and original-sandbox checks.
