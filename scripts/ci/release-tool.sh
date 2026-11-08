@@ -1,6 +1,7 @@
 # Sourced by scripts/ci/deploy-gate-setup.sh.
 #
 # release_tool <name> <installed path> <installer command...>
+# (RELEASE_TOOL_ATTEMPTS, default 6, bounds the installer attempts)
 #
 # GitHub Releases has answered 504 for tens of minutes at a time (2026-11-08: flyctl, cloudflared
 # and uv assets together, while githubstatus.com reported operational), failing every gate VM in
@@ -9,9 +10,9 @@
 # otherwise the installer is retried with bounded backoff. Only a disk that never had the tool
 # waits out an outage.
 release_tool() {
-  local name=$1 target=$2 attempt
+  local name=$1 target=$2 attempts=${RELEASE_TOOL_ATTEMPTS:-6} attempt
   shift 2
-  for attempt in 1 2 3 4 5 6; do
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
     if "$@" && [ -x "$target" ]; then
       mkdir -p "$RELEASE_TOOL_CACHE" && cp "$target" "$RELEASE_TOOL_CACHE/$name.tmp" \
         && mv -f "$RELEASE_TOOL_CACHE/$name.tmp" "$RELEASE_TOOL_CACHE/$name"
@@ -26,8 +27,8 @@ release_tool() {
       esac
       return
     fi
-    [ "$attempt" -lt 6 ] && sleep $((attempt * ${RELEASE_TOOL_RETRY_SECONDS:-15}))
+    [ "$attempt" -lt "$attempts" ] && sleep $((attempt * ${RELEASE_TOOL_RETRY_SECONDS:-15}))
   done
-  echo "$name unavailable: its installer failed 6 times and the dependency disk has no copy" >&2
+  echo "$name unavailable: its installer failed $attempts times and the dependency disk has no copy" >&2
   return 1
 }

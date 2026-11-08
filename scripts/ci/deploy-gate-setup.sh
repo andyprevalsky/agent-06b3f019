@@ -94,7 +94,11 @@ install_cloudflared() {
   rm -f "$tmp"
   return "$status"
 }
-command -v cloudflared >/dev/null || release_tool cloudflared /usr/local/bin/cloudflared install_cloudflared
+# Only run.sh's public-tunnel fallback uses cloudflared, and it refuses explicitly when it is missing,
+# so an outage costs at most two attempts here instead of failing gates that never open a tunnel.
+command -v cloudflared >/dev/null \
+  || RELEASE_TOOL_ATTEMPTS=2 release_tool cloudflared /usr/local/bin/cloudflared install_cloudflared \
+  || echo "⚠️ cloudflared unavailable; run.sh refuses any public tunnel that needs it" >&2
 command -v shlock >/dev/null || sudo install -m 0755 scripts/lib/shlock /usr/local/bin/shlock
 
 step "dependency disk"

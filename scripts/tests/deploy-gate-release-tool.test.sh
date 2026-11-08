@@ -38,6 +38,12 @@ run_case cold-outage always no
 grep -q 'dependency disk has no copy' "$tmp/cold-outage/out" || fail "cold outage lacks its reason"
 pass=$((pass + 1))
 
+# An explicit attempt budget bounds the retries.
+RELEASE_TOOL_ATTEMPTS=2 run_case budget always no
+[ "$(cat "$tmp/budget/attempts")" = 2 ] || fail "attempt budget ignored: $(cat "$tmp/budget/attempts") attempts"
+grep -q 'failed 2 times' "$tmp/budget/out" || fail "budget failure lacks its count"
+pass=$((pass + 1))
+
 # Outage, disk holds a last good copy: installed after the first failure, no waiting.
 run_case warm-outage always yes
 [ "$(cat "$tmp/warm-outage/status")" = 0 ] || fail "warm outage failed: $(cat "$tmp/warm-outage/out")"
@@ -62,7 +68,10 @@ pass=$((pass + 1))
 # The gate setup routes both GitHub Releases tools through the helper.
 setup="$ROOT/scripts/ci/deploy-gate-setup.sh"
 grep -q 'release_tool flyctl "\$HOME/.fly/bin/flyctl" install_flyctl' "$setup" || fail "setup bypasses release_tool for flyctl"
-grep -q 'release_tool cloudflared /usr/local/bin/cloudflared install_cloudflared' "$setup" || fail "setup bypasses release_tool for cloudflared"
+grep -q 'RELEASE_TOOL_ATTEMPTS=2 release_tool cloudflared /usr/local/bin/cloudflared install_cloudflared' "$setup" \
+  || fail "setup bypasses release_tool for cloudflared"
+grep -q 'cloudflared is required for isolated benchmark public tunnels' "$ROOT/scripts/run.sh" \
+  || fail "run.sh no longer refuses a missing cloudflared, so the setup may not treat it as optional"
 pass=$((pass + 1))
 
 echo "RESULTS: $pass passed, 0 failed"
