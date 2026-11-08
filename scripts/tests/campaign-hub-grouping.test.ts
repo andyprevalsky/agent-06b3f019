@@ -7,6 +7,7 @@ import {
   symlinkSync,
   chmodSync,
   createWriteStream,
+  renameSync,
 } from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
@@ -2032,3 +2033,174 @@ print(json.dumps([receipt(jobs(29, noise), 600, "enabled"), (receipt(jobs(30, no
     assert.deepEqual(JSON.parse(output), [null, 30, null, null]);
   });
 });
+
+test("the plain fleet infra stop counts each scheduled bench once and keeps its first breach", () => {
+  const fleetDir = path.join(workRoot, "fleet-infra-count");
+  const probe = spawn(
+    path.join(project, "agents/venv/bin/python"),
+    [
+      "-c",
+      `import json, os, runpy, sys
+from pathlib import Path
+campaign = runpy.run_path(sys.argv[1])
+root = Path(sys.argv[2])
+def finish(fleet, bench, code, status=None, name=None):
+    out = fleet / bench
+    out.mkdir(parents=True, exist_ok=True)
+    if status is not None:
+        (out / "cloudbench-run.json").write_text(json.dumps({"tasks": [
+            {"name": name or bench, "status": status, "passed": status == "PASSED"}]}))
+    (out / "benchmark-child.finished").write_text(code + "\\n")
+fleet = root / "fleet"
+benches = ["b%03d" % i for i in range(600)]
+for i in range(15):
+    finish(fleet, benches[i], "1", "INFRA_ERROR")
+for i in range(15, 29):
+    finish(fleet, benches[i], "1")  # finished without a run record: the aggregate's INFRA_ERROR row
+finish(fleet, benches[100], "0", "PASSED")
+finish(fleet, benches[101], "1", "FAILED")       # genuine failure
+finish(fleet, benches[102], "143")               # cancelled without infra evidence
+finish(fleet, benches[103], "1", "PASSED", name="other-task")  # unknown: no row for this bench
+(fleet / benches[104] / "host-replaced-m1").mkdir(parents=True)
+(fleet / benches[104] / "host-replaced-m1" / "benchmark-child.finished").write_text("1\\n")
+finish(fleet, benches[104], "0", "PASSED")       # a replaced physical attempt never adds a job
+(fleet / benches[105]).mkdir()                   # still running
+receipt = fleet / "infra-stop.json"
+stop = campaign["fleet_infra_stop"]
+results = [stop(fleet, benches + benches[:5], receipt), receipt.exists()]
+finish(fleet, benches[29], "1", "ERROR")
+first = stop(fleet, benches, receipt)
+attempts = {job["job_id"]: job["attempts"] for job in first["jobs"]}
+finish(fleet, benches[30], "1", "INFRA_ERROR")
+results += [first["infra_jobs"], first["scheduled_total"], first["infra_job_ids"] == benches[:30],
+            first["schema"], [a["status"] for a in attempts[benches[104]]], attempts[benches[102]][0]["status"],
+            stop(fleet, benches, receipt) == first]
+os.environ["CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP"] = "disabled"
+results.append(stop(fleet, benches, fleet / "disabled.json"))
+print(json.dumps(results))`,
+      path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+      fleetDir,
+    ],
+    { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "" } },
+  );
+  let output = "";
+  probe.stdout!.on("data", (chunk) => (output += chunk));
+  return once(probe, "close").then(() => {
+    assert.equal(probe.exitCode, 0);
+    assert.deepEqual(JSON.parse(output), [
+      null, false, 30, 600, true, "fleet-infra-stop-v1", ["replaced", "finished"], "cancelled", true, null,
+    ]);
+  });
+});
+
+test(
+  "a plain fleet continues at 1/40 infra jobs and stops itself through its TERM trap at 2/40",
+  { timeout: 120_000 },
+  async () => {
+    const work = path.join(workRoot, "fleet-infra-stop");
+    mkdirSync(work, { recursive: true, mode: 0o700 });
+    const fleetDir = path.join(work, "fleet");
+    const driver = path.join(work, "driver.sh");
+    // The real run-bench-fleet wait loop and stop check, extracted so they cannot
+    // drift, around fake children that speak the fleet's finished-marker protocol.
+    writeFileSync(
+      driver,
+      `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; WORK="$2"; ROOT_DIR="$3"; FLEET_DIR="$WORK/fleet"
+for name in fleet_job_running fleet_job_may_be_running fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
+    body="$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+    [ -n "$body" ] || { echo "missing $name" >&2; exit 90; }
+    eval "$body"
+done
+FLEET_INFRA_STOP_SENT=0
+INFRA_PROBE=0
+unset RUN_BENCH_CAMPAIGN_CHILD CLOUDBENCH_SCRIPT_SNAPSHOT
+BENCHES=(); CHILD_PIDS=(); CHILD_OUT=()
+for i in $(seq -w 0 39); do BENCHES+=("b$i"); done
+cleanup() {
+    local status=$? pid
+    trap - EXIT; trap '' TERM
+    for pid in "\${CHILD_PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+    for pid in "\${CHILD_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'echo "⚰️  controller received TERM ($(date -u +%H:%M:%S))"; exit 143' TERM
+for bench in "\${BENCHES[@]}"; do
+    out="$FLEET_DIR/$bench"; mkdir -p "$out"
+    (
+        trap 'printf "143\\n" > "$out/benchmark-child.finished"; : > "$WORK/terminated-$bench"; exit 143' TERM
+        while [ ! -e "$out/benchmark-child.finished" ]; do sleep 0.05; done
+    ) &
+    CHILD_PIDS+=("$!"); CHILD_OUT+=("$out")
+done
+: > "$WORK/driver.ready"
+fleet_wait_children_for_infra_stop
+for pid in "\${CHILD_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+echo "COMPLETED"
+`,
+    );
+    const run = spawn("bash", [driver, path.join(sourceRoot, "scripts/run-bench-fleet"), work, sourceRoot], {
+      env: { ...process.env, FLEET_INFRA_STOP_POLL_SECONDS: "0.2", CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    run.stdout!.on("data", (chunk) => (stdout += chunk.toString()));
+    run.stderr!.on("data", (chunk) => (stderr += chunk.toString()));
+    const closed = once(run, "close");
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    for (let i = 0; i < 300 && !existsSync(path.join(work, "driver.ready")); i++) await sleep(50);
+    assert.ok(existsSync(path.join(work, "driver.ready")), stderr);
+    const finish = (bench: string, code: string, status?: string) => {
+      const out = path.join(fleetDir, bench);
+      if (status) {
+        writeFileSync(
+          path.join(out, "cloudbench-run.json"),
+          JSON.stringify({ tasks: [{ name: bench, status, passed: status === "PASSED" }] }),
+        );
+      }
+      writeFileSync(path.join(out, "benchmark-child.finished.tmp"), `${code}\n`);
+      // Publish atomically, as run_fleet_child_supervised does.
+      renameSync(path.join(out, "benchmark-child.finished.tmp"), path.join(out, "benchmark-child.finished"));
+    };
+    finish("b00", "1", "INFRA_ERROR");
+    finish("b01", "0", "PASSED");
+    finish("b02", "1", "FAILED");
+    finish("b03", "143");
+    mkdirSync(path.join(fleetDir, "b04", "host-replaced-m1"));
+    writeFileSync(path.join(fleetDir, "b04", "host-replaced-m1", "benchmark-child.finished"), "1\n");
+    await sleep(2_000);
+    assert.equal(run.exitCode, null, `1/40 infra must not stop the fleet:\n${stderr}`);
+    assert.ok(!existsSync(path.join(fleetDir, "infra-stop.json")), "no breach receipt at 1/40");
+    assert.ok(!existsSync(path.join(work, "terminated-b05")), "no child cancelled at 1/40");
+    finish("b05", "1");
+    const timeout = setTimeout(() => run.kill("SIGKILL"), 60_000);
+    await closed;
+    clearTimeout(timeout);
+    assert.equal(run.exitCode, 143, stdout + stderr);
+    assert.doesNotMatch(stdout, /COMPLETED/);
+    assert.match(stderr, /INFRA STOP: 2\/40 scheduled jobs confirmed INFRA \(b00, b05\)/);
+    assert.match(stdout + stderr, /controller received TERM/);
+    const receipt = JSON.parse(readFileSync(path.join(fleetDir, "infra-stop.json"), "utf8"));
+    assert.equal(receipt.schema, "fleet-infra-stop-v1");
+    assert.equal(receipt.infra_jobs, 2);
+    assert.equal(receipt.scheduled_total, 40);
+    assert.deepEqual(receipt.infra_job_ids, ["b00", "b05"]);
+    const b04 = receipt.jobs.find((job: { job_id: string }) => job.job_id === "b04");
+    assert.deepEqual(
+      b04.attempts.map((attempt: { status: string }) => attempt.status),
+      ["replaced", "running"],
+    );
+    for (let i = 0; i < 40; i++) {
+      const bench = `b${String(i).padStart(2, "0")}`;
+      const finished = ["b00", "b01", "b02", "b03", "b05"].includes(bench);
+      assert.equal(
+        existsSync(path.join(work, `terminated-${bench}`)),
+        !finished,
+        `${bench} must ${finished ? "keep its own outcome" : "be cancelled by the controller's cleanup"}`,
+      );
+    }
+  },
+);

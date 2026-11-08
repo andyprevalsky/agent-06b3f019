@@ -796,6 +796,8 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-prestack-source-reviews.json" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
+       "$ROOT_DIR/scripts/run-bench-campaign.py" \
+       "$ROOT_DIR/scripts/cloudbench-shard-coordinator.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-machines.py" \
        "$ROOT_DIR/scripts/cloudbench-clone-volume.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-mutation.py" \
@@ -19549,6 +19551,55 @@ echo "   this run: $RUN_URL"
 echo "   per-bench viewers: $(for j in "${!CHILD_PORT[@]}"; do printf '%s→:%s ' "${CHILD_BENCH[$j]}" "${CHILD_PORT[$j]}"; done)"
 echo ""
 
+# Fixed-total infrastructure stop for every plain fleet launch. Campaigns and the
+# sharded operator already stop at `20 * infra_jobs >= scheduled_total`; this
+# applies the same predicate and job counting (run-bench-campaign.py
+# fleet_infra_stop -> infra_stop_receipt -> cloudbench-shard-coordinator.py
+# infra_stop_reached) to the requested benches. A campaign child leaves the
+# decision to its campaign, which owns the whole schedule; a task-free infra
+# probe already fails closed on any exclusion. The first breach receipt is kept
+# and the controller stops through its own TERM trap and EXIT cleanup.
+FLEET_INFRA_STOP_SENT=0
+fleet_infra_stop_check() {
+    local breach helper receipt
+    [ -z "${RUN_BENCH_CAMPAIGN_CHILD:-}" ] && [ "${INFRA_PROBE:-0}" != 1 ] \
+        && [ -n "${FLEET_DIR:-}" ] && [ "$FLEET_INFRA_STOP_SENT" = 0 ] || return 0
+    helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/run-bench-campaign.py"
+    receipt="$FLEET_DIR/infra-stop.json"
+    if ! breach="$(python3 -c 'import runpy, sys
+sys.exit(runpy.run_path(sys.argv[1])["fleet_infra_stop_main"](sys.argv[2:]))' \
+        "$helper" "$FLEET_DIR" "$receipt" "${BENCHES[@]}")"; then
+        echo "⚠️  infra stop evaluation failed; unknown verdicts never count, continuing" >&2
+        return 0
+    fi
+    [ -n "$breach" ] || return 0
+    FLEET_INFRA_STOP_SENT=1
+    echo "🛑 INFRA STOP: $breach >= 5% of the original schedule; stopping this exact fleet through its TERM cleanup (receipt: $receipt)" >&2
+    kill -TERM "${BASHPID:-$$}"
+}
+
+# Watch the children until each has finished, re-evaluating the infra stop
+# whenever another child finishes. Exit codes are still reaped by `wait` after.
+fleet_wait_children_for_infra_stop() {
+    local j live finished seen=-1
+    while :; do
+        live=0; finished=0
+        for j in "${!CHILD_PIDS[@]}"; do
+            if [ -e "${CHILD_OUT[$j]}/benchmark-child.finished" ]; then
+                finished=$((finished + 1))
+            elif fleet_job_may_be_running "${CHILD_PIDS[$j]}"; then
+                live=$((live + 1))
+            fi
+        done
+        [ "$live" -gt 0 ] || return 0
+        if [ "$finished" != "$seen" ]; then
+            seen="$finished"
+            fleet_infra_stop_check
+        fi
+        sleep "${FLEET_INFRA_STOP_POLL_SECONDS:-2}"
+    done
+}
+
 # A fleet run means simultaneous benchmark execution, not merely concurrent
 # provisioning. Each on-box driver announces after its isolated stack is
 # healthy; only then do we touch every machine's release file in parallel.
@@ -19664,6 +19715,8 @@ release_start_barrier() {
         python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-barrier.py" \
             --deadline "$deadline" --controller-pid "$$" || return 1
     fi
+    # Stacks that failed before the barrier may already disqualify the run.
+    fleet_infra_stop_check
     echo "🚦 releasing synchronized start barrier on the ready machines..."
     local release_pids=() release_failed=0 release_port_file
     for j in "${!CHILD_MACHINE[@]}"; do
@@ -19697,6 +19750,7 @@ if ! release_start_barrier; then
 fi
 
 # ── Wait for all children, then aggregate ────────────────────────────────────
+fleet_wait_children_for_infra_stop
 for j in "${!CHILD_PIDS[@]}"; do
     p="${CHILD_PIDS[$j]}"
     if wait "$p" 2>/dev/null; then
