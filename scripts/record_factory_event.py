@@ -236,7 +236,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def deploy_test_rows(event_log: Path) -> dict | None:
-    """Per-test rows (FAIL, FLAKY, QUARANTINED_*) of the gate round this stage-finish closes.
+    """Per-test rows (FAIL, FLAKY, QUARANTINED_*) and per-gate verdicts of the round this stage-finish closes.
 
     Read from the deploy cycle's attempt progress files since the matching stage-start, failed
     tests first within the bounded detail. Telemetry never blocks the stage: errors return None.
@@ -254,9 +254,15 @@ def deploy_test_rows(event_log: Path) -> dict | None:
                     and row.get("value") == "runtime-blackbox"):
                 since = float(row.get("recorded_epoch") or since)
         root = Path(git_value("rev-parse", "--show-toplevel") or Path.cwd())
-        rows = quarantine.attempt_rows(quarantine.state_dir(root) / "attempts", since)
-        tests = quarantine.test_lines(rows)
-        return tests if tests["lines"] or tests["omitted"] else None
+        attempts = quarantine.state_dir(root) / "attempts"
+        tests = quarantine.test_lines(quarantine.attempt_rows(attempts, since))
+        gates = quarantine.gate_rows(attempts, since)
+        detail = {}
+        if tests["lines"] or tests["omitted"]:
+            detail["tests"] = tests
+        if gates:
+            detail["gates"] = gates
+        return detail or None
     except Exception as error:  # Telemetry must never change a gate result.
         print(f"warning: could not collect deploy test rows: {type(error).__name__}", file=sys.stderr)
         return None
@@ -273,9 +279,9 @@ def main() -> int:
     try:
         detail = parse_event_detail(args.detail)
         if (args.workflow, args.event, args.value) == ("deploy", "stage-finish", "runtime-blackbox"):
-            tests = deploy_test_rows(event_log)
-            if tests is not None:
-                detail = {"schema_version": DETAIL_SCHEMA_VERSION, **detail, "tests": tests}
+            rows = deploy_test_rows(event_log)
+            if rows is not None:
+                detail = {"schema_version": DETAIL_SCHEMA_VERSION, **detail, **rows}
         payload = factory_event_payload(
             args.workflow,
             args.event,

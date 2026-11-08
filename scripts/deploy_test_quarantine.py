@@ -212,6 +212,39 @@ def attempt_rows(attempts: Path, since: float = 0.0) -> list[tuple[str, dict]]:
     return out
 
 
+def gate_outcome(receipt: dict) -> str:
+    """One verdict per gate attempt. A gate killed by fail-fast (cancelled) or its deadline is not a test failure."""
+    if receipt.get('cancelled'):
+        return 'CANCELLED'
+    if receipt.get('timed_out'):
+        return 'TIMEOUT'
+    if receipt.get('executed') is False:
+        return 'NOT_RUN'
+    if receipt.get('status') == 'PASS':
+        return 'PASS'
+    return 'FAIL' if receipt.get('complete') else 'UNVERIFIED'
+
+
+def gate_rows(attempts: Path, since: float = 0.0) -> list[dict]:
+    """Per-gate verdicts of the round, from each attempt's receipt.json (the cycle's own result, not a
+    workflow status), so local and Blacksmith gates land in the ledger the same way."""
+    out = []
+    for path in sorted(attempts.glob('*/*/*/receipt.json')):
+        try:
+            receipt = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        started = receipt.get('started_at') or 0
+        if not isinstance(receipt, dict) or started < since:
+            continue
+        finished = receipt.get('finished_at') or started
+        out.append({'gate': receipt.get('gate') or path.parent.name, 'phase': path.parent.parent.name,
+                    'round': path.parent.parent.parent.name, 'outcome': gate_outcome(receipt),
+                    'native_exit': receipt.get('native_exit'),
+                    'seconds': round(max(0.0, float(finished) - float(started)), 1)})
+    return out
+
+
 def state_dir(root: Path) -> Path:
     value = Path(os.environ.get(STATE_DIR_ENV) or DEFAULT_STATE_DIR)
     return value if value.is_absolute() else root / value

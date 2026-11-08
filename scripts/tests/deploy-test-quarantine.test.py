@@ -206,6 +206,38 @@ class LedgerRows(unittest.TestCase):
             self.assertEqual(['FAIL api::test_y at=700', 'QUARANTINED_FAIL api::test_x at=600'],
                              event['detail']['tests']['lines'])
 
+    def test_stage_finish_event_records_gate_verdicts_with_cancellations_separate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            log = temp / 'events.jsonl'
+            log.write_text(json.dumps({'workflow': 'deploy', 'event': 'stage-start', 'value': 'runtime-blackbox',
+                                       'recorded_epoch': 500.0}) + '\n')
+            receipts = {
+                'old': {'status': 'FAIL', 'complete': True, 'started_at': 10, 'finished_at': 20},
+                'api': {'status': 'FAIL', 'complete': True, 'native_exit': 1, 'started_at': 600, 'finished_at': 660},
+                'eslint': {'status': 'FAIL', 'complete': False, 'cancelled': True, 'native_exit': -15,
+                           'started_at': 600, 'finished_at': 630},
+                'semantic': {'status': 'FAIL', 'complete': False, 'timed_out': True, 'started_at': 601,
+                             'finished_at': 2401},
+                'structural': {'status': 'FAIL', 'complete': False, 'started_at': 602, 'finished_at': 700},
+                'ui': {'status': 'PASS', 'complete': True, 'native_exit': 0, 'started_at': 603, 'finished_at': 703.25},
+            }
+            for name, receipt in receipts.items():
+                folder = temp / 'state' / 'attempts' / '2' / 'initial' / name
+                folder.mkdir(parents=True)
+                (folder / 'receipt.json').write_text(json.dumps({'gate': name, **receipt}))
+            env = {**os.environ, 'FACTORY_EVENT_LOG': str(log), q.STATE_DIR_ENV: str(temp / 'state'),
+                   'DEPLOY_RUN_ROOT': str(temp / 'runs')}
+            subprocess.run([sys.executable, str(ROOT / 'scripts/record_factory_event.py'), 'deploy', 'stage-finish',
+                            'runtime-blackbox'], cwd=temp, env=env, check=True, capture_output=True, timeout=60)
+            gates = {g['gate']: g for g in json.loads(log.read_text().splitlines()[-1])['detail']['gates']}
+            self.assertNotIn('old', gates)  # an earlier round's receipt is not this round's verdict
+            self.assertEqual({'api': 'FAIL', 'eslint': 'CANCELLED', 'semantic': 'TIMEOUT',
+                              'structural': 'UNVERIFIED', 'ui': 'PASS'},
+                             {name: g['outcome'] for name, g in gates.items()})
+            self.assertEqual({'gate': 'ui', 'phase': 'initial', 'round': '2', 'outcome': 'PASS', 'native_exit': 0,
+                              'seconds': 100.2}, gates['ui'])
+
 
 class ReleaseReport(unittest.TestCase):
     def setUp(self):
