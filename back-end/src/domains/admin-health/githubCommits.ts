@@ -1,6 +1,11 @@
 import { mapWithConcurrency } from '../../providers/concurrency';
+import {
+  ensureGithubAppToken,
+  githubTokenCandidates,
+  recordGithubResponse,
+} from '../../providers/githubTokenPool';
 import { createLogger } from '../../providers/logger';
-import { GITHUB_REPO, githubApiTokenCandidates } from './config';
+import { GITHUB_REPO } from './config';
 
 const log = createLogger('AdminHealth');
 
@@ -20,7 +25,21 @@ const GITHUB_COMMITS_PER_PAGE = 100;
 // ~100 pages of commits took ~35s one at a time; GitHub allows 100 concurrent requests.
 const GITHUB_PAGE_CONCURRENCY = 20;
 const GITHUB_FETCH_BUDGET_MS = 60_000;
-const GITHUB_AUTH_FAILURE = /^GitHub (401|403)$/;
+/**
+ * GitHub API tokens for admin-health velocity (commits graph), best first.
+ *
+ * Read at call time (not module load) from the shared token pool: members with
+ * the most remaining quota first, and a present-but-stale `GITHUB_TOKEN` can
+ * still fall back to `GITHUB_DISPATCH_TOKEN` (Render has repeatedly shipped a
+ * dead fine-grained PAT while the dispatch oauth token still has `repo` scope).
+ * It lives here, not in config.ts: the config layer may not import providers.
+ */
+export function githubApiTokenCandidates(): string[] {
+  return githubTokenCandidates('pool');
+}
+
+// 404 counts: GitHub answers 404 when a credential cannot see the private repo.
+const GITHUB_AUTH_FAILURE = /^GitHub (401|403|404|429)$/;
 
 function lastPageFromLink(link: string | null): number | null {
   for (const part of (link ?? '').split(',')) {
@@ -54,6 +73,7 @@ async function fetchGithubCommitPage(
       'X-GitHub-Api-Version': '2022-11-28',
     },
   });
+  recordGithubResponse(token, response.status, response.headers);
   if (!response.ok) throw new Error(`GitHub ${response.status}`);
   const commits = (await response.json()) as Array<{
     commit: { committer?: { date?: string | null }; author?: { date?: string | null } };
@@ -124,6 +144,7 @@ async function fetchGithubItemsWithToken(
 export async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
   const [owner, repoName] = GITHUB_REPO.split('/');
   if (!owner || !repoName) throw new Error(`Invalid ADMIN_HEALTH_GITHUB_REPO: ${GITHUB_REPO}`);
+  await ensureGithubAppToken();
   const candidates = githubApiTokenCandidates();
   if (candidates.length === 0) {
     throw new Error('GITHUB_TOKEN / GITHUB_DISPATCH_TOKEN is not configured.');

@@ -32,6 +32,12 @@ globalThis.fetch = (async (
   if (authorization === 'Bearer stale_github_pat_should_401') {
     return new Response(JSON.stringify({ message: 'Bad credentials' }), { status: 401 });
   }
+  if (authorization === 'Bearer no_access_pat') {
+    return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+  }
+  if (authorization === 'Bearer rate_limited_pat') {
+    return new Response(JSON.stringify({ message: 'API rate limit exceeded' }), { status: 429 });
+  }
   if (authorization === 'Bearer working_dispatch_token') {
     return Response.json([
       {
@@ -52,7 +58,7 @@ globalThis.fetch = (async (
 }) as typeof fetch;
 
 async function main(): Promise<void> {
-  const { githubApiTokenCandidates } = await import('../../domains/admin-health/config');
+  const { githubApiTokenCandidates } = await import('../../domains/admin-health/githubCommits');
   assert.deepStrictEqual(githubApiTokenCandidates(), [
     'stale_github_pat_should_401',
     'working_dispatch_token',
@@ -79,6 +85,32 @@ async function main(): Promise<void> {
     'Bearer stale_github_pat_should_401',
     'Bearer working_dispatch_token',
   ]);
+
+  // A rate-limited token (HTTP 429) falls through to the next pool member like a 401/403.
+  process.env.GITHUB_TOKEN = 'rate_limited_pat';
+  process.env.GITHUB_DISPATCH_TOKEN = 'working_dispatch_token';
+  authHeaders.length = 0;
+  commitFetches = 0;
+  const rateLimited = await fetchVelocityByPeriod(periods);
+  assert.strictEqual(
+    rateLimited.current.dev.githubCommitsLanded.status,
+    'ready',
+    'a 429 on one pool member must fall back to the next member'
+  );
+  assert.deepStrictEqual(authHeaders, ['Bearer rate_limited_pat', 'Bearer working_dispatch_token']);
+
+  // A member that cannot see the private repo gets GitHub's 404; the next member is tried.
+  process.env.GITHUB_TOKEN = 'no_access_pat';
+  process.env.GITHUB_DISPATCH_TOKEN = 'working_dispatch_token';
+  authHeaders.length = 0;
+  commitFetches = 0;
+  const noAccess = await fetchVelocityByPeriod(periods);
+  assert.strictEqual(
+    noAccess.current.dev.githubCommitsLanded.status,
+    'ready',
+    'a 404 on one pool member must fall back to the next member'
+  );
+  assert.deepStrictEqual(authHeaders, ['Bearer no_access_pat', 'Bearer working_dispatch_token']);
 
   // Stale-only still errors (no silent empty graph).
   process.env.GITHUB_TOKEN = 'stale_github_pat_should_401';
