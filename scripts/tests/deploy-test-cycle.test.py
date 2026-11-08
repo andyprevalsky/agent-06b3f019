@@ -4525,7 +4525,8 @@ class RelayStartupEvidence(unittest.TestCase):
              patch.object(self.native.subprocess,'check_output',side_effect=lambda args,**kwargs:
                  original_check_output(args,**kwargs) if args[0]=='ps' else
                  b'original-broker' if args[-1].endswith('cloudbench-shared-relay.py') else
-                 (ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes() if args[-1].endswith('cloudbench-campaign-inventory.sh') else b'original-campaign'):
+                 (ROOT/'scripts/cloudbench-campaign-inventory.sh').read_bytes() if args[-1].endswith('cloudbench-campaign-inventory.sh') else
+                 (ROOT/'scripts'/args[-1].split(':scripts/',1)[1]).read_bytes() if args[-1].endswith((':scripts/lib/cloudbench-env.sh',':scripts/run-bench-fleet')) else b'original-campaign'):
             state={'plan':{'gates':[{'name':'smoke','native_cloud':True}]},
                    'attempts':[{'results':[receipt]}],
                    'failures':[{'id':'original-failure','gate':'smoke','check':'smoke/browser-smoke',
@@ -4934,6 +4935,98 @@ class RelayStartupEvidence(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
 
 
+
+    def preflight_refusal_fixture(self,layout='campaign-preflight-refusal-v1'):
+        """PR #1767: every dispatched job refused at run-bench preflight; runs/ empty; no monitor line."""
+        import hashlib
+        from datetime import datetime,timezone
+        receipt,owner,proof=self.fixture()
+        (self.relay/'startup-cleanup.json').unlink()
+        capture=json.loads((self.relay/'startup-agent.json').read_text())
+        ready=dict(agent=capture['agent'],authority_sha256=capture['authority_sha256'],
+                   pid=capture['broker']['pid'],birth=capture['broker']['birth'],
+                   socket='/tmp/cb-relay-abcdefgh/control.sock')
+        self.save(self.relay/'ready.json',ready)
+        self.save(self.relay/'serve.once.json',{k:ready[k]for k in ('authority_sha256','pid','birth')})
+        (self.relay/'broker.private.log').write_text('{"stopped": true}\n')
+        controller=subprocess.run([sys.executable,'-c','import os;print(os.getpid())'],capture_output=True,text=True,check=True)
+        head=receipt['source']['head'];summary=json.loads((self.campaign/'summary.json').read_text())
+        summary['jobs'][0].update(status='failed',controller_pid=int(controller.stdout),controller_exit_code=1,
+            started_at=summary['started_at'],finished_at=summary['finished_at'],wall_clock_seconds=4.179,
+            controller_command=['bash',str(self.base/'scripts/run-bench'),'browser-smoke','--ref',head,'--foreground'])
+        summary['peak_concurrency']=1;summary.pop('shared_inventory_failed');self.save(self.campaign/'summary.json',summary)
+        (self.campaign/'r001-j0001.log').write_text('\U0001f3af resolved 1 benchmark task(s): browser-smoke\n'
+            'BENCHMARK PARENT AGENT INSTRUCTIONS \u00b7 FORMAT v8\n- `scripts/run-bench scorecard <run-dir> --html`\n'
+            '- The assigned operational owner polls the exact CLI-printed monitor every\n'
+            "Campaign summary.json and each child's printed monitor handle are distinct.\n"
+            '  ref: the run source line is printed only after warm readiness\n'
+            'controller GITHUB_TOKEN exported (len=40)\ncontroller GITHUB_TOKEN exported (len=40)\n'
+            f'FATAL: requested benchmark commit {head} is not fetchable from origin and local patch shipping is disabled\n')
+        adapter_path=Path(receipt['worker_result']);adapter=json.loads(adapter_path.read_text())
+        adapter.update(complete=False,cleanup_complete=False,reason=None,fleet_directory=str(self.campaign),
+                       evidence={'browser-smoke':{'unverified':'campaign job has no native fleet handle'}});self.save(adapter_path,adapter)
+        reference=receipt['native_cleanup_reference']
+        reference['result_sha256']=hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+        proof.update(worker_result_sha256=reference['result_sha256'],layout=layout)
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
+        self.reseal();return receipt,owner,proof
+
+    def test_preflight_refusal_campaign_retires_launch_owner_without_credit(self):
+        receipt,owner,proof=self.preflight_refusal_fixture()
+        before=json.dumps(receipt,sort_keys=True);originals={p:Path(p).read_bytes()for p in proof['files']}
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual((result['participants'],result['retained_services'],result['native_audit_seals']),([],[],{}))
+        self.assertEqual(result['preflight_refusals'],{'r001-j0001':{'task':'browser-smoke','controller_exit_code':1}})
+        self.assertEqual(json.dumps(receipt,sort_keys=True),before)
+        self.assertEqual(receipt['cases'],{'browser-smoke':'UNVERIFIED'})
+        self.assertEqual(originals,{p:Path(p).read_bytes()for p in proof['files']})
+
+    def test_pr1767_preflight_shape_stays_refused_by_the_preallocation_layout(self):
+        receipt,owner,proof=self.preflight_refusal_fixture('campaign-preallocation-v1')
+        with self.assertRaisesRegex(ValueError,'campaign parent identity'):
+            self.validate_fixture(receipt,owner,proof)
+
+    def test_preflight_refusal_refuses_dispatch_foreign_source_live_or_changed_evidence(self):
+        receipt,owner,proof=self.preflight_refusal_fixture()
+        head=receipt['source']['head'];log=self.campaign/'r001-j0001.log'
+        original={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        directories={p for p in self.base.rglob('*')if p.is_dir()}
+        fatal=f'FATAL: requested benchmark commit {head} is not fetchable from origin and local patch shipping is disabled\n'
+        def job(**change):
+            summary=json.loads((self.campaign/'summary.json').read_text());summary['jobs'][0].update(change)
+            self.save(self.campaign/'summary.json',summary)
+        def summary(**change):
+            value=json.loads((self.campaign/'summary.json').read_text());value.update(change)
+            self.save(self.campaign/'summary.json',value)
+        sidecar=self.runs.parent/'cli.log.process.json'
+        mutations=[('monitor',lambda:log.write_text(f'{self.base}/scripts/run-bench monitor {self.runs}/x-1\n'+fatal),'dispatched a fleet'),
+                   ('ref-banner',lambda:log.write_text('ref : '+head+'\n'+fatal),'dispatched a fleet'),
+                   ('foreign-source',lambda:log.write_text(fatal.replace(head,'f'*40)),'bound source'),
+                   ('not-last',lambda:log.write_text(fatal+'later output\n'),'bound source'),
+                   ('second-fatal',lambda:log.write_text('FATAL: other\n'+fatal),'bound source'),
+                   ('fleet-participant',lambda:(self.runs/'20261108-000340-1').mkdir(),'fleet participant present'),
+                   ('hub',lambda:(self.runs/'_hub').mkdir(),'fleet participant present'),
+                   ('controller-success',lambda:job(controller_exit_code=0),'preflight job'),
+                   ('foreign-command',lambda:job(controller_command=['bash',str(self.base/'scripts/run-bench'),'browser-smoke','--ref','f'*40,'--foreground']),'preflight job'),
+                   ('live-controller',lambda:job(controller_pid=os.getpid()),'controller PID present'),
+                   ('passed-campaign',lambda:summary(status='passed'),'preflight inventory'),
+                   ('pending-hub',lambda:summary(shared_transport_cleanup_pending=True),'additional ownership'),
+                   ('live-relay',lambda:self.save(self.relay/'broker-owner.json',dict(pid=os.getpid(),birth=self.live_stamp(os.getpid()),parent_pid=1,parent_start='foreign')),'relay custody'),
+                   ('supervised-term',lambda:self.save(sidecar,{**json.loads(sidecar.read_text()),'term_sent':[os.getpid()]}),'unexpected supervised termination')]
+        for name,change,reason in mutations:
+            with self.subTest(name=name):
+                for path in sorted(self.base.rglob('*'),reverse=True):
+                    if path.is_dir() and path not in directories:path.rmdir()
+                for path,raw in original.items():path.write_bytes(raw)
+                change();self.reseal()
+                with self.assertRaisesRegex(ValueError,reason):self.validate_fixture(receipt,owner,proof)
+        for path in sorted(self.base.rglob('*'),reverse=True):
+            if path.is_dir() and path not in directories:path.rmdir()
+        for path,raw in original.items():path.write_bytes(raw)
+        self.reseal();log.write_text(fatal)  # same text, different bytes (no prefix): unbound change
+        with self.assertRaisesRegex(ValueError,'file hash mismatch'):self.validate_fixture(receipt,owner,proof)
 
 
 class RecoveredNativeReceiptGuard(unittest.TestCase):

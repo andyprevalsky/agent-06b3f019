@@ -604,6 +604,90 @@ def startup_campaign(root, runs, campaign, request, receipt, adapter, confirmed,
     return identities
 
 
+PREFLIGHT_REFUSAL = 'FATAL: requested benchmark commit {} is not fetchable from origin and local patch shipping is disabled'
+PREFLIGHT_PRODUCER = ('echo "FATAL: requested benchmark commit $resolved is not fetchable from origin '
+                      'and local patch shipping is disabled" >&2')
+PREFLIGHT_DISPATCH = ('if ! BENCH_REF="$(cloudbench_fetchable_ref "$ROOT_DIR" "$BENCH_REF" \\\n'
+                      '        "$([ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ] && printf 0 || printf 1)")"; then\n'
+                      '        exit 1\n')
+
+
+def preflight_refusal_campaign(root, runs, campaign, request, receipt, adapter, confirmed, document, bound, proof):
+    """Every dispatched job refused at run-bench preflight before any fleet existed (PR #1767).
+
+    Positive evidence only: each job's bound log ends in the exact producer refusal for the bound
+    source, with no monitor handle; no fleet participant exists; relay, publisher and supervisor
+    closure are replayed exactly as for a preallocation campaign. Launch eligibility only."""
+    from datetime import datetime
+    head = receipt['source']['head']
+    summary = document(campaign / 'summary.json')
+    checks, jobs = request['checks'], summary['jobs']
+    need(checks and len(set(checks)) == len(checks) and not request.get('skips')
+         and summary['campaign_id'] == campaign.name and summary['runs'] == 1
+         and summary['retry_infra'] == 0 and summary['status'] == 'failed'
+         and summary['task_count'] == summary['total_jobs'] == len(jobs) == len(checks)
+         and {j['task'] for j in jobs} == set(checks) and len({j['job_id'] for j in jobs}) == len(jobs),
+         'preflight inventory')
+    need(not any(summary.get(k) for k in ('cleanup_ticket_failure', 'shared_inventory_failed',
+                                          'shared_transport_cleanup_pending', 'workspace_binding'))
+         and not any(c.get('cleanup_budget_retirement_pending') for c in summary.get('startup_cohorts', [])),
+         'preflight additional ownership')
+    unverified = dict.fromkeys(checks, 'UNVERIFIED')
+    need(receipt.get('cases') == adapter.get('cases') == unverified and adapter.get('complete') is False
+         and adapter.get('cleanup_complete') is False and adapter.get('reason') is None
+         and adapter.get('fleet_directory') == str(campaign) and type(adapter.get('native_exit')) is int
+         and 1 <= adapter['native_exit'] <= 255
+         and adapter.get('evidence') == {n: {'unverified': 'campaign job has no native fleet handle'} for n in checks},
+         'preflight adapter outcome')
+    start, finish = (datetime.fromisoformat(summary[k]).timestamp() for k in ('started_at', 'finished_at'))
+    need(finite(start) and finite(finish) and adapter['started_at'] <= start <= finish
+         <= receipt['finished_at'] <= confirmed, 'preflight clocks')
+    need(runs.is_dir() and not runs.is_symlink() and runs.resolve() == runs and not any(runs.iterdir()),
+         'preflight fleet participant present')
+    # The bound source's own producer emits this exact refusal and exits before lock or Machine.
+    library = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                       head + ':scripts/lib/cloudbench-env.sh']).decode()
+    fleet = subprocess.check_output(['git', '--no-replace-objects', '-C', str(root), 'show',
+                                     head + ':scripts/run-bench-fleet']).decode()
+    need(library.count(PREFLIGHT_PRODUCER) == 1 and fleet.count(PREFLIGHT_DISPATCH) == 1,
+         'unsupported preflight producer')
+    refusal = PREFLIGHT_REFUSAL.format(head)
+    refused = {}
+    for job in jobs:
+        need(re.fullmatch(r'r001-j[0-9]{4}', job['job_id']) and job['run'] == 1 and job['attempt'] == 1
+             and job['attempts'] == [] and job['status'] == 'failed'
+             and type(job.get('controller_exit_code')) is int and 1 <= job['controller_exit_code'] <= 255
+             and type(job.get('controller_pid')) is int and job['controller_pid'] > 1
+             and job.get('controller_command') == ['bash', str(root / 'scripts/run-bench'), job['task'],
+                                                   '--ref', head, '--foreground'], 'preflight job')
+        need(job['job_id'] not in refused and job['task'] in checks, 'preflight job identity')
+        log = campaign / (job['job_id'] + '.log')
+        need(job['log'] == str(log), 'preflight job log binding')
+        lines = [line.strip() for line in bound(log).decode(errors='replace').splitlines() if line.strip()]
+        need(lines and lines[-1] == refusal and sum(line.startswith('FATAL:') for line in lines) == 1,
+             'preflight refusal for the bound source')
+        # The exact fleet handle/banner shapes campaign-v1 parses; prose such as "printed monitor" is not one.
+        handle = str(root / 'scripts/run-bench') + ' monitor '
+        need(not any(handle in line or re.fullmatch(r'ref\s*:\s*([0-9a-f]{40})(?:\s+.*)?', line) for line in lines),
+             'preflight dispatched a fleet')
+        # A live or reused controller PID is refused, never signalled.
+        need(not Path('/proc', str(job['controller_pid'])).exists(), 'preflight controller PID present')
+        refused[job['job_id']] = {'task': job['task'], 'controller_exit_code': job['controller_exit_code']}
+    supervision = preallocation_processes(root, runs, campaign, request, receipt, adapter, document, bound)
+    need(supervision['term_sent'] == supervision['kill_sent'] == [] and supervision['orphaned_children'] is False,
+         'preflight unexpected supervised termination')
+    from deploy_test_cloud import campaign_published
+    native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+    for path in (campaign / 'hub-group.json', campaign / 'hub-group-publication-ack.private.json'):
+        document(path)
+    try:
+        published = campaign_published(summary, campaign, adapter['started_at'], native)
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.SubprocessError) as error:
+        raise ValueError('native cleanup: preflight publication unavailable') from error
+    need(published, 'preflight publication closure')
+    return refused
+
+
 def validate(receipt, owner, proof):
     """Validate bound native retirement evidence without granting execution credit."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES, bounded_read, sha_file
@@ -675,6 +759,20 @@ def validate(receipt, owner, proof):
                 'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
                 'participants': [], 'native_audit_seals': {}, 'retained_services': [],
                 'startup_processes': identities, 'credit_granted': False}
+    if layout == 'campaign-preflight-refusal-v1':
+        campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+        need(proof.get('campaign') == str(campaign) and not proof.get('controller_log')
+             and proof.get('purpose') is None and not proof.get('recovered_runtime')
+             and not proof.get('current_hub_retirement')
+             and reference.get('native_directory') == str(campaign)
+             and str(campaign) in cli_text, 'preflight root binding')
+        refused = preflight_refusal_campaign(root, runs, campaign, request, receipt, adapter, confirmed,
+                                             document, bound, proof)
+        need(used == set(bindings), 'preflight proof file closure')
+        return {'kind': KIND, 'gate': receipt['gate'], 'token': token, 'owner': copy.deepcopy(owner),
+                'worker_result_sha256': adapter_sha, 'proof': copy.deepcopy(proof),
+                'participants': [], 'native_audit_seals': {}, 'retained_services': [],
+                'preflight_refusals': refused, 'credit_granted': False}
     preallocation = layout == 'campaign-preallocation-v1'
     supervision = None
     if layout in {'campaign-v1','campaign-preallocation-v1'}:
