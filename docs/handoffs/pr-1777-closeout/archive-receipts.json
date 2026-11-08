@@ -1,0 +1,45 @@
+{
+  "archives": {
+    "core": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1777-839396e4/20261108-core.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "006968dfd8362005ef09f768c1deccdc18fed07e4b2e351c4cf80ff635292acb",
+      "gzip_sha256": "88e654bf6aa62511ab6d99ecb3f21ff052d6d6759af23fa9dfb0e60d48cebf30",
+      "stored_bytes": 471033420,
+      "frames": 57,
+      "files": 50047,
+      "original_bytes": 2381797948,
+      "manifest_sha256": "ca137804ddbce48b2ace0440dd8400a344eeff429a83879614446703eeb4b0c2",
+      "full_readback_verified": true,
+      "separate_process_verify": {
+        "authenticated_original_files": 50047,
+        "exit": 0
+      }
+    },
+    "cloud": {
+      "format": "ROSE-PRIVATE-TAR-GCM-V1",
+      "bucket": "trace-archive",
+      "key": "devbox-closeout-private/pr1777-839396e4/20261108-cloud.tar.gz.aesgcm",
+      "encryption_key_id": "trace-archive-prod-2026-07-03",
+      "ciphertext_sha256": "50b12a16520f7d4bf3b4191e99da13f843c95467304000abeebd50121e6d8772",
+      "gzip_sha256": "07cf7418ed5dd5d5a64c1c17fe7d4cc833e9defee41ec45d06e8f2074993b672",
+      "stored_bytes": 2332581320,
+      "frames": 279,
+      "files": 10508,
+      "original_bytes": 9833018290,
+      "manifest_sha256": "e0e15e78f3183916a26fcb05b586ea68184e34e430c7f6d442a8d0eb55370f57",
+      "full_readback_verified": true,
+      "separate_process_verify": {
+        "authenticated_original_files": 10508,
+        "exit": 0
+      }
+    }
+  },
+  "restore": "agents/venv/bin/python docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt <receipt.json> --destination <empty dir>",
+  "symlinks_not_archived": [
+    "/home/boxes/rose/.context/pr1777-session/bin/gh",
+    "deploy-cloud/*/campaigns/*/shared-inventory/inventory/current (directory symlinks; targets archived)"
+  ]
+}
