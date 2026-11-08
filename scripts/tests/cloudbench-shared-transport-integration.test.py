@@ -114,6 +114,15 @@ class FakeUnixAgent:
         for thread in self.threads:thread.join(timeout=2)
 
 
+def kernel_socket_buffer_capacity():
+    """Upper bound of bytes one TCP hop plus one Unix hop can hold in kernel buffers on this host."""
+    def maximum(name):
+        try:return int(Path('/proc/sys/net',name).read_text().split()[-1])
+        except (OSError,ValueError):return 0
+    return (maximum('ipv4/tcp_wmem')+maximum('ipv4/tcp_rmem')
+            +maximum('core/wmem_max')+maximum('core/rmem_max'))
+
+
 def birth(pid):
     return 'proc-start:'+Path('/proc/sys/kernel/random/boot_id').read_text().strip()+':'+Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()[19]
 
@@ -323,7 +332,10 @@ class SharedRelay(unittest.TestCase):
     def test_backpressure_bounds_memory_and_keeps_control_responsive(self):
         f=RelayFixture(self);owner=f.owner();lease=f.acquire(owner,'a'*32);f.agent.mode='backpressure'
         client=f.connect(lease);client.settimeout(8)
-        payload=b'x'*(16*1024*1024);finished=threading.Event();errors=[]
+        # The kernel's own socket buffers on the client->broker and broker->agent hops can hold a
+        # payload without any relay buffering (Blacksmith VMs tune tcp_[rw]mem far above 16 MiB), so
+        # send more than those hops can absorb; the relay's RSS bound below is unchanged.
+        payload=b'x'*(16*1024*1024+2*kernel_socket_buffer_capacity());finished=threading.Event();errors=[]
         def sender():
             try:client.sendall(payload)
             except OSError as error:errors.append(error)
