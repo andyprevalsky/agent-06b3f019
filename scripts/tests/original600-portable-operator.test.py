@@ -3501,8 +3501,19 @@ HOST_GIT_SETTINGS = ('gc.auto', 'gc.autodetach', 'maintenance.auto', 'maintenanc
 
 
 def hermetic_git_env():
-    """A Git view that ignores the host's system/global configuration (hooks, filters, auto-maintenance)."""
-    return dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    """A Git view that ignores the host's system/global configuration (hooks, filters, auto-maintenance).
+
+    Git >= 2.54 defaults to geometric auto-maintenance that detaches after a ~256-object commit and
+    rewrites .git/objects/info/packs while the fixture is being removed (ENOTEMPTY on Blacksmith's
+    git 2.55); pin it off, appended to any inherited GIT_CONFIG_COUNT entries.
+    """
+    env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    count = int(env.get('GIT_CONFIG_COUNT') or 0)
+    for key, value in (('maintenance.auto', 'false'), ('gc.auto', '0')):
+        env[f'GIT_CONFIG_KEY_{count}'], env[f'GIT_CONFIG_VALUE_{count}'] = key, value
+        count += 1
+    env['GIT_CONFIG_COUNT'] = str(count)
+    return env
 
 
 def processes_naming(directory):
@@ -3583,6 +3594,20 @@ def fixture_directory():
             except Exception as failure:  # the evidence is best effort; the original removal error must still surface
                 error.add_note(f'cleanup failure report unavailable: {failure!r}')
             raise
+
+
+class HermeticGitEnv(unittest.TestCase):
+    def test_fixture_git_never_runs_detached_auto_maintenance(self):
+        """RCA 2026-11-07-sharded-routing-fixture-cleanup-enotempty-git: background repack raced cleanup."""
+        for inherited in ({}, {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.fixture', 'GIT_CONFIG_VALUE_0': 'kept'}):
+            with self.subTest(inherited=inherited), patch.dict(os.environ, inherited), tempfile.TemporaryDirectory() as name:
+                env = hermetic_git_env()
+                subprocess.run(['git', 'init', '-q', name], check=True, env=env)
+                value = lambda key: subprocess.run(['git', '-C', name, 'config', '--get', key], env=env,
+                                                   capture_output=True, text=True).stdout.strip()
+                self.assertEqual(('false', '0'), (value('maintenance.auto'), value('gc.auto')))
+                if inherited:
+                    self.assertEqual('kept', value('core.fixture'))
 
 
 class RunBenchShardedRouting(unittest.TestCase):

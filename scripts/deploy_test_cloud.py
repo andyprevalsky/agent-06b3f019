@@ -78,12 +78,13 @@ def collect_fleet(request, root, fleet, started, native_exit):
             outcome = str(task.get('benchmark_status') or task.get('status') or '').upper()
             if not math.isfinite(finish) or finish < started or task.get('cleanup_failure'):
                 raise ValueError('unverified native task or task cleanup')
+            # Hash before any verdict: an unreadable record must stay UNVERIFIED, never a bare PASS.
+            details[name] = {'native_task': {k: task.get(k) for k in ('name','status','benchmark_status','passed','failure_reason','agent_id')}, 'path': str(child),
+                             'sha256': hashlib.sha256(child.read_bytes()).hexdigest()}
             if task.get('passed') is True and outcome == 'PASSED':
                 cases[name] = 'PASS'
             elif task.get('passed') is False and outcome in {'FAILED', 'ERROR', 'INFRA_ERROR', 'SKIPPED'}:
                 cases[name] = 'FAIL'
-            details[name] = {'native_task': {k: task.get(k) for k in ('name','status','benchmark_status','passed','failure_reason','agent_id')}, 'path': str(child),
-                             'sha256': hashlib.sha256(child.read_bytes()).hexdigest()}
         except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
             details[name] = {'unverified': str(error), 'path': str(child)}
     for name in autoscaler_failed if autoscaler_only else ():
@@ -100,11 +101,15 @@ def autoscaler_reason(directory):
     """The native autoscaler's own first-line reason, or an explicit evidence gap."""
     for leaf in ('autoscaler.failed', 'autoscaler.acceptance-failed'):
         path = directory / leaf
-        if path.is_file() and not path.is_symlink():
-            with path.open(errors='replace') as stream:
-                reason = stream.readline(4096).strip()
-            if reason:
-                return reason
+        try:
+            if path.is_file() and not path.is_symlink():
+                with path.open(errors='replace') as stream:
+                    reason = stream.readline(4096).strip()
+                if reason:
+                    return reason
+        except OSError:
+            # The verified FAIL and cleanup stand; only its explanation is missing.
+            return f'mandatory autoscaler failed; {leaf} unreadable'
     return 'mandatory autoscaler failed; see the fleet controller log'
 
 

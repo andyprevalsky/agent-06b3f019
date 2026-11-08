@@ -673,7 +673,7 @@ class CloudCampaign(unittest.TestCase):
         cases,_,cleaned,_=self.cloud.collect_campaign(self.request,self.root,self.runs,self.campaign,1,1,16)
         self.assertEqual('FAIL',cases['task-16']);self.assertEqual('PASS',cases['task-0']);self.assertTrue(cleaned)
 
-    def seal_native_lifecycle(self, fleet, *, teardown='0', benches='task-5'):
+    def seal_native_lifecycle(self, fleet, *, teardown='0', benches='task-5', autoscaler='1'):
         """Run the fleet's actual lifecycle writer for a controller that exited 1."""
         text=(ROOT/'scripts/run-bench-fleet').read_text()
         start=text.index("<<'PY'\n",text.index('# Seal the lifecycle after provider audit'))
@@ -681,7 +681,7 @@ class CloudCampaign(unittest.TestCase):
         owner=cycle.read(fleet/'_batch/lifecycle.json')['fleet_owner_token']
         (fleet/'_batch/lifecycle.json').unlink()
         subprocess.run([sys.executable,'-c',body,str(fleet),owner,fleet.name,str(self.root),'1',teardown,'0','1',
-                        '1' if benches else '0',str(self.root/'registry'),'0','1'],check=True,timeout=30,
+                        autoscaler,str(self.root/'registry'),'0','1'],check=True,timeout=30,
                        env={**os.environ,'CLOUDBENCH_AUTOSCALER_FAILED_BENCHES':benches})
 
     def mass_agent_autoscaler_capacity_failure(self, **lifecycle):
@@ -715,8 +715,28 @@ class CloudCampaign(unittest.TestCase):
         self.assertIn('native cleanup was not verified',details['task-5']['unverified'])
 
     def test_unattributed_failed_lifecycle_still_blocks_cleanup(self):
-        cases,_,cleaned,_=self.mass_agent_autoscaler_capacity_failure(benches='')
-        self.assertEqual('UNVERIFIED',cases['task-5']);self.assertFalse(cleaned)
+        for benches in ('', 'task-5 not-requested'):
+            with self.subTest(benches=benches):
+                cases,details,cleaned,_=self.mass_agent_autoscaler_capacity_failure(benches=benches)
+                self.assertEqual('failed',cycle.read(self.runs/'fleet-5/_batch/lifecycle.json')['status'])
+                self.assertEqual('UNVERIFIED',cases['task-5']);self.assertFalse(cleaned)
+                self.assertIn('native cleanup was not verified',details['task-5']['unverified'])
+
+    def test_unreadable_autoscaler_reason_keeps_the_verified_failure(self):
+        (self.runs/'fleet-5/task-5/autoscaler.failed').write_text('x\n')
+        with patch.object(Path,'open',side_effect=PermissionError('denied')):
+            reason=self.cloud.autoscaler_reason(self.runs/'fleet-5/task-5')
+        self.assertEqual('mandatory autoscaler failed; autoscaler.failed unreadable',reason)
+
+    def test_unreadable_native_record_is_unverified_not_pass(self):
+        real=Path.read_bytes
+        def read_bytes(path):
+            if path.name=='cloudbench-run.json' and path.parent.name=='task-3':
+                raise PermissionError('denied')
+            return real(path)
+        with patch.object(Path,'read_bytes',read_bytes):
+            cases,details,_,_=self.campaign_collect()
+        self.assertEqual('UNVERIFIED',cases['task-3']);self.assertIn('unverified',details['task-3'])
 
     def test_fleet_attributes_every_autoscaler_failure_branch_to_its_bench(self):
         text=(ROOT/'scripts/run-bench-fleet').read_text()
