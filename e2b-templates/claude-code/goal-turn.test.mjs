@@ -163,6 +163,12 @@ async function runGoal({
     }
     if (expectExit) {
       await until(() => existsSync(env.EXIT_FILE), `CLI exit\n${log}`);
+      // The server logs this line before it closes the CLI's stdin; the exit
+      // file can be seen before that stdout chunk is read under load.
+      await until(
+        () => log.includes('"Closing CLI stdin"'),
+        `stdin close log\n${log}`,
+      );
     } else {
       await until(
         () =>
