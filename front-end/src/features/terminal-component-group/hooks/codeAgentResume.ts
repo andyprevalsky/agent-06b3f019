@@ -19,7 +19,7 @@
  */
 import type { Message } from '@/lib/api/types';
 
-import { eventTimeMs } from './codeAgentContract';
+import { eventTimeMs, messageRequester } from './codeAgentContract';
 
 const SPAWN_TOOL = 'spawn_claude_code_agent';
 
@@ -130,9 +130,13 @@ export function codeAgentResumeState(
 /**
  * The view's rows with each resuming person message annotated
  * (metadata.codeAgentResume, read by UserBubble). The resumed run's CLI gets the
- * person's text as its next turn and records it again: that later copy (as a
- * user row or a Rose → code agent row) never renders twice.
+ * person's text as its next turn and records it again: that one later copy (as a
+ * user row or a Rose → code agent row) never renders twice. A later message the
+ * person sends with the same text is their own turn and always renders.
  */
+/** A person's direct-turn row in the code-agent view (code:<task>:turn:<client id>). */
+const PERSON_TURN_ROW = /^code:[^:]+:turn:/;
+
 export function withResumeStates(source: Message[], taskId: string, rows: Message[]): Message[] {
   const states = new Map<string, CodeAgentResumeState>();
   for (const message of source) {
@@ -153,10 +157,22 @@ export function withResumeStates(source: Message[], taskId: string, rows: Messag
       out.push({ ...row, metadata: { ...row.metadata, codeAgentResume: state } });
       continue;
     }
+    // A person's own later turn is never an echo, even with the same text.
+    if (PERSON_TURN_ROW.test(row.message_id)) {
+      out.push(row);
+      continue;
+    }
     const a2a = row.metadata?.a2a as { text?: unknown } | undefined;
     const text = row.role === 'USER' ? row.text : str(a2a?.text);
     const at = eventTimeMs(row.timestamp) ?? 0;
-    if (text && resumed.some((person) => person.text === text && at >= person.at)) continue;
+    // Each resuming message has exactly one echo: drop the first match and stop.
+    const echoOf = text
+      ? resumed.findIndex((person) => person.text === text && at >= person.at)
+      : -1;
+    if (echoOf >= 0) {
+      resumed.splice(echoOf, 1);
+      continue;
+    }
     out.push(row);
   }
   return out;
@@ -205,4 +221,20 @@ export function browserResumeState(messages: Message[], row: Message): CodeAgent
   }
   if (own.length === 0) return { status: 'resuming', subject: 'browser' };
   return { status: own.length === 1 ? 'starting' : 'delivered', subject: 'browser' };
+}
+
+/**
+ * Rows a code agent requested (approvals, questions) across its runs: a resumed
+ * run stamps requests with its own task id (liveTaskId), not the one the view
+ * was opened for, so both must count or the resumed agent's approval never shows.
+ */
+export function requestedByCodeAgent(
+  messages: Message[],
+  taskId: string,
+  liveTaskId: string,
+): Message[] {
+  return messages.filter((message) => {
+    const requester = messageRequester(message.metadata)?.task_id;
+    return requester === taskId || requester === liveTaskId;
+  });
 }

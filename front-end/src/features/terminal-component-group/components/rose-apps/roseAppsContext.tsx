@@ -168,6 +168,9 @@ function useDrawerWidthState() {
     const onBarOffset = () => setLeftOffset(readLeftBarOffset());
     window.addEventListener('resize', onResize);
     window.addEventListener(ROSE_BAR_OFFSET_EVENT, onBarOffset);
+    // The bar publishes its first offset in a layout effect that runs before this
+    // listener exists (a reload with the bar pinned): read it once now.
+    onBarOffset();
     return () => {
       window.removeEventListener('resize', onResize);
       window.removeEventListener(ROSE_BAR_OFFSET_EVENT, onBarOffset);

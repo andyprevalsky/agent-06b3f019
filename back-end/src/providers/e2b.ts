@@ -605,8 +605,10 @@ export async function createCodexCodeSession(
 
   // Codex talks to its provider directly (never a Rose proxy or the DEMO cache);
   // the Fast Mode button only selects its native service tier.
-  envs.CODEX_SPEED = codexSpeed;
-  log.info('Codex code-agent speed', { agentId, taskId, codexSpeed });
+  // A person's resuming turn may pick its speed (cli_settings): it wins over the
+  // agent's stored speed, as its model and effort overrides already do.
+  envs.CODEX_SPEED = cli.speedOverride ?? codexSpeed;
+  log.info('Codex code-agent speed', { agentId, taskId, codexSpeed: envs.CODEX_SPEED });
 
   if (githubRepoUrl) {
     if (!process.env.GITHUB_TOKEN) {

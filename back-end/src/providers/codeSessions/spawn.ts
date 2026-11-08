@@ -44,6 +44,7 @@ import {
   extendLease,
   findOwnedCodeSession,
   markPaused,
+  releaseLease,
   resolveCodeSession,
   type CodeSessionRow,
 } from './store';
@@ -323,7 +324,17 @@ async function createSpawnTask<T extends SpawnCreateResult>(
         });
       });
     }
-    if (
+    // Refused because the user holds the live CLI in direct chat: the session is
+    // live, so only this spawn's lease is dropped (marking it PAUSED would read as
+    // stopped and let another spawn take the lease and stop that ws-server).
+    if (codeSession !== null && error instanceof CodeSessionHeldError) {
+      await releaseLease(codeSession.id, codeSession.leaseOwner).catch((cleanupError: unknown) => {
+        log.error('Held-session lease release failed; retaining the original start error', {
+          codeSessionId: codeSession?.id,
+          cleanupError: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      });
+    } else if (
       codeSession !== null &&
       switchedFrom === null &&
       !(error instanceof CodeSessionPauseUnconfirmedError)

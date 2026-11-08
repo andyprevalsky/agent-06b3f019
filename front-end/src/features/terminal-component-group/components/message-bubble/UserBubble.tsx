@@ -15,8 +15,7 @@
  */
 import { useContext } from 'react';
 import { cn } from '@/lib/utils';
-import { AgentContext } from '@/features/agent-context';
-import type { Message } from '../../hooks';
+import { AgentContext, type Message } from '../../hooks';
 import {
   browserResumeState,
   codeAgentResumeLabel,

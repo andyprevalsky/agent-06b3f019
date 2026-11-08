@@ -21,6 +21,7 @@ import { RoseAppIcons } from '@/features/terminal-component-group/components/ros
 import {
   CHAT_MIN_WIDTH,
   clampDrawerWidth,
+  defaultDrawerWidth,
 } from '@/features/terminal-component-group/components/rose-apps/roseAppsLayout';
 
 import { defaultProps, makeAgent } from './app-sidebar.fixtures';
@@ -117,6 +118,22 @@ describe('Rose sidebar resize handle', () => {
       expect(barWidth()).toBe(420);
     },
   );
+
+  it('a reload with the bar pinned sizes a right panel from the pinned offset', async () => {
+    // The bar publishes its offset in a layout effect before RoseApps listens:
+    // without reading it at mount, panels clamp against 64px and crush the chat.
+    stubPlatform('Linux x86_64', 1200);
+    const first = renderShell();
+    drag(560);
+    first.unmount();
+    renderShell();
+    expect(mainOffset()).toBe('560px');
+    await userEvent.setup().click(screen.getByTestId('rose-app-integrations'));
+    const panel = screen.getByTestId('rose-app-panel');
+    const expected = clampDrawerWidth(defaultDrawerWidth(1200, 560), 1200, 560);
+    expect(expected).toBeLessThan(clampDrawerWidth(defaultDrawerWidth(1200, 64), 1200, 64));
+    expect(Number.parseInt(panel.style.width, 10)).toBe(expected);
+  });
 
   it('persists width and pin across a remount', () => {
     stubPlatform('Linux x86_64');

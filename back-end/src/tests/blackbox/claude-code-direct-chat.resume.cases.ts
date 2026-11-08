@@ -142,9 +142,16 @@ export function registerResumeRecoveryCases(ctx: ResumeRecoveryContext): void {
         CODEX_SPEED: 'priority',
       }
     );
+    // Codex names its fast tier `priority`: a person's "fast" pick maps onto it.
+    assert.equal(cliSettingsEnvOverrides('codex', { speed: 'fast' }).CODEX_SPEED, 'priority');
     const { envs } = await codeAgentCliEnvs('claude', null, override);
     assert.equal(envs.CLAUDE_CODE_MODEL, 'claude-opus-5-5', 'overrides win over the agent tier');
     assert.equal(envs.CLAUDE_CODE_EFFORT, 'high');
+    // e2b.ts sets CODEX_SPEED from speedOverride last, so the agent's stored speed
+    // never overwrites the person's resuming-turn pick.
+    const codex = await codeAgentCliEnvs('codex', null, { speed: 'fast' });
+    assert.equal(codex.speedOverride, 'priority');
+    assert.equal((await codeAgentCliEnvs('codex', null, null)).speedOverride, null);
   });
 
   test("the owner's pause reaches a supervised resume run", async () => {

@@ -24,7 +24,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 import { useAgentContext } from '../../hooks';
-import { messageRequester } from '../../hooks/codeAgentContract';
+import { requestedByCodeAgent } from '../../hooks/codeAgentResume';
 import { useDirectTurn } from '../../hooks/codeAgentDirectTurn';
 import { codeSessionSettings } from '../../hooks/codeSessionSettings';
 import { derivePendingApproval } from '@/lib/pendingApproval';
@@ -69,9 +69,7 @@ export function CodeAgentConversationView({
   const settings = useMemo(() => codeSessionSettings(c.messages, taskId), [c.messages, taskId]);
   const turn = useDirectTurn(taskId, c.toolCallId);
   const [handledApprovals, setHandledApprovals] = useState<Set<string>>(() => new Set());
-  const pending = derivePendingApproval(
-    messages.filter((message) => messageRequester(message.metadata)?.task_id === taskId),
-  );
+  const pending = derivePendingApproval(requestedByCodeAgent(messages, taskId, c.liveTaskId));
   const approval = pending && !handledApprovals.has(pending.attentionRequestId) ? pending : null;
   useEscapeToClose(useCodeAgentView()?.close ?? NOOP);
   return (

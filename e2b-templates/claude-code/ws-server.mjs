@@ -1746,9 +1746,20 @@ function releaseHeldAgentTurns() {
           turn_ids: [id],
           reason: ack.reason || "rejected",
         });
+        closeStdinIfIdleAfterRelease();
       }
     });
   }
+}
+/**
+ * releaseDirectHold left stdin open for the released agent turns; when every one
+ * was refused (none written, so no `result` will ever close it), close it here
+ * exactly as a finished autonomous turn would.
+ */
+function closeStdinIfIdleAfterRelease() {
+  if (directHold || pendingTurns > 0 || heldAgentTurns.length > 0) return;
+  if (pendingDeliveries.size > 0) return;
+  endCliStdin("released agent turns were all undelivered");
 }
 /** The session ended while agent turns waited for the hand back: say which were lost. */
 function dropHeldAgentTurns(reason) {

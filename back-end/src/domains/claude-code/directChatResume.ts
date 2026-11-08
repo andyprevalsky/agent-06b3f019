@@ -28,7 +28,7 @@ import {
   codeAgentResumeRunExists,
   ensureResumeRunOnLiveQueue,
 } from '../../providers/codeAgentResumeWorkflow';
-import { startCodeAgentResumeWorkflowOrRefuse } from './directChatResumeStart';
+import { claimResumeStart, startCodeAgentResumeWorkflowOrRefuse } from './directChatResumeStart';
 import { listedBackgroundTasks } from '../agents/agentTreeBackgroundTasks';
 import { TERMINAL_STATUSES } from '../agents/statusBroadcastWorkflowId';
 import { findCodeSessionForToolCall } from '../agents/repoGraph';
@@ -295,14 +295,17 @@ export async function resumeStoppedCodeAgent(
   );
   const messageId = idempotentMessageId(resumeRow(params, toolCallId));
   if (messageId === null) throw new Error('direct turn rows are idempotent');
-  if (await resumeStarting(owner, task, key, toolCallId, messageId)) {
-    return queueBehindResume(params, toolCallId, attachments);
-  }
-  // A new resume: the earlier run's published session must not read as this
-  // run's; turns queued behind an earlier failed resume stay and reach this run.
-  await clearPublishedStartupTask(key);
+  // Check and claim under one lock: two quick turns must not both start a run.
   const marker: ResumeMarker = { messageId, since: new Date().toISOString() };
-  await putEphemeral(RESUME_NAMESPACE, key, { ...marker }, RESUME_MARKER_TTL_MS);
+  const claimed = await claimResumeStart(key, async () => {
+    if (await resumeStarting(owner, task, key, toolCallId, messageId)) return false;
+    // A new resume: the earlier run's published session must not read as this
+    // run's; turns queued behind an earlier failed resume stay and reach this run.
+    await clearPublishedStartupTask(key);
+    await putEphemeral(RESUME_NAMESPACE, key, { ...marker }, RESUME_MARKER_TTL_MS);
+    return true;
+  });
+  if (!claimed) return queueBehindResume(params, toolCallId, attachments);
   // The turn row first: its "Resuming…" precedes any (fast) refusal row.
   const queued = await persistQueued(params, toolCallId);
   let via: 'owner' | 'supervisor';

@@ -16,7 +16,10 @@ import { render, screen } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 
 import { UserBubble } from '@/features/terminal-component-group/components/message-bubble/UserBubble';
-import { mergeCodeAgentRuns } from '@/features/terminal-component-group/hooks/codeAgentResume';
+import {
+  mergeCodeAgentRuns,
+  requestedByCodeAgent,
+} from '@/features/terminal-component-group/hooks/codeAgentResume';
 import { sendCodeAgentMessage } from '@/features/terminal-component-group/hooks/codeAgentContract';
 import { codeSessionMessages } from '@/features/terminal-component-group/hooks/codeSessionMessages';
 import type { Message } from '@/lib/api';
@@ -185,6 +188,49 @@ describe('a message to a stopped code agent resumes it', () => {
     const rows = viewMessages(owner);
     expect(rows.filter((m) => m.text === 'Also update the changelog.')).toHaveLength(1);
     expect(rows.some((m) => (m.text ?? '').includes('Updated CHANGELOG.md.'))).toBe(true);
+  });
+
+  it('a later message with the same text still renders (only the one echo is hidden)', () => {
+    const again = row(
+      {
+        task_id: NEW,
+        action_type: 'user_direct_turn',
+        direct_turn_id: 'cm-again-2',
+        subAgentId: NEW,
+        title: 'You',
+      },
+      'Also update the changelog.',
+      60,
+    );
+    const owner = [...firstRun, resumeTurn, nextRunStarting, nextRunStarted, resumedEcho, again];
+    const people = viewMessages(owner).filter(
+      (m) => m.role === 'USER' && m.text === 'Also update the changelog.',
+    );
+    expect(people).toHaveLength(2);
+  });
+
+  it("a resumed run's approval request counts for the open view", () => {
+    const approval = (task: string, s: number) =>
+      row(
+        {
+          task_id: task,
+          toolName: 'request_user_approval',
+          requestingAgent: {
+            kind: 'code_agent',
+            agent_id: 'root-1',
+            provider: 'claude',
+            task_id: task,
+            label: 'Claude Code',
+          },
+        },
+        'Approve pushing to main?',
+        s,
+      );
+    const fromNewRun = approval(NEW, 50);
+    const fromOther = approval('task-other', 51);
+    const rows = requestedByCodeAgent([fromNewRun, fromOther], OLD, NEW);
+    expect(rows).toEqual([fromNewRun]);
+    expect(requestedByCodeAgent([fromNewRun], OLD, OLD)).toEqual([]);
   });
 
   it('a message to a running agent carries no resume line', () => {

@@ -177,12 +177,16 @@ export function cliSettingsEnvOverrides(
   if (override.reasoning_effort) envs[keys.effort] = override.reasoning_effort;
   if (override.speed) {
     // Claude has no ultrafast/priority tier: any non-standard pick is fast mode.
+    // Codex's "fast" tier is `priority` (codexSpeedFor); a Codex pick of
+    // priority/ultrafast/standard passes through unchanged.
     envs[keys.speed] =
       provider === 'claude'
         ? override.speed === 'standard'
           ? 'standard'
           : 'fast'
-        : override.speed;
+        : override.speed === 'fast'
+          ? 'priority'
+          : override.speed;
   }
   return envs;
 }
@@ -192,9 +196,16 @@ export async function codeAgentCliEnvs(
   provider: 'claude' | 'codex',
   agentId: string | null | undefined,
   override?: CodeCliSettingsOverride | null
-): Promise<{ settings: CodeAgentSettings; envs: Record<string, string> }> {
+): Promise<{
+  settings: CodeAgentSettings;
+  envs: Record<string, string>;
+  /** The person's resuming-turn speed, already in the provider's terms; null without one. */
+  speedOverride: string | null;
+}> {
   const settings = await codeAgentSettingsForAgent(agentId);
   const envs =
     provider === 'claude' ? claudeCodeSettingsEnvs(settings) : codexCodeSettingsEnvs(settings);
-  return { settings, envs: { ...envs, ...cliSettingsEnvOverrides(provider, override) } };
+  const overrides = cliSettingsEnvOverrides(provider, override);
+  const speedOverride = overrides[provider === 'claude' ? 'CLAUDE_CODE_SPEED' : 'CODEX_SPEED'];
+  return { settings, envs: { ...envs, ...overrides }, speedOverride: speedOverride ?? null };
 }
