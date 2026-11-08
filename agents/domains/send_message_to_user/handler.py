@@ -10,6 +10,15 @@ When is_question=True:
 - SMS-initiated goals: sends SMS immediately
 - Web/Mac-initiated: waits 15 min, then sends SMS if no response
 - Blocks until the user responds (via web chat or SMS supervisor reply_to_agent)
+
+The reply is a ``user_message`` wake (helpers/wait_wake.py) after the LLM context
+snapshot, the same baseline ``wait_for`` uses::
+
+    poll (snapshot mark) ── LLM turn asks ── mark = wait_baseline(wi)
+        receive_user_response (plain) ──▶ user_message wake, seq > mark ──▶ answered
+    A user message the model already read (seq <= mark) never answers, and agent
+    messages / background notifications are not the user's reply. A message sent
+    while the model was deciding to ask is unread, so it answers at once.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ from helpers.generation_handoff import (
     take_tool_resume,
 )
 from helpers.wait_condition_or_handoff import wait_condition_or_generation_handoff
+from helpers.wait_wake import first_wake, wait_baseline
 from helpers.wmh_activity_policy import wmh_activity_timeout_options
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 from utils.llm_timeouts import SMS_NOTIFICATION_ACTIVITY_TIMEOUT_SECONDS
@@ -50,6 +60,9 @@ with workflow.unsafe.imports_passed_through():
     from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 
 logger = structlog.get_logger()
+
+# Only the user's own message answers a question.
+QUESTION_REPLY_WAKE_KINDS = frozenset({"user_message"})
 
 
 class SendMessageToUserManager(ToolManager):
@@ -69,6 +82,14 @@ class SendMessageToUserManager(ToolManager):
         When is_question=True we pause until receive_user_response signal arrives.
         When is_question=False we simply surface the message for visibility.
         """
+        # Capture before any await; a continuation poll must not move the mark
+        # past a reply that arrived while this same question was parked.
+        resume = take_tool_resume(workflow_instance, tool_call_id)
+        reply_mark = resume["reply_mark"] if resume is not None else wait_baseline(workflow_instance)
+
+        def _replied() -> bool:
+            return first_wake(workflow_instance, reply_mark, QUESTION_REPLY_WAKE_KINDS) is not None
+
         # ── 0. Validate ──
         result = validate_tool_call(tool_call)
         if not result["ok"]:
@@ -83,7 +104,6 @@ class SendMessageToUserManager(ToolManager):
         message: str = result["message"]
         is_question: bool = result["is_question"]
 
-        resume = take_tool_resume(workflow_instance, tool_call_id)
         if resume is not None:
             inline_view = resume["inline_view"]
             fallback_deadline = datetime.fromisoformat(resume["fallback_deadline"])
@@ -178,7 +198,7 @@ class SendMessageToUserManager(ToolManager):
                 )
                 try:
                     await wait_condition_or_generation_handoff(
-                        lambda: workflow_instance._has_new_messages,
+                        _replied,
                         workflow_instance,
                         timeout=max(timedelta(0), fallback_deadline - workflow.now()),
                         workflow_mod=workflow,
@@ -213,10 +233,10 @@ class SendMessageToUserManager(ToolManager):
                         logger.error("Failed to send SMS fallback: %s", e)
 
             # ── 5. Wait for user response ──
-            if not workflow_instance._has_new_messages:
+            if not _replied():
                 try:
                     await wait_condition_or_generation_handoff(
-                        lambda: workflow_instance._has_new_messages,
+                        _replied,
                         workflow_instance,
                         workflow_mod=workflow,
                     )
@@ -235,6 +255,7 @@ class SendMessageToUserManager(ToolManager):
 
         except GenerationHandoffRequested as exc:
             if park_pending_tool(workflow_instance, tool_call_id, {
+                "reply_mark": reply_mark,
                 "inline_view": inline_view,
                 "agent_source": agent_source,
                 "sms_sent": sms_sent,
@@ -249,8 +270,6 @@ class SendMessageToUserManager(ToolManager):
                 metadata=build_attention_metadata(message, is_question, is_waiting=True, inline_view=inline_view),
             )
             raise
-
-        workflow_instance._has_new_messages = False
 
         logger.info(
             "User responded to send_message_to_user request",

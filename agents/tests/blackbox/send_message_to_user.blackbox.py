@@ -241,15 +241,28 @@ class _FakeWorkflowModule:
 class _FakeWorkflow:
     """Minimal workflow-instance stub."""
 
-    def __init__(self, *, user_id="user-1", agent_id="agent-1", depth=0, has_new_messages=True):
+    def __init__(self, *, user_id="user-1", agent_id="agent-1", depth=0, user_replied=True):
+        from helpers.wait_wake import record_wake
+
         self.user_id = user_id
         self.agent_id = agent_id
         self.depth = depth
-        self._has_new_messages = has_new_messages
+        # The poll feeding the asking LLM turn saw no wake events (helpers/wait_wake.py).
+        self._context_wake_mark = 0
         self._posted = []
+        if user_replied:
+            # A user message the model has not read yet answers the question at once.
+            record_wake(self, "user_message")
 
     async def _post_message(self, text, role, metadata=None):
         self._posted.append((text, role, metadata))
+
+
+def _user_replies(wf):
+    """The user's reply arrives during the wait: receive_user_response's wake."""
+    from helpers.wait_wake import record_wake
+
+    record_wake(wf, "user_message")
 
 
 def _patch_handler_workflow(fake):
@@ -308,7 +321,7 @@ async def test_handler_sms_source_sends_sms_and_waits():
     )
     restore = _patch_handler_workflow(fake)
     try:
-        wf = _FakeWorkflow(has_new_messages=True)  # immediate response
+        wf = _FakeWorkflow(user_replied=True)  # immediate response
         events = await _collect_events(
             SendMessageToUserManager().execute_tool(
                 workflow_instance=wf,
@@ -325,6 +338,58 @@ async def test_handler_sms_source_sends_sms_and_waits():
     assert events[-1].title == "User response received"
 
 
+async def test_handler_question_reply_baseline_is_the_context_snapshot():
+    """Only a user message the model has not read answers a question (H-72).
+
+    One it already read (its wake is at or before the asking turn's poll snapshot)
+    never does, e.g. the attachment post's empty message in epoch22 boxing r3. One
+    sent while the model was deciding to ask (after the snapshot) answers at once.
+    """
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from helpers.wait_wake import note_context_snapshot, record_wake, wake_mark
+
+    class _ReplyDuringWait(_FakeWorkflowModule):
+        def __init__(self, wf, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.wf = wf
+            self.parked: list[bool] = []
+
+        async def wait_condition(self, predicate, timeout=None):
+            answered = predicate()
+            self.parked.append(not answered)
+            if not answered:
+                _user_replies(self.wf)
+
+    async def ask(wf):
+        fake = _ReplyDuringWait(wf, activity_results={"get_agent_source": "WEB"})
+        restore = _patch_handler_workflow(fake)
+        try:
+            events = await _collect_events(
+                SendMessageToUserManager().execute_tool(
+                    workflow_instance=wf,
+                    tool_call={"message": "Which discount?", "is_question": True},
+                    tool_call_id="tc-baseline",
+                )
+            )
+        finally:
+            restore()
+        return fake.parked, events
+
+    read = _FakeWorkflow(user_replied=False)
+    record_wake(read, "user_message")
+    note_context_snapshot(read, wake_mark(read))
+    parked, events = await ask(read)
+    assert parked[:1] == [True], "a user message the model already read answered the question"
+    assert events[-1].title == "User response received"
+
+    unread = _FakeWorkflow(user_replied=False)
+    note_context_snapshot(unread, wake_mark(unread))
+    record_wake(unread, "user_message")
+    parked, events = await ask(unread)
+    assert parked == [], "a user message sent while the model decided to ask must answer at once"
+    assert events[-1].title == "User response received"
+
+
 async def test_handler_non_sms_timeout_triggers_sms_fallback():
     """Non-SMS agent waits; TimeoutError triggers SMS fallback notify."""
     from datetime import datetime, timedelta, timezone
@@ -332,7 +397,7 @@ async def test_handler_non_sms_timeout_triggers_sms_fallback():
     from domains.send_message_to_user.handler import SendMessageToUserManager
     from tools.base import MessageStatus
 
-    wf = _FakeWorkflow(has_new_messages=False)
+    wf = _FakeWorkflow(user_replied=False)
     activity_names: list[str] = []
 
     class _WaitFake(_FakeWorkflowModule):
@@ -354,7 +419,7 @@ async def test_handler_non_sms_timeout_triggers_sms_fallback():
                 # Advance past the 15m SMS fallback so the helper re-raises.
                 self._now = self._now + timedelta(minutes=16)
                 raise TimeoutError("no response")
-            wf._has_new_messages = True
+            _user_replies(wf)
             return
 
     fake = _WaitFake(
@@ -388,7 +453,7 @@ async def test_handler_non_sms_temporal_timeout_triggers_sms_fallback():
     from temporalio.exceptions import TimeoutType
     from tools.base import MessageStatus
 
-    wf = _FakeWorkflow(has_new_messages=False)
+    wf = _FakeWorkflow(user_replied=False)
     activity_names: list[str] = []
 
     class _WaitFake(_FakeWorkflowModule):
@@ -413,7 +478,7 @@ async def test_handler_non_sms_temporal_timeout_triggers_sms_fallback():
                     type=TimeoutType.START_TO_CLOSE,
                     last_heartbeat_details=(),
                 )
-            wf._has_new_messages = True
+            _user_replies(wf)
             return
 
     fake = _WaitFake(
@@ -451,7 +516,7 @@ async def test_handler_non_sms_fallback_handoff_closes_finished_and_reraises():
     )
     restore = _patch_handler_workflow(fake)
     try:
-        wf = _FakeWorkflow(has_new_messages=False)
+        wf = _FakeWorkflow(user_replied=False)
 
         async def _check_generation_handoff():
             return "navi-agent-tasks@new"
@@ -540,7 +605,7 @@ async def test_inline_view_question_keeps_pin_on_every_event():
     try:
         events = await _collect_events(
             SendMessageToUserManager().execute_tool(
-                workflow_instance=_FakeWorkflow(user_id=ROSE_DESKTOP_USER, has_new_messages=True),
+                workflow_instance=_FakeWorkflow(user_id=ROSE_DESKTOP_USER, user_replied=True),
                 tool_call={"message": "Pick one?", "is_question": True, "inline_view": {"view": "picker"}},
                 tool_call_id="tc-inline-q",
             )
@@ -613,7 +678,12 @@ async def test_inline_view_invalid_shape_rejected_without_lookup():
     from domains.send_message_to_user.handler import SendMessageToUserManager
     from tools.base import MessageStatus
 
-    for bad in ("hello", {"view": "Bad View"}, {"view": "ok", "props": [1]}, {"view": "ok", "props": {"x": "y" * 70000}}):
+    for bad in (
+        "hello",
+        {"view": "Bad View"},
+        {"view": "ok", "props": [1]},
+        {"view": "ok", "props": {"x": "y" * 70000}},
+    ):
         fake = _RecordingWorkflowModule()
         restore = _patch_handler_workflow(fake)
         try:
@@ -722,6 +792,7 @@ async def test_question_cutover_resumes_original_wait_without_republishing():
 
     from domains.send_message_to_user.handler import SendMessageToUserManager
     from helpers.generation_handoff import GenerationHandoffRequested
+    from helpers.wait_wake import first_wake, note_context_snapshot, wake_mark
     from tools.base import MessageStatus
 
     # Same boundary as prod 6f2f4117: WEB question -> cutover at +111s ->
@@ -732,7 +803,7 @@ async def test_question_cutover_resumes_original_wait_without_republishing():
         ("WEB", True, False),
         ("WEB", False, True),
     ]:
-        wf = _FakeWorkflow(user_id=ROSE_DESKTOP_USER, has_new_messages=False)
+        wf = _FakeWorkflow(user_id=ROSE_DESKTOP_USER, user_replied=False)
         saved = {}
         hints = {}
         events = []
@@ -776,7 +847,7 @@ async def test_question_cutover_resumes_original_wait_without_republishing():
             if phase < 2:
                 fake._now += timedelta(seconds=111 if phase == 0 else 60)
                 raise GenerationHandoffRequested(f"generation-{phase + 1}")
-            wf._has_new_messages = True
+            _user_replies(wf)
 
         restore = _patch_handler_workflow(fake)
         try:
@@ -800,7 +871,8 @@ async def test_question_cutover_resumes_original_wait_without_republishing():
                         hints.update(saved)
                         saved.clear()
                         if reply_on_resume:
-                            wf._has_new_messages = True
+                            _user_replies(wf)
+                            note_context_snapshot(wf, wake_mark(wf))
                     else:
                         assert raised is None
                         break
@@ -819,7 +891,7 @@ async def test_question_cutover_resumes_original_wait_without_republishing():
             assert waits == [timedelta(seconds=900), timedelta(seconds=789), timedelta(seconds=729)], (
                 "deploy reset the original SMS fallback deadline", waits
             )
-        assert not wf._has_new_messages, "the real reply was not consumed"
+        assert first_wake(wf, 0, {"user_message"}) is not None, "no real reply arrived"
 
 
 async def run_all_tests():
@@ -840,6 +912,10 @@ async def run_all_tests():
     r.record("build_attention_metadata_info", test_build_attention_metadata_info)
     await r.record_async("handler_sub_agent", test_handler_sub_agent_auto_responds)
     await r.record_async("handler_sms_source", test_handler_sms_source_sends_sms_and_waits)
+    await r.record_async(
+        "handler_question_reply_baseline_is_context_snapshot",
+        test_handler_question_reply_baseline_is_the_context_snapshot,
+    )
     await r.record_async("handler_non_sms_timeout", test_handler_non_sms_timeout_triggers_sms_fallback)
     await r.record_async(
         "handler_non_sms_temporal_timeout",
