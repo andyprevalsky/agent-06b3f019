@@ -3067,6 +3067,14 @@ class CerebrasRatchetHeadroom(unittest.TestCase):
         ready,_,err=self.wait(FakeCerebrasProbe((401,{})),deadline=40)
         self.assertFalse(ready);self.assertIn('answered HTTP 401',err)
 
+    def test_a_rejected_credential_stops_at_once_but_a_provider_error_is_retried(self):
+        # 2026-11-08: the probe answered 403 for an hour while the semantic gate waited on it.
+        ready,_,err=self.wait(FakeCerebrasProbe((403,{})),deadline=3600)
+        self.assertFalse(ready);self.assertEqual([],self.sleeps)
+        self.assertIn('cannot measure the shared Cerebras quota',err)
+        ready,_,err=self.wait(FakeCerebrasProbe((503,{})),deadline=90)
+        self.assertFalse(ready);self.assertTrue(self.sleeps)
+
     def test_cli_without_any_cerebras_key_reports_unmeasured(self):
         env={k:v for k,v in os.environ.items() if not k.startswith('CEREBRAS')}
         out=io.StringIO()
