@@ -312,7 +312,7 @@ def check_new_test_stability() -> None:
         row = next(iter(report["units"].values()))
         check(report["status"] == "FAIL" and row["attempts"][0]["exit"] is None, "stability: a timed-out run fails")
 
-        report = sat.run_stability([sat.Unit("backend-unit", "x.test.ts", [str(real)])], load_workers=1,
+        report = sat.run_stability([sat.Unit("unknown-lane", "x.test.ts", [str(real)])], load_workers=1,
                                    log_root=work / "logs-unsupported")
         check(report["status"] == "UNVERIFIED" and next(iter(report["units"].values()))["status"] == "UNSUPPORTED",
               "stability: a lane without a runner is UNSUPPORTED, never PASS")
@@ -719,6 +719,107 @@ def check_stability_blackbox_cases() -> None:
               "blackbox stability: a filtered run that skipped a selected case fails, never passes")
 
 
+def check_stability_backend_lanes() -> None:
+    """Backend lanes run with their own runner and a private local database; mac-app off Darwin is omitted."""
+    import os
+    import tempfile
+    lanes = sat.discover_lanes()
+    structural = next(u for u in lanes["backend-structural"].units if u.name == "layer-deps.test.ts")
+    command, cwd = sat.stability_command(structural)
+    check(command == ["npx", "tsx", "src/tests/structural/layer-deps.test.ts"] and cwd == sat.ROOT / "back-end",
+          f"stability: a backend structural unit runs its own package step with tsx from back-end ({command})")
+    shell = next((u for u in lanes["backend-structural"].units if u.name.endswith(".sh")), None)
+    if shell:
+        command, _ = sat.stability_command(shell)
+        check(command[0] == "bash" and command[-1].endswith(shell.name),
+              f"stability: a backend structural shell step keeps its bash command ({command})")
+    plan = sat.plan_unit(structural, list(structural.roots), None)
+    check(plan is not None and not plan.databases and sat.isolate_plan(plan, structural, 0).databases == [],
+          "stability: a backend structural unit needs no database")
+
+    blackbox = sat.Unit("backend-blackbox", "phone-hold", ["back-end/src/tests/blackbox/phone-hold.blackbox.ts"])
+    plan = sat.isolate_plan(sat.plan_unit(blackbox, list(blackbox.roots), None), blackbox, 3,
+                            server="postgresql://postgres:postgres@localhost:5432")
+    identity = plan.env.get("CONDUCTOR_WORKSPACE_NAME", "")
+    check(plan.command == ["bash", "scripts/run-blackbox-tests.sh", "phone-hold"] and plan.cwd == sat.ROOT / "back-end"
+          and identity.startswith(f"stab-{os.getpid()}-3-") and plan.env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] == "1"
+          and plan.env[sat.STABILITY_IDENTITY_ENV] == "1"
+          and plan.env["BLACKBOX_TEST_DATABASE_URL"] == f"postgresql://postgres:postgres@localhost:5432/victoria_{identity}"
+          and plan.databases == [f"victoria_{identity}"] and plan.prepare == [],
+          f"stability: a backend blackbox domain runs its runner on its own victoria_<identity> database ({plan.env})")
+    other = sat.isolate_plan(sat.plan_unit(blackbox, list(blackbox.roots), None), blackbox, 4,
+                             server="postgresql://postgres:postgres@localhost:5432")
+    check(other.databases != plan.databases
+          and other.env["BLACKBOX_TEST_BACKEND_START_PORT"] != plan.env["BLACKBOX_TEST_BACKEND_START_PORT"],
+          "stability: concurrent blackbox units get distinct databases and backend start ports")
+    check({"BLACKBOX_TEST_RUN_ID", "BLACKBOX_TEST_ARTIFACT_DIR", "BLACKBOX_TEST_BACKEND_PORT", "TEST_BASE_URL",
+           "ROSE_TEST_DB_LOCK_INHERITED_KEY"} <= set(plan.unset),
+          "stability: a blackbox unit never inherits a shared run id, artifact dir, port, backend or lock")
+
+    unit_file = sat.Unit("backend-unit", "back-end/src/tests/unit/sub/x.test.ts", ["back-end/src/tests/unit/sub/x.test.ts"])
+    plan = sat.isolate_plan(sat.plan_unit(unit_file, list(unit_file.roots), None), unit_file, 0,
+                            server="postgresql://postgres:postgres@127.0.0.1:5432")
+    url = plan.env.get("BACKEND_UNIT_DATABASE_URL", "")
+    check(plan.command == ["npx", "tsx", "scripts/run-unit-tests.ts"] and plan.env["BACKEND_UNIT_TEST_FILES"] == "sub/x.test.ts"
+          and url.startswith("postgresql://postgres:postgres@127.0.0.1:5432/victoria_stab-")
+          and all(plan.env[k] == url for k in ("DATABASE_URL", "DIRECT_URL", "DIRECT_DATABASE_URL"))
+          and plan.databases == [url.rsplit("/", 1)[1]] and "BACKEND_UNIT_ALLOW_REMOTE_DB" in plan.unset
+          and plan.prepare and "prisma:push:local" in plan.prepare[0],
+          f"stability: a backend unit file runs alone on its own pushed local database ({plan.env})")
+    for remote in ("postgresql://u:p@db.example.supabase.co:5432", "postgresql://u:p@localhost:5432?host=evil.example"):
+        try:
+            sat.isolate_plan(sat.plan_unit(unit_file, list(unit_file.roots), None), unit_file, 0, server=remote)
+            check(False, f"stability: the unit lane refuses a non-localhost database server ({remote})")
+        except ValueError:
+            check(True, f"stability: the unit lane refuses a non-localhost database server ({remote})")
+    # The second line of defence: an env that reaches the runner with a remote URL never runs or creates anything.
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        bad = sat.StabilityPlan("backend-unit:x", [sys.executable, "-c", "open('ran','w')"], work, [sat.WHOLE_UNIT], "t",
+                                env={"BACKEND_UNIT_DATABASE_URL": "postgresql://u:p@remote.example:5432/victoria_x"},
+                                databases=["victoria_x"], server="postgresql://postgres:postgres@localhost:5432")
+        with patch.object(sat, "_psql", side_effect=AssertionError("must not touch Postgres")):
+            row = sat._run_plan(0, bad, 5, 60, work, sat.CpuLoad(0, 60))
+        check(row["status"] == "UNVERIFIED" and "not a localhost" in row.get("reason", "") and not row["attempts"]
+              and not (work / "ran").exists() and row["databases"]["created"] == [],
+              "stability: a unit whose database URL is remote is refused before any run or database change")
+
+        # Setup and teardown touch exactly the owned name; teardown runs after a failing unit too.
+        calls: list[str] = []
+        fail = sat.StabilityPlan("backend-blackbox:y", [sys.executable, "-c", "raise SystemExit(1)"], work,
+                                 [sat.WHOLE_UNIT], "t", env={"BLACKBOX_TEST_DATABASE_URL":
+                                                             "postgresql://postgres:postgres@localhost:5432/victoria_stab-1"},
+                                 databases=["victoria_stab-1"], server="postgresql://postgres:postgres@localhost:5432")
+        with patch.object(sat, "_psql", side_effect=lambda server, sql, log=None: calls.append(sql) or True):
+            row = sat._run_plan(1, fail, 5, 60, work, sat.CpuLoad(0, 60))
+        check(row["status"] == "FAIL" and calls == ['CREATE DATABASE "victoria_stab-1"',
+                                                    'DROP DATABASE IF EXISTS "victoria_stab-1" WITH (FORCE)']
+              and row["databases"] == {"created": ["victoria_stab-1"], "dropped": ["victoria_stab-1"]},
+              f"stability: the unit's own database is created once and dropped by exact name even after a failure ({calls})")
+
+        mac = sat.Unit("mac-app-vitest", "mac-app/tests/blackbox/x.blackbox.ts", [str(work / "x.blackbox.ts")])
+        (work / "x.blackbox.ts").write_text("x")
+        ok = work / "ok.py"
+        ok.write_text("pass\n")
+        passing = sat.Unit("cloudbench-controller", f"{sys.executable} {ok}", [str(ok)])
+        with patch.object(sat.sys, "platform", "linux"):
+            report = sat.run_stability([mac, passing], load_workers=1, timeout=60, log_root=work / "logs-mac")
+            alone = sat.run_stability([mac], load_workers=1, timeout=60, log_root=work / "logs-mac-alone")
+        mac_row = report["units"][f"mac-app-vitest:{mac.name}"]
+        check(report["status"] == "PASS" and mac_row["status"] == "PLATFORM_OMITTED" and not mac_row["executed"]
+              and report["counts"] == {"PASS": 1, "PLATFORM_OMITTED": 1}
+              and alone["status"] == "PLATFORM_OMITTED" and alone["counts"] == {"PLATFORM_OMITTED": 1},
+              f"stability: mac-app on Linux is PLATFORM_OMITTED, outside the PASS count, never UNVERIFIED ({report['counts']})")
+        printed = io.StringIO()
+        with patch.object(sat, "new_test_units", return_value=[mac]), patch.object(sat.sys, "platform", "linux"), \
+                patch.object(sat, "run_stability",
+                             (lambda real: lambda *a, **k: real(*a, **{**k, "log_root": work / "logs-mac-cli"}))(sat.run_stability)), \
+                contextlib.redirect_stdout(printed):
+            code = sat.main(["--stability", "--changed-file", "x.blackbox.ts", "--load-workers", "1"])
+        check(code == 0 and "PLATFORM_OMITTED" in printed.getvalue() and "not a test pass" in printed.getvalue(),
+              "stability: an only-omitted check exits 0 and prints the omission, not a pass")
+
+
 def main() -> int:
     check_coverage_map_dependency_preflight()
     selector = sat.Selector()
@@ -784,6 +885,7 @@ def main() -> int:
     check_stability_concurrency()
     check_stability_case_selection()
     check_stability_blackbox_cases()
+    check_stability_backend_lanes()
 
     print(f"select-affected-tests: {len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0

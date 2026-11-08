@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -1033,12 +1034,40 @@ STABILITY_LOAD_LOOP = (
     "while os.getppid() == parent:\n"
     "    pass\n"
 )
-# Lanes whose units the check can run with their owning runner. Backend lanes need
-# the isolated blackbox runner/database (direct unit runs default to the PROD DB);
-# mac-app needs Darwin. Those units are reported UNSUPPORTED, never PASS.
+# Lanes whose units the check can run with their owning runner. Any other lane is
+# UNSUPPORTED, never PASS; mac-app off Darwin is PLATFORM_OMITTED (not a test pass).
 STABILITY_LANES = ("deploy-structural-gates", "cloudbench-controller", "agents-pytest", "agents-blackbox",
-                   "frontend-vitest")
+                   "frontend-vitest", "backend-blackbox", "backend-unit", "backend-structural")
+# Lanes that need a platform this host lacks (deploy_test_plan omits their gates the same way).
+STABILITY_PLATFORM_LANES = {"mac-app-vitest": "darwin"}
 WHOLE_UNIT = "<whole unit>"
+
+# Backend DB lanes. back-end/.env's DATABASE_URL is the REMOTE production database, so every
+# blackbox/unit stability unit gets its own empty database on this local server, created before
+# its runs and dropped (exact owned name) after them. Concurrent units never share a database:
+# the runner's test-db-run-lock fails fast on a second holder. Override the server with
+# ROSE_STABILITY_PG_SERVER (it must be localhost).
+STABILITY_PG_SERVER_ENV = "ROSE_STABILITY_PG_SERVER"
+STABILITY_PG_SERVER_DEFAULT = "postgresql://postgres:postgres@localhost:5432"
+# scripts/lib/workspace-env.sh: keep this unit's own identity even inside a prepared deploy
+# worktree (whose .context/deploy-worktree.env would otherwise put every unit on one database).
+STABILITY_IDENTITY_ENV = "ROSE_STABILITY_UNIT_IDENTITY"
+STABILITY_DB_LANES = ("backend-blackbox", "backend-unit")
+LOCAL_DB_HOSTS = ("localhost", "127.0.0.1", "::1")
+# Ambient runner controls a unit must not inherit: a shared run id/artifact dir/port, an existing
+# backend, an inherited lock, or a remote/opt-out database switch.
+BACKEND_BLACKBOX_UNSET = (
+    "BLACKBOX_TEST_RUN_ID", "CONTRACT_TEST_RUN_ID", "BLACKBOX_TEST_ARTIFACT_DIR", "CONTRACT_TEST_ARTIFACT_DIR",
+    "BLACKBOX_TEST_BACKEND_PORT", "CONTRACT_TEST_BACKEND_PORT", "CONTRACT_TEST_BACKEND_START_PORT",
+    "BLACKBOX_TEST_USE_EXISTING_BACKEND", "CONTRACT_TEST_USE_EXISTING_BACKEND", "TEST_BASE_URL",
+    "BLACKBOX_TEST_SKIP_DB_SYNC", "CONTRACT_TEST_SKIP_DB_SYNC", "CONTRACT_TEST_DATABASE_URL",
+    "ROSE_TEST_DB_LOCK_INHERITED_KEY", "ROSE_TEST_DB_LOCK_INHERITED_PID", "BENCHMARK_ISOLATED_RUN",
+)
+BACKEND_UNIT_UNSET = (
+    "BACKEND_UNIT_ALLOW_REMOTE_DB", "BACKEND_UNIT_SHARD", "BACKEND_UNIT_EXCLUDE_FILES", "BACKEND_UNIT_COVERAGE_DIR",
+    "BACKEND_UNIT_RESULTS_FILE", "NODE_V8_COVERAGE",
+)
+DB_SETUP_TIMEOUT_SECONDS = 600
 
 
 def new_test_units(changed: list[str], lanes: dict[str, Lane] | None = None) -> list[Unit]:
@@ -1292,6 +1321,17 @@ def _structural_gate_options() -> dict[str, dict[str, str]]:
     return options
 
 
+def _backend_structural_command(name: str) -> list[str] | None:
+    """The unit's own `test:structural` step from back-end/package.json, runnable from back-end/."""
+    script = json.loads(src().read("back-end/package.json"))["scripts"]["test:structural"]
+    for part in script.split("&&"):
+        tokens = part.split()
+        files = [t for t in tokens if f"back-end/{t}" in src().fileset]
+        if files and Path(files[0]).name == name:
+            return ["npx", *tokens] if tokens[0] == "tsx" else tokens
+    return None
+
+
 def stability_command(unit: Unit) -> tuple[list[str], Path] | None:
     python = ROOT / "agents" / "venv" / "bin" / "python"
     agents_python = str(python) if python.exists() else sys.executable
@@ -1308,7 +1348,69 @@ def stability_command(unit: Unit) -> tuple[list[str], Path] | None:
         return [agents_python, "scripts/run_blackbox_tests.py", unit.name], ROOT / "agents"
     if unit.lane == "frontend-vitest":
         return ["npx", "vitest", "run", str(PurePosixPath(unit.name).relative_to("front-end"))], ROOT / "front-end"
+    if unit.lane == "backend-blackbox":
+        return ["bash", "scripts/run-blackbox-tests.sh", unit.name], ROOT / "back-end"
+    if unit.lane == "backend-unit":
+        # The file filter (BACKEND_UNIT_TEST_FILES) and its local database come from backend_isolation().
+        return ["npx", "tsx", "scripts/run-unit-tests.ts"], ROOT / "back-end"
+    if unit.lane == "backend-structural":
+        command = _backend_structural_command(unit.name)
+        return (command, ROOT / "back-end") if command else None
     return None
+
+
+def local_database_url(server: str, database: str) -> str:
+    """`server`/`database`, refusing anything but a localhost Postgres (never the remote DATABASE_URL)."""
+    from urllib.parse import parse_qs, urlsplit
+    parts = urlsplit(server)
+    query = parse_qs(parts.query)
+    if parts.scheme not in ("postgres", "postgresql") or parts.hostname not in LOCAL_DB_HOSTS \
+            or "host" in query or "hostaddr" in query:
+        raise ValueError(f"refusing a non-localhost stability database server ({parts.hostname or 'unparseable'})")
+    if not re.fullmatch(r"victoria_[A-Za-z0-9][A-Za-z0-9_-]{0,53}", database):
+        raise ValueError(f"refusing an unowned stability database name {database!r}")
+    return f"{parts.scheme}://{parts.netloc}/{database}"
+
+
+def assert_local_database_env(env: dict[str, str]) -> None:
+    """Every database URL a backend unit receives must be localhost (checked again right before running)."""
+    from urllib.parse import parse_qs, urlsplit
+    for key in ("DATABASE_URL", "DIRECT_URL", "DIRECT_DATABASE_URL", "FAST_MODE_CACHE_DATABASE_URL",
+                "BACKEND_UNIT_DATABASE_URL", "BLACKBOX_TEST_DATABASE_URL"):
+        if key not in env:
+            continue
+        parts = urlsplit(env[key])
+        query = parse_qs(parts.query)
+        if parts.hostname not in LOCAL_DB_HOSTS or "host" in query or "hostaddr" in query:
+            raise ValueError(f"refusing to run: {key} is not a localhost database ({parts.hostname or 'unparseable'})")
+
+
+def backend_isolation(unit: Unit, identity: str, port: int, server: str | None = None) -> dict:
+    """Per-unit env, unset list, owned database and schema preparation for a backend DB lane."""
+    server = server or os.environ.get(STABILITY_PG_SERVER_ENV) or STABILITY_PG_SERVER_DEFAULT
+    database = f"victoria_{identity}"
+    url = local_database_url(server, database)
+    if unit.lane == "backend-blackbox":
+        # The runner takes its explicit database only when it is exactly victoria_<workspace>; it
+        # pushes the schema itself under that database's run lock.
+        env = {"ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME": "1", "CONDUCTOR_WORKSPACE_NAME": identity,
+               STABILITY_IDENTITY_ENV: "1", "BLACKBOX_TEST_DATABASE_URL": url,
+               "BLACKBOX_TEST_BACKEND_START_PORT": str(port)}
+        return {"env": env, "unset": BACKEND_BLACKBOX_UNSET, "databases": [database], "server": server,
+                "prepare": []}
+    if unit.lane == "backend-unit":
+        relative = str(PurePosixPath(unit.name).relative_to("back-end/src/tests/unit"))
+        db_env = {"DATABASE_URL": url, "DIRECT_URL": url, "DIRECT_DATABASE_URL": url,
+                  "FAST_MODE_CACHE_DATABASE_URL": url}
+        env = {**db_env, "BACKEND_UNIT_DATABASE_URL": url, "BACKEND_UNIT_TEST_FILES": relative,
+               "BACKEND_UNIT_CONCURRENCY": "1"}
+        # The repo's safe local push (refuses non-localhost), then the runtime SQL hooks the
+        # blackbox runner applies, so the unit sees the same schema as the coverage unit phase.
+        prepare = [["npm", "run", "--silent", "prisma:push:local", "--", "--skip-generate", "--accept-data-loss"],
+                   ["bash", "scripts/apply-local-runtime-sql-hooks.sh"]]
+        return {"env": env, "unset": BACKEND_UNIT_UNSET, "databases": [database], "server": server,
+                "prepare": prepare}
+    raise ValueError(f"lane {unit.lane} has no database isolation")
 
 
 @dataclass
@@ -1321,6 +1423,10 @@ class StabilityPlan:
     exclusive: str = ""
     env: dict[str, str] = field(default_factory=dict)
     receipt: bool = False  # every selected case must report that it ran (blackbox case filter)
+    unset: tuple[str, ...] = ()                         # ambient variables the unit must not inherit
+    databases: list[str] = field(default_factory=list)  # owned local databases: created, then dropped
+    server: str = ""                                    # their localhost Postgres server URL
+    prepare: list[list[str]] = field(default_factory=list)  # schema setup, once, before the runs
 
 
 def _is_python(executable: str) -> bool:
@@ -1496,12 +1602,13 @@ _RUNNING_LOCK = threading.Lock()
 
 
 def _run_once(command: list[str], cwd: Path, log: Path, timeout: float,
-              extra_env: dict[str, str] | None = None) -> tuple[int | None, float]:
+              extra_env: dict[str, str] | None = None, unset: tuple[str, ...] = ()) -> tuple[int | None, float]:
     started = time.monotonic()
+    env = {k: v for k, v in stability_environment().items() if k not in unset}
     with log.open("wb") as handle:
         proc = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=handle,
                                 stderr=subprocess.STDOUT, start_new_session=True,
-                                env={**stability_environment(), **(extra_env or {})})
+                                env={**env, **(extra_env or {})})
         with _RUNNING_LOCK:
             _RUNNING[proc.pid] = proc
         try:
@@ -1524,6 +1631,66 @@ def _log_slug(key: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")[-80:] or "unit"
 
 
+def _admin_url(server: str) -> str:
+    return f"{server.rstrip('/')}/postgres"
+
+
+def _psql(server: str, statement: str, log: Path | None = None) -> bool:
+    proc = subprocess.run(["psql", _admin_url(server), "-v", "ON_ERROR_STOP=1", "-qAtc", statement],
+                          stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+    if log is not None:
+        with log.open("ab") as handle:
+            handle.write(f"$ psql {statement}\n".encode() + proc.stdout + proc.stderr)
+    return proc.returncode == 0
+
+
+def _prepare_databases(plan: StabilityPlan, stem: str, log_root: Path, created: list[str]) -> str:
+    """Create the unit's owned databases and prepare their schema; '' on success, else the reason."""
+    try:
+        assert_local_database_env(plan.env)
+    except ValueError as exc:
+        return str(exc)
+    log = log_root / f"{stem}-prepare.log"
+    for name in plan.databases:
+        if not re.fullmatch(r"victoria_[A-Za-z0-9][A-Za-z0-9_-]{0,53}", name):
+            return f"refusing an unowned stability database name {name!r}"
+        if not _psql(plan.server, f'CREATE DATABASE "{name}"', log):
+            return f"could not create the local database {name} (see {log})"
+        created.append(name)
+    for step, command in enumerate(plan.prepare, 1):
+        code, _ = _run_once(command, plan.cwd, log_root / f"{stem}-prepare{step}.log", DB_SETUP_TIMEOUT_SECONDS,
+                            plan.env, plan.unset)
+        if code != 0:
+            return f"database setup step {' '.join(command)} exited {code} (see {stem}-prepare{step}.log)"
+    return ""
+
+
+def _drop_databases(server: str, created: list[str]) -> list[str]:
+    """Drop exactly the databases this unit created, and their run-lock files; returns the dropped names."""
+    dropped = []
+    lock_dir = Path(os.environ.get("ROSE_TEST_DB_LOCK_DIR") or "/tmp/rose-test-db-locks")
+    host = urlsplit_host_port(server)
+    for name in created:
+        try:
+            if _psql(server, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'):
+                dropped.append(name)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        # back-end/scripts/test-db-run-lock.sh names its lock file after host:port/database.
+        key = re.sub(r"[^A-Za-z0-9._-]", "_", f"{host}/{name}")
+        for suffix in (".lock", ".lock.owner"):
+            with contextlib.suppress(OSError):
+                (lock_dir / f"{key}{suffix}").unlink()
+    return dropped
+
+
+def urlsplit_host_port(server: str) -> str:
+    from urllib.parse import urlsplit
+    parts = urlsplit(server)
+    host = "localhost" if parts.hostname in LOCAL_DB_HOSTS else (parts.hostname or "")
+    return f"{host}:{parts.port or 5432}"
+
+
 def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_root: Path, load: CpuLoad) -> dict:
     attempts = []
     status = "PASS"
@@ -1532,9 +1699,15 @@ def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_ro
     # Name every file for its unit: a reader of the gate artifact finds a failing run's log
     # from the printed unit name, not an internal launch index.
     stem = f"{index:03d}-{_log_slug(plan.key)}"
+    created: list[str] = []
+    dropped: list[str] = []
     load.take()
     try:
-        for run in range(1, runs + 1):
+        if plan.databases or plan.prepare:
+            gone = _prepare_databases(plan, stem, log_root, created)
+            if gone:
+                status = "UNVERIFIED"
+        for run in range(1, runs + 1) if not gone else ():
             if not log_root.is_dir():
                 status, gone = "UNVERIFIED", f"log root {log_root} was deleted during the runs"
                 break
@@ -1543,7 +1716,7 @@ def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_ro
             receipt = log_root / f"{stem}-run{run}.cases"
             if plan.receipt:
                 env[BLACKBOX_CASE_RECEIPT_ENV] = str(receipt)
-            code, seconds = _run_once(plan.command, plan.cwd, log, timeout, env)
+            code, seconds = _run_once(plan.command, plan.cwd, log, timeout, env, plan.unset)
             loaded = load.alive()
             attempt = {"run": run, "exit": code, "seconds": seconds, "log": str(log), "loaded": loaded}
             if plan.receipt and code == 0:
@@ -1561,11 +1734,18 @@ def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_ro
                 status = "FAIL"
                 break
     finally:
+        if created:
+            dropped = _drop_databases(plan.server, created)
         load.give()
     row = {"status": status, "command": plan.command, "cwd": str(plan.cwd), "cases": plan.cases,
            "selection": plan.reason, "attempts": attempts,
            "consecutive_passes": sum(1 for a in attempts if a["exit"] == 0),
            "wall_seconds": round(time.monotonic() - started, 2)}
+    if plan.databases:
+        row["databases"] = {"created": created, "dropped": dropped}
+        leftover = sorted(set(created) - set(dropped))
+        if leftover:
+            row["leftover_databases"] = leftover
     if gone:
         row["reason"] = gone
     elif status == "UNVERIFIED":
@@ -1575,6 +1755,22 @@ def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_ro
     if plan.env:
         row["env"] = plan.env
     return row
+
+
+def isolate_plan(plan: StabilityPlan, unit: Unit, index: int, server: str | None = None) -> StabilityPlan:
+    """Give a backend DB-lane plan its own identity, port, database and schema setup."""
+    if unit.lane not in STABILITY_DB_LANES:
+        return plan
+    identity = f"stab-{os.getpid()}-{index}-{os.urandom(3).hex()}"
+    # A distinct start per unit; the runner still probes upward under its port locks.
+    port = int(os.environ.get("CONDUCTOR_PORT") or 55000) + 100 + 10 * (index + 1)
+    isolation = backend_isolation(unit, identity, port, server)
+    plan.env = {**plan.env, **isolation["env"]}
+    plan.unset = tuple(isolation["unset"])
+    plan.databases = list(isolation["databases"])
+    plan.server = isolation["server"]
+    plan.prepare = [list(c) for c in isolation["prepare"]]
+    return plan
 
 
 def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: int | None = None,
@@ -1597,12 +1793,24 @@ def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: i
     results: dict[str, dict] = {}
     pending: list[tuple[int, StabilityPlan]] = []
     for unit in units:
+        key = f"{unit.lane}:{unit.name}"
+        platform = STABILITY_PLATFORM_LANES.get(unit.lane)
+        if platform and platform != sys.platform:
+            # Same disposition as deploy_test_plan's omitted mac-app gates: nothing ran, nothing passed.
+            results[key] = {"status": "PLATFORM_OMITTED", "platform": platform, "executed": False,
+                            "reason": "platform not available; not a test pass"}
+            continue
         plan = plan_unit(unit, changed if changed is not None else list(unit.roots), diff)
         if plan is None:
-            results[f"{unit.lane}:{unit.name}"] = {
-                "status": "UNSUPPORTED", "reason": f"lane {unit.lane} has no stability runner here"}
-        else:
-            pending.append((len(pending), plan))
+            results[key] = {"status": "UNSUPPORTED", "reason": f"lane {unit.lane} has no stability runner here"}
+            continue
+        try:
+            plan = isolate_plan(plan, unit, len(pending))
+        except ValueError as exc:
+            results[key] = {"status": "UNVERIFIED", "reason": str(exc), "cases": plan.cases, "attempts": [],
+                            "consecutive_passes": 0}
+            continue
+        pending.append((len(pending), plan))
     # Whole units first: they are the long poles of the wall clock.
     pending.sort(key=lambda item: (item[1].cases != [WHOLE_UNIT], item[0]))
     bound = int(timeout * runs * max(1, len(pending)) + 60)
@@ -1665,8 +1873,12 @@ def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: i
             if row["status"] == "PASS":
                 row["status"] = "UNVERIFIED"
     statuses = {row["status"] for row in ordered.values()}
-    overall = "FAIL" if "FAIL" in statuses else ("UNVERIFIED" if statuses - {"PASS"} else "PASS")
-    report = {"status": overall, "runs": runs, "load": load_record, "digest_before": before,
+    # A platform-omitted unit neither passes nor blocks; it never counts as a PASS.
+    verdicts = statuses - {"PLATFORM_OMITTED"}
+    overall = ("FAIL" if "FAIL" in verdicts else "UNVERIFIED" if verdicts - {"PASS"}
+               else "PASS" if verdicts else "PLATFORM_OMITTED")
+    counts = {status: sum(1 for row in ordered.values() if row["status"] == status) for status in sorted(statuses)}
+    report = {"status": overall, "counts": counts, "runs": runs, "load": load_record, "digest_before": before,
               "digest_after": after, "units": ordered, "logs": str(log_root),
               "wall_seconds": round(time.monotonic() - began, 2)}
     # The unit -> attempt -> log index travels with the logs into the gate artifact.
@@ -1768,7 +1980,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(report, indent=2))
         else:
             load = report["load"]
-            print(f"new-test stability: {report['status']} ({report['runs']} consecutive runs per unit, "
+            tally = ", ".join(f"{n} {status}" for status, n in report["counts"].items())
+            print(f"new-test stability: {report['status']} [{tally}] ({report['runs']} consecutive runs per unit, "
                   f"{load['lanes']} concurrent lanes, {load['workers']} load slots topped up with "
                   f"{load['tool'] or 'no'} workers, wall {report['wall_seconds']:.0f}s, logs {report['logs']})")
             for key, row in report["units"].items():
@@ -1784,7 +1997,7 @@ def main(argv: list[str] | None = None) -> int:
                 attempts = row.get("attempts") or []
                 if row["status"] != "PASS" and attempts:
                     print(f"      log {attempts[-1]['log']}")
-        return {"PASS": 0, "FAIL": 1}.get(report["status"], 2)
+        return {"PASS": 0, "PLATFORM_OMITTED": 0, "FAIL": 1}.get(report["status"], 2)
     if args.rev:
         global SRC
         SRC = Source(args.rev)
